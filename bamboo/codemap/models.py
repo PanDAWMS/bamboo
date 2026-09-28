@@ -2859,7 +2859,17 @@ class StatementReading(BaseModel):
         default_factory=list,
         description=(
             "Junction owners a row this statement keeps is carried on to -- "
-            "where the investigation goes next when the statement is the lead."
+            "where the investigation goes next when the statement is the lead. "
+            "Three shapes resolve and all three name a junction the map holds: "
+            "the region calls one, the region builds a class the map owns one "
+            "in and starts it as a thread, or the rows are returned and the "
+            "caller does one of those two with them. 89 crossings over 65 of "
+            "the corpus's 264 statements. "
+            "Empty is not 'nowhere': 107 statements hand their rows back and "
+            "78 of them lead to a caller that does nothing the map answers "
+            "for, which the build reports rather than hides. Naming that "
+            "caller's own function instead would satisfy the question and not "
+            "the purpose -- a lead has to be somewhere the map will answer."
         ),
     )
 

@@ -2342,6 +2342,13 @@ def attach_reader_traces(
                 expected_sha=entry.blob_sha,
                 classify=classify,
                 region=region,
+                # The statement's own line, not the seeds: the binds are
+                # filled on the way to it and it is the one read they all
+                # answer for.  ``copyArchive.py::main`` rebuilds ``timeLimit``
+                # before each of its queries, so the query on 381 is explained
+                # by line 360 and the twenty-five other assignments in that
+                # function are answers to other queries.
+                reading_at=entry.line,
             )
             entry.trace = walked.steps
             entry.trace_note = walked.note

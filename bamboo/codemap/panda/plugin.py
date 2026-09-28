@@ -434,7 +434,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # ``self.cur.execute(...)`` resolved to the ``execute`` of an adder
         # plugin -- 520 crossings over 239 statements where 71 over 38 are
         # real, and 176 statements handed the same two false leads.
-        self._crossings = sqlwrite.attach_crossings(
+        # Read by the build's report rather than logged, so that the census
+        # appears where the other read-side counts do and nothing changes for
+        # the readers that only check the map.  The gap between the last two
+        # is the finding: an empty ``crosses_to`` on a statement that plainly
+        # hands its rows on would otherwise read as "these rows go nowhere".
+        self.crossings = sqlwrite.attach_crossings(
             fragment.read_sites, self._modules, fragment.junctions
         )
 

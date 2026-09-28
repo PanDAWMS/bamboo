@@ -738,6 +738,7 @@ class _Walk:
         budget: Budget,
         observed: str = "",
         within: Optional[tuple[str, str, int, int]] = None,
+        reading_at: Optional[tuple[str, str, int]] = None,
     ) -> None:
         self.roots = roots
         self.classify = classify
@@ -746,6 +747,9 @@ class _Walk:
         #: ``(file, owner, first, last)`` -- where in the starting function a
         #: name's bindings are looked for first.  See :meth:`_within`.
         self.within = within
+        #: ``(file, owner, line)`` -- the line in the starting function whose
+        #: reading is being explained.  See :meth:`_reaching`.
+        self.reading_at = reading_at
         self.parsed: dict[str, tuple[str, ast.Module]] = {}
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
         self.steps: list[TraceStep] = []
@@ -1206,6 +1210,68 @@ class _Walk:
             [node for node in caught if here(node)],
         )
 
+    def _reaching(
+        self,
+        frame: _Frame,
+        bindings: list,
+        loops: list,
+        caught: list,
+    ) -> tuple[list, list, list]:
+        """Drop the writes a later one overwrote before the read.
+
+        :meth:`_within` cuts by position -- which part of the function this
+        statement owns -- and that is the wrong instrument for a name the
+        function reuses *in order*.  ``copyArchive.py::main`` builds
+        ``timeLimit`` afresh before each of its queries, so the query on line
+        381 is answered by line 360 and by nothing else; the span rule gets
+        that one right and gets the query on 758 wrong, because its own
+        ``timeLimit`` is on 753, one line above where its region opens.
+        Execution order has no such edge.
+
+        The two compose rather than replace one another.  Measured over the
+        corpus's exits, the span is the narrower answer 34 times and the
+        cancelling rule is narrower 657 times, so neither contains the other.
+
+        The starting frame only, and the same reason as :meth:`_within`: a
+        deeper frame is another function, where this line number belongs to
+        another read.
+        """
+        if self.reading_at is None:
+            return bindings, loops, caught
+        file, owner, line = self.reading_at
+        if frame.file != file or frame.owner != owner:
+            return bindings, loops, caught
+        target = _statement_at(frame.func, line)
+        if target is None:
+            return bindings, loops, caught
+        sites: dict[int, ast.AST] = {}
+        for node in (*bindings, *loops, *caught):
+            sites[id(node)] = (
+                node
+                if isinstance(node, (ast.stmt, ast.ExceptHandler))
+                else pathcond.site_of(node)
+            )
+        alive = {
+            id(site) for site in pathcond.surviving_writes(list(sites.values()), target)
+        }
+
+        def lives(node: ast.AST) -> bool:
+            return id(sites[id(node)]) in alive
+
+        kept = (
+            [node for node in bindings if lives(node)],
+            [node for node in loops if lives(node)],
+            [node for node in caught if lives(node)],
+        )
+        # Never down to nothing.  A name the read saw was written by something,
+        # so an empty answer is the rule having cancelled the write that
+        # actually ran -- a name read above every assignment to it, or a loop
+        # this walk cannot see back into.  Saying "bound nowhere" there would
+        # be false, and the honest fallback is the unfiltered set.
+        if not any(kept):
+            return bindings, loops, caught
+        return kept
+
     def explain(self, frame: _Frame, name: str, depth: int) -> None:
         if name.startswith("self."):
             self._field(frame, name, depth)
@@ -1219,6 +1285,7 @@ class _Walk:
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
         bindings, loops, caught = self._within(frame, bindings, loops, caught)
+        bindings, loops, caught = self._reaching(frame, bindings, loops, caught)
         held = bool(bindings or loops or caught)
         if depth == 1 and self.armed:
             # ``assigned_expressions`` hands back every assignment in the
@@ -1673,6 +1740,7 @@ def walk(
     budget: Budget = DEFAULT_BUDGET,
     region: Optional[tuple[int, int]] = None,
     bindings_within: Optional[tuple[int, int]] = None,
+    reading_at: Optional[int] = None,
 ) -> Walked:
     """Explain the arms at *lines*, and say why the answer is short when it is.
 
@@ -1699,6 +1767,12 @@ def walk(
     only.  See :meth:`_Walk._within` -- and the same default, whole-function,
     for everything that does not ask.
 
+    *reading_at* is the other way of narrowing the same thing, by execution
+    order rather than by position: the line whose reading is being explained,
+    against which a write that a later one overwrote is dropped.  See
+    :meth:`_Walk._reaching`.  The two are given separately because neither
+    contains the other.
+
     **A tree that is not the map's is refused rather than warned about.**  A
     trace is shaped like an answer, and reading line 4971 of the wrong release
     produces plausible code that is not the code -- which already happened
@@ -1711,6 +1785,7 @@ def walk(
         budget,
         observed,
         within=(file, owner, *bindings_within) if bindings_within else None,
+        reading_at=(file, owner, reading_at) if reading_at else None,
     )
     parsed = state.module(file)
     if parsed is None:

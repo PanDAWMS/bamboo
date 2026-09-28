@@ -69,6 +69,8 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     literal_values,
     path_condition,
+    site_of,
+    surviving_writes,
     targets_of,
 )
 
@@ -1481,6 +1483,214 @@ def read_site_nodes(
     return nodes
 
 
+class CrossingCensus(NamedTuple):
+    """What :func:`attach_crossings` resolved, and what it could not.
+
+    ``handing_back`` counts the statements whose rows reach a ``return``, and
+    ``resolved`` the ones where the caller then does something the map holds a
+    junction for.  The difference is the shape the map can see and cannot
+    answer -- a number worth printing, because an empty ``crosses_to`` on a
+    statement that plainly hands its rows on reads as "nowhere" otherwise.
+    """
+
+    stored: int
+    handing_back: int
+    resolved: int
+
+
+#: How a row leaves the name the statement first bound it to.  Assignment and
+#: a loop target are the obvious two; the rest are how the corpus writes "put
+#: this row in the bucket it belongs to" before handing the bucket back.
+_CARRIERS = ("append", "add", "update", "extend", "setdefault")
+
+
+def _bound_by(node: ast.AST) -> set[str]:
+    """Names an assignment binds, counting ``d[key] = row`` as binding ``d``.
+
+    :func:`_assigned_names` deliberately does not: there it is asked which
+    names hold *this statement's rows*, and a dict the rows are filed into
+    holds other statements' rows too.  Here the question is the looser one --
+    could a row reach the return -- and ``retTaskIDs[jediTaskID] = {...}`` is
+    exactly how ``getTasksToExecCommand_JEDI`` builds what it returns.
+    """
+    targets: list[ast.expr]
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+        targets = [node.target]
+    else:
+        return set()
+    found: set[str] = set()
+    for target in targets:
+        parts = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+        for part in parts:
+            if isinstance(part, ast.Name):
+                found.add(part.id)
+            elif isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name):
+                found.add(part.value.id)
+    return found
+
+
+def _mentions(expression: ast.AST, held: set[str]) -> bool:
+    return any(isinstance(n, ast.Name) and n.id in held for n in ast.walk(expression))
+
+
+def _carried_into(func: ast.AST, seed: set[str]) -> set[str]:
+    """The names *seed*'s rows reach, by assignment, loop target or carrier.
+
+    Deliberately generous, because of what it decides: not *where* the rows go
+    but only whether the function's ``return`` is one of the places.  The
+    flagship's closure picks up ``varMap`` along the way and the answer --
+    ``retTaskList`` is returned -- is right anyway.  A name it should not have
+    taken costs a statement that resolves to nothing, not a wrong lead: the
+    caller still has to do something the map holds a junction for.
+    """
+    held = set(seed)
+    growing = True
+    while growing:
+        growing = False
+        for node in ast.walk(func):
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                if node.value is None or not _mentions(node.value, held):
+                    continue
+                fresh = _bound_by(node) - held
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                if not _mentions(node.iter, held):
+                    continue
+                target = node.target
+                parts = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+                fresh = {p.id for p in parts if isinstance(p, ast.Name)} - held
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if (
+                    node.func.attr not in _CARRIERS
+                    or not isinstance(node.func.value, ast.Name)
+                    or not any(_mentions(a, held) for a in node.args)
+                ):
+                    continue
+                fresh = {node.func.value.id} - held
+            else:
+                continue
+            if fresh:
+                held |= fresh
+                growing = True
+    return held
+
+
+def _hands_rows_back(func: ast.AST, held: set[str]) -> bool:
+    """Whether a ``return`` in *func* returns something built from *held*."""
+    return any(
+        isinstance(node, ast.Return) and node.value is not None and _mentions(node.value, held)
+        for node in ast.walk(func)
+    )
+
+
+def _enclosing(node: ast.AST, kinds: tuple) -> Optional[ast.AST]:
+    while node is not None and not isinstance(node, kinds):
+        node = getattr(node, "parent", None)
+    return node
+
+
+def _consumers_of(
+    name: str,
+    calls: dict[str, list[tuple[str, ast.Call, ast.AST]]],
+    where: str,
+    definition: ast.AST,
+) -> list[tuple[str, ast.Call, ast.AST]]:
+    """The call sites of *name* that are somewhere an investigation would go.
+
+    Two kinds are dropped.  The function calling itself, which is not a
+    crossing.  And the proxy layer: ``JediTaskBuffer.getTasksToExecCommand_JEDI``
+    consists of ``return proxy.getTasksToExecCommand_JEDI(...)``, so naming it
+    as where the rows went would stop the reader one hop short of the code
+    that does anything with them.  A caller whose own function has the same
+    name and hands the call straight back is that layer, by construction.
+
+    It is what makes the rest answerable rather than a refinement: 12 of the
+    corpus's statements had exactly one call site before this, 52 after.
+    """
+    found = []
+    for rel, call, caller in calls.get(name, []):
+        if caller is None or (rel == where and caller is definition):
+            continue
+        if caller.name == name and isinstance(
+            _enclosing(call, (ast.stmt,)), ast.Return
+        ):
+            continue
+        found.append((rel, call, caller))
+    return found
+
+
+def _reached_by(
+    caller: ast.AST,
+    arrived: ast.stmt,
+    seed: set[str],
+    held: set[str],
+    by_func: dict[str, set[str]],
+    by_class: dict[str, set[str]],
+) -> set[str]:
+    """The junctions *held* reaches in *caller*, by the two rules already used.
+
+    The same pair :func:`attach_crossings` applies inside a region -- a call
+    the map owns a junction for, and a class built here and started as a
+    thread -- with two things added that the region form does not need.  There
+    the stretch is the statement's own and everything in it is about these
+    rows.  Here it is somebody else's whole function, so the call has to
+    actually *take* one of the names the rows arrived in, **and** the line
+    they arrived on has to still be what that name holds there.
+
+    The second is not caution.  ``datasetManager.py::main`` runs seven queries
+    into the same ``res`` and hands each to a different thread class, so
+    without it one statement's rows resolve to all seven constructions -- the
+    reuse P1-54 met on the exits, met again a function further out.
+    ``pathcond.surviving_writes`` is the same answer here as it was there: at
+    the construction on line 906 the ``res`` in scope is the one from line
+    896, and the six others were overwritten or had not run.
+    """
+    writes = [
+        node
+        for node in ast.walk(caller)
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+        and _bound_by(node) & seed
+    ]
+
+    def theirs(use: ast.AST) -> bool:
+        """Whether the rows that reached *use* are the ones that arrived here."""
+        site = use if isinstance(use, ast.stmt) else site_of(use)
+        return arrived in surviving_writes(writes, site)
+
+    reached: set[str] = set()
+    built: dict[str, ast.AST] = {}
+    for node in ast.walk(caller):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        callee = node.value.func
+        made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
+        if made in by_class and any(_mentions(a, held) for a in node.value.args) and theirs(node):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    built[target.id] = made
+    for node in ast.walk(caller):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if isinstance(callee, ast.Attribute):
+            if (
+                callee.attr == "start"
+                and isinstance(callee.value, ast.Name)
+                and callee.value.id in built
+            ):
+                reached |= by_class[built[callee.value.id]]
+                continue
+            called = callee.attr
+        elif isinstance(callee, ast.Name):
+            called = callee.id
+        else:
+            continue
+        if any(_mentions(a, held) for a in node.args) and theirs(node):
+            reached |= by_func.get(called, set())
+    return reached
+
+
 def attach_crossings(
     read_sites: list[ReadSiteNode],
     modules: list[SourceModule],
@@ -1505,12 +1715,32 @@ def attach_crossings(
       ``start`` in ``thr.start()`` is not itself a junction owner, which is
       why the class the name was built from has to be carried.
 
-    **A value returned to the caller is not stored.** 137 of the corpus's
-    statements end in a ``return`` inside their region, and who receives it is
-    a question about call sites that this slice cannot answer -- offering the
-    caller's own name would be a lead pointing at whoever happened to be
-    grepped first.  Counted and reported instead; resolving it is the same
-    problem as the call graph the handover walk needs.
+    * the rows are handed back to the caller and the caller does one of those
+      two things with them -- 51 more, and the flagship is one.
+
+    **The third one was sized against the wrong shape.**  It used to be read
+    off "a ``return`` inside the region", which is 139 returns over 73
+    statements and does not include ``getTasksToExecCommand_JEDI@4591`` at
+    all: that statement owns 4573-4603, works its rows through 4600-4621, and
+    the function returns on 4647, the rows having travelled ``resList`` ->
+    ``retTaskIDs`` -> ``retTaskList`` on the way.  Followed by name instead --
+    see :func:`_carried_into` -- 106 statements hand their rows back.
+
+    **A crossing is only stored where all three of these hold**, and 76 of
+    those 106 fail the last one and keep an empty ``crosses_to``:
+
+    1. the rows reach a ``return``;
+    2. the owner has a call site that is not the proxy layer -- see
+       :func:`_consumers_of`;
+    3. at that call site the returned value is bound to a name from which the
+       caller does something the map holds a junction for.
+
+    Naming the caller's function and stopping there would satisfy 2 and not 3,
+    and a lead that does not name a junction is a lead pointing at whoever
+    happened to be grepped first.  Where several call sites resolve, all of
+    them are stored: the map's junctions are indexed by bare name throughout
+    this function, so one statement reaching five is the same ambiguity the
+    other two shapes already carry, not a new one.
 
     Run after promotion, not merely after the merge.  A crossing is a lead,
     and a lead has to name somewhere the map will answer for -- resolved
@@ -1519,16 +1749,40 @@ def attach_crossings(
     then dropped: 520 crossings over 239 statements where 71 over 38 are real,
     with 176 statements handed the same two leads to nowhere.
 
-    Returns how many crossings were stored.
+    Returns the census: how many crossings were stored, how many statements
+    hand their rows back at all, and how many of those named a junction.  The
+    gap between the last two is the honest size of what is still unresolved,
+    and it is reported rather than silently left as an empty field.
     """
     owners = {junction.owner for junction in junctions}
+    calls: dict[str, list[tuple[str, ast.Call, ast.AST]]] = {}
     by_func: dict[str, set[str]] = {}
     for owner in owners:
         by_func.setdefault(owner.rsplit("::", 1)[-1], set()).add(owner)
     trees = {module.rel_path: module.tree for module in modules}
     by_class: dict[str, set[str]] = {}
     for rel, tree in trees.items():
+        # The call index the return shape resolves against, and the parent
+        # links it walks upwards through.  Built once over the whole corpus
+        # because the question is the reverse of the other two shapes': not
+        # what this function calls, but who calls it.
+        attach_parents(tree)
         for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                callee = node.func
+                called = (
+                    callee.attr
+                    if isinstance(callee, ast.Attribute)
+                    else (callee.id if isinstance(callee, ast.Name) else None)
+                )
+                if called:
+                    calls.setdefault(called, []).append(
+                        (
+                            rel,
+                            node,
+                            _enclosing(node, (ast.FunctionDef, ast.AsyncFunctionDef)),
+                        )
+                    )
             if not isinstance(node, ast.ClassDef):
                 continue
             for item in node.body:
@@ -1539,6 +1793,8 @@ def attach_crossings(
                     by_class.setdefault(node.name, set()).add(name)
 
     stored = 0
+    handing_back = 0
+    resolved = 0
     for site in read_sites:
         if not site.region:
             continue
@@ -1590,11 +1846,65 @@ def attach_crossings(
                 else:
                     continue
                 reached |= by_func.get(called, set())
-        # Not itself: a statement is not somewhere its own rows go next.
+        back, hands = _handed_back(site, func, wanted, calls, by_func, by_class)
+        # Not itself: a statement is not somewhere its own rows go next.  Done
+        # to the return shape's answer before it is counted as well as to the
+        # whole, or the census reports two statements as resolved whose only
+        # lead was back to themselves.
+        back.discard(site.owner)
+        reached |= back
+        handing_back += 1 if hands else 0
+        resolved += 1 if back else 0
         reached.discard(site.owner)
         site.crosses_to = sorted(reached)
         stored += len(site.crosses_to)
-    return stored
+    return CrossingCensus(stored, handing_back, resolved)
+
+
+def _handed_back(
+    site: ReadSiteNode,
+    func: ast.AST,
+    wanted: str,
+    calls: dict[str, list[tuple[str, ast.Call, ast.AST]]],
+    by_func: dict[str, set[str]],
+    by_class: dict[str, set[str]],
+) -> tuple[set[str], bool]:
+    """The junctions reached by giving these rows back, and whether it is given.
+
+    The third shape of :func:`attach_crossings`, kept apart because it is the
+    only one that leaves the statement's own file.  Nothing here is new
+    machinery: the rows are followed to the ``return`` by name, the callers
+    are read off the corpus-wide call index with the proxy layer removed, and
+    what happens to them there is decided by the same two rules the region
+    scan uses.
+    """
+    first, last = site.region
+    handled = site.rows_handled
+    through = max(last, handled[1] if len(handled) >= 2 else last)
+    rows = _rows_of(func, site.anchor.line_start, through)
+    if not rows:
+        return set(), False
+    held = _carried_into(func, rows)
+    if not _hands_rows_back(func, held):
+        return set(), False
+    reached: set[str] = set()
+    for _rel, call, caller in _consumers_of(wanted, calls, site.anchor.file, func):
+        statement = _enclosing(call, (ast.stmt,))
+        if not isinstance(statement, ast.Assign):
+            # Returned on again, or thrown away.  The first is the proxy shape
+            # under another name and the second has no rows to follow.
+            continue
+        seed = _bound_by(statement)
+        if seed:
+            reached |= _reached_by(
+                caller,
+                statement,
+                seed,
+                _carried_into(caller, seed),
+                by_func,
+                by_class,
+            )
+    return reached, True
 
 
 def entity_nodes(

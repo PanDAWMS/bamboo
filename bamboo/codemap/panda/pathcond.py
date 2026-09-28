@@ -603,6 +603,81 @@ def can_reach(site: ast.AST, target: ast.AST) -> bool:
     return not_below(site, target) and compatible(site, target)
 
 
+def _cancels(site: ast.AST, other: ast.AST, target: ast.AST) -> bool:
+    """Whether *other* overwrites *site* before *target* reads it.
+
+    Three things have to hold.  *other* sits between them, so it runs after the
+    write it cancels; it is held by no loop *target* is outside of, or it would
+    be an iteration's write rather than one on the way; and every condition it
+    is under is one *target* is under too, so a path that reaches the read
+    passed through it.
+
+    The conditions are compared as the strings :func:`reachable_when` renders,
+    which is why the third test is a subset rather than an implication.  Two
+    conditions that mean the same thing and are written differently do not
+    match, and the rule then keeps a binding it could have cancelled -- short
+    of the truth in the direction that leaves the reader more to look at
+    rather than less.
+    """
+    if not site.lineno < other.lineno <= getattr(target, "lineno", 0):
+        return False
+    if loops_over(other) - loops_over(target):
+        return False
+    return set(reachable_when(other)) <= set(reachable_when(target))
+
+
+def reaching_definitions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, target: ast.AST
+) -> list[ast.expr]:
+    """The expressions bound to *name* that can still be what *target* reads.
+
+    :func:`assigned_expressions` answers "everything this name ever holds",
+    which is the right question for the build and the wrong one for a reader
+    asking why *this* line saw what it saw.  ``copyArchive.py::main`` assigns
+    ``timeLimit`` twenty-six times in 1353 lines; the statement on line 381
+    reads the one on line 360 and no other, because lines 397 onwards had not
+    run yet and 298, 321 and 341 were overwritten by 360 on the way.
+
+    Two steps, and the second is what the first cannot do.  :func:`can_reach`
+    drops the writes that are positioned below the read or on a path that
+    excludes it -- five of the twenty-six survive that for line 381.  It does
+    not drop a write that *did* run and was then replaced, because reaching
+    the read is not the question there.  :func:`_cancels` is.
+
+    Measured on the corpus: of 29 (statement, bind name) pairs where the name
+    has more than one assignment, 20 narrow, every one of them to exactly one
+    expression, and none is emptied.  An emptied name would mean the rule had
+    cancelled the write the read actually saw, so nothing coming back is the
+    signal that it is wrong rather than an answer.
+
+    Returns the expressions, in source order, so a caller that wants positions
+    takes :func:`site_of` as it already does for
+    :func:`assigned_expressions`.
+    """
+    bound = assigned_expressions(func).get(name, [])
+    kept = surviving_writes([site_of(value) for value in bound], target)
+    alive = {id(site) for site in kept}
+    return [value for value in bound if id(site_of(value)) in alive]
+
+
+def surviving_writes(sites: Sequence[ast.AST], target: ast.AST) -> list[ast.AST]:
+    """Of *sites*, the writes that can still be what *target* reads.
+
+    The body of :func:`reaching_definitions`, taken apart so that a caller
+    holding writes from several shapes can ask about all of them at once.  The
+    walk is that caller: a name arrives at a read through a plain assignment,
+    a tuple unpacking, a ``with`` or a ``for`` target, and cancelling only
+    within one of those shapes would keep a tuple-bound ``res`` alive against
+    the assignment that replaced it.
+    """
+    live = [site for site in sites if can_reach(site, target)]
+    return [
+        site
+        for site in live
+        if not any(_cancels(site, other, target) for other in live if other is not site)
+    ]
+
+
 def literal_values(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     name: str,

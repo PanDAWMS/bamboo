@@ -1531,3 +1531,81 @@ def f(db):
 
     (step,) = [s for s in steps if s.name == "spec"]
     assert step.value == "db.get_task()"
+
+
+def test_a_later_unconditional_binding_cancels_the_one_before_it(tmp_path):
+    """Three time limits, one query -- and the walk offered all three.
+
+    ``copyArchive.py::main`` rebuilds ``timeLimit`` before each of its
+    twenty-odd queries, so the query on line 381 came back explained by the
+    assignments on 298 and 321 as well as its own on 360.  Only 360 can be
+    what it read: the two above it were overwritten on the way.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.first_limit()
+        limit = self.second_limit()
+        limit = self.third_limit()
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    whole, _note = _walk(roots, file="sweeper", owner="run", lines=[7])
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[7], reading_at=6)
+
+    assert [step.line for step in whole if step.kind == models.TRACE_BINDING] == [3, 4, 5]
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [5]
+
+
+def test_a_binding_under_a_condition_cancels_nothing(tmp_path):
+    """Only a write that ran on *every* path to the read can overwrite one.
+
+    An assignment in an ``if`` may not have happened, so the one above it is
+    still an answer.  The rule is conservative in the direction that leaves
+    the reader more to look at rather than less.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.first_limit()
+        if self.urgent():
+            limit = self.second_limit()
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[7], reading_at=6)
+
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [3, 5]
+
+
+def test_cancelling_never_leaves_a_name_with_no_binding_at_all(tmp_path):
+    """An empty answer would be the rule cancelling the write that ran.
+
+    The two arms of an ``if`` cannot both run, so the only assignment to
+    ``limit`` is on a path this read is not on -- ``pathcond.can_reach`` says
+    no to all of them.  "Bound nowhere" would be false where the code plainly
+    binds it, so the unfiltered set comes back instead.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self, row):
+        if self.urgent():
+            limit = self.fast_limit()
+        else:
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[6], reading_at=6)
+
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [4]

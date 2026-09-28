@@ -8329,11 +8329,11 @@ def test_a_statement_says_which_junction_its_rows_are_carried_to():
     )
     junctions = [_junction("w.py::run"), _junction("r.py::retryTask")]
 
-    stored = sqlwrite.attach_crossings(nodes, modules, junctions)
+    census = sqlwrite.attach_crossings(nodes, modules, junctions)
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == ["r.py::retryTask", "w.py::run"]
-    assert stored == 2
+    assert census.stored == 2
 
 
 def test_a_statement_does_not_cross_to_a_name_no_junction_owns():
@@ -8362,6 +8362,166 @@ def test_a_statement_does_not_cross_to_a_name_no_junction_owns():
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == []
+
+
+ROWS_HANDED_BACK = (
+    "class TaskModule:\n"
+    "    def getTasks(self):\n"
+    "        varMap = {}\n"
+    "        varMap[':status'] = 'pending'\n"
+    "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+    "        sqlA += 'WHERE status=:status '\n"
+    "        self.cur.execute(sqlA + comment, varMap)\n"
+    "        res = self.cur.fetchall()\n"
+    "        kept = []\n"
+    "        for (taskID,) in res:\n"
+    "            kept.append(taskID)\n"
+    "        return kept\n"
+)
+
+
+def _crossed(source, junctions, *, others=()):
+    """Build the read sites for *source*, resolve, and hand back the nodes."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "x.py"),
+        *[_module(text, name) for text, name in others],
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    nodes = sqlwrite.read_site_nodes(
+        sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
+    )
+    census = sqlwrite.attach_crossings(nodes, modules, [_junction(j) for j in junctions])
+    return nodes, census
+
+
+def test_rows_given_back_cross_to_what_the_caller_does_with_them():
+    """The third shape, and the one the request's first round asked for.
+
+    ``getTasksToExecCommand_JEDI@4591`` owns 4573-4603 and works its rows
+    through 4600-4621, while the function returns on 4647 -- so "a ``return``
+    inside the region", which is how this hole used to be sized, does not
+    include it.  Followed by name, the rows reach the return and the caller is
+    where the investigation goes next.
+    """
+    caller = (
+        "class Commando:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        self.retryTask(tasks)\n"
+    )
+    nodes, census = _crossed(
+        ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")]
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["c.py::retryTask"]
+    assert (census.handing_back, census.resolved) == (1, 1)
+
+
+def test_the_proxy_layer_is_not_where_the_rows_went():
+    """``JediTaskBuffer.getTasksToExecCommand_JEDI`` is ``return proxy.<same>``.
+
+    Naming it would stop the reader one hop short of the code that does
+    anything with the rows.  A caller whose own function has the same name and
+    hands the call straight back is that layer by construction -- and dropping
+    it is what makes the rest answerable, not a refinement: 12 statements had
+    exactly one call site before, 53 after.
+    """
+    proxy = (
+        "class Buffer:\n"
+        "    def getTasks(self):\n"
+        "        return proxy.getTasks()\n"
+    )
+    nodes, census = _crossed(
+        ROWS_HANDED_BACK, ["p.py::getTasks"], others=[(proxy, "p.py")]
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+    assert (census.handing_back, census.resolved) == (1, 0)
+
+
+def test_a_caller_that_does_nothing_the_map_answers_for_leaves_it_empty():
+    """78 of the 107 statements that hand their rows back end here.
+
+    The caller is found and does something with the rows, and none of it is
+    somewhere the map holds a junction.  Naming the caller's own function
+    would satisfy the question and not the purpose.
+    """
+    caller = (
+        "class Commando:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        print(tasks)\n"
+    )
+    nodes, census = _crossed(ROWS_HANDED_BACK, ["c.py::somethingElse"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+    assert (census.handing_back, census.resolved) == (1, 0)
+
+
+def test_rows_that_never_reach_a_return_do_not_cross_to_the_caller():
+    """The function returns, and not these rows.
+
+    The closure that follows them is generous on purpose -- it decides only
+    whether the ``return`` is one of the places they reach -- but a name it
+    never touches is still an answer of no.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def getTasks(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            tmpLog.debug(taskID)\n"
+        "        return self.counter\n"
+    )
+    caller = (
+        "class Commando:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        self.retryTask(tasks)\n"
+    )
+    nodes, census = _crossed(source, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+    assert (census.handing_back, census.resolved) == (0, 0)
+
+
+def test_the_caller_reusing_the_name_gets_only_its_own_rows():
+    """``datasetManager.py::main`` runs seven queries into the same ``res``.
+
+    Each is handed to a different thread class, so without the arriving
+    assignment having to still be live one statement's rows resolve to all
+    seven.  This is the reuse P1-54 met on the exits, met again a function
+    further out, and ``pathcond.surviving_writes`` is the same answer.
+    """
+    caller = (
+        "class Manager:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        self.retryTask(tasks)\n"
+        "        tasks = self.taskBufferIF.getOtherTasks()\n"
+        "        self.finishTask(tasks)\n"
+    )
+    nodes, _census = _crossed(
+        ROWS_HANDED_BACK,
+        ["c.py::retryTask", "c.py::finishTask"],
+        others=[(caller, "c.py")],
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["c.py::retryTask"]
 
 
 def _site_with(**fields):

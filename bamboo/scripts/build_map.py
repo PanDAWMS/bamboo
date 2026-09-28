@@ -512,6 +512,18 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             f"came back; {sum(len(r.crosses_to) for r in reads)} crossing(s) "
             f"over {len(crossed)} statement(s)"
         )
+        # The third crossing shape leaves the file, so what it could not
+        # resolve is not visible in the nodes at all: a statement whose rows
+        # reach a ``return`` and whose caller does nothing the map answers for
+        # keeps the same empty field as one whose rows go nowhere.  Said here
+        # so the two are not read as the same answer.
+        crossings = getattr(plugin, "crossings", None)
+        if crossings is not None:
+            click.echo(
+                f"    {crossings.handing_back} statement(s) hand their rows "
+                f"back to a caller, {crossings.resolved} of which reach a "
+                "junction"
+            )
         # Reported beside them because it is what makes the exits findable:
         # the loop opens inside the region and runs to its own end, and where
         # that end is past the region the exits are only reachable through
