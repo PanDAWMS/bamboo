@@ -2202,6 +2202,193 @@ def test_a_join_key_is_not_a_condition_on_a_value():
     assert sql.predicates(joined) == [("jobStatus", ":jobStatus")]
 
 
+def _conditions(statement: str) -> list[str]:
+    """``sql.conditions`` rendered the way a reader reads it."""
+    return [
+        " OR ".join(" AND ".join(branch.terms) for branch in condition.branches)
+        for condition in sql.conditions(statement)
+    ]
+
+
+def test_a_paren_hides_a_condition_from_predicates_but_not_from_conditions():
+    """The two readers disagree on this statement, and both are right.
+
+    ``_PREDICATE_BIND`` wants whitespace after ``AND``, so the term behind
+    ``AND (`` is invisible to it -- sixteen of the corpus's equalities are lost
+    that way, and fixing that moves ``selects`` and everything downstream of
+    it.  ``conditions`` reads the paren, which is why it can say what
+    ``selects`` does not: the row also had to be older than a time limit.
+    """
+    statement = (
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus "
+        "AND (modificationTime<:modificationTime OR (endTime IS NOT NULL "
+        "AND endTime<:endTime))"
+    )
+
+    assert sql.predicates(statement) == [("jobStatus", ":jobStatus")]
+    assert _conditions(statement) == [
+        "modificationTime<:modificationTime OR endTime IS NOT NULL AND endTime<:endTime"
+    ]
+
+
+def test_a_term_selects_already_carries_is_not_repeated_as_a_condition():
+    """One fact, one row.  ``jobStatus=:jobStatus`` is the ``selects`` list."""
+    statement = (
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus "
+        "AND stateChangeTime != modificationTime"
+    )
+
+    assert _conditions(statement) == ["stateChangeTime != modificationTime"]
+
+
+def test_a_join_term_is_not_a_condition_but_a_column_pair_is():
+    """``c1.jediTaskID=d.jediTaskID`` says how two tables meet.
+
+    A row is not passed over for failing a join key; it is passed over for
+    failing ``stateChangeTime != modificationTime``, which compares two of its
+    own columns and looks identical until the alias is read.  182 of the
+    corpus's terms are joins and would bury the 473 that are answers.
+    """
+    statement = (
+        "SELECT tabT.jediTaskID FROM {}.JEDI_Tasks tabT,{}.JEDI_Datasets tabD "
+        "WHERE tabT.jediTaskID=tabD.jediTaskID AND tabT.status=tabA.status "
+        "AND stateChangeTime != modificationTime"
+    )
+
+    assert _conditions(statement) == ["stateChangeTime != modificationTime"]
+
+
+def test_an_or_group_stays_one_condition():
+    """Split into two entries the list would ask for a row that cannot exist.
+
+    The conditions list reads as a conjunction -- "the row had to satisfy all
+    of these" -- so ``(status=:running OR status=:scouting)`` has to arrive as
+    one entry.  Flattened it says the status must be both at once, and a
+    reader ruling out the first term rules out a statement that never required
+    it.  124 of the corpus's 473 terms sit in such a group.
+    """
+    statement = (
+        "SELECT jediTaskID FROM {}.JEDI_Tasks tabT WHERE tabT.vo=:vo "
+        "AND (tabT.status=:running OR tabT.status=:scouting)"
+    )
+
+    assert _conditions(statement) == ["tabT.status=:running OR tabT.status=:scouting"]
+
+
+def test_a_branch_of_an_or_group_keeps_the_terms_that_go_together():
+    """``(A AND B) OR (C AND D)`` is two branches of two, not four branches.
+
+    Flattening the ``AND``s would report a weaker requirement than the
+    statement makes: a row satisfying ``B`` alone has not satisfied the group.
+    ``getFailureCountsForTask_JEDI`` is this shape, and the innermost paren
+    around each of its three ``jobStatus`` terms holds no ``OR`` at all --
+    which is why the group is found by looking outward.
+    """
+    statement = (
+        "SELECT COUNT(*) FROM {}.jobsArchived4 WHERE jediTaskID=:jediTaskID "
+        "AND ((jobStatus=:jobFailed AND pilotErrorCode IS NOT NULL) "
+        "OR (jobStatus=:jobClosed AND jobSubStatus=:toReassign))"
+    )
+
+    assert [
+        [branch.terms for branch in condition.branches]
+        for condition in sql.conditions(statement)
+    ] == [
+        [
+            ("jobStatus=:jobFailed", "pilotErrorCode IS NOT NULL"),
+            ("jobStatus=:jobClosed", "jobSubStatus=:toReassign"),
+        ]
+    ]
+
+
+def test_a_top_level_or_is_one_condition_even_with_no_parens_of_its_own():
+    """``(A) OR (B) AND C`` is two alternatives, not a requirement plus two.
+
+    ``get_workers_to_synchronize`` is this shape.  Looking outward for an
+    enclosing paren -- which is what this did before -- finds the group around
+    ``A``, sees no ``OR`` inside it, and reports every one of its terms as
+    required on its own.  ``AND`` binds tighter than ``OR``, so ``C`` belongs
+    to the second alternative.
+    """
+    statement = (
+        "SELECT workerID FROM ATLAS_PANDA.harvester_workers "
+        "WHERE (status in ('submitted') AND pilotStatus='running') "
+        "OR (status in ('ready') AND pilotStatus='finished') "
+        "AND lastupdate > sysdate FOR UPDATE"
+    )
+
+    assert [
+        [branch.terms for branch in condition.branches]
+        for condition in sql.conditions(statement)
+    ] == [
+        [
+            ("status in ('submitted')", "pilotStatus='running'"),
+            ("status in ('ready')", "pilotStatus='finished'", "lastupdate > sysdate"),
+        ]
+    ]
+
+
+def test_a_disjunction_inside_a_branch_keeps_its_parentheses():
+    """``X AND a OR b`` reads as ``(X AND a) OR b``, which is looser.
+
+    A row that fails ``X`` would be reported as still able to come back, which
+    is the direction that lets a wrong explanation survive.  The branch's
+    terms are joined by ``AND``, so a nested disjunction has to carry its own
+    brackets into the text.
+    """
+    statement = (
+        "SELECT x FROM T WHERE (a='1' AND b<:p) "
+        "OR (c='2' AND d<:q AND (e>:r OR e IS NULL))"
+    )
+
+    assert [
+        [branch.terms for branch in condition.branches]
+        for condition in sql.conditions(statement)
+    ] == [
+        [
+            ("a='1'", "b<:p"),
+            ("c='2'", "d<:q", "(e>:r OR e IS NULL)"),
+        ]
+    ]
+
+
+def test_what_follows_the_where_clause_is_not_a_condition():
+    """``ORDER BY`` and ``FOR UPDATE`` are about the rows that did come back."""
+    statement = (
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE lockedBy IS NULL "
+        "ORDER BY PandaID"
+    )
+
+    assert _conditions(statement) == ["lockedBy IS NULL"]
+
+
+def test_a_disjunction_that_lost_a_branch_to_a_join_is_not_recorded():
+    """One alternative gone, and the row satisfies the rest whatever it holds.
+
+    Recording what is left would state a requirement the statement does not
+    make -- the direction that gets a row ruled out for failing a test it
+    never faced.
+    """
+    statement = (
+        "SELECT a.x FROM A a,B b WHERE a.vo=:vo AND (a.id=b.id OR a.late IS NULL)"
+    )
+
+    assert _conditions(statement) == []
+
+
+def test_a_condition_that_names_no_bind_is_still_returned():
+    """An ``IS NULL`` names no value to go looking for, and is still a reason.
+
+    The map has nowhere to send a walk for it, and saying so is the point:
+    ``Branch.binds`` is empty, and the renderer leaves the term plain rather
+    than dropping it.
+    """
+    statement = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE lockedBy IS NULL"
+
+    assert [condition.binds for condition in sql.conditions(statement)] == [()]
+    assert _conditions(statement) == ["lockedBy IS NULL"]
+
+
 def test_an_interpolated_table_is_still_reported_as_a_read():
     """The hole is kept on purpose, and the difference from ``joins`` is real.
 
@@ -7568,9 +7755,15 @@ def test_two_queries_in_one_function_are_two_read_sites():
     # One row per statement, so the identities are distinct.
     assert len({n.name for n in nodes}) == 2
     assert [n.tables for n in nodes] == [["JEDI_Tasks"], ["JEDI_Tasks"]]
-    # ``execute`` fills its binds anywhere in the function, so no region is
-    # claimed.  The forwarded form is where a window exists to be read.
-    assert [n.bind_window for n in nodes] == [[], []]
+    # The ``execute`` form gets a window too, since P1-52.  It resolves its
+    # binds by key and needs no scope for *that* -- which is why none was read
+    # here before -- but where a walk should start is a different question,
+    # and ``varMap2 = {}`` / ``varMap3 = {}`` answer it the same way the
+    # forwarded form's do.
+    assert [n.bind_window for n in nodes] == [[3, 7], [8, 12]]
+    # And the stretch of the function each statement owns: the first runs out
+    # where the second starts binding.
+    assert [n.region for n in nodes] == [[3, 7], [8, 12]]
     assert [(n.anchor.line_start, n.anchor.line_end) for n in nodes] == [(7, 7), (12, 12)]
 
 

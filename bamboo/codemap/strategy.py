@@ -118,6 +118,7 @@ from bamboo.codemap.models import (
     Reading,
     ReadSiteNode,
     StageCut,
+    StatementReading,
     Strategy,
     Symptom,
     outcome_excludes,
@@ -465,7 +466,7 @@ def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
 
 def _reader_statements(
     read_statements: dict[str, list[ReadSiteNode]], observed: str
-) -> dict[str, list[str]]:
+) -> tuple[list[StatementReading], dict[str, int]]:
     """Where each reader asks for *observed*, and how much else it runs.
 
     Narrowed to the value, because the unnarrowed list answers a question
@@ -480,8 +481,14 @@ def _reader_statements(
     them: the pair may have come from ``updated_by``, where the verb is the
     other one, and answering with nothing there would be worse than answering
     with a list.
+
+    Carried as :class:`StatementReading` rather than as rendered lines since
+    P1-52.  The conditions are the answer to "the row had this value and did
+    not come back", and the region is what a skeleton has to be scoped to --
+    neither of which fits in a string that was built to be printed.
     """
-    rendered: dict[str, list[str]] = {}
+    readings: list[StatementReading] = []
+    elsewhere: dict[str, int] = {}
     for owner, sites in sorted(read_statements.items()):
         if not sites:
             continue
@@ -491,19 +498,22 @@ def _reader_statements(
             if any(pair.endswith(f"={observed}") for pair in site.selects)
         ]
         shown = asking or sites
-        lines = [
-            site.anchor.as_ref()
-            + (f" (binds {site.bind_window[0]}-{site.bind_window[1]})" if site.bind_window else "")
-            + f"  asks on {', '.join(site.selects)}"
-            for site in shown
-        ]
-        if asking and len(asking) < len(sites):
-            lines.append(
-                f"and {len(sites) - len(asking)} other statement(s) in this function, "
-                "asking on other values"
+        for site in shown:
+            readings.append(
+                StatementReading(
+                    owner=owner,
+                    file=site.anchor.file,
+                    blob_sha=site.anchor.blob_sha or "",
+                    line=site.anchor.line_start,
+                    selects=list(site.selects),
+                    conditions=list(site.conditions),
+                    bind_window=list(site.bind_window),
+                    region=list(site.region),
+                )
             )
-        rendered[owner] = lines
-    return rendered
+        if asking and len(asking) < len(sites):
+            elsewhere[owner] = len(sites) - len(asking)
+    return readings, elsewhere
 
 
 def _findings(candidates: list[Candidate], junctions: list[JunctionNode]) -> list[str]:
@@ -750,6 +760,10 @@ def _follow_up(
             "; that reader settles no value and writes no row, so what acts on the "
             "row is whatever called it, which this line does not name"
         )
+    # Rendered here rather than in the report so the strategy carries the
+    # answer and not a handle to look it up with: a derivation is checkable
+    # only if what it concluded is in it.
+    statement_readings, statements_elsewhere = _reader_statements(read_statements, observed)
     return FollowUp(
         selected=selected,
         reader_acts=reader_acts,
@@ -758,10 +772,8 @@ def _follow_up(
         creates_rows=creates_rows,
         created_by=created_by,
         reader_log_files=reader_files,
-        # Rendered here rather than in the report so the strategy carries the
-        # answer and not a handle to look it up with: a derivation is checkable
-        # only if what it concluded is in it.
-        reader_statements=_reader_statements(read_statements, observed),
+        reader_statements=statement_readings,
+        reader_statements_elsewhere=statements_elsewhere,
         selection_gates=list(selection_gates),
         triggers=triggers,
         self_repairing=repairing,
@@ -2179,6 +2191,75 @@ def attach_traces(
         entry.trace_note = walked.note
         entry.skeleton = walked.skeleton
     _report_what_the_lines_cannot_separate(strategy)
+
+
+#: ``:modificationTime@375`` or ``:taskStatus1@1820,1822`` -- the lines a
+#: condition's bind was filled on, which the read side wrote into the term.
+_SEEDED_AT = re.compile(r"@(\d+(?:,\d+)*)")
+
+
+def condition_seeds(conditions: Sequence[str]) -> list[int]:
+    """The lines to walk from, for a statement's conditions.
+
+    The read side already resolved them -- a bind is filled at an assignment,
+    and the region it was filled in is on the node -- so this reads them back
+    rather than opening the source again.  A condition naming no bind
+    contributes none, which is the map saying that term cannot be walked
+    rather than that it is not there.
+    """
+    found: set[int] = set()
+    for condition in conditions:
+        for group in _SEEDED_AT.findall(condition):
+            found.update(int(line) for line in group.split(","))
+    return sorted(found)
+
+
+def attach_reader_traces(
+    strategy: Strategy,
+    roots: dict,
+    classify=None,
+) -> None:
+    """Walk the source for each reader statement and scope it to its region.
+
+    Beside :func:`attach_traces` and deliberately not inside it.  That one
+    walks a junction's arms and hands the whole function to the skeleton,
+    which is right: a junction owns its function.  A statement owns the
+    stretch between its own binds and the next statement's, and handed the
+    function ``copyArchive.py::main``'s three ``holding`` queries answer with
+    the same 251 rows -- the reader cannot tell which time limit rejected
+    their row, which is the question they came with.
+
+    No handovers.  A crossing is a property of the junction the map recorded,
+    and these are statements; passing a junction's would attribute another
+    decision's reach to a query that shares its function.
+    """
+    if not roots:
+        return
+    if classify is None:
+        from bamboo.codemap.panda.provenance import classify as classify_panda
+
+        classify = classify_panda
+    for entry in strategy.follow_up.reader_statements if strategy.follow_up else []:
+        lines = condition_seeds(entry.conditions)
+        if not entry.file or not lines:
+            # Said by leaving the trace empty rather than by walking the
+            # statement's own line: a statement whose conditions name no bind
+            # has nothing to explain, and a walk seeded at the ``execute``
+            # would return the SQL text, which reads no names at all.
+            continue
+        walked = trace.walk(
+            roots,
+            file=entry.file,
+            owner=entry.owner,
+            lines=lines,
+            observed=strategy.symptom.observed or "",
+            expected_sha=entry.blob_sha,
+            classify=classify,
+            region=tuple(entry.region) if len(entry.region) == 2 else None,
+        )
+        entry.trace = walked.steps
+        entry.trace_note = walked.note
+        entry.skeleton = walked.skeleton
 
 
 def _report_what_the_lines_cannot_separate(strategy: Strategy) -> None:

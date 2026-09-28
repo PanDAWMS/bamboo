@@ -992,7 +992,9 @@ class _Walk:
                     fallback = (rendered, spelled, f"{spelled} is set to this value above")
         return fallback
 
-    def skeleton(self, frame: _Frame) -> list[SkeletonLine]:
+    def skeleton(
+        self, frame: _Frame, region: Optional[tuple[int, int]] = None
+    ) -> list[SkeletonLine]:
         """What this function prints, in source order, with the arms in place.
 
         Built from the whole function rather than from the arms outward, and
@@ -1003,16 +1005,30 @@ class _Walk:
         Only the parts of the tree that lead to a printed line or an arm are
         walked into.  A skeleton is not the source again -- a 540-line
         function whose every branch is reproduced buries the handful of rows a
-        reader came for, which is the failure this round is elsewhere fixing.
+        reader came for.
+
+        *region* is how the read side says which part of the function is its
+        own.  ``copyArchive.py::main`` runs three ``holding`` queries and is
+        1353 lines: without a region all three answer with the same 251 rows,
+        and the reader cannot tell which limit rejected their row.  A
+        statement outside the region is not printed, and a header above one
+        inside it still is -- the nesting is what a reader is here for, so it
+        survives by enclosing something shown rather than by its own line.
         """
         func = frame.func
         if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return []
+
+        def within(statement: ast.stmt) -> bool:
+            if region is None:
+                return True
+            return region[0] <= statement.lineno <= region[1]
+
         printed: dict[int, list[tuple[ast.expr, ast.expr]]] = {}
         carried: set[int] = set()
         for argument, message in self.reachable_calls(frame):
             statement = _enclosing_statement(argument)
-            if statement is not None:
+            if statement is not None and within(statement):
                 printed.setdefault(id(statement), []).append((argument, message))
                 carried.add(id(argument))
         # A call left with no message at all -- a bare name nothing in the
@@ -1024,7 +1040,7 @@ class _Walk:
             if id(argument) in carried:
                 continue
             statement = _enclosing_statement(argument)
-            if statement is not None:
+            if statement is not None and within(statement):
                 printed.setdefault(id(statement), []).append((argument, argument))
         rows: list[SkeletonLine] = []
         self._emit(frame, func.body, 0, printed, rows)
@@ -1539,6 +1555,7 @@ def walk(
     handovers: Sequence[Handover] = (),
     classify: Optional[Classifier] = None,
     budget: Budget = DEFAULT_BUDGET,
+    region: Optional[tuple[int, int]] = None,
 ) -> Walked:
     """Explain the arms at *lines*, and say why the answer is short when it is.
 
@@ -1553,6 +1570,12 @@ def walk(
     the narrower pattern with it filled in as well.  Without one the skeleton
     still comes back, because a line that reports nothing about the value
     still says the code around it ran.
+
+    *region* narrows that skeleton to one part of the function, and is the
+    read side's to give: a junction owns its whole function and passes none,
+    a statement owns the stretch between its own binds and the next
+    statement's.  The default is the whole function, so nothing that does not
+    ask for a region sees a different answer.
 
     **A tree that is not the map's is refused rather than warned about.**  A
     trace is shaped like an answer, and reading line 4971 of the wrong release
@@ -1577,4 +1600,4 @@ def walk(
     while state.queue:
         held, name, depth = state.queue.popleft()
         state.explain(held, name, depth)
-    return Walked(state.steps, state.note, state.skeleton(frame))
+    return Walked(state.steps, state.note, state.skeleton(frame, region))

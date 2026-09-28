@@ -1020,6 +1020,47 @@ class ReadSiteNode(BaseNode):
             "value is the SQL text and reads no names at all."
         ),
     )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every other term the ``WHERE`` requires of a row, sorted -- what "
+            "``selects`` does not say.  A row can hold the value the map names "
+            "and still not come back, and until now the map had no way to say "
+            "why: ``copyArchive.py``'s ``holding`` query also requires "
+            "``modificationTime<:modificationTime``, and that is the answer a "
+            "reader came for.\n\n"
+            "Written as the source writes the term, with ``@<line>`` appended "
+            "when a bind fills it -- ``modificationTime<:modificationTime@375`` "
+            "-- and nothing appended when none can, which is the map saying the "
+            "term is real but not walkable (a ``NULL`` check, a column compared "
+            "against another column).\n\n"
+            "**The list reads as a conjunction, so an ``OR`` group is one "
+            "entry** with its branches joined by `` OR ``.  Split into separate "
+            "entries, ``(tabT.status=:running OR tabT.status=:scouting)`` asks "
+            "for a row whose status is both, which no row can be; 124 of the "
+            "corpus's 473 terms are branches of such a group.\n\n"
+            "Join terms are left out.  ``c1.jediTaskID=d.jediTaskID`` says how "
+            "two tables meet, not why a row was passed over, and the 182 of "
+            "them would bury the terms that do."
+        ),
+    )
+    region: list[int] = Field(
+        default_factory=list,
+        description=(
+            "``[first, last]`` -- the stretch of the function this statement "
+            "owns, from where its binds start being filled to just before the "
+            "next statement starts filling its own.\n\n"
+            "Not the same claim as ``bind_window``, which ends at the call: "
+            "what a reader came for is usually what the code *prints after* "
+            "the rows come back, and in ``copyArchive.py::main`` every logging "
+            "call for the ``holding`` query sits outside the window. The "
+            "region is what a skeleton is scoped to, and it is why the three "
+            "``holding`` statements stop returning the same 251 rows: they are "
+            "``[374, 399]``, ``[400, 428]`` and ``[429, 453]``. Median 21 "
+            "lines against the enclosing function's 86, and 363 at worst "
+            "against 1353."
+        ),
+    )
     anchor: Anchor = Field(
         ...,
         description=(
@@ -2210,15 +2251,28 @@ class FollowUp(BaseModel):
             "fix.  Empty is a finding, not a licence to guess a file."
         ),
     )
-    reader_statements: dict[str, list[str]] = Field(
+    reader_statements: list[StatementReading] = Field(
+        default_factory=list,
+        description=(
+            "One entry per statement that asks for the observed value: where "
+            "it is, what it asks rows by, what else it requires of them, and "
+            "the stretch of its function it owns.  The log file says which log "
+            "to read and this says where in the code: ``copyArchive.py::main`` "
+            "asks for ``jobStatus='holding'`` from three statements with three "
+            "different time limits, and named by the function alone those are "
+            "one answer.\n\n"
+            "Rendered text was what this held until P1-52, which is why the "
+            "conditions and the walk had nowhere to go: a string cannot carry "
+            "a skeleton."
+        ),
+    )
+    reader_statements_elsewhere: dict[str, int] = Field(
         default_factory=dict,
         description=(
-            "``{reader: where its statements are}``, one entry per statement, "
-            "as ``file:line`` plus what that statement asks rows by.  The log "
-            "file says which log to read and this says where in the code: "
-            "``copyArchive.py::main`` asks for ``jobStatus='holding'`` from "
-            "three statements with three different time limits, and named by "
-            "the function alone those are one answer."
+            "``{reader: how many of its other statements ask on other "
+            "values}``.  Counted rather than dropped -- a reader asking what "
+            "else this daemon does is asking something real, and a silent "
+            "filter would make the listed ones look like the whole of it."
         ),
     )
     triggers: list[str] = Field(
@@ -2594,6 +2648,62 @@ class TraceStep(BaseModel):
     )
     detail: str = Field(default="", description="Which interface, key or caller.")
     depth: int = Field(default=0, description="Hops from the arm.")
+
+
+class StatementReading(BaseModel):
+    """One statement a reader runs, what else it asks of a row, and its stretch.
+
+    The read side's counterpart to :class:`Reading`, and per statement rather
+    than per function for the reason the read site node exists: ``copyArchive.py
+    ::main`` asks for ``jobStatus='holding'`` three times with three different
+    time limits, and one answer for the function is the wrong number of
+    answers.
+
+    Carries its own trace and skeleton rather than borrowing the function's.
+    A reading walks the arms of a junction and is scoped to the whole
+    function, which is right there -- the junction owns it.  A statement owns
+    only ``region``, and handed the function it answers three questions with
+    the same 251 rows.
+    """
+
+    owner: str
+    file: str = Field(default="", description="Where the statement is.")
+    blob_sha: str = Field(
+        default="", description="Hash of the file the map read it from."
+    )
+    line: int = Field(default=0, description="The line the statement runs on.")
+    selects: list[str] = Field(
+        default_factory=list, description="``subject=value`` this statement asks rows by."
+    )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What else the ``WHERE`` requires, read as a conjunction -- the "
+            "answer to a row that holds the value and never came back."
+        ),
+    )
+    bind_window: list[int] = Field(
+        default_factory=list, description="``[first, last]`` the binds are filled within."
+    )
+    region: list[int] = Field(
+        default_factory=list,
+        description="``[first, last]`` of the function this statement owns.",
+    )
+    trace: list[TraceStep] = Field(
+        default_factory=list,
+        description=(
+            "Why the conditions hold the values they do, walked from the "
+            "assignments that fill their binds.  Empty without a source tree, "
+            "and empty on purpose when the tree is not the one mapped."
+        ),
+    )
+    trace_note: str = Field(
+        default="", description="Why the walk is short, where it is."
+    )
+    skeleton: list[SkeletonLine] = Field(
+        default_factory=list,
+        description="What this statement's region prints, in source order.",
+    )
 
 
 class Reading(BaseModel):

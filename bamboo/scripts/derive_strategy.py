@@ -142,6 +142,10 @@ def _report_verdict(strategy: Strategy, evaluated: bool) -> None:
 #: made in twelve places, which is itself the answer to "where does one come
 #: from" -- so the count is printed rather than the list quietly cut.
 _TOP_CREATORS = 4
+#: Steps shown under one reader statement.  A walk from a time limit is three
+#: or four steps; the cap is here so one statement cannot push the next one
+#: off the page, and the count of what was cut is printed.
+_TOP_READER_STEPS = 6
 
 
 def _report_follow_up(strategy: Strategy) -> None:
@@ -200,8 +204,41 @@ def _report_follow_up(strategy: Strategy) -> None:
         # different time limits.  Printed under the owner rather than pooled,
         # because which statement asked is the thing being distinguished.
         for owner in actors:
-            for where in follow.reader_statements.get(owner, []):
-                click.echo(f"                                     {where}")
+            for entry in follow.reader_statements:
+                if entry.owner != owner:
+                    continue
+                where = f"{entry.file}:{entry.line}"
+                if entry.region:
+                    where += f" (lines {entry.region[0]}-{entry.region[1]})"
+                click.echo(
+                    f"                                     {where}"
+                    f"  asks on {', '.join(entry.selects)}"
+                )
+                # What else the row had to be.  The question this answers is
+                # "it held the value and did not come back", and until the
+                # conditions were recorded the map's answer stopped one line
+                # above it.
+                for condition in entry.conditions:
+                    click.echo(f"                                       and {condition}")
+                for step in entry.trace[:_TOP_READER_STEPS]:
+                    head = step.name if not step.value else f"{step.name} = {step.value}"
+                    click.echo(
+                        f"                                       ↳ {step.line or '':>5}"
+                        f"  {step.kind:<11} {head.strip(' =')}"
+                    )
+                if len(entry.trace) > _TOP_READER_STEPS:
+                    click.echo(
+                        " " * 39
+                        + f"↳ … {len(entry.trace) - _TOP_READER_STEPS} more step(s)"
+                    )
+                if entry.trace_note:
+                    click.echo(f"                                       ↳ {entry.trace_note}")
+            others = follow.reader_statements_elsewhere.get(owner)
+            if others:
+                click.echo(
+                    f"                                     and {others} other statement(s) "
+                    "in this function, asking on other values"
+                )
     if follow.selection_gates:
         click.echo(f"  what bounds that query's reach   {', '.join(follow.selection_gates)}")
         click.echo("                                   nothing in the map writes these")
@@ -1211,6 +1248,11 @@ def main(
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
     for hop in investigation.hops:
         strategy_mod.attach_traces(hop.strategy, roots)
+        # The read side's own walk, scoped to each statement's region.  A
+        # second call rather than a flag on the first: the two walk different
+        # things -- a junction's arms and a query's conditions -- and the
+        # scoping is what separates the three ``holding`` statements.
+        strategy_mod.attach_reader_traces(hop.strategy, roots)
 
     if len(investigation.hops) > 1 or max_hops > 1:
         _report_trace(investigation)

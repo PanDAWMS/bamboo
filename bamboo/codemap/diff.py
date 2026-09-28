@@ -76,7 +76,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     # is what the statement asks for.  A predicate gaining a value is the read
     # side's equivalent of a branch gaining an outcome: it is the difference
     # between a status something carries a row out of and one it does not.
-    NodeType.READ_SITE.value: ("selects", "tables", "bind_window"),
+    NodeType.READ_SITE.value: ("selects", "tables", "bind_window", "conditions", "region"),
     _JUNCTION: ("subject", "owner", "log_files", "attribution", "structural_subject"),
     NodeType.BOUNDARY.value: (
         "system",

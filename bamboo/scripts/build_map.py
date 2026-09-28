@@ -483,10 +483,20 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
     if reads:
         many = [r for r in reads if len(r.selects) > 1]
         windowed = [r for r in reads if r.bind_window]
+        conditioned = [r for r in reads if r.conditions]
+        terms = sum(len(r.conditions) for r in reads)
         click.echo(
             f"  read sites: {len(reads)} statement(s) over "
             f"{len({r.owner for r in reads})} owner(s), {len(many)} asking on more "
             f"than one value, {len(windowed)} with a bind window"
+        )
+        # What a row had to be besides holding the value, and the stretch of
+        # the function that answers for it.  Both counted because both are
+        # answers where they are empty: a statement with no conditions asks
+        # only for the value, and that is what the reader wanted to know.
+        click.echo(
+            f"    {terms} condition(s) over {len(conditioned)} statement(s); "
+            f"{len(reads) - len(conditioned)} ask on the value alone"
         )
         busiest = Counter(r.owner for r in reads).most_common(top)
         for owner, count in busiest:

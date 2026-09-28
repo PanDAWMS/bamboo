@@ -466,6 +466,55 @@ def readers_have_a_statement(fragment: MapFragment) -> GateResult:
     )
 
 
+def bind_windows_are_known(fragment: MapFragment) -> GateResult:
+    """(i) Every statement the map names says where its binds were filled.
+
+    A statement is somewhere to send a reader; the window is what makes it
+    somewhere to *walk from*.  ``strategy`` seeds a walk at the assignments
+    that fill a run's binds, and a statement with no window offers the whole
+    enclosing function instead -- ``copyArchive.py::main`` is 1353 lines, so
+    "where did this time limit come from" is answered with the function and
+    the reader is no further on than before the statement became a node.
+
+    The gap was a call form, not a missing fact.  ``sql.executions`` computes a
+    window only for the forwarded call, where it needs one to pair a statement
+    with the right varmap; the ``execute`` form resolves its binds by key and
+    needs no scope for *that*, so none was computed -- and 217 of the corpus's
+    264 statements are that form.  The walk's seed range is a different
+    question from bind resolution, and it went unasked.
+
+    **A statement that binds nothing is not a failure.**
+    ``copyArchive.py::main`` runs one ``querySQLS(sql.format(table), {})``
+    whose values are all literals in the text; there is no assignment anywhere
+    to place, so an empty window is the true answer.  It is recognised by its
+    conditions naming no bind rather than by name -- and before the conditions
+    exist that excludes nobody, which is the right way round for a gate that
+    reports what the map cannot yet say.
+    """
+    failures: list[str] = []
+    for site in sorted(fragment.read_sites, key=lambda s: s.name):
+        if site.bind_window:
+            continue
+        # Positive knowledge only: terms recorded, none of them naming a bind.
+        if site.conditions and not any(":" in term for term in site.conditions):
+            continue
+        shown = ", ".join(sorted(site.selects)[:3]) or "<no value>"
+        failures.append(
+            f"{site.owner}@{site.anchor.line_start} asks by {shown}"
+            " -- no bind window, so a walk would be scoped to the whole function"
+        )
+    return GateResult(
+        gate="bind-windows-are-known",
+        passed=not failures,
+        checked=len(fragment.read_sites),
+        unit="statements",
+        question="does every statement the map names say where its binds were filled?",
+        finding="a statement records no bind window, so there is nothing to seed a walk from but its function",
+        failures=failures,
+        note="An unwindowed statement is still stored, offered and compared; nothing downstream reads a window to notice.",
+    )
+
+
 def branch_positions_are_known(fragment: MapFragment) -> GateResult:
     """(i) Every arm the map offers says where in the source it decided.
 
@@ -1786,6 +1835,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(boundary_ownership_param_declared(fragment))
     if fragment.subjects:
         results.append(readers_have_a_statement(fragment))
+    if fragment.read_sites:
+        results.append(bind_windows_are_known(fragment))
     if fragment.junctions:
         results.append(structural_attribution_agrees(fragment))
         results.append(declared_status_is_written(fragment))

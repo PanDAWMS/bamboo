@@ -1298,7 +1298,7 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             pieces = [head]
         varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
         window = (
-            _binding_window(func, varmap, node.lineno)
+            binding_window(func, varmap, node.lineno)
             if forwarded and varmap is not None
             else None
         )
@@ -1342,7 +1342,7 @@ _FORWARDED = frozenset({"querySQL", "querySQLS"})
 RUNNERS = frozenset({"execute", "executemany"}) | _FORWARDED
 
 
-def _binding_window(
+def binding_window(
     func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str, line: int
 ) -> tuple[int, int]:
     """Lines whose ``<varmap>[...]`` assignments belong to the run at *line*.
@@ -1352,6 +1352,15 @@ def _binding_window(
     ``copyArchive.main`` writes it 31 times for 23 statements.  With no such
     assignment the window opens at the top of the function, which is the same
     answer the unwindowed reading gives.
+
+    Public because it answers a second question :func:`executions` does not
+    ask.  There it is called only for the forwarded form, which needs a scope
+    to pair a statement with the right varmap; ``execute`` resolves its binds
+    by key and needs none.  But *where a walk should start* is a different
+    question, and the answer is as good for one form as the other -- measured
+    on the corpus, 216 of the 217 ``execute`` statements get a window here,
+    median 6 lines and never the whole function, the same shape as the 47 the
+    forwarded form already had.
     """
     start = func.lineno
     for node in ast.walk(func):
@@ -1779,6 +1788,237 @@ def predicates(sql: str) -> list[tuple[str, str]]:
     return found
 
 
+#: One ``WHERE`` term, whole.  Used to recognise a leaf of the clause rather
+#: than to find one: the splitting is done by :func:`_parse_clause`, which
+#: reads the ``AND``/``OR`` structure the parens declare.  ``predicates``
+#: cannot use this -- it answers "which value does this select on", and
+#: ``modificationTime<:limit`` names no value.
+_CONDITION_TERM = re.compile(
+    r"^(?:NOT\s+)?(?:\w+\.)?[A-Za-z_]\w*\s*"
+    r"(?:(?:=|<>|!=|<=|>=|<|>)\s*.+"
+    r"|(?:NOT\s+)?IN\s*\(.*\)|IS\s+(?:NOT\s+)?NULL)$",
+    re.IGNORECASE | re.DOTALL,
+)
+#: A term that is nothing but ``<column> <equality> <bind>`` -- the shape
+#: :func:`predicates` returns, used to tell "already in ``selects``" from
+#: "said nowhere".
+_CONDITION_EQUALITY = re.compile(r"^[^=<>!]*(?:=|<>|!=)\s*(:\w+)\s*$")
+#: ``<column> <op> <column>``.  Qualified on either side it is a join;
+#: unqualified it is the statement comparing two of a row's own columns, which
+#: is a reason a row was passed over and nothing else in the map records.
+_CONDITION_COMPARISON = re.compile(
+    r"^(?:NOT\s+)?((?:\w+\.)?\w+)\s*(?:=|<>|!=|<=|>=|<|>)\s*((?:\w+\.)?\w+)\s*$",
+    re.IGNORECASE,
+)
+#: Where the ``WHERE`` clause ends.  Everything after is about the rows that
+#: did come back, not about which ones do.
+_CLAUSE_END = re.compile(
+    r"\b(?:GROUP\s+BY|ORDER\s+BY|HAVING|FOR\s+UPDATE|UNION|FETCH\s+FIRST)\b", re.IGNORECASE
+)
+_WHERE = re.compile(r"\bWHERE\b", re.IGNORECASE)
+
+
+class Branch(NamedTuple):
+    """One alternative of a condition: the terms a row can satisfy together."""
+
+    #: The terms, joined by ``AND`` as the statement writes them.
+    terms: tuple[str, ...]
+    #: Every bind key named anywhere in ``terms``, in the order they appear.
+    binds: tuple[str, ...]
+
+
+class Condition(NamedTuple):
+    """One thing a statement requires of a row, beside the values it selects on.
+
+    A conjunction of branches is not what this is: the *list* of conditions is
+    the conjunction, and each condition is a disjunction of :class:`Branch`.
+    One branch is the ordinary case -- ``modificationTime<:modificationTime``
+    is required outright -- and several is an ``OR``, which has to stay one
+    condition or the list stops reading as "all of these must hold".
+    """
+
+    branches: tuple[Branch, ...]
+
+    @property
+    def binds(self) -> tuple[str, ...]:
+        """Every bind key this condition names, across all its branches."""
+        return tuple(key for branch in self.branches for key in branch.binds)
+
+
+def _top_level(text: str, keyword: str) -> list[tuple[int, int]]:
+    """Spans of *text* between its ``keyword``s at paren depth zero."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    depth = 0
+    for token in re.finditer(r"\(|\)|\b" + keyword + r"\b", text, re.IGNORECASE):
+        found = token.group(0)
+        if found == "(":
+            depth += 1
+        elif found == ")":
+            depth -= 1
+        elif depth == 0:
+            spans.append((start, token.start()))
+            start = token.end()
+    spans.append((start, len(text)))
+    return spans
+
+
+def _parse_clause(text: str):
+    """The ``AND``/``OR`` tree of a ``WHERE`` clause, as nested lists.
+
+    ``("or", [child, …])``, ``("and", [child, …])`` or ``("term", text)``.
+    Read rather than pattern-matched because the two readings that came before
+    it were both wrong in ways a regex cannot see: ``AND (`` hides a term from
+    anything that wants whitespace, and looking outward for an enclosing paren
+    misses ``(A AND B) OR (C AND D) AND E``, where the disjunction is at the
+    top and has no parens of its own.
+
+    ``AND`` binds tighter than ``OR``, so the ``OR`` split happens first --
+    which is what makes ``E`` above part of the second alternative and not a
+    requirement in its own right.
+    """
+    text = text.strip()
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for index, char in enumerate(text):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and index < len(text) - 1:
+                    return _parse_clause_split(text)
+        text = text[1:-1].strip()
+    return _parse_clause_split(text)
+
+
+def _parse_clause_split(text: str):
+    for keyword, kind in (("OR", "or"), ("AND", "and")):
+        spans = _top_level(text, keyword)
+        if len(spans) > 1:
+            return (kind, [_parse_clause(text[lo:hi]) for lo, hi in spans])
+    return ("term", re.sub(r"\s+", " ", text).strip())
+
+
+def _keep_term(term: str, held: set[str], in_or: bool) -> bool:
+    """Whether *term* is a reason a row was passed over that the map lacks."""
+    if not _CONDITION_TERM.match(term):
+        return False
+    equality = _CONDITION_EQUALITY.match(term)
+    # Dropped as "already in ``selects``" only outside a disjunction.  Inside
+    # one it is not the same fact: ``selects`` says the statement asks by the
+    # value outright, and the alternative says it accepts that *or* something
+    # else.  ``predicates`` also picks up a group's later branches while the
+    # paren hides its first, so dropping them hands a reader half a
+    # disjunction and no sign that the rest exists.
+    if not in_or and equality and equality.group(1) in held:
+        return False
+    if not _BIND_KEY.search(term):
+        sides = _CONDITION_COMPARISON.match(term)
+        if sides and ("." in sides.group(1) or "." in sides.group(2)):
+            return False  # a join says how two tables meet, not why a row was skipped
+    return True
+
+
+def _prune(node, held: set[str], in_or: bool):
+    """Drop what is not an answer, and drop a disjunction that lost a branch.
+
+    An ``OR`` with one branch gone is satisfied by that branch whatever the
+    row does, so recording the rest would state a requirement the statement
+    does not make -- the direction that gets a row ruled out for failing a
+    test it never faced.
+    """
+    kind, body = node
+    if kind == "term":
+        return node if _keep_term(body, held, in_or) else None
+    children = [_prune(child, held, in_or or kind == "or") for child in body]
+    if kind == "or":
+        return (kind, children) if all(children) else None
+    kept = [child for child in children if child]
+    return (kind, kept) if kept else None
+
+
+def _terms_of(node) -> tuple[str, ...]:
+    """A branch's terms, with a nested disjunction kept whole as one term.
+
+    Parenthesised, because the terms around it are joined by ``AND`` and
+    ``AND`` binds tighter: ``X AND a OR b`` reads as ``(X AND a) OR b``, which
+    is not what the statement said and is the looser of the two -- a row that
+    fails ``X`` would be reported as still able to come back.
+    """
+    kind, body = node
+    if kind == "term":
+        return (body,)
+    if kind == "and":
+        return tuple(term for child in body for term in _terms_of(child))
+    return (f"({' OR '.join(_render_branch(child) for child in body)})",)
+
+
+def _render_branch(node) -> str:
+    terms = _terms_of(node)
+    return f"({' AND '.join(terms)})" if len(terms) > 1 else terms[0]
+
+
+def _as_condition(node) -> Condition:
+    kind, body = node
+    parts = body if kind == "or" else [node]
+    return Condition(
+        tuple(
+            Branch(
+                _terms_of(part),
+                tuple(key for term in _terms_of(part) for key in _BIND_KEY.findall(term)),
+            )
+            for part in parts
+        )
+    )
+
+
+def conditions(sql: str) -> list[Condition]:
+    """Return what *sql* asks of a row beyond the values it selects on.
+
+    Beside :func:`predicates` rather than inside it, and the two answer
+    different questions.  ``predicates`` says *which value* a statement asks
+    rows by, so it reads equalities on a bind and nothing else -- that is what
+    a subject's vocabulary is made of.  This says *what else had to be true*,
+    which is the question a row that holds the value and never came back
+    raises: ``copyArchive.py``'s ``holding`` query also requires
+    ``modificationTime<:modificationTime``, and the map had no way to say so.
+
+    **The list reads as a conjunction**, so a disjunction is one entry with
+    its alternatives joined -- split up, ``(status=:running OR
+    status=:scouting)`` asks for a row whose status is both, which no row can
+    be.  That is why the clause is parsed rather than scanned for terms.
+
+    What is left out, and why:
+
+    * **Terms ``predicates`` already returns, where they stand alone.**  Those
+      are the ``selects`` list; repeating them would make one fact two rows.
+      Inside a disjunction they are kept -- see :func:`_keep_term`.
+    * **Join terms.**  ``c1.jediTaskID=d.jediTaskID`` says how two tables meet,
+      not why a row was passed over.  182 of the corpus's terms are joins, and
+      left in they bury the ones that are answers -- one statement in
+      ``entity_module.py`` carries six.
+    * **A disjunction that lost a branch to either of those.**  It no longer
+      constrains anything, and recording what is left would over-state it.
+
+    What is kept and cannot be walked is still returned: an ``IS NULL`` and a
+    column compared against another column name no value to go looking for,
+    and saying the term is there is the point.  The caller decides what to do
+    with :attr:`Branch.binds`, which is empty for exactly those.
+    """
+    opened = _WHERE.search(sql)
+    if opened is None:
+        return []
+    rest = sql[opened.end() :]
+    closed = _CLAUSE_END.search(rest)
+    clause = rest[: closed.start()] if closed else rest
+    held = {key for _column, key in predicates(sql)}
+    tree = _prune(_parse_clause(clause), held, False)
+    if tree is None:
+        return []
+    kind, body = tree
+    return [_as_condition(child) for child in body] if kind == "and" else [_as_condition(tree)]
+
+
 def selected_literals(sql: str) -> list[tuple[str, str]]:
     """Return ``(column, value)`` for each predicate testing a literal.
 
@@ -1827,7 +2067,7 @@ def bound_values(
     var_map)`` names both halves in one call, so reading every bind in the
     function would have ``copyArchive.main`` claim its 23 statements each
     select all 11 values of ``:jobStatus``.  The bounds come from the code:
-    see :func:`_binding_window`.
+    see :func:`binding_window`.
 
     **Two spellings, one meaning.**  ``varMap[":status"] = v`` and ``var_map =
     {":status": v}`` bind the same placeholder to the same value, and reading

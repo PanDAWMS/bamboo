@@ -751,12 +751,46 @@ class ReadStatement(NamedTuple):
     file: str
     blob_sha: str
     line: int
-    #: The lines the forwarded form filled this run's binds within, or ``None``
-    #: for ``execute``, where the binds are the function's own.
+    #: The lines this run's binds are filled within.  Read from the code for
+    #: both call forms -- see :func:`~bamboo.codemap.panda.sql.binding_window`
+    #: -- and ``None`` only where the call names no varmap to read.
     window: Optional[tuple[int, int]]
     #: ``{(subject, value)}`` the predicates name, for the read verb only.
     selects: set[tuple[str, str]]
     tables: set[str]
+    #: What the ``WHERE`` asks of a row beside those values, rendered, with
+    #: ``@<line>`` on the binds a walk can be seeded at.
+    conditions: list[str]
+    #: ``[first, last]`` -- the stretch of the function this statement owns.
+    #: Filled once the function's other runs are known, so it arrives by
+    #: ``_replace`` rather than at construction.
+    region: Optional[tuple[int, int]] = None
+
+
+def _render_condition(condition: "sql.Condition", seeds: dict[str, list[int]]) -> str:
+    """One condition as the map stores it, with its walkable binds placed.
+
+    ``@<line>`` marks a bind an assignment in this run's window fills, so a
+    consumer can seed a walk there without re-reading the source; a bind with
+    no assignment to point at, and every term that names no bind at all, is
+    written plain -- which is the map saying the term is real and not
+    walkable, rather than saying nothing.
+
+    Branches are joined by ``OR`` because the list of conditions is the
+    conjunction.  A branch holding more than one term is parenthesised: SQL
+    binds ``AND`` tighter than ``OR`` and so does this, but a reader should
+    not have to know that to see which terms go together.
+    """
+    parts: list[str] = []
+    for branch in condition.branches:
+        text = " AND ".join(branch.terms)
+        for key in sorted(set(branch.binds), key=len, reverse=True):
+            lines = seeds.get(key)
+            if lines:
+                placed = ",".join(str(line) for line in lines)
+                text = re.sub(re.escape(key) + r"\b", f"{key}@{placed}", text)
+        parts.append(f"({text})" if len(branch.terms) > 1 and len(condition.branches) > 1 else text)
+    return " OR ".join(parts)
 
 
 READ_SLICE_NAME = "sql-read"
@@ -981,6 +1015,107 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
         use.tables.add(table)
         getattr(use, f"{verb}_by").add(owner)
 
+    def place_conditions(
+        func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
+    ) -> None:
+        """Say what each of *func*'s statements requires of a row besides the value.
+
+        A branchy statement is emitted as several variants at one ``execute``,
+        and exactly one of them ran.  Unioning their terms -- which is what
+        ``selects`` does, and what this did first -- reads as a conjunction and
+        so **over-states** the requirement: 24 of the corpus's statements have
+        variants that disagree, over 66 terms, and a reader ruling a row out
+        against a term the text that ran never carried is the failure this
+        field exists to prevent.
+
+        So the variants are folded as what they are, a disjunction:
+        ``(A and B) or (A and C)`` is ``A``, required outright, and ``B or C``
+        as one condition.  A variant that requires nothing beyond the common
+        part makes that disjunction free, and then it is not recorded at all.
+        """
+        runs: dict[int, list] = {}
+        for run in executions:
+            seen_text = runs.setdefault(run.call.lineno, [])
+            if all(run.sql != other.sql for other in seen_text):
+                seen_text.append(run)
+        for line, variants in runs.items():
+            kept = statements.get((owner, line))
+            if kept is None:
+                continue
+            rendered: list[list[str]] = []
+            for run in variants:
+                window = run.window
+                if window is None and run.varmap:
+                    window = sql.binding_window(func, run.varmap, line)
+                found = sql.conditions(run.sql)
+                seeds: dict[str, list[int]] = {}
+                for condition in found:
+                    for key in condition.binds:
+                        if key in seeds:
+                            continue
+                        at_lines = sorted(
+                            {
+                                bind.site.lineno
+                                for bind in sql.bound_values(
+                                    func, run.varmap or "", key, window
+                                )
+                            }
+                        )
+                        if at_lines:
+                            seeds[key] = at_lines
+                rendered.append([_render_condition(c, seeds) for c in found])
+            common = set.intersection(*(set(one) for one in rendered))
+            kept.conditions.extend(sorted(common))
+            remainders: list[tuple[str, ...]] = []
+            for one in rendered:
+                shape = tuple(entry for entry in one if entry not in common)
+                if shape not in remainders:
+                    remainders.append(shape)
+            if len(remainders) == 1:
+                kept.conditions.extend(remainders[0])
+            elif all(remainders):
+                kept.conditions.append(
+                    " OR ".join(
+                        f"({' AND '.join(shape)})" if len(shape) > 1 else shape[0]
+                        for shape in remainders
+                    )
+                )
+
+    def place_regions(
+        func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
+    ) -> None:
+        """Give each of *func*'s statements the stretch of it that it owns.
+
+        From where this run's binds start being filled to just before the next
+        run's do.  Every run of the function is laid out, not only the stored
+        ones: the statement that ends a region may be one no read site was
+        built from, and stopping at the next *stored* one would hand a reader
+        the following query's logging as well.
+
+        Keyed by the call line because a branchy statement is emitted as
+        several runs at one ``execute``, and a read site is one ``(owner,
+        line)``: without the key the region ends at the statement's own second
+        variant, which is itself.
+        """
+        starts: dict[int, int] = {}
+        for run in executions:
+            line = run.call.lineno
+            window = run.window
+            if window is None and run.varmap:
+                window = sql.binding_window(func, run.varmap, line)
+            begins = window[0] if window else line
+            starts[line] = min(starts.get(line, begins), begins)
+        last = func.end_lineno or func.lineno
+        ordered = sorted(starts.items())
+        for index, (line, begins) in enumerate(ordered):
+            kept = statements.get((owner, line))
+            if kept is None:
+                continue
+            following = ordered[index + 1][1] if index + 1 < len(ordered) else last + 1
+            statements[(owner, line)] = kept._replace(
+                region=(begins, max(line, following - 1))
+            )
+
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             owner = f"{module.rel_path}::{func.name}"
@@ -992,7 +1127,11 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
             # ``:jobStatus`` bound to ``holding`` at each, and the text-only
             # key reported none of them.
             seen: set[tuple[str, Optional[tuple[int, int]]]] = set()
-            for run in sql.executions(func):
+            # Read once and handed on.  ``executions`` is the most expensive
+            # call in this walk, and the two passes below want the same list:
+            # calling it again for each of them tripled the build.
+            executions = sql.executions(func)
+            for run in executions:
                 if (run.sql, run.window) in seen:
                     continue
                 seen.add((run.sql, run.window))
@@ -1016,15 +1155,24 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                 # pair, and thrown away again if none lands.  The line is the
                 # one the statement *runs* on: the text is assembled further up
                 # and the binds are not in scope there.
+                # Read for both call forms.  ``run.window`` is left alone
+                # below, where it pairs a statement with its varmap: narrowing
+                # the ``execute`` form's bind lookup would drop values from
+                # ``selects``, which is a different question from where a walk
+                # should start.
+                window = run.window
+                if window is None and run.varmap:
+                    window = sql.binding_window(func, run.varmap, run.call.lineno)
                 at = ReadStatement(
                     owner=owner,
                     package=module.package,
                     file=module.rel_path,
                     blob_sha=module.blob_sha,
                     line=run.call.lineno,
-                    window=run.window,
+                    window=window,
                     selects=set(),
                     tables=set(),
+                    conditions=[],
                 )
                 read_tables: set[str] = set()
                 for verb, table in _table_verbs(run.sql):
@@ -1058,6 +1206,8 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                 kept = statements.get((owner, run.call.lineno))
                 if kept is not None:
                     kept.tables.update(read_tables)
+            place_conditions(func, owner, executions)
+            place_regions(func, owner, executions)
     return ReadSide(
         values=found,
         entities=rows,
@@ -1094,11 +1244,14 @@ def read_site_nodes(
                 owner=owner,
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
                 tables=sorted(at.tables),
-                # Kept where it is a fact and left empty where it is not:
-                # ``execute`` fills its binds anywhere in the function, so
-                # claiming a region there would be claiming a scope the code
-                # does not declare.
+                # Empty only where the call names no varmap to read -- one
+                # statement in the corpus, ``querySQLS(sql.format(t), {})``,
+                # whose values are all literals in the text.  There is no
+                # assignment anywhere to place, so an empty window is the
+                # true answer rather than a gap.
                 bind_window=list(at.window) if at.window else [],
+                conditions=sorted(at.conditions),
+                region=list(at.region) if at.region else [],
                 anchor=Anchor(
                     package=at.package,
                     file=at.file,

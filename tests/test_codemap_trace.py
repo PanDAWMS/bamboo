@@ -1027,6 +1027,67 @@ class Refiner:
     assert walked.note == "the walk was not run: this tree is not the one that was mapped"
 
 
+def test_a_region_cuts_the_skeleton_to_one_statements_stretch(tmp_path):
+    """Three queries in one function are three answers, not one.
+
+    ``copyArchive.py::main`` is 1353 lines and runs the ``holding`` query
+    three times with three different time limits; handed the whole function
+    all three come back with the same rows, and the reader cannot tell which
+    limit rejected theirs.  The region is what the read side records to say
+    which stretch is whose.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper='''\
+class Sweeper:
+    def run(self):
+        limit = self.first_limit()
+        rows = self.query(limit)
+        logger.debug("first sweep found %s", rows)
+        limit = self.second_limit()
+        rows = self.query(limit)
+        logger.debug("second sweep found %s", rows)
+''',
+    )
+
+    whole = _walked(roots, file="sweeper", owner="run", lines=[3])
+    first = _walked(roots, file="sweeper", owner="run", lines=[3], region=(3, 5))
+    second = _walked(roots, file="sweeper", owner="run", lines=[6], region=(6, 8))
+
+    printed = [row.line for row in whole.skeleton if row.kind == models.SKELETON_PRINT]
+    assert printed == [5, 8]
+    assert [row.line for row in first.skeleton if row.kind == models.SKELETON_PRINT] == [5]
+    assert [row.line for row in second.skeleton if row.kind == models.SKELETON_PRINT] == [8]
+
+
+def test_a_header_above_a_shown_line_survives_the_region(tmp_path):
+    """The nesting is what a reader is here for, so it is not cut by its line.
+
+    A header outside the region stays when it encloses something inside it,
+    and goes when it does not -- which is the same rule the skeleton already
+    uses to keep itself from being the source again.
+    """
+    roots = _tree(
+        tmp_path,
+        guarded='''\
+class Guarded:
+    def run(self, spec):
+        if spec.enabled:
+            limit = self.limit()
+            logger.debug("inside found %s", limit)
+        logger.debug("outside")
+''',
+    )
+
+    walked = _walked(roots, file="guarded", owner="run", lines=[4], region=(4, 5))
+
+    kinds = [(row.kind, row.line) for row in walked.skeleton]
+    assert (models.SKELETON_PRINT, 5) in kinds
+    assert (models.SKELETON_PRINT, 6) not in kinds
+    # The ``if`` above line 5 is outside the region and still shown.
+    assert any(line == 3 for _kind, line in kinds)
+
+
 def test_a_subtree_with_no_line_and_no_arm_is_left_out(tmp_path):
     """A skeleton is not the source again.
 
