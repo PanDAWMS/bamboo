@@ -20,9 +20,24 @@ belongs to the subquery -- and each was found because ``lfn``, then
 **2. A declared vocabulary.**  The rarest and strongest: the class states the
 value set outright.
 
-**3. A closed set of literals dominates the writes.**  Existence of two
-literals is not enough -- ``jediTaskID`` has 528 writes of which a few are
-literal -- so the literal writes must be a majority.
+**3. The writes form a closed set of literals.**  Two distinct literal values
+at least, and no more than forty: an identifier is written from a sequence or a
+row and offers none, while a free-text field offers a different string every
+time.  ``jediTaskID`` is the case this was narrowed against and the *range* is
+what excludes it -- measured, 91 of the dropped subjects have an attribute
+ending in ``ID`` and none of them reaches two distinct literals.
+
+This once also required the literal writes to be a *majority*, on the reading
+that ``jediTaskID`` needed it.  It did not, and the share was measured doing a
+different job: it kept out ``JobSpec.jobParameters`` and ``JobSpec.metadata``
+-- payloads assembled at run time -- while also keeping out
+``JediTaskSpec.errorDialog`` at 16 literal writes of 33, which is the map's own
+symptom-to-cause hop, and ``JediTaskSpec.ramCount``.  Worse, its denominator
+was *the writes this map managed to explain*, not the writes the code makes,
+so reading one more statement demoted a subject although PanDA had not changed:
+that is how ``setScoutJobData_JEDI`` becoming readable removed
+``JediTaskSpec.ramCount`` and its three junctions from the map.  Dropping the
+share adds 15 subjects and 141 junctions, measured over the corpus.
 
 Two further signals (the field is mentioned in logs; it is written under a
 guard) fire on 69% and 79% of everything and so corroborate rather than
@@ -62,11 +77,9 @@ FILTER_GATE = "5:gates-a-filter-stage"
 # value from.
 _PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
 
-# Share of a subject's outcomes that must be literals for the set to count as
-# closed.  A majority keeps identifiers out while tolerating the passthrough
-# and computed writes real status fields also have.
-CLOSED_SET_SHARE = 0.5
-# Two values are a set; forty are a free-form field wearing one.
+# Two values are a set; forty are a free-form field wearing one.  This is the
+# whole of criterion 3 -- see the module docstring for the share test that used
+# to stand beside it and what measurement removed it.
 _CLOSED_SET_RANGE = range(2, 41)
 
 # ``WHERE status='ready'`` / ``AND type IN ('input','pseudo_input')``.  The
@@ -130,15 +143,16 @@ def criteria_for(
     source: they already hold every outcome of every write site, which is
     exactly the evidence -- and it means a subject reached through SQL is
     judged by the same rule as one reached through an attribute.
+
+    It counts the *distinct* literal outcomes and nothing else.  Anything
+    weighed against the number of junctions would be weighed against how much
+    of the corpus this build managed to read, which moves when the reader
+    improves and not when PanDA changes.
     """
-    literal = Counter()
-    total = Counter()
     values: dict[str, set[str]] = {}
     for junction in fragment.junctions:
         for branch in junction.branches:
-            total[junction.subject] += 1
             if branch.tier == 1:
-                literal[junction.subject] += 1
                 values.setdefault(junction.subject, set()).add(branch.outcome)
 
     filtered = filter_gated_fields(fragment)
@@ -151,13 +165,7 @@ def criteria_for(
             criteria.append(FILTER_GATE)
         if vocabularies.get((subject.spec_class, subject.attribute)):
             criteria.append(DECLARED_VOCABULARY)
-        seen = values.get(subject.name, set())
-        written = total.get(subject.name, 0)
-        if (
-            len(seen) in _CLOSED_SET_RANGE
-            and written
-            and literal[subject.name] / written >= CLOSED_SET_SHARE
-        ):
+        if len(values.get(subject.name, set())) in _CLOSED_SET_RANGE:
             criteria.append(CLOSED_LITERAL_SET)
         if criteria:
             found[subject.name] = criteria

@@ -51,6 +51,7 @@ from typing import NamedTuple, Optional
 from pydantic import BaseModel, Field
 
 from bamboo.codemap.panda.pathcond import (
+    ancestors,
     attach_parents,
     can_reach,
     exclusive,
@@ -512,6 +513,7 @@ def _fold_filled(
     per_part: list[tuple[list[ast.expr], set[int]]],
     assignment: dict[str, str],
     dropped: set[int],
+    key_fills: Optional[list[Optional[str]]] = None,
 ) -> tuple[str, list[Span]]:
     """:func:`_fold`, with each fragment's table holes filled from *assignment*.
 
@@ -520,11 +522,21 @@ def _fold_filled(
     *after* filling: ``_fill`` changes the length of any fragment carrying a
     hole, so offsets measured on the unfilled text point at the wrong column as
     soon as a table name is interpolated.
+
+    *key_fills* is the other kind of filling -- see :func:`_key_fills`.  A
+    fragment appended once per key of a mapping stands for all of them, so its
+    replacement is already the whole run and the table holes have nothing left
+    to say about it.
     """
     assembled = ""
     spans: list[Span] = []
     for index, (_line, operator, text, node) in enumerate(parts):
         if index in dropped:
+            continue
+        if key_fills is not None and key_fills[index] is not None:
+            text = key_fills[index]
+            spans.append(Span(node, len(assembled), len(assembled) + len(text)))
+            assembled += text
             continue
         expressions, holes = per_part[index]
         if holes and assignment:
@@ -583,6 +595,7 @@ def _run_variants(
     start = 1 if parts and parts[0][1] == "=" else 0
     statements = _compatible_sets(parts, start)
     per_part, choices = _table_choices(func, parts)
+    key_fills = _key_fills(func, parts)
     assignments = _assignments(choices)
     total = len(statements) * len(assignments)
     if total > _MAX_BRANCH_VARIANTS:
@@ -598,7 +611,7 @@ def _run_variants(
             total,
             _MAX_BRANCH_VARIANTS,
         )
-        return [_fold_filled(parts, per_part, {}, set())]
+        return [_fold_filled(parts, per_part, {}, set(), key_fills)]
 
     every = set(range(start, len(parts)))
     found: list[tuple[str, list[Span]]] = []
@@ -606,7 +619,7 @@ def _run_variants(
     for members in statements:
         dropped = every - members
         for assignment in assignments:
-            text, spans = _fold_filled(parts, per_part, assignment, dropped)
+            text, spans = _fold_filled(parts, per_part, assignment, dropped, key_fills)
             if text and text not in seen:
                 seen.add(text)
                 found.append((text, spans))
@@ -1056,6 +1069,398 @@ def _literal_values(
             else:
                 found.extend(_rewritten_values(func, node.value, deeper))
     return found
+
+
+#: How far a key substitution follows a name bound from another name.
+#: ``tmpScoutKey = f":{scoutKey}"`` is one hop and the corpus asks for no more.
+_KEY_HOPS = 2
+
+
+def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
+    """The name bound to the key by ``for k, v in d.items()``, and ``d``.
+
+    Only a loop that plainly walks a mapping.  ``for table in (...)`` is a
+    sequence and :func:`_literal_values` already answers for it; reading a
+    sequence element as a column name would put the *values* of a list into a
+    ``SET`` clause.
+    """
+    over = node.iter
+    if not (
+        isinstance(over, ast.Call)
+        and isinstance(over.func, ast.Attribute)
+        and over.func.attr in {"items", "keys"}
+        and not over.args
+    ):
+        return "", None
+    target = node.target
+    if isinstance(target, ast.Name):
+        return target.id, over.func.value
+    if (
+        isinstance(target, ast.Tuple)
+        and target.elts
+        and isinstance(target.elts[0], ast.Name)
+    ):
+        return target.elts[0].id, over.func.value
+    return "", None
+
+
+def _returned_slot(call_target: ast.expr, name: str) -> Optional[int]:
+    """Which element of a returned tuple *name* was unpacked from."""
+    if isinstance(call_target, ast.Name):
+        return None if call_target.id != name else -1
+    if isinstance(call_target, ast.Tuple):
+        for index, element in enumerate(call_target.elts):
+            if isinstance(element, ast.Name) and element.id == name:
+                return index
+    return None
+
+
+def _module_of(node: ast.AST) -> Optional[ast.Module]:
+    """The file *node* was parsed from, when the parent links reach it.
+
+    Every recognizer that reads a statement attaches them over the whole tree
+    first, so this is the usual case; where it is not, the keys are simply not
+    resolved.  Guessing from the name alone would attach one method's columns
+    to a same-named method in another file.
+    """
+    return next((one for one in ancestors(node) if isinstance(one, ast.Module)), None)
+
+
+def _literal_keys(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
+    """The keys *func* writes into the mapping it binds to *name*, in source order.
+
+    Source order because that is the order the mapping is built in, and so the
+    order the columns appear in the statement.  ``ast.walk`` is breadth-first,
+    which would put a key set inside an ``if`` after one set below it.
+    """
+    found: dict[str, int] = {}
+    for node in ast.walk(func):
+        for target in targets_of(node):
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == name
+                and isinstance(target.slice, ast.Constant)
+                and isinstance(target.slice.value, str)
+            ):
+                line = getattr(node, "lineno", 0)
+                found[target.slice.value] = min(
+                    found.get(target.slice.value, line), line
+                )
+    return sorted(found, key=lambda key: (found[key], key))
+
+
+def _mapping_keys(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, mapping: ast.expr
+) -> list[str]:
+    """The keys the mapping behind *mapping* can hold, read one call out.
+
+    ``setScoutJobData_JEDI`` builds its ``SET`` clause from the map the scout
+    returned, so the columns it writes are stated in ``getScoutJobData_JEDI``
+    and nowhere else -- which is why the map had the scout writing no column
+    of ``JediTaskSpec`` at all.
+
+    One hop, and only where the source says all of it: the mapping is bound in
+    *func* from a call, the callee is a function of the same file found by
+    name, and the name it returns is subscripted with literal strings.  A
+    mapping that arrives as a **parameter** is not resolved here -- its keys
+    are the caller's to state, and five of the corpus's seven mapping loops
+    are that shape.  Returning nothing there is the map saying it does not
+    know the columns, which is true; filling them in from one caller would
+    make it say something false about the others.
+    """
+    if not isinstance(mapping, ast.Name):
+        return []
+    module = _module_of(func)
+    if module is None:
+        return []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        slots = [_returned_slot(target, mapping.id) for target in node.targets]
+        slot = next((one for one in slots if one is not None), None)
+        if slot is None:
+            continue
+        callee = node.value.func
+        called = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", "")
+        for other in ast.walk(module):
+            if (
+                not isinstance(other, (ast.FunctionDef, ast.AsyncFunctionDef))
+                or other.name != called
+                or other is func
+            ):
+                continue
+            for returned in ast.walk(other):
+                if not isinstance(returned, ast.Return) or returned.value is None:
+                    continue
+                value = returned.value
+                if slot >= 0:
+                    if not isinstance(value, ast.Tuple) or slot >= len(value.elts):
+                        continue
+                    value = value.elts[slot]
+                if isinstance(value, ast.Name) and (keys := _literal_keys(other, value.id)):
+                    return keys
+    return []
+
+
+def _string_value(
+    node: ast.expr, bound: dict[str, str], scope: ast.AST, hops: int = 0
+) -> Optional[str]:
+    """*node* rendered with the loop's key bound, or ``None`` if it cannot be.
+
+    ``None`` is not "empty": it says this piece of the column name is decided
+    at run time, and a hole filled with a guess reads exactly like one the code
+    wrote out.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in bound:
+            return bound[node.id]
+        if hops >= _KEY_HOPS:
+            return None
+        for other in ast.walk(scope):
+            if isinstance(other, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == node.id
+                for target in other.targets
+            ):
+                return _string_value(other.value, bound, scope, hops + 1)
+        return None
+    if isinstance(node, ast.JoinedStr):
+        parts = [
+            part.value
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            else _string_value(part.value, bound, scope, hops)
+            if isinstance(part, ast.FormattedValue)
+            else None
+            for part in node.values
+        ]
+        return None if any(part is None for part in parts) else "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _string_value(node.left, bound, scope, hops)
+        right = _string_value(node.right, bound, scope, hops)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _constant_strings(node: ast.expr) -> Optional[list[str]]:
+    """The strings of a literal sequence, or ``None`` if it is not one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return None
+    found = [
+        element.value
+        for element in node.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    ]
+    return found if len(found) == len(node.elts) else None
+
+
+def _test_value(
+    test: ast.expr, bound: dict[str, str], scope: ast.AST
+) -> Optional[bool]:
+    """Whether *test* holds for this key, or ``None`` where it cannot be decided.
+
+    The corpus writes the same skip two ways -- ``if scoutKey in ["newNG"]``
+    and ``if not k.startswith("walltime") and not k.startswith("ram")`` -- so
+    reading only the first leaves the merge loop writing sixteen columns where
+    it writes four.  Anything outside these forms answers ``None``, and the
+    caller then declines the whole loop rather than assuming the skip never
+    fires.
+    """
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _test_value(test.operand, bound, scope)
+        return None if inner is None else not inner
+    if isinstance(test, ast.BoolOp):
+        values = [_test_value(one, bound, scope) for one in test.values]
+        if any(one is None for one in values):
+            return None
+        return all(values) if isinstance(test.op, ast.And) else any(values)
+    if isinstance(test, ast.Compare) and len(test.ops) == len(test.comparators) == 1:
+        left = _string_value(test.left, bound, scope)
+        if left is None:
+            return None
+        operator, right = test.ops[0], test.comparators[0]
+        if isinstance(operator, (ast.In, ast.NotIn)):
+            members = _constant_strings(right)
+            if members is None:
+                return None
+            return (left in members) is isinstance(operator, ast.In)
+        if isinstance(operator, (ast.Eq, ast.NotEq)):
+            other = _string_value(right, bound, scope)
+            if other is None:
+                return None
+            return (left == other) is isinstance(operator, ast.Eq)
+        return None
+    if (
+        isinstance(test, ast.Call)
+        and isinstance(test.func, ast.Attribute)
+        and test.func.attr in {"startswith", "endswith"}
+        and len(test.args) == 1
+        and not test.keywords
+    ):
+        subject = _string_value(test.func.value, bound, scope)
+        prefixes = _constant_strings(test.args[0])
+        if subject is None or prefixes is None:
+            return None
+        method = subject.startswith if test.func.attr == "startswith" else subject.endswith
+        return any(method(one) for one in prefixes)
+    return None
+
+
+def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
+    """Of *keys*, the ones the loop does not ``continue`` past.
+
+    ``None`` when the loop skips on something this cannot read.  A skip that is
+    missed does not shorten the answer, it falsifies it: the column would be
+    reported as written on every pass when the code writes it on none.
+    """
+    guards: list[ast.expr] = []
+    for node in ast.walk(loop):
+        if isinstance(node, ast.For) and node is not loop:
+            # Its ``continue`` belongs to the inner loop and says nothing
+            # about which keys reach the fragment.
+            continue
+        if isinstance(node, ast.If) and len(node.body) == 1 and isinstance(node.body[0], ast.Continue):
+            guards.append(node.test)
+        elif isinstance(node, ast.Continue) and not any(
+            isinstance(one, ast.If) and one.body == [node] for one in ast.walk(loop)
+        ):
+            return None
+    kept: list[str] = []
+    for one in keys:
+        bound = {key: one}
+        decided = [_test_value(guard, bound, loop) for guard in guards]
+        if any(value is None for value in decided):
+            return None
+        if not any(decided):
+            kept.append(one)
+    return kept
+
+
+def _key_fills(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    parts: list[tuple[int, str, str, ast.stmt]],
+) -> list[Optional[str]]:
+    """For each fragment, the text the loop around it actually appends.
+
+    A loop over a mapping appends *one* fragment per key to *one* statement, so
+    the expansion belongs here and not in :func:`_run_variants`: a table name
+    the loop supplies makes four statements, and a column name it supplies
+    makes one statement four columns wider.  ``None`` leaves the fragment as
+    reassembly already reads it.
+    """
+    fills: list[Optional[str]] = []
+    for _line, _operator, text, node in parts:
+        value = written_value(node)
+        expressions = _hole_expressions(value) if value is not None else None
+        loop = next(
+            (one for one in ancestors(node) if isinstance(one, ast.For)), None
+        )
+        if expressions is None or not expressions or loop is None:
+            fills.append(None)
+            continue
+        if len(expressions) != text.count(_BARE_FIELD):
+            fills.append(None)
+            continue
+        key, mapping = _mapping_iterated(loop)
+        if not key or mapping is None or not any(
+            _reads(expression, key) or isinstance(expression, ast.Name)
+            for expression in expressions
+        ):
+            fills.append(None)
+            continue
+        keys = _mapping_keys(func, mapping)
+        kept = _kept_keys(loop, key, keys) if keys else None
+        if not kept:
+            fills.append(None)
+            continue
+        pieces: list[str] = []
+        for one in kept:
+            bound = {key: one}
+            filled = [_string_value(expression, bound, loop) for expression in expressions]
+            if any(part is None for part in filled):
+                pieces = []
+                break
+            pieces.append(_fill(text, dict(enumerate(filled))))
+        fills.append("".join(pieces) if pieces else None)
+    return fills
+
+
+def spells_key(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, spelled: ast.expr, key: str
+) -> bool:
+    """Whether ``<varmap>[<spelled>]`` fills *key* on one pass of its loop.
+
+    The bind side of :func:`_key_fills`.  ``setScoutJobData_JEDI`` writes
+    ``varMap[tmpScoutKey] = scoutVal`` beside the fragment that names the
+    column, so a statement whose ``SET`` clause now spells ``:cpuTime`` still
+    had no value for it: the placeholder was read as computed and passed over.
+    Both halves come from the same key, so both are answered by the same
+    substitution or neither is.
+    """
+    loop = next((one for one in ancestors(node) if isinstance(one, ast.For)), None)
+    if loop is None:
+        return False
+    name, mapping = _mapping_iterated(loop)
+    if not name or mapping is None:
+        return False
+    keys = _mapping_keys(func, mapping)
+    kept = _kept_keys(loop, name, keys) if keys else None
+    if not kept:
+        return False
+    return any(_string_value(spelled, {name: one}, loop) == key for one in kept)
+
+
+class KeyColumnCensus(NamedTuple):
+    """How many statements name a column from a mapping key, and how many resolve."""
+
+    loops: int
+    resolved: int
+    from_parameter: int
+
+
+def key_column_census(func: ast.FunctionDef | ast.AsyncFunctionDef) -> KeyColumnCensus:
+    """Count the fragments :func:`_key_fills` is asked about, and how it answered.
+
+    An unresolved one leaves the statement naming no column at all, which looks
+    exactly like a statement that writes none.  The count is reported so that
+    the two are not read as the same answer, and so that the five the corpus
+    leaves to a caller are a number rather than a silence.
+    """
+    loops = resolved = from_parameter = 0
+    arguments = {argument.arg for argument in func.args.args}
+    counted: set[int] = set()
+    for name in {run.variable for run in executions(func) if run.variable}:
+        parts = _parts(func, name)
+        for (_line, _operator, _text, node), fill in zip(
+            parts, _key_fills(func, parts), strict=True
+        ):
+            loop = next((one for one in ancestors(node) if isinstance(one, ast.For)), None)
+            if loop is None or id(node) in counted:
+                continue
+            key, mapping = _mapping_iterated(loop)
+            if not key or mapping is None:
+                continue
+            value = written_value(node)
+            holes = _hole_expressions(value) if value is not None else None
+            # Fed by the key, asked by substituting two of them: a fragment
+            # whose only hole is the schema sits inside the loop without the
+            # loop having anything to do with its text.
+            if not holes or not any(
+                _string_value(hole, {key: "\x00one"}, loop)
+                != _string_value(hole, {key: "\x00two"}, loop)
+                for hole in holes
+            ):
+                continue
+            counted.add(id(node))
+            loops += 1
+            if fill is not None:
+                resolved += 1
+            elif isinstance(mapping, ast.Name) and mapping.id in arguments:
+                from_parameter += 1
+    return KeyColumnCensus(loops, resolved, from_parameter)
 
 
 def _reads(expression: ast.expr, name: str) -> bool:
@@ -2156,7 +2561,19 @@ def scan_binds(
             ):
                 assigned = True
                 if not isinstance(target.slice, ast.Constant):
-                    computed += 1
+                    # A key the loop computes -- ``varMap[tmpScoutKey] = val``.
+                    # Resolvable exactly where the statement's own column is:
+                    # see :func:`spells_key`.  Where it is not, it names a
+                    # placeholder the statement does not spell either, so there
+                    # is nothing to pair it with.
+                    if not spells_key(func, node, target.slice, key):
+                        computed += 1
+                        continue
+                    spelled_keys.add(key)
+                    if in_window:
+                        found.append(Bind(node.value, node))
+                    else:
+                        excluded += 1
                     continue
                 spelled_keys.add(target.slice.value)
                 if target.slice.value != key:

@@ -1758,7 +1758,17 @@ def attach_crossings(
     calls: dict[str, list[tuple[str, ast.Call, ast.AST]]] = {}
     by_func: dict[str, set[str]] = {}
     for owner in owners:
-        by_func.setdefault(owner.rsplit("::", 1)[-1], set()).add(owner)
+        name = owner.rsplit("::", 1)[-1]
+        # ``self.cur.execute(sql, varMap)`` names the database, not a function
+        # of this corpus, so a junction living in a *method* called ``execute``
+        # must not answer for it.  The adder plugins have one, and without this
+        # every statement in the corpus crosses to both of them: 222 read sites
+        # handed the same two false leads, which is the shape the crossing pass
+        # was written to avoid and had been avoiding by accident, because until
+        # ``JobSpec.ddmErrorDiag`` was promoted no ``execute`` owned a junction.
+        if name in sql.RUNNERS:
+            continue
+        by_func.setdefault(name, set()).add(owner)
     trees = {module.rel_path: module.tree for module in modules}
     by_class: dict[str, set[str]] = {}
     for rel, tree in trees.items():

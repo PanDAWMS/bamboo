@@ -153,6 +153,22 @@ def _text(node: ast.AST) -> str:
         return "..."
 
 
+def _operator(site: ast.AST) -> str:
+    """How a binding's value reaches the name -- ``=``, or an augmented form.
+
+    The step carries the right-hand side alone, so without this a reader is
+    shown ``timeOutVal = 60`` for ``timeOutVal *= 60`` and takes sixty for the
+    value.  ``ast.unparse`` renders the operator through a throwaway ``BinOp``
+    rather than a table, so an operator the grammar gains is not one this has
+    to be told about.
+    """
+    if not isinstance(site, ast.AugAssign):
+        return "="
+    blank = ast.Name(id="_", ctx=ast.Load())
+    rendered = _text(ast.BinOp(left=blank, op=site.op, right=blank))
+    return f"{rendered[1:-1].strip()}=" if rendered.startswith("_") else "="
+
+
 def _add(out: list[str], name: str) -> None:
     if name not in out:
         out.append(name)
@@ -1325,7 +1341,13 @@ class _Walk:
                 return
             self._unbound(frame, name, depth)
             return
-        for expression in bindings:
+        # In the order the file states them.  ``ast.walk`` is breadth-first, so
+        # unsorted it prints ``copyArchive.py``'s ``timeOutVal *= 60`` before
+        # the ``timeOutVal = 48`` nested one level in above it, and the default
+        # reads as if it were applied after the multiply.
+        for expression in sorted(
+            bindings, key=lambda node: getattr(pathcond.site_of(node), "lineno", 0)
+        ):
             self._binding(frame, name, expression, depth, slots.get(id(expression)))
         for loop in loops:
             self._loop(frame, name, loop, depth)
@@ -1365,6 +1387,7 @@ class _Walk:
             file=frame.file,
             line=getattr(site, "lineno", 0),
             value=_text(expression) if slot is None else f"{_text(expression)}[{slot}]",
+            operator=_operator(site),
             guards=pathcond.path_condition(site),
             unseen=unseen,
             reads=reads,
@@ -1401,6 +1424,7 @@ class _Walk:
                 file=frame.file,
                 line=line,
                 value=_text(expression),
+                operator=_operator(pathcond.site_of(expression)),
                 unseen=[
                     f"{MODULE_SCOPE} at {line}: bound when the file is imported, "
                     f"not on the way here"

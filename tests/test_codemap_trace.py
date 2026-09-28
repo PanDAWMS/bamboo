@@ -1609,3 +1609,102 @@ class Sweeper:
     ours, _note = _walk(roots, file="sweeper", owner="run", lines=[6], reading_at=6)
 
     assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [4]
+
+
+def test_a_compound_assignment_cancels_nothing_because_it_reads_first(tmp_path):
+    """``timeOutVal *= 60`` needs whatever was there, so both writes stand.
+
+    ``copyArchive.py`` reads a configured holding limit, falls back to
+    forty-eight, and converts to minutes.  Taking the conversion for an
+    overwrite left the map saying the limit was sixty minutes -- not a short
+    answer but a wrong one, and the same shape dropped the ``SELECT`` from two
+    SQL strings assembled with ``+=``.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.configured_limit()
+        if not limit:
+            limit = 48
+        limit *= 60
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[8], reading_at=7)
+
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [3, 5, 6]
+
+
+def test_a_plain_assignment_still_cancels_a_compound_one(tmp_path):
+    """The exemption is one-way: what runs after needs nothing of what was there."""
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.configured_limit()
+        limit *= 60
+        limit = self.override()
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[7], reading_at=6)
+
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [5]
+
+
+def test_a_binding_says_how_its_value_reaches_the_name(tmp_path):
+    """The step carries the right-hand side alone, so it has to carry the rest.
+
+    Printed as ``limit = 60`` a reader takes sixty for the value, which is the
+    one number the line does not produce.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.configured_limit()
+        limit *= 60
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[6], reading_at=5)
+
+    bound = {step.line: step for step in ours if step.kind == models.TRACE_BINDING}
+    assert (bound[3].operator, bound[3].value) == ("=", "self.configured_limit()")
+    assert (bound[4].operator, bound[4].value) == ("*=", "60")
+
+
+def test_bindings_are_explained_in_the_order_the_file_states_them(tmp_path):
+    """``ast.walk`` is breadth-first, and reading them in that order misleads.
+
+    The fallback is one level in, so unsorted it comes back *after* the
+    conversion that follows it and reads as if forty-eight were applied last.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.configured_limit()
+        if not limit:
+            limit = 48
+        limit *= 60
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[8], reading_at=7)
+
+    shown = [step.line for step in ours if step.kind == models.TRACE_BINDING]
+    assert shown == sorted(shown)

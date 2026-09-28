@@ -618,7 +618,24 @@ def _cancels(site: ast.AST, other: ast.AST, target: ast.AST) -> bool:
     match, and the rule then keeps a binding it could have cancelled -- short
     of the truth in the direction that leaves the reader more to look at
     rather than less.
+
+    An ``ast.AugAssign`` cancels nothing, because it reads the value it
+    replaces: ``timeOutVal *= 60`` needs whatever line 423 or 425 put there,
+    so both are still answers to the read below it.  Treating it as an
+    overwrite cost five of the corpus's thirty-seven narrowings a *wrong*
+    answer rather than a short one -- ``copyArchive.py``'s holding limit read
+    as sixty minutes instead of the configured value or forty-eight hours, and
+    two SQL strings assembled with ``+=`` read as their last clause with the
+    ``SELECT`` dropped.  The reverse stays: a later *plain* assignment does
+    cancel an ``AugAssign``, since it needs nothing of what was there.
+
+    The rule stops at ``AugAssign`` rather than at "reads the name it binds".
+    ``x = f(x)`` reads it too and is still the whole answer once it has run;
+    the difference is that :func:`assigned_expressions` returns the right-hand
+    side alone, which reconstructs ``f(x)`` and not ``x * 60``.
     """
+    if isinstance(other, ast.AugAssign):
+        return False
     if not site.lineno < other.lineno <= getattr(target, "lineno", 0):
         return False
     if loops_over(other) - loops_over(target):
@@ -644,20 +661,27 @@ def reaching_definitions(
     not drop a write that *did* run and was then replaced, because reaching
     the read is not the question there.  :func:`_cancels` is.
 
-    Measured on the corpus: of 29 (statement, bind name) pairs where the name
-    has more than one assignment, 20 narrow, every one of them to exactly one
-    expression, and none is emptied.  An emptied name would mean the rule had
-    cancelled the write the read actually saw, so nothing coming back is the
-    signal that it is wrong rather than an answer.
+    Measured on the corpus by walking every read statement: of 62 (statement,
+    bind name) pairs where the name has more than one assignment, 35 narrow
+    and none is emptied.  An emptied name would mean the rule had cancelled
+    the write the read actually saw, so nothing coming back is a signal that
+    it is wrong rather than an answer -- but only that one.  It cannot see a
+    narrowing that kept the *wrong* line, which is what ``AugAssign`` was
+    doing to five of these pairs until the rule stopped treating it as an
+    overwrite; that needs the lines themselves compared.
 
-    Returns the expressions, in source order, so a caller that wants positions
-    takes :func:`site_of` as it already does for
-    :func:`assigned_expressions`.
+    Returns the expressions in source order -- ``assigned_expressions`` walks
+    breadth-first, so a nested default comes back after the statement below
+    it -- and a caller that wants positions takes :func:`site_of` as it
+    already does for :func:`assigned_expressions`.
     """
     bound = assigned_expressions(func).get(name, [])
     kept = surviving_writes([site_of(value) for value in bound], target)
     alive = {id(site) for site in kept}
-    return [value for value in bound if id(site_of(value)) in alive]
+    return sorted(
+        (value for value in bound if id(site_of(value)) in alive),
+        key=lambda value: site_of(value).lineno,
+    )
 
 
 def surviving_writes(sites: Sequence[ast.AST], target: ast.AST) -> list[ast.AST]:

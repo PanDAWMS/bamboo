@@ -199,10 +199,10 @@ STRONG_CLOSED_SET = "3:closed-literal-set"
 # Criteria 4 and 5 corroborate but do not promote -- see promote_subjects().
 STRONG_CRITERIA = {STRONG_WHERE, STRONG_VOCAB, STRONG_CLOSED_SET}
 
-# Share of an attribute's writes that must come from its literal set for that
-# set to count as closed.  A majority keeps identifiers out while tolerating
-# the passthrough and computed writes real status fields also have.
-CLOSED_SET_SHARE = 0.5
+# What makes a literal set closed: two distinct values at least and forty at
+# most.  The share test that used to stand beside this was removed from
+# ``promotion.criteria_for`` -- its docstring says what the measurement found
+# -- and this census reads the same rule so the two cannot disagree.
 
 
 @dataclass
@@ -369,8 +369,8 @@ def promote_subjects(
                 cand.criteria.add(STRONG_WHERE)
             if spec_class in vocab_classes and _STATUS_RE.search(attr):
                 cand.criteria.add(STRONG_VOCAB)
-            values, n_literal, n_total = literal_writes.get(attr, (set(), 0, 0))
-            if 2 <= len(values) <= 40 and n_total and n_literal / n_total >= CLOSED_SET_SHARE:
+            values, _n_literal, _n_total = literal_writes.get(attr, (set(), 0, 0))
+            if 2 <= len(values) <= 40:
                 cand.criteria.add(STRONG_CLOSED_SET)
             if logged_fields.get(attr):
                 cand.criteria.add("4:mentioned-in-logs")

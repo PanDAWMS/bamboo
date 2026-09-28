@@ -2716,6 +2716,11 @@ class TraceStep(BaseModel):
     unconditional.  86% of the map's arms have at least one of those on the
     way to them, which is why the two are separate fields rather than one
     list -- a reader that cannot tell them apart reads silence as certainty.
+
+    ``value`` is the right-hand side alone, so ``operator`` carries the rest
+    of the assignment: printing ``timeOutVal = 60`` for ``timeOutVal *= 60``
+    states a value the line never produced.  A reader that joins the two gets
+    the statement back.
     """
 
     kind: str = Field(..., description="One of the TRACE_* kinds.")
@@ -2724,6 +2729,10 @@ class TraceStep(BaseModel):
     file: str = Field(default="")
     line: int = Field(default=0)
     value: str = Field(default="", description="The expression, as source.")
+    operator: str = Field(
+        default="=",
+        description="How the value reaches the name: '=', or '+=' and friends.",
+    )
     guards: list[str] = Field(
         default_factory=list, description="The path condition of this site."
     )
@@ -2863,10 +2872,15 @@ class StatementReading(BaseModel):
             "Three shapes resolve and all three name a junction the map holds: "
             "the region calls one, the region builds a class the map owns one "
             "in and starts it as a thread, or the rows are returned and the "
-            "caller does one of those two with them. 89 crossings over 65 of "
+            "caller does one of those two with them. 110 crossings over 73 of "
             "the corpus's 264 statements. "
+            "Resolved by the callee's *name*, which is why the database's own "
+            "runners are excluded from the index: a junction in a method "
+            "called execute would answer for every self.cur.execute in the "
+            "corpus, and did, until JobSpec.ddmErrorDiag was promoted and 222 "
+            "statements were handed the adder plugins as their lead. "
             "Empty is not 'nowhere': 107 statements hand their rows back and "
-            "78 of them lead to a caller that does nothing the map answers "
+            "70 of them lead to a caller that does nothing the map answers "
             "for, which the build reports rather than hides. Naming that "
             "caller's own function instead would satisfy the question and not "
             "the purpose -- a lead has to be somewhere the map will answer."

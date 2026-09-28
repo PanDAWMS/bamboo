@@ -3594,16 +3594,38 @@ def test_a_quote_inside_a_subquery_does_not_promote_the_outer_field():
     assert promotion.gated_fields([_module(source, "x.py")])["jediTaskID"] == 0
 
 
-def test_two_literals_are_not_enough_to_close_a_set():
-    """``jediTaskID`` has 528 writes of which a few are literal; that is not a set."""
+def test_one_literal_does_not_close_a_set():
+    """An identifier is written from a row or a sequence, so it offers no set.
+
+    This is what keeps ``jediTaskID`` out, measured: of the corpus's dropped
+    subjects, 91 have an attribute ending in ``ID`` and not one of them reaches
+    two distinct literal outcomes.
+    """
     fragment = _fragment_with(
-        ("JediTaskSpec", "jediTaskID", [("a", 1), ("b", 1)] + [("x", 2)] * 8),
+        ("JediTaskSpec", "jediTaskID", [("0", 1)] + [("x", 2)] * 8),
         ("JediTaskSpec", "status", [("ready", 1), ("running", 1), ("done", 1)]),
     )
     criteria = promotion.criteria_for(fragment, Counter(), {})
 
     assert "JediTaskSpec.jediTaskID" not in criteria
     assert criteria["JediTaskSpec.status"] == ["3:closed-literal-set"]
+
+
+def test_runtime_writes_do_not_outvote_the_literals():
+    """The literals close the set however many other writes the map can read.
+
+    Weighing them against the junction count weighs them against how much of
+    the corpus this build managed to read: ``JediTaskSpec.ramCount`` left the
+    map when ``setScoutJobData_JEDI`` became readable, although PanDA had not
+    changed.  Two distinct literals and eight runtime writes is the shape that
+    used to fall out at exactly the old majority.
+    """
+    fragment = _fragment_with(
+        ("JediTaskSpec", "errorDialog", [("a", 1), ("b", 1)] + [("x", 2)] * 8),
+    )
+    criteria = promotion.criteria_for(fragment, Counter(), {})
+
+    assert criteria["JediTaskSpec.errorDialog"] == ["3:closed-literal-set"]
 
 
 def test_unpromoted_subjects_and_their_junctions_are_dropped():
@@ -13711,3 +13733,131 @@ def test_a_table_this_corpus_only_reads_is_a_boundary_and_not_a_kind_of_row():
 
     # Joined, never written here: a dependency, not a kind of row PanDA keeps.
     assert "schedconfig" not in entities
+
+
+_SCOUT_SOURCE = '''
+class Proxy:
+    def get_scout_data(self, task_id):
+        returnMap = {}
+        returnMap["ramCount"] = ram
+        returnMap["walltime"] = wall
+        returnMap["newNG"] = ng
+        return True, returnMap, extra
+
+    def set_scout_data(self, task_id):
+        ok, scoutData, extra = self.get_scout_data(task_id)
+        varMap = {}
+        varMap[":jediTaskID"] = task_id
+        sqlTSD = f"UPDATE {schema}.JEDI_Tasks SET "
+        for scoutKey, scoutVal in scoutData.items():
+            if scoutKey in ["newNG"]:
+                continue
+            tmpScoutKey = f":{scoutKey}"
+            varMap[tmpScoutKey] = scoutVal
+            sqlTSD += f"{scoutKey}={tmpScoutKey},"
+        sqlTSD = sqlTSD[:-1]
+        sqlTSD += " WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlTSD + comment, varMap)
+'''
+
+
+def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
+    """The scout's columns are stated in the method that built the mapping.
+
+    ``setScoutJobData_JEDI`` appends ``f"{scoutKey}={tmpScoutKey},"`` per key,
+    so reassembly saw ``"{}={},"`` and the statement named no column at all --
+    which is why the map had the scout writing nothing of ``JediTaskSpec``.
+    """
+    func = _func(_SCOUT_SOURCE, "set_scout_data")
+
+    statements = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
+
+    (statement,) = statements
+    assert sorted(statement.columns) == ["ramCount", "walltime"]
+
+
+def test_a_key_the_loop_passes_over_is_not_a_column():
+    """``if scoutKey in ["newNG"]: continue`` -- the statement never writes it."""
+    func = _func(_SCOUT_SOURCE, "set_scout_data")
+
+    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+
+    assert "newNG" not in columns
+
+
+def test_a_skip_written_as_a_prefix_test_is_read_too():
+    """``if not k.startswith("walltime") and not k.startswith("ram")`` is the
+    other spelling, and reading only ``in [...]`` has the merge loop writing
+    sixteen columns where it writes four."""
+    source = _SCOUT_SOURCE.replace(
+        '            if scoutKey in ["newNG"]:',
+        '            if not scoutKey.startswith("wall"):',
+    )
+    func = _func(source, "set_scout_data")
+
+    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+
+    assert columns == {"walltime"}
+
+
+def test_a_skip_this_cannot_read_leaves_the_column_unnamed():
+    """Missing a skip does not shorten the answer, it falsifies it."""
+    source = _SCOUT_SOURCE.replace(
+        '            if scoutKey in ["newNG"]:',
+        "            if self.excluded(scoutKey):",
+    )
+    func = _func(source, "set_scout_data")
+
+    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+
+    assert columns == set()
+
+
+def test_a_literal_before_the_key_stays_in_the_column_name():
+    """``merge{mergeScoutKey}`` writes ``mergewalltime``, a different column."""
+    source = _SCOUT_SOURCE.replace(
+        '            sqlTSD += f"{scoutKey}={tmpScoutKey},"',
+        '            sqlTSD += f"merge{scoutKey}={tmpScoutKey},"',
+    )
+    func = _func(source, "set_scout_data")
+
+    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+
+    assert columns == {"mergeramCount", "mergewalltime"}
+
+
+def test_the_placeholder_the_loop_computes_is_resolved_with_the_column():
+    """Both halves come from the same key, so both resolve or neither does.
+
+    Left as a hole the value reads as an expression rather than a bind, and the
+    walk cannot follow it to ``varMap[tmpScoutKey] = scoutVal``.
+    """
+    func = _func(_SCOUT_SOURCE, "set_scout_data")
+
+    (statement,) = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
+
+    assert statement.columns["ramCount"].kind == "bind"
+    assert statement.columns["ramCount"].text == ":ramCount"
+    assert [ast.unparse(b.value) for b in sql.bound_values(func, "varMap", ":ramCount")] == [
+        "scoutVal"
+    ]
+
+
+def test_a_mapping_that_arrives_as_a_parameter_is_the_callers_to_state():
+    """Five of the corpus's mapping loops are this shape; filling them in from
+    one caller would make the statement say something false about the others."""
+    source = (
+        "def update(self, criteria):\n"
+        "    sql = f'UPDATE {schema}.JEDI_Tasks SET '\n"
+        "    for tmpKey, tmpVal in criteria.items():\n"
+        "        sql += f'{tmpKey}=:{tmpKey},'\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    func = _func(source, "update")
+
+    columns = {c for text in sql.variants(func, "sql") for w in sql.writes(text) for c in w.columns}
+
+    assert columns == set()
+    assert sql.key_column_census(func) == sql.KeyColumnCensus(
+        loops=1, resolved=0, from_parameter=1
+    )

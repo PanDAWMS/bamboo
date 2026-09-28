@@ -524,6 +524,16 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
                 f"back to a caller, {crossings.resolved} of which reach a "
                 "junction"
             )
+        # The write side's version of the same silence: a column name built
+        # from a mapping key leaves the statement naming no column, which reads
+        # as a statement that writes none.
+        keys = getattr(plugin, "key_columns", None)
+        if keys is not None and keys.loops:
+            click.echo(
+                f"    {keys.loops} SQL fragment(s) name their column from a "
+                f"mapping key: {keys.resolved} read here, {keys.from_parameter} "
+                "left to the caller that supplies the mapping"
+            )
         # Reported beside them because it is what makes the exits findable:
         # the loop opens inside the region and runs to its own end, and where
         # that end is past the region the exits are only reachable through

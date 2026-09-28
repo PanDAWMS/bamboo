@@ -33,7 +33,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import promotion
+from bamboo.codemap.panda import promotion, sql
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
@@ -441,6 +441,24 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # hands its rows on would otherwise read as "these rows go nowhere".
         self.crossings = sqlwrite.attach_crossings(
             fragment.read_sites, self._modules, fragment.junctions
+        )
+
+        # A column name the code builds from a mapping key.  Where the keys
+        # cannot be read the statement names no column, which in the map looks
+        # exactly like a statement that writes none -- so the count is carried
+        # to the build report rather than left as that silence.
+        self.key_columns = sql.KeyColumnCensus(
+            *(
+                sum(part)
+                for part in zip(
+                    *(
+                        sql.key_column_census(func)
+                        for module in self._modules
+                        for func, _owner in functions_with_owner(module.tree)
+                    ),
+                    strict=True,
+                )
+            )
         )
 
         # After promotion, so the reach figure describes the map that is kept

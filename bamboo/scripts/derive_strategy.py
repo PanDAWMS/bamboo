@@ -190,7 +190,7 @@ def _report_exits(entry) -> None:
                 "of the log cannot tell this exit from the row never arriving"
             )
         for step in leaving.trace[:_TOP_EXIT_STEPS]:
-            head = step.name if not step.value else f"{step.name} = {step.value}"
+            head = step.name if not step.value else f"{step.name} {step.operator} {step.value}"
             # An exit's step is often a whole ``if`` block rather than an
             # assignment, and printed as it stands it breaks the column.
             click.echo(
@@ -272,7 +272,11 @@ def _report_follow_up(strategy: Strategy) -> None:
                 for condition in entry.conditions:
                     click.echo(f"                                       and {condition}")
                 for step in entry.trace[:_TOP_READER_STEPS]:
-                    head = step.name if not step.value else f"{step.name} = {step.value}"
+                    head = (
+                        step.name
+                        if not step.value
+                        else f"{step.name} {step.operator} {step.value}"
+                    )
                     click.echo(
                         f"                                       ↳ {step.line or '':>5}"
                         f"  {step.kind:<11} {head.strip(' =')}"
@@ -592,7 +596,7 @@ def _report_walk(entry, top: int, full: bool) -> None:
         if step.kind == models_mod.TRACE_UNBOUND:
             head = step.name
         elif step.name:
-            head = f"{step.name} = {step.value}"
+            head = f"{step.name} {step.operator} {step.value}"
         else:
             head = step.value
         click.echo(f"          {step.line or '':>5}  {step.kind:<11} {head}")
