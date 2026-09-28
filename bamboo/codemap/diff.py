@@ -82,6 +82,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "bind_window",
         "conditions",
         "region",
+        "rows_handled",
         "exits",
         "crosses_to",
     ),

@@ -1076,13 +1076,51 @@ class ReadSiteNode(BaseNode):
             "the result itself and the answer is that nothing came back at "
             "all, which points at the ``conditions`` rather than at the "
             "handling.\n\n"
-            "Read inside ``region``, and only in a loop over *this* "
-            "statement's rows. The function's own control flow is left out: "
-            "the corpus has 363 such exits against the 48 kept, and an answer "
-            "naming every error path in the function does not say where the "
-            "row went. Empty is an answer -- most statements have no exit of "
-            "their own -- so there is no gate on this field, only the "
-            "invariant that every line named falls inside ``region``."
+            "**An ``except`` counts only when the handler leaves.** "
+            "``except Exception: pass`` is written so the row is *not* "
+            "stopped, and a handler assigning a fallback says the same at "
+            "more length; a handler is an exit when it contains a "
+            "``continue``, ``break``, ``return`` or ``raise``.\n\n"
+            "Read in the loop over *this* statement's rows, which opens "
+            "inside ``region`` and runs to its own end -- see "
+            "``rows_handled``. Only the exits taken **in that loop**: judged "
+            "by line range instead, 19 more come in from loops nested in it, "
+            "such as ``copyArchive@206``'s ``continue@245``, which is about "
+            "one of a job's files. The function's own control flow is left "
+            "out, because an answer naming every error path in the function "
+            "does not say where the row went.\n\n"
+            "The corpus holds 103 over 57 statements: 90 per row (43 "
+            "``continue``, 27 ``raise``, 11 ``break``, 7 ``except``, 2 "
+            "``return``) and 13 because nothing came back, 6 of which print "
+            "nothing at all. Empty is an answer -- most statements have no "
+            "exit of their own -- so there is no coverage gate on this field, "
+            "only the invariant that every line named falls inside ``region`` "
+            "or ``rows_handled``."
+        ),
+    )
+    rows_handled: list[int] = Field(
+        default_factory=list,
+        description=(
+            "``[first, last]`` -- the stretch where this statement's rows are "
+            "worked through, which is the loop over them. Empty where "
+            "nothing loops over them; 151 of the corpus's 264 statements "
+            "have one, a median of 11 lines and 238 at worst.\n\n"
+            "**Not a second ``region``, and it can outlive one.** ``region`` "
+            "ends where the next statement's binds start being filled, and "
+            "for 64 of those 151 the row loop opened inside the region runs "
+            "on past that point: ``getTasksToExecCommand_JEDI``'s query on "
+            "line 4591 owns 4585-4603 and works its rows through 4600-4621, "
+            "because another query opens on 4606 *inside the loop*. Reading "
+            "exits in ``region`` alone loses the ``except`` that gives up the "
+            "lock and the ``continue`` that skips the task -- which was the "
+            "one thing the analyser asked for that P1-53 did not deliver.\n\n"
+            "The loop must **open** inside ``region``; only its end is "
+            "followed. Searching the function for every loop over the same "
+            "names instead gives 174 exits over 71 statements against 90 over "
+            "45, because ``res`` is reused: ``copyArchive.py::main``'s first "
+            "query picks up the ``continue`` belonging to its query on line "
+            "381, and one handler on line 1364 lands on 19 statements. The "
+            "region is what makes ``res`` mean *this* ``res``."
         ),
     )
     crosses_to: list[str] = Field(
@@ -2785,6 +2823,14 @@ class StatementReading(BaseModel):
     region: list[int] = Field(
         default_factory=list,
         description="``[first, last]`` of the function this statement owns.",
+    )
+    rows_handled: list[int] = Field(
+        default_factory=list,
+        description=(
+            "``[first, last]`` where the rows are worked through -- the loop "
+            "over them, which can run past ``region``. Empty where nothing "
+            "loops over them."
+        ),
     )
     trace: list[TraceStep] = Field(
         default_factory=list,

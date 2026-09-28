@@ -529,6 +529,7 @@ def _reader_statements(
                     conditions=list(site.conditions),
                     bind_window=list(site.bind_window),
                     region=list(site.region),
+                    rows_handled=list(site.rows_handled),
                     exits=[_statement_exit(text) for text in site.exits],
                     crosses_to=list(site.crosses_to),
                 )
@@ -2352,8 +2353,34 @@ def attach_reader_traces(
         _attach_exit_traces(entry, roots, strategy, classify)
 
 
+def _where_its_names_are_filled(entry) -> Optional[tuple[int, int]]:
+    """The stretch a statement's own names are assigned in, or ``None``.
+
+    Its region, **with the end replaced by the end of the loop over its
+    rows**.  Past that loop the function is setting up its next query, and the
+    region runs on to wherever that query's binds start being filled:
+    ``copyArchive.py::main``'s query on line 381 owns 374-399, works its rows
+    through 386-393, and lines 397-398 assign the ``timeLimit`` and the
+    ``sql`` of the query on line 405.  Handed the whole region, the exit taken
+    on 390 is explained with the *next* query's ``sql`` -- one confident wrong
+    answer in place of nine honest ones.
+
+    Where the loop outlives the region the end grows instead, which is the
+    same rule: ``getTasksToExecCommand_JEDI@4591`` owns 4573-4603 and works
+    its rows through 4600-4621.
+    """
+    region = entry.region if len(entry.region) >= 2 else None
+    handled = entry.rows_handled if len(entry.rows_handled) >= 2 else None
+    if region is None and handled is None:
+        return None
+    low = region[0] if region else handled[0]
+    high = handled[1] if handled else region[1]
+    return (low, max(low, high))
+
+
 def _attach_exit_traces(entry, roots: dict, strategy: Strategy, classify) -> None:
     """Fill each exit's block skeleton and the walk from where it is decided."""
+    ours = _where_its_names_are_filled(entry)
     for leaving in entry.exits:
         guard = trace.exit_guard(
             roots,
@@ -2375,6 +2402,7 @@ def _attach_exit_traces(entry, roots: dict, strategy: Strategy, classify) -> Non
             expected_sha=entry.blob_sha,
             classify=classify,
             region=(first, last),
+            bindings_within=ours,
         )
         leaving.trace = walked.steps
         leaving.trace_note = walked.note

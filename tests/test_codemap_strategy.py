@@ -3680,6 +3680,38 @@ def test_the_two_kinds_of_exit_are_read_back_apart():
     assert (empty_handed.kind, empty_handed.line, empty_handed.no_rows) == ("return", 263, True)
 
 
+def test_an_exits_walk_stops_where_the_rows_stop_being_worked_through():
+    """The region runs on into the *next* query's setup, and the walk followed it.
+
+    ``copyArchive.py::main``'s query on line 381 owns 374-399 and works its
+    rows through 386-393; lines 397-398 assign the ``timeLimit`` and the
+    ``sql`` of the query on line 405.  Handed the whole region, the exit taken
+    on 390 was explained with the next query's ``sql`` -- one confident wrong
+    answer in place of nine honest ones.  Cut at the loop's end, ``sql`` has
+    no binding in the stretch and the whole function is offered again.
+    """
+    flagship = models.StatementReading(
+        owner="pandaserver/daemons/scripts/copyArchive.py::main",
+        region=[374, 399],
+        rows_handled=[386, 393],
+    )
+    outliving = models.StatementReading(
+        owner="task_complex_module.py::getTasksToExecCommand_JEDI",
+        region=[4573, 4603],
+        rows_handled=[4600, 4621],
+    )
+    no_loop = models.StatementReading(owner="x.py::sweep", region=[3, 20])
+    nothing = models.StatementReading(owner="x.py::sweep")
+
+    # Cut back to the loop's end...
+    assert strategy_mod._where_its_names_are_filled(flagship) == (374, 393)
+    # ...and grown to it where the loop outlives the region, which is the
+    # same rule: the rows are worked through past where the region ends.
+    assert strategy_mod._where_its_names_are_filled(outliving) == (4573, 4621)
+    assert strategy_mod._where_its_names_are_filled(no_loop) == (3, 20)
+    assert strategy_mod._where_its_names_are_filled(nothing) is None
+
+
 def test_a_statement_that_hands_its_rows_on_is_a_lead():
     """The request's sixth point: a reader the analyser can *choose*.
 

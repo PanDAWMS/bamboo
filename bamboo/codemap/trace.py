@@ -737,11 +737,15 @@ class _Walk:
         classify: Classifier,
         budget: Budget,
         observed: str = "",
+        within: Optional[tuple[str, str, int, int]] = None,
     ) -> None:
         self.roots = roots
         self.classify = classify
         self.budget = budget
         self.observed = observed
+        #: ``(file, owner, first, last)`` -- where in the starting function a
+        #: name's bindings are looked for first.  See :meth:`_within`.
+        self.within = within
         self.parsed: dict[str, tuple[str, ast.Module]] = {}
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
         self.steps: list[TraceStep] = []
@@ -1156,6 +1160,52 @@ class _Walk:
             for value, _conditions, _line in pathcond.literal_values(frame.func, name)
         )
 
+    def _within(
+        self,
+        frame: _Frame,
+        bindings: list,
+        loops: list,
+        caught: list,
+    ) -> tuple[list, list, list]:
+        """Keep only the bindings inside the caller's stretch, when any are.
+
+        ``assigned_expressions`` hands back every assignment of the name in
+        the function, and a read side statement owns one part of it.
+        ``copyArchive.py::main`` assigns ``res = taskBuffer.querySQLS(...)``
+        nine times in 1353 lines, so the exit taken on line 390 was explained
+        with the assignments on lines 263 and 284 -- other queries, whose
+        rows the row that stopped here never was.
+
+        Inside *or* nothing, rather than inside and then the rest: a name with
+        no binding in the stretch is one the statement did not fill, and there
+        the whole function is the right place to look.  ``xmlIDs`` above the
+        same exit is filled far from the statement and still explains it.
+
+        The starting function only.  Deeper frames are other files, where
+        these line numbers mean something else.
+        """
+        if self.within is None:
+            return bindings, loops, caught
+        file, owner, low, high = self.within
+        if frame.file != file or frame.owner != owner:
+            return bindings, loops, caught
+
+        def here(node: ast.AST) -> bool:
+            site = (
+                node
+                if isinstance(node, (ast.stmt, ast.ExceptHandler))
+                else pathcond.site_of(node)
+            )
+            return low <= getattr(site, "lineno", 0) <= high
+
+        if not any(here(node) for node in (*bindings, *loops, *caught)):
+            return bindings, loops, caught
+        return (
+            [node for node in bindings if here(node)],
+            [node for node in loops if here(node)],
+            [node for node in caught if here(node)],
+        )
+
     def explain(self, frame: _Frame, name: str, depth: int) -> None:
         if name.startswith("self."):
             self._field(frame, name, depth)
@@ -1168,6 +1218,7 @@ class _Walk:
         bindings.extend(_walrus_bindings(frame.func, name))
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
+        bindings, loops, caught = self._within(frame, bindings, loops, caught)
         held = bool(bindings or loops or caught)
         if depth == 1 and self.armed:
             # ``assigned_expressions`` hands back every assignment in the
@@ -1621,6 +1672,7 @@ def walk(
     classify: Optional[Classifier] = None,
     budget: Budget = DEFAULT_BUDGET,
     region: Optional[tuple[int, int]] = None,
+    bindings_within: Optional[tuple[int, int]] = None,
 ) -> Walked:
     """Explain the arms at *lines*, and say why the answer is short when it is.
 
@@ -1642,13 +1694,24 @@ def walk(
     statement's.  The default is the whole function, so nothing that does not
     ask for a region sees a different answer.
 
+    *bindings_within* says the same thing about the walk rather than the
+    skeleton: a name assigned inside that stretch is explained from there
+    only.  See :meth:`_Walk._within` -- and the same default, whole-function,
+    for everything that does not ask.
+
     **A tree that is not the map's is refused rather than warned about.**  A
     trace is shaped like an answer, and reading line 4971 of the wrong release
     produces plausible code that is not the code -- which already happened
     once, to a report that only printed coordinates.  Computing from the wrong
     tree is worse than printing from it.
     """
-    state = _Walk(roots, classify or _nothing, budget, observed)
+    state = _Walk(
+        roots,
+        classify or _nothing,
+        budget,
+        observed,
+        within=(file, owner, *bindings_within) if bindings_within else None,
+    )
     parsed = state.module(file)
     if parsed is None:
         return Walked([], "the map's file could not be read from this tree")

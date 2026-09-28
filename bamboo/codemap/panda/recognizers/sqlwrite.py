@@ -770,6 +770,10 @@ class ReadStatement(NamedTuple):
     #: it arrives by ``_replace`` too.  A tuple, because a NamedTuple's
     #: default is shared by every instance that does not override it.
     exits: tuple[str, ...] = ()
+    #: ``(first, last)`` -- the stretch where this run's rows are worked
+    #: through, which is the loop over them and can outlive ``region``.
+    #: ``None`` where nothing loops over them.
+    rows_handled: Optional[tuple[int, int]] = None
 
 
 def _render_condition(condition: "sql.Condition", seeds: dict[str, list[int]]) -> str:
@@ -957,6 +961,49 @@ _EXIT_NAMES = {
     ast.Raise: "raise",
     ast.ExceptHandler: "except",
 }
+#: The four ways a row stops being followed on its own.  ``ExceptHandler`` is
+#: not one of them: it is a place where one of these may be written.
+_LEAVES = (ast.Return, ast.Continue, ast.Break, ast.Raise)
+
+
+#: ``while`` carries no ``iter``; its test is where the rows would be named,
+#: and either way it is the names that decide.
+_LOOPS = (ast.For, ast.AsyncFor, ast.While)
+
+
+def _enclosing_loops(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> dict[int, ast.AST]:
+    """``{id(node): the loop that most closely encloses it}``, function-wide.
+
+    An exit belongs to this statement only when the loop it is taken in is the
+    loop over this statement's rows.  Judged by line range instead, a
+    ``continue`` four levels down reads as the row being skipped:
+    ``copyArchive@206`` picks up ``continue@245``, which is about one of a
+    job's files.  Over the corpus that is 19 exits filed against the wrong
+    question.
+    """
+    found: dict[int, ast.AST] = {}
+
+    def descend(node: ast.AST, loop: Optional[ast.AST]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if loop is not None:
+                found[id(child)] = loop
+            descend(child, child if isinstance(child, _LOOPS) else loop)
+
+    descend(func, None)
+    return found
+
+
+def _leaves(handler: ast.ExceptHandler) -> bool:
+    """Whether catching here actually stops the row.
+
+    ``except Exception: pass`` is written so the row is *not* stopped, and a
+    handler assigning a fallback is the same answer at more length.  Counting
+    every handler made 2 of the 3 statements the map credited with an
+    ``except`` say the opposite of what their code does.
+    """
+    return any(isinstance(inner, _LEAVES) for inner in ast.walk(handler))
 
 
 def _assigned_names(node: ast.Assign) -> set[str]:
@@ -1194,43 +1241,70 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
         A ``return`` under a test on the result says **nothing came back**,
         which is the answer when the query is not the thing that is wrong.
 
-        Only a loop over *this statement's* rows.  Counting every loop inside
-        the region gives 85 exits instead of 48, and what the extra 37 are is
-        visible in one statement: ``insertFilesForDataset_JEDI``'s first query
-        owns 363 lines of its function and loops over its rows in 7 of them,
-        so all 14 of its exits are the function's own control flow filed as
-        "this row was skipped".
+        Only the loop over *this statement's* rows, and only the exits taken
+        in it.  Counting every loop inside the region instead files
+        ``insertFilesForDataset_JEDI``'s 14 exits as "this row was skipped"
+        when its query owns 363 lines and loops over its rows in 7 of them;
+        counting by line range inside the right loop adds 19 more that belong
+        to a loop nested in it, such as ``copyArchive@206``'s ``continue@245``
+        about one of a job's files.
 
-        The function's own exits -- 363 of them over the corpus, against 48
-        kept -- are left out for the same reason the JOIN terms are left out
-        of ``conditions``: an answer that names every error path in the
-        function does not say where the row went.
+        The function's own exits are left out for the same reason the JOIN
+        terms are left out of ``conditions``: an answer that names every error
+        path in the function does not say where the row went.
         """
         for (own, line), kept in list(statements.items()):
             if own != owner or kept.region is None:
                 continue
             _first, last = kept.region
             names = _rows_of(func, line, last)
+            enclosing = _enclosing_loops(func)
             spans: list[tuple[int, int]] = []
+            over_rows: set[int] = set()
             for node in ast.walk(func):
-                if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                if not isinstance(node, _LOOPS):
                     continue
+                # The loop must **open** inside the region; only its end is
+                # followed.  Searching the function for every loop over the
+                # same names gives 174 exits over 71 statements against 90
+                # over 45, because ``res`` is reused: ``copyArchive::main``'s
+                # first query picks up the ``continue`` that belongs to its
+                # query on line 381, and one handler on line 1364 lands on 19
+                # statements.  The region is what makes ``res`` mean *this*
+                # ``res``, and keeping the opening inside it keeps that.
                 if not line < node.lineno <= last:
                     continue
-                # ``while`` carries no ``iter``; its test is where the rows
-                # would be named, and either way it is the names that decide.
                 header = (
                     node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
                 )
                 over = {n.id for n in ast.walk(header) if isinstance(n, ast.Name)}
                 if over & names:
                     spans.append((node.lineno, node.end_lineno or node.lineno))
+                    over_rows.add(id(node))
+            # Where the rows are worked through.  Kept as a field of its own
+            # because it is not ``region``: a loop opened inside the region
+            # runs to its own end, and for 64 of the corpus's 151 looping
+            # statements that end is past where the next statement opens.
+            handled = (
+                (min(low for low, _ in spans), max(high for _, high in spans))
+                if spans
+                else None
+            )
             found: set[str] = set()
             for node in ast.walk(func):
-                if not isinstance(node, _EXITS) or not line <= node.lineno <= last:
+                if not isinstance(node, _EXITS):
                     continue
-                if any(low <= node.lineno <= high for low, high in spans):
-                    found.add(f"{_EXIT_NAMES[type(node)]}@{node.lineno}")
+                # The loop it is *taken in*, not the lines it falls between:
+                # see :func:`_enclosing_loops`.  A row loop opens after this
+                # statement ran, so membership already places the exit after
+                # ``line`` -- and past ``last`` is exactly the case the
+                # region alone was losing.
+                taken_in = enclosing.get(id(node))
+                if taken_in is None or id(taken_in) not in over_rows:
+                    continue
+                if isinstance(node, ast.ExceptHandler) and not _leaves(node):
+                    continue
+                found.add(f"{_EXIT_NAMES[type(node)]}@{node.lineno}")
             for node in ast.walk(func):
                 if not isinstance(node, ast.If) or not line < node.lineno <= last:
                     continue
@@ -1251,7 +1325,9 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                     if not line <= inner.lineno <= last:
                         continue
                     found.add(f"no-rows:{_EXIT_NAMES[type(inner)]}@{inner.lineno}")
-            statements[(owner, line)] = kept._replace(exits=tuple(sorted(found)))
+            statements[(owner, line)] = kept._replace(
+                exits=tuple(sorted(found)), rows_handled=handled
+            )
 
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
@@ -1392,6 +1468,7 @@ def read_site_nodes(
                 conditions=sorted(at.conditions),
                 region=list(at.region) if at.region else [],
                 exits=list(at.exits),
+                rows_handled=list(at.rows_handled) if at.rows_handled else [],
                 anchor=Anchor(
                     package=at.package,
                     file=at.file,

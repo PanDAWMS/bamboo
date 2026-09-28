@@ -512,6 +512,18 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             f"came back; {sum(len(r.crosses_to) for r in reads)} crossing(s) "
             f"over {len(crossed)} statement(s)"
         )
+        # Reported beside them because it is what makes the exits findable:
+        # the loop opens inside the region and runs to its own end, and where
+        # that end is past the region the exits are only reachable through
+        # this stretch.
+        handled = [r for r in reads if r.rows_handled]
+        outlives = sum(
+            1 for r in reads if r.rows_handled and r.region and r.rows_handled[1] > r.region[1]
+        )
+        click.echo(
+            f"    {len(handled)} statement(s) work their rows through a loop, "
+            f"{outlives} of which runs past the region"
+        )
         busiest = Counter(r.owner for r in reads).most_common(top)
         for owner, count in busiest:
             if count < 2:

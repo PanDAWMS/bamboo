@@ -1152,6 +1152,61 @@ class Sweeper:
     assert guard == (7, 8, 9)
 
 
+def test_a_name_bound_in_the_stretch_is_explained_from_there_only(tmp_path):
+    """One function, three queries, one name -- and the walk offered all three.
+
+    ``copyArchive.py::main`` assigns ``res = taskBuffer.querySQLS(...)`` nine
+    times in 1353 lines, so the exit taken on line 390 came back explained by
+    the assignments on lines 263 and 284: other queries, whose rows the row
+    that stopped here never was.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.first_limit()
+        self.handle(limit)
+        limit = self.second_limit()
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    whole, _note = _walk(roots, file="sweeper", owner="run", lines=[7])
+    ours, _note = _walk(
+        roots, file="sweeper", owner="run", lines=[7], bindings_within=(5, 7)
+    )
+
+    assert [step.line for step in whole if step.kind == models.TRACE_BINDING] == [3, 5]
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [5]
+
+
+def test_a_name_bound_nowhere_in_the_stretch_still_gets_the_function(tmp_path):
+    """Inside *or* nothing, not inside and then the rest.
+
+    A name the statement did not fill is one the whole function is the right
+    place to look for: above the flagship exit, ``xmlIDs`` is built far from
+    the query and still explains it.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        skipped = self.load_skips()
+        for row in self.query():
+            row.status = skipped
+""",
+    )
+
+    ours, _note = _walk(
+        roots, file="sweeper", owner="run", lines=[5], bindings_within=(4, 5)
+    )
+
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [3]
+
+
 def test_a_header_above_a_shown_line_survives_the_region(tmp_path):
     """The nesting is what a reader is here for, so it is not cut by its line.
 

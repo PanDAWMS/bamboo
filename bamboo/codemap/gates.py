@@ -522,9 +522,14 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
     wrong fails the same way: it hands a reader a coordinate to look at and
     the coordinate is not the one the map means.
 
-    * an ``exits`` line must fall inside the statement's own ``region``.  The
-      region is what tells three ``holding`` queries in one 1353-line function
-      apart, and an exit outside it belongs to a different query;
+    * an ``exits`` line must fall inside the statement's own ``region`` or in
+      the stretch where its rows are worked through.  The region is what tells
+      three ``holding`` queries in one 1353-line function apart, and an exit
+      outside both belongs to a different query.  ``rows_handled`` is in the
+      claim because a row loop opened inside the region runs to its own end,
+      which for 64 of the corpus's 151 looping statements is past where the
+      next statement opens -- the region alone would call those exits foreign
+      when they are the only ones the statement has;
     * a ``crosses_to`` owner must be one the map actually holds a junction
       for.  This gate exists because that failed: ``attach_crossings`` first
       ran after the junctions were merged but *before* promotion, so every
@@ -542,16 +547,19 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
     owners = {junction.owner for junction in fragment.junctions}
     failures: list[str] = []
     for site in sorted(fragment.read_sites, key=lambda s: s.name):
-        first, last = (site.region + [0, 0])[:2] if site.region else (0, 0)
+        spans = [
+            tuple(span[:2]) for span in (site.region, site.rows_handled) if len(span) >= 2
+        ]
         for exit_at in site.exits:
             _kind, _sep, where = exit_at.rpartition("@")
             if not where.isdigit():
                 failures.append(f"{site.owner}@{site.anchor.line_start} records {exit_at!r}, which names no line")
                 continue
-            if not site.region or not first <= int(where) <= last:
+            if not any(first <= int(where) <= last for first, last in spans):
                 failures.append(
-                    f"{site.owner}@{site.anchor.line_start} exits at {where},"
-                    f" outside its own region {site.region} -- that line answers for another statement"
+                    f"{site.owner}@{site.anchor.line_start} exits at {where}, outside both its"
+                    f" region {site.region} and its rows {site.rows_handled}"
+                    " -- that line answers for another statement"
                 )
         for reached in site.crosses_to:
             if reached not in owners:

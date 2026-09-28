@@ -7946,6 +7946,259 @@ def test_a_loop_that_is_not_over_the_rows_contributes_no_exit():
     assert node.exits == []
 
 
+def test_a_handler_that_swallows_is_not_an_exit():
+    """``except Exception: pass`` is written so the row is *not* stopped.
+
+    P1-53 counted every handler in the row loop, and 2 of the 3 statements it
+    credited with an ``except`` said the opposite of what their code does:
+    ``getDispatchDatasetsPerUser@2745`` catches and passes, and
+    ``getCommands@1795`` catches and assigns a fallback.  Both rows go on.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            try:\n"
+        "                self.doIt(taskID)\n"
+        "            except Exception:\n"
+        "                pass\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == []
+
+
+def test_a_handler_that_leaves_is_an_exit():
+    """The qualification is what the handler *contains*, not whether it is empty.
+
+    ``setScoutJobDataToTasks_JEDI@3605`` is the corpus's one real case: its
+    handler logs and then gives up on the row.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            try:\n"
+        "                self.doIt(taskID)\n"
+        "            except Exception:\n"
+        "                continue\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == ["continue@13", "except@12"]
+
+
+def test_a_handler_assigning_a_fallback_is_not_an_exit():
+    """``getCommands@1795`` catches and assigns, which is not empty and not an exit.
+
+    The rule reads the handler for a way out, not for a body -- an assignment
+    is the code saying the row carries on with a substitute.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            try:\n"
+        "                params = self.parse(taskID)\n"
+        "            except Exception:\n"
+        "                params = {}\n"
+        "            self.doIt(params)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == []
+
+
+def test_the_stretch_the_rows_are_worked_through_is_recorded():
+    """``rows_handled`` is the loop over the rows, and it is not ``region``.
+
+    The region ends where the next statement's binds start being filled; the
+    loop runs to its own end.  For 64 of the corpus's 151 looping statements
+    the second is past the first, because the next query opens *inside* the
+    loop -- which is the shape here.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            varMap2 = {}\n"
+        "            varMap2[':jediTaskID'] = taskID\n"
+        "            sqlB = f'SELECT status FROM {schema}.JEDI_Tasks '\n"
+        "            sqlB += 'WHERE jediTaskID=:jediTaskID '\n"
+        "            self.cur.execute(sqlB + comment, varMap2)\n"
+        "            resB = self.cur.fetchall()\n"
+        "            if not resB:\n"
+        "                continue\n"
+        "            self.doIt(taskID)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    # The region stops where the inner query's binds start being filled...
+    assert node.region == [3, 9]
+    # ...and the rows go on being worked through to the end of the loop.
+    assert node.rows_handled == [9, 18]
+
+
+def test_an_exit_in_the_loop_past_the_region_is_still_this_statements():
+    """The one thing P1-53 did not deliver for the analyser.
+
+    ``getTasksToExecCommand_JEDI@4591`` owns 4585-4603 and works its rows
+    through 4600-4621, because another query opens on 4606 *inside* the loop.
+    Read in the region alone it has no exits at all; read to the loop's end it
+    has the ``except`` that gives up the lock and the ``continue`` that skips
+    the task, which is the answer to "the map says this task was selected and
+    nothing happened to it".
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            varMap2 = {}\n"
+        "            varMap2[':jediTaskID'] = taskID\n"
+        "            sqlB = f'SELECT status FROM {schema}.JEDI_Tasks '\n"
+        "            sqlB += 'WHERE jediTaskID=:jediTaskID '\n"
+        "            self.cur.execute(sqlB + comment, varMap2)\n"
+        "            resB = self.cur.fetchall()\n"
+        "            if resB[0][0] == 'done':\n"
+        "                continue\n"
+        "            self.doIt(taskID)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    # Line 17 is nine lines past where this statement's region ends...
+    assert node.region == [3, 9]
+    # ...and it is still where a row this statement asked for stops.
+    assert node.exits == ["continue@17"]
+
+
+def test_an_exit_in_a_loop_nested_in_the_row_loop_is_not_this_statements():
+    """The exit belongs to the loop it is *taken in*, not to a line range.
+
+    Followed to the loop's end and judged by range, 19 more exits come in from
+    loops nested inside it: ``copyArchive@206`` picks up ``continue@245``,
+    which passes over one of a job's *files*, not the job.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            for fileSpec in self.filesOf(taskID):\n"
+        "                if fileSpec.status == 'bad':\n"
+        "                    continue\n"
+        "            self.doIt(taskID)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == []
+    # The file loop is inside the row loop, so the rows are still worked
+    # through across all of it -- the filter is on the exit, not the stretch.
+    assert node.rows_handled == [9, 13]
+
+
+def test_a_loop_opening_outside_the_region_is_not_this_statements_rows():
+    """The loop must *open* inside the region; only its end is followed.
+
+    Searching the function for every loop over the same names gives 174 exits
+    over 71 statements against 90 over 45. ``res`` is reused:
+    ``copyArchive::main``'s first query would pick up the ``continue``
+    belonging to its query 285 lines later, and one handler on line 1364 would
+    land on 19 statements. The region is what makes ``res`` mean *this*
+    ``res``.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        varMap2 = {}\n"
+        "        varMap2[':status'] = 'running'\n"
+        # A different select list, or the two runs share a dedup key: a
+        # statement is kept once per ``(text, window)``.
+        "        sqlB = f'SELECT taskName FROM {schema}.JEDI_Tasks '\n"
+        "        sqlB += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlB + comment, varMap2)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            if taskID in skipList:\n"
+        "                continue\n"
+        "            self.doIt(taskID)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    first, second = [n for n in nodes if n.anchor.line_start in (7, 13)]
+    # The loop names ``res``, which the first statement also fills -- and it
+    # opens in the second statement's stretch, so it is the second's rows.
+    assert first.exits == []
+    assert first.rows_handled == []
+    assert second.exits == ["continue@17"]
+    assert second.rows_handled == [15, 18]
+
+
+def test_a_statement_whose_rows_nothing_loops_over_handles_them_nowhere():
+    """Empty is the answer, not a gap: 113 of the corpus's 264 have no loop."""
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        return res\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.rows_handled == []
+
+
 def test_an_exit_because_nothing_came_back_says_so():
     """A different answer from a row being dropped, so a different prefix.
 
@@ -8163,7 +8416,30 @@ def test_gate_catches_an_exit_outside_the_statements_own_region():
     result = gates.statement_leads_resolve(fragment)
 
     assert not result.passed
-    assert "outside its own region" in result.failures[0]
+    assert "outside both its region" in result.failures[0]
+
+
+def test_gate_accepts_an_exit_in_the_loop_that_outlives_the_region():
+    """The region ends where the next statement's binds start being filled.
+
+    A row loop opened inside it runs to its own end, and for 64 of the
+    corpus's 151 looping statements that end is past the region --
+    ``getTasksToExecCommand_JEDI@4591`` owns 4585-4603 and works its rows
+    through 4600-4621 because another query opens on 4606, inside the loop.
+    Judged against the region alone, its only two exits read as foreign.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        read_sites=[
+            _site_with(region=[3, 20], rows_handled=[18, 40], exits=["continue@33"])
+        ],
+        junctions=[_junction("x.py::retryTask")],
+    )
+
+    result = gates.statement_leads_resolve(fragment)
+
+    assert result.passed
 
 
 def test_gate_passes_a_statement_that_leads_nowhere():
