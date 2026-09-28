@@ -87,6 +87,7 @@ from bamboo.codemap.models import (
     ELIMINATED,
     LEAD_CALLEE,
     LEAD_MAP,
+    LEAD_READER,
     PASSTHROUGH_OUTCOME,
     READS_ONLY_AT_TOP,
     READS_ONLY_FOR_A_CALLER,
@@ -97,6 +98,7 @@ from bamboo.codemap.models import (
     SKELETON_PRINT,
     STOP_AMBIGUOUS,
     STOP_DESCENT,
+    STOP_HANDED_ON,
     STOP_NO_WRITER,
     STOP_SHARED_TABLE,
     SYMPTOM_DISTRIBUTION,
@@ -118,6 +120,7 @@ from bamboo.codemap.models import (
     Reading,
     ReadSiteNode,
     StageCut,
+    StatementExit,
     StatementReading,
     Strategy,
     Symptom,
@@ -464,6 +467,23 @@ def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
     return settled
 
 
+_NO_ROWS = "no-rows:"
+
+
+def _statement_exit(text: str) -> StatementExit:
+    """Read back what the map stored -- ``"continue@390"`` / ``"no-rows:return@263"``.
+
+    The prefix is the whole of the difference between "the row came back and
+    was passed over" and "nothing came back", which are answers pointing at
+    two different halves of the statement.
+    """
+    no_rows = text.startswith(_NO_ROWS)
+    kind, _at, where = text.removeprefix(_NO_ROWS).rpartition("@")
+    return StatementExit(
+        kind=kind or text, line=int(where) if where.isdigit() else 0, no_rows=no_rows
+    )
+
+
 def _reader_statements(
     read_statements: dict[str, list[ReadSiteNode]], observed: str
 ) -> tuple[list[StatementReading], dict[str, int]]:
@@ -509,6 +529,8 @@ def _reader_statements(
                     conditions=list(site.conditions),
                     bind_window=list(site.bind_window),
                     region=list(site.region),
+                    exits=[_statement_exit(text) for text in site.exits],
+                    crosses_to=list(site.crosses_to),
                 )
             )
         if asking and len(asking) < len(sites):
@@ -1111,6 +1133,14 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         producers, symptom.task_id, symptom.subject.startswith(_TASK_SCOPED)
     )
 
+    # Read once and handed to both the follow-up and the leads: the statements
+    # are what makes a reader somewhere to go next, and awaiting them twice
+    # would let the two halves of one answer disagree.
+    reading_here = await code_map.read_sites(
+        subject.selected_by.get(symptom.observed, [])
+        + subject.updated_by.get(symptom.observed, [])
+    )
+
     strategy = Strategy(
         symptom=symptom,
         map_id=code_map.map_id,
@@ -1129,10 +1159,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
                 subject.selected_by.get(symptom.observed, [])
                 + subject.updated_by.get(symptom.observed, [])
             ),
-            await code_map.read_sites(
-                subject.selected_by.get(symptom.observed, [])
-                + subject.updated_by.get(symptom.observed, [])
-            ),
+            reading_here,
             await code_map.entities_for(subject.spec_class),
             await code_map.changing_functions(),
         ),
@@ -1148,6 +1175,9 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
                 producers,
                 await code_map.selections_by_owner(),
                 await code_map.entity_reads_by_owner(),
+            )
+            + _reader_leads(
+                symptom, reading_here, await code_map.subjects_by_junction_owner()
             )
         ),
         readings=_readings(candidates, asked),
@@ -1621,6 +1651,55 @@ def _joined(symptom: Symptom, producers: list[JunctionNode]) -> list[Lead]:
         for entity in junction.joined_entities
         if entity != here
     ]
+
+
+def _reader_leads(
+    symptom: Symptom,
+    read_sites: dict[str, list[ReadSiteNode]],
+    subjects_by_owner: dict[str, list[str]],
+) -> list[Lead]:
+    """Where a statement that keeps a row hands it on.
+
+    The read side's own lead, and the request's sixth point: until now a
+    reader could be listed but not *chosen*, because ``LEAD_MAP`` /
+    ``LEAD_CALLEE`` / ``LEAD_GLOSS`` all answer "who wrote this value" and a
+    reader answers "who picked the row up".  A statement that selects a row
+    and starts a ``Watcher`` on it is the next thing that happens to that row,
+    and it was the one hop the map held every piece of and could not offer.
+
+    Narrowed to the statements that ask for the observed value.  A reader's
+    other statements cross to their own junctions and have nothing to do with
+    the row in hand -- ``copyArchive.py::main`` runs thirty statements and
+    three of them ask for ``holding``.
+
+    Stops rather than continues.  The map names where the row went; what it
+    became there is an observation, and a lead carrying a made-up value would
+    be a question the evidence cannot fail.
+    """
+    leads: list[Lead] = []
+    seen: set[tuple[str, str]] = set()
+    for owner, sites in sorted(read_sites.items()):
+        for site in sites:
+            if not any(pair.endswith(f"={symptom.observed}") for pair in site.selects):
+                continue
+            for reached in site.crosses_to:
+                for decided in subjects_by_owner.get(reached, ()):
+                    if decided == symptom.subject or (reached, decided) in seen:
+                        continue
+                    seen.add((reached, decided))
+                    leads.append(
+                        Lead(
+                            field=decided,
+                            stop=STOP_HANDED_ON,
+                            why=(
+                                f"{short_owner(owner)}@{site.anchor.line_start} hands the "
+                                f"rows it keeps to {short_owner(reached)}, which decides it"
+                            ),
+                            opened_by=f"{owner}@{site.anchor.line_start}",
+                            source=LEAD_READER,
+                        )
+                    )
+    return leads
 
 
 def _leads(
@@ -2232,6 +2311,14 @@ def attach_reader_traces(
     No handovers.  A crossing is a property of the junction the map recorded,
     and these are statements; passing a junction's would attribute another
     decision's reach to a query that shares its function.
+
+    **Each exit is walked on its own**, from the line that decides it rather
+    than from the statement.  The two questions are different: the statement's
+    own walk explains why the ``WHERE`` holds the values it does -- why no row
+    came back -- and an exit's explains why a row that *did* come back was
+    dropped.  ``copyArchive.py::main``'s ``holding`` query skips every job
+    already in ``xmlIDs``, and where ``xmlIDs`` came from is the answer, not
+    where the time limit came from.
     """
     if not roots:
         return
@@ -2240,26 +2327,62 @@ def attach_reader_traces(
 
         classify = classify_panda
     for entry in strategy.follow_up.reader_statements if strategy.follow_up else []:
-        lines = condition_seeds(entry.conditions)
-        if not entry.file or not lines:
-            # Said by leaving the trace empty rather than by walking the
-            # statement's own line: a statement whose conditions name no bind
-            # has nothing to explain, and a walk seeded at the ``execute``
-            # would return the SQL text, which reads no names at all.
+        if not entry.file:
             continue
+        region = tuple(entry.region) if len(entry.region) == 2 else None
+        lines = condition_seeds(entry.conditions)
+        if lines:
+            walked = trace.walk(
+                roots,
+                file=entry.file,
+                owner=entry.owner,
+                lines=lines,
+                observed=strategy.symptom.observed or "",
+                expected_sha=entry.blob_sha,
+                classify=classify,
+                region=region,
+            )
+            entry.trace = walked.steps
+            entry.trace_note = walked.note
+            entry.skeleton = walked.skeleton
+        # Else said by leaving the trace empty rather than by walking the
+        # statement's own line: a statement whose conditions name no bind has
+        # nothing to explain, and a walk seeded at the ``execute`` would return
+        # the SQL text, which reads no names at all.
+        _attach_exit_traces(entry, roots, strategy, classify)
+
+
+def _attach_exit_traces(entry, roots: dict, strategy: Strategy, classify) -> None:
+    """Fill each exit's block skeleton and the walk from where it is decided."""
+    for leaving in entry.exits:
+        guard = trace.exit_guard(
+            roots,
+            file=entry.file,
+            owner=entry.owner,
+            line=leaving.line,
+            expected_sha=entry.blob_sha,
+        )
+        if guard is None:
+            continue
+        decided, first, last = guard
+        leaving.decided_at = decided
         walked = trace.walk(
             roots,
             file=entry.file,
             owner=entry.owner,
-            lines=lines,
+            lines=[decided],
             observed=strategy.symptom.observed or "",
             expected_sha=entry.blob_sha,
             classify=classify,
-            region=tuple(entry.region) if len(entry.region) == 2 else None,
+            region=(first, last),
         )
-        entry.trace = walked.steps
-        entry.trace_note = walked.note
-        entry.skeleton = walked.skeleton
+        leaving.trace = walked.steps
+        leaving.trace_note = walked.note
+        # The block's own lines only.  Cutting the region at the exit instead
+        # hands back the branch the row did not take -- and an empty list here
+        # is the finding the request asked for: six of the corpus's fourteen
+        # no-rows exits print nothing at all.
+        leaving.skeleton = walked.skeleton
 
 
 def _report_what_the_lines_cannot_separate(strategy: Strategy) -> None:

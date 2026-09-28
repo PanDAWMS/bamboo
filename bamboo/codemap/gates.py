@@ -515,6 +515,62 @@ def bind_windows_are_known(fragment: MapFragment) -> GateResult:
     )
 
 
+def statement_leads_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every exit and every crossing a statement offers points somewhere real.
+
+    Two consistency claims, one gate, because a statement that gets either
+    wrong fails the same way: it hands a reader a coordinate to look at and
+    the coordinate is not the one the map means.
+
+    * an ``exits`` line must fall inside the statement's own ``region``.  The
+      region is what tells three ``holding`` queries in one 1353-line function
+      apart, and an exit outside it belongs to a different query;
+    * a ``crosses_to`` owner must be one the map actually holds a junction
+      for.  This gate exists because that failed: ``attach_crossings`` first
+      ran after the junctions were merged but *before* promotion, so every
+      ``self.cur.execute(...)`` inside a region resolved to the ``execute`` of
+      an adder plugin the map then dropped -- 520 crossings over 239
+      statements where 71 over 38 are real, and 176 statements carrying the
+      same two leads to nowhere.  Nothing else noticed: the field was
+      populated, the diff reported it as content, and every unit test passed.
+
+    Not a coverage gate.  Most statements have no exit and no crossing, and
+    that is an answer rather than a gap -- "the rows go nowhere in particular"
+    is what a reader needs to hear when it is true.  What is assertable for
+    all is that the coordinates offered are the map's own.
+    """
+    owners = {junction.owner for junction in fragment.junctions}
+    failures: list[str] = []
+    for site in sorted(fragment.read_sites, key=lambda s: s.name):
+        first, last = (site.region + [0, 0])[:2] if site.region else (0, 0)
+        for exit_at in site.exits:
+            _kind, _sep, where = exit_at.rpartition("@")
+            if not where.isdigit():
+                failures.append(f"{site.owner}@{site.anchor.line_start} records {exit_at!r}, which names no line")
+                continue
+            if not site.region or not first <= int(where) <= last:
+                failures.append(
+                    f"{site.owner}@{site.anchor.line_start} exits at {where},"
+                    f" outside its own region {site.region} -- that line answers for another statement"
+                )
+        for reached in site.crosses_to:
+            if reached not in owners:
+                failures.append(
+                    f"{site.owner}@{site.anchor.line_start} leads to {reached},"
+                    " which the map holds no junction for"
+                )
+    return GateResult(
+        gate="statement-leads-resolve",
+        passed=not failures,
+        checked=len(fragment.read_sites),
+        unit="statements",
+        question="does every exit and crossing a statement offers point somewhere the map means?",
+        finding="a statement offers a coordinate outside its own region, or a lead to a junction the map does not hold",
+        failures=failures,
+        note="Both fields are stored, diffed and rendered whatever they hold; a lead to nowhere reads exactly like a lead.",
+    )
+
+
 def branch_positions_are_known(fragment: MapFragment) -> GateResult:
     """(i) Every arm the map offers says where in the source it decided.
 
@@ -1837,6 +1893,7 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(readers_have_a_statement(fragment))
     if fragment.read_sites:
         results.append(bind_windows_are_known(fragment))
+        results.append(statement_leads_resolve(fragment))
     if fragment.junctions:
         results.append(structural_attribution_agrees(fragment))
         results.append(declared_status_is_written(fragment))

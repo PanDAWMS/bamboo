@@ -1544,6 +1544,71 @@ class Walked(NamedTuple):
     skeleton: list[SkeletonLine] = []
 
 
+def exit_guard(
+    roots: dict[str, Path],
+    *,
+    file: str,
+    owner: str,
+    line: int,
+    expected_sha: str = "",
+) -> Optional[tuple[int, int, int]]:
+    """``(decided at, first, last)`` for the block an exit at *line* sits in.
+
+    What the read side stores is where a row stops being followed; what a
+    reader asks next is *what the code says when it stops there*, and the
+    answer is the block the exit is in, not the lines before it.  Cutting the
+    statement's skeleton at the exit line instead reads the other branch back
+    to them: ``copyArchive.py``'s ``holding`` query logs one line if nothing
+    came back and another if something did, and everything in between belongs
+    to the branch the row did not take.
+
+    The block, and not the guarding ``if`` alone, because the exit is only
+    half of what happened -- ``if int(id) in xmlIDs:`` is followed by
+    ``_logger.debug("   found XML -> skip")`` and *then* the ``continue``, and
+    that line is the whole of what a reader can grep for.
+
+    ``None`` when the tree is not the one the map was built from, on the same
+    terms as :func:`walk`: a block read out of the wrong release is plausible
+    code that is not the code.
+    """
+    state = _Walk(roots, _nothing, DEFAULT_BUDGET, "")
+    parsed = state.module(file)
+    if parsed is None:
+        return None
+    source, _tree = parsed
+    if expected_sha and git_blob_sha(source) != expected_sha:
+        return None
+    frame = state.frame(file, owner, line=line)
+    if frame is None or not isinstance(
+        frame.func, (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        return None
+    # An ``except`` is addressed by its own line and is not an ``ast.stmt``,
+    # so it is looked for by hand before the statements are.
+    for node in ast.walk(frame.func):
+        if isinstance(node, ast.ExceptHandler) and node.lineno == line and node.body:
+            return (line, node.body[0].lineno, node.body[-1].end_lineno or node.lineno)
+    statement = _statement_at(frame.func, line)
+    if statement is None:
+        return None
+    for ancestor in pathcond.ancestors(statement):
+        if not isinstance(ancestor, (ast.stmt, ast.ExceptHandler)):
+            continue
+        for _header, body in (
+            [("except", ancestor.body)]
+            if isinstance(ancestor, ast.ExceptHandler)
+            else _blocks_of(ancestor)
+        ):
+            if statement not in body:
+                continue
+            return (
+                ancestor.lineno,
+                body[0].lineno,
+                max(item.end_lineno or item.lineno for item in body),
+            )
+    return None
+
+
 def walk(
     roots: dict[str, Path],
     *,

@@ -1060,6 +1060,98 @@ class Sweeper:
     assert [row.line for row in second.skeleton if row.kind == models.SKELETON_PRINT] == [8]
 
 
+def test_an_exits_guard_is_the_block_it_is_taken_in(tmp_path):
+    """What the code says when a row stops here, without the branch it did not take.
+
+    Cutting the statement's region at the exit line instead reads the other
+    branch back to the reader: ``copyArchive.py``'s ``holding`` query logs one
+    line when nothing came back and another when something did, and a reader
+    told to grep for both has been told something false about one of them.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        rows = self.query()
+        if rows is None:
+            logger.debug("nothing came back")
+            return None
+        logger.debug("found %s", rows)
+        for row in rows:
+            if row in self.skipped:
+                logger.debug("already seen -> skip %s", row)
+                continue
+            self.hand_on(row)
+""",
+    )
+    seen = {"file": f"{PACKAGE}/sweeper", "owner": f"{PACKAGE}/sweeper::run"}
+
+    early = trace_mod.exit_guard(roots, line=6, **seen)
+    skipped = trace_mod.exit_guard(roots, line=11, **seen)
+
+    # Decided at the ``if``, and the block is the two lines it guards.
+    assert early == (4, 5, 6)
+    assert skipped == (9, 10, 11)
+
+
+def test_an_exits_guard_carries_only_what_that_block_prints(tmp_path):
+    """The lines a reader can actually grep for, and silence when there are none."""
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        rows = self.query()
+        if rows is None:
+            return None
+        logger.debug("found %s", rows)
+        for row in rows:
+            if row in self.skipped:
+                logger.debug("already seen -> skip %s", row)
+                continue
+""",
+    )
+
+    quiet = _walked(roots, file="sweeper", owner="run", lines=[4], region=(4, 5))
+    noisy = _walked(roots, file="sweeper", owner="run", lines=[8], region=(9, 10))
+
+    # The early return prints nothing at all -- the finding, not a gap: a grep
+    # of the log cannot tell this exit from the row never arriving.
+    assert [row for row in quiet.skeleton if row.kind == models.SKELETON_PRINT] == []
+    assert [
+        row.line for row in noisy.skeleton if row.kind == models.SKELETON_PRINT
+    ] == [9]
+
+
+def test_an_except_handler_is_addressed_by_its_own_line(tmp_path):
+    """``ExceptHandler`` is not an ``ast.stmt``, so it is looked for by hand.
+
+    Reached through the statement walk it is invisible, which over the corpus
+    read as zero ``except`` exits where there are eight.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        rows = self.query()
+        for row in rows:
+            try:
+                self.hand_on(row)
+            except Exception:
+                logger.error("handing on failed")
+                continue
+""",
+    )
+
+    guard = trace_mod.exit_guard(
+        roots, file=f"{PACKAGE}/sweeper", owner=f"{PACKAGE}/sweeper::run", line=7
+    )
+
+    assert guard == (7, 8, 9)
+
+
 def test_a_header_above_a_shown_line_survives_the_region(tmp_path):
     """The nesting is what a reader is here for, so it is not cut by its line.
 

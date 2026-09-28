@@ -765,6 +765,11 @@ class ReadStatement(NamedTuple):
     #: Filled once the function's other runs are known, so it arrives by
     #: ``_replace`` rather than at construction.
     region: Optional[tuple[int, int]] = None
+    #: ``"continue@390"`` / ``"no-rows:return@263"`` -- where a row this
+    #: statement asked for stops being followed.  Read inside ``region``, so
+    #: it arrives by ``_replace`` too.  A tuple, because a NamedTuple's
+    #: default is shared by every instance that does not override it.
+    exits: tuple[str, ...] = ()
 
 
 def _render_condition(condition: "sql.Condition", seeds: dict[str, list[int]]) -> str:
@@ -932,6 +937,59 @@ def _assembled_queries(
     }
 
 
+#: Where a statement's rows arrive.  The ``execute`` form binds nothing at the
+#: call -- ``self.cur.execute(sql, varMap)`` and then ``res =
+#: self.cur.fetchall()`` -- so reading the call line alone finds the rows for
+#: 48 of the corpus's 264 statements and misses every exit taken because none
+#: came back.
+_FETCH = ("fetchall", "fetchone", "fetchmany")
+#: An exit that says nothing is a different answer from one that logs: the
+#: reader looking for why a row stopped here has no line to grep for.
+_SAYS_SOMETHING = ("debug", "info", "warning", "error", "critical", "exception")
+#: ``ExceptHandler`` is not an ``ast.stmt``, which is why it is named rather
+#: than reached through one.
+_EXITS = (ast.Continue, ast.Break, ast.Return, ast.Raise, ast.ExceptHandler)
+#: Spelled as the code spells them, so a reader can grep the line.
+_EXIT_NAMES = {
+    ast.Continue: "continue",
+    ast.Break: "break",
+    ast.Return: "return",
+    ast.Raise: "raise",
+    ast.ExceptHandler: "except",
+}
+
+
+def _assigned_names(node: ast.Assign) -> set[str]:
+    found: set[str] = set()
+    for target in node.targets:
+        parts = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+        found |= {part.id for part in parts if isinstance(part, ast.Name)}
+    return found
+
+
+def _rows_of(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
+) -> set[str]:
+    """The names this statement's rows land in, within the stretch it owns.
+
+    The call line first, for the forwarded form that returns them; otherwise
+    the first ``fetch*`` under it.  Reading only the call would leave most of
+    the corpus with no rows to test an exit against -- see :data:`_FETCH`.
+    """
+    names: set[str] = set()
+    fetched: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign):
+            continue
+        if node.lineno == line:
+            names |= _assigned_names(node)
+        elif line < node.lineno <= last and isinstance(node.value, ast.Call):
+            callee = node.value.func
+            if isinstance(callee, ast.Attribute) and callee.attr in _FETCH:
+                fetched |= _assigned_names(node)
+    return names or fetched
+
+
 def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSide:
     """Return what the corpus's statements ask for: which values, and whose rows.
 
@@ -1092,6 +1150,13 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
         built from, and stopping at the next *stored* one would hand a reader
         the following query's logging as well.
 
+        Where two statements share one ``var_map = {}`` the later one's binds
+        start filling *above* the earlier one's call, so the next run's window
+        is no edge at all: it would end a region before the statement it
+        belongs to ran, taking that statement's own ``fetchall`` with it.  A
+        statement's territory cannot close at or before it ran, so where the
+        windows overlap the next *call* is the edge.
+
         Keyed by the call line because a branchy statement is emitted as
         several runs at one ``execute``, and a read site is one ``(owner,
         line)``: without the key the region ends at the statement's own second
@@ -1111,10 +1176,82 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
             kept = statements.get((owner, line))
             if kept is None:
                 continue
-            following = ordered[index + 1][1] if index + 1 < len(ordered) else last + 1
+            if index + 1 < len(ordered):
+                next_line, next_begins = ordered[index + 1]
+                following = next_begins if next_begins > line else next_line
+            else:
+                following = last + 1
             statements[(owner, line)] = kept._replace(
                 region=(begins, max(line, following - 1))
             )
+
+    def place_exits(func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str) -> None:
+        """Give each statement the ways a row it asked for stops being followed.
+
+        Two kinds, told apart by a prefix because they are different answers.
+        A ``continue`` in the loop over the rows says *this row* was dropped
+        here -- the request's own example, ``if int(id) in xmlIDs: continue``.
+        A ``return`` under a test on the result says **nothing came back**,
+        which is the answer when the query is not the thing that is wrong.
+
+        Only a loop over *this statement's* rows.  Counting every loop inside
+        the region gives 85 exits instead of 48, and what the extra 37 are is
+        visible in one statement: ``insertFilesForDataset_JEDI``'s first query
+        owns 363 lines of its function and loops over its rows in 7 of them,
+        so all 14 of its exits are the function's own control flow filed as
+        "this row was skipped".
+
+        The function's own exits -- 363 of them over the corpus, against 48
+        kept -- are left out for the same reason the JOIN terms are left out
+        of ``conditions``: an answer that names every error path in the
+        function does not say where the row went.
+        """
+        for (own, line), kept in list(statements.items()):
+            if own != owner or kept.region is None:
+                continue
+            _first, last = kept.region
+            names = _rows_of(func, line, last)
+            spans: list[tuple[int, int]] = []
+            for node in ast.walk(func):
+                if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                    continue
+                if not line < node.lineno <= last:
+                    continue
+                # ``while`` carries no ``iter``; its test is where the rows
+                # would be named, and either way it is the names that decide.
+                header = (
+                    node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
+                )
+                over = {n.id for n in ast.walk(header) if isinstance(n, ast.Name)}
+                if over & names:
+                    spans.append((node.lineno, node.end_lineno or node.lineno))
+            found: set[str] = set()
+            for node in ast.walk(func):
+                if not isinstance(node, _EXITS) or not line <= node.lineno <= last:
+                    continue
+                if any(low <= node.lineno <= high for low, high in spans):
+                    found.add(f"{_EXIT_NAMES[type(node)]}@{node.lineno}")
+            for node in ast.walk(func):
+                if not isinstance(node, ast.If) or not line < node.lineno <= last:
+                    continue
+                tested = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+                if not tested & names:
+                    continue
+                # The guarded branch only.  A test on the result splits the
+                # code in two, and the ``else`` is the branch where the rows
+                # *did* come back -- ``if resF is None or len(resF) == 0:``
+                # logs "no files" and its ``else`` works through them, ending
+                # in a ``break`` that means the opposite of this field.
+                for inner in node.body:
+                    if not isinstance(inner, (ast.Return, ast.Continue, ast.Break, ast.Raise)):
+                        continue
+                    # And inside the region, like every other exit: the guard
+                    # can be in this statement's stretch while what it guards
+                    # runs on into the next one's.
+                    if not line <= inner.lineno <= last:
+                        continue
+                    found.add(f"no-rows:{_EXIT_NAMES[type(inner)]}@{inner.lineno}")
+            statements[(owner, line)] = kept._replace(exits=tuple(sorted(found)))
 
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
@@ -1207,7 +1344,9 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                 if kept is not None:
                     kept.tables.update(read_tables)
             place_conditions(func, owner, executions)
+            # Regions first: the exits are read inside the stretch it settles.
             place_regions(func, owner, executions)
+            place_exits(func, owner)
     return ReadSide(
         values=found,
         entities=rows,
@@ -1252,6 +1391,7 @@ def read_site_nodes(
                 bind_window=list(at.window) if at.window else [],
                 conditions=sorted(at.conditions),
                 region=list(at.region) if at.region else [],
+                exits=list(at.exits),
                 anchor=Anchor(
                     package=at.package,
                     file=at.file,
@@ -1262,6 +1402,122 @@ def read_site_nodes(
             )
         )
     return nodes
+
+
+def attach_crossings(
+    read_sites: list[ReadSiteNode],
+    modules: list[SourceModule],
+    junctions: list[JunctionNode],
+) -> int:
+    """Say which junction a row handled here is carried on to.
+
+    The request's sixth point: a reader wants to be able to pick a *statement*
+    as the lead and be told where the investigation goes next.  A statement
+    already says which rows it asked for and which of them it drops; what it
+    could not say is that the ones it keeps are handed to something the map
+    already holds an answer for.
+
+    Two shapes resolve by name and both are stored:
+
+    * the region calls a function the map owns a junction in -- 65 of them;
+    * the region builds a class the map owns a junction in and starts it as a
+      thread -- 6, and one of those is the statement this whole slice is
+      measured on.  ``copyArchive.py::main``'s ``holding`` query hands each
+      job to ``Watcher(...)`` and calls ``.start()``, so the next thing that
+      happens to a held job is ``Watcher.run``, which is a junction.  The
+      ``start`` in ``thr.start()`` is not itself a junction owner, which is
+      why the class the name was built from has to be carried.
+
+    **A value returned to the caller is not stored.** 137 of the corpus's
+    statements end in a ``return`` inside their region, and who receives it is
+    a question about call sites that this slice cannot answer -- offering the
+    caller's own name would be a lead pointing at whoever happened to be
+    grepped first.  Counted and reported instead; resolving it is the same
+    problem as the call graph the handover walk needs.
+
+    Run after promotion, not merely after the merge.  A crossing is a lead,
+    and a lead has to name somewhere the map will answer for -- resolved
+    against the candidate junctions instead, every ``self.cur.execute(...)``
+    in a region resolved to the ``execute`` of an adder plugin that promotion
+    then dropped: 520 crossings over 239 statements where 71 over 38 are real,
+    with 176 statements handed the same two leads to nowhere.
+
+    Returns how many crossings were stored.
+    """
+    owners = {junction.owner for junction in junctions}
+    by_func: dict[str, set[str]] = {}
+    for owner in owners:
+        by_func.setdefault(owner.rsplit("::", 1)[-1], set()).add(owner)
+    trees = {module.rel_path: module.tree for module in modules}
+    by_class: dict[str, set[str]] = {}
+    for rel, tree in trees.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                name = f"{rel}::{item.name}"
+                if name in owners:
+                    by_class.setdefault(node.name, set()).add(name)
+
+    stored = 0
+    for site in read_sites:
+        if not site.region:
+            continue
+        tree = trees.get(site.anchor.file)
+        if tree is None:
+            continue
+        wanted = site.owner.rsplit("::", 1)[-1]
+        func = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == wanted
+                and node.lineno <= site.anchor.line_start <= (node.end_lineno or node.lineno)
+            ),
+            None,
+        )
+        if func is None:
+            continue
+        first, last = site.region
+        reached: set[str] = set()
+        # The name a thread was built from, so ``.start()`` can be resolved.
+        built: dict[str, str] = {}
+        for node in ast.walk(func):
+            if not isinstance(node, ast.stmt) or not first <= node.lineno <= last:
+                continue
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                callee = node.value.func
+                made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
+                if made in by_class:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            built[target.id] = made
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Call):
+                    continue
+                if isinstance(inner.func, ast.Attribute):
+                    receiver = inner.func.value
+                    if (
+                        inner.func.attr == "start"
+                        and isinstance(receiver, ast.Name)
+                        and receiver.id in built
+                    ):
+                        reached |= by_class[built[receiver.id]]
+                        continue
+                    called = inner.func.attr
+                elif isinstance(inner.func, ast.Name):
+                    called = inner.func.id
+                else:
+                    continue
+                reached |= by_func.get(called, set())
+        # Not itself: a statement is not somewhere its own rows go next.
+        reached.discard(site.owner)
+        site.crosses_to = sorted(reached)
+        stored += len(site.crosses_to)
+    return stored
 
 
 def entity_nodes(

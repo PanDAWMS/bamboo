@@ -3664,3 +3664,86 @@ async def test_a_function_that_prints_nothing_is_still_reported_as_silent():
     ).output
 
     assert "silent" in output
+
+
+def test_the_two_kinds_of_exit_are_read_back_apart():
+    """The prefix is the whole of the difference between two answers.
+
+    "The row came back and was passed over" sends a reader to the handling;
+    "nothing came back" sends them to the statement's conditions.  Pooled into
+    one word they would send everyone to the same place.
+    """
+    passed_over = strategy_mod._statement_exit("continue@390")
+    empty_handed = strategy_mod._statement_exit("no-rows:return@263")
+
+    assert (passed_over.kind, passed_over.line, passed_over.no_rows) == ("continue", 390, False)
+    assert (empty_handed.kind, empty_handed.line, empty_handed.no_rows) == ("return", 263, True)
+
+
+def test_a_statement_that_hands_its_rows_on_is_a_lead():
+    """The request's sixth point: a reader the analyser can *choose*.
+
+    ``LEAD_MAP`` / ``LEAD_CALLEE`` / ``LEAD_GLOSS`` all answer "who wrote this
+    value"; a reader answers "who picked the row up", and the hop from a
+    ``holding`` query to the ``Watcher`` it starts is one the map held every
+    piece of and could not offer.
+    """
+    site = models.ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="r:1",
+        owner="pandaserver/daemons/scripts/copyArchive.py::main",
+        anchor=Anchor(
+            package="pandaserver",
+            file="pandaserver/daemons/scripts/copyArchive.py",
+            line_start=381,
+            line_end=381,
+        ),
+        selects=["JobSpec.jobStatus=holding"],
+        region=[374, 399],
+        crosses_to=["pandaserver/jobdispatcher/Watcher.py::run"],
+    )
+
+    leads = strategy_mod._reader_leads(
+        Symptom(subject="JobSpec.jobStatus", observed="holding"),
+        {site.owner: [site]},
+        {"pandaserver/jobdispatcher/Watcher.py::run": ["JobSpec.taskBufferErrorCode"]},
+    )
+
+    (lead,) = leads
+    assert lead.field == "JobSpec.taskBufferErrorCode"
+    assert lead.source == models.LEAD_READER
+    assert lead.stop == models.STOP_HANDED_ON
+    assert lead.opened_by.endswith("copyArchive.py::main@381")
+
+
+def test_a_statement_asking_on_another_value_opens_no_lead():
+    """``copyArchive.py::main`` runs thirty statements and three ask on this value.
+
+    The other twenty-seven cross to their own junctions, which have nothing to
+    do with the row in hand -- offering them would be the pooling the read
+    site node exists to undo.
+    """
+    site = models.ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="r:2",
+        owner="pandaserver/daemons/scripts/copyArchive.py::main",
+        anchor=Anchor(
+            package="pandaserver",
+            file="pandaserver/daemons/scripts/copyArchive.py",
+            line_start=1260,
+            line_end=1260,
+        ),
+        selects=["JobSpec.jobStatus=transferring"],
+        region=[1254, 1324],
+        crosses_to=["pandaserver/jobdispatcher/Watcher.py::run"],
+    )
+
+    leads = strategy_mod._reader_leads(
+        Symptom(subject="JobSpec.jobStatus", observed="holding"),
+        {site.owner: [site]},
+        {"pandaserver/jobdispatcher/Watcher.py::run": ["JobSpec.taskBufferErrorCode"]},
+    )
+
+    assert leads == []

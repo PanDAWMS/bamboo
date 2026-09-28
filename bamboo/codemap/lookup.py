@@ -329,6 +329,24 @@ class CodeMap:
                     by_owner.setdefault(owner, []).append((subject.name, value))
         return by_owner
 
+    async def subjects_by_junction_owner(self) -> dict[str, list[str]]:
+        """``{owner: [the subjects its junctions decide]}``.
+
+        What a crossing resolves to.  ``ReadSiteNode.crosses_to`` stores an
+        owner, because that is what a name in the source resolves to; what a
+        reader wants back is the *question* that owner settles, and one owner
+        can settle more than one -- ``archiveJob`` writes both a job's status
+        and its files'.
+
+        Keyed by the whole ``module::method`` for the reason
+        :meth:`selections_by_owner` is: ``run`` is defined in every daemon
+        script in this corpus.
+        """
+        by_owner: dict[str, set[str]] = {}
+        for junction in await self._find(JunctionNode):
+            by_owner.setdefault(junction.owner, set()).add(junction.subject)
+        return {owner: sorted(names) for owner, names in by_owner.items()}
+
     async def entity_reads_by_owner(self) -> dict[str, list[str]]:
         """``{owner: [the entities whose rows it selects]}``.
 

@@ -1061,6 +1061,50 @@ class ReadSiteNode(BaseNode):
             "against 1353."
         ),
     )
+    exits: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where a row this statement asked for stops being followed, "
+            "sorted -- ``\"continue@390\"``, ``\"except@1301\"``, "
+            "``\"no-rows:return@263\"``.\n\n"
+            "**The prefix separates two different answers.** Without it, a "
+            "``continue`` inside the loop over the rows says *this row* was "
+            "dropped here -- ``copyArchive.py``'s ``holding`` query hands its "
+            "rows to a loop that skips every job whose ID is already in the "
+            "XML, which is why a job the map says was selected never reaches "
+            "the ``Watcher``. With ``no-rows:``, the exit is under a test on "
+            "the result itself and the answer is that nothing came back at "
+            "all, which points at the ``conditions`` rather than at the "
+            "handling.\n\n"
+            "Read inside ``region``, and only in a loop over *this* "
+            "statement's rows. The function's own control flow is left out: "
+            "the corpus has 363 such exits against the 48 kept, and an answer "
+            "naming every error path in the function does not say where the "
+            "row went. Empty is an answer -- most statements have no exit of "
+            "their own -- so there is no gate on this field, only the "
+            "invariant that every line named falls inside ``region``."
+        ),
+    )
+    crosses_to: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Junction owners a row kept by this statement is carried on to, "
+            "sorted -- where the investigation goes next when the statement "
+            "itself is the lead.\n\n"
+            "Resolved by name, from two shapes: the region calls a function "
+            "the map owns a junction in, or it builds a class the map owns "
+            "one in and starts it as a thread. The second is not decoration: "
+            "``copyArchive.py::main``'s ``holding`` query hands each job to "
+            "``Watcher(...).start()``, so the next thing that happens to a "
+            "held job is ``Watcher.run`` -- and ``start`` is not itself a "
+            "junction owner, so the class the name was built from is what "
+            "resolves it.\n\n"
+            "**A value returned to the caller is not here.** 137 statements "
+            "end in a ``return`` inside their region, and who receives it is "
+            "a question about call sites this slice cannot answer; naming the "
+            "caller would be a lead pointing at whoever was grepped first."
+        ),
+    )
     anchor: Anchor = Field(
         ...,
         description=(
@@ -2445,7 +2489,7 @@ class Localization(BaseModel):
 #: category -- a place the value came from that this map does not explain --
 #: and naming which one is the answer, not the absence of one.
 #:
-#: The first five are reached by a :class:`Lead`, hop by hop through the map.
+#: The first six are reached by a :class:`Lead`, hop by hop through the map.
 #: The last four are reached by the use-time trace, which walks the source of
 #: one arm and gets further down into an expression than the map's own edges
 #: do.  One vocabulary for both, because it is one question and two spellings
@@ -2457,6 +2501,12 @@ STOP_SHARED_TABLE = "a table the map only ever reads"
 STOP_NEEDS_VALUE = "read by the condition, but its value was not observed"
 STOP_AMBIGUOUS = "several subjects declare that name and the map cannot say which"
 STOP_DESCENT = "another entity's rows, which this derivation does not census"
+#: The read side's terminal, and the one the analyser asked for.  A statement
+#: that keeps a row hands it to something the map holds a junction for -- the
+#: ``holding`` query builds a ``Watcher`` and starts it -- so the map can name
+#: exactly where to look next and cannot say what the value became there,
+#: which is an observation rather than a derivation.
+STOP_HANDED_ON = "handed to a junction the map holds, whose outcome was not observed"
 STOP_CONFIG = "a configuration value, set outside the code"
 STOP_EXTERNAL = "a value another system supplies"
 STOP_UPSTREAM = "a value the database supplies, whose writers the map names"
@@ -2468,10 +2518,14 @@ STOP_PARAMETER = "chosen by whoever called or built this"
 #: than it is.  ``map`` is an edge the extraction recorded; ``callee`` is one
 #: hop along a ``self.<method>()`` call, deterministic but assembled here;
 #: ``gloss`` is a reading's proposal, a hypothesis the next hop's evidence
-#: checks.  Only the first two exist today.
+#: checks; ``reader`` is a statement that selects a row and hands it on, which
+#: is an edge the extraction recorded like ``map`` but from the read side --
+#: kept apart because the three map-side suppliers all answer "who wrote this"
+#: and this one answers "who picked it up".  ``gloss`` alone does not exist yet.
 LEAD_MAP = "map"
 LEAD_CALLEE = "callee"
 LEAD_GLOSS = "gloss"
+LEAD_READER = "reader"
 
 
 class Lead(BaseModel):
@@ -2650,6 +2704,49 @@ class TraceStep(BaseModel):
     depth: int = Field(default=0, description="Hops from the arm.")
 
 
+class StatementExit(BaseModel):
+    """One way a row this statement asked for stops being followed, and what it says.
+
+    The map stores the coordinate; this is the reading of it.  Two of them
+    answer different questions and the reader has to be told which they are
+    looking at: a ``continue`` in the loop over the rows means the row *came
+    back* and was passed over, so the query is fine and the handling is the
+    thing to read; ``no_rows`` means nothing came back at all, which sends
+    them to the statement's ``conditions`` instead.
+
+    ``skeleton`` is what the block prints on the way out -- the line to grep
+    the log for.  **Empty is the finding**, not a gap: six of the corpus's
+    fourteen no-rows exits print nothing at all, and a row that vanishes in
+    silence is precisely the case a reader cannot resolve from a log and has
+    been asking the map about.
+    """
+
+    kind: str = Field(description="``continue`` | ``break`` | ``return`` | ``raise`` | ``except``")
+    line: int = Field(default=0, description="Where the exit is taken.")
+    no_rows: bool = Field(
+        default=False,
+        description=(
+            "True when the exit is guarded by a test on the result rather "
+            "than taken inside the loop over the rows -- nothing came back."
+        ),
+    )
+    decided_at: int = Field(
+        default=0, description="The line of the ``if`` or ``except`` that decides it."
+    )
+    skeleton: list[SkeletonLine] = Field(
+        default_factory=list,
+        description="What the block holding this exit prints; empty means it is silent.",
+    )
+    trace: list[TraceStep] = Field(
+        default_factory=list,
+        description=(
+            "Why the exit fired, walked from the line that decides it -- the "
+            "answer to 'the row came back and was dropped, by what?'"
+        ),
+    )
+    trace_note: str = Field(default="", description="Why the walk is short, where it is.")
+
+
 class StatementReading(BaseModel):
     """One statement a reader runs, what else it asks of a row, and its stretch.
 
@@ -2703,6 +2800,21 @@ class StatementReading(BaseModel):
     skeleton: list[SkeletonLine] = Field(
         default_factory=list,
         description="What this statement's region prints, in source order.",
+    )
+    exits: list[StatementExit] = Field(
+        default_factory=list,
+        description=(
+            "Where a row this statement asked for stops being followed, and "
+            "what the code says on the way out.  Empty for most statements, "
+            "which is an answer."
+        ),
+    )
+    crosses_to: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Junction owners a row this statement keeps is carried on to -- "
+            "where the investigation goes next when the statement is the lead."
+        ),
     )
 
 

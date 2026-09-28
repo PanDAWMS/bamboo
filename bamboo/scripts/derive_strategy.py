@@ -146,6 +146,57 @@ _TOP_CREATORS = 4
 #: or four steps; the cap is here so one statement cannot push the next one
 #: off the page, and the count of what was cut is printed.
 _TOP_READER_STEPS = 6
+#: Printed lines and walked steps shown under one exit.  Smaller than the
+#: statement's own caps because an exit is a block rather than a function: a
+#: guard that prints six lines is not a guard, it is the handling.
+_TOP_EXIT_LINES = 3
+_TOP_EXIT_STEPS = 3
+
+
+def _report_exits(entry) -> None:
+    """Where a row this statement asked for stops, and what it says on the way.
+
+    Printed under the conditions and before the crossings, which is the order
+    the questions come in: the conditions say why a row might not have come
+    back, the exits say what happened to one that did, and the crossing says
+    where it went if nothing stopped it.
+
+    **A silent exit is said out loud.**  The reader's next move is to grep a
+    log, and an exit that prints nothing is the case where that will not work
+    -- six of the corpus's fourteen no-rows exits are silent, and until now
+    the reader found that out by grepping and finding nothing.
+    """
+    for leaving in entry.exits:
+        why = "nothing came back" if leaving.no_rows else "the row was passed over"
+        click.echo(
+            f"                                       ✂ {leaving.kind}@{leaving.line}"
+            f"  {why}"
+            + (f", decided at {leaving.decided_at}" if leaving.decided_at else "")
+        )
+        # The printed rows only.  A skeleton carries the branch headers that
+        # enclose them, which is what a reader aligning a whole function
+        # against a log region needs; here the block *is* the context, and
+        # three header rows push the one grippable line off the page.
+        printed = [row for row in leaving.skeleton if row.kind == models_mod.SKELETON_PRINT]
+        for line in printed[:_TOP_EXIT_LINES]:
+            click.echo(f"                                         prints {line.line:>5}  {line.text}")
+        if len(printed) > _TOP_EXIT_LINES:
+            click.echo(
+                " " * 41 + f"… {len(printed) - _TOP_EXIT_LINES} more printed line(s)"
+            )
+        if not printed:
+            click.echo(
+                "                                         prints nothing -- a grep "
+                "of the log cannot tell this exit from the row never arriving"
+            )
+        for step in leaving.trace[:_TOP_EXIT_STEPS]:
+            head = step.name if not step.value else f"{step.name} = {step.value}"
+            # An exit's step is often a whole ``if`` block rather than an
+            # assignment, and printed as it stands it breaks the column.
+            click.echo(
+                f"                                         ↳ {step.line or '':>5}"
+                f"  {step.kind:<11} {' '.join(head.split()).strip(' =')}"
+            )
 
 
 def _report_follow_up(strategy: Strategy) -> None:
@@ -233,6 +284,11 @@ def _report_follow_up(strategy: Strategy) -> None:
                     )
                 if entry.trace_note:
                     click.echo(f"                                       ↳ {entry.trace_note}")
+                _report_exits(entry)
+                for reached in entry.crosses_to:
+                    click.echo(
+                        f"                                       → hands kept rows to {reached}"
+                    )
             others = follow.reader_statements_elsewhere.get(owner)
             if others:
                 click.echo(

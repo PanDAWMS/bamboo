@@ -428,6 +428,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         criteria = promotion.close_over_passthrough(fragment, criteria)
         self._dropped = promotion.apply(fragment, criteria)
 
+        # Where a row a statement keeps is carried on to.  **After promotion**,
+        # because a crossing is a lead and a lead has to name somewhere the map
+        # will answer for: resolved against the candidates instead, every
+        # ``self.cur.execute(...)`` resolved to the ``execute`` of an adder
+        # plugin -- 520 crossings over 239 statements where 71 over 38 are
+        # real, and 176 statements handed the same two false leads.
+        self._crossings = sqlwrite.attach_crossings(
+            fragment.read_sites, self._modules, fragment.junctions
+        )
+
         # After promotion, so the reach figure describes the map that is kept
         # rather than every candidate the slices produced.
         # Classified once and handed to both readers of it: the trigger slice

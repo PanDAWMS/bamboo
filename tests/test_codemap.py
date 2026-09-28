@@ -7814,6 +7814,377 @@ def test_the_forwarded_form_carries_the_region_its_binds_are_filled_in():
     ]
 
 
+def test_two_statements_sharing_one_var_map_keep_their_own_rows():
+    """The region ends at the next *call* when the next window opens above it.
+
+    Twenty of the corpus's 264 statements fill their binds into a ``var_map``
+    a statement above them opened.  Both windows then start on the same line,
+    so ending the first region "just before the next window" put its close
+    above its own ``execute`` -- and the ``fetchall`` two lines under the call,
+    which is where the rows the statement asked for actually arrive, fell
+    outside the stretch the statement owns.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        resA = self.cur.fetchall()\n"
+        "        varMap[':status'] = 'finishing'\n"
+        "        sqlB = f'SELECT taskName FROM {schema}.JEDI_Tasks '\n"
+        "        sqlB += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlB + comment, varMap)\n"
+        "        resB = self.cur.fetchall()\n"
+        "    def touch(self, jediTaskID):\n"
+        "        varMap3 = {}\n"
+        "        varMap3[':status'] = 'ready'\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap3)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    nodes = sqlwrite.read_site_nodes(
+        sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
+    )
+
+    # One ``varMap = {}`` above both, so both windows open on line 3.
+    assert [(n.anchor.line_start, n.bind_window) for n in nodes] == [
+        (7, [3, 7]),
+        (12, [3, 12]),
+    ]
+    # The first statement still owns its ``fetchall`` on line 8: the second
+    # statement's *call* ends the region, not the window they share.
+    assert [n.region for n in nodes] == [[3, 11], [3, 13]]
+
+
+def _read_nodes(source: str, rel: str = "x.py"):
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, rel)]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    side = sqlwrite.read_side(modules, attributor)
+    return modules, sqlwrite.read_site_nodes(side.statements, MAP_ID, VERSION)
+
+
+_EXIT_TAIL = (
+    "    def touch(self, jediTaskID):\n"
+    "        varMap9 = {}\n"
+    "        varMap9[':status'] = 'ready'\n"
+    "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+    "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+    "        self.cur.execute(sqlU + comment, varMap9)\n"
+)
+
+
+def test_a_row_dropped_in_the_loop_over_the_rows_is_an_exit():
+    """The request's own example: ``if int(id) in xmlIDs: continue``.
+
+    The answer a reader came for when the map says a value was selected and
+    the job never moved -- the row *was* returned and the code passed it over.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            if taskID in skipList:\n"
+        "                continue\n"
+        "            self.doIt(taskID)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == ["continue@11"]
+    # And inside the stretch the statement owns, which is the one invariant
+    # this field has: a line outside it belongs to another statement.
+    first, last = node.region
+    assert first <= 11 <= last
+
+
+def test_a_loop_that_is_not_over_the_rows_contributes_no_exit():
+    """Every loop in the region gives 85 exits over the corpus against 48.
+
+    What the extra 37 are is visible in one statement:
+    ``insertFilesForDataset_JEDI``'s first query owns 363 lines of its
+    function and loops over its own rows in 7 of them, so all 14 of its exits
+    would be filed as "this row was skipped" when they are the function
+    working through an unrelated list.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for siteName in siteList:\n"
+        "            if siteName in blackList:\n"
+        "                continue\n"
+        "        return res\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    # Neither the ``continue`` in the site loop nor the function's own
+    # ``return``: one is about a site and the other about the function.
+    assert node.exits == []
+
+
+def test_an_exit_because_nothing_came_back_says_so():
+    """A different answer from a row being dropped, so a different prefix.
+
+    "The rows were there and this one was passed over" sends a reader to the
+    handling; "nothing came back" sends them to the ``conditions``.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        if res is None:\n"
+        "            return None\n"
+        "        return res\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    # The ``return`` on line 11 is the function's, under no test on the rows.
+    assert node.exits == ["no-rows:return@10"]
+
+
+def test_the_branch_where_the_rows_did_come_back_is_not_a_no_rows_exit():
+    """``if res is None: ... else: <work> ; break`` -- the ``break`` means the opposite.
+
+    Caught by the gate on the real corpus, not here first:
+    ``doForRedoStalledJobs`` logs "no files" when the query comes back empty
+    and works through the files when it does not, ending in a ``break`` that
+    says "found what I came for".  Filed as ``no-rows:`` it told a reader the
+    query returned nothing, which is the one thing that ``break`` rules out.
+
+    The same statement showed the other half of it: that ``break`` is on line
+    631 and the statement's region ends at 613, so it also belongs to the next
+    query's stretch.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        resT = self.cur.fetchall()\n"
+        "        if resT is None or len(resT) == 0:\n"
+        "            tmpLog.debug('no tasks')\n"
+        "        else:\n"
+        "            for (taskID,) in resT:\n"
+        "                self.doIt(taskID)\n"
+        "            break\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    # Neither exit: the ``break`` is in the branch where the rows arrived, and
+    # the loop over them holds nothing that leaves it.
+    assert node.exits == []
+
+
+def test_the_rows_are_followed_to_the_fetch_that_binds_them():
+    """``execute`` binds nothing at the call -- 195 of 264 arrive at a fetch.
+
+    Reading the call line alone leaves most statements with no name to test
+    an exit against, and the no-rows exits drop from 14 to 3.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        self.conn.commit()\n"
+        "        resTask = self.cur.fetchall()\n"
+        "        if not resTask:\n"
+        "            return None\n"
+        "        for (taskID,) in resTask:\n"
+        "            if taskID in skipList:\n"
+        "                break\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == ["break@14", "no-rows:return@11"]
+
+
+def test_a_statement_says_which_junction_its_rows_are_carried_to():
+    """The request's sixth point: a statement is somewhere to lead *from*.
+
+    Two shapes, and the thread one is not decoration -- ``copyArchive.py``'s
+    ``holding`` query hands each job to ``Watcher(...).start()``, so what
+    happens to a held job next is ``Watcher.run``.  ``start`` is not itself a
+    junction owner, so the class the name was built from is what resolves it.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            thr = Watcher(taskID)\n"
+        "            thr.start()\n"
+        "            self.retryTask(taskID)\n"
+    ) + _EXIT_TAIL
+    watcher = "class Watcher:\n    def run(self):\n        pass\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        pass\n"
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "x.py"),
+        _module(watcher, "w.py"),
+        _module(retrier, "r.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    nodes = sqlwrite.read_site_nodes(
+        sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
+    )
+    junctions = [_junction("w.py::run"), _junction("r.py::retryTask")]
+
+    stored = sqlwrite.attach_crossings(nodes, modules, junctions)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["r.py::retryTask", "w.py::run"]
+    assert stored == 2
+
+
+def test_a_statement_does_not_cross_to_a_name_no_junction_owns():
+    """The resolution is by name against the junctions the map holds.
+
+    A call to something the map has no answer for is not a lead, and neither
+    is the statement's own owner -- rows do not go next to where they are.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        for (taskID,) in res:\n"
+        "            tmpLog.debug(taskID)\n"
+        "            self.sweep()\n"
+    ) + _EXIT_TAIL
+    modules, nodes = _read_nodes(source)
+    junctions = [_junction("x.py::sweep")]
+
+    sqlwrite.attach_crossings(nodes, modules, junctions)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+
+
+def _site_with(**fields):
+    base = {
+        "map_id": MAP_ID,
+        "derived_from": VERSION,
+        "name": "r:1",
+        "owner": "x.py::sweep",
+        "anchor": Anchor(package="server", file="x.py", line_start=7, line_end=7),
+        "region": [3, 20],
+    }
+    base.update(fields)
+    return ReadSiteNode(**base)
+
+
+def test_gate_catches_a_lead_to_a_junction_the_map_does_not_hold():
+    """This gate exists because the resolution ran at the wrong moment.
+
+    ``attach_crossings`` first ran after the junctions were merged but before
+    promotion, so every ``self.cur.execute(...)`` inside a region resolved to
+    the ``execute`` of an adder plugin that promotion then dropped: 520
+    crossings over 239 statements where 71 over 38 are real.  Every unit test
+    passed and the diff called it content.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        read_sites=[_site_with(crosses_to=["pandaserver/dataservice/adder_gen.py::execute"])],
+        junctions=[_junction("x.py::retryTask")],
+    )
+
+    result = gates.statement_leads_resolve(fragment)
+
+    assert not result.passed
+    assert "holds no junction for" in result.failures[0]
+
+
+def test_gate_catches_an_exit_outside_the_statements_own_region():
+    """A line outside the region answers for a different statement.
+
+    ``copyArchive.py::main`` runs three ``holding`` queries in 1353 lines; an
+    exit attributed across the boundary tells a reader their row was dropped
+    by a query that never saw it.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        read_sites=[_site_with(exits=["continue@390"])],
+        junctions=[_junction("x.py::retryTask")],
+    )
+
+    result = gates.statement_leads_resolve(fragment)
+
+    assert not result.passed
+    assert "outside its own region" in result.failures[0]
+
+
+def test_gate_passes_a_statement_that_leads_nowhere():
+    """Not a coverage gate: most statements have no exit and no crossing.
+
+    "The rows go nowhere in particular" is the answer a reader needs when it
+    is true, so an empty field is never a failure here.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        read_sites=[_site_with(), _site_with(name="r:2", exits=["continue@11"])],
+        junctions=[_junction("x.py::retryTask")],
+    )
+
+    result = gates.statement_leads_resolve(fragment)
+
+    assert result.passed
+    assert result.checked == 2
+
+
 def test_a_read_site_lists_every_value_one_statement_asks_rows_by():
     """One row per statement, not per pair -- 189 of the corpus's 264 read sites
     ask on more than one, and keying per pair would put several nodes on one

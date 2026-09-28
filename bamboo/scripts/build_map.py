@@ -498,6 +498,20 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             f"    {terms} condition(s) over {len(conditioned)} statement(s); "
             f"{len(reads) - len(conditioned)} ask on the value alone"
         )
+        # Where the rows go after the statement has them: dropped one by one,
+        # not there at all, or handed to something the map already answers
+        # for.  Counted separately because an empty ``exits`` is an answer --
+        # most statements have none -- while an empty ``crosses_to`` on a
+        # statement that clearly hands its rows on is a resolution that failed.
+        exited = [r for r in reads if r.exits]
+        silent_exit = sum(1 for r in reads for e in r.exits if e.startswith("no-rows:"))
+        crossed = [r for r in reads if r.crosses_to]
+        click.echo(
+            f"    {sum(len(r.exits) for r in reads)} exit(s) over "
+            f"{len(exited)} statement(s), {silent_exit} of them because no row "
+            f"came back; {sum(len(r.crosses_to) for r in reads)} crossing(s) "
+            f"over {len(crossed)} statement(s)"
+        )
         busiest = Counter(r.owner for r in reads).most_common(top)
         for owner, count in busiest:
             if count < 2:
