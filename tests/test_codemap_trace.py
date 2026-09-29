@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from bamboo.codemap import models
 from bamboo.codemap import trace as trace_mod
 from bamboo.codemap.models import (
@@ -2125,3 +2127,127 @@ def test_a_value_the_database_supplies_is_still_where_the_walk_stops(tmp_path):
 
     assert any(s.name == "task" and s.detail == "getTaskWithID_JEDI" for s in steps)
     assert not any(s.name == "task_id" for s in steps)
+
+
+_SITE_MAPPER = '''\
+class SiteMapper:
+    def getSite(self, name) -> "SiteSpec":
+        return self.sites[name]
+'''
+
+_TASK_BUFFER = '''\
+from pandaserver.brokerage.SiteMapper import SiteMapper
+
+
+class TaskBuffer:
+    def get_site_mapper(self) -> SiteMapper:
+        return SiteMapper(self)
+'''
+
+_PLUGIN_BASE = '''\
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pandaserver.brokerage.SiteMapper import SiteMapper
+
+
+class PluginBase:
+    site_mapper: "SiteMapper"
+'''
+
+_PLUGIN = '''\
+from pandaserver.brokerage.SiteMapper import SiteMapper
+from pandaserver.dataservice.plugin_base import PluginBase
+from pandaserver.taskbuffer.TaskBuffer import TaskBuffer
+
+
+class Plugin(PluginBase):
+    def by_field(self):
+        spec = self.site_mapper.getSite(self.job.computingSite)
+        return spec.ddm_output
+
+    def by_constructor(self, tb):
+        mapper = SiteMapper(tb)
+        spec = mapper.getSite(self.job.computingSite)
+        return spec.ddm_output
+
+    def by_parameter(self, mapper: SiteMapper | None):
+        spec = mapper.getSite(self.job.computingSite)
+        return spec.ddm_output
+
+    def by_return(self, tb: TaskBuffer):
+        mapper = tb.get_site_mapper()
+        spec = mapper.getSite(self.job.computingSite)
+        return spec.ddm_output
+'''
+
+_LOOKALIKE = '''\
+class SiteMapper:
+    def getSite(self, name):
+        return name
+
+
+class Other:
+    def run(self):
+        mapper = SiteMapper()
+        spec = mapper.getSite(self.name)
+        return spec.ddm_output
+'''
+
+
+def _server(tmp_path: Path, **files: str) -> dict[str, Path]:
+    root = tmp_path / "pandaserver"
+    for relative, text in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return {"pandaserver": root}
+
+
+@pytest.mark.parametrize("method, line", [
+    ("by_field", 9), ("by_constructor", 14), ("by_parameter", 18), ("by_return", 23),
+])
+def test_a_site_mapper_is_known_by_what_it_is_declared_to_be(tmp_path, method, line):
+    """``self.site_mapper`` is the ``SiteMapper`` ``self.siteMapper`` is, and
+    matching the spelling classified one and walked through the other.  The
+    class is read the way a type checker reads it -- a base's annotation in
+    another file, a constructor, a parameter's annotation, a method's return
+    annotation -- and none of these spells ``siteMapper``."""
+    roots = _server(
+        tmp_path,
+        **{
+            "brokerage/SiteMapper.py": _SITE_MAPPER,
+            "taskbuffer/TaskBuffer.py": _TASK_BUFFER,
+            "dataservice/plugin_base.py": _PLUGIN_BASE,
+            "dataservice/plugin.py": _PLUGIN,
+        },
+    )
+
+    walked = trace_mod.walk(
+        roots,
+        file="pandaserver/dataservice/plugin.py",
+        owner=f"pandaserver/dataservice/plugin.py::Plugin.{method}",
+        lines=[line],
+        classify=provenance.classify,
+    )
+
+    (spec,) = [s for s in walked.steps if s.name == "spec"]
+    assert spec.detail == "CRIC site declaration", method
+    assert any(s.name == "self.job" for s in walked.steps), method
+
+
+def test_a_class_that_is_only_named_like_the_interface_is_not_it(tmp_path):
+    """The key is the file that declares the class: a ``SiteMapper`` of the
+    same name elsewhere is not the one CRIC is behind."""
+    roots = _server(tmp_path, **{"daemons/other.py": _LOOKALIKE})
+
+    walked = trace_mod.walk(
+        roots,
+        file="pandaserver/daemons/other.py",
+        owner="pandaserver/daemons/other.py::Other.run",
+        lines=[10],
+        classify=provenance.classify,
+    )
+
+    (spec,) = [s for s in walked.steps if s.name == "spec"]
+    assert spec.detail == ""

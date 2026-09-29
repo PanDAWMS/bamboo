@@ -124,7 +124,7 @@ DEFAULT_BUDGET = Budget()
 #: What a step's terminal is, when the classifier is not supplied.  Injected
 #: rather than imported so that the walk stays about Python and the naming of
 #: interfaces stays with the map that has them.
-Classifier = Callable[[ast.expr, Optional[Callable[[str], Optional[ast.expr]]]], tuple[str, str]]
+Classifier = Callable[..., tuple[str, str]]
 
 
 def _nothing(_expression: ast.expr, _resolve=None, _typed=None) -> tuple[str, str]:
@@ -831,7 +831,7 @@ def _is_parameter(func: ast.AST, name: str) -> bool:
     return any(argument.arg == name for argument in every)
 
 
-def _raised_in(node: ast.AST, classify: Classifier, resolve) -> tuple[str, str]:
+def _raised_in(node: ast.AST, classify: Classifier, resolve, typed=None) -> tuple[str, str]:
     """The terminal of what the ``try`` body above this handler called.
 
     A handler ran because something above it raised, so the interface that
@@ -850,11 +850,300 @@ def _raised_in(node: ast.AST, classify: Classifier, resolve) -> tuple[str, str]:
         for statement in block.body:
             for sub in ast.walk(statement):
                 if isinstance(sub, ast.Call):
-                    terminal, detail = classify(sub, resolve)
+                    terminal, detail = classify(sub, resolve, typed)
                     if terminal:
                         return terminal, detail
         break
     return "", ""
+
+
+def _unquoted(annotation: ast.expr) -> ast.expr:
+    """"SiteMapper" as the expression it quotes; anything else as it is."""
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            return ast.parse(annotation.value.strip(), mode="eval").body
+        except SyntaxError:
+            return annotation
+    return annotation
+
+class _Types:
+    """What class the code *declares* a receiver to be.
+
+    Read the way a type checker reads it -- an annotation, a constructor, the
+    return annotation of the method called -- and nothing else.  The walk
+    needs it for one question, which system is on the other side of a call:
+    ``self.site_mapper.getSite(x)`` and ``self.siteMapper.getSite(x)`` are one
+    interface spelled two ways, and matching the spelling classified one and
+    walked straight through the other.  What the object *is* does not depend
+    on what someone called it.
+
+    Its own parse cache, apart from the walk's: reading a base class or the
+    interface's own module to learn a type is not a step on the path, so it
+    does not spend the walk's file budget.  The frame's own module is taken
+    from the walk, because ``pathcond.class_of`` finds a method by identity.
+    """
+
+    #: How deep a declaration is followed through fields, locals and calls.
+    #: JEDI's ``self.siteMapper`` is four links from what declares it -- the
+    #: field's assignment, the call, ``self.taskBufferIF``'s assignment, the
+    #: ``__init__`` parameter's annotation -- and each of those is two levels
+    #: here, so four stopped one short of the answer.
+    DEPTH = 8
+
+    def __init__(self, roots: dict[str, Path], walked: dict[str, tuple[str, ast.Module]]):
+        self.roots = roots
+        self.walked = walked
+        self.parsed: dict[str, Optional[ast.Module]] = {}
+        self._imports: dict[str, dict[str, tuple[str, str]]] = {}
+        self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
+
+    def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
+        """``pathcond.assigned_expressions``, once per function."""
+        if id(func) not in self._assigned:
+            self._assigned[id(func)] = pathcond.assigned_expressions(func)
+        return self._assigned[id(func)]
+
+    # -- modules -----------------------------------------------------------
+
+    def tree(self, file: str) -> Optional[ast.Module]:
+        if file in self.walked:
+            return self.walked[file][1]
+        if file not in self.parsed:
+            package, _, relative = file.partition("/")
+            root = self.roots.get(package)
+            tree = None
+            if root is not None and relative:
+                try:
+                    tree = ast.parse((root / relative).read_text(errors="replace"))
+                except (OSError, SyntaxError, ValueError):
+                    tree = None
+            self.parsed[file] = tree
+        return self.parsed[file]
+
+    def module_file(self, dotted: str) -> Optional[str]:
+        """``pandaserver.brokerage.SiteMapper`` -> its file, when the tree holds it."""
+        parts = dotted.split(".")
+        if not parts or parts[0] not in self.roots:
+            return None
+        for candidate in ("/".join(parts) + ".py", "/".join(parts) + "/__init__.py"):
+            if self.tree(candidate) is not None:
+                return candidate
+        return None
+
+    def imports(self, file: str) -> dict[str, tuple[str, str]]:
+        """``{local name: (module, attribute)}`` for every import in *file*.
+
+        Every import, wherever it sits: ``if TYPE_CHECKING:`` is where PanDA
+        puts the ones only an annotation needs, and those are the ones this
+        reads.  A relative import is resolved against the file's own package.
+        """
+        if file in self._imports:
+            return self._imports[file]
+        found: dict[str, tuple[str, str]] = {}
+        tree = self.tree(file)
+        package = file[: -len(".py")].split("/")[:-1] if file.endswith(".py") else []
+        for node in ast.walk(tree) if tree is not None else ():
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        found[alias.asname] = (alias.name, "")
+                    else:
+                        head = alias.name.split(".")[0]
+                        found.setdefault(head, (head, ""))
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = package[: len(package) - (node.level - 1)] if node.level > 1 else package
+                    module = ".".join([*base, *([node.module] if node.module else [])])
+                else:
+                    module = node.module or ""
+                for alias in node.names:
+                    found[alias.asname or alias.name] = (module, alias.name)
+        self._imports[file] = found
+        return found
+
+    # -- classes -----------------------------------------------------------
+
+    def class_named(self, file: str, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
+        """The class *expression* names in *file*: declared there, or imported."""
+        if depth > self.DEPTH:
+            return None
+        tree = self.tree(file)
+        if tree is None:
+            return None
+        if isinstance(expression, ast.Name):
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef) and node.name == expression.id:
+                    return file, node
+            held = self.imports(file).get(expression.id)
+            if held is None:
+                return None
+            module, attribute = held
+            if not attribute:
+                return None
+            # ``from pkg.mod import Cls`` -- or ``from pkg import mod``, a module.
+            target = self.module_file(module)
+            if target is not None:
+                return self.class_named(target, ast.Name(id=attribute, ctx=ast.Load()), depth + 1)
+            return None
+        if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+            # ``SiteMapper.SiteMapper`` -- a module imported, then its class.
+            held = self.imports(file).get(expression.value.id)
+            if held is None:
+                return None
+            module, attribute = held
+            dotted = f"{module}.{attribute}" if attribute else module
+            target = self.module_file(dotted)
+            if target is None:
+                return None
+            return self.class_named(target, ast.Name(id=expression.attr, ctx=ast.Load()), depth + 1)
+        return None
+
+    def annotated(self, file: str, annotation: Optional[ast.expr]) -> Optional[tuple[str, ast.ClassDef]]:
+        """The class an annotation states, through quotes and ``Optional``/``| None``."""
+        if annotation is None:
+            return None
+        annotation = _unquoted(annotation)
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            sides = [
+                side for side in (annotation.left, annotation.right)
+                if not (isinstance(side, ast.Constant) and side.value is None)
+            ]
+            found = {self.annotated(file, side) for side in sides} - {None}
+            return found.pop() if len(found) == 1 else None
+        if isinstance(annotation, ast.Subscript):
+            wrapper = annotation.value
+            name = wrapper.attr if isinstance(wrapper, ast.Attribute) else getattr(wrapper, "id", "")
+            if name == "Optional":
+                return self.annotated(file, annotation.slice)
+            if name == "Union" and isinstance(annotation.slice, ast.Tuple):
+                sides = [
+                    side for side in annotation.slice.elts
+                    if not (isinstance(side, ast.Constant) and side.value is None)
+                ]
+                found = {self.annotated(file, side) for side in sides} - {None}
+                return found.pop() if len(found) == 1 else None
+            return None
+        return self.class_named(file, annotation)
+
+    def lineage(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
+        """*cls* and its bases, nearest first, followed across files through imports."""
+        order: list[tuple[str, ast.ClassDef]] = [(file, cls)]
+        queue = [(file, base) for base in cls.bases]
+        seen = {(file, cls.name)}
+        while queue and len(order) < 12:
+            where, base = queue.pop(0)
+            found = self.class_named(where, base)
+            if found is None or (found[0], found[1].name) in seen:
+                continue
+            seen.add((found[0], found[1].name))
+            order.append(found)
+            queue.extend((found[0], one) for one in found[1].bases)
+        return order
+
+    def method(self, file: str, cls: ast.ClassDef, name: str):
+        for where, holder in self.lineage(file, cls):
+            for node in holder.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+                    return where, node
+        return None
+
+    # -- declarations ------------------------------------------------------
+
+    def of_field(self, file: str, cls: ast.ClassDef, field: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
+        """``self.<field>``'s class: its annotation in the class or a base, else what it is assigned."""
+        lineage = self.lineage(file, cls)
+        for where, holder in lineage:
+            for node in holder.body:
+                if (
+                    isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == field
+                ):
+                    return self.annotated(where, node.annotation)
+            for method in pathcond.methods_of(holder):
+                for node in ast.walk(method):
+                    if (
+                        isinstance(node, ast.AnnAssign)
+                        and isinstance(node.target, ast.Attribute)
+                        and isinstance(node.target.value, ast.Name)
+                        and node.target.value.id == "self"
+                        and node.target.attr == field
+                    ):
+                        return self.annotated(where, node.annotation)
+        if depth >= self.DEPTH:
+            return None
+        found: set[tuple[str, str]] = set()
+        held: dict[tuple[str, str], tuple[str, ast.ClassDef]] = {}
+        for where, holder in lineage:
+            for method in pathcond.methods_of(holder):
+                for expression in pathcond.attribute_expressions(method, field):
+                    if isinstance(expression, ast.Constant) and expression.value is None:
+                        continue
+                    one = self.of_expression(where, method, expression, depth + 1)
+                    if one is None:
+                        return None
+                    found.add((one[0], one[1].name))
+                    held[(one[0], one[1].name)] = one
+        return held[found.pop()] if len(found) == 1 else None
+
+    def of_expression(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
+        """The class *expression*, read in *func* of *file*, is declared to be."""
+        if depth > self.DEPTH:
+            return None
+        tree = self.tree(file)
+        if tree is None:
+            return None
+        if isinstance(expression, ast.Name):
+            args = getattr(func, "args", None)
+            for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
+                if argument.arg == expression.id:
+                    return self.annotated(file, argument.annotation)
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == expression.id
+                ):
+                    return self.annotated(file, node.annotation)
+            # Every assignment, less the ``None`` a name is cleared with:
+            # ``siteMapper = SiteMapper(taskBuffer)`` and, at the end of the
+            # daemon, ``siteMapper = None``.  The evidence for a local is all in
+            # this function, so it is read rather than asked for; the answer
+            # is a class only where every assignment says the same one.
+            bound = [
+                value
+                for value in self.assigned(func).get(expression.id, [])
+                if not (isinstance(value, ast.Constant) and value.value is None)
+            ]
+            found = {self.of_expression(file, func, value, depth + 1) for value in bound}
+            return found.pop() if len(found) == 1 else None
+        if (
+            isinstance(expression, ast.Attribute)
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id == "self"
+        ):
+            cls = pathcond.class_of(tree, func)
+            return self.of_field(file, cls, expression.attr, depth + 1) if cls is not None else None
+        if isinstance(expression, ast.Call):
+            called = expression.func
+            constructed = self.class_named(file, called) if isinstance(called, (ast.Name, ast.Attribute)) else None
+            if constructed is not None:
+                return constructed
+            if isinstance(called, ast.Attribute):
+                receiver = called.value
+                if isinstance(receiver, ast.Name) and receiver.id == "self":
+                    cls = pathcond.class_of(tree, func)
+                    owner = (file, cls) if cls is not None else None
+                else:
+                    owner = self.of_expression(file, func, receiver, depth + 1)
+                if owner is None:
+                    return None
+                found = self.method(owner[0], owner[1], called.attr)
+                if found is None:
+                    return None
+                where, method = found
+                return self.annotated(where, method.returns)
+        return None
 
 
 class _Walk:
@@ -894,6 +1183,8 @@ class _Walk:
         self._logged: dict[tuple[str, str], list[tuple[ast.expr, ast.expr]]] = {}
         self.note = ""
         self.queue: deque[tuple[_Frame, str, int, Optional[ast.AST]]] = deque()
+        self.types = _Types(roots, self.parsed)
+        self._declared: dict[tuple[str, str, str], Optional[str]] = {}
 
     # -- source ------------------------------------------------------------
 
@@ -975,6 +1266,22 @@ class _Walk:
 
     def resolver(self, frame: _Frame):
         return lambda name: pathcond.single_definition(frame.func, name)
+
+    def typer(self, frame: _Frame):
+        """expression -> "<file>::<Class>" it is declared to be in *frame*, or None."""
+
+        def declared(expression: ast.expr) -> Optional[str]:
+            key = (frame.file, frame.owner, _text(expression))
+            if key not in self._declared:
+                found = self.types.of_expression(frame.file, frame.func, expression)
+                self._declared[key] = f"{found[0]}::{found[1].name}" if found else None
+            return self._declared[key]
+
+        return declared
+
+    def terminal_of(self, frame: _Frame, expression: ast.expr) -> tuple[str, str]:
+        """(terminal, detail) for *expression* read in *frame*, the walk's way."""
+        return self.classify(expression, self.resolver(frame), self.typer(frame))
 
     def scope_key(self, frame: _Frame) -> str:
         """What a name asked in *frame* is unique within.
@@ -1062,7 +1369,7 @@ class _Walk:
         for name in _guard_reads(statement):
             _add(reads, name)
         terminal, detail = (
-            self.classify(value, self.resolver(frame)) if value is not None else ("", "")
+            self.terminal_of(frame, value) if value is not None else ("", "")
         )
         step = TraceStep(
             kind=TRACE_WRITE,
@@ -1574,7 +1881,8 @@ class _Walk:
     ) -> None:
         site = pathcond.site_of(expression)
         resolve = self.resolver(frame)
-        terminal, detail = self.classify(expression, resolve)
+        typed = self.typer(frame)
+        terminal, detail = self.classify(expression, resolve, typed)
         unseen = _unseen(site)
         inner = _nested_scope(frame.func, site)
         if inner is not None:
@@ -1586,7 +1894,7 @@ class _Walk:
         if not terminal and any(
             entry.startswith(pathcond.UNSEEN_EXCEPT) for entry in unseen
         ):
-            terminal, detail = _raised_in(site, self.classify, resolve)
+            terminal, detail = _raised_in(site, self.classify, resolve, typed)
         reads = _reads(expression)
         own = list(reads)
         for read in _guard_reads(site):
@@ -1644,7 +1952,7 @@ class _Walk:
         function's frame would answer with whatever local happened to share the
         name -- the mistake the scope note below exists to prevent.
         """
-        terminal, detail = self.classify(expression, self.resolver(frame))
+        terminal, detail = self.terminal_of(frame, expression)
         line = getattr(expression, "lineno", 0)
         self.record(
             TraceStep(
@@ -1689,7 +1997,10 @@ class _Walk:
         """An ``except ... as e``: the value is whatever the body raised."""
         resolve = self.resolver(frame)
         terminal, detail = _raised_in(
-            handler.body[0] if handler.body else handler, self.classify, resolve
+            handler.body[0] if handler.body else handler,
+            self.classify,
+            resolve,
+            self.typer(frame),
         )
         self.record(
             TraceStep(
@@ -1777,7 +2088,7 @@ class _Walk:
             expression = ast.parse(name, mode="eval").body
         except SyntaxError:
             return
-        terminal, detail = self.classify(expression, self.resolver(frame))
+        terminal, detail = self.terminal_of(frame, expression)
         if terminal:
             self.record(
                 TraceStep(

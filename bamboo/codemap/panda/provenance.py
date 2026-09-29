@@ -20,6 +20,13 @@ bare local that no ``self.`` test would match, and the corpus has punished
 name matching twice already.  So the receiver chain is walked to its base and,
 when the base is a local, one reaching definition is followed -- which is what
 turns ``ddmIF.getDatasetMetaData(...)`` into DDM.
+
+**Declared first, named second.**  A receiver whose class the code declares --
+annotated, constructed, returned by a method with a return annotation -- is
+classified by that class (:data:`INTERFACE_CLASSES`), and the attribute names
+below answer only for what nothing declares yet.  The names are the older rule
+and the weaker one: ``self.site_mapper`` is the same ``SiteMapper`` as
+``self.siteMapper`` and was classified as nothing.
 """
 
 from __future__ import annotations
@@ -29,7 +36,27 @@ from typing import Callable, Optional
 
 from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
 
+#: The class a receiver is declared to be -> the system on the other side of it.
+#:
+#: **What the object is, not what someone called it.**  ``self.site_mapper`` and
+#: ``self.siteMapper`` are the same ``SiteMapper`` and the spelling table below
+#: knew one of them: the setupper walked straight through ``getSite`` where the
+#: adder stopped on it, and the two functions deciding ``src == dst`` looked as
+#: though they read different things.  The class is read the way a type checker
+#: reads it -- an annotation, a constructor, a method's return annotation -- by
+#: the walk, which hands it here as ``typed``; the key is the file that declares
+#: the class, so a class of the same name elsewhere is not this one.
+INTERFACE_CLASSES = {
+    "pandaserver/brokerage/SiteMapper.py::SiteMapper": "CRIC site declaration",
+}
+
 #: ``self.<attribute>`` -> the system on the other side of it.
+#:
+#: The spelling, kept where the class cannot be read yet.  JEDI builds its
+#: ``self.siteMapper`` from ``self.taskBufferIF.get_site_mapper()``, and that
+#: interface forwards every call through ``__getattr__ -> Any``, so no
+#: declaration says what comes back; ``siteMapper`` stays here until PanDA
+#: states it, and ``ddmIF`` until DDM's classes are read the same way.
 EXTERNAL_INTERFACES = {
     "ddmIF": "DDM / Rucio",
     "siteMapper": "CRIC site declaration",
@@ -50,6 +77,8 @@ _CONFIG_CALL = "getConfigValue"
 _CONFIG_MODULE = "jedi_config"
 
 Resolver = Callable[[str], Optional[ast.expr]]
+#: ``self.<field>`` or a local -> ``"<file>::<Class>"`` it is declared to be, or ``None``.
+Typer = Callable[[ast.expr], Optional[str]]
 
 
 def _text(node: ast.AST) -> str:
@@ -92,10 +121,28 @@ def _base(attribute: ast.Attribute) -> tuple[Optional[ast.expr], str]:
     return node, nearest
 
 
+def _self_field(attribute: ast.Attribute) -> Optional[ast.Attribute]:
+    """The ``self.<field>`` link a chain rooted at ``self`` starts with."""
+    node: ast.expr = attribute
+    while isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            return node
+        node = node.value
+    return None
+
+
 def _rooted_in(
-    attribute: ast.Attribute, resolve: Optional[Resolver], hops: int = 1
-) -> Optional[tuple[str, str]]:
-    """``(self.<field>, the call on it)`` a dotted chain is rooted in.
+    attribute: ast.Attribute,
+    resolve: Optional[Resolver],
+    hops: int = 1,
+    typed: Optional[Typer] = None,
+) -> Optional[tuple[str, str, str]]:
+    """``(self.<field>, the call on it, the declared class)`` a dotted chain is rooted in.
+
+    The declared class is the root's -- ``self.<field>``'s, or a local's where
+    the chain starts at one -- and empty where nothing declares it.  A local
+    whose class is not an interface is still followed one hop: ``src_site_spec``
+    is a ``SiteSpec``, and it came out of ``self.siteMapper.getSite(...)``.
 
     Both halves, because a hop through a local moves the interesting name.
     ``taskSpec.getNumFilesPerJob()`` where ``taskSpec`` came out of
@@ -108,7 +155,12 @@ def _rooted_in(
     if not isinstance(base, ast.Name):
         return None
     if base.id == "self":
-        return nearest, attribute.attr
+        field = _self_field(attribute)
+        declared = (typed(field) if typed is not None and field is not None else None) or ""
+        return nearest, attribute.attr, declared
+    declared = (typed(base) if typed is not None else None) or ""
+    if declared in INTERFACE_CLASSES:
+        return "", attribute.attr, declared
     if hops <= 0 or resolve is None:
         return None
     bound = resolve(base.id)
@@ -116,12 +168,12 @@ def _rooted_in(
         return None
     target = bound.func if isinstance(bound, ast.Call) else bound
     if isinstance(target, ast.Attribute):
-        return _rooted_in(target, resolve, hops - 1)
+        return _rooted_in(target, resolve, hops - 1, typed)
     return None
 
 
 def _terminal_of(
-    node: ast.AST, resolve: Optional[Resolver]
+    node: ast.AST, resolve: Optional[Resolver], typed: Optional[Typer] = None
 ) -> Optional[tuple[str, str]]:
     if isinstance(node, ast.Call) and _called(node.func) == _CONFIG_CALL:
         return STOP_CONFIG, _config_key(node)
@@ -129,10 +181,12 @@ def _terminal_of(
         base, _ = _base(node)
         if isinstance(base, ast.Name) and base.id == _CONFIG_MODULE:
             return STOP_CONFIG, _text(node)
-        rooted = _rooted_in(node, resolve)
+        rooted = _rooted_in(node, resolve, typed=typed)
         if rooted is None:
             return None
-        field, call = rooted
+        field, call, declared = rooted
+        if declared in INTERFACE_CLASSES:
+            return STOP_EXTERNAL, INTERFACE_CLASSES[declared]
         if field in EXTERNAL_INTERFACES:
             return STOP_EXTERNAL, EXTERNAL_INTERFACES[field]
         if field in DATABASE_INTERFACES:
@@ -141,7 +195,9 @@ def _terminal_of(
 
 
 def classify(
-    expression: ast.expr, resolve: Optional[Resolver] = None
+    expression: ast.expr,
+    resolve: Optional[Resolver] = None,
+    typed: Optional[Typer] = None,
 ) -> tuple[str, str]:
     """``(terminal, detail)`` for *expression*, or ``("", "")`` to keep walking.
 
@@ -152,7 +208,7 @@ def classify(
     category, which is what "where did this come from" means.
     """
     for node in ast.walk(expression):
-        found = _terminal_of(node, resolve)
+        found = _terminal_of(node, resolve, typed)
         if found is not None:
             return found
     return "", ""
