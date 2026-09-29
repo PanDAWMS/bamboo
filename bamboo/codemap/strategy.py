@@ -2325,6 +2325,14 @@ def attach_traces(
             expected_sha=entry.blob_sha,
             handovers=handovers.get(entry.owner, ()),
             classify=classify,
+            # Each arm is read where it is decided, and each name behind it
+            # where the statement that asked for it read it -- the narrowing
+            # the statement and exit walks already had.  Without it a name the
+            # function reassigns came back with every assignment it ever had,
+            # the shape that once explained ``copyArchive.py``'s exit on 390
+            # with the query on 89.  No ``bindings_within``: a junction owns
+            # its whole function, so there is no stretch to prefer.
+            reaching=True,
         )
         entry.trace = walked.steps
         entry.trace_note = walked.note

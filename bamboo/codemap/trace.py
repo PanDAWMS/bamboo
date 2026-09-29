@@ -849,6 +849,7 @@ class _Walk:
         observed: str = "",
         within: Optional[tuple[str, str, int, int]] = None,
         reading_at: Optional[tuple[str, str, int]] = None,
+        narrowed: Optional[tuple[str, str]] = None,
     ) -> None:
         self.roots = roots
         self.classify = classify
@@ -862,7 +863,7 @@ class _Walk:
         self.reading_at = reading_at
         #: ``(file, owner)`` of the starting function where a name is narrowed
         #: to the writes that reach the statement that read it, or ``None``.
-        self.narrowed = reading_at[:2] if reading_at else None
+        self.narrowed = narrowed or (reading_at[:2] if reading_at else None)
         self.parsed: dict[str, tuple[str, ast.Module]] = {}
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
         self.steps: list[TraceStep] = []
@@ -1976,6 +1977,7 @@ def walk(
     region: Optional[tuple[int, int]] = None,
     bindings_within: Optional[tuple[int, int]] = None,
     reading_at: Optional[int] = None,
+    reaching: bool = False,
 ) -> Walked:
     """Explain the arms at *lines*, and say why the answer is short when it is.
 
@@ -2008,6 +2010,12 @@ def walk(
     :meth:`_Walk._reaching`.  The two are given separately because neither
     contains the other.
 
+    *reaching* asks for the same narrowing with no line to read at: each arm
+    is its own reading point, and each name deeper in is read where the
+    statement that asked for it read it.  What a junction's arms want, since a
+    junction owns its whole function and has no one statement to answer for.
+    Implied by *reading_at*.
+
     **A tree that is not the map's is refused rather than warned about.**  A
     trace is shaped like an answer, and reading line 4971 of the wrong release
     produces plausible code that is not the code -- which already happened
@@ -2021,6 +2029,7 @@ def walk(
         observed,
         within=(file, owner, *bindings_within) if bindings_within else None,
         reading_at=(file, owner, reading_at) if reading_at else None,
+        narrowed=(file, owner) if reaching or reading_at else None,
     )
     parsed = state.module(file)
     if parsed is None:

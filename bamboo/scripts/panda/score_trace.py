@@ -100,6 +100,16 @@ from bamboo.codemap.panda.recognizers.selection import _LOG_LEVELS
 
 logger = logging.getLogger(__name__)
 
+#: Every walk here is the whole-function one, although ``derive-strategy``
+#: now narrows a junction's arms to the writes that reach them.  Said once and
+#: passed at every call, so the choice is visible where the walk is made:
+#: the audit's ``complete`` asks for *every* binding of each name, and a
+#: narrowed walk would read as incomplete by that definition wherever it is
+#: right.  Re-stating the check against reaching writes needs a reading of
+#: them the walk does not share, or the checker agrees with the walker by
+#: construction -- that is its own piece of work, not a flag to flip here.
+_REACHING = False
+
 
 def _case_id(case: dict) -> str:
     return f"{case['owner']}@{case['line']}"
@@ -161,6 +171,7 @@ def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
         handovers=_case_handovers(case),
         classify=provenance.classify,
         budget=budget,
+        reaching=_REACHING,
     )
     out.append(f"  stratum {case.get('stratum', '?')}   tier {case.get('tier', '?')}"
                f"   outcome {case.get('outcome', '?')}")
@@ -238,6 +249,7 @@ async def _draw(
                 handovers=_handovers(junction),
                 classify=provenance.classify,
                 budget=budget,
+                reaching=_REACHING,
             )
             kinds = {
                 f"unbound:{step.terminal or 'none'}"
@@ -657,6 +669,7 @@ async def _scan(map_id: str, source_root: Optional[Path], budget, top: int) -> N
             handovers=_handovers(junction),
             classify=provenance.classify,
             budget=budget,
+            reaching=_REACHING,
         )
         if not steps:
             continue
@@ -900,6 +913,7 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
             handovers=_case_handovers(case),
             classify=provenance.classify,
             budget=budget,
+            reaching=_REACHING,
         )
         cid = _case_id(case)
 

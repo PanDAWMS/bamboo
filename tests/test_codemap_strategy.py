@@ -3437,6 +3437,50 @@ def test_no_source_tree_leaves_the_reading_as_coordinates(tmp_path):
     assert strategy.readings[0].trace_note == ""
 
 
+_REASSIGNED = """\
+class Sweeper:
+    def runImpl(self, task):
+        sql = self.holding_query()
+        self.run_query(sql)
+        sql = self.finishing_query()
+        if self.cur.execute(sql):
+            task.status = "finishing"
+        sql = self.cleanup_query()
+        self.run_query(sql)
+"""
+
+
+def test_a_junctions_arm_is_explained_by_the_writes_that_reach_it(tmp_path):
+    """The narrowing the statement and exit walks had, on the junction's own.
+
+    ``copyArchive.py::main`` assigns ``sql`` forty-four times, and a walk that
+    answers with every assignment of a name offered an exit the query on line
+    89 as its reason.  A junction's arm is walked the same way now: the ``if``
+    deciding line 7 read the ``sql`` set on line 5, and the two on either side
+    belong to other queries.
+    """
+    root = tmp_path / "pandajedi"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sweeper.py").write_text(_REASSIGNED)
+    reading = models.Reading(
+        owner="pandajedi/sweeper.py::runImpl",
+        file="pandajedi/sweeper.py",
+        gloss_key="k",
+        lines=[7],
+    )
+    strategy = models.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        readings=[reading],
+    )
+
+    strategy_mod.attach_traces(strategy, {"pandajedi": root})
+
+    bound = [s.line for s in reading.trace if s.name == "sql" and s.kind == models.TRACE_BINDING]
+    assert bound == [5]
+
+
 async def test_a_value_nothing_re_evaluates_says_where_a_row_of_that_kind_is_made():
     """The verdict told a reader to go and ask whether a command arrived, and
     could not say where a command arriving would be.
