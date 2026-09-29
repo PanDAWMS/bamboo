@@ -35,6 +35,7 @@ from bamboo.codemap.models import (
     LogSiteNode,
     LoopCutNode,
     MapFragment,
+    ReadingStop,
     ReadSiteNode,
     SourceModule,
     SubjectNode,
@@ -1430,7 +1431,7 @@ def _sql_extract(source: str, rel: str = "pandaserver/taskbuffer/db_proxy_mods/t
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     conflicts = attributor.learn_table_classes(modules)
-    subjects, junctions, coverage, uncovered, _diag, _why = sqlwrite.extract(
+    subjects, junctions, coverage, uncovered, _diag, _why, _stops = sqlwrite.extract(
         modules, MAP_ID, VERSION, attributor
     )
     return subjects, junctions, coverage, uncovered, conflicts, attributor
@@ -1449,7 +1450,7 @@ def _sql_unexplained(
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
-    _s, _j, coverage, _u, _d, unexplained = sqlwrite.extract(
+    _s, _j, coverage, _u, _d, unexplained, _stops = sqlwrite.extract(
         modules, MAP_ID, VERSION, attributor
     )
     return unexplained, coverage
@@ -1748,6 +1749,156 @@ def test_a_statement_executed_in_three_pieces_is_read_whole():
     assert len(texts) == 1
     assert "SET status=:status" in texts[0]
     assert "status IN (:old_1)" in texts[0]
+
+
+def test_a_fragment_with_no_text_of_its_own_is_named_rather_than_dropped():
+    """``sqlP += sql_where_clause`` -- ``getJobs``, and the whole pilot request.
+
+    The reassembly kept only what rendered, so the fragment holding every
+    condition the job dispatcher selects on vanished and the statement read as
+    a bare ``SELECT ... FROM jobsActive4``.  Nothing was wrong with the
+    statement that was left, which is why it went unnoticed for the map's
+    whole life: a truncated ``WHERE`` looks exactly like no ``WHERE``.
+    """
+    source = (
+        "def f(self):\n"
+        "    sqlP = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab '\n"
+        "    sqlP += sql_where_clause\n"
+        "    self.cur.execute(sqlP + comment, getValMap)\n"
+    )
+    func = _func(source)
+
+    stops = {stop for run in sql.executions(func) for stop in run.unresolved}
+
+    assert {stop.source for stop in stops} == {"sql_where_clause"}
+    assert {stop.reason for stop in stops} == {sql.FRAGMENT_NOT_RENDERED}
+    assert {stop.line for stop in stops} == {3}
+
+
+def test_a_where_whose_binds_are_interpolated_names_the_term_it_cannot_fill():
+    """``AND jobStatus IN ({})`` -- ``lockJobsForReassign``.
+
+    The column is readable and the placeholders are not, because the code
+    spells them with a helper over a list it was handed.  The term is what the
+    consumer needs: told only "a hole", it knows something is wrong; told
+    ``jobStatus IN ({})`` it knows which argument at the call site to read.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 '\n"
+        "    sql += 'WHERE modificationTime<:modificationTime '\n"
+        "    sql += f'AND jobStatus IN ({names}) '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    stops = {stop for run in sql.executions(func) for stop in run.unresolved}
+
+    assert [stop.source for stop in stops] == ["jobStatus IN ({})"]
+    assert {stop.reason for stop in stops} == {sql.BINDS_ARE_A_HOLE}
+
+
+def test_a_schema_interpolated_into_the_where_is_not_something_it_stopped_on():
+    """``datasetID IN (SELECT datasetID FROM {}.JEDI_Datasets ...)``.
+
+    Reassembly blanks the schema everywhere on purpose, and a subquery puts
+    one inside the ``WHERE``.  Counting it would report 17 statements as
+    unreadable that are read in full, and a census with false entries is worse
+    than none: it is what the next round would be planned from.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = f'SELECT lfn FROM {schema}.JEDI_Dataset_Contents '\n"
+        "    sql += f'WHERE jediTaskID=:jediTaskID AND datasetID IN "
+        "(SELECT datasetID FROM {schema}.JEDI_Datasets WHERE jediTaskID=:jediTaskID) '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert [run.unresolved for run in sql.executions(func)] == [()]
+
+
+def test_a_column_the_statement_interpolates_is_its_own_reason():
+    """``WHERE {}=:{}`` -- ``queryDatasetWithMap`` builds the column from a key.
+
+    A different answer from a hole where the values go, and the request asked
+    for it by name: the ten fragments whose column is left to the caller are
+    counted from the other end by ``key_column_census``, and this is where the
+    same statements say so at the point they are read.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT vuid FROM ATLAS_PANDA.Datasets '\n"
+        "    sql += f'WHERE {key}=:{key} '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    stops = {stop for run in sql.executions(func) for stop in run.unresolved}
+
+    assert [stop.source for stop in stops] == ["{}=:{}"]
+    assert {stop.reason for stop in stops} == {sql.COLUMN_IS_A_HOLE}
+
+
+def test_a_row_precondition_is_stored_with_the_value_its_bind_holds():
+    """``jobStatus=:oldJobStatus`` is what the statement says; ``activated`` is
+    what it means, and only the second can be compared with what a reader
+    selects on.
+
+    ``getJobs`` is the case: the one query that moves a job from ``activated``
+    to ``sent``, holding the guard and unable to say which value it guards.
+    """
+    source = (
+        "def f(self):\n"
+        "    sqlJ = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newJobStatus'\n"
+        "    sqlJ += ' WHERE PandaID=:PandaID AND jobStatus=:oldJobStatus'\n"
+        "    varMap = {}\n"
+        "    varMap[':newJobStatus'] = 'sent'\n"
+        "    varMap[':oldJobStatus'] = 'activated'\n"
+        "    self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+    func = _func(source)
+    (run,) = sql.executions(func)
+    (statement,) = sql.writes(run.sql)
+
+    settled, done = sql.settled_precondition(
+        statement.preconditions["jobStatus"], func, run.varmap, run.window, lambda v, f: []
+    )
+
+    assert done is False, "nothing settles when the resolver answers nothing"
+    settled, done = sql.settled_precondition(
+        statement.preconditions["jobStatus"],
+        func,
+        run.varmap,
+        run.window,
+        lambda v, f: [v.value] if isinstance(v, ast.Constant) else [],
+    )
+    assert (settled, done) == ("jobStatus=activated", True)
+
+
+def test_a_row_precondition_whose_bind_arrives_from_outside_keeps_its_bind():
+    """Returned unchanged, and that is the honest answer rather than a failure.
+
+    ``jobStatus=:oldStatus`` still says truly that this column is tested; what
+    it cannot say is which value. The caller is told which of the two it got
+    so it can report the second as somewhere the reading stopped.
+    """
+    source = (
+        "def f(self, oldStatus):\n"
+        "    sqlJ = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newJobStatus'\n"
+        "    sqlJ += ' WHERE jobStatus=:oldStatus'\n"
+        "    varMap = {}\n"
+        "    varMap[':newJobStatus'] = 'sent'\n"
+        "    varMap[':oldStatus'] = oldStatus\n"
+        "    self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+    func = _func(source)
+    (run,) = sql.executions(func)
+    (statement,) = sql.writes(run.sql)
+
+    assert sql.settled_precondition(
+        statement.preconditions["jobStatus"], func, run.varmap, run.window, lambda v, f: []
+    ) == ("jobStatus=:oldStatus", False)
 
 
 def test_a_table_the_call_substitutes_is_read_from_the_loop_that_supplies_it():
@@ -3425,7 +3576,9 @@ def test_a_bind_filled_from_a_declared_mapping_resolves_to_its_values():
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
-    _s, junctions, _c, _u, _d, _x = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    _s, junctions, _c, _u, _d, _x, _stops = sqlwrite.extract(
+        modules, MAP_ID, VERSION, attributor
+    )
     status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
 
     assert {(b.outcome, b.tier) for b in status[0].branches} == {
@@ -4044,7 +4197,9 @@ def test_a_bound_template_is_filed_against_the_column_not_the_bind():
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
-    _s, _j, _c, _u, diagnostics, _x = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    _s, _j, _c, _u, diagnostics, _x, _stops = sqlwrite.extract(
+        modules, MAP_ID, VERSION, attributor
+    )
 
     assert [(d.template, d.field, d.form) for d in diagnostics] == [
         ("site {} is unknown", "JEDI_Tasks.errorDialog", "bind")
@@ -7836,6 +7991,47 @@ def test_the_forwarded_form_carries_the_region_its_binds_are_filled_in():
     ]
 
 
+def test_a_stop_in_any_variant_marks_the_statement():
+    """A branchy statement is several variants at one call, and exactly one ran.
+
+    ``conditions`` deliberately does *not* union them -- a union reads as a
+    conjunction and over-states what the row must be -- but a stop is not a
+    requirement. It says the reader could not follow a fragment, and a
+    fragment one variant carries is one the statement has.  Taking the first
+    variant's left ``lockJobsForReassign`` unmarked, because its two-column
+    variant, which has no ``WHERE`` at all, recorded before the one carrying
+    ``jobStatus IN ({})``.
+    """
+    source = (
+        "def lockJobs(self, statList):\n"
+        "    varMap = {}\n"
+        "    varMap[':status'] = 'holding'\n"
+        "    if wide:\n"
+        "        sql = 'SELECT PandaID,lockedby FROM ATLAS_PANDA.jobsActive4 '\n"
+        "    else:\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 '\n"
+        "    sql += 'WHERE jobStatus=:status '\n"
+        "    if wide:\n"
+        "        sql += f'AND prodSourceLabel IN ({names}) '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/daemons/scripts/x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    (node,) = sqlwrite.read_site_nodes(
+        sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
+    )
+
+    assert node.selects == ["jobsActive4.jobStatus=holding"]
+    assert node.unresolved == ["prodSourceLabel IN ({}) -- " + sql.BINDS_ARE_A_HOLE]
+
+
 def test_two_statements_sharing_one_var_map_keep_their_own_rows():
     """The region ends at the next *call* when the next window opens above it.
 
@@ -8557,6 +8753,102 @@ def _site_with(**fields):
     }
     base.update(fields)
     return ReadSiteNode(**base)
+
+
+def _movers(
+    guard: str,
+    *,
+    selects: list[str],
+    stops: list[str] = (),
+    conditions: list[str] = (),
+) -> MapFragment:
+    """A junction guarding on *guard* and one statement, in one function."""
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.subjects.append(
+        SubjectNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="JobSpec.jobStatus",
+            spec_class="JobSpec",
+            attribute="jobStatus",
+        )
+    )
+    fragment.junctions.append(
+        JunctionNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="j:getJobs",
+            subject="JobSpec.jobStatus",
+            owner="x.py::getJobs",
+            branches=[Branch(outcome="sent", row_precondition=[guard], order=0)],
+        )
+    )
+    fragment.read_sites.append(
+        _site_with(
+            owner="x.py::getJobs",
+            selects=selects,
+            conditions=list(conditions),
+            unresolved=list(stops),
+        )
+    )
+    fragment.reading_stops.extend(
+        ReadingStop(reason="a fragment of the statement has no text of its own",
+                    detail=stop, file="x.py", owner="x.py::getJobs", line=5)
+        for stop in stops
+    )
+    return fragment
+
+
+def test_gate_catches_a_function_that_guards_on_a_value_and_asks_for_nothing():
+    """The map holds a statement for the function, read it in full, and that
+    statement asks for nothing at all -- so the junction's guard is the only
+    thing in the map that knows which rows this function touches.
+    """
+    fragment = _movers("jobStatus=activated", selects=[])
+
+    result = gates.movers_of_a_value_agree(fragment)
+
+    assert not result.passed
+    assert "x.py::getJobs" in result.failures[0]
+    assert "JobSpec.jobStatus=activated" in result.failures[0]
+
+
+def test_a_function_that_asks_by_another_key_is_not_a_disagreement():
+    """``throttleJobsInPausedTasks_JEDI`` finds its jobs by ``jediTaskID`` and
+    requires ``jobStatus=activated`` of them.
+
+    The status is the compare-and-set, not the index.  A correction to what
+    this gate was planned to assert, found by reading the three differences it
+    first failed on -- all three were this, and none was a gap.
+    """
+    fragment = _movers(
+        "jobStatus=activated", selects=[], conditions=["jediTaskID=:jediTaskID@9"]
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+
+    assert result.passed
+
+
+def test_a_statement_read_only_in_part_is_a_reason_and_not_a_disagreement():
+    """The same difference, with the map saying why it has it.
+
+    Zero difference is not the target: ``getJobs`` really does select in one
+    statement and require in another, and a rule forcing the lists together
+    would have to invent one of them.  What the gate asserts is that a name on
+    one list and not the other has a reason -- and "its own query was read
+    only in part" is the reason this round exists to record.
+    """
+    fragment = _movers(
+        "jobStatus=activated",
+        selects=["JobSpec.jobStatus=holding"],
+        stops=["build_where_clause()"],
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+
+    assert result.passed
+    assert "1 difference(s) carry a reason" in result.note
 
 
 def test_gate_catches_a_lead_to_a_junction_the_map_does_not_hold():
@@ -9931,6 +10223,8 @@ def _fragment_of(*nodes, version: str = VERSION) -> MapFragment:
             fragment.boundaries.append(node)
         elif isinstance(node, SubjectNode):
             fragment.subjects.append(node)
+        elif isinstance(node, ReadSiteNode):
+            fragment.read_sites.append(node)
     return fragment
 
 
@@ -10085,6 +10379,49 @@ def test_branches_are_matched_by_outcome_not_position():
     assert drifted[0].before == "[nFiles > 0]"
     assert drifted[0].after == "[nFiles > 2]"
     assert any(c.field == "branch" and c.after == "broken" for c in result.other())
+
+
+def test_a_row_precondition_that_moves_is_reported():
+    """The field that says whether a branch's outcome can land at all.
+
+    Left off the comparison until now, and the round that settled these
+    guards' binds -- ``jobStatus=:oldJobStatus`` becoming
+    ``jobStatus=activated`` on 45 junctions -- was told by ``diff-map`` that
+    the two builds described the same map.  The same hole ``log_sites`` had.
+    """
+    old = _fragment_of(
+        _junction_for_diff(
+            [Branch(outcome="sent", row_precondition=["jobStatus=:oldJobStatus"], order=0)]
+        )
+    )
+    new = _fragment_of(
+        _junction_for_diff(
+            [Branch(outcome="sent", row_precondition=["jobStatus=activated"], order=0)]
+        )
+    )
+
+    result = diff.compare(old, new)
+
+    (change,) = [c for c in result.changes if c.field == "row_precondition"]
+    assert change.before == "[jobStatus=:oldJobStatus]"
+    assert change.after == "[jobStatus=activated]"
+
+
+def test_a_statement_that_starts_being_read_only_in_part_is_reported():
+    """A term moving out of ``conditions`` and into ``unresolved``.
+
+    That is a statement the map stopped being able to read, which is a change
+    of the same kind as a predicate gaining a value -- and with the field
+    unlisted the two builds compare as identical.
+    """
+    old = _fragment_of(_site_with(conditions=["jobStatus=:jobStatus@12"]))
+    new = _fragment_of(
+        _site_with(conditions=[], unresolved=["jobStatus IN ({}) -- " + sql.BINDS_ARE_A_HOLE])
+    )
+
+    result = diff.compare(old, new)
+
+    assert {c.field for c in result.changes} == {"conditions", "unresolved"}
 
 
 def test_losing_a_polled_entry_is_reported():

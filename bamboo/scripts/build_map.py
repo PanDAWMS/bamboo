@@ -906,6 +906,36 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
                 click.echo(f"      - {row.owner}  {row.table}.{row.column}")
     click.echo("  * = a gap in the extraction")
 
+    stops = fragment.reading_stops
+    if stops:
+        # Not a denominator and not a ratio.  These sit on statements the
+        # slices otherwise read: what they say is that one clause, one
+        # fragment or one bind is decided somewhere this build does not go, so
+        # a consumer shown the statement is shown where to read next.  Until
+        # this list existed a truncated ``WHERE`` was indistinguishable from
+        # no ``WHERE`` -- ``getJobs``, the whole of the pilot's job request,
+        # was stored as a ``SELECT`` that filters on nothing.
+        where = Counter(r.owner for r in stops)
+        click.echo(
+            f"\nwhere the reading stopped: {len(stops)} in "
+            f"{len(where)} function(s)"
+        )
+        for reason, count in Counter(r.reason for r in stops).most_common():
+            here = [r for r in stops if r.reason == reason]
+            files = Counter(r.file for r in here).most_common(1)[0]
+            click.echo(
+                f"  {count:>4}  {reason}   (most in {files[0]}, {files[1]})"
+            )
+            # The expression, not the class of expression.  A reader told
+            # "a fragment does not render" knows only that something is
+            # wrong; told ``build_where_clause()`` it knows what to open.
+            for detail, seen in Counter(r.detail for r in here).most_common(3):
+                click.echo(f"        {seen:>3}x  {detail}")
+        for owner, count in where.most_common(top):
+            click.echo(f"  {count:>4}  {owner}")
+        if len(where) > top:
+            click.echo(f"    … {len(where) - top} more function(s)")
+
     # The slices with a gap and no reasons, said out loud rather than left to a
     # reader to notice by subtraction.  Each keeps its own notion of what a
     # candidate is, so a reason vocabulary for one does not transfer, and

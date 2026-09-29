@@ -527,6 +527,7 @@ def _reader_statements(
                     line=site.anchor.line_start,
                     selects=list(site.selects),
                     conditions=list(site.conditions),
+                    unresolved=list(site.unresolved),
                     bind_window=list(site.bind_window),
                     region=list(site.region),
                     rows_handled=list(site.rows_handled),

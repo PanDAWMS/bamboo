@@ -554,6 +554,50 @@ async def test_a_run_time_candidate_says_where_its_value_comes_from():
     assert "value from" in copied
 
 
+def test_a_statement_read_only_in_part_says_so_beside_its_conditions():
+    """``lockJobsForReassign`` -- the query the two-day reassign picks jobs up with.
+
+    Its ``WHERE`` reads ``jobStatus IN ({})`` because the states arrive as an
+    argument, so the map stored it with an empty ``conditions`` list and the
+    answer showed a query that filters on nothing.  A consumer cannot tell
+    that from a query whose filter nobody could read, and the second is where
+    it should go and read the caller.
+    """
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_follow_up
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject="JobSpec.jobStatus", observed="activated"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        follow_up=models.FollowUp(
+            selected=True,
+            selected_by=["x.py::lockJobsForReassign"],
+            reader_statements=[
+                models.StatementReading(
+                    owner="x.py::lockJobsForReassign",
+                    file="x.py",
+                    line=846,
+                    selects=["JobSpec.relocationFlag=2"],
+                    conditions=["modificationTime<:modificationTime@797"],
+                    unresolved=[
+                        "jobStatus IN ({}) -- the WHERE names its bind variables"
+                        " through an interpolation"
+                    ],
+                )
+            ],
+        ),
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_follow_up(strategy, False))
+    output = runner.invoke(command).output
+
+    assert "and modificationTime<:modificationTime@797" in output
+    assert "not read here  jobStatus IN ({})" in output
+
+
 _METRICS = "daemons/scripts/metric_collector.py::analy_pmerge_jobs_wait_time"
 _GETTER_READER = "taskbuffer/db_proxy_mods/task_standalone_module.py::checkDuplication_JEDI"
 

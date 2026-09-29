@@ -81,6 +81,11 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "tables",
         "bind_window",
         "conditions",
+        # What the statement was read only in part on.  Listed for the same
+        # reason ``conditions`` is: a term moving out of ``conditions`` and
+        # into here is a statement the map stopped being able to read, and
+        # with the field unlisted the two builds would compare as identical.
+        "unresolved",
         "region",
         "rows_handled",
         "exits",
@@ -249,7 +254,14 @@ def _branch_changes(name: str, old: Any, new: Any) -> list[Change]:
             Change(node=name, kind=_JUNCTION, field="branch", before="—", after=outcome)
         )
     for outcome in sorted(set(before) & set(after)):
-        for field in ("path_condition", "tier", "emits", "log_level"):
+        # ``row_precondition`` is here because leaving it out was the same hole
+        # the note above ``log_sites`` in ``_index`` records: a field nobody
+        # listed compares equal to itself however it changes.  The round that
+        # settled these guards' binds -- ``jobStatus=:oldJobStatus`` becoming
+        # ``jobStatus=activated`` on 45 junctions -- was told the two builds
+        # described the same map.  It is also the field that says whether a
+        # branch's outcome can land at all, so drift in it is not cosmetic.
+        for field in ("path_condition", "row_precondition", "tier", "emits", "log_level"):
             old_value = _render(getattr(before[outcome], field))
             new_value = _render(getattr(after[outcome], field))
             if old_value != new_value:

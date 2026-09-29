@@ -214,12 +214,125 @@ class SqlWrite(BaseModel):
     )
 
 
+class Stop(NamedTuple):
+    """Somewhere the reading of one statement stopped, and what it stopped on.
+
+    The reassembly is regex over rendered strings and always had places it
+    could not follow; what it did not have was a way to say so.  A fragment
+    with no text of its own was dropped and the statement read on without it,
+    which is how ``getJobs``'s ``WHERE`` -- every condition the pilot's job
+    request is answered by -- came to be missing from the map with nothing
+    anywhere saying it was.
+
+    *source* is the expression, unparsed, not a class of expression.  A
+    consumer told "a fragment does not render" knows only that something is
+    wrong; told ``build_where_clause()`` or
+    ``get_sql_IN_bind_variables(statList, prefix=':stat')`` it knows which
+    function to open, and that is the whole point of saying it out loud.
+    """
+
+    line: int
+    source: str
+    reason: str
+
+
+#: A ``+=`` whose right-hand side says nothing about its own text.  Two shapes
+#: in the corpus: a name another function returned (``sqlP += sql_where_clause``)
+#: and a call that builds the fragment (``sql2 += JobSpec.bindValuesExpression()``).
+FRAGMENT_NOT_RENDERED = "a fragment of the statement has no text of its own"
+
+#: ``AND jobStatus IN ({})``.  The column is readable and the placeholders are
+#: not, because the code spells them with :func:`get_sql_IN_bind_variables`
+#: over a list.  The statement is not truncated -- it is there, and it selects
+#: on values nobody can name from this function alone.
+BINDS_ARE_A_HOLE = "the WHERE names its bind variables through an interpolation"
+
+#: ``WHERE {}=:{}`` -- ``queryDatasetWithMap`` builds the column name from the
+#: key of a mapping it was handed.  A different answer from the one above: the
+#: reader has no column to go looking for, let alone a value.
+COLUMN_IS_A_HOLE = "the WHERE names its column through an interpolation"
+
+#: Where the binds go, as opposed to where the schema does.  ``{}.JEDI_Tasks``
+#: is a hole too and is not a gap: reassembly blanks the schema on purpose.
+_HOLE = re.compile(r"\{\d*\}")
+
+
+def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
+    """One :class:`Stop` per ``WHERE`` term the reassembly left a hole in.
+
+    Read off the assembled text rather than off a fragment, because that is
+    where it is decidable, and the three holes a ``WHERE`` can carry are three
+    different answers:
+
+    * **The schema**, ``{}.JEDI_Datasets`` -- blanked on purpose, and not a
+      gap.  Stripped first, and stripping it is what separates the other two
+      from the 19 statements whose only hole is a schema inside a subquery.
+    * **The placeholders**, ``jobStatus IN ({})`` -- the column is readable
+      and the values are at whichever call site supplied the list.
+    * **The column**, ``{}=:{}`` -- the statement names its column from a
+      mapping key, which :func:`key_column_census` counts from the other end.
+
+    The term is kept whole, ``AND``/``OR`` to ``AND``/``OR``, so the consumer
+    is told which column it is about.
+    """
+    clause = _SCHEMA_HOLE.sub("", where_clause(sql))
+    if not _HOLE.search(clause):
+        return ()
+    found: set[Stop] = set()
+    for term in _CLAUSE_JOIN.split(clause):
+        if not _HOLE.search(term):
+            continue
+        text = _balanced(" ".join(term.split()))
+        found.add(
+            Stop(
+                line,
+                text,
+                COLUMN_IS_A_HOLE if _HOLE.match(text) else BINDS_ARE_A_HOLE,
+            )
+        )
+    return tuple(sorted(found))
+
+
+def _balanced(term: str) -> str:
+    """Trim the parentheses splitting on ``AND`` left unmatched, and only those.
+
+    ``(cloud IS NULL OR cloud IN ({}))`` splits into a leading ``(cloud IS
+    NULL`` and a trailing ``cloud IN ({}))``, and a blanket ``strip("()")``
+    would take the ``)`` that closes ``IN`` as well -- the term would read
+    ``jobStatus IN ({}``, which is not what the code says and not something a
+    reader can search the source for.
+    """
+    while term.startswith("(") and term.count("(") > term.count(")"):
+        term = term[1:].lstrip()
+    while term.endswith(")") and term.count(")") > term.count("("):
+        term = term[:-1].rstrip()
+    return term
+
+
+#: ``{}.`` -- a hole that qualifies a name is the schema, wherever it appears.
+_SCHEMA_HOLE = re.compile(r"\{\d*\}\.")
+
+#: What separates one term of a ``WHERE`` from the next, at any depth.  Depth
+#: is not tracked: a term of a subquery is still a term whose hole the reader
+#: cannot fill, and splitting it out names the column rather than the subquery.
+_CLAUSE_JOIN = re.compile(r"\b(?:AND|OR)\b", re.IGNORECASE)
+
+
 def _parts(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     name: str,
     seen: frozenset[str] = frozenset(),
+    stops: Optional[list[Stop]] = None,
 ) -> list[tuple[int, str, str, ast.stmt]]:
-    """Return ``(line, operator, text, node)`` for each statement building *name*."""
+    """Return ``(line, operator, text, node)`` for each statement building *name*.
+
+    *stops* is an out-parameter, filled with what this walk could not render.
+    Out rather than returned because every caller but one wants the fragments
+    alone, and because the account has to come from the walk that failed: a
+    second pass asking "why is this statement short" would be a different
+    reading of the same nodes, free to disagree with this one.  The same
+    reason :class:`BindScan` travels with its binds.
+    """
     if name in seen:
         return []
     seen = seen | {name}
@@ -249,6 +362,14 @@ def _parts(
             text = rendered_text(node.value)
             if text is not None:
                 parts.append((node.lineno, "+=", text, node))
+            elif stops is not None:
+                # Only ``+=``.  A ``=`` that renders nothing starts no
+                # statement, so nothing was dropped from one -- and 12 of the
+                # 14 in the corpus are ``sql = sql[:-1]`` trimming a trailing
+                # comma, which ``executions`` already reads as a discard.
+                stops.append(
+                    Stop(node.lineno, ast.unparse(node.value), FRAGMENT_NOT_RENDERED)
+                )
     parts.sort(key=lambda part: part[0])
     return parts
 
@@ -747,6 +868,15 @@ class Execution(NamedTuple):
     reading would claim all 253.  The window is not guessed -- the same
     function writes ``var_map = {}`` 31 times, so the code declares its own
     block boundaries and this only reads them.
+    """
+
+    unresolved: tuple[Stop, ...] = ()
+    """Where reading *this* run stopped, if it stopped anywhere.
+
+    Empty for most of them, and empty is an answer: it says the text in
+    ``sql`` is the whole statement.  A consumer that reports a query without
+    reading this field reports a truncated ``WHERE`` as a complete one, which
+    is the failure the field exists for.
     """
 
 
@@ -1628,6 +1758,11 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
         if len(node.args) < 2:
             continue
         expression = node.args[0]
+        # Filled by the reassembly below, and handed to every Execution this
+        # call yields: the variants of one name are variants of one statement,
+        # and a fragment the reader could not follow was missing from all of
+        # them.
+        stops: list[Stop] = []
         statement, fillers, percent = _call_site_fill(func, expression)
         operands = _concatenated(statement)
         sources: dict[str, list[ast.stmt]] = {}
@@ -1660,9 +1795,10 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             # on what is already there, and counting it cost three real read
             # edges, measured.  Most of that spelling never reaches ``_parts``,
             # which keeps only what renders -- ``sql = f"{sql} AND x"`` does.
+            built = _parts(func, base.id, stops=stops)
             discards = [
                 part
-                for _line, operator, _text, part in _parts(func, base.id)
+                for _line, operator, _text, part in built
                 if operator == "=" and not _reads(part.value, base.id)
             ]
         elif forwarded:
@@ -1730,6 +1866,7 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
                         variable=held,
                         call=node,
                         window=window,
+                        unresolved=tuple(stops) + _hole_stops(text, node.lineno),
                     )
                 )
     return found
@@ -1812,6 +1949,55 @@ def _preconditions(clause: str, columns: set[str]) -> dict[str, str]:
         if owner is not None and owner not in found:
             found[owner] = re.sub(r"\s+", " ", term).strip()
     return found
+
+
+#: ``jobStatus=:oldJobStatus`` -- the only shape of precondition whose value
+#: is in Python.  ``commandToPilot IS NULL`` and ``nFiles>nFilesUsed`` name no
+#: bind, and there is nothing to settle in them.
+_PRECONDITION_BIND = re.compile(r"^([\w.]+)\s*(=|<>|!=)\s*(:\w+)\s*$")
+
+
+def settled_precondition(
+    term: str,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: Optional[str],
+    window: Optional[tuple[int, int]],
+    settle,
+) -> tuple[str, bool]:
+    """*term* with its bind replaced by the value, and whether that happened.
+
+    ``jobStatus=:oldJobStatus`` is what the statement says and ``activated``
+    is what it means, and only the second can be compared with what a reader
+    selects on.  ``getJobs`` -- the one query that moves a job from
+    ``activated`` to ``sent``, the whole of the pilot's job request -- records
+    the first, so the map holds its guard and cannot tell you which value it
+    guards.
+
+    The raw term is returned unchanged when nothing settles, and that is the
+    honest answer rather than a failure: the bind is filled by an argument or
+    by a callee, and ``jobStatus=:oldJobStatus`` still says truly that this
+    column is being tested.  The caller is told which of the two it got so it
+    can say so.
+
+    Several values is not ambiguity -- a method that runs one statement twice
+    binds two -- so they are rendered as the ``IN`` the statement would have
+    spelled had they been literals, and a negated test as ``NOT IN``.
+    """
+    match = _PRECONDITION_BIND.match(term.strip())
+    if match is None or varmap is None:
+        return term, False
+    column, operator, key = match.groups()
+    found: set[str] = set()
+    for bind in bound_values(func, varmap, key, window):
+        found.update(settle(bind.value, func))
+    if not found:
+        return term, False
+    negated = operator in ("<>", "!=")
+    if len(found) == 1:
+        value = next(iter(found))
+        return f"{column}{'<>' if negated else '='}{value}", True
+    inside = ",".join(sorted(found))
+    return f"{column} {'NOT IN' if negated else 'IN'} ({inside})", True
 
 
 def writes(sql: str) -> list[SqlWrite]:
@@ -2410,18 +2596,31 @@ def conditions(sql: str) -> list[Condition]:
     and saying the term is there is the point.  The caller decides what to do
     with :attr:`Branch.binds`, which is empty for exactly those.
     """
-    opened = _WHERE.search(sql)
-    if opened is None:
+    clause = where_clause(sql)
+    if not clause:
         return []
-    rest = sql[opened.end() :]
-    closed = _CLAUSE_END.search(rest)
-    clause = rest[: closed.start()] if closed else rest
     held = {key for _column, key in predicates(sql)}
     tree = _prune(_parse_clause(clause), held, False)
     if tree is None:
         return []
     kind, body = tree
     return [_as_condition(child) for child in body] if kind == "and" else [_as_condition(tree)]
+
+
+def where_clause(sql: str) -> str:
+    """The text between ``WHERE`` and whatever ends the clause, or ``""``.
+
+    One spelling, because two readers want it for opposite questions -- which
+    terms the statement makes, and whether the placeholders in them are
+    readable at all -- and a second copy of "where the clause ends" is how the
+    two would come to disagree about a statement with a ``UNION`` in it.
+    """
+    opened = _WHERE.search(sql)
+    if opened is None:
+        return ""
+    rest = sql[opened.end() :]
+    closed = _CLAUSE_END.search(rest)
+    return rest[: closed.start()] if closed else rest
 
 
 def selected_literals(sql: str) -> list[tuple[str, str]]:

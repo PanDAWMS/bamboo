@@ -515,6 +515,104 @@ def bind_windows_are_known(fragment: MapFragment) -> GateResult:
     )
 
 
+#: ``jobStatus=activated`` -- a row precondition whose value is settled.  The
+#: unsettled ones still spell a bind and are skipped here by not matching.
+_SETTLED_GUARD = re.compile(r"^([\w.]+)\s*=\s*([^:\s][^\s]*)$")
+
+
+def movers_of_a_value_agree(fragment: MapFragment) -> GateResult:
+    """(i) Two readings of "what moves a row off value *v*", and their difference.
+
+    The map answers that question one way: the statements whose ``WHERE``
+    selects on *v*.  It holds the answer a second way and never compares them
+    -- a junction whose ``row_precondition`` requires *v* only lands on a row
+    that still has it, which is the same claim reached from the write side.
+
+    **Zero difference is not the target and would be the wrong one.**  The two
+    questions differ honestly: ``getJobs`` selects ``activated`` in one
+    statement and requires it in the compare-and-set of another, and a rule
+    that forced the lists together would have to invent one of them.  What is
+    assertable is that every name on one list and not the other has a reason
+    the map can give, and the reasons are about the map rather than about
+    PanDA:
+
+    * one of this function's statements was read only in part, so what it
+      selects on is not all of what it selects on;
+    * the function has no statement recorded at all, which after the read
+      side's own census means the query was there and unreadable;
+    * its statements ask for the row by another key.  ``throttleJobsInPaused
+      Tasks_JEDI`` finds its jobs by ``jediTaskID`` and requires
+      ``jobStatus=activated`` of them; the status is the compare-and-set, not
+      the index.  Three of the corpus's differences are this and none of them
+      is a gap -- which is a correction to what this gate was planned to
+      assert, found by reading the three it first failed on.
+
+    A difference with none of the three is a failure: the map holds a
+    statement for the function, read it in full, and that statement asks for
+    nothing at all.
+    """
+    selects: dict[tuple[str, str], set[str]] = {}
+    for site in fragment.read_sites:
+        for pair in site.selects:
+            subject, _sep, value = pair.partition("=")
+            selects.setdefault((subject, value), set()).add(site.owner)
+    # The column a term names is SQL's spelling; the subject's is the spec
+    # class's.  Matched on the lowered attribute, which is the join the read
+    # side already makes when it turns a predicate into a ``selects`` entry.
+    named = {
+        (subject.spec_class, subject.attribute.lower()): subject.name
+        for subject in fragment.subjects
+    }
+    partly_read = {stop.owner for stop in fragment.reading_stops}
+    recorded = {site.owner for site in fragment.read_sites}
+    # Asks by something.  Not "has a statement": a statement the map recorded
+    # with no condition and no value is one it read as filtering on nothing,
+    # and that is the case this gate is left able to catch.
+    asks_by_a_key = {
+        site.owner
+        for site in fragment.read_sites
+        if site.selects or site.conditions
+    }
+    guards: dict[tuple[str, str], set[str]] = {}
+    for junction in fragment.junctions:
+        spec = junction.subject.partition(".")[0]
+        for branch in junction.branches:
+            for term in branch.row_precondition:
+                match = _SETTLED_GUARD.match(term.strip())
+                if match is None:
+                    continue
+                column, value = match.groups()
+                subject = named.get((spec, column.lower()))
+                if subject is not None:
+                    guards.setdefault((subject, value), set()).add(junction.owner)
+    failures: list[str] = []
+    explained = 0
+    for (subject, value), owners in sorted(guards.items()):
+        for owner in sorted(owners - selects.get((subject, value), set())):
+            if owner in partly_read or owner not in recorded or owner in asks_by_a_key:
+                explained += 1
+                continue
+            failures.append(
+                f"{owner} only lands on a row where {subject}={value},"
+                " and no statement the map holds selects on it"
+            )
+    return GateResult(
+        gate="movers-of-a-value-agree",
+        passed=not failures,
+        checked=len(guards),
+        unit="guarded (subject, value) pairs",
+        question="does every function that guards on a value have a reason for not selecting on it?",
+        finding="a junction requires a value of the row it writes, and nothing in the map asks for that row",
+        failures=failures,
+        note=(
+            f"{explained} difference(s) carry a reason: the statement was read "
+            "only in part, the map holds none for that function, or it asks "
+            "for the row by another key. The two readings are not meant to "
+            "coincide."
+        ),
+    )
+
+
 def statement_leads_resolve(fragment: MapFragment) -> GateResult:
     """(i) Every exit and every crossing a statement offers points somewhere real.
 
@@ -1902,6 +2000,7 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
     if fragment.read_sites:
         results.append(bind_windows_are_known(fragment))
         results.append(statement_leads_resolve(fragment))
+        results.append(movers_of_a_value_agree(fragment))
     if fragment.junctions:
         results.append(structural_attribution_agrees(fragment))
         results.append(declared_status_is_written(fragment))

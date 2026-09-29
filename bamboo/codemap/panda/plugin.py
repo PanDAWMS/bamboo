@@ -333,7 +333,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._uncovered_tables,
             bound_text,
             self._unexplained_writes,
+            reading_stops,
         ) = sqlwrite.extract(self._modules, self.map_id, self._version, attributor)
+        # On the fragment rather than on the plugin, because a gate reads the
+        # fragment: "which junctions guard on a value nothing selects on" is a
+        # question whose answer is half in the nodes and half in what the
+        # build could not read, and a gate that could only see the first half
+        # would report every unreadable ``WHERE`` as a disagreement.
+        fragment.reading_stops.extend(reading_stops)
         fragment.subjects.extend(sql_subjects)
         fragment.junctions.extend(sql_junctions)
         fragment.coverage.extend(sql_coverage)

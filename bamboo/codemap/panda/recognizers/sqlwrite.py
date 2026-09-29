@@ -58,6 +58,7 @@ from bamboo.codemap.models import (
     DiagnosticTemplate,
     EntityNode,
     JunctionNode,
+    ReadingStop,
     ReadSiteNode,
     SourceModule,
     SubjectNode,
@@ -135,6 +136,13 @@ NOT_RUN_HERE = "assembled here and not run here"
 ACCOUNTED_FOR = frozenset(
     {VARMAP_FROM_OUTSIDE, BOUND_OUTSIDE_WINDOW, NOT_RUN_HERE}
 )
+
+
+#: A row precondition naming a bind nothing in the function fills.  Kept as
+#: the raw term rather than dropped -- ``jobStatus=:oldJobStatus`` still says
+#: truly which column is tested -- and counted, because the value is what makes
+#: the guard comparable with what a reader selects on.
+PRECONDITION_BIND_UNSETTLED = "the row precondition names a bind nothing here fills"
 
 
 class Unexplained(NamedTuple):
@@ -227,6 +235,7 @@ def extract(
     set[str],
     list[DiagnosticTemplate],
     list[Unexplained],
+    list[ReadingStop],
 ]:
     """Extract junctions for SQL bind writes.
 
@@ -244,10 +253,17 @@ def extract(
     replaces -- a second reader of the same source disagreed with this one by 77
     columns.
 
+    And, last, where the reading of a statement stopped -- a fragment with no
+    text of its own, a ``WHERE`` whose placeholders are an interpolation, a row
+    precondition whose bind nothing here fills.  Collected on this walk because
+    this walk already visits every execution in the corpus, and a second one
+    asking the same question is how the two counts would come to disagree.
+
     *attributor* is passed in already taught: the table map is learned from the
     whole corpus, so it cannot be built from the module in hand.
     """
     junctions: dict[str, JunctionNode] = {}
+    stopped: list[ReadingStop] = []
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str, str]] = set()
     uncovered: set[str] = set()
@@ -277,8 +293,39 @@ def extract(
                 if key in seen:
                     continue
                 seen.add(key)
+                stopped.extend(
+                    ReadingStop(
+                        reason=stop.reason,
+                        detail=stop.source,
+                        file=module.rel_path,
+                        owner=f"{module.rel_path}::{func.name}",
+                        line=stop.line,
+                    )
+                    for stop in run.unresolved
+                )
                 for statement in sql.writes(run.sql):
                     spec_class = attributor.class_for_table(statement.table)
+                    # Settled once per statement, not once per column: every
+                    # column of one ``SET`` is bounded by the same ``WHERE``,
+                    # and settling inside the column loop would count each
+                    # unsettled bind as many times as the statement has
+                    # columns.
+                    preconditions = []
+                    for term in sorted(statement.preconditions.values()):
+                        settled, done = sql.settled_precondition(
+                            term, func, run.varmap, run.window, settle
+                        )
+                        preconditions.append(settled)
+                        if not done and ":" in term:
+                            stopped.append(
+                                ReadingStop(
+                                    reason=PRECONDITION_BIND_UNSETTLED,
+                                    detail=term,
+                                    file=module.rel_path,
+                                    owner=f"{module.rel_path}::{func.name}",
+                                    line=run.call.lineno,
+                                )
+                            )
                     # A name nobody could read is not a table that holds no
                     # spec.  Listed together they read as one finding, and only
                     # one of the two is a gap in the extraction -- see
@@ -357,7 +404,7 @@ def extract(
                             # it also writes, not only the one for this column:
                             # any of them failing leaves the row untouched, so
                             # they bound this write as much as its own does.
-                            row_precondition=sorted(statement.preconditions.values()),
+                            row_precondition=preconditions,
                             setters=setters,
                         )
         if candidates:
@@ -382,8 +429,10 @@ def extract(
         )
         for qualifier, attribute, kind in sorted(attributed)
     ]
-    # ``unexplained`` last: it is the only one of the five that is about what
-    # this pass could *not* do, and a caller ignoring it still builds a map.
+    # ``unexplained`` and ``stopped`` last: they are the two that are about
+    # what this pass could *not* do, and a caller ignoring them still builds a
+    # map.  Two lists rather than one because they answer different questions
+    # -- a column with no outcome, and a statement read only in part.
     return (
         subjects,
         list(junctions.values()),
@@ -391,6 +440,7 @@ def extract(
         uncovered,
         diagnostics,
         unexplained,
+        stopped,
     )
 
 
@@ -776,6 +826,12 @@ class ReadStatement(NamedTuple):
     #: through, which is the loop over them and can outlive ``region``.
     #: ``None`` where nothing loops over them.
     rows_handled: Optional[tuple[int, int]] = None
+    #: ``"jobStatus IN ({}) -- the WHERE names its bind variables through an
+    #: interpolation"``.  What this run was read only in part on, from
+    #: :attr:`sql.Execution.unresolved`, so that a consumer offered the
+    #: statement is offered the expression to open next rather than a
+    #: ``conditions`` list that is silently short.
+    unresolved: tuple[str, ...] = ()
 
 
 def _render_condition(condition: "sql.Condition", seeds: dict[str, list[int]]) -> str:
@@ -1115,7 +1171,21 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
         # Filed against the statement as well as the function, and only kept
         # when a pair actually lands: a run whose predicates name nothing the
         # map promoted is not somewhere to send a reader, so it gets no row.
-        statements.setdefault((at.owner, at.line), at).selects.add((subject, value))
+        kept = statements.setdefault((at.owner, at.line), at)
+        kept.selects.add((subject, value))
+        # Unioned across the variants, not taken from whichever recorded
+        # first.  ``conditions`` is deliberately *not* unioned -- see
+        # ``place_conditions``, where a union reads as a conjunction and
+        # over-states what the row must be -- but a stop is not a requirement:
+        # it says the reader could not follow a fragment, and a fragment one
+        # variant could not follow is one the statement has.  Keeping the
+        # first variant's left ``lockJobsForReassign`` unmarked, because the
+        # two-column variant with no ``WHERE`` at all recorded before the one
+        # carrying ``jobStatus IN ({})``.
+        if at is not kept and at.unresolved:
+            statements[(at.owner, at.line)] = kept._replace(
+                unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved)))
+            )
 
     def touch(table: str, owner: str, verb: str) -> None:
         use = rows.setdefault(table.lower(), EntityUse(set(), set(), set(), set(), set()))
@@ -1388,6 +1458,14 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                     selects=set(),
                     tables=set(),
                     conditions=[],
+                    unresolved=tuple(
+                        sorted(
+                            {
+                                f"{stop.source} -- {stop.reason}"
+                                for stop in run.unresolved
+                            }
+                        )
+                    ),
                 )
                 read_tables: set[str] = set()
                 for verb, table in _table_verbs(run.sql):
@@ -1468,6 +1546,7 @@ def read_site_nodes(
                 # true answer rather than a gap.
                 bind_window=list(at.window) if at.window else [],
                 conditions=sorted(at.conditions),
+                unresolved=list(at.unresolved),
                 region=list(at.region) if at.region else [],
                 exits=list(at.exits),
                 rows_handled=list(at.rows_handled) if at.rows_handled else [],

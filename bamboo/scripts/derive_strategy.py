@@ -284,6 +284,14 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
                 # above it.
                 for condition in entry.conditions:
                     click.echo(f"                                       and {condition}")
+                # Beside the conditions, not folded away with the steps: the
+                # line above is what the map *could* read of the ``WHERE``,
+                # and this is where that stops.  A reader who is not told
+                # reads a short ``conditions`` list as a complete one, which
+                # is how ``lockJobsForReassign`` came to look like a query
+                # that filters on nothing.
+                for stop in entry.unresolved:
+                    click.echo(f"                                       not read here  {stop}")
                 steps = entry.trace if full else entry.trace[:_TOP_READER_STEPS]
                 for step in steps:
                     head = (

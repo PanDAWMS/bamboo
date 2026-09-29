@@ -1044,6 +1044,26 @@ class ReadSiteNode(BaseNode):
             "them would bury the terms that do."
         ),
     )
+    unresolved: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<expression> -- <reason>`` for every part of this statement the "
+            "extraction could not follow, sorted.  Empty is the usual answer "
+            "and it is an answer: it says ``conditions`` is the whole "
+            "``WHERE``.\n\n"
+            "What it is for is that the opposite case looked identical. "
+            "``lockJobsForReassign`` selects the jobs a two-day reassign picks "
+            "up; its ``WHERE`` reads ``jobStatus IN ({})`` because the states "
+            "arrive as an argument, so the map stored the statement with an "
+            "empty ``conditions`` and nothing anywhere said the statement was "
+            "read only in part. A consumer cannot tell a query that filters on "
+            "nothing from one whose filter nobody could read, and the second is "
+            "where it should go and read the caller.\n\n"
+            "The expression, not a class of expression: ``build_where_clause()``"
+            " and ``jobStatus IN ({})`` name what to open next, which is the "
+            "whole point of saying it out loud."
+        ),
+    )
     region: list[int] = Field(
         default_factory=list,
         description=(
@@ -1309,6 +1329,36 @@ class ValueEnumNode(BaseNode):
         return f"{namespace}.{constant}"
 
 
+class ReadingStop(BaseModel):
+    """One place the reading of one statement stopped, and what it stopped on.
+
+    Beside :class:`CoverageStat` rather than inside it, because it answers a
+    different question.  Coverage asks whether a statement was read at all; a
+    statement can be counted as read, carry its table, its subject and its
+    binds, and still be missing the half of its ``WHERE`` that decides which
+    rows come back.  Until this record existed those two cases were the same
+    row in the same ratio, which is why ``getJobs`` -- the query the pilot's
+    whole job request is answered by -- sat in the map as a ``SELECT`` that
+    filters on nothing, with no number anywhere moving.
+
+    Not a node.  It is what the build could not say, and a map that stored its
+    own gaps as nodes would count them among what it covers.
+    """
+
+    reason: str
+    detail: str = Field(
+        default="",
+        description=(
+            "The expression, unparsed -- ``build_where_clause()``, "
+            "``jobStatus IN ({})``. What to open next, not what class of thing "
+            "stopped the reading."
+        ),
+    )
+    file: str = ""
+    owner: str = ""
+    line: int = 0
+
+
 class CoverageStat(BaseModel):
     """Per-file extraction coverage for one slice.
 
@@ -1350,6 +1400,7 @@ class MapFragment(BaseModel):
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
+    reading_stops: list[ReadingStop] = Field(default_factory=list)
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
         description=(
@@ -1398,6 +1449,7 @@ class MapFragment(BaseModel):
         self.diagnostics.extend(other.diagnostics)
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
+        self.reading_stops.extend(other.reading_stops)
         self.declaration_yields.update(other.declaration_yields)
         self.annotation_readings.extend(other.annotation_readings)
         self.spec_annotation_forms.update(other.spec_annotation_forms)
@@ -2824,6 +2876,15 @@ class StatementReading(BaseModel):
         description=(
             "What else the ``WHERE`` requires, read as a conjunction -- the "
             "answer to a row that holds the value and never came back."
+        ),
+    )
+    unresolved: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<expression> -- <reason>`` for the parts of this statement the "
+            "extraction could not follow. Carried from the node so a reader "
+            "shown the statement is told where ``conditions`` stops being the "
+            "whole ``WHERE``."
         ),
     )
     bind_window: list[int] = Field(

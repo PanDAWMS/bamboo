@@ -54,7 +54,7 @@ import re
 from typing import Iterator, NamedTuple, Optional
 
 from bamboo.codemap.models import Emit, JunctionNode, SourceModule, SubjectNode
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
@@ -147,6 +147,11 @@ def flush_methods(
     limit the trigger slice puts on a cross-module hop, for the same reason.
     """
     only_here = sole_definitions(modules)
+    # The same resolver the SQL slice builds, built again here rather than
+    # threaded through ``attach``: both halves of a ``row_precondition`` have
+    # to be settled by one rule, and the rule is ``sql.settled_precondition``
+    # -- what each caller supplies is only the table of declared constants.
+    settle = values.resolver(values.declared_mappings(modules))
     declared = logfile.declared_files(modules)
     inherited = logfile.inherited_files(modules, declared)
     found: dict[str, Flush] = {}
@@ -186,10 +191,19 @@ def flush_methods(
                         if column in guards:
                             continue
                         term = re.sub(r"\s+", " ", raw).strip()
-                        guards[column] = (
-                            term,
-                            _gating_parameters(func, term, parameters),
+                        # Settled here for the same reason the SQL slice
+                        # settles its own: these terms land in the *same*
+                        # ``row_precondition`` list, and one half spelling the
+                        # bind while the other spells the value would leave the
+                        # list unreadable and the gate comparing it against a
+                        # reader's values half blind.  ``_gating_parameters``
+                        # is asked of the raw term, which is what names the
+                        # parameter.
+                        gating = _gating_parameters(func, term, parameters)
+                        settled, _done = sql.settled_precondition(
+                            term, func, run.varmap, run.window, settle
                         )
+                        guards[column] = (settled, gating)
             found[func.name] = Flush(
                 spec_classes=frozenset(classes),
                 guards=guards,
