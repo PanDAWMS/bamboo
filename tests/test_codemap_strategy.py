@@ -3712,6 +3712,104 @@ def test_an_exits_walk_stops_where_the_rows_stop_being_worked_through():
     assert strategy_mod._where_its_names_are_filled(nothing) is None
 
 
+def test_an_exits_walk_is_folded_to_three_steps_and_says_so():
+    """The name that decided the exit can sit in step four.
+
+    The cap was applied whatever ``--full`` said and printed no count, so a
+    reader was handed three steps that looked like the whole answer.  Every
+    other fold in this module lifts under the flag and says how much it cut.
+    """
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_exits
+
+    entry = models.StatementReading(
+        owner="a.py::sweep",
+        exits=[
+            models.StatementExit(
+                kind="continue",
+                line=390,
+                decided_at=388,
+                trace=[
+                    models.TraceStep(kind=models.TRACE_BINDING, name=f"n{i}", line=i)
+                    for i in range(5)
+                ],
+            )
+        ],
+    )
+
+    def show(full):
+        @click.command()
+        def cli():
+            _report_exits(entry, full)
+
+        return click.testing.CliRunner().invoke(cli, []).output
+
+    folded, whole = show(False), show(True)
+
+    assert "… 2 more step(s) (--full)" in folded
+    assert folded.count("↳") == 3 + 1
+    assert "more step(s)" not in whole
+    assert whole.count("↳") == 5
+
+
+def test_an_exit_is_explained_by_the_write_its_own_statement_saw(tmp_path):
+    """The span says "inside or anywhere", and the query's ``sql`` is one line above it.
+
+    ``copyArchive.py::main`` assigns ``sql`` forty-four times.  Its holding
+    query on 381 sets it on 373 -- one line above the stretch the statement
+    owns -- so the span rule found nothing inside and offered the reader all
+    forty-four, headed by the one from line 89.  Execution order has no such
+    edge: only the assignment above the read and below the ones it replaced
+    can be what ran.
+    """
+    root = tmp_path / "pandaserver"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sweeper.py").write_text(
+        """\
+def main():
+    sql = "SELECT id FROM merging"
+    rows = query(sql)
+    sql = "SELECT id FROM holding"
+    rows = query(sql)
+    if rows is None:
+        logger.debug("nothing came back")
+    else:
+        for row in rows:
+            if row in seen:
+                continue
+    sql = "SELECT id FROM transferring"
+"""
+    )
+    entry = models.StatementReading(
+        owner="pandaserver/sweeper.py::main",
+        file="pandaserver/sweeper.py",
+        line=5,
+        # As the read side stores it: the binds are filled from the statement
+        # on, so the assignment on 4 is one line above the stretch.
+        region=[5, 12],
+        rows_handled=[9, 11],
+        exits=[models.StatementExit(kind="continue", line=11)],
+    )
+    strategy = models.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="holding"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+    )
+
+    strategy_mod._attach_exit_traces(entry, {"pandaserver": root}, strategy, None)
+
+    (leaving,) = entry.exits
+    assert leaving.decided_at == 10
+    bound = [
+        (step.name, step.line)
+        for step in leaving.trace
+        if step.kind == models.TRACE_BINDING
+    ]
+    assert ("sql", 4) in bound
+    assert [line for name, line in bound if name == "sql"] == [4]
+
+
 def test_a_statement_that_hands_its_rows_on_is_a_lead():
     """The request's sixth point: a reader the analyser can *choose*.
 

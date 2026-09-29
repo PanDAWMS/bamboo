@@ -148,12 +148,13 @@ _TOP_CREATORS = 4
 _TOP_READER_STEPS = 6
 #: Printed lines and walked steps shown under one exit.  Smaller than the
 #: statement's own caps because an exit is a block rather than a function: a
-#: guard that prints six lines is not a guard, it is the handling.
+#: guard that prints six lines is not a guard, it is the handling.  Both are
+#: lifted by ``--full``, like every other fold in this module.
 _TOP_EXIT_LINES = 3
 _TOP_EXIT_STEPS = 3
 
 
-def _report_exits(entry) -> None:
+def _report_exits(entry, full: bool) -> None:
     """Where a row this statement asked for stops, and what it says on the way.
 
     Printed under the conditions and before the crossings, which is the order
@@ -165,6 +166,12 @@ def _report_exits(entry) -> None:
     log, and an exit that prints nothing is the case where that will not work
     -- six of the corpus's fourteen no-rows exits are silent, and until now
     the reader found that out by grepping and finding nothing.
+
+    Folded to three of each under ``--full``'s eye, and what was cut is
+    counted.  Until now the walk was cut silently at three steps whatever the
+    flag said, so the name that decided the exit could sit in step four and
+    the reader was shown a confident answer with no sign that there was more
+    of it.
     """
     for leaving in entry.exits:
         why = "nothing came back" if leaving.no_rows else "the row was passed over"
@@ -178,18 +185,20 @@ def _report_exits(entry) -> None:
         # against a log region needs; here the block *is* the context, and
         # three header rows push the one grippable line off the page.
         printed = [row for row in leaving.skeleton if row.kind == models_mod.SKELETON_PRINT]
-        for line in printed[:_TOP_EXIT_LINES]:
+        lines = printed if full else printed[:_TOP_EXIT_LINES]
+        for line in lines:
             click.echo(f"                                         prints {line.line:>5}  {line.text}")
-        if len(printed) > _TOP_EXIT_LINES:
+        if len(printed) > len(lines):
             click.echo(
-                " " * 41 + f"… {len(printed) - _TOP_EXIT_LINES} more printed line(s)"
+                " " * 41 + f"… {len(printed) - len(lines)} more printed line(s) (--full)"
             )
         if not printed:
             click.echo(
                 "                                         prints nothing -- a grep "
                 "of the log cannot tell this exit from the row never arriving"
             )
-        for step in leaving.trace[:_TOP_EXIT_STEPS]:
+        walked = leaving.trace if full else leaving.trace[:_TOP_EXIT_STEPS]
+        for step in walked:
             head = step.name if not step.value else f"{step.name} {step.operator} {step.value}"
             # An exit's step is often a whole ``if`` block rather than an
             # assignment, and printed as it stands it breaks the column.
@@ -197,9 +206,13 @@ def _report_exits(entry) -> None:
                 f"                                         ↳ {step.line or '':>5}"
                 f"  {step.kind:<11} {' '.join(head.split()).strip(' =')}"
             )
+        if len(leaving.trace) > len(walked):
+            click.echo(
+                " " * 41 + f"↳ … {len(leaving.trace) - len(walked)} more step(s) (--full)"
+            )
 
 
-def _report_follow_up(strategy: Strategy) -> None:
+def _report_follow_up(strategy: Strategy, full: bool) -> None:
     """Whether the row is going anywhere, printed before who put it there.
 
     The order is the finding.  A task sat in ``finishing`` while the query that
@@ -271,7 +284,8 @@ def _report_follow_up(strategy: Strategy) -> None:
                 # above it.
                 for condition in entry.conditions:
                     click.echo(f"                                       and {condition}")
-                for step in entry.trace[:_TOP_READER_STEPS]:
+                steps = entry.trace if full else entry.trace[:_TOP_READER_STEPS]
+                for step in steps:
                     head = (
                         step.name
                         if not step.value
@@ -281,14 +295,14 @@ def _report_follow_up(strategy: Strategy) -> None:
                         f"                                       ↳ {step.line or '':>5}"
                         f"  {step.kind:<11} {head.strip(' =')}"
                     )
-                if len(entry.trace) > _TOP_READER_STEPS:
+                if len(entry.trace) > len(steps):
                     click.echo(
                         " " * 39
-                        + f"↳ … {len(entry.trace) - _TOP_READER_STEPS} more step(s)"
+                        + f"↳ … {len(entry.trace) - len(steps)} more step(s) (--full)"
                     )
                 if entry.trace_note:
                     click.echo(f"                                       ↳ {entry.trace_note}")
-                _report_exits(entry)
+                _report_exits(entry, full)
                 for reached in entry.crosses_to:
                     click.echo(
                         f"                                       → hands kept rows to {reached}"
@@ -1331,7 +1345,7 @@ def main(
             _report_localization(strategy, top, full, evaluated)
         else:
             _report_verdict(strategy, evaluated)
-            _report_follow_up(strategy)
+            _report_follow_up(strategy, full)
             _report_candidates(strategy, top, full, evaluated or named)
         _report_observations(strategy, top, full, evaluated)
         _report_leads(strategy, top, full)

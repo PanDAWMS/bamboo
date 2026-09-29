@@ -2410,6 +2410,16 @@ def _attach_exit_traces(entry, roots: dict, strategy: Strategy, classify) -> Non
             classify=classify,
             region=(first, last),
             bindings_within=ours,
+            # The line the exit is decided at, not the line it is taken on: a
+            # ``continue`` carries no test, and the write a reader wants is
+            # the one the ``if`` above it saw.  Without this the walk falls
+            # back to "inside the span or anywhere", and
+            # ``copyArchive.py::main``'s span opens one line *below* the
+            # ``sql`` its holding query runs -- so every one of that
+            # function's forty-four ``sql`` assignments came back, headed by
+            # one from four hundred lines away.  Ten of the corpus's hundred
+            # and three exits answered from the wrong statement.
+            reading_at=decided,
         )
         leaving.trace = walked.steps
         leaving.trace_note = walked.note

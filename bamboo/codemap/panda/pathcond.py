@@ -551,6 +551,28 @@ def loops_over(node: ast.AST) -> set[int]:
     return found
 
 
+def handlers_over(node: ast.AST) -> set[int]:
+    """The header line of every ``except`` handler whose *body* holds *node*.
+
+    :func:`loops_over`'s counterpart for the other construct a path condition
+    cannot see.  :func:`reachable_when` renders ``ast.If`` tests and nothing
+    else, so an assignment in a handler reads as one that always ran -- but a
+    handler runs only when something below the ``try`` raised, which is a
+    condition no ``if`` in the function states.
+    """
+    found: set[int] = set()
+    previous = node
+    for ancestor in ancestors(node):
+        if isinstance(
+            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+        ):
+            break
+        if isinstance(ancestor, ast.ExceptHandler) and previous in ancestor.body:
+            found.add(ancestor.lineno)
+        previous = ancestor
+    return found
+
+
 def not_below(site: ast.AST, target: ast.AST) -> bool:
     """Whether *site* could have run before *target* on one pass.
 
@@ -617,7 +639,32 @@ def _cancels(site: ast.AST, other: ast.AST, target: ast.AST) -> bool:
     conditions that mean the same thing and are written differently do not
     match, and the rule then keeps a binding it could have cancelled -- short
     of the truth in the direction that leaves the reader more to look at
-    rather than less.
+    rather than less.  That holds for a condition the renderer spells
+    differently; it does **not** hold for one it cannot see at all, which is
+    why the ``except`` test below is a separate rule rather than a refinement.
+    A condition that goes uncounted makes the rendered set *smaller*, the
+    subset test easier to pass, and the cancelling too eager.
+
+    An ``except`` body is such a condition.  It runs only when something
+    raised, so a write in one cannot be assumed to have replaced the write
+    above it::
+
+        try:    nRanges = int(nRanges)     # 64
+        except: nRanges = 8                # 66
+
+    and the map said the request always asks for eight.  Measured over the
+    corpus's read sites, 199 firings across 28 (name, write, killer) triples
+    are of this shape -- ``objectstores`` read as always empty,
+    ``retryJob``'s ``attemptNr`` as always ``-999``, and
+    ``assigned_harvester_id`` as always unset.
+
+    The killed write's own handlers are subtracted as well as the target's,
+    and that is not a loosening: a write inside the handler is live only on a
+    path where the handler ran, and on that path the later write in the same
+    handler ran too.  ``getTasksToRefine_JEDI`` rebuilds ``varMap`` three
+    times inside one ``except``, and without this the rule would hand a
+    reader all three.  Subtracting only the target's would give up 51
+    firings over 3 triples that are right.
 
     An ``ast.AugAssign`` cancels nothing, because it reads the value it
     replaces: ``timeOutVal *= 60`` needs whatever line 423 or 425 put there,
@@ -639,6 +686,8 @@ def _cancels(site: ast.AST, other: ast.AST, target: ast.AST) -> bool:
     if not site.lineno < other.lineno <= getattr(target, "lineno", 0):
         return False
     if loops_over(other) - loops_over(target):
+        return False
+    if handlers_over(other) - handlers_over(target) - handlers_over(site):
         return False
     return set(reachable_when(other)) <= set(reachable_when(target))
 
@@ -662,7 +711,7 @@ def reaching_definitions(
     the read is not the question there.  :func:`_cancels` is.
 
     Measured on the corpus by walking every read statement: of 62 (statement,
-    bind name) pairs where the name has more than one assignment, 35 narrow
+    bind name) pairs where the name has more than one assignment, 34 narrow
     and none is emptied.  An emptied name would mean the rule had cancelled
     the write the read actually saw, so nothing coming back is a signal that
     it is wrong rather than an answer -- but only that one.  It cannot see a

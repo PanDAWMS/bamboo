@@ -1376,6 +1376,110 @@ class Proxy:
 # ---------------------------------------------------------------------------
 
 
+def test_an_arm_that_is_a_test_follows_the_names_it_tests(tmp_path):
+    """An exit is armed at the ``if`` that decides it, and that ``if`` has no value.
+
+    ``_value_of`` answers for assignments; ``_guard_reads`` answers for the
+    tests *above* a statement and correctly leaves the statement's own out.
+    Between them the one name that decides an exit went unfollowed --
+    ``copyArchive.py``'s ``if int(id) in xmlIDs: continue`` was explained by
+    the rows it was iterating and never by ``xmlIDs``.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        skipped = self.already_done()
+        for row in self.query():
+            if row in skipped:
+                continue
+""",
+    )
+
+    steps, _note = _walk(roots, file="sweeper", owner="run", lines=[5])
+
+    assert "skipped" in steps[0].reads
+    assert ("skipped", 3) in [(step.name, step.line) for step in steps]
+
+
+def test_a_container_filled_by_add_answers_with_what_went_into_it(tmp_path):
+    """``xmlIDs = set()`` is honest and useless; the ``.add`` is the answer.
+
+    A name reached only this way is assigned exactly once, to an empty
+    container, so stopping at the assignment tells a reader nothing about why
+    their row was skipped.  Twelve names in the corpus are reached this way.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        skipped = set()
+        for report in self.reports():
+            skipped.add(int(report.id))
+        for row in self.query():
+            if row in skipped:
+                continue
+""",
+    )
+
+    steps, _note = _walk(roots, file="sweeper", owner="run", lines=[7])
+
+    bound = [(step.name, step.line) for step in steps if step.kind == models.TRACE_BINDING]
+    assert ("skipped", 5) in bound
+    # And the walk goes on from it: what was added is the question's next hop.
+    assert any(step.name == "report" for step in steps)
+
+
+def test_a_container_the_code_also_assigns_keeps_the_assignment(tmp_path):
+    """The members are offered only where the assignments leave the reader nowhere.
+
+    A name given a value has that value to answer with, and listing every
+    ``append`` beside it would bury it.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        skipped = self.already_done()
+        skipped.add(9)
+        for row in self.query():
+            if row in skipped:
+                continue
+""",
+    )
+
+    steps, _note = _walk(roots, file="sweeper", owner="run", lines=[6])
+
+    bound = [(step.name, step.line) for step in steps if step.kind == models.TRACE_BINDING]
+    assert ("skipped", 3) in bound
+    assert ("skipped", 4) not in bound
+
+
+def test_a_key_named_with_no_default_is_not_a_value_the_container_holds(tmp_path):
+    """``d.setdefault(key)``'s last argument is the key, not what is in ``d``."""
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        seen = {}
+        for row in self.query():
+            seen.setdefault(row.site)
+        if seen:
+            return None
+""",
+    )
+
+    steps, _note = _walk(roots, file="sweeper", owner="run", lines=[6])
+
+    assert [(step.name, step.line) for step in steps if step.kind == models.TRACE_BINDING] == [
+        ("seen", 3)
+    ]
+
+
 def test_a_binding_below_the_arm_is_not_offered_as_an_explanation(tmp_path):
     """Pruning is by elimination, so a site that cannot have run on the way
     does not merely add noise -- it dilutes "one of these two" into "one of
@@ -1584,6 +1688,70 @@ class Sweeper:
     ours, _note = _walk(roots, file="sweeper", owner="run", lines=[7], reading_at=6)
 
     assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [3, 5]
+
+
+def test_a_write_in_an_except_body_cancels_nothing_outside_it(tmp_path):
+    """A handler runs only when something raised, and the path condition cannot see it.
+
+    ``reachable_when`` renders ``ast.If`` tests and nothing else, so an
+    assignment in an ``except`` read as one that always ran::
+
+        try:    nRanges = int(nRanges)
+        except: nRanges = 8
+
+    and ``getEventRanges`` was answered with "the request always asks for
+    eight".  Uncounted conditions make the rendered set smaller and the
+    subset test easier to pass, so this rule errs towards cancelling -- the
+    opposite direction from the rendering mismatch above it.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        limit = self.first_limit()
+        try:
+            limit = self.parse(limit)
+        except Exception:
+            limit = 8
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[9], reading_at=8)
+
+    # 5 is in the ``try`` body, which runs unless something raised first, so
+    # it does cancel 3.  7 is the handler and cancels neither.
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [5, 7]
+
+
+def test_a_write_in_the_same_except_body_still_cancels_the_one_above_it(tmp_path):
+    """Both are live only where the handler ran, and there the later one won.
+
+    Subtracting the *killed* write's handlers as well as the read's is what
+    keeps this: ``getTasksToRefine_JEDI`` rebuilds ``varMap`` three times
+    inside one ``except``, and a rule that looked only at the read would hand
+    a reader all three.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        try:
+            limit = self.parse()
+        except Exception:
+            limit = self.fallback()
+            limit = self.floor(limit)
+        for row in self.query():
+            row.status = limit
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[9], reading_at=8)
+
+    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [4, 7]
 
 
 def test_cancelling_never_leaves_a_name_with_no_binding_at_all(tmp_path):

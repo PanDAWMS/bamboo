@@ -161,7 +161,16 @@ def _operator(site: ast.AST) -> str:
     value.  ``ast.unparse`` renders the operator through a throwaway ``BinOp``
     rather than a table, so an operator the grammar gains is not one this has
     to be told about.
+
+    A container filled by :func:`_mutated_bindings` says which method filled
+    it.  ``xmlIDs = int(panda_id)`` would be a wrong answer twice over: the
+    name is not assigned there, and what it holds is every such value rather
+    than only this one.
     """
+    if isinstance(site, ast.Expr) and isinstance(site.value, ast.Call):
+        called = site.value.func
+        if isinstance(called, ast.Attribute) and called.attr in _FILLERS:
+            return f".{called.attr}"
     if not isinstance(site, ast.AugAssign):
         return "="
     blank = ast.Name(id="_", ctx=ast.Load())
@@ -648,6 +657,63 @@ def _walrus_bindings(func: ast.AST, name: str) -> list[ast.expr]:
     ]
 
 
+#: How a name that is never re-assigned still gets its members.  The same set
+#: :mod:`~bamboo.codemap.panda.recognizers.sqlwrite` carries a row on, less
+#: the removals -- those take a value out and so answer no question about
+#: where one came from.
+_FILLERS = ("append", "add", "update", "extend", "setdefault")
+
+
+#: The constructors an empty container is spelled with.
+_EMPTY_CALLS = ("set", "dict", "list", "tuple", "defaultdict", "OrderedDict")
+
+
+def _is_empty_container(node: ast.expr) -> bool:
+    """Whether *node* is a container literal with nothing in it."""
+    if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
+        return not node.elts
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    if isinstance(node, ast.Call) and not node.args and not node.keywords:
+        return isinstance(node.func, ast.Name) and node.func.id in _EMPTY_CALLS
+    return False
+
+
+def _mutated_bindings(func: ast.AST, name: str) -> list[ast.expr]:
+    """What ``<name>.add(x)`` and its kin put into a container.
+
+    A name filled this way is assigned exactly once, to an empty container,
+    and answering a reader with ``xmlIDs = set()`` is honest and useless.
+    ``copyArchive.py::main`` skips every job already in ``xmlIDs``, and what
+    is in it comes from ``xmlIDs.add(int(panda_id))`` over the rows of
+    ``taskBuffer.listJobOutputReport()`` -- which is the answer to why the
+    row was skipped.
+
+    Twelve (function, name) pairs in the corpus are reached only this way --
+    ``xmlIDs`` and ``sitesToDisableReassign`` in the same function,
+    ``checkedDS``, ``umCheckedIDs``, ``workers_queued``, ``statsPerShare``.
+    Kept narrow on purpose: a container that is assigned a *value* has that
+    value to answer with, and listing every ``append`` beside it would bury
+    it, so this is asked only where every assignment is an empty container.
+    """
+    found: list[ast.expr] = []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        held = node.func.value
+        if node.func.attr not in _FILLERS or not isinstance(held, ast.Name):
+            continue
+        if held.id != name or not node.args:
+            continue
+        # ``d.setdefault(key)`` names a key and no value; its last argument is
+        # the key, and reporting that as what the container holds would be a
+        # wrong answer rather than a short one.
+        if node.func.attr == "setdefault" and len(node.args) < 2:
+            continue
+        found.append(node.args[-1])
+    return found
+
+
 def _module_bindings(tree: ast.Module, name: str) -> list[ast.expr]:
     """Module-scope assignments to *name*, nothing nested.
 
@@ -902,6 +968,17 @@ class _Walk:
             return
         value = _value_of(statement)
         reads = _reads(value) if value is not None else []
+        # An arm is usually an assignment, and then its value is what to
+        # follow.  An exit is not: it is armed at the ``if`` that decides it,
+        # and ``_value_of`` has no value for one.  ``_guard_reads`` answers
+        # for the tests *above* a statement and correctly leaves this one out,
+        # so ``copyArchive.py``'s ``if int(id) in xmlIDs: continue`` was
+        # explained by the rows it was iterating and never by ``xmlIDs`` --
+        # the name that decided it.  Seventy of the corpus's exits were short
+        # of a hundred and two such names.
+        if isinstance(statement, (ast.If, ast.While)):
+            for name in _reads(statement.test):
+                _add(reads, name)
         for name in _guard_reads(statement):
             _add(reads, name)
         terminal, detail = (
@@ -1298,6 +1375,11 @@ class _Walk:
         bindings.extend(node.value for node, _slot in unpacked)
         bindings.extend(_with_bindings(frame.func, name))
         bindings.extend(_walrus_bindings(frame.func, name))
+        # Last, and only where the assignments leave the reader nowhere: a
+        # container that is assigned a value has that value to answer with,
+        # and the members would be noise beside it.
+        if bindings and all(_is_empty_container(node) for node in bindings):
+            bindings.extend(_mutated_bindings(frame.func, name))
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
         bindings, loops, caught = self._within(frame, bindings, loops, caught)

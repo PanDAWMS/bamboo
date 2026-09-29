@@ -777,6 +777,19 @@ def _binding_lines(func: ast.AST, name: str) -> dict[int, str]:
                 found[node.lineno] = "walrus"
         elif isinstance(node, ast.ExceptHandler) and node.name == name:
             found[node.lineno] = "except"
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            # ``xmlIDs.add(int(panda_id))`` gives the name its members without
+            # assigning it, and the walk offers those where the assignments
+            # are all empty containers.  A check that counts only assignments
+            # calls every one of those a fabrication -- twelve of them in the
+            # sample, all naming a line that does put a value there.
+            held = node.func.value
+            if (
+                node.func.attr in trace_mod._FILLERS
+                and isinstance(held, ast.Name)
+                and held.id == name
+            ):
+                found[node.lineno] = f".{node.func.attr}"
     return found
 
 
