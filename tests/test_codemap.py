@@ -28,6 +28,7 @@ from bamboo.codemap.models import (
     AnnotationAudit,
     BoundaryNode,
     Branch,
+    EntityNode,
     EntryPoint,
     EnumerationWrite,
     FilterStageNode,
@@ -8761,8 +8762,17 @@ def _movers(
     selects: list[str],
     stops: list[str] = (),
     conditions: list[str] = (),
+    tables: list[str] = ("jobsActive4",),
+    stop_statement: int = 7,
+    stop_reads: list[str] = ("jobsActive4",),
 ) -> MapFragment:
-    """A junction guarding on *guard* and one statement, in one function."""
+    """A junction guarding on *guard* and one statement, in one function.
+
+    The statement runs on line 7 and reads *tables*; each of *stops* is a stop
+    in the statement on *stop_statement* reading *stop_reads* -- line 7 by
+    default, so the statement's own node carries it.  Two kinds of row are
+    named, jobs and tasks, so a statement on the other kind can be asked about.
+    """
     fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
     fragment.subjects.append(
         SubjectNode(
@@ -8772,6 +8782,16 @@ def _movers(
             spec_class="JobSpec",
             attribute="jobStatus",
         )
+    )
+    fragment.entities.extend(
+        EntityNode(
+            name=table.lower(),
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            spec_class=spec,
+            tables=[table],
+        )
+        for table, spec in (("jobsActive4", "JobSpec"), ("JEDI_Tasks", "JediTaskSpec"))
     )
     fragment.junctions.append(
         JunctionNode(
@@ -8788,12 +8808,20 @@ def _movers(
             owner="x.py::getJobs",
             selects=selects,
             conditions=list(conditions),
-            unresolved=list(stops),
+            tables=list(tables),
+            unresolved=list(stops) if stop_statement == 7 else [],
         )
     )
     fragment.reading_stops.extend(
-        ReadingStop(reason="a fragment of the statement has no text of its own",
-                    detail=stop, file="x.py", owner="x.py::getJobs", line=5)
+        ReadingStop(
+            reason="a fragment of the statement has no text of its own",
+            detail=stop,
+            file="x.py",
+            owner="x.py::getJobs",
+            line=stop_statement - 2,
+            statement=stop_statement,
+            reads=list(stop_reads),
+        )
         for stop in stops
     )
     return fragment
@@ -8811,33 +8839,36 @@ def test_gate_catches_a_function_that_guards_on_a_value_and_asks_for_nothing():
     assert not result.passed
     assert "x.py::getJobs" in result.failures[0]
     assert "JobSpec.jobStatus=activated" in result.failures[0]
+    assert gates.MOVER_ASKS_NOTHING in result.failures[0]
 
 
-def test_a_function_that_asks_by_another_key_is_not_a_disagreement():
-    """``throttleJobsInPausedTasks_JEDI`` finds its jobs by ``jediTaskID`` and
-    requires ``jobStatus=activated`` of them.
+def test_a_function_whose_query_on_these_rows_asks_by_other_terms_is_an_answer():
+    """``removeFilesIndexInconsistent_JEDI`` reads its files for ``lost`` and
+    requires ``ready`` of the one it writes.
 
-    The status is the compare-and-set, not the index.  A correction to what
-    this gate was planned to assert, found by reading the three differences it
-    first failed on -- all three were this, and none was a gap.
+    The status is the compare-and-set, not what the rows were asked for by,
+    and every statement on those rows was read -- so the map can say why the
+    two lists differ, and it is not a gap.
     """
     fragment = _movers(
         "jobStatus=activated", selects=[], conditions=["jediTaskID=:jediTaskID@9"]
     )
 
     result = gates.movers_of_a_value_agree(fragment)
+    (difference,) = gates.mover_differences(fragment)
 
     assert result.passed
+    assert difference.reason == gates.MOVER_OTHER_TERMS
+    assert difference.where == "@7"
 
 
-def test_a_statement_read_only_in_part_is_a_reason_and_not_a_disagreement():
-    """The same difference, with the map saying why it has it.
+def test_a_statement_read_only_in_part_is_a_gap_and_fails_the_gate():
+    """The same difference, with the map's own statement read in part.
 
-    Zero difference is not the target: ``getJobs`` really does select in one
-    statement and require in another, and a rule forcing the lists together
-    would have to invent one of them.  What the gate asserts is that a name on
-    one list and not the other has a reason -- and "its own query was read
-    only in part" is the reason this round exists to record.
+    This used to pass as "a reason", with a count in the note.  It is a
+    reason -- and it is the map's, not PanDA's: what the statement selects on
+    is not all of what it selects on, so the value the guard requires may be
+    exactly the part nobody read.  A work item, and named as one.
     """
     fragment = _movers(
         "jobStatus=activated",
@@ -8847,8 +8878,116 @@ def test_a_statement_read_only_in_part_is_a_reason_and_not_a_disagreement():
 
     result = gates.movers_of_a_value_agree(fragment)
 
+    assert not result.passed
+    assert gates.MOVER_PARTIAL in result.failures[0]
+    assert "(@7)" in result.failures[0]
+
+
+def test_a_stop_in_a_statement_with_no_node_names_that_statement():
+    """``getJobs``: the ``SELECT`` that picks the pilot's jobs runs on line 2391,
+    its ``WHERE`` is a fragment nobody could render, and so it has no node --
+    while the function's other query, on ``sent``, was read in full.
+
+    Judged per function, the full read of the *other* statement excused it.
+    Judged per statement, the one that stopped is named with what stopped it.
+    """
+    fragment = _movers(
+        "jobStatus=activated",
+        selects=["JobSpec.jobStatus=sent"],
+        conditions=["modificationTime>:modificationTime@5"],
+        stops=["sql_where_clause", "sorting_sql"],
+        stop_statement=2391,
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+    (difference,) = gates.mover_differences(fragment)
+
+    assert not result.passed
+    assert difference.reason == gates.MOVER_UNNODED
+    assert difference.where == "@2391 sql_where_clause, sorting_sql"
+
+
+def test_a_stop_in_a_write_says_nothing_about_which_rows_were_picked_up():
+    """A precondition whose bind nothing fills, or an ``INSERT``'s
+    ``bindValuesExpression()``, is a gap in reading a write.
+
+    Seven of the eight functions the gate used to excuse as "read only in
+    part" had stopped only there.  A stop that reads no table neither excuses
+    a difference nor accuses one.
+    """
+    fragment = _movers(
+        "jobStatus=activated",
+        selects=["JobSpec.jobStatus=sent"],
+        stops=["FileSpec.bindValuesExpression(useSeq=True)"],
+        stop_statement=40,
+        stop_reads=[],
+    )
+
+    (difference,) = gates.mover_differences(fragment)
+
+    assert difference.reason == gates.MOVER_OTHER_TERMS
+
+
+def test_a_statement_on_another_kind_of_row_does_not_decide():
+    """``throttleJobsInPausedTasks_JEDI`` asks for paused *tasks* and requires
+    ``activated`` of the *jobs* it writes.
+
+    The task query was read in full, and it is not a statement about jobs, so
+    it answers nothing about which jobs were picked up.  What the map can say
+    is that it holds no query here on jobs at all -- and it says that, rather
+    than the key it cannot see.
+    """
+    fragment = _movers(
+        "jobStatus=activated",
+        selects=["JediTaskSpec.status=paused"],
+        tables=["JEDI_Tasks"],
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+    (difference,) = gates.mover_differences(fragment)
+
     assert result.passed
-    assert "1 difference(s) carry a reason" in result.note
+    assert difference.reason == gates.MOVER_READS_NONE
+    assert difference.where == ""
+
+
+def test_a_stop_on_a_table_the_map_cannot_place_counts_as_a_gap():
+    """A table no entity names could be any kind of row, so a stop in a query
+    on it is not allowed to be read as "about something else".  The direction
+    is chosen: a stop the map cannot place errs towards being called a gap.
+    """
+    fragment = _movers(
+        "jobStatus=activated",
+        selects=[],
+        conditions=["jediTaskID=:jediTaskID@9"],
+        stops=["build_where_clause()"],
+        stop_statement=90,
+        stop_reads=["{}.jobs"],
+    )
+
+    (difference,) = gates.mover_differences(fragment)
+
+    assert difference.reason == gates.MOVER_UNNODED
+
+
+def test_a_query_joining_a_table_the_map_cannot_place_is_not_taken_for_one_on_these_rows():
+    """``throttleJobsInPausedTasks_JEDI`` asks for paused tasks through a join
+    with ``JEDI_AUX_Status_MinTaskID``, which no entity names.
+
+    An unplaced table may be anything, and for a *gap* that is enough to count
+    it.  For an answer it is not: "every query here on jobs was read in full
+    and asks by other terms" is a claim about a job query, and the function
+    runs none.
+    """
+    fragment = _movers(
+        "jobStatus=activated",
+        selects=["JediTaskSpec.status=paused"],
+        tables=["JEDI_AUX_Status_MinTaskID", "JEDI_Tasks"],
+    )
+
+    (difference,) = gates.mover_differences(fragment)
+
+    assert difference.reason == gates.MOVER_READS_NONE
 
 
 def test_gate_catches_a_lead_to_a_junction_the_map_does_not_hold():

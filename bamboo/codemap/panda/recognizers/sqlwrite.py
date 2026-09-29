@@ -293,6 +293,14 @@ def extract(
                 if key in seen:
                     continue
                 seen.add(key)
+                # Which rows the statement reads, so a stop can be told apart
+                # by whether it is in a query at all.  A gap in the ``VALUES``
+                # of an ``INSERT`` and a gap in a ``SELECT``'s ``WHERE`` are the
+                # same reason and different answers to "which rows did this
+                # function pick up".
+                read_tables = sorted(
+                    {table for verb, table in _table_verbs(run.sql) if verb == "read"}
+                )
                 stopped.extend(
                     ReadingStop(
                         reason=stop.reason,
@@ -300,6 +308,8 @@ def extract(
                         file=module.rel_path,
                         owner=f"{module.rel_path}::{func.name}",
                         line=stop.line,
+                        statement=run.call.lineno,
+                        reads=read_tables,
                     )
                     for stop in run.unresolved
                 )
@@ -317,6 +327,9 @@ def extract(
                         )
                         preconditions.append(settled)
                         if not done and ":" in term:
+                            # ``reads`` left empty whatever else the text
+                            # holds: this is the write's own guard, and a
+                            # subquery beside it is not what failed to settle.
                             stopped.append(
                                 ReadingStop(
                                     reason=PRECONDITION_BIND_UNSETTLED,
@@ -324,6 +337,7 @@ def extract(
                                     file=module.rel_path,
                                     owner=f"{module.rel_path}::{func.name}",
                                     line=run.call.lineno,
+                                    statement=run.call.lineno,
                                 )
                             )
                     # A name nobody could read is not a table that holds no

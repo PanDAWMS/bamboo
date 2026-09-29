@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
@@ -519,6 +519,199 @@ def bind_windows_are_known(fragment: MapFragment) -> GateResult:
 #: unsettled ones still spell a bind and are skipped here by not matching.
 _SETTLED_GUARD = re.compile(r"^([\w.]+)\s*=\s*([^:\s][^\s]*)$")
 
+#: Why a function whose write requires a value of the row is not among the
+#: statements that select on that value.  Judged from the statements of that
+#: function that read *the same kind of row* the guard is on -- see
+#: :func:`mover_differences`.  The first two are the map's own gaps and are
+#: work items; the third is what this gate was built to catch; the last two
+#: are answers.
+MOVER_UNNODED = "a statement here that reads these rows stopped being read, and has no node"
+MOVER_PARTIAL = "a statement here that reads these rows was read only in part"
+MOVER_ASKS_NOTHING = (
+    "every statement here that reads these rows was read in full, and asks for nothing"
+)
+MOVER_OTHER_TERMS = (
+    "every statement here that reads these rows was read in full, and asks by other"
+    " terms -- the value is the write's own compare-and-set"
+)
+MOVER_READS_NONE = (
+    "nothing the map holds here reads these rows -- the write finds them by its own"
+    " WHERE, or by what the caller hands it"
+)
+#: The reasons that are the map's gaps rather than answers about PanDA.
+MOVER_DEFECTS = (MOVER_UNNODED, MOVER_PARTIAL)
+#: The reasons the gate fails on.
+MOVER_FAILURES = (*MOVER_DEFECTS, MOVER_ASKS_NOTHING)
+#: Worst first, for a report that lists them.
+MOVER_ORDER = (
+    MOVER_UNNODED, MOVER_PARTIAL, MOVER_ASKS_NOTHING, MOVER_OTHER_TERMS, MOVER_READS_NONE
+)
+
+
+class MoverDifference(NamedTuple):
+    """One function whose write requires *value* and whose queries do not ask for it."""
+
+    subject: str
+    value: str
+    owner: str
+    reason: str
+    where: str = ""
+
+
+def _guarded_pairs(fragment: MapFragment) -> dict[tuple[str, str], set[str]]:
+    """``{(subject, value): the owners whose write requires it of the row}``."""
+    # The column a term names is SQL's spelling; the subject's is the spec
+    # class's.  Matched on the lowered attribute, which is the join the read
+    # side already makes when it turns a predicate into a ``selects`` entry.
+    named = {
+        (subject.spec_class, subject.attribute.lower()): subject.name
+        for subject in fragment.subjects
+    }
+    guards: dict[tuple[str, str], set[str]] = {}
+    for junction in fragment.junctions:
+        spec = junction.subject.partition(".")[0]
+        for branch in junction.branches:
+            for term in branch.row_precondition:
+                match = _SETTLED_GUARD.match(term.strip())
+                if match is None:
+                    continue
+                column, value = match.groups()
+                subject = named.get((spec, column.lower()))
+                if subject is not None:
+                    guards.setdefault((subject, value), set()).add(junction.owner)
+    return guards
+
+
+def _unsettled_guards(fragment: MapFragment) -> int:
+    """How many ``(owner, term)`` guards still spell a bind, so were not compared."""
+    return len(
+        {
+            (junction.owner, term)
+            for junction in fragment.junctions
+            for branch in junction.branches
+            for term in branch.row_precondition
+            if ":" in term
+        }
+    )
+
+
+def mover_differences(fragment: MapFragment) -> list[MoverDifference]:
+    """Every function whose write requires a value its queries do not ask for, and why.
+
+    The difference :func:`movers_of_a_value_agree` asserts about, with the
+    reason worked out **per statement, and only from the statements that read
+    the kind of row the guard is on**.  The reasons used to be worked out per
+    function, which answered a different question: ``getJobs`` was excused as
+    "read only in part" on the strength of any stop anywhere in it, and seven
+    of the eight functions excused that way had stopped only in a *write* -- a
+    precondition bind, an ``INSERT``'s ``bindValuesExpression()`` -- which
+    says nothing about which rows the function picked up.  ``getJobs``'s own
+    gap was one statement, the ``SELECT`` on line 2391, and the function-level
+    reading could not name it.
+
+    **The kind of row is the spec class, not the table,** because the junction
+    does not carry the table its write went to, and a job read from
+    ``jobsDefined4`` beside a write to ``jobsActive4`` is still a job.
+
+    **A table the map cannot place counts one way for a gap and the other for
+    an answer.**  A table no entity names -- ``filesTable_Arch``, or one
+    spelled through an interpolation -- could be any kind, so a stop in a
+    statement on it, or a node read in part, is counted as this kind: an
+    unplaced gap errs towards being called a gap.  An answer needs the kind
+    *known*: ``throttleJobsInPausedTasks_JEDI``'s task query joins
+    ``JEDI_AUX_Status_MinTaskID``, which no entity names, and counting that as
+    "a statement on jobs, read in full, asking by other terms" claimed a job
+    query the function does not run.
+
+    **Nothing here claims a key.**  The read side stores no statement that
+    asks by a key alone, and a write's ``WHERE`` keeps only the terms on
+    columns it also writes, so "finds the row by another key" is not something
+    this map can see.  ``getJobs``'s ``UPDATE`` finds its row by ``PandaID``
+    too, and a rule keyed on that would excuse the one function this gate
+    exists for.  What *can* be seen is whether every statement of the function
+    that reads these rows was read, and that is what the reasons say.
+    """
+    selects: dict[tuple[str, str], set[str]] = {}
+    for site in fragment.read_sites:
+        for pair in site.selects:
+            subject, _sep, value = pair.partition("=")
+            selects.setdefault((subject, value), set()).add(site.owner)
+    kind_of_table: dict[str, Optional[str]] = {}
+    for entity in fragment.entities:
+        for table in entity.tables:
+            kind_of_table[table.lower()] = entity.spec_class
+    spec_of = {subject.name: subject.spec_class for subject in fragment.subjects}
+    sites_of: dict[str, list] = {}
+    for site in fragment.read_sites:
+        sites_of.setdefault(site.owner, []).append(site)
+    stops_of: dict[str, list] = {}
+    for stop in fragment.reading_stops:
+        stops_of.setdefault(stop.owner, []).append(stop)
+
+    def may_be(tables: list[str], spec: str) -> bool:
+        return any(
+            "{" in table
+            or table.lower() not in kind_of_table
+            or kind_of_table[table.lower()] == spec
+            for table in tables
+        )
+
+    def known_to_be(tables: list[str], spec: str) -> bool:
+        return any(
+            "{" not in table and kind_of_table.get(table.lower()) == spec for table in tables
+        )
+
+    found: list[MoverDifference] = []
+    for (subject, value), owners in sorted(_guarded_pairs(fragment).items()):
+        spec = spec_of.get(subject, subject.partition(".")[0])
+        for owner in sorted(owners - selects.get((subject, value), set())):
+            maybe = [s for s in sites_of.get(owner, []) if may_be(s.tables, spec)]
+            sites = [s for s in maybe if known_to_be(s.tables, spec)]
+            noded = {s.anchor.line_start for s in sites_of.get(owner, [])}
+            # A stop in a statement that reads rows of this kind.  A stop with
+            # no tables read is in a write, and was never about this.
+            stopped = [
+                stop
+                for stop in stops_of.get(owner, [])
+                if stop.reads and may_be(stop.reads, spec)
+            ]
+            unnoded = [stop for stop in stopped if stop.statement not in noded]
+            # The node's own record of the gap, and the build's -- the same
+            # fact twice, so either is enough.
+            partial = sorted(
+                {s.anchor.line_start for s in maybe if s.unresolved}
+                | {stop.statement for stop in stopped if stop.statement in noded}
+            )
+            if unnoded:
+                reason = MOVER_UNNODED
+                where = _stops_where(unnoded)
+            elif partial:
+                reason = MOVER_PARTIAL
+                where = ", ".join(f"@{line}" for line in partial)
+            elif sites:
+                reason = (
+                    MOVER_OTHER_TERMS
+                    if any(s.selects or s.conditions for s in sites)
+                    else MOVER_ASKS_NOTHING
+                )
+                where = ", ".join(f"@{s.anchor.line_start}" for s in sites)
+            else:
+                reason, where = MOVER_READS_NONE, ""
+            found.append(MoverDifference(subject, value, owner, reason, where))
+    return found
+
+
+def _stops_where(stops: list) -> str:
+    """``@2391 sql_where_clause, sorting_sql`` -- each statement once, with what stopped it."""
+    by_statement: dict[int, list[str]] = {}
+    for stop in stops:
+        held = by_statement.setdefault(stop.statement, [])
+        if stop.detail not in held:
+            held.append(stop.detail)
+    return "; ".join(
+        f"@{line} {', '.join(details)}" for line, details in sorted(by_statement.items())
+    )
+
 
 def movers_of_a_value_agree(fragment: MapFragment) -> GateResult:
     """(i) Two readings of "what moves a row off value *v*", and their difference.
@@ -533,82 +726,40 @@ def movers_of_a_value_agree(fragment: MapFragment) -> GateResult:
     statement and requires it in the compare-and-set of another, and a rule
     that forced the lists together would have to invent one of them.  What is
     assertable is that every name on one list and not the other has a reason
-    the map can give, and the reasons are about the map rather than about
-    PanDA:
+    -- see :func:`mover_differences` for the five, which are judged per
+    statement.
 
-    * one of this function's statements was read only in part, so what it
-      selects on is not all of what it selects on;
-    * the function has no statement recorded at all, which after the read
-      side's own census means the query was there and unreadable;
-    * its statements ask for the row by another key.  ``throttleJobsInPaused
-      Tasks_JEDI`` finds its jobs by ``jediTaskID`` and requires
-      ``jobStatus=activated`` of them; the status is the compare-and-set, not
-      the index.  Three of the corpus's differences are this and none of them
-      is a gap -- which is a correction to what this gate was planned to
-      assert, found by reading the three it first failed on.
-
-    A difference with none of the three is a failure: the map holds a
-    statement for the function, read it in full, and that statement asks for
-    nothing at all.
+    **Two of the reasons are the map's own gaps, and this gate fails on
+    them.**  It used to pass with a count in the note, which is the form a
+    work item takes when nobody is meant to find it: ``getJobs`` sat in that
+    count, unnamed, for the round the gate was added to expose it.  The third
+    failure is the one the gate was first written for: every statement that
+    reads the row was read in full and asks for nothing at all.
     """
-    selects: dict[tuple[str, str], set[str]] = {}
-    for site in fragment.read_sites:
-        for pair in site.selects:
-            subject, _sep, value = pair.partition("=")
-            selects.setdefault((subject, value), set()).add(site.owner)
-    # The column a term names is SQL's spelling; the subject's is the spec
-    # class's.  Matched on the lowered attribute, which is the join the read
-    # side already makes when it turns a predicate into a ``selects`` entry.
-    named = {
-        (subject.spec_class, subject.attribute.lower()): subject.name
-        for subject in fragment.subjects
-    }
-    partly_read = {stop.owner for stop in fragment.reading_stops}
-    recorded = {site.owner for site in fragment.read_sites}
-    # Asks by something.  Not "has a statement": a statement the map recorded
-    # with no condition and no value is one it read as filtering on nothing,
-    # and that is the case this gate is left able to catch.
-    asks_by_a_key = {
-        site.owner
-        for site in fragment.read_sites
-        if site.selects or site.conditions
-    }
-    guards: dict[tuple[str, str], set[str]] = {}
-    for junction in fragment.junctions:
-        spec = junction.subject.partition(".")[0]
-        for branch in junction.branches:
-            for term in branch.row_precondition:
-                match = _SETTLED_GUARD.match(term.strip())
-                if match is None:
-                    continue
-                column, value = match.groups()
-                subject = named.get((spec, column.lower()))
-                if subject is not None:
-                    guards.setdefault((subject, value), set()).add(junction.owner)
-    failures: list[str] = []
-    explained = 0
-    for (subject, value), owners in sorted(guards.items()):
-        for owner in sorted(owners - selects.get((subject, value), set())):
-            if owner in partly_read or owner not in recorded or owner in asks_by_a_key:
-                explained += 1
-                continue
-            failures.append(
-                f"{owner} only lands on a row where {subject}={value},"
-                " and no statement the map holds selects on it"
-            )
+    guards = _guarded_pairs(fragment)
+    differences = mover_differences(fragment)
+    failures = [
+        f"{d.owner} only lands on a row where {d.subject}={d.value} -- {d.reason}"
+        + (f" ({d.where})" if d.where else "")
+        for d in differences
+        if d.reason in MOVER_FAILURES
+    ]
+    answered = Counter(d.reason for d in differences if d.reason not in MOVER_FAILURES)
     return GateResult(
         gate="movers-of-a-value-agree",
         passed=not failures,
         checked=len(guards),
         unit="guarded (subject, value) pairs",
         question="does every function that guards on a value have a reason for not selecting on it?",
-        finding="a junction requires a value of the row it writes, and nothing in the map asks for that row",
+        finding="a junction requires a value of the row it writes, and the map cannot say which statement picks that row",
         failures=failures,
         note=(
-            f"{explained} difference(s) carry a reason: the statement was read "
-            "only in part, the map holds none for that function, or it asks "
-            "for the row by another key. The two readings are not meant to "
-            "coincide."
+            f"{len(differences)} difference(s); {sum(answered.values())} carry an "
+            "answer rather than a gap"
+            + "".join(f" -- {count}: {reason}" for reason, count in answered.most_common())
+            + f". {_unsettled_guards(fragment)} guard(s) still name a bind nothing"
+            " here settles, and are not compared. The two readings are not meant"
+            " to coincide."
         ),
     )
 

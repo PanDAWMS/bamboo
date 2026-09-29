@@ -936,6 +936,30 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
         if len(where) > top:
             click.echo(f"    … {len(where) - top} more function(s)")
 
+    differences = gates.mover_differences(fragment)
+    if differences:
+        # Every one by name, not folded to ``top``.  The gate beside this used
+        # to pass with the count in a note, and ``getJobs`` -- the statement
+        # it was added to expose -- was one of thirteen that nobody could see.
+        # The gaps are listed first because they are work; the answers are
+        # listed because an answer nobody can read is a claim nobody can check.
+        click.echo(
+            f"\nwho moves a value, read two ways: {len(differences)} function(s) whose "
+            "write requires a value its queries do not ask for"
+        )
+        for reason in gates.MOVER_ORDER:
+            here = [d for d in differences if d.reason == reason]
+            if not here:
+                continue
+            mark = "*" if reason in gates.MOVER_FAILURES else " "
+            click.echo(f"  {len(here):>4}{mark} {reason}")
+            for d in here:
+                click.echo(
+                    f"          {d.owner}  {d.subject}={d.value}"
+                    + (f"  {d.where}" if d.where else "")
+                )
+        click.echo("  * = a gap in the map, or a statement read in full that asks for nothing")
+
     # The slices with a gap and no reasons, said out loud rather than left to a
     # reader to notice by subtraction.  Each keeps its own notion of what a
     # candidate is, so a reason vocabulary for one does not transfer, and

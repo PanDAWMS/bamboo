@@ -1342,7 +1342,9 @@ class ReadingStop(BaseModel):
     filters on nothing, with no number anywhere moving.
 
     Not a node.  It is what the build could not say, and a map that stored its
-    own gaps as nodes would count them among what it covers.
+    own gaps as nodes would count them among what it covers.  For the same
+    reason ``diff`` does not compare these: it compares what the map claims,
+    and a build that stops somewhere new says so in its own report.
     """
 
     reason: str
@@ -1356,7 +1358,36 @@ class ReadingStop(BaseModel):
     )
     file: str = ""
     owner: str = ""
-    line: int = 0
+    line: int = Field(
+        default=0,
+        description=(
+            "Where the thing that stopped the reading is written -- the "
+            "fragment's line, which for ``getJobs`` is 2380, not the line the "
+            "statement runs on.  See ``statement``."
+        ),
+    )
+    statement: int = Field(
+        default=0,
+        description=(
+            "The line the statement runs on, which is the line a read site is "
+            "anchored at.  Without it a stop names a function and not a "
+            "statement, and a function-level answer is how "
+            "``movers-of-a-value-agree`` came to excuse ``getJobs`` as 'read "
+            "only in part' on the strength of a stop in a different statement "
+            "from the one it was asked about -- seven of the eight functions it "
+            "excused that way stopped only in a write."
+        ),
+    )
+    reads: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The tables the statement reads rows of, as the source spells them. "
+            "Empty for a statement that only writes: a precondition whose bind "
+            "nothing fills, or an ``INSERT``'s ``bindValuesExpression()``, is a "
+            "gap in reading a write, and says nothing about which rows a "
+            "function picked up."
+        ),
+    )
 
 
 class CoverageStat(BaseModel):
