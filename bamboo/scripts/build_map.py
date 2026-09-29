@@ -38,7 +38,7 @@ import click
 
 from bamboo.codemap import gates
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
-from bamboo.codemap.models import MapFragment
+from bamboo.codemap.models import SCOPE_OF_STOPS, MapFragment
 from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 from bamboo.codemap.store import store_fragment
@@ -921,6 +921,9 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
             f"\nwhere the reading stopped: {len(stops)} in "
             f"{len(where)} function(s)"
         )
+        # The scope, said where the number is: a count read as "where the map
+        # stops" is taken for all of it, and it is the SQL reader's alone.
+        click.echo(f"  {SCOPE_OF_STOPS}")
         for reason, count in Counter(r.reason for r in stops).most_common():
             here = [r for r in stops if r.reason == reason]
             files = Counter(r.file for r in here).most_common(1)[0]

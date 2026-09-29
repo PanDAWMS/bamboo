@@ -256,6 +256,11 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
     )
     if follow.gaps_note and (follow.selected_by or follow.guarded_by):
         click.echo(f"  where the map could not read them {follow.gaps_note}")
+    if follow.selected_by or follow.guarded_by:
+        # Beside the lists rather than under each gap: a list with no gap in
+        # it is read as complete, and it is complete only as far as the SQL
+        # reader goes.
+        click.echo(f"  what the map says it could not read {models_mod.SCOPE_OF_STOPS}")
     if actors:
         for index, owner in enumerate(actors):
             label = heading if index == 0 else " " * 33

@@ -1366,6 +1366,15 @@ class ValueEnumNode(BaseNode):
         return f"{namespace}.{constant}"
 
 
+#: What a count of :class:`ReadingStop` covers, said wherever one is printed:
+#: a count read as "where the map stops" is taken for all of it, and it is the
+#: SQL reader's alone.
+SCOPE_OF_STOPS = (
+    "(the reading of SQL statements only: a method's writes, SiteMapper and "
+    "calls out of PanDA are not in it)"
+)
+
+
 class ReadingStop(BaseModel):
     """One place the reading of one statement stopped, and what it stopped on.
 
