@@ -598,6 +598,138 @@ def test_a_statement_read_only_in_part_says_so_beside_its_conditions():
     assert "not read here  jobStatus IN ({})" in output
 
 
+_GET_JOBS = "taskbuffer/db_proxy_mods/job_complex_module.py::getJobs"
+_EXEC_COMMAND = "taskbuffer/db_proxy_mods/task_complex_module.py::getTasksToExecCommand_JEDI"
+_THROTTLE_USER = "taskbuffer/db_proxy_mods/job_standalone_module.py::throttleUserJobs"
+
+
+def _guarded_fragment() -> MapFragment:
+    """``activated``, selected by one query and required by three writes.
+
+    ``getJobs`` moves it on to ``sent`` and no query of its is in the map;
+    ``getTasksToExecCommand_JEDI`` requires it through an ``IN`` list and only
+    on a write of another column; ``throttleUserJobs`` both selects it and
+    requires it.  One write guards on a negation, which requires nothing.
+    """
+    return MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                name="JobSpec.jobStatus",
+                selected=["activated"],
+                selected_by={"activated": [_THROTTLE_USER]},
+            )
+        ],
+        junctions=[
+            _junction(
+                _GET_JOBS,
+                Branch(outcome="sent", line=2442, row_precondition=["jobStatus=activated"]),
+                log_files=[OTHER_LOG],
+                subject="JobSpec.jobStatus",
+            ),
+            _junction(
+                _GET_JOBS,
+                Branch(
+                    outcome="runtime(timeNow)",
+                    line=2444,
+                    row_precondition=["jobStatus=activated"],
+                ),
+                subject="JobSpec.modificationTime",
+            ),
+            _junction(
+                _EXEC_COMMAND,
+                Branch(
+                    outcome="runtime(x)",
+                    line=4700,
+                    row_precondition=["jobStatus IN (activated,throttled)"],
+                ),
+                subject="JobSpec.commandToPilot",
+            ),
+            _junction(
+                _THROTTLE_USER,
+                Branch(outcome="throttled", line=90, row_precondition=["jobStatus=activated"]),
+                subject="JobSpec.jobStatus",
+            ),
+            _junction(
+                "x.py::updateJobStatus",
+                Branch(outcome="failed", line=12, row_precondition=["NOT jobStatus=:ngStatus"]),
+                subject="JobSpec.jobStatus",
+            ),
+        ],
+    )
+
+
+async def test_the_writes_that_require_the_value_are_named_beside_the_queries():
+    """``getJobs`` moves every ``activated`` job the pilot is sent, and the
+    answer for ``activated`` never named it: its ``SELECT`` is one the map
+    could not read, and the answer listed only queries.
+
+    The guard was in the map all along -- ``jobStatus=activated`` on its
+    ``UPDATE`` -- and now answers the half of "what moves it on" a query
+    cannot.  A negated guard requires nothing and moves nothing off the value,
+    so it is not here.
+    """
+    strategy = await strategy_mod.derive(
+        await _map(_guarded_fragment()),
+        Symptom(subject="JobSpec.jobStatus", observed="activated"),
+    )
+
+    guarded = {entry.owner: entry for entry in strategy.follow_up.guarded_by}
+    assert sorted(guarded) == sorted([_EXEC_COMMAND, _THROTTLE_USER, _GET_JOBS])
+    assert guarded[_GET_JOBS].outcomes == ["sent"]
+    assert guarded[_GET_JOBS].lines == [2442]
+    assert guarded[_GET_JOBS].writes == ["JobSpec.jobStatus", "JobSpec.modificationTime"]
+    assert guarded[_GET_JOBS].also_selects is False
+    assert guarded[_THROTTLE_USER].also_selects is True
+    assert guarded[_EXEC_COMMAND].outcomes == []
+    assert guarded[_EXEC_COMMAND].lines == [4700]
+    assert guarded[_EXEC_COMMAND].guards == ["jobStatus IN (activated,throttled)"]
+
+
+async def test_the_guard_block_says_which_half_each_mover_came_from():
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_follow_up
+
+    strategy = await strategy_mod.derive(
+        await _map(_guarded_fragment()),
+        Symptom(subject="JobSpec.jobStatus", observed="activated"),
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_follow_up(strategy, False))
+    output = runner.invoke(command).output
+
+    assert "1 query select it [read], 3 write(s) require it [guard], 1 of them both" in output
+    assert "which write requires it [guard] job_complex_module.py::getJobs" in output
+    assert ":2442 → sent   only lands on a row where jobStatus=activated" in output
+    assert ":4700, writing JobSpec.commandToPilot   only lands on a row where" in output
+    assert "throttleUserJobs   also selects it [read], above" in output
+
+
+async def test_the_gate_and_the_answer_read_a_guard_the_same_way():
+    """Two readers of one guard drift, and the gate matched ``col=value``
+    alone while the answer is asked to show ``IN`` lists too.  Every
+    ``(subject, value)`` the gate compares names the same writers the answer
+    lists, so neither can widen without the other.
+    """
+    from bamboo.codemap import gates
+
+    fragment = _guarded_fragment()
+    code_map = await _map(fragment)
+    subject = await code_map.subject("JobSpec.jobStatus")
+
+    for (name, value), owners in gates._guarded_pairs(fragment).items():
+        assert name == "JobSpec.jobStatus"
+        answered = {junction.owner for junction, _b, _t in await code_map.guarded_on(subject, value)}
+        assert answered == owners, value
+    assert set(gates._guarded_pairs(fragment)) == {
+        ("JobSpec.jobStatus", "activated"),
+        ("JobSpec.jobStatus", "throttled"),
+    }
+
+
 _METRICS = "daemons/scripts/metric_collector.py::analy_pmerge_jobs_wait_time"
 _GETTER_READER = "taskbuffer/db_proxy_mods/task_standalone_module.py::checkDuplication_JEDI"
 

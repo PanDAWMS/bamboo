@@ -41,6 +41,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
     ValueEnumNode,
+    required_values,
 )
 from bamboo.codemap.panda import attribution, pathcond, promotion, sql, values
 from bamboo.codemap.panda.recognizers import (
@@ -8988,6 +8989,43 @@ def test_a_query_joining_a_table_the_map_cannot_place_is_not_taken_for_one_on_th
     (difference,) = gates.mover_differences(fragment)
 
     assert difference.reason == gates.MOVER_READS_NONE
+
+
+@pytest.mark.parametrize(
+    "term, expected",
+    [
+        ("jobStatus=activated", ("jobstatus", ["activated"])),
+        ("status='ready'", ("status", ["ready"])),
+        ("tab.jobStatus=activated", ("jobstatus", ["activated"])),
+        ("keepTrack=1", ("keeptrack", ["1"])),
+        ("jobStatus IN (activated,throttled)", ("jobstatus", ["activated", "throttled"])),
+        ("status IN ('ready','running','scouting')", ("status", ["ready", "running", "scouting"])),
+        ("jobStatus=:oldJobStatus", None),
+        ("status IN (:st1,:st2)", None),
+        ("status IN ({})", None),
+        ("NOT jobStatus=:ngStatus", None),
+        ("status<>missing", None),
+        ("status NOT IN (a,b)", None),
+        ("NOT status IN (a,b)", None),
+        ("cloud IS NULL", None),
+        ("modificationTime>=x", None),
+    ],
+)
+def test_a_guard_is_read_for_the_values_it_requires(term, expected):
+    """A negation lands on a row holding almost anything, so it requires no
+    value; a bind, a hole and a comparison have no value to read off."""
+    assert required_values(term) == expected
+
+
+def test_a_guard_spelled_as_a_list_is_compared_too():
+    """``getTasksToExecCommand_JEDI`` requires ``jobStatus IN (activated,
+    throttled)``, and the gate matched ``col=value`` alone -- so a write that
+    moves activated jobs on a command was a mover of ``activated`` nowhere."""
+    fragment = _movers("jobStatus IN (activated,throttled)", selects=[])
+
+    pairs = sorted((d.subject, d.value) for d in gates.mover_differences(fragment))
+
+    assert pairs == [("JobSpec.jobStatus", "activated"), ("JobSpec.jobStatus", "throttled")]
 
 
 def test_gate_catches_a_lead_to_a_junction_the_map_does_not_hold():

@@ -234,6 +234,16 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
         f"  a re-evaluating trigger reaches  {repair}"
         + (f"  ({', '.join(follow.triggers)})" if follow.triggers else "")
     )
+    # Both halves of "what moves it on", counted before either is listed, so
+    # a reader who stops at the first list is told there is a second.
+    if follow.guarded_by:
+        both = sum(1 for entry in follow.guarded_by if entry.also_selects)
+        click.echo(
+            f"  what moves it on                 {len(follow.selected_by)} quer"
+            f"{'y' if len(follow.selected_by) == 1 else 'ies'} select it [read], "
+            f"{len(follow.guarded_by)} write(s) require it [guard]"
+            + (f", {both} of them both" if both else "")
+        )
     # A query where there is one: it is the statement that could have missed the
     # row, which is the question.  An update acts on the row by the same value
     # but is the picking up rather than a chance to have failed at it, so it is
@@ -321,6 +331,7 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
                     f"                                     and {others} other statement(s) "
                     "in this function, asking on other values"
                 )
+    _report_guarded(follow)
     if follow.selection_gates:
         click.echo(f"  what bounds that query's reach   {', '.join(follow.selection_gates)}")
         click.echo("                                   nothing in the map writes these")
@@ -344,6 +355,39 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
         follow.question, width=_WIDTH, initial_indent="  → ", subsequent_indent="    "
     ).splitlines():
         click.echo(line)
+
+
+def _report_guarded(follow) -> None:
+    """The writes that require the value -- the movers no query above can show.
+
+    Printed under the queries rather than merged into them, and marked, because
+    the two halves are different claims: a query is somewhere the row could
+    have been missed, a guarded write is somewhere it is moved on from, and
+    ``getJobs`` -- the pilot's whole job request -- is on this half only, since
+    its ``SELECT`` is one the map could not read.  A function on both halves
+    says so, so the two lists read as one set without a name counted twice.
+
+    Always shown, not folded under ``--full``: a list of movers cut short reads
+    as the whole of them, which is the failure this block exists to end.
+    """
+    for index, entry in enumerate(follow.guarded_by):
+        label = "  which write requires it [guard]" if index == 0 else " " * 33
+        click.echo(
+            f"{label} {strategy_mod.short_owner(entry.owner)}"
+            + ("   also selects it [read], above" if entry.also_selects else "")
+        )
+        where = ", ".join(f":{line}" for line in entry.lines) or "no line recorded"
+        moves = f" → {', '.join(entry.outcomes)}" if entry.outcomes else ""
+        if not entry.outcomes and entry.writes:
+            moves = f", writing {', '.join(entry.writes)}"
+        click.echo(
+            f"                                     {where}{moves}"
+            f"   only lands on a row where {' and '.join(entry.guards)}"
+        )
+        click.echo(
+            "                                     "
+            + (", ".join(entry.log_files) or "no log file names it")
+        )
 
 
 def _at(branch) -> str:

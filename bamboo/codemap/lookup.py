@@ -39,6 +39,7 @@ from bamboo.codemap.models import (
     TERM_STEP,
     TERM_VALUE,
     BoundaryNode,
+    Branch,
     EntityNode,
     FilterStageNode,
     JunctionNode,
@@ -50,6 +51,7 @@ from bamboo.codemap.models import (
     Symptom,
     ValueEnumNode,
     outcome_excludes,
+    required_values,
 )
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.models.graph_element import BaseNode, NodeType
@@ -265,6 +267,48 @@ class CodeMap:
                 for b in junction.branches
             )
         ]
+
+    async def guarded_on(
+        self, subject: SubjectNode, value: str
+    ) -> list[tuple[JunctionNode, list[Branch], list[str]]]:
+        """The writes that require *value* of *subject*'s column, and where they say so.
+
+        ``(junction, branches, terms)`` for every junction on a row of the
+        subject's kind whose ``row_precondition`` requires the value -- the
+        branches carrying the guard and the guard as the map stores it.  Any
+        subject's junction, not only *subject*'s: a guard is a ``WHERE`` term of
+        one ``UPDATE``, and every column that statement sets carries it, so the
+        status's own junction is not the only place it can be read from.
+
+        The same reading of a guard as ``movers-of-a-value-agree`` makes --
+        :func:`~bamboo.codemap.models.required_values`, matched on the lowered
+        attribute -- so the gate and the answer cannot disagree about who
+        requires a value.
+        """
+        column = subject.attribute.lower()
+        found: list[tuple[JunctionNode, list[Branch], list[str]]] = []
+        for junction in sorted(
+            await self._find(JunctionNode), key=lambda j: (j.owner, j.subject)
+        ):
+            if junction.subject.partition(".")[0] != subject.spec_class:
+                continue
+            branches: list[Branch] = []
+            terms: list[str] = []
+            for branch in junction.branches:
+                hits = [
+                    term
+                    for term in branch.row_precondition
+                    if (required := required_values(term)) is not None
+                    and required[0] == column
+                    and value in required[1]
+                ]
+                if not hits:
+                    continue
+                branches.append(branch)
+                terms.extend(term for term in hits if term not in terms)
+            if branches:
+                found.append((junction, branches, terms))
+        return found
 
     async def selection_gates_for(self, subject: str) -> list[str]:
         """Tables that bound which rows the queries selecting *subject* can see.

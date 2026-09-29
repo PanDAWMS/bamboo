@@ -28,7 +28,7 @@ from typing import NamedTuple, Optional
 from pydantic import BaseModel, Field
 
 from bamboo.codemap import evidence
-from bamboo.codemap.models import MapFragment
+from bamboo.codemap.models import MapFragment, required_values
 from bamboo.codemap.panda import values
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 
@@ -515,10 +515,6 @@ def bind_windows_are_known(fragment: MapFragment) -> GateResult:
     )
 
 
-#: ``jobStatus=activated`` -- a row precondition whose value is settled.  The
-#: unsettled ones still spell a bind and are skipped here by not matching.
-_SETTLED_GUARD = re.compile(r"^([\w.]+)\s*=\s*([^:\s][^\s]*)$")
-
 #: Why a function whose write requires a value of the row is not among the
 #: statements that select on that value.  Judged from the statements of that
 #: function that read *the same kind of row* the guard is on -- see
@@ -559,7 +555,12 @@ class MoverDifference(NamedTuple):
 
 
 def _guarded_pairs(fragment: MapFragment) -> dict[tuple[str, str], set[str]]:
-    """``{(subject, value): the owners whose write requires it of the row}``."""
+    """``{(subject, value): the owners whose write requires it of the row}``.
+
+    Read with :func:`~bamboo.codemap.models.required_values`, the same reading
+    ``derive-strategy`` answers "which write requires it" with -- so the gate
+    and the answer cannot come to disagree about what a guard says.
+    """
     # The column a term names is SQL's spelling; the subject's is the spec
     # class's.  Matched on the lowered attribute, which is the join the read
     # side already makes when it turns a predicate into a ``selects`` entry.
@@ -572,12 +573,14 @@ def _guarded_pairs(fragment: MapFragment) -> dict[tuple[str, str], set[str]]:
         spec = junction.subject.partition(".")[0]
         for branch in junction.branches:
             for term in branch.row_precondition:
-                match = _SETTLED_GUARD.match(term.strip())
-                if match is None:
+                required = required_values(term)
+                if required is None:
                     continue
-                column, value = match.groups()
-                subject = named.get((spec, column.lower()))
-                if subject is not None:
+                column, values = required
+                subject = named.get((spec, column))
+                if subject is None:
+                    continue
+                for value in values:
                     guards.setdefault((subject, value), set()).add(junction.owner)
     return guards
 

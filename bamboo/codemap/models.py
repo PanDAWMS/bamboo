@@ -507,6 +507,43 @@ def outcome_excludes(outcome: Optional[str], value: str) -> bool:
         return True
     return any(chunk and chunk not in value for chunk in literals[1:-1])
 
+
+#: ``jobStatus=activated``, ``status='ready'`` -- a settled equality.
+_REQUIRES_ONE = re.compile(r"^([\w.]+)\s*=\s*('?)([^:\s'(){},]+)\2$")
+#: ``jobStatus IN (activated,throttled)`` -- a settled list, quoted or not.
+_REQUIRES_ANY = re.compile(r"^([\w.]+)\s+IN\s*\(([^():{}]+)\)$", re.IGNORECASE)
+
+
+def required_values(term: str) -> Optional[tuple[str, list[str]]]:
+    """``(column, values)`` a row precondition requires the row to hold, or ``None``.
+
+    One reading of a guard for everything that compares guards with anything,
+    because two readings drift: the gate matched ``col=value`` alone, so
+    ``getTasksToExecCommand_JEDI``'s ``jobStatus IN (activated,throttled)`` --
+    a write that moves activated jobs on a command -- was not among the movers
+    of ``activated`` anywhere, and nothing said so.
+
+    The column comes back bare and lowered (``tab.jobStatus`` -> ``jobstatus``),
+    which is how a subject's attribute is matched.  Values lose their quotes.
+
+    **``None`` for everything that does not require a value**, and that
+    includes a negation: ``status<>missing`` lands on a row holding almost
+    anything, so it says which value the write refuses rather than which one it
+    moves the row off.  A bind nobody settled, a null test, a comparison and a
+    term spelled through an interpolation are ``None`` for the plainer reason
+    that no value can be read off them.
+    """
+    text = term.strip()
+    match = _REQUIRES_ONE.match(text)
+    if match:
+        return match.group(1).rsplit(".", 1)[-1].lower(), [match.group(3)]
+    match = _REQUIRES_ANY.match(text)
+    if match:
+        values = [part.strip().strip("'") for part in match.group(2).split(",")]
+        if values and all(value and ":" not in value for value in values):
+            return match.group(1).rsplit(".", 1)[-1].lower(), values
+    return None
+
 # How work arrives at a junction.  Declared with the field that carries it
 # rather than in the recognizer that assigns it, because both halves of the map
 # read them: the extraction to label an entry, and an investigation to decide
@@ -2440,6 +2477,18 @@ class FollowUp(BaseModel):
             "filter would make the listed ones look like the whole of it."
         ),
     )
+    guarded_by: list[GuardReading] = Field(
+        default_factory=list,
+        description=(
+            "The functions whose write requires the observed value of the row "
+            "-- the movers the queries above cannot show.  With "
+            "``reader_statements`` this is the whole of 'what moves the row "
+            "on' as the map holds it, and each entry says which half it came "
+            "from.  Not ``updated_by``: that also holds writes that act on "
+            "rows holding the value and change something else -- a priority, "
+            "a share -- and leave the value where it is."
+        ),
+    )
     triggers: list[str] = Field(
         default_factory=list,
         description=(
@@ -2875,6 +2924,56 @@ class StatementExit(BaseModel):
         ),
     )
     trace_note: str = Field(default="", description="Why the walk is short, where it is.")
+
+
+class GuardReading(BaseModel):
+    """One function whose write requires the observed value of the row it lands on.
+
+    The other half of "what moves this row on".  :class:`StatementReading` is
+    the half the map always answered with -- a query whose ``WHERE`` selects
+    the value -- and it cannot see a write that picks its rows some other way
+    and only *requires* the value: ``getJobs`` moves every ``activated`` job
+    the pilot is sent, and its ``SELECT`` is one the map could not read, so the
+    answer for ``activated`` never named it although its ``UPDATE`` said
+    ``jobStatus=activated`` in plain text.
+
+    Per function rather than per junction: one ``UPDATE`` is several junctions
+    -- a status, a time, a counter -- and each carries the same guard.
+    """
+
+    owner: str
+    file: str = Field(default="", description="Where the write is.")
+    writes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The subjects the guarded write settles, the asked subject first "
+            "when it is one of them."
+        ),
+    )
+    lines: list[int] = Field(
+        default_factory=list,
+        description="Where the guarded branches are decided, in source order.",
+    )
+    outcomes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What those branches move the asked subject to -- where the row "
+            "goes next.  Empty when the guard rides on a write of another "
+            "subject only."
+        ),
+    )
+    guards: list[str] = Field(
+        default_factory=list,
+        description="The row preconditions, as the map stores them, that require the value.",
+    )
+    log_files: list[str] = Field(default_factory=list)
+    also_selects: bool = Field(
+        default=False,
+        description=(
+            "Whether a query of this function selects the value too, so it is "
+            "listed on both halves of the answer."
+        ),
+    )
 
 
 class StatementReading(BaseModel):

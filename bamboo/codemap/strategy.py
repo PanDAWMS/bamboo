@@ -109,6 +109,7 @@ from bamboo.codemap.models import (
     EntityNode,
     FollowUp,
     FunnelStep,
+    GuardReading,
     Handover,
     JunctionNode,
     Lead,
@@ -585,6 +586,56 @@ def _readers_phrase(selected_by: list[str], reader_files: list[str]) -> str:
     return f"{named}{where}"
 
 
+def _guard_readings(
+    subject: str,
+    guarded: list[tuple[JunctionNode, list, list[str]]],
+    selected_by: Sequence[str],
+) -> list[GuardReading]:
+    """One entry per function whose write requires the value, from ``guarded_on``.
+
+    Folded per function because one ``UPDATE`` is several junctions -- a
+    status, a time, a counter -- each carrying the same guard, and listing
+    them apart would make one write look like three.  The lines and outcomes
+    are the asked subject's own branches where the function has one, which is
+    where the row goes next; a guard that rides only on another column's
+    write keeps that write's lines, and no outcome, rather than none.
+    """
+    held: dict[str, GuardReading] = {}
+    others: dict[str, list[int]] = {}
+    for junction, branches, terms in guarded:
+        entry = held.get(junction.owner)
+        if entry is None:
+            entry = GuardReading(
+                owner=junction.owner,
+                file=junction.anchor.file if junction.anchor else "",
+                also_selects=junction.owner in selected_by,
+            )
+            held[junction.owner] = entry
+        if junction.subject not in entry.writes:
+            entry.writes.append(junction.subject)
+        for term in terms:
+            if term not in entry.guards:
+                entry.guards.append(term)
+        for name in junction.observable_log_files():
+            if name not in entry.log_files:
+                entry.log_files.append(name)
+        lines = [branch.line for branch in branches if branch.line]
+        if junction.subject != subject:
+            others.setdefault(junction.owner, []).extend(lines)
+            continue
+        entry.lines.extend(line for line in lines if line not in entry.lines)
+        for branch in branches:
+            if branch.outcome not in entry.outcomes:
+                entry.outcomes.append(branch.outcome)
+    for owner, entry in held.items():
+        if not entry.lines:
+            entry.lines = sorted(set(others.get(owner, [])))
+        entry.lines.sort()
+        entry.writes.sort(key=lambda name: (name != subject, name))
+        entry.log_files.sort()
+    return [held[owner] for owner in sorted(held)]
+
+
 def _follow_up(
     observed: str,
     selected_values: list[str],
@@ -597,6 +648,7 @@ def _follow_up(
     read_statements: dict[str, list["ReadSiteNode"]],
     entities: list[EntityNode],
     changing: set[str],
+    guarded: Sequence[GuardReading] = (),
 ) -> FollowUp:
     """Whether anything will move the value on, and what to ask if not.
 
@@ -798,6 +850,7 @@ def _follow_up(
         reader_log_files=reader_files,
         reader_statements=statement_readings,
         reader_statements_elsewhere=statements_elsewhere,
+        guarded_by=list(guarded),
         selection_gates=list(selection_gates),
         triggers=triggers,
         self_repairing=repairing,
@@ -1164,6 +1217,11 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             reading_here,
             await code_map.entities_for(subject.spec_class),
             await code_map.changing_functions(),
+            guarded=_guard_readings(
+                symptom.subject,
+                await code_map.guarded_on(subject, symptom.observed),
+                subject.selected_by.get(symptom.observed, []),
+            ),
         ),
         # Map edges first, so that when both suppliers name one field the fold
         # in ``evaluate`` keeps the deterministic one.  Not folded here: doing
