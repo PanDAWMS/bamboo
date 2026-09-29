@@ -2316,7 +2316,9 @@ def test_a_class_that_is_only_named_like_the_interface_is_not_it(tmp_path):
     )
 
     (spec,) = [s for s in walked.steps if s.name == "spec"]
-    assert spec.detail == ""
+    assert spec.terminal == ""
+    # Not an interface, so a function of the corpus: the walk goes into it.
+    assert spec.detail == "returns from pandaserver/daemons/other.py::getSite"
 
 
 # ---------------------------------------------------------------------------

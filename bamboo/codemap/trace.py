@@ -58,6 +58,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional, Sequence
 
+from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.calls import Types as _Types
 from bamboo.codemap.gitsource import blob_sha as git_blob_sha
 from bamboo.codemap.models import (
@@ -72,6 +73,7 @@ from bamboo.codemap.models import (
     TRACE_HANDOVER,
     TRACE_LOOP,
     TRACE_PRINT,
+    TRACE_RETURN,
     TRACE_UNBOUND,
     TRACE_WRITE,
     Handover,
@@ -125,6 +127,14 @@ class Budget(NamedTuple):
     functions: int = 40
     steps: int = 120
     depth: int = 8
+    #: What the walk may spend beyond the function it was asked about --
+    #: inside the calls a value was bound from, and at the calls that passed a
+    #: parameter in.  Its own allowance, spent only after the function's own
+    #: answer is complete, so going into a call can never cut short what the
+    #: walk said about the function before it could.
+    crossed_files: int = 24
+    crossed_functions: int = 60
+    crossed_steps: int = 240
 
 
 DEFAULT_BUDGET = Budget()
@@ -891,6 +901,35 @@ def _dominates(site: ast.AST, target: ast.AST) -> bool:
     return False
 
 
+#: How many of a function's call sites a parameter is followed to.
+_MAX_CALLERS = 8
+
+
+def _same_node(scope: ast.AST, node: ast.AST) -> Optional[ast.AST]:
+    """The node of *scope*'s own tree at *node*'s position, *node* being from another parse."""
+    for held in ast.walk(scope):
+        if (
+            type(held) is type(node)
+            and getattr(held, "lineno", None) == getattr(node, "lineno", None)
+            and getattr(held, "col_offset", None) == getattr(node, "col_offset", None)
+        ):
+            return held
+    return None
+
+
+def _projected(value: ast.expr, key: Optional[object]) -> ast.expr:
+    """The part of a returned *value* a caller took: a tuple's slot, a literal dict's key."""
+    if key is None:
+        return value
+    if isinstance(key, int) and isinstance(value, (ast.Tuple, ast.List)) and -len(value.elts) <= key < len(value.elts):
+        return value.elts[key]
+    if isinstance(value, ast.Dict):
+        for held, item in zip(value.keys, value.values, strict=True):
+            if isinstance(held, ast.Constant) and held.value == key:
+                return item
+    return value
+
+
 def _own_nodes(func: ast.AST):
     """Every node of *func*'s own body; nested functions and classes run elsewhere."""
     for child in ast.iter_child_nodes(func):
@@ -1265,15 +1304,35 @@ class _Walk:
         self._logged: dict[tuple[str, str], list[tuple[ast.expr, _Message]]] = {}
         self.note = ""
         self.queue: deque[tuple[_Frame, str, int, Optional[ast.AST]]] = deque()
+        #: What waits until the function's own answer is done: going into a
+        #: call, and the names asked in the functions reached that way.
+        self.beyond: deque[Callable[[], None]] = deque()
+        #: Whether what is being recorded now is spent from the crossing's
+        #: allowance -- see ``Budget.crossed_steps``.
+        self.crossing = False
+        self.crossed = 0
+        self.crossing_note = ""
+        #: ``_message_sites`` per (function, spelling): a function with a
+        #: hundred logging calls asks for the same local a hundred times.
+        self._sites: dict[tuple[int, str], tuple] = {}
         self.types = _Types(roots, self.parsed)
         self._declared: dict[tuple[str, str, str], Optional[str]] = {}
+        self.calls = calls_mod.Calls(self.types)
+        #: ``{(file, owner): [(caller frame, the call, what it binds)]}`` for
+        #: every function the walk went into, so a parameter read there is
+        #: answered by the call that brought the walk in.
+        self.passed: dict[tuple[str, str], list[tuple[_Frame, ast.Call, dict]]] = {}
+        #: Functions the walk went into: narrowed like the starting one, each
+        #: name answered with the writes that reach the statement reading it.
+        self.entered: set[tuple[str, str]] = set()
 
     # -- source ------------------------------------------------------------
 
     def module(self, file: str) -> Optional[tuple[str, ast.Module]]:
         if file in self.parsed:
             return self.parsed[file]
-        if len(self.parsed) >= self.budget.files:
+        limit = self.budget.files + (self.budget.crossed_files if self.crossing else 0)
+        if len(self.parsed) >= limit:
             self._exhausted("files")
             return None
         package, _, relative = file.partition("/")
@@ -1304,7 +1363,8 @@ class _Walk:
         key = (file, owner)
         if key in self.frames:
             return self.frames[key]
-        if len(self.frames) >= self.budget.functions:
+        limit = self.budget.functions + (self.budget.crossed_functions if self.crossing else 0)
+        if len(self.frames) >= limit:
             self._exhausted("functions")
             return None
         self.frames[key] = None
@@ -1334,17 +1394,47 @@ class _Walk:
     # -- steps -------------------------------------------------------------
 
     def _exhausted(self, what: str) -> None:
+        if self.crossing:
+            if not self.crossing_note:
+                self.crossing_note = (
+                    f"the walk's {what} budget beyond this function ran out; "
+                    "what the calls hand back is part of the answer"
+                )
+            return
         if not self.note:
             self.note = (
                 f"the walk's {what} budget ran out; what follows is part of the answer"
             )
 
     def record(self, step: TraceStep) -> bool:
-        if len(self.steps) >= self.budget.steps:
+        if self.crossing:
+            if self.crossed >= self.budget.crossed_steps:
+                self._exhausted("steps")
+                return False
+            self.crossed += 1
+            self.steps.append(step)
+            return True
+        if len(self.steps) - self.crossed >= self.budget.steps:
             self._exhausted("steps")
             return False
         self.steps.append(step)
         return True
+
+    def drain(self) -> None:
+        """Explain everything asked: the function's own names first, then beyond it."""
+        while self.queue or self.beyond:
+            if self.queue:
+                self.crossing = False
+                held, name, depth, at = self.queue.popleft()
+                self.explain(held, name, depth, at)
+            else:
+                self.crossing = True
+                self.beyond.popleft()()
+        self.crossing = False
+
+    def notes(self) -> str:
+        """The note, and the crossing's own where it ran out."""
+        return "; ".join(one for one in (self.note, self.crossing_note) if one)
 
     def resolver(self, frame: _Frame):
         return lambda name: pathcond.single_definition(frame.func, name)
@@ -1387,8 +1477,14 @@ class _Walk:
         return key
 
     def narrows(self, frame: _Frame) -> bool:
-        """Whether names in *frame* are narrowed to the writes that reach their read."""
-        return self.narrowed is not None and (frame.file, frame.owner) == self.narrowed
+        """Whether names in *frame* are narrowed to the writes that reach their read.
+
+        The starting function where the walk asks for it, and every function
+        it went into through a call: there the reading point is the
+        ``return`` or the call, never a line of the starting function.
+        """
+        key = (frame.file, frame.owner)
+        return (self.narrowed is not None and key == self.narrowed) or key in self.entered
 
     def want(
         self,
@@ -1425,7 +1521,14 @@ class _Walk:
             if key in self.seen:
                 continue
             self.seen.add(key)
-            self.queue.append((frame, name, depth, at))
+            if (frame.file, frame.owner) in self.entered:
+                self.beyond.append(
+                    lambda held=frame, one=name, deep=depth, where=at: self.explain(
+                        held, one, deep, where
+                    )
+                )
+            else:
+                self.queue.append((frame, name, depth, at))
 
     # -- the walk ----------------------------------------------------------
 
@@ -1623,7 +1726,10 @@ class _Walk:
         if spelled in seen:
             return [[_hole(expr)]], []
         seen = seen | {spelled}
-        plain, appended, opaque = _message_sites(frame.func, spelled)
+        held = self._sites.get((id(frame.func), spelled))
+        if held is None:
+            held = self._sites[(id(frame.func), spelled)] = _message_sites(frame.func, spelled)
+        plain, appended, opaque = held
         plain = [value for value in plain if pathcond.can_reach(value, at)]
         appended = [value for value in appended if pathcond.can_reach(value, at)]
         opaque = [site for site in opaque if pathcond.can_reach(site, at)]
@@ -2125,6 +2231,28 @@ class _Walk:
             done = self.explained.setdefault((f"{frame.file}::{frame.owner}", name), set())
         done.update(_walked_key(node) for node in (*bindings, *loops, *caught))
         if not bindings and not loops and not caught:
+            if any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+                for node in ast.walk(frame.func)
+                if node is not frame.func
+            ):
+                # A function defined here is a name for code, not a value --
+                # the same reason imports are dropped.
+                return
+            # A closure reads what the function it is nested in bound:
+            # ``build_where_clause`` is ``getJobs``'s, and its ``mem`` is the
+            # parameter ``getJobs`` was called with, not a module name.
+            if not _is_parameter(frame.func, name):
+                enclosing = self.types.enclosing_function(frame.file, frame.func)
+                if enclosing is not None:
+                    outer_frame = self.frame(
+                        frame.file,
+                        f"{frame.file}::{getattr(enclosing, 'name', '')}",
+                        line=enclosing.lineno,
+                    )
+                    if outer_frame is not None:
+                        self.want(outer_frame, [name], depth)
+                        return
             # The file's own body is the last place to look.  Asked only here,
             # after the function has had its say, so a local always wins over a
             # module constant of the same name.
@@ -2203,6 +2331,10 @@ class _Walk:
             self.want(frame, own, depth + 1, site)
             for test, names in _guard_tests(site):
                 self.want(frame, names, depth + 1, test)
+        if not terminal:
+            self.beyond.append(
+                lambda: self._enter(frame, step, expression, slot, depth + 1)
+            )
         if (
             isinstance(site, ast.AugAssign)
             and isinstance(site.target, ast.Name)
@@ -2215,6 +2347,179 @@ class _Walk:
             # Whatever the right-hand side resolved to: that stops the walk
             # along *it*, not along the value being divided.
             self.want(frame, [name], depth + 1, site)
+
+    def _enter(
+        self,
+        frame: _Frame,
+        step: TraceStep,
+        expression: ast.expr,
+        slot: Optional[int],
+        depth: int,
+    ) -> None:
+        """Go into the call a value was bound from, and explain what it returns.
+
+        The walk stopped at ``pandaIDs = self.tb.getPandaIDsWithTask_JEDI(...)``
+        and at ``tmp_where_clause, tmp_val_map = self.construct_where_clause(...)``
+        as though the call were the value.  The value is what the call hands
+        back: each ``return`` of each function the call is placed at is a step,
+        in that function's terms, and the names it reads are asked there --
+        its parameters answered by the call that brought the walk in.
+
+        Where the call cannot be placed the step says why, so a walk that ends
+        here says what would carry it further.
+        """
+        call = expression
+        key: Optional[object] = slot
+        if isinstance(call, ast.Subscript) and isinstance(call.slice, ast.Constant):
+            key, call = call.slice.value, call.value
+        if not isinstance(call, ast.Call):
+            return
+        if isinstance(call.func, ast.Name) and call.func.id in _BUILTINS:
+            return
+        placed = self.calls.callees(frame.file, frame.func, call)
+        if not placed.targets:
+            if placed.unplaced:
+                step.detail = f"not entered: {placed.unplaced}"
+            return
+        entered: list[str] = []
+        for target in placed.targets:
+            callee = self._callee_frame(target)
+            if callee is None:
+                continue
+            self.passed.setdefault((callee.file, callee.owner), []).append(
+                (frame, call, calls_mod.bind(call, target))
+            )
+            self.entered.add((callee.file, callee.owner))
+            for returned in calls_mod.returns(callee.func):
+                value = _projected(returned, key)
+                statement = pathcond.site_of(returned) if hasattr(returned, "parent") else callee.func
+                terminal, detail = self.terminal_of(callee, value)
+                text = _text(value)
+                if value is returned and key is not None:
+                    text = f"({text})[{key!r}]"
+                reads = _reads(value)
+                if not self.record(
+                    TraceStep(
+                        kind=TRACE_RETURN,
+                        name=f"{getattr(callee.func, 'name', 'call')}()",
+                        owner=callee.owner,
+                        file=callee.file,
+                        line=getattr(statement, "lineno", 0),
+                        value=text,
+                        guards=pathcond.path_condition(statement),
+                        unseen=_unseen(statement),
+                        reads=reads,
+                        terminal=terminal,
+                        detail=detail,
+                        depth=depth,
+                    )
+                ):
+                    return
+                if not terminal or terminal in _WALKED_THROUGH:
+                    self.want(callee, reads, depth + 1, statement)
+                    for test, names in _guard_tests(statement):
+                        self.want(callee, names, depth + 1, test)
+            entered.append(callee.owner)
+        if entered:
+            step.detail = f"returns from {', '.join(entered)}"
+
+    def _callee_frame(self, target: calls_mod.Target) -> Optional[_Frame]:
+        """This walk's own frame for a function a call was placed at."""
+        owner = f"{target.file}::{target.func.name}"  # type: ignore[attr-defined]
+        held = self.frames.get((target.file, owner))
+        line = target.func.lineno  # type: ignore[attr-defined]
+        if held is not None and held.func.lineno != line:
+            # Two functions of one file with one name: a method of each of two
+            # classes.  Spelled with the class so the second is not the first.
+            owner = f"{target.file}::{target.cls.name if target.cls else 'module'}.{target.func.name}"  # type: ignore[attr-defined]
+        return self.frame(target.file, owner, line=line)
+
+    def _passed_in(self, frame: _Frame, name: str, depth: int) -> bool:
+        """Answer a parameter from the call that brought the walk into *frame*."""
+        held = self.passed.get((frame.file, frame.owner))
+        if not held:
+            return False
+        for caller, call, bound in held:
+            argument = bound.get(name)
+            statement = _enclosing_statement(call) or call
+            reads = _reads(argument) if argument is not None else []
+            step = TraceStep(
+                kind=TRACE_HANDOVER,
+                name=name,
+                owner=caller.owner,
+                file=caller.file,
+                line=getattr(call, "lineno", 0),
+                value=_text(argument) if argument is not None else name,
+                guards=pathcond.path_condition(statement),
+                unseen=_unseen(statement),
+                reads=reads,
+                detail=(
+                    f"passed to {getattr(frame.func, 'name', '')} here"
+                    if argument is not None
+                    else "passed through * or ** here, so which argument it is is not said"
+                ),
+                depth=depth,
+            )
+            if not self.record(step):
+                return True
+            if reads:
+                self.want(caller, reads, depth + 1, statement)
+        return True
+
+    def _called_from(self, frame: _Frame, name: str, depth: int, stopped: TraceStep) -> bool:
+        """Answer a parameter from the calls placed at this function, where nothing brought the walk in.
+
+        The parameter is chosen at the call site, and until now that was the
+        whole answer.  ``calls.callers`` names the sites; each is a step with
+        the expression it hands over, walked in the caller.  At most
+        :data:`_MAX_CALLERS` of them, and the rest counted, so a helper called
+        from everywhere does not turn one question into sixty.
+        """
+        cls = self.types.method_class(frame.file, frame.func)
+        target = calls_mod.Target(frame.file, frame.func, cls[1] if cls else None)
+        sites = self.calls.callers(target)
+        if not sites:
+            return False
+        stopped.detail = (
+            f"a parameter; followed to {min(len(sites), _MAX_CALLERS)} of the "
+            f"{len(sites)} call(s) placed at {getattr(frame.func, 'name', '')}"
+        )
+        for site in sites[:_MAX_CALLERS]:
+            caller = self.frame(
+                site.file, f"{site.file}::{site.func.name}", line=site.func.lineno  # type: ignore[attr-defined]
+            )
+            if caller is None:
+                continue
+            call = _same_node(caller.func, site.call)
+            if not isinstance(call, ast.Call):
+                continue
+            argument = calls_mod.bind(call, target).get(name)
+            statement = _enclosing_statement(call) or call
+            reads = _reads(argument) if argument is not None else []
+            if not self.record(
+                TraceStep(
+                    kind=TRACE_HANDOVER,
+                    name=name,
+                    owner=caller.owner,
+                    file=caller.file,
+                    line=call.lineno,
+                    value=_text(argument) if argument is not None else name,
+                    guards=pathcond.path_condition(statement),
+                    unseen=_unseen(statement),
+                    reads=reads,
+                    detail=(
+                        f"passed to {getattr(frame.func, 'name', '')} here"
+                        if argument is not None
+                        else "passed through * or ** here, so which argument it is is not said"
+                    ),
+                    depth=depth,
+                )
+            ):
+                return True
+            if reads:
+                self.entered.add((caller.file, caller.owner))
+                self.want(caller, reads, depth + 1, statement)
+        return True
 
     def _module_binding(
         self, frame: _Frame, name: str, expression: ast.expr, depth: int
@@ -2463,8 +2768,9 @@ class _Walk:
                 if handover.reached_by == ARRIVES_BY_CALL and name in handover.fields:
                     self._handover(frame, name, handover, depth)
                     return
-        self.record(
-            TraceStep(
+            if self._passed_in(frame, name, depth):
+                return
+        stopped = TraceStep(
                 kind=TRACE_UNBOUND,
                 name=name,
                 owner=frame.owner,
@@ -2481,7 +2787,10 @@ class _Walk:
                 ),
                 depth=depth,
             )
-        )
+        if self.record(stopped) and parameter:
+            # The parameter's own answer is the stop, as it always was; where
+            # it was chosen is looked for beyond this function, afterwards.
+            self.beyond.append(lambda: self._called_from(frame, name, depth, stopped))
 
 
 class Walked(NamedTuple):
@@ -2651,10 +2960,8 @@ def walk(
         return Walked([], "the map's function could not be located in this tree")
     for line in lines:
         state.arm(frame, line)
-    while state.queue:
-        held, name, depth, at = state.queue.popleft()
-        state.explain(held, name, depth, at)
-    return Walked(state.steps, state.note, state.skeleton(frame, region))
+    state.drain()
+    return Walked(state.steps, state.notes(), state.skeleton(frame, region))
 
 
 def walk_from_print(
@@ -2735,7 +3042,5 @@ def walk_from_print(
             )
         )
         state.want(frame, reads, 1, statement)
-    while state.queue:
-        held, name, depth, at = state.queue.popleft()
-        state.explain(held, name, depth, at)
-    return Walked(state.steps, state.note, state.skeleton(frame))
+    state.drain()
+    return Walked(state.steps, state.notes(), state.skeleton(frame))

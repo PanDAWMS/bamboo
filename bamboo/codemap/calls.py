@@ -45,6 +45,20 @@ UNPLACED_DYNAMIC = "the callee is chosen at run time"
 UNPLACED_NAME = "the name is bound to something that is not a function here"
 
 
+#: Parsed modules shared by every reading of the same files.  A walk is made
+#: once per arm, per statement and per printed line, and the corpus index
+#: behind :meth:`Calls.callers` would otherwise be rebuilt for each.  Keyed by
+#: the file's stat, so a tree edited under a reading is read afresh.
+_PARSED: dict[tuple[str, int, int], Optional[ast.Module]] = {}
+#: ``callers`` index and answers, per set of roots.
+_INDEXES: dict[tuple, dict[str, list["CallSite"]]] = {}
+_CALLERS: dict[tuple, list["CallSite"]] = {}
+
+
+def _roots_key(roots: dict[str, Path]) -> tuple:
+    return tuple(sorted((package, str(root)) for package, root in roots.items()))
+
+
 class Target(NamedTuple):
     """One function definition a call can land in."""
 
@@ -272,6 +286,10 @@ class Calls:
         """
         if self._by_name is not None:
             return self._by_name
+        shared = _INDEXES.get(_roots_key(self.types.roots))
+        if shared is not None:
+            self._by_name = shared
+            return shared
         found: dict[str, list[CallSite]] = {}
         for file in self.types.corpus_files():
             tree = self.types.tree(file)
@@ -291,6 +309,7 @@ class Calls:
                     if name:
                         found.setdefault(name, []).append(CallSite(file, func, node))
         self._by_name = found
+        _INDEXES[_roots_key(self.types.roots)] = found
         return found
 
     def callers(self, target: Target) -> list[CallSite]:
@@ -298,6 +317,10 @@ class Calls:
         key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
         if key in self._callers:
             return self._callers[key]
+        shared = (_roots_key(self.types.roots), *key)
+        if shared in _CALLERS:
+            self._callers[key] = _CALLERS[shared]
+            return _CALLERS[shared]
         name = target.func.name  # type: ignore[attr-defined]
         if name == "__init__" and target.cls is not None:
             name = target.cls.name
@@ -310,6 +333,7 @@ class Calls:
             )
         ]
         self._callers[key] = kept
+        _CALLERS[shared] = kept
         return kept
 
     # -- what a method changes on its object --------------------------------
@@ -431,12 +455,22 @@ class Types:
             root = self.roots.get(package)
             tree = None
             if root is not None and relative:
+                path = root / relative
                 try:
-                    tree = ast.parse((root / relative).read_text(errors="replace"))
-                except (OSError, SyntaxError, ValueError):
-                    tree = None
-                if tree is not None:
-                    pathcond.attach_parents(tree)
+                    stat = path.stat()
+                except OSError:
+                    stat = None
+                key = (str(path), stat.st_mtime_ns, stat.st_size) if stat else None
+                if key is not None and key in _PARSED:
+                    tree = _PARSED[key]
+                elif key is not None:
+                    try:
+                        tree = ast.parse(path.read_text(errors="replace"))
+                    except (OSError, SyntaxError, ValueError):
+                        tree = None
+                    if tree is not None:
+                        pathcond.attach_parents(tree)
+                    _PARSED[key] = tree
             self.parsed[file] = tree
         return self.parsed[file]
 

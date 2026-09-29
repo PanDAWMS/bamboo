@@ -2842,9 +2842,13 @@ class Lead(BaseModel):
 #: worker's own attribute to the expression the knight built it with; and
 #: ``unbound`` is a name this function does not bind, which is where the walk
 #: either crosses or stops.  ``print`` is a logging call a reader started
-#: from, with the names its message reads.
+#: from, with the names its message reads; ``return`` is below.
 TRACE_WRITE = "write"
 TRACE_PRINT = "print"
+#: What a called function hands back, where the walk went into the call to
+#: explain a value bound from it.  Named after the call, not after the name it
+#: was bound to: its expression is in the callee's terms.
+TRACE_RETURN = "return"
 TRACE_BINDING = "binding"
 TRACE_LOOP = "loop-target"
 TRACE_HANDOVER = "handover"
