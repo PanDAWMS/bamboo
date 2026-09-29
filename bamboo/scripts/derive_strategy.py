@@ -766,6 +766,8 @@ def _report_skeleton(entry, top: int, full: bool) -> None:
             click.echo(f"          {row.line:>5} ARM {pad}{row.text}")
             continue
         body = row.pattern or f"-- {row.refused} --"
+        if row.keyed:
+            body += "   [only with the entity's key]"
         click.echo(f"          {row.line:>5}  |  {pad}{body}")
         if row.value:
             click.echo(f"                 {pad}with the value: {row.value}")

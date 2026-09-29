@@ -2871,6 +2871,14 @@ class SkeletonLine(BaseModel):
         default="",
         description="Why no pattern was rendered, when none was -- shown in its place.",
     )
+    keyed: bool = Field(
+        default=False,
+        description=(
+            "Whether the pattern is a question only together with the entity's "
+            "key: too little literal to ask on its own -- ``Try:`` -- and "
+            "exactly the question among one job's lines."
+        ),
+    )
     arms: list[int] = Field(
         default_factory=list,
         description=(

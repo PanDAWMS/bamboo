@@ -810,13 +810,13 @@ class Proxy:
     assert not re.search(row.value, "raising the task priority to newPrio=1000")
 
 
-def test_a_message_with_too_little_literal_is_refused_and_says_so(tmp_path):
-    """Refused rather than rendered, and said rather than left blank.
+def test_a_message_with_too_little_literal_is_rendered_and_marked(tmp_path):
+    """Marked rather than refused: a question only with the entity's key.
 
-    ``to\\ None`` is seven characters of literal; it is not a sentence, and
-    handing it to a reader to grep with is handing them a wrong conclusion.
-    A row that silently lost its pattern would read as *production does not
-    print here*, which is a different and also wrong thing to say.
+    ``to`` is two characters of literal and matches half a log, and among one
+    job's lines it is exactly the question -- ``Try:`` is what tells a
+    temporary failure from a fatal one in ``register_files``.  The reader
+    always narrows by the key, so the row says that and gives the pattern.
     """
     roots = _tree(
         tmp_path,
@@ -830,9 +830,75 @@ class Proxy:
 
     (row,) = _printed(roots, file="proxy", owner="run", lines=[3], observed="deleting")
 
+    assert row.pattern == r"to\ "
+    assert row.keyed is True
+    assert row.refused == ""
+    assert re.search(row.value, "to deleting")
+
+
+def test_a_message_with_no_literal_at_all_is_still_refused(tmp_path):
+    """Nothing to ask with, and said rather than left blank: a row that
+    silently lost its pattern reads as *production does not print here*."""
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        spec.status = "deleting"
+        logger.debug(f"{spec.status}")
+''',
+    )
+
+    (row,) = _printed(roots, file="proxy", owner="run", lines=[3], observed="deleting")
+
     assert row.pattern == ""
-    assert row.value == ""
-    assert row.refused == "too little literal (2 chars)"
+    assert row.refused == "no literal text to ask with"
+
+
+def test_a_hole_printing_a_dict_may_hold_spaces(tmp_path):
+    """``registerFilesInDatasets {str(dest_id_map)} zip=`` prints a dict, and a
+    hole closed at the first space never reached ``zip=``: none of the job's
+    lines matched."""
+    roots = _tree(
+        tmp_path,
+        adder='''\
+class Adder:
+    def register(self, dest_id_map, cont_zip_map):
+        self.result = 1
+        self.logger.debug(f"registerFilesInDatasets {str(dest_id_map)} zip={str(cont_zip_map)}")
+''',
+    )
+
+    (row,) = _printed(roots, file="adder", owner="register", lines=[3])
+
+    line = "7338795608 registerFilesInDatasets {'UNI': {'ds_sub1': [{'guid': 'F3'}]}} zip={}"
+    assert re.search(row.pattern, line)
+    assert not row.keyed
+
+
+def test_a_number_and_a_fragment_the_function_wrote_out_are_matched(tmp_path):
+    """``reg_msg_str`` is one of two f-strings and the line prints either.
+    Written out, each is a variant; the ``:03d`` hole is a number."""
+    roots = _tree(
+        tmp_path,
+        adder='''\
+class Adder:
+    def register(self, reg_num_files, reg_time):
+        if self.add_to_top_only:
+            reg_msg_str = f"File registration for {reg_num_files} files "
+        else:
+            reg_msg_str = f"File registration with rucio for {reg_num_files} files "
+        self.result = 1
+        self.logger.debug(f"{reg_msg_str} took {reg_time.seconds}.{reg_time.microseconds // 1000:03d} sec")
+''',
+    )
+
+    rows = _printed(roots, file="adder", owner="register", lines=[7])
+
+    line = "7338795608 File registration with rucio for 2 files  took 0.047 sec"
+    assert len(rows) == 2
+    assert [bool(re.search(row.pattern, line)) for row in rows] == [False, True]
+    assert not any(row.keyed for row in rows)
 
 
 def test_the_line_the_arm_writes_the_value_of_is_matched_too(tmp_path):

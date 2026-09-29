@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import itertools
 import logging
 import re
 from collections import deque
@@ -345,6 +346,16 @@ def _written_texts(statement: ast.stmt) -> list[str]:
     return [text for text in texts if text and text != "..."]
 
 
+# How much literal text a pattern needs before it can be asked on its own.
+#
+# **Below it a pattern is marked, not refused.**  The reader asks every line
+# together with the entity's key -- the PandaID a line carries -- and ``Try:``
+# is four characters that tell a temporary failure from a fatal one in
+# ``register_files``, once the job is fixed.  Refused, the row said nothing at
+# all; marked, it says what to grep and that it is only a question with the key.
+# A message with no literal text at all is still refused: there is nothing to
+# ask with.  What follows is why the mark sits at 14.
+#
 # How much literal text a pattern needs before it is a question rather than a
 # sieve.  Set from two measurements, neither of which found a clean answer.
 #
@@ -404,6 +415,53 @@ def literal_length(message: ast.JoinedStr) -> int:
     return sum(len(_literal_text(part).strip()) for part in message.values)
 
 
+#: Calls whose result prints as a Python ``repr`` -- a dict, a list, an
+#: exception's text -- and so may hold spaces, commas and brackets.
+_PRINTS_TEXT = frozenset(
+    {"str", "repr", "sorted", "list", "dict", "set", "tuple", "format_exc", "join", "keys", "values", "items"}
+)
+#: Calls whose result prints as a number.
+_PRINTS_NUMBER = frozenset({"len", "int", "round", "sum", "count"})
+#: The type letter a format spec ends with when it prints a number.
+_NUMBER_SPEC = frozenset("bcdeEfFgGnoxX%")
+
+
+def _hole_prints(part: ast.FormattedValue) -> str:
+    """How the value in a hole prints: ``"number"``, ``"text"``, or ``""``.
+
+    ``""`` is a token -- a status, an id, a site name -- and the default,
+    closed against the character after it as before.  The two others are the
+    shapes that closing got wrong: ``registerFilesInDatasets {str(dest_id_map)}
+    zip=`` prints a dict with spaces in it, so a hole that stopped at the first
+    space never reached ``zip=``, and none of the job's lines matched.
+    Read off the syntax only; a name whose value is a dict prints like one too,
+    and is left a token rather than guessed at.
+    """
+    spec = part.format_spec
+    if isinstance(spec, ast.JoinedStr) and all(
+        isinstance(value, ast.Constant) for value in spec.values
+    ):
+        written = "".join(str(value.value) for value in spec.values)
+        if written and written[-1] in _NUMBER_SPEC:
+            return "number"
+    if part.conversion == ord("r"):
+        return "text"
+    value = part.value
+    if isinstance(
+        value,
+        (ast.Dict, ast.List, ast.Set, ast.Tuple, ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp),
+    ):
+        return "text"
+    if isinstance(value, ast.Call):
+        called = value.func
+        name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+        if name in _PRINTS_TEXT:
+            return "text"
+        if name in _PRINTS_NUMBER:
+            return "number"
+    return ""
+
+
 def _bound(message: ast.JoinedStr, hole: int) -> str:
     """A pattern for an unfilled hole, closed against the literal after it.
 
@@ -416,8 +474,19 @@ def _bound(message: ast.JoinedStr, hole: int) -> str:
 
     Falls back to ``.*`` with nothing to close against -- a trailing hole, or
     one butted straight against another.
+
+    **Closed by what the hole prints, where the syntax says.**  A hole that
+    prints text -- ``str(dest_id_map)``, a list, a ``!r`` -- may hold the very
+    character that closes a token, so it runs, lazily, up to the whole literal
+    after it; a number prints as one.  See :func:`_hole_prints`.
     """
     following = _literal_text(message.values[hole + 1]) if hole + 1 < len(message.values) else ""
+    part = message.values[hole]
+    prints = _hole_prints(part) if isinstance(part, ast.FormattedValue) else ""
+    if prints == "number":
+        return r"[-+]?[\d.]+(?:[eE][-+]?\d+)?%?"
+    if prints == "text":
+        return ".*?" if following else ".*"
     if following:
         return f"[^{re.escape(following[0])}]*"
     return ".*"
@@ -435,14 +504,15 @@ def _pattern(message: ast.JoinedStr, hole: Optional[int], observed: str) -> str:
     other hole is closed against the literal that follows it rather than left
     as ``.*``; a filled hole with no literal after it gets :data:`NOT_A_WORD`,
     so the value has to end where the pattern says it ends; and a message with
-    less than :data:`MIN_LITERAL` characters of literal is refused outright,
-    because there is not enough of it left to be a sentence.
+    no literal text at all is refused, because there is nothing to ask with.
+    One with less than :data:`MIN_LITERAL` characters is rendered, and the row
+    carries :func:`keyed` for it.
 
     Leading and trailing holes are dropped.  The search is unanchored, so a
     run at either end asks for nothing the rest does not already ask for, and
     printing it invites a reader to think it does.
     """
-    if literal_length(message) < MIN_LITERAL:
+    if literal_length(message) == 0:
         return ""
     pieces: list[tuple[str, bool]] = []
     for position, part in enumerate(message.values):
@@ -567,8 +637,58 @@ def _constant_pattern(message: ast.expr) -> str:
     """
     if isinstance(message, ast.Constant) and isinstance(message.value, str):
         text = message.value
-        return re.escape(text) if len(text.strip()) >= MIN_LITERAL else ""
+        return re.escape(text) if text.strip() else ""
     return ""
+
+
+def keyed(message: ast.expr) -> bool:
+    """Whether a rendered *message* is a question only together with the entity's key.
+
+    Below :data:`MIN_LITERAL` characters of literal the pattern matches lines
+    it does not mean -- ``Try:`` is in more than one message -- and narrowed to
+    one job's lines it is exactly the question: the reader always narrows.
+    """
+    if isinstance(message, ast.JoinedStr):
+        return literal_length(message) < MIN_LITERAL
+    if isinstance(message, ast.Constant) and isinstance(message.value, str):
+        return len(message.value.strip()) < MIN_LITERAL
+    return False
+
+
+#: How many ways one message may be written out before the rest are left.
+_MAX_EXPANDED = 4
+
+
+def _literal_text_of(value: ast.expr) -> Optional[list[ast.expr]]:
+    """The pieces of a sentence fragment, or ``None`` for anything else.
+
+    An f-string, or a string with a space in it.  A bare token -- ``newStatus =
+    "exhausted"`` -- is left a hole: the hole already matches it, and it is the
+    value the row's ``value`` pattern names, which writing it out would erase.
+    A fragment is what a token hole cannot match, which is the failure here.
+    """
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return [value] if any(character.isspace() for character in value.value) else None
+    if isinstance(value, ast.JoinedStr):
+        return list(value.values)
+    return None
+
+
+def _merged(pieces: list[ast.expr]) -> list[ast.expr]:
+    """Adjacent literal pieces as one, so a written-out hole reads as its text."""
+    out: list[ast.expr] = []
+    for piece in pieces:
+        if (
+            out
+            and isinstance(piece, ast.Constant)
+            and isinstance(out[-1], ast.Constant)
+            and isinstance(piece.value, str)
+            and isinstance(out[-1].value, str)
+        ):
+            out[-1] = ast.Constant(value=out[-1].value + piece.value)
+            continue
+        out.append(piece)
+    return out
 
 
 def _refusal(message: ast.expr) -> str:
@@ -578,10 +698,10 @@ def _refusal(message: ast.expr) -> str:
     as a line production does not print, and the reader would go looking for
     it in the log.
     """
-    if isinstance(message, ast.JoinedStr):
-        return f"too little literal ({literal_length(message)} chars)"
-    if isinstance(message, ast.Constant) and isinstance(message.value, str):
-        return f"too little literal ({len(message.value.strip())} chars)"
+    if isinstance(message, ast.JoinedStr) or (
+        isinstance(message, ast.Constant) and isinstance(message.value, str)
+    ):
+        return "no literal text to ask with"
     return "the message is not a literal this walk can render"
 
 
@@ -1596,7 +1716,7 @@ class _Walk:
     ) -> list[SkeletonLine]:
         line = getattr(statement, "lineno", 0)
         rows: list[SkeletonLine] = []
-        for argument, message in printed.get(id(statement), ()):
+        for argument, written in printed.get(id(statement), ()):
             # Compatibility only, not :func:`pathcond.can_reach`: a line printed after
             # the arm is printed alongside it just as much as one before, and
             # the position rule would drop exactly the lines that say what the
@@ -1604,37 +1724,39 @@ class _Walk:
             arms = [
                 arm for arm, held in self.armed.items() if pathcond.compatible(held, argument)
             ]
-            if isinstance(message, ast.JoinedStr):
-                pattern = line_pattern(message)
-                value, hole, because = self._value_hole(
-                    frame, message, [self.armed[arm] for arm in arms]
+            for message in self._expanded(frame, written, argument):
+                if isinstance(message, ast.JoinedStr):
+                    pattern = line_pattern(message)
+                    value, hole, because = self._value_hole(
+                        frame, message, [self.armed[arm] for arm in arms]
+                    )
+                else:
+                    pattern = _constant_pattern(message)
+                    value, hole, because = "", "", ""
+                refused = "" if pattern else _refusal(message)
+                # Deduped on what the row would *say*, refusals included: one
+                # call can resolve to several messages that render the same,
+                # and three identical refusals on one line tell a reader
+                # nothing three times.
+                if any(
+                    (row.pattern, row.text) == (pattern, _text(message)) for row in rows
+                ):
+                    continue
+                rows.append(
+                    SkeletonLine(
+                        kind=SKELETON_PRINT,
+                        line=line,
+                        depth=depth,
+                        text=_text(message),
+                        pattern=pattern,
+                        refused=refused,
+                        keyed=bool(pattern) and keyed(message),
+                        arms=sorted(arms),
+                        value=value,
+                        hole=hole,
+                        because=because,
+                    )
                 )
-            else:
-                pattern = _constant_pattern(message)
-                value, hole, because = "", "", ""
-            refused = "" if pattern else _refusal(message)
-            # Deduped on what the row would *say*, refusals included: one call
-            # can resolve to several messages that render the same, and three
-            # identical "too little literal" rows on one line tell a reader
-            # nothing three times.
-            if any(
-                (row.pattern, row.text) == (pattern, _text(message)) for row in rows
-            ):
-                continue
-            rows.append(
-                SkeletonLine(
-                    kind=SKELETON_PRINT,
-                    line=line,
-                    depth=depth,
-                    text=_text(message),
-                    pattern=pattern,
-                    refused=refused,
-                    arms=sorted(arms),
-                    value=value,
-                    hole=hole,
-                    because=because,
-                )
-            )
         if line in self.armed:
             rows.append(
                 SkeletonLine(
@@ -1645,6 +1767,58 @@ class _Walk:
                 )
             )
         return rows
+
+    def _expanded(self, frame: _Frame, message: ast.expr, at: ast.AST) -> list[ast.expr]:
+        """*message* with each hole a local fills with literal text written out.
+
+        ``reg_msg_str`` is assigned an f-string on 748 and another on 750, and
+        ``f"{reg_msg_str} took {...} sec"`` on 775 rendered as eight characters
+        of literal -- refused -- where either line production prints is forty.
+        A hole is written out only where every assignment that can reach the
+        call is a literal or an f-string, and there are few of them; each is a
+        variant of its own, since which of them ran is what the line says.
+        """
+        if not isinstance(message, ast.JoinedStr):
+            return [message]
+        assigned = self.types.assigned(frame.func)
+        choices: list[list[list[ast.expr]]] = []
+        changed = False
+        for part in message.values:
+            bound: list[ast.expr] = []
+            if (
+                isinstance(part, ast.FormattedValue)
+                and isinstance(part.value, ast.Name)
+                and part.conversion == -1
+                and part.format_spec is None
+            ):
+                bound = [
+                    value
+                    for value in assigned.get(part.value.id, [])
+                    if pathcond.can_reach(value, at)
+                ]
+            texts = [_literal_text_of(value) for value in bound]
+            if (
+                bound
+                and len(bound) <= _MAX_EXPANDED
+                and all(text is not None for text in texts)
+                and all(
+                    isinstance(pathcond.site_of(value), (ast.Assign, ast.AnnAssign))
+                    for value in bound
+                )
+            ):
+                choices.append(texts)
+                changed = True
+                continue
+            choices.append([[part]])
+        if not changed:
+            return [message]
+        variants: list[ast.expr] = []
+        for combination in itertools.product(*choices):
+            pieces = [piece for text in combination for piece in text]
+            variants.append(ast.JoinedStr(values=_merged(pieces)))
+            if len(variants) >= _MAX_EXPANDED:
+                break
+        return variants
 
     def _holds_observed(self, frame: _Frame, name: str) -> bool:
         """Whether a reaching definition in this function settles *name* to it."""
