@@ -625,7 +625,9 @@ def can_reach(site: ast.AST, target: ast.AST) -> bool:
     return not_below(site, target) and compatible(site, target)
 
 
-def _cancels(site: ast.AST, other: ast.AST, target: ast.AST) -> bool:
+def _cancels(
+    site: ast.AST, other: ast.AST, target: ast.AST, rereads: Sequence[ast.AST] = ()
+) -> bool:
     """Whether *other* overwrites *site* before *target* reads it.
 
     Three things have to hold.  *other* sits between them, so it runs after the
@@ -680,8 +682,15 @@ def _cancels(site: ast.AST, other: ast.AST, target: ast.AST) -> bool:
     ``x = f(x)`` reads it too and is still the whole answer once it has run;
     the difference is that :func:`assigned_expressions` returns the right-hand
     side alone, which reconstructs ``f(x)`` and not ``x * 60``.
+
+    *rereads* are the other writes of that kind -- ``keyList.add(tmpKey)``,
+    which the caller knows is a mutation and this function cannot tell from a
+    statement.  A set after ``add`` still holds everything it held before, so
+    ``copyArchive.py``'s ``if tmpKey not in keyList`` read the ``set()`` and
+    the first loop's keys as well as the second's, and cancelling them left
+    the test explained by its own loop alone.
     """
-    if isinstance(other, ast.AugAssign):
+    if isinstance(other, ast.AugAssign) or any(other is one for one in rereads):
         return False
     if not site.lineno < other.lineno <= getattr(target, "lineno", 0):
         return False
@@ -733,7 +742,9 @@ def reaching_definitions(
     )
 
 
-def surviving_writes(sites: Sequence[ast.AST], target: ast.AST) -> list[ast.AST]:
+def surviving_writes(
+    sites: Sequence[ast.AST], target: ast.AST, rereads: Sequence[ast.AST] = ()
+) -> list[ast.AST]:
     """Of *sites*, the writes that can still be what *target* reads.
 
     The body of :func:`reaching_definitions`, taken apart so that a caller
@@ -742,12 +753,16 @@ def surviving_writes(sites: Sequence[ast.AST], target: ast.AST) -> list[ast.AST]
     a tuple unpacking, a ``with`` or a ``for`` target, and cancelling only
     within one of those shapes would keep a tuple-bound ``res`` alive against
     the assignment that replaced it.
+
+    *rereads* are writes that keep what was there -- see :func:`_cancels`.
     """
     live = [site for site in sites if can_reach(site, target)]
     return [
         site
         for site in live
-        if not any(_cancels(site, other, target) for other in live if other is not site)
+        if not any(
+            _cancels(site, other, target, rereads) for other in live if other is not site
+        )
     ]
 
 

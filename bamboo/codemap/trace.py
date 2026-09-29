@@ -243,6 +243,29 @@ def _guard_reads(node: ast.AST) -> list[str]:
     return out
 
 
+def _guard_tests(node: ast.AST) -> list[tuple[ast.If, list[str]]]:
+    """:func:`_guard_reads` with the ``if`` each name is read at.
+
+    Where a walk counts a name's writes from the statement that read it, the
+    statement that read a guard's names is the ``if``, not the line under it:
+    ``if tmpKey not in keyList: keyList.add(tmpKey)`` read the set before the
+    ``add`` below the test ran.
+    """
+    found: list[tuple[ast.If, list[str]]] = []
+    previous = node
+    for ancestor in pathcond.ancestors(node):
+        if isinstance(
+            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+        ):
+            break
+        if isinstance(ancestor, ast.If) and (
+            previous in ancestor.body or previous in ancestor.orelse
+        ):
+            found.append((ancestor, _reads(ancestor.test)))
+        previous = ancestor
+    return found
+
+
 def _unseen(node: ast.AST) -> list[str]:
     return [
         f"{entry.kind} at {entry.line}: {entry.detail}"
@@ -268,6 +291,11 @@ def _statement_at(func: ast.AST, line: int) -> Optional[ast.stmt]:
     if not holding:
         return None
     return min(holding, key=lambda node: (node.end_lineno or node.lineno) - node.lineno)
+
+
+def _walked_key(node: ast.AST) -> tuple[int, int, str]:
+    """A binding's identity across two askings of one name: where it is, and what."""
+    return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0), type(node).__name__)
 
 
 def _value_of(statement: ast.stmt) -> Optional[ast.expr]:
@@ -832,15 +860,22 @@ class _Walk:
         #: ``(file, owner, line)`` -- the line in the starting function whose
         #: reading is being explained.  See :meth:`_reaching`.
         self.reading_at = reading_at
+        #: ``(file, owner)`` of the starting function where a name is narrowed
+        #: to the writes that reach the statement that read it, or ``None``.
+        self.narrowed = reading_at[:2] if reading_at else None
         self.parsed: dict[str, tuple[str, ast.Module]] = {}
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
         self.steps: list[TraceStep] = []
         self.armed: dict[int, ast.stmt] = {}
-        self.seen: set[tuple[str, str]] = set()
+        self.seen: set[tuple] = set()
+        #: ``{(function, name): the bindings already walked}``, where a name is
+        #: asked again from each statement that reads it -- so the second
+        #: asking adds what *its* statement reaches and nothing twice.
+        self.explained: dict[tuple[str, str], set[tuple[int, int, str]]] = {}
         self._scopes: dict[tuple[str, str], str] = {}
         self._logged: dict[tuple[str, str], list[tuple[ast.expr, ast.expr]]] = {}
         self.note = ""
-        self.queue: deque[tuple[_Frame, str, int]] = deque()
+        self.queue: deque[tuple[_Frame, str, int, Optional[ast.AST]]] = deque()
 
     # -- source ------------------------------------------------------------
 
@@ -944,7 +979,30 @@ class _Walk:
         self._scopes[(frame.file, frame.owner)] = key
         return key
 
-    def want(self, frame: _Frame, names: Sequence[str], depth: int) -> None:
+    def narrows(self, frame: _Frame) -> bool:
+        """Whether names in *frame* are narrowed to the writes that reach their read."""
+        return self.narrowed is not None and (frame.file, frame.owner) == self.narrowed
+
+    def want(
+        self,
+        frame: _Frame,
+        names: Sequence[str],
+        depth: int,
+        at: Optional[ast.AST] = None,
+    ) -> None:
+        """Queue *names* for explaining, as read by the statement *at*.
+
+        **Once per statement that reads a name, where the walk is narrowed.**
+        Once per name is right for a walk that answers with every assignment
+        in the function, since a second asking would find the same ones.  It
+        is wrong for a walk that answers with the writes reaching *the read*,
+        because a name read in two places has two sets of those -- and
+        ``getScoutJobData_JEDI`` reads ``memVal`` four times on the way to
+        line 1019: ``memVal = int(memVal)`` on 1007 needs the ``/= 1024`` on
+        1006, which needs the margin on 1005, which needs the percentile on
+        1002.  Asked once, from 1019, the walk kept 1007 and never asked
+        again, so the percentile and both scout settings behind it were cut.
+        """
         if depth > self.budget.depth:
             self._exhausted("depth")
             return
@@ -952,13 +1010,15 @@ class _Walk:
             if name in frame.imports:
                 continue
             if name.startswith("self."):
-                key = (self.scope_key(frame), name)
+                key: tuple = (self.scope_key(frame), name)
             else:
                 key = (f"{frame.file}::{frame.owner}", name)
+                if at is not None and self.narrows(frame):
+                    key = (*key, id(at))
             if key in self.seen:
                 continue
             self.seen.add(key)
-            self.queue.append((frame, name, depth))
+            self.queue.append((frame, name, depth, at))
 
     # -- the walk ----------------------------------------------------------
 
@@ -968,6 +1028,7 @@ class _Walk:
             return
         value = _value_of(statement)
         reads = _reads(value) if value is not None else []
+        own: list[str] = []
         # An arm is usually an assignment, and then its value is what to
         # follow.  An exit is not: it is armed at the ``if`` that decides it,
         # and ``_value_of`` has no value for one.  ``_guard_reads`` answers
@@ -979,6 +1040,7 @@ class _Walk:
         if isinstance(statement, (ast.If, ast.While)):
             for name in _reads(statement.test):
                 _add(reads, name)
+        own = list(reads)
         for name in _guard_reads(statement):
             _add(reads, name)
         terminal, detail = (
@@ -1004,7 +1066,18 @@ class _Walk:
         # per arm is what made the old shape repeat itself.
         self.armed[line] = statement
         if not terminal:
-            self.want(frame, reads, 1)
+            # Read at the line the caller named, where it named one: an exit
+            # is decided at its ``if`` and a statement answers for the binds
+            # filled on the way to it, and the arm is not always that line.
+            if not self.narrows(frame):
+                self.want(frame, reads, 1)
+                return
+            at: ast.AST = statement
+            if self.reading_at is not None:
+                at = _statement_at(frame.func, self.reading_at[2]) or statement
+            self.want(frame, own, 1, at)
+            for test, names in _guard_tests(statement):
+                self.want(frame, names, 1, test)
 
     def logged(self, frame: _Frame) -> list[tuple[ast.expr, ast.expr]]:
         """The logging calls in this frame's function, found once per function."""
@@ -1309,6 +1382,8 @@ class _Walk:
         bindings: list,
         loops: list,
         caught: list,
+        at: Optional[ast.AST] = None,
+        rereads: Sequence[ast.AST] = (),
     ) -> tuple[list, list, list]:
         """Drop the writes a later one overwrote before the read.
 
@@ -1328,13 +1403,20 @@ class _Walk:
         The starting frame only, and the same reason as :meth:`_within`: a
         deeper frame is another function, where this line number belongs to
         another read.
+
+        **The read is the statement that read the name** -- *at* -- and not the
+        line the walk started from.  Cancelling against the starting line at
+        every depth answered "which writes reach line 1019" for a name read on
+        line 1007, and ``memVal = int(memVal)`` then cancelled the very writes
+        it reads.  The statement itself is never its own answer, because it
+        reads before it writes; inside a loop its previous iteration's value
+        still can be, and is kept -- as an answer, never as a canceller.
         """
-        if self.reading_at is None:
+        if not self.narrows(frame):
             return bindings, loops, caught
-        file, owner, line = self.reading_at
-        if frame.file != file or frame.owner != owner:
-            return bindings, loops, caught
-        target = _statement_at(frame.func, line)
+        target = at
+        if target is None and self.reading_at is not None:
+            target = _statement_at(frame.func, self.reading_at[2])
         if target is None:
             return bindings, loops, caught
         sites: dict[int, ast.AST] = {}
@@ -1344,9 +1426,10 @@ class _Walk:
                 if isinstance(node, (ast.stmt, ast.ExceptHandler))
                 else pathcond.site_of(node)
             )
-        alive = {
-            id(site) for site in pathcond.surviving_writes(list(sites.values()), target)
-        }
+        others = [site for site in sites.values() if site is not target]
+        alive = {id(site) for site in pathcond.surviving_writes(others, target, rereads)}
+        if pathcond.loops_over(target):
+            alive.add(id(target))
 
         def lives(node: ast.AST) -> bool:
             return id(sites[id(node)]) in alive
@@ -1365,7 +1448,9 @@ class _Walk:
             return bindings, loops, caught
         return kept
 
-    def explain(self, frame: _Frame, name: str, depth: int) -> None:
+    def explain(
+        self, frame: _Frame, name: str, depth: int, at: Optional[ast.AST] = None
+    ) -> None:
         if name.startswith("self."):
             self._field(frame, name, depth)
             return
@@ -1378,13 +1463,22 @@ class _Walk:
         # Last, and only where the assignments leave the reader nowhere: a
         # container that is assigned a value has that value to answer with,
         # and the members would be noise beside it.
+        mutated: list[ast.expr] = []
         if bindings and all(_is_empty_container(node) for node in bindings):
-            bindings.extend(_mutated_bindings(frame.func, name))
+            mutated = _mutated_bindings(frame.func, name)
+            bindings.extend(mutated)
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
         bindings, loops, caught = self._within(frame, bindings, loops, caught)
-        bindings, loops, caught = self._reaching(frame, bindings, loops, caught)
+        bindings, loops, caught = self._reaching(
+            frame, bindings, loops, caught, at, [pathcond.site_of(node) for node in mutated]
+        )
         held = bool(bindings or loops or caught)
+        # Asked before, from another statement: only what this one reaches and
+        # the first did not.  The fallbacks below answered the first asking
+        # and would say the same thing again.
+        done = self.explained.get((f"{frame.file}::{frame.owner}", name))
+        again = done is not None
         if depth == 1 and self.armed:
             # ``assigned_expressions`` hands back every assignment in the
             # function and the arms are at one point in it.  Pruning is by
@@ -1409,8 +1503,18 @@ class _Walk:
                 # Bound here, and by nothing that could have run first.
                 # "Not bound in this function" would be false and silence
                 # would leave the guard unexplained, so it says which.
-                self._unbound(frame, name, depth, only_below=True)
+                if not again:
+                    self._unbound(frame, name, depth, only_below=True)
                 return
+        if again:
+            bindings = [node for node in bindings if _walked_key(node) not in done]
+            loops = [node for node in loops if _walked_key(node) not in done]
+            caught = [node for node in caught if _walked_key(node) not in done]
+            if not (bindings or loops or caught):
+                return
+        else:
+            done = self.explained.setdefault((f"{frame.file}::{frame.owner}", name), set())
+        done.update(_walked_key(node) for node in (*bindings, *loops, *caught))
         if not bindings and not loops and not caught:
             # The file's own body is the last place to look.  Asked only here,
             # after the function has had its say, so a local always wins over a
@@ -1460,6 +1564,7 @@ class _Walk:
         ):
             terminal, detail = _raised_in(site, self.classify, resolve)
         reads = _reads(expression)
+        own = list(reads)
         for read in _guard_reads(site):
             _add(reads, read)
         step = TraceStep(
@@ -1479,8 +1584,26 @@ class _Walk:
         )
         if not self.record(step):
             return
-        if not terminal:
+        if not terminal and not self.narrows(frame):
             self.want(frame, reads, depth + 1)
+        elif not terminal:
+            # Each name from the statement that read it: the value's from
+            # this line, a guard's from its ``if``.
+            self.want(frame, own, depth + 1, site)
+            for test, names in _guard_tests(site):
+                self.want(frame, names, depth + 1, test)
+        if (
+            isinstance(site, ast.AugAssign)
+            and isinstance(site.target, ast.Name)
+            and site.target.id == name
+            and self.narrows(frame)
+        ):
+            # ``memVal /= 1024`` reads the ``memVal`` it replaces, and the
+            # expression this step was built from is ``1024`` alone -- so the
+            # read is asked for here, or the write above it is never reached.
+            # Whatever the right-hand side resolved to: that stops the walk
+            # along *it*, not along the value being divided.
+            self.want(frame, [name], depth + 1, site)
 
     def _module_binding(
         self, frame: _Frame, name: str, expression: ast.expr, depth: int
@@ -1533,7 +1656,7 @@ class _Walk:
             depth=depth,
         )
         if self.record(step):
-            self.want(frame, reads, depth + 1)
+            self.want(frame, reads, depth + 1, loop)
 
     def _caught(
         self, frame: _Frame, name: str, handler: ast.ExceptHandler, depth: int
@@ -1907,6 +2030,6 @@ def walk(
     for line in lines:
         state.arm(frame, line)
     while state.queue:
-        held, name, depth = state.queue.popleft()
-        state.explain(held, name, depth)
+        held, name, depth, at = state.queue.popleft()
+        state.explain(held, name, depth, at)
     return Walked(state.steps, state.note, state.skeleton(frame, region))

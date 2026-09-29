@@ -1722,8 +1722,11 @@ class Sweeper:
     ours, _note = _walk(roots, file="sweeper", owner="run", lines=[9], reading_at=8)
 
     # 5 is in the ``try`` body, which runs unless something raised first, so
-    # it does cancel 3.  7 is the handler and cancels neither.
-    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [5, 7]
+    # it does cancel 3 as an answer to line 8.  7 is the handler and cancels
+    # neither.  3 is still walked -- one hop further, as what line 5 parses.
+    answers = [s.line for s in ours if s.kind == models.TRACE_BINDING and s.depth == 1]
+    assert answers == [5, 7]
+    assert [(s.line, s.depth) for s in ours if s.line == 3] == [(3, 2)]
 
 
 def test_a_write_in_the_same_except_body_still_cancels_the_one_above_it(tmp_path):
@@ -1751,7 +1754,11 @@ class Sweeper:
 
     ours, _note = _walk(roots, file="sweeper", owner="run", lines=[9], reading_at=8)
 
-    assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [4, 7]
+    # 6 is not an answer to line 8 -- 7 replaced it -- and is walked one hop
+    # further, as the ``limit`` that ``self.floor`` was given.
+    answers = [s.line for s in ours if s.kind == models.TRACE_BINDING and s.depth == 1]
+    assert answers == [4, 7]
+    assert [(s.line, s.depth) for s in ours if s.line == 6] == [(6, 2)]
 
 
 def test_cancelling_never_leaves_a_name_with_no_binding_at_all(tmp_path):
@@ -1825,6 +1832,142 @@ class Sweeper:
     ours, _note = _walk(roots, file="sweeper", owner="run", lines=[7], reading_at=6)
 
     assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [5]
+
+
+def test_a_name_that_reads_itself_is_followed_back_past_its_own_line(tmp_path):
+    """``getScoutJobData_JEDI`` builds the scout's ``ramCount`` in five steps on
+    one name -- a percentile, a margin, a unit, a cast, a floor -- and returns
+    the last.
+
+    Narrowed to the return, the walk kept the cast and the floor and cut
+    the rest: ``mem = int(mem)`` reads the ``mem`` above it, and that read was
+    measured against the return rather than against the cast, where the only
+    write reaching is the one on the line before.  The percentile and both
+    scout settings behind it went with it.
+    """
+    roots = _tree(
+        tmp_path,
+        scout="""\
+class Scout:
+    def run(self, sizes, margin, out):
+        mem = self.percentile(sizes)
+        mem = mem * (100 + margin) // 100
+        mem /= 1024
+        mem = int(mem)
+        if mem < 0:
+            mem = 1
+        out["ram"] = mem
+""",
+    )
+
+    whole, _note = _walk(roots, file="scout", owner="run", lines=[9])
+    ours, _note = _walk(roots, file="scout", owner="run", lines=[9], reading_at=9)
+
+    bound = [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "mem"]
+    assert sorted(bound) == [3, 4, 5, 6, 8]
+    assert sorted(bound) == sorted(
+        s.line for s in whole if s.kind == models.TRACE_BINDING and s.name == "mem"
+    )
+    assert "margin" in {s.name for s in ours if s.kind == models.TRACE_UNBOUND}
+    # Asked four times, walked once each.
+    assert len(bound) == len(set(bound))
+
+
+def test_a_name_read_on_the_way_is_answered_where_it_was_read(tmp_path):
+    """``y = t + 1`` reads ``t`` on line 4, and line 4 is where its writes are
+    counted from -- not the line the walk started at.
+
+    Counted from the start, the write on line 5 cancelled the one on line 3
+    and was offered as the ``t`` that ``y`` was built from: a confident answer
+    from a line that ran after the read.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self, row):
+        t = self.first()
+        y = t + 1
+        t = self.second()
+        row.status = y
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[6], reading_at=6)
+
+    assert [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "t"] == [3]
+
+
+def test_a_name_carried_round_a_loop_keeps_its_first_value_and_its_own(tmp_path):
+    """``total = total + r`` in a loop reads the value before the loop on the
+    first pass and its own on every other, and cancels neither."""
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self, rows, row):
+        total = 0
+        for r in rows:
+            total = total + r
+        row.status = total
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[6], reading_at=6)
+
+    bound = [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "total"]
+    assert sorted(bound) == [3, 5]
+
+
+def test_an_add_keeps_what_the_container_held(tmp_path):
+    """``seen.add(b)`` leaves ``a`` in the set, so it cancels nothing.
+
+    The rule already said this of ``timeOutVal *= 60`` and not of a method
+    that fills a container, and the members a narrowed walk answered with
+    were the last one added.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self, a, b, row):
+        seen = set()
+        seen.add(a)
+        seen.add(b)
+        row.status = seen
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[6], reading_at=6)
+
+    bound = sorted(s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "seen")
+    assert bound == [3, 4, 5]
+
+
+def test_a_guards_names_are_read_where_the_if_reads_them(tmp_path):
+    """``if x > 0`` read the ``x`` from line 3; the ``x = 0`` under it ran after.
+
+    Counted from the line the guard dominates, the test was explained by the
+    write inside its own body -- ``x = 0`` offered as what ``x > 0`` saw, from
+    a line that had not run when the test did.  Nothing else here reads that
+    ``x``, so it is no answer at all.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self, row):
+        x = self.first()
+        if x > 0:
+            x = 0
+            y = 1
+            row.status = y
+""",
+    )
+
+    ours, _note = _walk(roots, file="sweeper", owner="run", lines=[7], reading_at=7)
+
+    assert [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "x"] == [3]
 
 
 def test_a_binding_says_how_its_value_reaches_the_name(tmp_path):
