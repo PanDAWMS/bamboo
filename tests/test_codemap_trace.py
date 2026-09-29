@@ -1970,6 +1970,70 @@ class Sweeper:
     assert [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "x"] == [3]
 
 
+def test_a_test_on_a_name_rebound_since_does_not_keep_two_writes_apart(tmp_path):
+    """``AtlasProdWatchDog.doActionForReassign`` skips a task on ``if tmpStat
+    is not True: continue``, then sets ``tmpStat`` afresh per dataset and marks
+    the task failed under ``if tmpStat is not True``.
+
+    Read as text, everything after the skip is "not (tmpStat is not True)" and
+    the failure "tmpStat is not True", so the two could not meet, and a walk
+    narrowed to what reaches ``if isOK`` lost the ``isOK = False`` that says
+    why the task was not reassigned.  The skip's test is about the first
+    ``tmpStat``; by the failure it is another.
+    """
+    roots = _tree(
+        tmp_path,
+        dog="""\
+class Dog:
+    def run(self, tasks, sets):
+        for task in tasks:
+            stat = self.check(task)
+            if stat is not True:
+                continue
+            ok = True
+            for one in sets:
+                stat = self.move(one)
+                if stat is not True:
+                    ok = False
+            if ok:
+                task.status = "done"
+""",
+    )
+
+    ours, _note = _walk(roots, file="dog", owner="run", lines=[13], reading_at=13)
+
+    assert [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "ok"] == [7, 11]
+
+
+def test_a_write_in_a_try_whose_handler_passes_leaves_the_one_above_standing(tmp_path):
+    """``TaskRefiner.runImpl``: ``dataset_did = None``, then ``try: dataset_did
+    = rucioAPI.get_did_str(...)`` with ``except Exception: pass``, then ``if
+    dataset_did is not None``.
+
+    Whenever Rucio raised, the test sees the ``None``.  Read as "the ``try``
+    body runs unless something raised", the call's write replaced it, and the
+    one path the test exists for was gone from the answer.
+    """
+    roots = _tree(
+        tmp_path,
+        refiner="""\
+class Refiner:
+    def run(self, name, out):
+        did = None
+        try:
+            did = self.rucio.get_did_str(name)
+        except Exception:
+            pass
+        if did is not None:
+            out.append(did)
+""",
+    )
+
+    ours, _note = _walk(roots, file="refiner", owner="run", lines=[9], reading_at=9)
+
+    assert [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "did"] == [3, 5]
+
+
 def test_a_binding_says_how_its_value_reaches_the_name(tmp_path):
     """The step carries the right-hand side alone, so it has to carry the rest.
 

@@ -610,23 +610,211 @@ def reachable_when(node: ast.AST) -> list[str]:
     ]
 
 
-def compatible(one: ast.AST, other: ast.AST) -> bool:
+def _names_in(expression: ast.AST) -> set[str]:
+    return {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
+
+
+def _rebinds(func: ast.AST) -> dict[str, list[int]]:
+    """``{name: every line in *func* that gives it a new value}``, found once per function.
+
+    Plain and annotated assignments, ``+=``, loop and ``with`` targets, the
+    walrus, ``except ... as``, and the two ways a container changes in place --
+    ``x[k] = v`` and ``x.add(v)`` -- because a test on ``x`` read before any
+    of those described a different ``x``.  Wide on purpose: the one reader of
+    this drops a condition for it, and dropping one only makes two sites look
+    more able to meet.
+    """
+    held = getattr(func, "_rebinds", None)
+    if held is not None:
+        return held
+    found: dict[str, list[int]] = {}
+
+    def note(target: ast.AST, line: int) -> None:
+        if isinstance(target, ast.Name):
+            found.setdefault(target.id, []).append(line)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                note(element, line)
+        elif isinstance(target, ast.Starred):
+            note(target.value, line)
+        elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+            found.setdefault(target.value.id, []).append(line)
+
+    for node in ast.walk(func):
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in targets_of(node):
+                note(target, line)
+        elif isinstance(node, ast.AugAssign):
+            note(node.target, line)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            note(node.target, line)
+        elif isinstance(node, ast.NamedExpr):
+            note(node.target, line)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    note(item.optional_vars, line)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            found.setdefault(node.name, []).append(line)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        ):
+            found.setdefault(node.func.value.id, []).append(line)
+    try:
+        func._rebinds = found  # type: ignore[attr-defined]
+    except AttributeError:
+        pass
+    return found
+
+
+def _dominating_ifs(node: ast.AST) -> list[ast.If]:
+    """The ``if`` statements :func:`path_condition` reads a condition from, outermost first."""
+    found: list[ast.If] = []
+    previous = node
+    for ancestor in ancestors(node):
+        if isinstance(ancestor, ast.If) and (
+            previous in ancestor.body or previous in ancestor.orelse
+        ):
+            found.append(ancestor)
+        previous = ancestor
+    found.reverse()
+    return found
+
+
+def _early_exit_ifs(node: ast.AST) -> list[tuple[str, ast.stmt]]:
+    """:func:`enclosing_guards`' early exits, each with the statement that implies it."""
+    found: list[tuple[str, ast.stmt]] = []
+    previous = node
+    for ancestor in ancestors(node):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(ancestor, field, None)
+            if not isinstance(block, list) or previous not in block:
+                continue
+            found.extend(
+                (implied, statement)
+                for statement in block[: block.index(previous)]
+                if (implied := _implied_by(statement))
+            )
+            break
+        if isinstance(
+            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+        ):
+            break
+        previous = ancestor
+    return found
+
+
+def current_conditions(node: ast.AST) -> list[str]:
+    """:func:`reachable_when`, less every condition on a name given a new value since.
+
+    A condition is a string about a name, and it describes the name as it was
+    when its ``if`` ran.  ``AtlasProdWatchDog.doActionForReassign`` skips a
+    task with ``if tmpStat is not True: continue`` and, further down the same
+    loop, sets ``tmpStat`` afresh and fails the task under ``if tmpStat is not
+    True``.  Compared as text, everything below the skip was "not (tmpStat is
+    not True)" and the failure "tmpStat is not True", so the two could never
+    meet -- and a walk narrowed to what reaches ``if isOK`` dropped the one
+    ``isOK = False`` that says why a task was not reassigned.
+
+    Only for deciding whether two sites *can* meet: dropping a condition makes
+    that easier and never harder.  Not for deciding whether one write
+    *replaced* another, where a condition dropped from the replacing side would
+    make replacing easier -- the unsafe direction.
+    """
+    func = enclosing_function(node)
+    rebinds = _rebinds(func) if func is not None else {}
+    line = getattr(node, "lineno", 0)
+
+    def stale(test: ast.AST, at: int) -> bool:
+        return any(at < bound < line for name in _names_in(test) for bound in rebinds.get(name, ()))
+
+    ifs = _dominating_ifs(node)
+    written = path_condition(node)
+    if len(ifs) != len(written):
+        # A test ``path_condition`` could not render and skipped; the pairing
+        # is lost, so nothing is dropped rather than the wrong thing.
+        kept = list(written)
+    else:
+        kept = [text for text, held in zip(written, ifs) if not stale(held.test, held.lineno)]
+    kept.extend(
+        implied
+        for implied, statement in _early_exit_ifs(node)
+        if not stale(statement.test, statement.lineno)
+    )
+    return kept
+
+
+def compatible(one: ast.AST, other: ast.AST, current: bool = False) -> bool:
     """Whether both nodes can be on one run through the function.
 
     A path condition is a necessary condition, so this is conservative in the
     direction that is safe: it separates two sites only where one's condition
     contradicts the other's.
+
+    *current* reads each side's conditions as :func:`current_conditions`,
+    which the walk asks for and the build does not yet -- see there.
     """
+    if current:
+        return not exclusive(current_conditions(one), current_conditions(other))
     return not exclusive(reachable_when(one), reachable_when(other))
 
 
-def can_reach(site: ast.AST, target: ast.AST) -> bool:
+def can_reach(site: ast.AST, target: ast.AST, current: bool = False) -> bool:
     """Whether what *site* writes can be what *target* reads."""
-    return not_below(site, target) and compatible(site, target)
+    return not_below(site, target) and compatible(site, target, current)
+
+
+def _within(node: ast.AST, container: ast.AST) -> bool:
+    return node is container or any(ancestor is container for ancestor in ancestors(node))
+
+
+def _skipped_by_a_raise(other: ast.AST, target: ast.AST, live: Sequence[ast.AST]) -> bool:
+    """Whether an exception can carry control past *other*'s write and on to *target*.
+
+    A write in a ``try`` body runs unless something above it in the body
+    raised, and that is the path this asks about: a handler that neither
+    leaves nor writes the name again sends control on with the value from
+    before the ``try``.  ``TaskRefiner.runImpl`` sets ``dataset_did = None``,
+    tries ``rucioAPI.get_did_str()``, passes on any exception and then tests
+    ``if dataset_did is not None`` -- the ``None`` is what that test sees
+    whenever Rucio failed, and reading the ``try``'s write as having replaced
+    it dropped exactly that answer.
+
+    A handler holding another of the *live* writes is taken to write the name,
+    which is the case ``except: limit = 8`` below a ``try: limit = parse()``
+    is: there the ``try``'s write does replace the one above it on every path
+    that reaches the read.
+    """
+    previous = other
+    for ancestor in ancestors(other):
+        if isinstance(
+            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+        ):
+            break
+        if (
+            isinstance(ancestor, ast.Try)
+            and previous in ancestor.body
+            and not _within(target, ancestor)
+        ):
+            for handler in ancestor.handlers:
+                if _jumps(handler.body):
+                    continue
+                if any(site is not other and _within(site, handler) for site in live):
+                    continue
+                return True
+        previous = ancestor
+    return False
 
 
 def _cancels(
-    site: ast.AST, other: ast.AST, target: ast.AST, rereads: Sequence[ast.AST] = ()
+    site: ast.AST,
+    other: ast.AST,
+    target: ast.AST,
+    rereads: Sequence[ast.AST] = (),
+    live: Optional[Sequence[ast.AST]] = None,
 ) -> bool:
     """Whether *other* overwrites *site* before *target* reads it.
 
@@ -692,6 +880,10 @@ def _cancels(
     """
     if isinstance(other, ast.AugAssign) or any(other is one for one in rereads):
         return False
+    # *live* is given where the caller reads the function as it runs -- see
+    # :func:`_skipped_by_a_raise`.
+    if live is not None and _skipped_by_a_raise(other, target, live):
+        return False
     if not site.lineno < other.lineno <= getattr(target, "lineno", 0):
         return False
     if loops_over(other) - loops_over(target):
@@ -743,7 +935,10 @@ def reaching_definitions(
 
 
 def surviving_writes(
-    sites: Sequence[ast.AST], target: ast.AST, rereads: Sequence[ast.AST] = ()
+    sites: Sequence[ast.AST],
+    target: ast.AST,
+    rereads: Sequence[ast.AST] = (),
+    as_run: bool = False,
 ) -> list[ast.AST]:
     """Of *sites*, the writes that can still be what *target* reads.
 
@@ -755,13 +950,22 @@ def surviving_writes(
     the assignment that replaced it.
 
     *rereads* are writes that keep what was there -- see :func:`_cancels`.
+
+    *as_run* reads the function the way it runs rather than the way it is
+    written, in the two places those differ: a test describes its name as it
+    was when the test ran (:func:`current_conditions`), and an exception can
+    carry control past a ``try``'s write (:func:`_skipped_by_a_raise`).  The
+    walk asks for it.  The build does not yet, because the build's answers are
+    stored and compared, and changing them is its own round.
     """
-    live = [site for site in sites if can_reach(site, target)]
+    live = [site for site in sites if can_reach(site, target, as_run)]
     return [
         site
         for site in live
         if not any(
-            _cancels(site, other, target, rereads) for other in live if other is not site
+            _cancels(site, other, target, rereads, live if as_run else None)
+            for other in live
+            if other is not site
         )
     ]
 

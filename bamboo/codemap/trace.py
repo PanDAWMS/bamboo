@@ -1427,7 +1427,13 @@ class _Walk:
                 else pathcond.site_of(node)
             )
         others = [site for site in sites.values() if site is not target]
-        alive = {id(site) for site in pathcond.surviving_writes(others, target, rereads)}
+        # ``as_run``: a test on a name the function has since rebound says
+        # nothing about the rebound value, and a ``try``'s write is skipped by
+        # the exception its handler swallows -- see ``pathcond.surviving_writes``.
+        alive = {
+            id(site)
+            for site in pathcond.surviving_writes(others, target, rereads, as_run=True)
+        }
         if pathcond.loops_over(target):
             alive.add(id(target))
 
