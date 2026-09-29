@@ -2848,6 +2848,30 @@ SKELETON_PRINT = "print"
 SKELETON_ARM = "arm"
 
 
+class SkeletonHole(BaseModel):
+    """One hole of a printed line, and the expression the source fills it with.
+
+    The pattern says where a value goes and how far it can run; this says
+    *which* value.  A reader who has the line in hand reads each hole back
+    against its expression -- ``prodSourceLabel`` out of ``{str(e)} :
+    {self.job.prodSourceLabel} in {self.job.jobStatus}`` -- which the pattern
+    alone cannot tell it.
+    """
+
+    expression: str = Field(description="What fills the hole, as the source spells it.")
+    prints: str = Field(
+        default="token",
+        description="token | text | number -- how the value prints, read off the syntax.",
+    )
+    appended: bool = Field(
+        default=False,
+        description=(
+            "Whether this hole is what ``+=`` adds after the message was first "
+            "written.  Always the last hole, and left out of the pattern."
+        ),
+    )
+
+
 class SkeletonLine(BaseModel):
     """One row of what a function prints, in source order, with the arms in place.
 
@@ -2893,6 +2917,10 @@ class SkeletonLine(BaseModel):
             "key: too little literal to ask on its own -- ``Try:`` -- and "
             "exactly the question among one job's lines."
         ),
+    )
+    holes: list[SkeletonHole] = Field(
+        default_factory=list,
+        description="Every hole of the pattern, in order, with what fills it.",
     )
     arms: list[int] = Field(
         default_factory=list,

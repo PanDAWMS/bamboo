@@ -1665,7 +1665,7 @@ def f(api, log):
         for row in walked.skeleton
         if row.kind == models.SKELETON_PRINT and row.refused
     }
-    assert refused == {7: "the message is not a literal this walk can render"}
+    assert refused == {7: trace_mod.REFUSED_RETURNED}
 
 
 def test_an_unpacked_binding_says_which_slot_it_took(tmp_path):
@@ -2317,3 +2317,218 @@ def test_a_class_that_is_only_named_like_the_interface_is_not_it(tmp_path):
 
     (spec,) = [s for s in walked.steps if s.name == "spec"]
     assert spec.detail == ""
+
+
+# ---------------------------------------------------------------------------
+# A message the call does not write out: the syntax it is built in
+# ---------------------------------------------------------------------------
+
+
+def _rows_at(roots, line, **kwargs):
+    rows = _printed(roots, file="m", owner="f", lines=[kwargs.pop("arm", 2)], **kwargs)
+    return [row for row in rows if row.line == line]
+
+
+def test_a_message_built_with_plus_is_written_out(tmp_path):
+    """154 lines of the corpus print ``a + b``, and every one was refused."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(job, log):
+    job.status = "failed"
+    log.error("failed to get " + job.name + " from " + str(job.site) + traceback.format_exc())
+''',
+    )
+
+    (row,) = _rows_at(roots, 3)
+
+    assert row.pattern == r"failed\ to\ get\ [^\ ]*\ from\ "
+    assert [hole.expression for hole in row.holes] == [
+        "job.name",
+        "str(job.site)",
+        "traceback.format_exc()",
+    ]
+    assert [hole.prints for hole in row.holes] == ["token", "text", "text"]
+
+
+def test_a_percent_template_is_written_out_with_its_numbers(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(job, log, took):
+    job.status = "done"
+    log.debug("end: took %s.%03d sec in total" % (took.seconds, took.microseconds / 1000))
+''',
+    )
+
+    (row,) = _rows_at(roots, 3)
+
+    assert row.pattern.startswith(r"end:\ took\ [^\.]*\.[-+]?[\d.]+")
+    assert row.pattern.endswith(r"\ sec\ in\ total")
+    assert [hole.prints for hole in row.holes] == ["token", "number"]
+
+
+def test_a_format_template_is_written_out_with_its_specs(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(site, log, n, rate):
+    site.status = "throttled"
+    log.info("throttle {0} since nQ({1}) < {2:.3f}".format(site.name, n, rate))
+''',
+    )
+
+    (row,) = _rows_at(roots, 3)
+
+    assert row.pattern == r"throttle\ [^\ ]*\ since\ nQ\([^\)]*\)\ <\ "
+    assert [(hole.expression, hole.prints) for hole in row.holes] == [
+        ("site.name", "token"),
+        ("n", "token"),
+        ("rate", "number"),
+    ]
+
+
+def test_a_name_added_to_with_plus_equals_prints_one_row_not_two(tmp_path):
+    """``err_str += traceback.format_exc()`` made a second row of its own, which
+    could never be rendered -- and a refused row beside a shaped one tells a
+    reader the line's absence proves nothing.  The line is the one the first
+    binding wrote, with the traceback after it."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(job, log):
+    job.status = "failed"
+    try:
+        job.run()
+    except Exception as e:
+        err_str = f"execute() : {type(e)} {e}"
+        err_str += traceback.format_exc()
+        log.debug(err_str)
+''',
+    )
+
+    (row,) = _rows_at(roots, 8)
+
+    assert row.pattern == r"execute\(\)\ :\ [^\ ]*\ "
+    assert row.holes[-1].appended is True
+
+
+def test_what_plus_equals_adds_with_text_of_its_own_is_a_row_too(tmp_path):
+    """``for merge`` and ``for retry`` are what say which branch ran."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(job, log, merging):
+    job.status = "sent"
+    msg = f"sent {job.id} "
+    if merging:
+        msg += "for merge"
+    else:
+        msg += "for retry"
+    log.debug(msg)
+''',
+    )
+
+    patterns = {row.pattern for row in _rows_at(roots, 8)}
+
+    assert patterns == {r"sent\ [^\ ]*\ ", r"for\ merge", r"for\ retry"}
+
+
+def test_an_f_string_of_a_local_prints_the_rows_the_local_does(tmp_path):
+    """``f"{error_message}"`` and ``error_message`` are one message.  The first
+    was read by a narrower rule, which gave up on a local that ``+=`` also
+    writes and left the line with no text at all."""
+    source = '''\
+def f(job, log):
+    job.status = "failed"
+    error_message = ""
+    try:
+        job.register()
+    except RegistrationError as e:
+        error_message = f"{str(e)} : {job.label} in {job.status}"
+        error_message += "\\n" + traceback.format_exc()
+    except Exception as e:
+        error_message = f"{type(e)} : {e}"
+    log.error(%s)
+'''
+    bare = _tree(tmp_path / "bare", m=source % "error_message")
+    fstring = _tree(tmp_path / "fstring", m=source % 'f"{error_message}"')
+
+    said = [{(row.pattern, row.refused) for row in _rows_at(roots, 11)} for roots in (bare, fstring)]
+
+    assert said[0] == said[1]
+    assert (r"\ :\ [^\ ]*\ in\ ", "") in said[0]
+    assert ("", "no literal text to ask with") in said[0]
+
+
+def test_a_field_assigned_just_above_the_call_is_written_out(tmp_path):
+    """``self.logger.error(self.job.ddmErrorDiag)`` on the line after the
+    assignment prints the assignment, and nothing from outside can reach it."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, file):
+    self.job.jobStatus = "failed"
+    self.job.ddmErrorDiag = f"expected output {file.lfn} is missing in pilot JSON"
+    self.logger.error(self.job.ddmErrorDiag)
+''',
+    )
+
+    (row,) = _rows_at(roots, 4)
+
+    assert row.pattern == r"expected\ output\ [^\ ]*\ is\ missing\ in\ pilot\ JSON"
+
+
+def test_a_field_assigned_only_on_one_path_may_hold_what_came_in(tmp_path):
+    """Where no binding here runs on every path, the field may still hold what
+    it held on the way in, and that way is refused rather than dropped."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, bad):
+    self.job.jobStatus = "failed"
+    if bad:
+        self.job.ddmErrorDiag = "the file was bad on arrival"
+    self.logger.error(self.job.ddmErrorDiag)
+''',
+    )
+
+    said = {(row.pattern, row.refused) for row in _rows_at(roots, 5)}
+
+    assert said == {
+        (r"the\ file\ was\ bad\ on\ arrival", ""),
+        ("", trace_mod.REFUSED_SET_ELSEWHERE),
+    }
+
+
+def test_a_parameter_passed_straight_to_the_log_is_the_callers(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(job, log, msg):
+    job.status = "failed"
+    log.error(msg)
+''',
+    )
+
+    (row,) = _rows_at(roots, 3)
+
+    assert row.refused == trace_mod.REFUSED_HANDED_IN
+
+
+def test_a_local_bound_to_a_bare_word_stays_a_hole(tmp_path):
+    """``newStatus = "exhausted"`` is the value the row's ``value`` pattern
+    names; writing it out would erase the hole the observed value fills."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(task, log):
+    newStatus = "exhausted"
+    task.status = newStatus
+    log.info(f"set status={newStatus} for task")
+''',
+    )
+
+    (row,) = _printed(roots, file="m", owner="f", lines=[3])
+
+    assert row.pattern == r"set\ status=[^\ ]*\ for\ task"

@@ -53,6 +53,7 @@ import builtins
 import itertools
 import logging
 import re
+import string
 from collections import deque
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional, Sequence
@@ -72,17 +73,21 @@ from bamboo.codemap.models import (
     TRACE_UNBOUND,
     TRACE_WRITE,
     Handover,
+    SkeletonHole,
     SkeletonLine,
     TraceStep,
 )
 from bamboo.codemap.panda import pathcond
 
-# ``_logged_arguments`` is the build's own spelling of "what this corpus logs",
-# reused rather than restated.  A second spelling here would be a second thing
-# to keep current, and the one thing the two cadences must agree on is which
-# calls are log calls: the map's question and the trace's prediction have to be
-# about the same sentence or they cannot be compared at all.
-from bamboo.codemap.panda.recognizers.emit import _logged_arguments, logging_arguments
+# ``logging_arguments`` is the build's own spelling of which calls are log
+# calls, reused rather than restated: the map's question and the trace's
+# prediction have to be about the same calls or they cannot be compared at
+# all.  What a call *prints* is read here, by :meth:`_Walk.messages`, and more
+# widely than the build's ``_logged_arguments`` reads it -- a message built
+# with ``+``, ``%`` or ``.format``, or into an attribute, is written out here
+# and is still one hole there.  Two readings of one thing; the build's is the
+# narrower, and stored ``Branch.messages`` still come from it.
+from bamboo.codemap.panda.recognizers.emit import logging_arguments
 from bamboo.codemap.reading import containing_function
 
 logger = logging.getLogger(__name__)
@@ -437,6 +442,8 @@ def _hole_prints(part: ast.FormattedValue) -> str:
     Read off the syntax only; a name whose value is a dict prints like one too,
     and is left a token rather than guessed at.
     """
+    if getattr(part, "appended", False):
+        return "text"
     spec = part.format_spec
     if isinstance(spec, ast.JoinedStr) and all(
         isinstance(value, ast.Constant) for value in spec.values
@@ -641,6 +648,21 @@ def _constant_pattern(message: ast.expr) -> str:
     return ""
 
 
+def _holes_of(message: ast.expr) -> list[SkeletonHole]:
+    """Every hole of a rendered message, with the expression that fills it."""
+    if not isinstance(message, ast.JoinedStr):
+        return []
+    return [
+        SkeletonHole(
+            expression=_text(part.value),
+            prints=_hole_prints(part) or "token",
+            appended=bool(getattr(part, "appended", False)),
+        )
+        for part in message.values
+        if isinstance(part, ast.FormattedValue)
+    ]
+
+
 def keyed(message: ast.expr) -> bool:
     """Whether a rendered *message* is a question only together with the entity's key.
 
@@ -657,21 +679,6 @@ def keyed(message: ast.expr) -> bool:
 
 #: How many ways one message may be written out before the rest are left.
 _MAX_EXPANDED = 4
-
-
-def _literal_text_of(value: ast.expr) -> Optional[list[ast.expr]]:
-    """The pieces of a sentence fragment, or ``None`` for anything else.
-
-    An f-string, or a string with a space in it.  A bare token -- ``newStatus =
-    "exhausted"`` -- is left a hole: the hole already matches it, and it is the
-    value the row's ``value`` pattern names, which writing it out would erase.
-    A fragment is what a token hole cannot match, which is the failure here.
-    """
-    if isinstance(value, ast.Constant) and isinstance(value.value, str):
-        return [value] if any(character.isspace() for character in value.value) else None
-    if isinstance(value, ast.JoinedStr):
-        return list(value.values)
-    return None
 
 
 def _merged(pieces: list[ast.expr]) -> list[ast.expr]:
@@ -691,18 +698,260 @@ def _merged(pieces: list[ast.expr]) -> list[ast.expr]:
     return out
 
 
-def _refusal(message: ast.expr) -> str:
-    """Why no pattern was rendered, in the words the skeleton prints in its place.
+#: Why a printed line has no pattern, one reason per way of failing.  Said
+#: rather than left blank: a row that silently loses its pattern reads as a
+#: line production does not print, and the reader would go looking for it.
+#: The last three are where the message comes from another function, which
+#: the walk does not follow yet; they are separate so a count of them is the
+#: size of that work.
+REFUSED_NO_LITERAL = "no literal text to ask with"
+REFUSED_UNRENDERED = "the message is not a literal this walk can render"
+REFUSED_HANDED_IN = "the message is handed in by the caller"
+REFUSED_SET_ELSEWHERE = "the message is a value set outside this function"
+REFUSED_RETURNED = "the message is what a call returns"
 
-    Said rather than left blank.  A row that silently loses its pattern reads
-    as a line production does not print, and the reader would go looking for
-    it in the log.
-    """
+
+def _refusal(message: ast.expr) -> str:
+    """Why no pattern was rendered, for a message that reached rendering."""
     if isinstance(message, ast.JoinedStr) or (
         isinstance(message, ast.Constant) and isinstance(message.value, str)
     ):
-        return "no literal text to ask with"
-    return "the message is not a literal this walk can render"
+        return REFUSED_NO_LITERAL
+    return REFUSED_UNRENDERED
+
+
+class _Message(NamedTuple):
+    """One way a logging call can print: a message to render, or why not."""
+
+    expr: ast.expr
+    refused: str = ""
+
+
+#: How deep a message is followed through the names it is built from.
+_MESSAGE_DEPTH = 4
+
+#: A ``%`` conversion, as ``printf`` spells one.
+_PRINTF = re.compile(
+    r"%(?:\((?P<key>[^)]*)\))?[-#0 +]*(?P<width>\*|\d+)?(?:\.(?P<precision>\*|\d+))?"
+    r"[hlL]?(?P<kind>[diouxXeEfFgGcrsa%])"
+)
+#: The ``%`` conversions that print a number, spelled as the format spec
+#: :func:`_hole_prints` reads.
+_PRINTF_NUMBER = {"d": "d", "i": "d", "u": "d", "o": "o", "x": "x", "X": "X",
+                  "e": "e", "E": "E", "f": "f", "F": "F", "g": "g", "G": "G"}
+
+
+def _hole(value: ast.expr, spec: str = "", conversion: int = -1) -> ast.FormattedValue:
+    """A hole holding *value*, as an f-string would write it."""
+    return ast.FormattedValue(
+        value=value,
+        conversion=conversion,
+        format_spec=ast.JoinedStr(values=[ast.Constant(value=spec)]) if spec else None,
+    )
+
+
+def _appended(name: ast.expr) -> ast.FormattedValue:
+    """The hole for what ``+=`` adds to a message after it was first written.
+
+    Text of any shape -- ``traceback.format_exc()`` is the common one -- and
+    always at the end, which is where a trailing hole is dropped from the
+    pattern: the line starts the way the first binding wrote it.
+    """
+    hole = _hole(name)
+    hole.appended = True  # type: ignore[attr-defined]
+    return hole
+
+
+def _constant_text(pieces: Sequence[ast.expr]) -> Optional[str]:
+    """The text of *pieces* when every one is literal, else ``None``."""
+    if all(isinstance(p, ast.Constant) and isinstance(p.value, str) for p in pieces):
+        return "".join(p.value for p in pieces)  # type: ignore[attr-defined]
+    return None
+
+
+def _has_literal(pieces: Sequence[ast.expr]) -> bool:
+    return any(_literal_text(piece).strip() for piece in pieces)
+
+
+def _is_token(pieces: Sequence[ast.expr]) -> bool:
+    """Whether *pieces*, less what ``+=`` adds, are one word with no space in it."""
+    own = [piece for piece in pieces if not getattr(piece, "appended", False)]
+    return (
+        len(own) == 1
+        and isinstance(own[0], ast.Constant)
+        and isinstance(own[0].value, str)
+        and bool(own[0].value)
+        and not any(character.isspace() for character in own[0].value)
+    )
+
+
+def _printf_pieces(template: str, values: ast.expr) -> Optional[list[ast.expr]]:
+    """``template % values`` as literal pieces and holes, or ``None`` if unreadable."""
+    elements = list(values.elts) if isinstance(values, ast.Tuple) else None
+    pieces: list[ast.expr] = []
+    position = used = 0
+    for match in _PRINTF.finditer(template):
+        pieces.append(ast.Constant(value=template[position : match.start()]))
+        position = match.end()
+        kind = match["kind"]
+        if kind == "%":
+            pieces.append(ast.Constant(value="%"))
+            continue
+        if match["width"] == "*" or match["precision"] == "*":
+            return None
+        if match["key"] is not None:
+            value: ast.expr = ast.Subscript(value=values, slice=ast.Constant(value=match["key"]))
+        elif elements is not None:
+            if used >= len(elements):
+                return None
+            value = elements[used]
+            used += 1
+        else:
+            if used:
+                return None
+            value = values
+            used += 1
+        pieces.append(
+            _hole(
+                value,
+                spec=_PRINTF_NUMBER.get(kind, ""),
+                conversion=ord(kind) if kind in "ra" else -1,
+            )
+        )
+    pieces.append(ast.Constant(value=template[position:]))
+    return pieces
+
+
+def _format_pieces(template: str, call: ast.Call) -> Optional[list[ast.expr]]:
+    """``template.format(...)`` as literal pieces and holes, or ``None`` if unreadable."""
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError:
+        return None
+    named = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
+    spread = [keyword.value for keyword in call.keywords if keyword.arg is None]
+    pieces: list[ast.expr] = []
+    automatic = 0
+    for literal, field, spec, conversion in parsed:
+        if literal:
+            pieces.append(ast.Constant(value=literal))
+        if field is None:
+            continue
+        head = re.match(r"[^.\[]*", field).group(0)  # type: ignore[union-attr]
+        value: Optional[ast.expr]
+        if head == "":
+            value = call.args[automatic] if automatic < len(call.args) else None
+            automatic += 1
+        elif head.isdigit():
+            value = call.args[int(head)] if int(head) < len(call.args) else None
+        elif head in named:
+            value = named[head]
+        elif spread:
+            value = ast.Subscript(value=spread[0], slice=ast.Constant(value=head))
+        else:
+            value = None
+        if value is None:
+            return None
+        if field[len(head) :]:
+            try:
+                value = ast.parse(_text(value) + field[len(head) :], mode="eval").body
+            except SyntaxError:
+                return None
+        pieces.append(
+            _hole(
+                value,
+                spec="" if (spec is None or "{" in spec) else spec,
+                conversion=ord(conversion) if conversion else -1,
+            )
+        )
+    return pieces
+
+
+def _dominates(site: ast.AST, target: ast.AST) -> bool:
+    """Whether statement *site* runs on every path to *target*.
+
+    Read off the nesting: *site* sits in a block that holds *target*, above
+    it.  Two branches of an ``if``, a ``try`` body and its handler, are
+    different blocks, so a binding in one does not dominate a call in the
+    other -- which is the case that matters.
+    """
+    below = target
+    for ancestor in [target, *pathcond.ancestors(target)]:
+        for _header, body in _blocks_of(ancestor) if isinstance(ancestor, ast.stmt) else []:
+            if below in body and site in body:
+                return body.index(site) < body.index(below)
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return site in ancestor.body and below in ancestor.body and (
+                ancestor.body.index(site) < ancestor.body.index(below)
+            )
+        if isinstance(ancestor, ast.stmt):
+            below = ancestor
+    return False
+
+
+def _own_nodes(func: ast.AST):
+    """Every node of *func*'s own body; nested functions and classes run elsewhere."""
+    for child in ast.iter_child_nodes(func):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        yield child
+        yield from _own_nodes(child)
+
+
+def _message_sites(
+    func: ast.AST, spelled: str
+) -> tuple[list[ast.expr], list[ast.expr], list[ast.AST]]:
+    """``(plain, appended, opaque)`` bindings of the name or place spelled *spelled*.
+
+    *plain* are values assigned outright, *appended* the right-hand sides of
+    ``+=``, and *opaque* the sites that bind it to something no text is
+    written for here: a loop target, ``with ... as``, ``except ... as``, a
+    slot of an unpacked call.
+    """
+    plain: list[ast.expr] = []
+    appended: list[ast.expr] = []
+    opaque: list[ast.AST] = []
+
+    def slot(target: ast.expr, value: Optional[ast.expr]) -> None:
+        if _text(target) == spelled:
+            if value is None:
+                opaque.append(target)
+            else:
+                plain.append(value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            # A slot of a literal tuple is that element; a slot of a call is
+            # what the call returns, which is the call's to say.
+            if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
+                elements: list[Optional[ast.expr]] = list(value.elts)
+            elif isinstance(value, ast.Call):
+                elements = [value] * len(target.elts)
+            else:
+                elements = [None] * len(target.elts)
+            for inner, held in zip(target.elts, elements, strict=True):
+                slot(inner, held)
+
+    for node in _own_nodes(func):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                slot(target, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            slot(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            slot(node.target, node.value)
+        elif isinstance(node, ast.AugAssign) and _text(node.target) == spelled:
+            if isinstance(node.op, ast.Add):
+                appended.append(node.value)
+            else:
+                opaque.append(node.target)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            slot(node.target, None)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    slot(item.optional_vars, None)
+        elif isinstance(node, ast.ExceptHandler) and node.name == spelled and node.body:
+            opaque.append(node.body[0])
+    return plain, appended, opaque
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -1300,7 +1549,7 @@ class _Walk:
         #: asking adds what *its* statement reaches and nothing twice.
         self.explained: dict[tuple[str, str], set[tuple[int, int, str]]] = {}
         self._scopes: dict[tuple[str, str], str] = {}
-        self._logged: dict[tuple[str, str], list[tuple[ast.expr, ast.expr]]] = {}
+        self._logged: dict[tuple[str, str], list[tuple[ast.expr, _Message]]] = {}
         self.note = ""
         self.queue: deque[tuple[_Frame, str, int, Optional[ast.AST]]] = deque()
         self.types = _Types(roots, self.parsed)
@@ -1524,43 +1773,183 @@ class _Walk:
             for test, names in _guard_tests(statement):
                 self.want(frame, names, 1, test)
 
-    def logged(self, frame: _Frame) -> list[tuple[ast.expr, ast.expr]]:
-        """The logging calls in this frame's function, found once per function."""
-        key = (frame.file, frame.owner)
-        if key not in self._logged:
-            self._logged[key] = (
-                _logged_arguments(frame.func)
-                if isinstance(frame.func, (ast.FunctionDef, ast.AsyncFunctionDef))
-                else []
-            )
-        return self._logged[key]
-
     # -- skeleton ----------------------------------------------------------
 
-    def reachable_calls(self, frame: _Frame) -> list[tuple[ast.expr, ast.expr]]:
-        """The logging calls in this frame, less the messages that cannot reach one.
+    def messages(self, frame: _Frame) -> list[tuple[ast.expr, _Message]]:
+        """Every way each logging call in this frame can print, or why it cannot be said.
 
-        ``_logged_arguments`` resolves ``log.debug(msg_str)`` one hop through a
-        local, and ``assigned_expressions`` hands back *every* assignment to
-        that name in the function.  Five of them for one call is common, and
-        four of the five are in branches the call cannot be reached from.  The
-        build cannot narrow it -- a stored answer has to hold for every caller
-        -- but at use time two rules in this module already do:
+        One entry per way, and at least one per call: a call whose message
+        cannot be written out still gets a row with the reason, because the
+        reader lays the skeleton over a grep of the log region and a line that
+        is there and not here reads as certainty rather than as a gap.
 
-        An assignment below the call cannot have run before it.  And an
-        assignment the call's own path condition contradicts cannot have run
-        on the way to it, which is the same exclusivity test the arms use.
-
-        A narrow fix, measured: 2188 (call, message) pairs become 1843, and
-        117 of 1568 call sites shrink at all.  The function this was found in
-        held eleven of them.
+        Only the bindings that can reach the call count -- one below it, or one
+        its path condition contradicts, cannot have run on the way to it.  That
+        took 2188 (call, message) pairs to 1843 when it was first applied.
         """
-        out: list[tuple[ast.expr, ast.expr]] = []
-        for argument, message in self.logged(frame):
-            if message is not argument and not pathcond.can_reach(message, argument):
-                continue
-            out.append((argument, message))
+        key = (frame.file, frame.owner)
+        if key in self._logged:
+            return self._logged[key]
+        out: list[tuple[ast.expr, _Message]] = []
+        if isinstance(frame.func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for argument in logging_arguments(frame.func):
+                if isinstance(argument, (ast.JoinedStr, ast.Constant)):
+                    # Written at the call: rendered as it always was.
+                    out.append((argument, _Message(argument)))
+                    continue
+                ways, refused = self._message_ways(frame, argument, argument, 0, frozenset())
+                for pieces in ways:
+                    if len(pieces) == 1 and isinstance(pieces[0], ast.Constant):
+                        message: ast.expr = pieces[0]
+                    else:
+                        message = ast.JoinedStr(values=_merged(pieces))
+                    out.append((argument, _Message(message)))
+                for reason in dict.fromkeys(refused):
+                    out.append((argument, _Message(argument, reason)))
+        self._logged[key] = out
         return out
+
+    def _message_ways(
+        self,
+        frame: _Frame,
+        expr: ast.expr,
+        at: ast.AST,
+        depth: int,
+        seen: frozenset[str],
+    ) -> tuple[list[list[ast.expr]], list[str]]:
+        """``(ways, refusals)``: each way *expr* can print as pieces, and why the rest cannot.
+
+        A piece is literal text (``ast.Constant``) or a hole
+        (``ast.FormattedValue``) -- an f-string's own parts, so every way comes
+        out as one and renders the way an f-string always has.  A hole is also
+        what a part of the message becomes when its text cannot be written out
+        here and the rest can: ``error_message + traceback.format_exc()`` is
+        the message, a hole, and nothing is lost by saying so.  Only where the
+        *whole* message comes from somewhere this walk does not look is there
+        a refusal, with the reason.
+        """
+        if depth > _MESSAGE_DEPTH:
+            return [[_hole(expr)]], []
+        if isinstance(expr, ast.Constant):
+            return ([[expr]] if isinstance(expr.value, str) else [[_hole(expr)]]), []
+        if isinstance(expr, ast.JoinedStr):
+            return [list(expr.values)], []
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+            left = self._operand(frame, expr.left, at, depth, seen)
+            right = self._operand(frame, expr.right, at, depth, seen)
+            if len(left) * len(right) > _MAX_EXPANDED:
+                if len(left) >= len(right):
+                    left = [[_hole(expr.left)]]
+                else:
+                    right = [[_hole(expr.right)]]
+            return [one + other for one in left for other in right], []
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mod):
+            templates, _refused = self._message_ways(frame, expr.left, at, depth + 1, seen)
+            texts = [_constant_text(template) for template in templates]
+            ways = [_printf_pieces(text, expr.right) for text in texts if text is not None]
+            if templates and len(ways) == len(templates) and all(w is not None for w in ways):
+                return ways, []  # type: ignore[return-value]
+            return [[_hole(expr)]], []
+        if isinstance(expr, ast.Call):
+            called = expr.func
+            if isinstance(called, ast.Attribute) and called.attr == "format":
+                templates, _refused = self._message_ways(frame, called.value, at, depth + 1, seen)
+                texts = [_constant_text(template) for template in templates]
+                ways = [_format_pieces(text, expr) for text in texts if text is not None]
+                if templates and len(ways) == len(templates) and all(w is not None for w in ways):
+                    return ways, []  # type: ignore[return-value]
+                return [[_hole(expr)]], []
+            name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+            if (
+                name in _PRINTS_TEXT
+                or name in _PRINTS_NUMBER
+                or (isinstance(called, ast.Name) and called.id in _BUILTINS)
+            ):
+                return [[_hole(expr)]], []
+            return [], [REFUSED_RETURNED]
+        if isinstance(expr, ast.IfExp):
+            ways: list[list[ast.expr]] = []
+            for branch in (expr.body, expr.orelse):
+                ways.extend(self._operand(frame, branch, at, depth, seen))
+            return ways, []
+        if isinstance(expr, (ast.Name, ast.Attribute, ast.Subscript)):
+            return self._bound_message(frame, expr, at, depth, seen)
+        return [[_hole(expr)]], []
+
+    def _operand(
+        self, frame: _Frame, expr: ast.expr, at: ast.AST, depth: int, seen: frozenset[str]
+    ) -> list[list[ast.expr]]:
+        """The ways a *part* of a message prints; one hole where it cannot be said."""
+        ways, refused = self._message_ways(frame, expr, at, depth + 1, seen)
+        if not ways or refused or len(ways) > _MAX_EXPANDED:
+            return [[_hole(expr)]]
+        return ways
+
+    def _bound_message(
+        self, frame: _Frame, expr: ast.expr, at: ast.AST, depth: int, seen: frozenset[str]
+    ) -> tuple[list[list[ast.expr]], list[str]]:
+        """The ways a name, an attribute or an item printed here was written.
+
+        What this function writes into it before the call: every outright
+        binding that can reach it, each a way of its own, and what ``+=`` adds
+        after as a hole at the end.  What ``+=`` adds is a way of its own too,
+        where it has literal text -- the line then *contains* it, wherever the
+        first binding left off.  ``err_str += traceback.format_exc()`` has
+        none, and adds no row: the line is the one the first binding wrote.
+        A short one is kept and marked like any other -- ``for merge`` and
+        ``for retry`` added to one message are what says which branch ran.
+
+        One row per binding however many there are, as the build's own
+        reading of the same call always gave; only a message nested inside
+        another is capped, and then left one hole rather than dropped.
+
+        A name bound nowhere in the function is a module constant, a parameter
+        or a value from elsewhere, and only the first is read here.
+        """
+        spelled = _text(expr)
+        if spelled in seen:
+            return [[_hole(expr)]], []
+        seen = seen | {spelled}
+        plain, appended, opaque = _message_sites(frame.func, spelled)
+        plain = [value for value in plain if pathcond.can_reach(value, at)]
+        appended = [value for value in appended if pathcond.can_reach(value, at)]
+        opaque = [site for site in opaque if pathcond.can_reach(site, at)]
+        if not plain and not opaque:
+            if not isinstance(expr, ast.Name):
+                return [], [REFUSED_SET_ELSEWHERE]
+            if _is_parameter(frame.func, expr.id):
+                return [], [REFUSED_HANDED_IN]
+            parsed = self.module(frame.file)
+            outer = _module_bindings(parsed[1], expr.id) if parsed is not None else []
+            if expr.id in frame.imports or not outer:
+                return [], [REFUSED_SET_ELSEWHERE]
+            plain = outer
+        ways: list[list[ast.expr]] = []
+        refused: list[str] = []
+        # A parameter, a field or an item keeps whatever it held on the way in
+        # unless a binding here runs on every path to the call -- and a way
+        # that holds the caller's value is one this walk cannot write out.  A
+        # local has no such way: read before it is bound, it raises.
+        outside = (
+            REFUSED_HANDED_IN
+            if isinstance(expr, ast.Name) and _is_parameter(frame.func, expr.id)
+            else "" if isinstance(expr, ast.Name) else REFUSED_SET_ELSEWHERE
+        )
+        if outside and not any(_dominates(pathcond.site_of(value), at) for value in plain):
+            refused.append(outside)
+        tail = [_appended(expr)] if appended else []
+        for value in plain:
+            found, why = self._message_ways(frame, value, value, depth + 1, seen)
+            ways.extend(way + tail for way in found)
+            refused.extend(why)
+        for value in appended:
+            found, _why = self._message_ways(frame, value, value, depth + 1, seen)
+            ways.extend(tail + way + tail for way in found if _has_literal(way))
+        if opaque:
+            ways.append([_hole(expr)])
+        if len(ways) + len(refused) > _MAX_EXPANDED and depth:
+            return [[_hole(expr)]], []
+        return ways, refused
 
     def _value_hole(
         self, frame: _Frame, message: ast.JoinedStr, arms: Sequence[ast.stmt]
@@ -1643,24 +2032,11 @@ class _Walk:
                 return True
             return region[0] <= statement.lineno <= region[1]
 
-        printed: dict[int, list[tuple[ast.expr, ast.expr]]] = {}
-        carried: set[int] = set()
-        for argument, message in self.reachable_calls(frame):
+        printed: dict[int, list[tuple[ast.expr, _Message]]] = {}
+        for argument, message in self.messages(frame):
             statement = _enclosing_statement(argument)
             if statement is not None and within(statement):
                 printed.setdefault(id(statement), []).append((argument, message))
-                carried.add(id(argument))
-        # A call left with no message at all -- a bare name nothing in the
-        # function binds, or one whose every binding is out of reach -- used to
-        # leave no row.  The reader lays this over a grep of the log region, so
-        # a line that is there and not here reads as certainty rather than as
-        # a gap.  Refused out loud, in the words the other refusals use.
-        for argument in logging_arguments(frame.func):
-            if id(argument) in carried:
-                continue
-            statement = _enclosing_statement(argument)
-            if statement is not None and within(statement):
-                printed.setdefault(id(statement), []).append((argument, argument))
         rows: list[SkeletonLine] = []
         self._emit(frame, func.body, 0, printed, rows)
         return rows
@@ -1670,7 +2046,7 @@ class _Walk:
         frame: _Frame,
         body: Sequence[ast.stmt],
         depth: int,
-        printed: dict[int, list[tuple[ast.expr, ast.expr]]],
+        printed: dict[int, list[tuple[ast.expr, _Message]]],
         rows: list[SkeletonLine],
     ) -> None:
         for statement in body:
@@ -1712,7 +2088,7 @@ class _Walk:
         frame: _Frame,
         statement: ast.stmt,
         depth: int,
-        printed: dict[int, list[tuple[ast.expr, ast.expr]]],
+        printed: dict[int, list[tuple[ast.expr, _Message]]],
     ) -> list[SkeletonLine]:
         line = getattr(statement, "lineno", 0)
         rows: list[SkeletonLine] = []
@@ -1724,7 +2100,23 @@ class _Walk:
             arms = [
                 arm for arm, held in self.armed.items() if pathcond.compatible(held, argument)
             ]
-            for message in self._expanded(frame, written, argument):
+            if written.refused:
+                if not any(
+                    (row.refused, row.text) == (written.refused, _text(written.expr))
+                    for row in rows
+                ):
+                    rows.append(
+                        SkeletonLine(
+                            kind=SKELETON_PRINT,
+                            line=line,
+                            depth=depth,
+                            text=_text(written.expr),
+                            refused=written.refused,
+                            arms=sorted(arms),
+                        )
+                    )
+                continue
+            for message in self._expanded(frame, written.expr, argument):
                 if isinstance(message, ast.JoinedStr):
                     pattern = line_pattern(message)
                     value, hole, because = self._value_hole(
@@ -1751,6 +2143,7 @@ class _Walk:
                         pattern=pattern,
                         refused=refused,
                         keyed=bool(pattern) and keyed(message),
+                        holes=_holes_of(message),
                         arms=sorted(arms),
                         value=value,
                         hole=hole,
@@ -1769,46 +2162,44 @@ class _Walk:
         return rows
 
     def _expanded(self, frame: _Frame, message: ast.expr, at: ast.AST) -> list[ast.expr]:
-        """*message* with each hole a local fills with literal text written out.
+        """*message* with each hole a local fills with text written out.
 
         ``reg_msg_str`` is assigned an f-string on 748 and another on 750, and
         ``f"{reg_msg_str} took {...} sec"`` on 775 rendered as eight characters
         of literal -- refused -- where either line production prints is forty.
-        A hole is written out only where every assignment that can reach the
-        call is a literal or an f-string, and there are few of them; each is a
-        variant of its own, since which of them ran is what the line says.
+        Each way the local was written is a variant of its own, since which of
+        them ran is what the line says -- read by :meth:`_bound_message`, the
+        same reading a message passed bare gets, so ``f"{error_message}"`` and
+        ``error_message`` print the same rows.
+
+        A hole is written out only where every way it was written can be, and
+        there are few; and not where one of them is a bare token --
+        ``newStatus = "exhausted"`` -- which the hole already matches and which
+        is the value the row's ``value`` pattern names.  What ``+=`` added is
+        never written out: it is the tail of a message, not a local of its own.
         """
         if not isinstance(message, ast.JoinedStr):
             return [message]
-        assigned = self.types.assigned(frame.func)
         choices: list[list[list[ast.expr]]] = []
         changed = False
         for part in message.values:
-            bound: list[ast.expr] = []
             if (
                 isinstance(part, ast.FormattedValue)
                 and isinstance(part.value, ast.Name)
                 and part.conversion == -1
                 and part.format_spec is None
+                and not getattr(part, "appended", False)
             ):
-                bound = [
-                    value
-                    for value in assigned.get(part.value.id, [])
-                    if pathcond.can_reach(value, at)
-                ]
-            texts = [_literal_text_of(value) for value in bound]
-            if (
-                bound
-                and len(bound) <= _MAX_EXPANDED
-                and all(text is not None for text in texts)
-                and all(
-                    isinstance(pathcond.site_of(value), (ast.Assign, ast.AnnAssign))
-                    for value in bound
-                )
-            ):
-                choices.append(texts)
-                changed = True
-                continue
+                ways, refused = self._bound_message(frame, part.value, at, 1, frozenset())
+                if (
+                    ways
+                    and not refused
+                    and len(ways) <= _MAX_EXPANDED
+                    and not any(_is_token(way) for way in ways)
+                ):
+                    choices.append(ways)
+                    changed = True
+                    continue
             choices.append([[part]])
         if not changed:
             return [message]
