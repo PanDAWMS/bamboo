@@ -1186,6 +1186,91 @@ async def _investigate(
         await graph_db.close()
 
 
+async def _mapped_blob(map_id: str, version: Optional[str], file: str) -> Optional[str]:
+    """The blob the stored map read *file* as, from any node anchored in it.
+
+    ``None`` when the map holds no node in that file -- a line can be printed
+    by a function the map records nothing about -- and then the tree cannot
+    be checked against the map, which is said rather than assumed.
+    """
+    from bamboo.database.graph_database_client import GraphDatabaseClient
+
+    graph_db = GraphDatabaseClient()
+    await graph_db.connect()
+    try:
+        code_map = CodeMap(graph_db, map_id=map_id, version=version)
+        for model in (models_mod.JunctionNode, models_mod.ReadSiteNode):
+            for node in await code_map._find(model):
+                anchor = node.anchor
+                if anchor is not None and anchor.file == file and anchor.blob_sha:
+                    return anchor.blob_sha
+        return None
+    finally:
+        await graph_db.close()
+
+
+def _report_from_line(
+    map_id: str,
+    version: Optional[str],
+    from_line: str,
+    source_root: Optional[Path],
+    top: int,
+    full: bool,
+) -> None:
+    """What the line on FILE:LINE prints, and where the values in it came from."""
+    from types import SimpleNamespace
+
+    from bamboo.codemap import trace as trace_mod
+    from bamboo.codemap.panda.provenance import classify
+
+    file, _, line_text = from_line.rpartition(":")
+    if not file or not line_text.isdigit():
+        raise click.UsageError("--from-line takes FILE:LINE, e.g. pandajedi/jediorder/TaskCommando.py:214")
+    line = int(line_text)
+    roots = PandaCodeMapPlugin._resolve_roots(source_root)
+    expected = asyncio.run(_mapped_blob(map_id, version, file))
+    walked = trace_mod.walk_from_print(
+        roots, file=file, line=line, expected_sha=expected or "", classify=classify
+    )
+    click.echo(f"from the line  {file}:{line}")
+    click.echo(
+        "        tree checked against the map's blob of this file"
+        if expected
+        else "        the map holds no node in this file, so this tree is not checked against it"
+    )
+    # The rows of the call on this line, or -- where the line writes the
+    # message and a later call logs it -- the rows that print what it wrote.
+    printed = [row for row in walked.skeleton if row.kind == models_mod.SKELETON_PRINT]
+    written = {step.value for step in walked.steps if step.kind == models_mod.TRACE_PRINT}
+    rows = [row for row in printed if row.line == line] or [
+        row for row in printed if row.text in written
+    ]
+    for row in rows:
+        where = "" if row.line == line else f"@{row.line} "
+        if row.pattern:
+            keyed = "  [only with the entity's key]" if row.keyed else ""
+            click.echo(f"        prints  {where}{row.pattern}{keyed}")
+            for hole in row.holes:
+                tail = ", added by +=" if hole.appended else ""
+                click.echo(f"                hole  {hole.expression}  ({hole.prints}{tail})")
+        else:
+            click.echo(f"        prints  {where}-- {row.refused}: {row.text}")
+    _report_walk(SimpleNamespace(trace=walked.steps, trace_note=walked.note), top, full)
+    # Said once, under the walk, rather than as a stop on every step it
+    # applies to: the steps are shared with the other entries, and a new
+    # terminal there would end walks that go on through such a binding today.
+    entered = [
+        step
+        for step in walked.steps
+        if step.kind == models_mod.TRACE_BINDING and not step.terminal and "(" in step.value
+    ]
+    if entered:
+        click.echo(
+            f"        {len(entered)} step(s) bind what a call returns, and the walk "
+            "does not go into the call yet"
+        )
+
+
 @click.command("derive-strategy")
 @click.option("--map-id", default="panda", show_default=True, help="Which Code Map to read.")
 @click.option(
@@ -1277,6 +1362,18 @@ async def _investigate(
         "to production."
     ),
 )
+@click.option(
+    "--from-line",
+    "from_line",
+    default=None,
+    metavar="FILE:LINE",
+    help=(
+        "Start from a line production printed rather than from a symptom: the "
+        "logging call on FILE:LINE, or the message it prints written there, "
+        "walked back from the names the message reads.  FILE is relative to "
+        "the source root, as the map spells it."
+    ),
+)
 @click.option("--full", is_flag=True, help="Print every folded row, with conditions and anchors.")
 @click.option("--top", default=10, show_default=True, help="Rows per listing.")
 @click.option("-v", "--verbose", is_flag=True, help="DEBUG logging.")
@@ -1293,12 +1390,19 @@ def main(
     timeout: float,
     source_root: Optional[Path],
     max_hops: int,
+    from_line: Optional[str],
     full: bool,
     top: int,
     verbose: bool,
 ) -> None:
     """Ask the Code Map what it has to say about a symptom."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
+
+    if from_line is not None:
+        if description or subject or observed:
+            raise click.UsageError("--from-line starts from a line, not from a symptom.")
+        _report_from_line(map_id, version, from_line, source_root, top, full)
+        return
 
     if bool(description) == bool(subject or observed):
         raise click.UsageError(

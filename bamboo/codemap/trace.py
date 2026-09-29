@@ -70,6 +70,7 @@ from bamboo.codemap.models import (
     TRACE_BINDING,
     TRACE_HANDOVER,
     TRACE_LOOP,
+    TRACE_PRINT,
     TRACE_UNBOUND,
     TRACE_WRITE,
     Handover,
@@ -2942,3 +2943,87 @@ def walk(
         held, name, depth, at = state.queue.popleft()
         state.explain(held, name, depth, at)
     return Walked(state.steps, state.note, state.skeleton(frame, region))
+
+
+def walk_from_print(
+    roots: dict[str, Path],
+    *,
+    file: str,
+    line: int,
+    expected_sha: str = "",
+    classify: Optional[Classifier] = None,
+    budget: Budget = DEFAULT_BUDGET,
+) -> Walked:
+    """Explain what the logging call on *line* prints, from the names its message reads.
+
+    The entry a reader with a log line in hand needs: ``waiting 26 jobs for
+    soft finish`` is the line, and the question is where its ``26`` came from.
+    Every other entry starts from a write or a guard the map recorded; this
+    one starts from what production printed, which is the one thing the
+    reader holds.
+
+    The call is the first step and its message's names are what is walked --
+    not the logger it is called on, which says nothing about the value.  A
+    message built into a local first is walked through the local, the way any
+    name is.  Narrowed as a statement's walk is: each name is answered with
+    the writes that reach the statement that read it.
+
+    The walk does not yet enter a call, so a value a call returns ends the
+    step that binds it, as it does for every other entry.  Refused, like
+    :func:`walk`, when the tree is not the one the map was built from.
+    """
+    state = _Walk(roots, classify or _nothing, budget)
+    parsed = state.module(file)
+    if parsed is None:
+        return Walked([], "the file could not be read from this tree")
+    source, tree = parsed
+    if expected_sha and git_blob_sha(source) != expected_sha:
+        return Walked([], "the walk was not run: this tree is not the one that was mapped")
+    func = containing_function(tree, line, "")
+    if func is None:
+        return Walked([], "no function holds this line")
+    owner = f"{file}::{func.name}"
+    state.narrowed = (file, owner)
+    frame = state.frame(file, owner, line=line)
+    if frame is None:
+        return Walked([], "the function could not be located in this tree")
+    statement = _statement_at(frame.func, line)
+    calls = logging_arguments(frame.func)
+    arguments = [
+        argument
+        for argument in calls
+        if statement is not None and _enclosing_statement(argument) is statement
+    ]
+    # The line a reader recognises is often where the message is written,
+    # not where it is logged: ``tmpMsg = f"waiting {len(pandaIDs)} ..."`` on
+    # one line and ``tmpLog.info(tmpMsg)`` on the next.  A binding a logging
+    # call prints is the message as much as the call's own argument is.
+    if not arguments and isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value:
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        named = {_text(target) for target in targets}
+        if any(
+            _text(argument) in named and pathcond.can_reach(statement.value, argument)
+            for argument in calls
+        ):
+            arguments = [statement.value]
+    if not arguments:
+        return Walked([], "no logging call prints what is on this line")
+    for argument in arguments:
+        reads = _reads(argument)
+        state.record(
+            TraceStep(
+                kind=TRACE_PRINT,
+                owner=owner,
+                file=file,
+                line=statement.lineno,
+                value=_text(argument),
+                guards=pathcond.path_condition(statement),
+                unseen=_unseen(statement),
+                reads=reads,
+            )
+        )
+        state.want(frame, reads, 1, statement)
+    while state.queue:
+        held, name, depth, at = state.queue.popleft()
+        state.explain(held, name, depth, at)
+    return Walked(state.steps, state.note, state.skeleton(frame))

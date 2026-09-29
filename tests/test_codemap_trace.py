@@ -2532,3 +2532,58 @@ def f(task, log):
     (row,) = _printed(roots, file="m", owner="f", lines=[3])
 
     assert row.pattern == r"set\ status=[^\ ]*\ for\ task"
+
+
+# ---------------------------------------------------------------------------
+# Starting from a line production printed
+# ---------------------------------------------------------------------------
+
+
+def test_a_print_line_is_walked_from_the_names_its_message_reads(tmp_path):
+    """The reader holds ``waiting 26 jobs for soft finish``, not a guard.  The
+    logger it went through says nothing about the 26 and is not walked."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, task_id, log):
+    pandaIDs = self.tb.getPandaIDsWithTask_JEDI(task_id, True)
+    tmpMsg = f"waiting {len(pandaIDs)} jobs for soft finish"
+    log.info(tmpMsg)
+''',
+    )
+
+    for line in (3, 4):
+        walked = trace_mod.walk_from_print(
+            roots, file=f"{PACKAGE}/m", line=line, classify=provenance.classify
+        )
+        kinds = [(step.kind, step.name or step.value) for step in walked.steps]
+        assert kinds[0][0] == models.TRACE_PRINT
+        assert (models.TRACE_BINDING, "pandaIDs") in kinds
+        assert not any(name == "log" for _kind, name in kinds)
+
+
+def test_a_line_that_neither_prints_nor_writes_a_message_says_so(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(job, log):
+    job.status = "done"
+    log.info("done")
+''',
+    )
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m", line=2)
+
+    assert walked.steps == []
+    assert walked.note == "no logging call prints what is on this line"
+
+
+def test_a_print_line_from_another_tree_is_refused(tmp_path):
+    roots = _tree(tmp_path, m='def f(log):\n    log.info("done here")\n')
+
+    walked = trace_mod.walk_from_print(
+        roots, file=f"{PACKAGE}/m", line=2, expected_sha="0" * 40
+    )
+
+    assert walked.steps == []
+    assert "not the one that was mapped" in walked.note

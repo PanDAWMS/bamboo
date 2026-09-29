@@ -2832,8 +2832,10 @@ class Lead(BaseModel):
 #: function; ``handover`` is the one crossing the map supplies, from a
 #: worker's own attribute to the expression the knight built it with; and
 #: ``unbound`` is a name this function does not bind, which is where the walk
-#: either crosses or stops.
+#: either crosses or stops.  ``print`` is a logging call a reader started
+#: from, with the names its message reads.
 TRACE_WRITE = "write"
+TRACE_PRINT = "print"
 TRACE_BINDING = "binding"
 TRACE_LOOP = "loop-target"
 TRACE_HANDOVER = "handover"
