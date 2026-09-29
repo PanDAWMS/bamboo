@@ -37,6 +37,7 @@ from bamboo.codemap.models import (
     LoopCutNode,
     MapFragment,
     ReadingStop,
+    RowKeySource,
     ReadSiteNode,
     SourceModule,
     SubjectNode,
@@ -8766,6 +8767,7 @@ def _movers(
     tables: list[str] = ("jobsActive4",),
     stop_statement: int = 7,
     stop_reads: list[str] = ("jobsActive4",),
+    row_keys: list[RowKeySource] = (),
 ) -> MapFragment:
     """A junction guarding on *guard* and one statement, in one function.
 
@@ -8825,7 +8827,20 @@ def _movers(
         )
         for stop in stops
     )
+    fragment.row_key_sources.extend(row_keys)
     return fragment
+
+
+def _row_key(handed_by: str = "", statement: int = 30) -> RowKeySource:
+    """The guarded ``UPDATE`` on line *statement*, its key filled by *handed_by*."""
+    return RowKeySource(
+        owner="x.py::getJobs",
+        file="x.py",
+        statement=statement,
+        columns=["jobStatus"],
+        keys=["PandaID=:PandaID"],
+        handed_by=handed_by,
+    )
 
 
 def test_gate_catches_a_function_that_guards_on_a_value_and_asks_for_nothing():
@@ -8942,14 +8957,15 @@ def test_a_statement_on_another_kind_of_row_does_not_decide():
         "jobStatus=activated",
         selects=["JediTaskSpec.status=paused"],
         tables=["JEDI_Tasks"],
+        row_keys=[_row_key()],
     )
 
     result = gates.movers_of_a_value_agree(fragment)
     (difference,) = gates.mover_differences(fragment)
 
     assert result.passed
-    assert difference.reason == gates.MOVER_READS_NONE
-    assert difference.where == ""
+    assert difference.reason == gates.MOVER_OWN_WHERE
+    assert difference.where == "@30"
 
 
 def test_a_stop_on_a_table_the_map_cannot_place_counts_as_a_gap():
@@ -8984,11 +9000,75 @@ def test_a_query_joining_a_table_the_map_cannot_place_is_not_taken_for_one_on_th
         "jobStatus=activated",
         selects=["JediTaskSpec.status=paused"],
         tables=["JEDI_AUX_Status_MinTaskID", "JEDI_Tasks"],
+        row_keys=[_row_key()],
     )
 
     (difference,) = gates.mover_differences(fragment)
 
-    assert difference.reason == gates.MOVER_READS_NONE
+    assert difference.reason == gates.MOVER_OWN_WHERE
+
+
+def test_a_statement_the_caller_hands_in_is_a_gap_and_fails_the_gate():
+    """``queryTasksToBePending_JEDI`` runs the ``SELECT`` its caller builds.
+
+    Its tables are not known here, so an empty ``reads`` would have read as a
+    write and excused it as "nothing here reads these rows".  A statement
+    that may read anything is counted as one that may read these.
+    """
+    fragment = _movers("jobStatus=activated", selects=[], tables=["JEDI_Tasks"])
+    fragment.read_sites.clear()
+    fragment.reading_stops.append(
+        ReadingStop(
+            reason=sql.SKIP_HANDED_IN,
+            detail="sql_query",
+            file="x.py",
+            owner="x.py::getJobs",
+            line=12,
+            statement=12,
+            reads_known=False,
+        )
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+    (difference,) = gates.mover_differences(fragment)
+
+    assert not result.passed
+    assert difference.reason == gates.MOVER_HANDED_IN
+    assert difference.where == "@12 sql_query"
+
+
+def test_rows_named_by_what_the_caller_hands_in_send_the_reader_to_the_caller():
+    """``setCloudToTasks_JEDI`` binds its row key from the map its caller passed.
+
+    An answer, and a different one from a write that picks its own rows: the
+    rows it moves are whichever the caller chose, so the caller is where to go.
+    """
+    fragment = _movers(
+        "jobStatus=activated",
+        selects=[],
+        tables=["JEDI_Tasks"],
+        row_keys=[_row_key("jobs"), _row_key("", statement=40)],
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+    (difference,) = gates.mover_differences(fragment)
+
+    assert result.passed
+    assert difference.reason == gates.MOVER_HANDED_ROWS
+    assert difference.where == "by jobs"
+
+
+def test_a_row_key_on_another_column_does_not_decide():
+    """A key recorded for a write guarding a different column says nothing here."""
+    other = _row_key("jobs")
+    other.columns = ["lockedBy"]
+    fragment = _movers(
+        "jobStatus=activated", selects=[], tables=["JEDI_Tasks"], row_keys=[other]
+    )
+
+    (difference,) = gates.mover_differences(fragment)
+
+    assert difference.reason == gates.MOVER_UNDECIDED
 
 
 @pytest.mark.parametrize(
@@ -14375,3 +14455,238 @@ def test_a_mapping_that_arrives_as_a_parameter_is_the_callers_to_state():
     assert sql.key_column_census(func) == sql.KeyColumnCensus(
         loops=1, resolved=0, from_parameter=1
     )
+
+
+# ---------------------------------------------------------------------------
+# The executions nothing was read out of, and who named a guarded write's rows
+# ---------------------------------------------------------------------------
+
+_SKIPPING = '''
+class TaskModule:
+    def queryTasksToBePending_JEDI(self, sql_query, params_map, reason):
+        comment = " /* queryTasksToBePending_JEDI */"
+        self.cur.execute(sql_query + comment, params_map)
+        taskIDs = self.cur.fetchall()
+
+    def getSiteInfo(self):
+        sql = "SELECT siteid, cloud FROM ATLAS_PANDA.schedconfig"
+        self.cur.execute(sql)
+
+    def setSession(self):
+        self.cur.execute("ALTER SESSION SET TIME_ZONE='UTC'")
+
+    def inline(self):
+        self.cur.execute("SELECT LAST_INSERT_ID()", {})
+
+    def unbound(self):
+        self.cur.execute(SQL_FROM_ELSEWHERE, {})
+
+    def peekJob(self, table):
+        sql = sql1_0 % (columns, table) + sql1_1
+        self.cur.execute(sql + comment, varMap)
+'''
+
+_WRAPPER = '''
+class WrappedCursor:
+    def execute(self, sql, varDict=None):
+        return self.cur.execute(sql, varDict)
+'''
+
+
+def _skips(source: str, name: str) -> list:
+    tree = ast.parse(source)
+    func = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+    skipped: list = []
+    runs = sql.executions(func, skipped)
+    return runs, skipped
+
+
+@pytest.mark.parametrize(
+    "name, reason, detail",
+    [
+        ("queryTasksToBePending_JEDI", sql.SKIP_HANDED_IN, "sql_query"),
+        ("getSiteInfo", sql.SKIP_NO_VARMAP, "sql"),
+        ("inline", sql.SKIP_INLINE, "SELECT LAST_INSERT_ID()"),
+        ("unbound", sql.SKIP_UNBOUND, "SQL_FROM_ELSEWHERE"),
+        ("peekJob", sql.SKIP_UNREAD_NAME, "sql"),
+    ],
+)
+def test_an_execution_nothing_is_read_out_of_is_said_with_its_reason(name, reason, detail):
+    """Each of these was a silent ``continue``: no node, no stop, no count."""
+    runs, skipped = _skips(_SKIPPING, name)
+
+    assert runs == []
+    assert [(s.reason, s.detail) for s in skipped] == [(reason, detail)]
+
+
+def test_a_wrapper_handing_on_its_callers_statement_is_not_a_skip():
+    """``WrappedCursor.execute`` runs what every caller wrote, and the callers
+    are where it is read -- handing it on is not a gap."""
+    runs, skipped = _skips(_WRAPPER, "execute")
+
+    assert runs == [] and skipped == []
+
+
+def test_the_skipped_statements_become_stops_with_what_they_read():
+    """A known text keeps its tables; an unknown one says its tables are unknown,
+    and a statement about no rows -- ``ALTER SESSION`` -- is no stop at all."""
+    tree = ast.parse(_SKIPPING)
+    stops = {
+        func.name: sqlwrite.statement_stops(func, "pandaserver/x.py")
+        for func in ast.walk(tree)
+        if isinstance(func, ast.FunctionDef)
+    }
+
+    (handed,) = stops["queryTasksToBePending_JEDI"]
+    (unbound,) = stops["unbound"]
+    (plain,) = stops["getSiteInfo"]
+    assert (handed.reads, handed.reads_known) == ([], False)
+    assert (unbound.reads, unbound.reads_known) == ([], False)
+    assert (plain.reads, plain.reads_known) == (["schedconfig"], True)
+    assert plain.statement == 10 and plain.owner == "pandaserver/x.py::getSiteInfo"
+    assert stops["setSession"] == []
+
+
+def test_the_answers_stops_are_the_builds_stops():
+    """``statement_stops`` is what ``derive-strategy`` reads one function with,
+    and ``extract`` what the build reads the corpus with: the read side of the
+    two must be the same list, or the gate and the answer disagree."""
+    source = _SKIPPING + '''
+    def getJobs(self, where):
+        sqlP = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE "
+        sqlP += where
+        self.cur.execute(sqlP + comment, varMap)
+'''
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, rel)]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    *_rest, stops = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+
+    tree = modules[1].tree
+    again = [
+        stop
+        for func in ast.walk(tree)
+        if isinstance(func, ast.FunctionDef)
+        for stop in sqlwrite.statement_stops(func, rel)
+    ]
+    built = [s for s in stops if s.reason != sqlwrite.PRECONDITION_BIND_UNSETTLED]
+    key = lambda s: (s.owner, s.statement, s.reason, s.detail)  # noqa: E731
+    assert sorted(map(key, again)) == sorted(map(key, built))
+    assert any(s.reason == sql.SKIP_HANDED_IN for s in built)
+
+
+def test_a_writes_row_keys_are_the_where_terms_it_does_not_guard():
+    (write,) = sql.writes(
+        "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newStatus "
+        "WHERE PandaID=:PandaID AND jobStatus=:oldStatus AND NOT x=:y "
+        "AND t.jediTaskID = :jediTaskID AND status IN (:a,:b)"
+    )
+
+    assert write.preconditions == {"jobStatus": "jobStatus=:oldStatus"}
+    assert write.keys == {"PandaID": ":PandaID", "jediTaskID": ":jediTaskID"}
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [
+        ("job.PandaID", "jobs"),
+        ("tid", "taskCloudMap"),
+        ("row_id", ""),
+        ("self.datasets[0].vuid", "self.datasets"),
+        ("str(jediTaskID)", "jediTaskID"),
+        ("self.getNext(jediTaskID)", "jediTaskID"),
+        ("self.cur.rowcount", "self.cur"),
+    ],
+)
+def test_handed_in_says_which_parameter_or_field_a_value_came_from(expression, expected):
+    """One hop through a local or a loop; a method's result is not handed in,
+    what a method is handed is."""
+    func = ast.parse(
+        "def f(self, jobs, taskCloudMap, jediTaskID):\n"
+        "    for job in jobs:\n"
+        "        pass\n"
+        "    for tid, cloud in taskCloudMap.items():\n"
+        "        pass\n"
+        "    rows = self.cur.fetchall()\n"
+        "    for row_id, _x in rows:\n"
+        "        pass\n"
+    ).body[0]
+
+    assert pathcond.handed_in(func, ast.parse(expression, mode="eval").body) == expected
+
+
+_KEYED = '''
+class TaskModule:
+    def setCloudToTasks_JEDI(self, taskCloudMap):
+        sqlU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        for jediTaskID, cloud in taskCloudMap.items():
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":newStatus"] = "ready"
+            varMap[":oldStatus"] = "assigning"
+            self.cur.execute(sqlU + comment, varMap)
+
+    def rescuePickedFiles_JEDI(self, vo):
+        sqlT = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        self.cur.execute(sqlT + comment, {":vo": vo})
+        resList = self.cur.fetchall()
+        sqlU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        for (jediTaskID,) in resList:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":newStatus"] = "ready"
+            varMap[":oldStatus"] = "picked"
+            self.cur.execute(sqlU + comment, varMap)
+'''
+
+
+def test_a_guarded_write_says_whether_its_caller_named_the_rows():
+    """The two shapes the "nothing here reads these rows" answer held."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_KEYED, rel)]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    keys: list[RowKeySource] = []
+    sqlwrite.extract(modules, MAP_ID, VERSION, attributor, row_keys=keys)
+
+    by = {source.owner.rpartition("::")[2]: source for source in keys}
+    assert by["setCloudToTasks_JEDI"].handed_by == "taskCloudMap"
+    assert by["setCloudToTasks_JEDI"].keys == ["jediTaskID=:jediTaskID"]
+    assert by["setCloudToTasks_JEDI"].columns == ["status"]
+    assert by["rescuePickedFiles_JEDI"].handed_by == ""
+
+
+def test_a_guarded_flush_says_whether_its_spec_was_handed_in():
+    """The row a flush writes is the spec it is given, and this one is the
+    caller's parameter."""
+    caller = '''
+class TaskRefiner:
+    def runImpl(self, taskSpec: JediTaskSpec, taskStatus):
+        taskSpec.status = "tobroken"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1}, oldStatus=[taskStatus])
+'''
+    rel = "pandajedi/jediorder/Knight.py"
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_FLUSH_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(caller, rel),
+    ]
+    _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    keys: list[RowKeySource] = []
+    flush.attach(junctions, modules, attributor, row_keys=keys)
+
+    (source,) = keys
+    assert source.owner == f"{rel}::runImpl"
+    assert source.handed_by == "taskSpec"
+    assert source.columns == ["status"]

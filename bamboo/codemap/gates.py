@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 
 from bamboo.codemap import evidence
 from bamboo.codemap.models import MapFragment, required_values
-from bamboo.codemap.panda import values
+from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
@@ -518,10 +518,13 @@ def bind_windows_are_known(fragment: MapFragment) -> GateResult:
 #: Why a function whose write requires a value of the row is not among the
 #: statements that select on that value.  Judged from the statements of that
 #: function that read *the same kind of row* the guard is on -- see
-#: :func:`mover_differences`.  The first two are the map's own gaps and are
-#: work items; the third is what this gate was built to catch; the last two
-#: are answers.
+#: :func:`mover_reason`.  The first three are the map's own gaps and are work
+#: items; the fourth is what this gate was built to catch; the rest are answers.
 MOVER_UNNODED = "a statement here that reads these rows stopped being read, and has no node"
+MOVER_HANDED_IN = (
+    "a statement here that may read these rows is handed in by the caller, and the"
+    " map reads it nowhere"
+)
 MOVER_PARTIAL = "a statement here that reads these rows was read only in part"
 MOVER_ASKS_NOTHING = (
     "every statement here that reads these rows was read in full, and asks for nothing"
@@ -530,17 +533,35 @@ MOVER_OTHER_TERMS = (
     "every statement here that reads these rows was read in full, and asks by other"
     " terms -- the value is the write's own compare-and-set"
 )
-MOVER_READS_NONE = (
-    "nothing the map holds here reads these rows -- the write finds them by its own"
-    " WHERE, or by what the caller hands it"
+#: The three that used to be one reason, "nothing the map holds here reads these
+#: rows".  That one was an answer, and it held a gap: ``queryTasksToBePending_JEDI``
+#: runs a ``SELECT`` its caller hands it, which is now :data:`MOVER_HANDED_IN`.
+#: What is left splits on who named the rows the write lands on.
+MOVER_HANDED_ROWS = (
+    "no query here reads these rows -- the write lands on rows named by what the"
+    " caller hands it"
+)
+MOVER_OWN_WHERE = (
+    "no query here reads these rows -- the write picks them by its own WHERE, under"
+    " keys this function filled"
+)
+MOVER_UNDECIDED = (
+    "no query here reads these rows, and the map does not say how the write names them"
 )
 #: The reasons that are the map's gaps rather than answers about PanDA.
-MOVER_DEFECTS = (MOVER_UNNODED, MOVER_PARTIAL)
+MOVER_DEFECTS = (MOVER_UNNODED, MOVER_HANDED_IN, MOVER_PARTIAL)
 #: The reasons the gate fails on.
 MOVER_FAILURES = (*MOVER_DEFECTS, MOVER_ASKS_NOTHING)
 #: Worst first, for a report that lists them.
 MOVER_ORDER = (
-    MOVER_UNNODED, MOVER_PARTIAL, MOVER_ASKS_NOTHING, MOVER_OTHER_TERMS, MOVER_READS_NONE
+    MOVER_UNNODED,
+    MOVER_HANDED_IN,
+    MOVER_PARTIAL,
+    MOVER_ASKS_NOTHING,
+    MOVER_OTHER_TERMS,
+    MOVER_HANDED_ROWS,
+    MOVER_OWN_WHERE,
+    MOVER_UNDECIDED,
 )
 
 
@@ -626,32 +647,81 @@ def mover_differences(fragment: MapFragment) -> list[MoverDifference]:
     "a statement on jobs, read in full, asking by other terms" claimed a job
     query the function does not run.
 
-    **Nothing here claims a key.**  The read side stores no statement that
-    asks by a key alone, and a write's ``WHERE`` keeps only the terms on
-    columns it also writes, so "finds the row by another key" is not something
-    this map can see.  ``getJobs``'s ``UPDATE`` finds its row by ``PandaID``
-    too, and a rule keyed on that would excuse the one function this gate
-    exists for.  What *can* be seen is whether every statement of the function
-    that reads these rows was read, and that is what the reasons say.
+    **A key is asked last, and only to split the answers.**  ``getJobs``'s
+    ``UPDATE`` finds its row by ``PandaID`` too, and a rule that asked about the
+    key first would excuse the one function this gate exists for.  So every
+    statement of the function that reads these rows is judged before any key
+    is looked at, and a key only says, of a function with no such statement,
+    who named the rows its write lands on: the caller, through a parameter or
+    a field (:class:`~bamboo.codemap.models.RowKeySource`), or the function
+    itself.  The first sends a reader to the caller; the second does not.
     """
     selects: dict[tuple[str, str], set[str]] = {}
     for site in fragment.read_sites:
         for pair in site.selects:
             subject, _sep, value = pair.partition("=")
             selects.setdefault((subject, value), set()).add(site.owner)
-    kind_of_table: dict[str, Optional[str]] = {}
-    for entity in fragment.entities:
-        for table in entity.tables:
-            kind_of_table[table.lower()] = entity.spec_class
+    kind_of_table = kinds_of_tables(fragment.entities)
     spec_of = {subject.name: subject.spec_class for subject in fragment.subjects}
+    column_of = {subject.name: subject.attribute for subject in fragment.subjects}
     sites_of: dict[str, list] = {}
     for site in fragment.read_sites:
         sites_of.setdefault(site.owner, []).append(site)
     stops_of: dict[str, list] = {}
     for stop in fragment.reading_stops:
         stops_of.setdefault(stop.owner, []).append(stop)
+    keys_of: dict[str, list] = {}
+    for source in fragment.row_key_sources:
+        keys_of.setdefault(source.owner, []).append(source)
 
-    def may_be(tables: list[str], spec: str) -> bool:
+    found: list[MoverDifference] = []
+    for (subject, value), owners in sorted(_guarded_pairs(fragment).items()):
+        spec = spec_of.get(subject, subject.partition(".")[0])
+        column = column_of.get(subject, subject.rpartition(".")[2])
+        for owner in sorted(owners - selects.get((subject, value), set())):
+            reason, where = mover_reason(
+                spec,
+                sites_of.get(owner, []),
+                stops_of.get(owner, []),
+                kind_of_table,
+                keys_of.get(owner, []),
+                column,
+            )
+            found.append(MoverDifference(subject, value, owner, reason, where))
+    return found
+
+
+def kinds_of_tables(entities) -> dict[str, Optional[str]]:
+    """``{table, lowered: the spec class of its rows}`` from the entities."""
+    found: dict[str, Optional[str]] = {}
+    for entity in entities:
+        for table in entity.tables:
+            found[table.lower()] = entity.spec_class
+    return found
+
+
+def mover_reason(
+    spec: str,
+    sites: list,
+    stops: list,
+    kind_of_table: dict[str, Optional[str]],
+    row_keys: list = (),
+    column: str = "",
+) -> tuple[str, str]:
+    """``(reason, where)`` for one function, about rows of class *spec*.
+
+    The judgement :func:`mover_differences` makes, taken out so that
+    ``derive-strategy`` makes the same one about a function it names as a
+    mover: the gate and the answer reading one function two ways is the drift
+    this gate exists to catch elsewhere.
+
+    *sites* and *stops* are the function's read sites and reading stops; the
+    answer passes what it recomputed from the source, the gate what the build
+    stored.  *row_keys* and *column* decide the answers at the end, and only
+    those, so a caller that asks about gaps alone can leave them out.
+    """
+
+    def may_be(tables: list[str]) -> bool:
         return any(
             "{" in table
             or table.lower() not in kind_of_table
@@ -659,49 +729,56 @@ def mover_differences(fragment: MapFragment) -> list[MoverDifference]:
             for table in tables
         )
 
-    def known_to_be(tables: list[str], spec: str) -> bool:
+    def known_to_be(tables: list[str]) -> bool:
         return any(
             "{" not in table and kind_of_table.get(table.lower()) == spec for table in tables
         )
 
-    found: list[MoverDifference] = []
-    for (subject, value), owners in sorted(_guarded_pairs(fragment).items()):
-        spec = spec_of.get(subject, subject.partition(".")[0])
-        for owner in sorted(owners - selects.get((subject, value), set())):
-            maybe = [s for s in sites_of.get(owner, []) if may_be(s.tables, spec)]
-            sites = [s for s in maybe if known_to_be(s.tables, spec)]
-            noded = {s.anchor.line_start for s in sites_of.get(owner, [])}
-            # A stop in a statement that reads rows of this kind.  A stop with
-            # no tables read is in a write, and was never about this.
-            stopped = [
-                stop
-                for stop in stops_of.get(owner, [])
-                if stop.reads and may_be(stop.reads, spec)
-            ]
-            unnoded = [stop for stop in stopped if stop.statement not in noded]
-            # The node's own record of the gap, and the build's -- the same
-            # fact twice, so either is enough.
-            partial = sorted(
-                {s.anchor.line_start for s in maybe if s.unresolved}
-                | {stop.statement for stop in stopped if stop.statement in noded}
-            )
-            if unnoded:
-                reason = MOVER_UNNODED
-                where = _stops_where(unnoded)
-            elif partial:
-                reason = MOVER_PARTIAL
-                where = ", ".join(f"@{line}" for line in partial)
-            elif sites:
-                reason = (
-                    MOVER_OTHER_TERMS
-                    if any(s.selects or s.conditions for s in sites)
-                    else MOVER_ASKS_NOTHING
-                )
-                where = ", ".join(f"@{s.anchor.line_start}" for s in sites)
-            else:
-                reason, where = MOVER_READS_NONE, ""
-            found.append(MoverDifference(subject, value, owner, reason, where))
-    return found
+    maybe = [s for s in sites if may_be(s.tables)]
+    known = [s for s in maybe if known_to_be(s.tables)]
+    noded = {s.anchor.line_start for s in sites}
+    # A stop in a statement that reads rows of this kind.  A stop with no
+    # tables read is in a write, and was never about this -- unless the tables
+    # are not known at all, which is a statement handed in or a name nothing
+    # here binds: then it may read anything, and an unplaced gap is a gap.
+    stopped = [
+        stop
+        for stop in stops
+        if (stop.reads and may_be(stop.reads)) or not getattr(stop, "reads_known", True)
+    ]
+    unnoded = [stop for stop in stopped if stop.statement not in noded]
+    handed = [stop for stop in unnoded if stop.reason == sql.SKIP_HANDED_IN]
+    unnoded = [stop for stop in unnoded if stop.reason != sql.SKIP_HANDED_IN]
+    # The node's own record of the gap, and the build's -- the same fact
+    # twice, so either is enough.
+    partial = sorted(
+        {s.anchor.line_start for s in maybe if s.unresolved}
+        | {stop.statement for stop in stopped if stop.statement in noded}
+    )
+    if unnoded:
+        return MOVER_UNNODED, _stops_where(unnoded)
+    if handed:
+        return MOVER_HANDED_IN, _stops_where(handed)
+    if partial:
+        return MOVER_PARTIAL, ", ".join(f"@{line}" for line in partial)
+    if known:
+        reason = (
+            MOVER_OTHER_TERMS
+            if any(s.selects or s.conditions for s in known)
+            else MOVER_ASKS_NOTHING
+        )
+        return reason, ", ".join(f"@{s.anchor.line_start}" for s in known)
+    guarded = [
+        source
+        for source in row_keys
+        if not column or column.lower() in {one.lower() for one in source.columns}
+    ]
+    by = sorted({source.handed_by for source in guarded if source.handed_by})
+    if by:
+        return MOVER_HANDED_ROWS, "by " + ", ".join(by)
+    if guarded:
+        return MOVER_OWN_WHERE, ", ".join(sorted({f"@{s.statement}" for s in guarded}))
+    return MOVER_UNDECIDED, ""
 
 
 def _stops_where(stops: list) -> str:

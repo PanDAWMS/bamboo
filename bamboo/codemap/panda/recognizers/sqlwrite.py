@@ -60,6 +60,7 @@ from bamboo.codemap.models import (
     JunctionNode,
     ReadingStop,
     ReadSiteNode,
+    RowKeySource,
     SourceModule,
     SubjectNode,
 )
@@ -68,6 +69,7 @@ from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
+    handed_in,
     literal_values,
     path_condition,
     site_of,
@@ -223,11 +225,115 @@ def _subject_of(
     return table, column, "table"
 
 
+def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingStop]:
+    """Where reading one statement that *was* read stopped.
+
+    With the tables the statement reads, so a stop can be told apart by
+    whether it is in a query at all.  A gap in the ``VALUES`` of an ``INSERT``
+    and a gap in a ``SELECT``'s ``WHERE`` are the same reason and different
+    answers to "which rows did this function pick up".
+    """
+    read_tables = sorted({table for verb, table in _table_verbs(run.sql) if verb == "read"})
+    return [
+        ReadingStop(
+            reason=stop.reason,
+            detail=stop.source,
+            file=rel_path,
+            owner=owner,
+            line=stop.line,
+            statement=run.call.lineno,
+            reads=read_tables,
+        )
+        for stop in run.unresolved
+    ]
+
+
+def _skip_stops(skipped: list[sql.Skip], rel_path: str, owner: str) -> list[ReadingStop]:
+    """An execution nothing was read out of, as a stop on the statement it runs.
+
+    Left out where the text is known and names no table: ``ALTER SESSION`` and
+    ``SET`` run through the same cursor and are about no rows.  Where the text
+    is not known at all the tables are not either, and the stop says so rather
+    than reading as a write.
+    """
+    found: list[ReadingStop] = []
+    for skip in skipped:
+        verbs = [pair for text in skip.texts for pair in _table_verbs(text)]
+        if skip.texts and not verbs:
+            continue
+        found.append(
+            ReadingStop(
+                reason=skip.reason,
+                detail=skip.detail,
+                file=rel_path,
+                owner=owner,
+                line=skip.line,
+                statement=skip.line,
+                reads=sorted({table for verb, table in verbs if verb == "read"}),
+                reads_known=bool(skip.texts),
+            )
+        )
+    return found
+
+
+def statement_stops(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, rel_path: str
+) -> list[ReadingStop]:
+    """Every place reading *func*'s statements stopped, the build's way.
+
+    The read half of what :func:`extract` records, for a caller holding one
+    function rather than the corpus: ``derive-strategy`` says under each
+    function that moves a value which of its statements the map could not
+    read, and a second reading of the same source is how two counts of one
+    thing come to disagree.  The precondition stops are the write's and are
+    left to ``extract``.
+    """
+    owner = f"{rel_path}::{func.name}"
+    found: list[ReadingStop] = []
+    seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
+    skipped: list[sql.Skip] = []
+    for run in sql.executions(func, skipped):
+        key = (run.variable, run.sql, run.varmap, run.window)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.extend(_run_stops(run, rel_path, owner))
+    found.extend(_skip_stops(skipped, rel_path, owner))
+    return found
+
+
+def _row_key_source(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: sql.Execution,
+    statement: sql.SqlWrite,
+    rel_path: str,
+) -> RowKeySource:
+    """Where a guarded write's row keys were filled from -- see :class:`RowKeySource`."""
+    handed = ""
+    if run.varmap is not None:
+        for _column, bind in sorted(statement.keys.items()):
+            for filled in sql.bound_values(func, run.varmap, bind, run.window):
+                handed = handed_in(func, filled.value)
+                if handed:
+                    break
+            if handed:
+                break
+    return RowKeySource(
+        owner=f"{rel_path}::{func.name}",
+        file=rel_path,
+        statement=run.call.lineno,
+        columns=sorted(statement.preconditions),
+        keys=[f"{column}={bind}" for column, bind in sorted(statement.keys.items())],
+        handed_by=handed,
+    )
+
+
 def extract(
     modules: list[SourceModule],
     map_id: str,
     derived_from: str,
     attributor: SpecAttributor,
+    row_keys: Optional[list[RowKeySource]] = None,
 ) -> tuple[
     list[SubjectNode],
     list[JunctionNode],
@@ -261,6 +367,10 @@ def extract(
 
     *attributor* is passed in already taught: the table map is learned from the
     whole corpus, so it cannot be built from the module in hand.
+
+    *row_keys*, where given, is filled with where each guarded write's row keys
+    came from.  A list to fill rather than an eighth return value: one caller
+    asks for it, and the seven above are unpacked in many places.
     """
     junctions: dict[str, JunctionNode] = {}
     stopped: list[ReadingStop] = []
@@ -288,31 +398,14 @@ def extract(
             # run twice.  Counting both would inflate the coverage denominator
             # with duplicates and make the slice look worse than it reads.
             seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
-            for run in sql.executions(func):
+            owner = f"{module.rel_path}::{func.name}"
+            skipped: list[sql.Skip] = []
+            for run in sql.executions(func, skipped):
                 key = (run.variable, run.sql, run.varmap, run.window)
                 if key in seen:
                     continue
                 seen.add(key)
-                # Which rows the statement reads, so a stop can be told apart
-                # by whether it is in a query at all.  A gap in the ``VALUES``
-                # of an ``INSERT`` and a gap in a ``SELECT``'s ``WHERE`` are the
-                # same reason and different answers to "which rows did this
-                # function pick up".
-                read_tables = sorted(
-                    {table for verb, table in _table_verbs(run.sql) if verb == "read"}
-                )
-                stopped.extend(
-                    ReadingStop(
-                        reason=stop.reason,
-                        detail=stop.source,
-                        file=module.rel_path,
-                        owner=f"{module.rel_path}::{func.name}",
-                        line=stop.line,
-                        statement=run.call.lineno,
-                        reads=read_tables,
-                    )
-                    for stop in run.unresolved
-                )
+                stopped.extend(_run_stops(run, module.rel_path, owner))
                 for statement in sql.writes(run.sql):
                     spec_class = attributor.class_for_table(statement.table)
                     # Settled once per statement, not once per column: every
@@ -340,6 +433,8 @@ def extract(
                                     statement=run.call.lineno,
                                 )
                             )
+                    if row_keys is not None and statement.preconditions:
+                        row_keys.append(_row_key_source(func, run, statement, module.rel_path))
                     # A name nobody could read is not a table that holds no
                     # spec.  Listed together they read as one finding, and only
                     # one of the two is a gap in the extraction -- see
@@ -421,6 +516,10 @@ def extract(
                             row_precondition=preconditions,
                             setters=setters,
                         )
+            # The executions nothing was read out of, last: they have no run
+            # to hang on, and saying them is what tells "read in full" from
+            # "never read".
+            stopped.extend(_skip_stops(skipped, module.rel_path, owner))
         if candidates:
             coverage.append(
                 CoverageStat(

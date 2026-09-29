@@ -334,7 +334,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             bound_text,
             self._unexplained_writes,
             reading_stops,
-        ) = sqlwrite.extract(self._modules, self.map_id, self._version, attributor)
+        ) = sqlwrite.extract(
+            self._modules,
+            self.map_id,
+            self._version,
+            attributor,
+            row_keys=fragment.row_key_sources,
+        )
         # On the fragment rather than on the plugin, because a gate reads the
         # fragment: "which junctions guard on a value nothing selects on" is a
         # question whose answer is half in the nodes and half in what the
@@ -414,7 +420,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # callers with ``audited`` rather than ``attributor`` -- it asks which
         # class an attribute write is on, which is the progress slice's own
         # question, and that slice learns element types before asking it.
-        self._flush_guards = flush.attach(fragment.junctions, self._modules, audited)
+        self._flush_guards = flush.attach(
+            fragment.junctions, self._modules, audited, row_keys=fragment.row_key_sources
+        )
         if self._flush_guards:
             logger.info(
                 "PandaCodeMapPlugin: %d branch(es) told what the row had to say for "

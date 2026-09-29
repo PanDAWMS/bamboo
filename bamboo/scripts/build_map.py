@@ -39,6 +39,7 @@ import click
 from bamboo.codemap import gates
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import MapFragment
+from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 from bamboo.codemap.store import store_fragment
 
@@ -931,6 +932,19 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
             # wrong; told ``build_where_clause()`` it knows what to open.
             for detail, seen in Counter(r.detail for r in here).most_common(3):
                 click.echo(f"        {seen:>3}x  {detail}")
+            if reason == sql.SKIP_HANDED_IN:
+                # By function, every one: the text is in the caller, so the
+                # function is the only coordinate there is, and a handful
+                # folded to three is the silence this line exists to end.
+                for owner, seen in sorted(Counter(r.owner for r in here).items()):
+                    click.echo(f"        {seen:>3}   {owner}")
+        skipped = [r for r in stops if r.reason in sql.SKIP_REASONS]
+        if skipped:
+            click.echo(
+                f"    of these, {len(skipped)} are executions no statement was read out"
+                f" of at all, in {len({r.owner for r in skipped})} function(s);"
+                " the rest stopped inside a statement that was read"
+            )
         for owner, count in where.most_common(top):
             click.echo(f"  {count:>4}  {owner}")
         if len(where) > top:

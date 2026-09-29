@@ -1425,6 +1425,46 @@ class ReadingStop(BaseModel):
             "function picked up."
         ),
     )
+    reads_known: bool = Field(
+        default=True,
+        description=(
+            "Whether ``reads`` is known at all.  False for a statement the "
+            "build has no text of -- one handed in by the caller, or a name "
+            "this function does not bind -- where an empty ``reads`` would "
+            "read as \"only writes\" and is really \"any rows\"."
+        ),
+    )
+
+
+class RowKeySource(BaseModel):
+    """How one guarded write names the rows it lands on.
+
+    Not a node, beside :class:`ReadingStop` and for the same reason.  A write
+    whose ``WHERE`` requires a value -- ``status=:oldStatus`` -- lands on rows
+    its other terms name: ``jediTaskID=:jediTaskID``.  Where that key was
+    filled from a parameter or a field, the caller chose the rows and is where
+    a reader goes next; where it was filled here, from this function's own
+    query, it is not.  ``movers-of-a-value-agree`` needs that to split the
+    functions none of whose queries read the rows.
+    """
+
+    owner: str
+    file: str = ""
+    statement: int = Field(default=0, description="The line the write runs on.")
+    columns: list[str] = Field(
+        default_factory=list, description="The columns its guard tests, as SQL spells them."
+    )
+    keys: list[str] = Field(
+        default_factory=list,
+        description="The row-naming terms it was judged from, ``jediTaskID=:jediTaskID``.",
+    )
+    handed_by: str = Field(
+        default="",
+        description=(
+            "The parameter or ``self`` field a key was filled from, or empty "
+            "when every key was filled here."
+        ),
+    )
 
 
 class CoverageStat(BaseModel):
@@ -1469,6 +1509,7 @@ class MapFragment(BaseModel):
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
     reading_stops: list[ReadingStop] = Field(default_factory=list)
+    row_key_sources: list[RowKeySource] = Field(default_factory=list)
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
         description=(
@@ -1518,6 +1559,7 @@ class MapFragment(BaseModel):
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
         self.reading_stops.extend(other.reading_stops)
+        self.row_key_sources.extend(other.row_key_sources)
         self.declaration_yields.update(other.declaration_yields)
         self.annotation_readings.extend(other.annotation_readings)
         self.spec_annotation_forms.update(other.spec_annotation_forms)

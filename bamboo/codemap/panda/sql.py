@@ -212,6 +212,15 @@ class SqlWrite(BaseModel):
             "statement does not write are row identity, not a race."
         ),
     )
+    keys: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Column -> the bind it is equated to, for the ``WHERE`` terms on "
+            "columns this statement does not write: ``PandaID=:PandaID``.  The "
+            "row identity the preconditions leave out, and where to look to "
+            "say who named the rows -- see ``sqlwrite``'s ``RowKeySource``."
+        ),
+    )
 
 
 class Stop(NamedTuple):
@@ -1706,7 +1715,10 @@ def _call_site_fill(
     return expression, [], False
 
 
-def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
+def executions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    skipped: Optional[list["Skip"]] = None,
+) -> list[Execution]:
     """Return one :class:`Execution` per cursor execution in *func*.
 
     The call is what pairs a statement with its binds.  Reading them separately
@@ -1739,6 +1751,14 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     :func:`pathcond.can_reach` is the predicate the walk already uses to decide
     whether a binding can be what an arm read, and this is the same question
     asked of a different pair.
+
+    **A call it reads nothing out of is said, where *skipped* is given.**  Every
+    ``continue`` below used to be silent, and the statements behind them were
+    in no node, no stop and no count: ``queryTasksToBePending_JEDI`` runs the
+    ``SELECT`` its caller hands it, and the one function that moves ``ready``
+    tasks to ``pending`` looked like one whose write picks its own rows.  Each
+    is a :class:`Skip` with the reason, so a consumer can tell "read in full"
+    from "never read" -- see :data:`SKIP_REASONS`.
     """
     # ``_compatible_sets`` reads the arms a fragment sits under off the ancestor
     # chain, and two of this function's callers -- ``boundary`` and ``trigger``
@@ -1755,7 +1775,13 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
         forwarded = node.func.attr in _FORWARDED
         if not forwarded and node.func.attr not in {"execute", "executemany"}:
             continue
+        if not node.args:
+            continue
         if len(node.args) < 2:
+            if skipped is not None:
+                skip = _skip_without_binds(func, node)
+                if skip is not None:
+                    skipped.append(skip)
             continue
         expression = node.args[0]
         # Filled by the reassembly below, and handed to every Execution this
@@ -1811,8 +1837,22 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             head = [rendered] if rendered is not None else []
             held = ""
         else:
+            if skipped is not None:
+                rendered = rendered_text(operands[0])
+                skipped.append(
+                    Skip(
+                        node.lineno,
+                        SKIP_INLINE,
+                        _clipped(rendered if rendered is not None else _unparsed(operands[0])),
+                        (rendered,) if rendered else (),
+                    )
+                )
             continue
         if not head:
+            if skipped is not None:
+                skip = _skip_without_text(func, node, operands[0], forwarded)
+                if skip is not None:
+                    skipped.append(skip)
             continue
         pieces: list[list[str]] = [head]
         for operand in operands[1:]:
@@ -1843,6 +1883,7 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             if forwarded and varmap is not None
             else None
         )
+        produced = len(found)
         for combination in itertools.product(*pieces):
             built_by = reaching.get(combination[0], [])
             if built_by and not any(can_reach(fragment, node) for fragment in built_by):
@@ -1869,7 +1910,139 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
                         unresolved=tuple(stops) + _hole_stops(text, node.lineno),
                     )
                 )
+        if skipped is not None and len(found) == produced:
+            # Every statement the name held was built somewhere this call
+            # cannot be reached from, or thrown away before it: the call runs
+            # something, and nothing here says what.
+            skipped.append(Skip(node.lineno, SKIP_UNREACHED, held, tuple(head)))
     return found
+
+
+class Skip(NamedTuple):
+    """A cursor execution :func:`executions` saw and read no statement out of.
+
+    ``texts`` is whatever text the statement can be read to hold -- the
+    variants of its name, or what it renders to -- so a consumer can still say
+    which tables it touches.  Empty when there is none, and then *which rows it
+    reads* is unknown rather than "none".
+    """
+
+    line: int
+    reason: str
+    detail: str
+    texts: tuple[str, ...] = ()
+
+
+#: The ways an execution is seen and not read.  Spelled for a reader of the
+#: build's stop list, beside the reasons a statement that *was* read stopped.
+SKIP_NO_VARMAP = (
+    "the statement runs with no bind map, and this build reads a statement only"
+    " with its binds"
+)
+SKIP_HANDED_IN = "the statement is handed in by the caller, so its text is not in this function"
+SKIP_UNBOUND = "the statement is a name this function does not bind"
+SKIP_UNREAD_NAME = "the statement is a name bound here to text this build cannot render"
+SKIP_INLINE = "the statement is written into the call, and this build reads it there only from a name"
+SKIP_UNRENDERED = "the statement written into the forwarded call does not render"
+SKIP_UNREACHED = "no statement this function builds reaches this call"
+SKIP_REASONS = (
+    SKIP_NO_VARMAP,
+    SKIP_HANDED_IN,
+    SKIP_UNBOUND,
+    SKIP_UNREAD_NAME,
+    SKIP_INLINE,
+    SKIP_UNRENDERED,
+    SKIP_UNREACHED,
+)
+
+#: Functions whose own statement parameter this reader reads at their callers
+#: instead: the cursor's own ``execute`` wrapped, and the forwarded form.  The
+#: same names :func:`executions` accepts, so a statement handed to one of them
+#: is read where it is written, and handing it on is not a gap.
+_READ_AT_THE_CALLER = frozenset({"execute", "executemany"}) | frozenset({"querySQL", "querySQLS"})
+
+
+def _unparsed(node: ast.AST) -> str:
+    try:
+        return ast.unparse(node)
+    except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
+        return "..."
+
+
+def _clipped(text: str, width: int = 72) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= width else flat[: width - 1] + "\u2026"
+
+
+def _head_texts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, head: ast.expr
+) -> tuple[str, ...]:
+    """What the head of a statement can be read to hold, without pairing binds."""
+    if isinstance(head, ast.Name):
+        return tuple(text for text in variants(func, head.id) if text)
+    rendered = rendered_text(head)
+    return (rendered,) if rendered else ()
+
+
+def _skip_without_text(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.Call,
+    head: ast.expr,
+    forwarded: bool,
+) -> Optional[Skip]:
+    """Why a call whose statement has no text here was not read, or ``None``.
+
+    ``None`` for a function this reader already reads at its callers --
+    ``WrappedCursor.execute(sql, ...)`` hands on a statement every caller
+    wrote, and the callers are where it is read.
+    """
+    if isinstance(head, ast.Name):
+        if _is_parameter(func, head.id):
+            if func.name in _READ_AT_THE_CALLER:
+                return None
+            return Skip(call.lineno, SKIP_HANDED_IN, head.id)
+        # ``sql = sql1_0 % (JobSpec.columnNames(), table) + sql1_1`` binds the
+        # name to something no rendering here follows -- a different fact from
+        # a name that came from nowhere in this function, and a different
+        # place to go and read.
+        bound = any(
+            isinstance(node, ast.Name) and node.id == head.id and isinstance(node.ctx, ast.Store)
+            for node in ast.walk(func)
+        )
+        return Skip(call.lineno, SKIP_UNREAD_NAME if bound else SKIP_UNBOUND, head.id)
+    if forwarded:
+        return Skip(call.lineno, SKIP_UNRENDERED, _clipped(_unparsed(head)))
+    return Skip(call.lineno, SKIP_INLINE, _clipped(_unparsed(head)))
+
+
+def _skip_without_binds(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call
+) -> Optional[Skip]:
+    """The skip for ``execute(sql)``, which names no bind map to pair it with.
+
+    ``None`` on the same terms as :func:`_skip_without_text`: a wrapper of the
+    cursor handing on its caller's statement.
+    """
+    statement, _fillers, _percent = _call_site_fill(func, call.args[0])
+    head = _concatenated(statement)[0]
+    texts = _head_texts(func, head)
+    if not texts:
+        # No text either: a statement handed in is handed in whether or not a
+        # map comes with it, and saying so is the more useful of the two.
+        skip = _skip_without_text(func, call, head, call.func.attr in _FORWARDED)
+        if skip is None or skip.reason == SKIP_HANDED_IN:
+            return skip
+    detail = head.id if isinstance(head, ast.Name) else _clipped(texts[0] if texts else _unparsed(head))
+    return Skip(call.lineno, SKIP_NO_VARMAP, detail, texts)
+
+
+def _is_parameter(func: ast.AST, name: str) -> bool:
+    args = getattr(func, "args", None)
+    if args is None:
+        return False
+    every = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    every += [one for one in (args.vararg, args.kwarg) if one is not None]
+    return any(argument.arg == name for argument in every)
 
 
 #: How the daemon layer runs a statement.  A second execution form rather than
@@ -1951,6 +2124,28 @@ def _preconditions(clause: str, columns: set[str]) -> dict[str, str]:
     return found
 
 
+#: ``PandaID=:PandaID`` -- a term naming one column by one bind.
+_KEY_TERM = re.compile(r"^(?:\w+\.)?([A-Za-z_]\w*)\s*=\s*(:\w+)$")
+
+
+def _keys(clause: str, columns: set[str]) -> dict[str, str]:
+    """``{column: bind}`` for the terms of *clause* on columns not in *columns*.
+
+    Read with the same term pattern :func:`_preconditions` uses, so the two
+    split one ``WHERE`` between them and cannot both claim a term.  A negated
+    term and a list are not a key: neither names *the* row.
+    """
+    found: dict[str, str] = {}
+    lowered = {column.lower() for column in columns}
+    for term, column in _TERM.findall(clause):
+        if column.lower() in lowered:
+            continue
+        match = _KEY_TERM.match(re.sub(r"\s+", " ", term).strip())
+        if match is not None and match.group(1) not in found:
+            found[match.group(1)] = match.group(2)
+    return found
+
+
 #: ``jobStatus=:oldJobStatus`` -- the only shape of precondition whose value
 #: is in Python.  ``commandToPilot IS NULL`` and ``nFiles>nFilesUsed`` name no
 #: bind, and there is nothing to settle in them.
@@ -2014,6 +2209,7 @@ def writes(sql: str) -> list[SqlWrite]:
                     table=_table_of(match.group(1)),
                     columns=columns,
                     preconditions=_preconditions(sql[match.end(2) :], set(columns)),
+                    keys=_keys(sql[match.end(2) :], set(columns)),
                 )
             )
     for match in _INSERT.finditer(sql):

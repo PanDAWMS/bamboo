@@ -53,12 +53,13 @@ import ast
 import re
 from typing import Iterator, NamedTuple, Optional
 
-from bamboo.codemap.models import Emit, JunctionNode, SourceModule, SubjectNode
+from bamboo.codemap.models import Emit, JunctionNode, RowKeySource, SourceModule, SubjectNode
 from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
+    handed_in,
     path_condition,
     targets_of,
     written_value,
@@ -257,9 +258,18 @@ def _changed_attributes(
 
 
 def attach(
-    junctions: list[JunctionNode], modules: list[SourceModule], attributor: SpecAttributor
+    junctions: list[JunctionNode],
+    modules: list[SourceModule],
+    attributor: SpecAttributor,
+    row_keys: Optional[list[RowKeySource]] = None,
 ) -> int:
     """Give each caller's branches the row its flush needed.  Returns how many.
+
+    *row_keys*, where given, gets one :class:`RowKeySource` per guarded flush:
+    the row a flush writes is the spec it is handed, so where that spec came
+    from -- a parameter, a field, or this function's own query -- is who named
+    the row.  ``TaskBuffer.updateJobs`` flushes each of the ``jobs`` its caller
+    passed, and its guard requires ``defined`` of rows it never selected.
 
     Applied to every branch of a matching junction rather than to the writes
     that provably reach the flush call: a method that changes a spec and then
@@ -298,6 +308,8 @@ def attach(
                     )
                     if not guards and not flush.rows_emits:
                         continue
+                    if row_keys is not None and guards:
+                        row_keys.append(_row_key_source(node, func, owner, spec, flush, guards, module, attributor))
                     for junction in here:
                         if junction.subject not in {
                             SubjectNode.make_name(spec, attribute) for attribute in written
@@ -318,3 +330,31 @@ def attach(
                                     continue
                                 branch.emits.append(line)
     return annotated
+
+
+def _row_key_source(
+    call: ast.Call,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner: Optional[str],
+    spec: str,
+    flush: Flush,
+    guards: list[str],
+    module: SourceModule,
+    attributor: SpecAttributor,
+) -> RowKeySource:
+    """The spec a guarded flush is handed, and whether the caller handed it here."""
+    handed = ""
+    passed: list[str] = []
+    for argument in (*call.args, *(keyword.value for keyword in call.keywords)):
+        if attributor.class_of(argument, func, owner) != spec:
+            continue
+        passed.append(ast.unparse(argument))
+        handed = handed or handed_in(func, argument)
+    return RowKeySource(
+        owner=f"{module.rel_path}::{func.name}",
+        file=module.rel_path,
+        statement=call.lineno,
+        columns=sorted(column for column, (term, _gating) in flush.guards.items() if term in guards),
+        keys=passed,
+        handed_by=handed,
+    )
