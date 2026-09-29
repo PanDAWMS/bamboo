@@ -254,10 +254,16 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
         if follow.selected_by
         else "  which update acts on it       "
     )
+    if follow.gaps_note and (follow.selected_by or follow.guarded_by):
+        click.echo(f"  where the map could not read them {follow.gaps_note}")
     if actors:
         for index, owner in enumerate(actors):
             label = heading if index == 0 else " " * 33
             click.echo(f"{label} {strategy_mod.short_owner(owner)}")
+            # Beside the name, as the guard half does: a list of movers with a
+            # hole in one of them reads as complete unless the hole is said.
+            for gap in follow.reader_gaps.get(owner, []):
+                click.echo(f"                                     the map could not read here: {gap}")
         click.echo(
             "                                   "
             + (
@@ -388,6 +394,8 @@ def _report_guarded(follow) -> None:
             "                                     "
             + (", ".join(entry.log_files) or "no log file names it")
         )
+        for gap in entry.gaps:
+            click.echo(f"                                     the map could not read here: {gap}")
 
 
 def _at(branch) -> str:
@@ -1379,6 +1387,9 @@ def main(
         # things -- a junction's arms and a query's conditions -- and the
         # scoping is what separates the three ``holding`` statements.
         strategy_mod.attach_reader_traces(hop.strategy, roots)
+        # Where the map could not read the functions named as movers, from the
+        # same tree: the gate knows, and the answer is where a reader looks.
+        strategy_mod.attach_mover_gaps(hop.strategy, roots)
 
     if len(investigation.hops) > 1 or max_hops > 1:
         _report_trace(investigation)

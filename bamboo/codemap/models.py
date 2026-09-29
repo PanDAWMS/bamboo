@@ -2550,6 +2550,24 @@ class FollowUp(BaseModel):
         ),
     )
     question: str = Field(default="", description="What to ask next, in one sentence.")
+    reader_gaps: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "``{reader: where the map could not read its statements on these "
+            "rows}``, the same judgement :attr:`GuardReading.gaps` carries for "
+            "the other half.  Only readers with one are listed."
+        ),
+    )
+    gaps_note: str = Field(
+        default="",
+        description="Why no function above carries its gaps, when none could be read.",
+    )
+    # What ``attach_mover_gaps`` judges with, gathered while the map is open and
+    # left out of what is printed or saved: it is the map's, not the answer's.
+    mover_sites: dict[str, list["ReadSiteNode"]] = Field(default_factory=dict, exclude=True)
+    mover_files: dict[str, tuple[str, str]] = Field(default_factory=dict, exclude=True)
+    table_kinds: dict[str, Optional[str]] = Field(default_factory=dict, exclude=True)
+    spec_class: str = Field(default="", exclude=True)
 
 
 class StageCut(BaseModel):
@@ -3014,6 +3032,18 @@ class GuardReading(BaseModel):
         description=(
             "Whether a query of this function selects the value too, so it is "
             "listed on both halves of the answer."
+        ),
+    )
+    gaps: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the map could not read this function's statements on these "
+            "rows, as ``movers-of-a-value-agree`` judges it: ``@2391 "
+            "sql_where_clause, sorting_sql -- <why>``.  ``getJobs`` is on this "
+            "half because its ``SELECT`` is one the map could not read, and "
+            "without this the answer named it and did not say so.  Filled at "
+            "use time from the source, like the traces -- see "
+            ":func:`bamboo.codemap.strategy.attach_mover_gaps`."
         ),
     )
 

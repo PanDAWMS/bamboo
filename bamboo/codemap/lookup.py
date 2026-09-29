@@ -219,6 +219,10 @@ class CodeMap:
         """Every subject, for callers that need to resolve a name themselves."""
         return sorted(await self._find(SubjectNode), key=lambda s: s.name)
 
+    async def entities(self) -> list[EntityNode]:
+        """Every kind of row the map knows, for callers placing a table themselves."""
+        return sorted(await self._find(EntityNode), key=lambda entity: entity.name)
+
     async def writers_of(self, subject: str) -> list[JunctionNode]:
         """Every junction that settles *subject*.
 

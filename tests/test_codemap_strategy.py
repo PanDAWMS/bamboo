@@ -730,6 +730,103 @@ async def test_the_gate_and_the_answer_read_a_guard_the_same_way():
     }
 
 
+_GET_JOBS_SOURCE = """
+class JobModule:
+    def getJobs(self, where):
+        sqlP = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE "
+        sqlP += sql_where_clause
+        self.cur.execute(sqlP + comment, varMap)
+        sqlU = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newStatus WHERE PandaID=:PandaID AND jobStatus=:oldJobStatus"
+        self.cur.execute(sqlU + comment, varMap)
+"""
+
+
+async def _gaps_answer(tmp_path, source: str = _GET_JOBS_SOURCE, sha: str = ""):
+    """``activated``'s answer, with ``getJobs`` read from *source* in a tree."""
+    fragment = _guarded_fragment()
+    fragment.entities.append(
+        EntityNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="jobsactive4",
+            spec_class="JobSpec",
+            tables=["jobsActive4"],
+        )
+    )
+    for junction in fragment.junctions:
+        if junction.owner == _GET_JOBS:
+            junction.anchor.blob_sha = sha
+    root = tmp_path / "taskbuffer"
+    (root / "db_proxy_mods").mkdir(parents=True)
+    (root / "db_proxy_mods" / "job_complex_module.py").write_text(source)
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject="JobSpec.jobStatus", observed="activated")
+    )
+    strategy_mod.attach_mover_gaps(strategy, {"taskbuffer": root})
+    return strategy
+
+
+async def test_a_mover_the_map_could_not_read_says_so_under_its_name(tmp_path):
+    """``getJobs`` is named as what moves an ``activated`` job, and the
+    ``SELECT`` that picks the job is one the map could not read.  The gate
+    knew; the answer now says it where the name is."""
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_follow_up
+
+    strategy = await _gaps_answer(tmp_path)
+
+    guarded = {entry.owner: entry for entry in strategy.follow_up.guarded_by}
+    (gap,) = guarded[_GET_JOBS].gaps
+    assert gap.startswith("@6 sql_where_clause -- a statement here that reads these rows")
+    assert guarded[_THROTTLE_USER].gaps == ["not read: the file could not be read from this tree"]
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_follow_up(strategy, False))
+    output = runner.invoke(command).output
+    assert "the map could not read here: @6 sql_where_clause" in output
+
+
+async def test_the_gaps_are_the_gates_own_judgement(tmp_path):
+    """One judgement asked from two places: the answer's reading of the one
+    function and the gate's reading of the build must name the same gap."""
+    from bamboo.codemap import gates
+    from bamboo.codemap.panda.pathcond import attach_parents
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    import ast as ast_mod
+
+    strategy = await _gaps_answer(tmp_path)
+    tree = ast_mod.parse(_GET_JOBS_SOURCE)
+    attach_parents(tree)
+    func = next(n for n in ast_mod.walk(tree) if isinstance(n, ast_mod.FunctionDef))
+    stops = sqlwrite.statement_stops(func, "taskbuffer/db_proxy_mods/job_complex_module.py")
+    reason, where = gates.mover_reason(
+        "JobSpec", [], stops, {"jobsactive4": "JobSpec"}
+    )
+
+    guarded = {entry.owner: entry for entry in strategy.follow_up.guarded_by}
+    assert guarded[_GET_JOBS].gaps == [f"{where} -- {reason}"]
+
+
+async def test_a_tree_that_is_not_the_maps_is_refused_rather_than_read(tmp_path):
+    strategy = await _gaps_answer(tmp_path, sha="0" * 40)
+
+    guarded = {entry.owner: entry for entry in strategy.follow_up.guarded_by}
+    assert guarded[_GET_JOBS].gaps == ["not read: this tree is not the one that was mapped"]
+
+
+async def test_without_a_tree_the_answer_says_it_did_not_read(tmp_path):
+    strategy = await strategy_mod.derive(
+        await _map(_guarded_fragment()),
+        Symptom(subject="JobSpec.jobStatus", observed="activated"),
+    )
+    strategy_mod.attach_mover_gaps(strategy, {})
+
+    assert strategy.follow_up.gaps_note.startswith("no source tree")
+    assert all(entry.gaps == [] for entry in strategy.follow_up.guarded_by)
+
+
 _METRICS = "daemons/scripts/metric_collector.py::analy_pmerge_jobs_wait_time"
 _GETTER_READER = "taskbuffer/db_proxy_mods/task_standalone_module.py::checkDuplication_JEDI"
 

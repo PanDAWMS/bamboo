@@ -124,6 +124,7 @@ from bamboo.codemap.models import (
     StatementExit,
     StatementReading,
     Strategy,
+    SubjectNode,
     Symptom,
     outcome_excludes,
 )
@@ -1196,6 +1197,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         + subject.updated_by.get(symptom.observed, [])
     )
 
+    guarded_here = await code_map.guarded_on(subject, symptom.observed)
     strategy = Strategy(
         symptom=symptom,
         map_id=code_map.map_id,
@@ -1219,7 +1221,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             await code_map.changing_functions(),
             guarded=_guard_readings(
                 symptom.subject,
-                await code_map.guarded_on(subject, symptom.observed),
+                guarded_here,
                 subject.selected_by.get(symptom.observed, []),
             ),
         ),
@@ -1243,6 +1245,9 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         readings=_readings(candidates, asked),
         findings=_findings(candidates, producers),
         gaps=gaps,
+    )
+    await _hold_what_the_movers_are_judged_with(
+        strategy.follow_up, code_map, subject, guarded_here
     )
     # Applied here when the caller already has the message, so the plan a reader
     # inspects before any query goes out is the narrowed one.  When it arrives
@@ -2338,6 +2343,107 @@ def attach_traces(
         entry.trace_note = walked.note
         entry.skeleton = walked.skeleton
     _report_what_the_lines_cannot_separate(strategy)
+
+
+async def _hold_what_the_movers_are_judged_with(
+    follow: Optional[FollowUp], code_map: CodeMap, subject: SubjectNode, guarded
+) -> None:
+    """Keep, on the follow-up, what :func:`attach_mover_gaps` needs from the map.
+
+    Gathered here because this is where the map is open: the gaps themselves
+    need the source, and are judged afterwards the way the traces are.  The
+    read sites of every function the answer names as a mover, where each one's
+    file is and which blob the map read, and every table's kind of row -- a
+    table no entity places counts one way for a gap and the other for an
+    answer, so the kinds of *all* of them are needed, not the subject's.
+    """
+    if follow is None:
+        return
+    owners = sorted(set(follow.selected_by) | {entry.owner for entry in follow.guarded_by})
+    if not owners:
+        return
+    from bamboo.codemap import gates
+
+    sites = await code_map.read_sites(owners)
+    follow.mover_sites = {owner: list(found) for owner, found in sites.items()}
+    files: dict[str, tuple[str, str]] = {}
+    for junction, _branches, _terms in guarded:
+        if junction.anchor is not None:
+            files.setdefault(junction.owner, (junction.anchor.file, junction.anchor.blob_sha))
+    for owner, found in sites.items():
+        for site in found:
+            if site.anchor is not None:
+                files.setdefault(owner, (site.anchor.file, site.anchor.blob_sha))
+    follow.mover_files = files
+    follow.table_kinds = gates.kinds_of_tables(await code_map.entities())
+    follow.spec_class = subject.spec_class or subject.name.partition(".")[0]
+
+
+def attach_mover_gaps(strategy: Strategy, roots: dict) -> None:
+    """Say, under each function the answer names as a mover, what the map could not read there.
+
+    The gate ``movers-of-a-value-agree`` knows ``getJobs``'s ``SELECT`` on
+    2391 was never read, and the answer that names ``getJobs`` as what moves
+    an ``activated`` job did not say so: the stops are the build's, and the
+    answer reads the stored map, where they are not kept.  So they are read
+    again here, from the same source the traces walk and by the build's own
+    reading (``sqlwrite.statement_stops``), and judged by the gate's own
+    judgement (``gates.mover_reason``) -- one reading and one judgement, two
+    places they are asked from.
+
+    Only the gaps are said.  Whether a function's queries ask by other terms
+    is the gate's business; what a reader of the answer needs is where the
+    list of movers may be short.  A tree that is not the map's is refused, on
+    the same terms as :func:`trace.walk`.
+    """
+    follow = strategy.follow_up
+    if follow is None:
+        return
+    owners = list(dict.fromkeys([*follow.selected_by, *(g.owner for g in follow.guarded_by)]))
+    if not owners:
+        return
+    if not roots:
+        follow.gaps_note = "no source tree, so where the map could not read these functions is not said"
+        return
+    judged = {owner: _mover_gaps(owner, follow, roots) for owner in owners}
+    for entry in follow.guarded_by:
+        entry.gaps = judged[entry.owner]
+    follow.reader_gaps = {owner: judged[owner] for owner in follow.selected_by if judged[owner]}
+
+
+def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[str]:
+    """``["@2391 sql_where_clause, sorting_sql -- <why>"]`` for one function, or none."""
+    from bamboo.codemap import gates
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    file, sha = follow.mover_files.get(owner, (owner.partition("::")[0], ""))
+    package, _sep, relative = file.partition("/")
+    root = roots.get(package)
+    if root is None or not relative:
+        return ["not read: the file is outside the tree the answer was given"]
+    try:
+        source = (root / relative).read_text(errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, ValueError):
+        return ["not read: the file could not be read from this tree"]
+    if sha and blob_sha(source) != sha:
+        return ["not read: this tree is not the one that was mapped"]
+    attach_parents(tree)
+    name = owner.rpartition("::")[2]
+    stops = [
+        stop
+        for func, _cls in functions_with_owner(tree)
+        if func.name == name
+        for stop in sqlwrite.statement_stops(func, file)
+    ]
+    reason, where = gates.mover_reason(
+        follow.spec_class, follow.mover_sites.get(owner, []), stops, follow.table_kinds
+    )
+    if reason not in gates.MOVER_DEFECTS:
+        return []
+    return [f"{where} -- {reason}"]
 
 
 #: ``:modificationTime@375`` or ``:taskStatus1@1820,1822`` -- the lines a
