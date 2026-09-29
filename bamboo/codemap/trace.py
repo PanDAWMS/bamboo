@@ -63,6 +63,7 @@ from bamboo.codemap.models import (
     SKELETON_ARM,
     SKELETON_BRANCH,
     SKELETON_PRINT,
+    STOP_EXTERNAL,
     STOP_PARAMETER,
     TRACE_BINDING,
     TRACE_HANDOVER,
@@ -126,8 +127,24 @@ DEFAULT_BUDGET = Budget()
 Classifier = Callable[[ast.expr, Optional[Callable[[str], Optional[ast.expr]]]], tuple[str, str]]
 
 
-def _nothing(_expression: ast.expr, _resolve=None) -> tuple[str, str]:
+def _nothing(_expression: ast.expr, _resolve=None, _typed=None) -> tuple[str, str]:
     return "", ""
+
+
+#: Terminals the walk records and still walks *into*.  A value another system
+#: supplies is answered by that system for a key, and the key is this code's:
+#: ``src_site_spec = self.siteMapper.getSite(self.job.computingSite)`` is CRIC's
+#: answer about ``job.computingSite``, and stopping at "CRIC" dropped which site
+#: was asked -- the one difference between the adder and the setupper deciding
+#: the same ``tmp_src_ddm == tmp_dst_ddm`` two ways.  So the step keeps its
+#: terminal, and the names its value and its guards read are explained as for
+#: any other step.
+#:
+#: The database's and a configuration row's are not here.  Both are calls into
+#: this corpus -- ``getConfigValue`` is a ``SELECT`` on ``ATLAS_PANDA.CONFIG`` --
+#: so their arguments flow into statements the map reads, which is the crossing
+#: of a call and its arguments, and a different change from this one.
+_WALKED_THROUGH = frozenset({STOP_EXTERNAL})
 
 
 #: Where a binding the walk reports actually lives, when that is not the
@@ -1066,7 +1083,7 @@ class _Walk:
         # do not change with which arm is being explained, and rendering them
         # per arm is what made the old shape repeat itself.
         self.armed[line] = statement
-        if not terminal:
+        if not terminal or terminal in _WALKED_THROUGH:
             # Read at the line the caller named, where it named one: an exit
             # is decided at its ``if`` and a statement answers for the binds
             # filled on the way to it, and the arm is not always that line.
@@ -1591,9 +1608,10 @@ class _Walk:
         )
         if not self.record(step):
             return
-        if not terminal and not self.narrows(frame):
+        onwards = not terminal or terminal in _WALKED_THROUGH
+        if onwards and not self.narrows(frame):
             self.want(frame, reads, depth + 1)
-        elif not terminal:
+        elif onwards:
             # Each name from the statement that read it: the value's from
             # this line, a guard's from its ``if``.
             self.want(frame, own, depth + 1, site)

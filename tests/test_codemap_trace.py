@@ -2083,3 +2083,45 @@ class Sweeper:
 
     shown = [step.line for step in ours if step.kind == models.TRACE_BINDING]
     assert shown == sorted(shown)
+
+
+ADDER = '''\
+class Adder:
+    def execute(self):
+        src_site_spec = self.siteMapper.getSite(self.job.computingSite)
+        scope = select_scope(src_site_spec, self.job.prodSourceLabel)
+        tmp_src_ddm = src_site_spec.ddm_output[scope]
+        task = self.taskBufferIF.getTaskWithID_JEDI(task_id)
+        if tmp_src_ddm == task.ddm:
+            pass
+'''
+
+
+def test_a_value_another_system_supplies_still_says_what_it_was_asked_for(tmp_path):
+    """CRIC answered for ``job.computingSite``, and stopping at "CRIC" lost
+    which site was asked -- the one difference between two functions deciding
+    the same ``src == dst`` two ways.  The step keeps its terminal; the key is
+    walked like any other name."""
+    roots = _tree(tmp_path, adder=ADDER)
+
+    steps, _note = _walk(roots, file="adder", owner="execute", lines=[7], reaching=True)
+
+    by = {(s.name, s.line): s for s in steps}
+    assert by[("tmp_src_ddm", 5)].detail == "CRIC site declaration"
+    asked = by[("src_site_spec", 3)]
+    assert asked.detail == "CRIC site declaration"
+    assert asked.value == "self.siteMapper.getSite(self.job.computingSite)"
+    assert ("scope", 4) in by
+    assert any(s.name == "self.job" for s in steps)
+
+
+def test_a_value_the_database_supplies_is_still_where_the_walk_stops(tmp_path):
+    """The database's arguments flow into statements this map reads -- a call
+    and its arguments, which is another change -- so ``task_id`` is not
+    walked from here."""
+    roots = _tree(tmp_path, adder=ADDER)
+
+    steps, _note = _walk(roots, file="adder", owner="execute", lines=[7], reaching=True)
+
+    assert any(s.name == "task" and s.detail == "getTaskWithID_JEDI" for s in steps)
+    assert not any(s.name == "task_id" for s in steps)
