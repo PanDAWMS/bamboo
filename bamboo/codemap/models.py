@@ -1545,24 +1545,39 @@ class MapFragment(BaseModel):
     )
 
     def extend(self, other: "MapFragment") -> None:
-        """Merge *other* into this fragment in place."""
-        self.subjects.extend(other.subjects)
-        self.entities.extend(other.entities)
-        self.junctions.extend(other.junctions)
-        self.boundaries.extend(other.boundaries)
-        self.value_enums.extend(other.value_enums)
-        self.filter_stages.extend(other.filter_stages)
-        self.loop_cuts.extend(other.loop_cuts)
-        self.log_sites.extend(other.log_sites)
-        self.read_sites.extend(other.read_sites)
-        self.diagnostics.extend(other.diagnostics)
-        self.enumeration_writes.extend(other.enumeration_writes)
-        self.coverage.extend(other.coverage)
-        self.reading_stops.extend(other.reading_stops)
-        self.row_key_sources.extend(other.row_key_sources)
-        self.declaration_yields.update(other.declaration_yields)
-        self.annotation_readings.extend(other.annotation_readings)
-        self.spec_annotation_forms.update(other.spec_annotation_forms)
+        """Merge *other* into this fragment in place.
+
+        Every part but the two that name the build, read off the model rather
+        than listed here: a list of fields written out by hand is a second
+        copy of the model, and the part added next is the one it drops.
+        """
+        for part in type(self).model_fields:
+            if part in ("map_id", "derived_from"):
+                continue
+            held = getattr(self, part)
+            if isinstance(held, dict):
+                held.update(getattr(other, part))
+            else:
+                held.extend(getattr(other, part))
+
+
+#: The parts of a :class:`MapFragment` that hold stored nodes, in the order
+#: ``store_fragment`` writes them.  One tuple for the store and for ``diff``,
+#: because the two lists were once separate and ``diff`` held seven of the
+#: eight kinds the database stored: every log site compared as absent from
+#: both builds.  Every other part is the build's own report -- see
+#: ``diff.NOT_COMPARED_PARTS``.
+MAP_NODE_GROUPS: tuple[str, ...] = (
+    "value_enums",
+    "subjects",
+    "entities",
+    "junctions",
+    "boundaries",
+    "filter_stages",
+    "loop_cuts",
+    "log_sites",
+    "read_sites",
+)
 
 
 class AnnotationAudit(BaseModel):

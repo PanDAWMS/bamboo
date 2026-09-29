@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from bamboo.codemap.models import MapFragment
+from bamboo.codemap.models import MAP_NODE_GROUPS, MapFragment
 from bamboo.models.graph_element import NodeType
 
 # Keyed off the enum rather than spelled out, because spelling them out is how
@@ -71,7 +71,9 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     # ``owner`` is the signature, so it cannot differ between two nodes being
     # compared.
-    NodeType.LOG_SITE.value: ("log_files", "caller_log_files", "owns_logger"),
+    # ``triggers`` is how the reader's module is started, which is what
+    # ``_follow_up`` reads to say whether anything will look at the row again.
+    NodeType.LOG_SITE.value: ("log_files", "caller_log_files", "owns_logger", "triggers"),
     # ``owner`` and the line are the signature here, so what is left to differ
     # is what the statement asks for.  A predicate gaining a value is the read
     # side's equivalent of a branch gaining an outcome: it is the difference
@@ -91,7 +93,23 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "exits",
         "crosses_to",
     ),
-    _JUNCTION: ("subject", "owner", "log_files", "attribution", "structural_subject"),
+    # ``calls``, ``joined_entities`` and ``dispatch`` are what the owner
+    # consults, reads beside its rows and constructs to run, and the two log
+    # fields are the ones ``LOG_SITE`` already compares for the same owner: all
+    # five were outside this list with nothing saying why, which is the hole
+    # :data:`NOT_COMPARED` now closes.
+    _JUNCTION: (
+        "subject",
+        "owner",
+        "log_files",
+        "caller_log_files",
+        "owns_logger",
+        "attribution",
+        "structural_subject",
+        "calls",
+        "joined_entities",
+        "dispatch",
+    ),
     NodeType.BOUNDARY.value: (
         "system",
         "kind",
@@ -130,6 +148,99 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "log_level",
         "log_files",
     ),
+}
+
+_IDENTITY = "identity: the node's signature or part of it, so equal on both sides"
+_PROVENANCE = "provenance: which build wrote the node, different by definition"
+_POSITION = "position: moves whenever a line is added above it"
+_GLOSS_KEY = (
+    "a hash of the function's text: moves with an edited comment, and keys a "
+    "reading rather than stating anything the function does"
+)
+
+#: The fields of every stored node that are *not* compared, each with why.
+#: Together with :data:`CONTENT_FIELDS` they are the whole model -- a test holds
+#: the two against ``model_fields`` -- so a field added to a node fails until
+#: someone says which list it belongs in.  Until this existed a field nobody
+#: listed compared equal to itself however it changed, and ``log_sites``,
+#: ``row_precondition`` and ``selected_by`` were each found that way, a round
+#: at a time; a misspelt one read ``None`` on both sides and passed as well.
+COMMON_NOT_COMPARED: dict[str, str] = {
+    "id": _IDENTITY,
+    "name": _IDENTITY,
+    "node_type": _IDENTITY,
+    "map_id": _IDENTITY,
+    "derived_from": _PROVENANCE,
+    "description": "prose for the vector index, which the code map does not write",
+    "metadata": "free-form, and the code map does not write it",
+}
+NOT_COMPARED: dict[str, dict[str, str]] = {
+    NodeType.VALUE_ENUM.value: {
+        "anchor": _POSITION,
+        "references": (
+            "a count of sites that churns with edits elsewhere in the file; "
+            "zero is the fact, and value-enum-referenced gates it"
+        ),
+    },
+    NodeType.SUBJECT.value: {},
+    NodeType.ENTITY.value: {},
+    NodeType.LOG_SITE.value: {"owner": _IDENTITY},
+    NodeType.READ_SITE.value: {"owner": _IDENTITY, "anchor": _POSITION},
+    _JUNCTION: {
+        "anchor": _POSITION,
+        "gloss_key": _GLOSS_KEY,
+        "branches": "compared one by one: see BRANCH_FIELDS",
+        "entry_points": "compared one by one: see ENTRY_KEY and ENTRY_FIELDS",
+    },
+    NodeType.BOUNDARY.value: {"anchor": _POSITION},
+    NodeType.FILTER_STAGE.value: {"anchor": _POSITION, "gloss_key": _GLOSS_KEY},
+    NodeType.LOOP_CUT.value: {
+        "message": _IDENTITY,
+        "loop_line": _POSITION,
+        "anchor": _POSITION,
+    },
+}
+
+#: What a branch says, compared between two branches of one outcome.  ``tags``
+#: and ``messages`` are the signature production writes when the branch fires,
+#: so a reworded message is a branch a reader can no longer name from a log.
+BRANCH_FIELDS: tuple[str, ...] = (
+    "path_condition",
+    "row_precondition",
+    "tier",
+    "emits",
+    "log_level",
+    "tags",
+    "messages",
+)
+BRANCH_NOT_COMPARED: dict[str, str] = {
+    "outcome": "the key branches are matched on",
+    "line": _POSITION,
+    "order": _POSITION,
+}
+
+#: An entry's identity is the door, as :class:`EntryPoint` states it; what it
+#: hands over, and through how many sites, is what it says.
+ENTRY_KEY: tuple[str, ...] = ("trigger", "entry", "via", "reached_by")
+ENTRY_FIELDS: tuple[str, ...] = ("arg_binding", "sites")
+
+#: The parts of a fragment that hold no stored node.  ``diff`` compares what the
+#: stored map claims; these are the build's report on itself, which it prints.
+_REPORT = "not stored: the build's report on itself, printed by the build"
+NOT_COMPARED_PARTS: dict[str, str] = {
+    "map_id": _IDENTITY,
+    "derived_from": _PROVENANCE,
+    "diagnostics": _REPORT,
+    "enumeration_writes": _REPORT,
+    "coverage": _REPORT,
+    "reading_stops": (
+        "what the build could not say, not what the map claims -- "
+        "see ReadingStop, and the answer reads them again from the source"
+    ),
+    "row_key_sources": _REPORT,
+    "declaration_yields": _REPORT,
+    "annotation_readings": _REPORT,
+    "spec_annotation_forms": _REPORT,
 }
 
 # The two fields that hold a decision's reasoning.  A change here is what no
@@ -213,25 +324,33 @@ def _key(node: Any) -> tuple[str, str]:
 
 def _index(fragment: MapFragment) -> dict[tuple[str, str], Any]:
     nodes: dict[tuple[str, str], Any] = {}
-    for group in (
-        fragment.value_enums,
-        fragment.subjects,
-        fragment.entities,
-        fragment.junctions,
-        fragment.boundaries,
-        fragment.filter_stages,
-        fragment.loop_cuts,
-        # Every kind ``store_fragment`` writes belongs here.  ``log_sites`` was
-        # not, so ``CONTENT_FIELDS[LOG_SITE]`` was answering a question nobody
-        # asked and all 294 of them compared as absent from both builds: which
-        # log will show a reader's query running could move, or the reader
-        # could appear, and the report said nothing either way.
-        fragment.log_sites,
-        fragment.read_sites,
-    ):
-        for node in group:
+    # Every kind ``store_fragment`` writes, from the one tuple both read.
+    # ``log_sites`` was once missing from a list written out here, so
+    # ``CONTENT_FIELDS[LOG_SITE]`` was answering a question nobody asked and all
+    # 294 of them compared as absent from both builds.
+    for group in MAP_NODE_GROUPS:
+        for node in getattr(fragment, group):
             nodes[_key(node)] = node
     return nodes
+
+
+def _unmatched(olds: list[Any], news: list[Any], fields: tuple[str, ...]) -> tuple[list, list]:
+    """What is left of two lists once every item with its twin on the other side is taken.
+
+    Twins are equal on *fields*.  What is left is in source order, so a pair
+    made from it is the nth survivor on each side.
+    """
+    def said(item: Any) -> str:
+        return _render([getattr(item, field) for field in fields])
+
+    left = list(olds)
+    right = list(news)
+    for item in list(left):
+        twin = next((other for other in right if said(other) == said(item)), None)
+        if twin is not None:
+            left.remove(item)
+            right.remove(twin)
+    return left, right
 
 
 def _branch_changes(name: str, old: Any, new: Any) -> list[Change]:
@@ -241,9 +360,20 @@ def _branch_changes(name: str, old: Any, new: Any) -> list[Change]:
     that makes drift visible: a branch keeps its outcome while the condition
     that reaches it is edited, which is exactly the case a positional
     comparison would render as "everything after line 40 changed".
+
+    **An outcome can have several branches**, and did on 107 of 680 junctions:
+    ``add_sub.py::main`` closes a job two ways.  Matched on the outcome alone
+    the last of them stood for all, and an edit to any other compared as no
+    change.  Branches of one outcome that say the same thing on both sides are
+    set aside; what is left is paired in source order and compared field by
+    field, so an edited condition is still drift and not a removal and an
+    addition.
     """
-    before = {b.outcome: b for b in old.branches}
-    after = {b.outcome: b for b in new.branches}
+    before: dict[str, list[Any]] = {}
+    after: dict[str, list[Any]] = {}
+    for branches, index in ((old.branches, before), (new.branches, after)):
+        for branch in branches:
+            index.setdefault(branch.outcome, []).append(branch)
     changes: list[Change] = []
     for outcome in sorted(set(before) - set(after)):
         changes.append(
@@ -261,19 +391,29 @@ def _branch_changes(name: str, old: Any, new: Any) -> list[Change]:
         # ``jobStatus=activated`` on 45 junctions -- was told the two builds
         # described the same map.  It is also the field that says whether a
         # branch's outcome can land at all, so drift in it is not cosmetic.
-        for field in ("path_condition", "row_precondition", "tier", "emits", "log_level"):
-            old_value = _render(getattr(before[outcome], field))
-            new_value = _render(getattr(after[outcome], field))
-            if old_value != new_value:
-                changes.append(
-                    Change(
-                        node=f"{name} → {outcome}",
-                        kind=_JUNCTION,
-                        field=field,
-                        before=old_value,
-                        after=new_value,
+        olds, news = _unmatched(before[outcome], after[outcome], BRANCH_FIELDS)
+        for old_branch, new_branch in zip(olds, news, strict=False):
+            for field in BRANCH_FIELDS:
+                old_value = _render(getattr(old_branch, field))
+                new_value = _render(getattr(new_branch, field))
+                if old_value != new_value:
+                    changes.append(
+                        Change(
+                            node=f"{name} → {outcome}",
+                            kind=_JUNCTION,
+                            field=field,
+                            before=old_value,
+                            after=new_value,
+                        )
                     )
-                )
+        for _ in olds[len(news):]:
+            changes.append(
+                Change(node=name, kind=_JUNCTION, field="branch", before=outcome, after="—")
+            )
+        for _ in news[len(olds):]:
+            changes.append(
+                Change(node=name, kind=_JUNCTION, field="branch", before="—", after=outcome)
+            )
     return changes
 
 
@@ -281,21 +421,60 @@ def _entry_changes(name: str, old: Any, new: Any) -> list[Change]:
     """Compare how a junction is reached.
 
     A junction losing its polled entry is not a cosmetic difference: it is the
-    difference between a stall that clears itself and one that does not.
+    difference between a stall that clears itself and one that does not.  And
+    an entry that stays but hands over something else is a guard that fires
+    on one path and not another -- ``arg_binding`` was left out of this, so
+    that could move with the report saying nothing.
     """
-    before = {(e.trigger, e.entry) for e in old.entry_points}
-    after = {(e.trigger, e.entry) for e in new.entry_points}
-    if before == after:
-        return []
-    return [
-        Change(
-            node=name,
-            kind=_JUNCTION,
-            field="entry_points",
-            before=_render(sorted(before)),
-            after=_render(sorted(after)),
+    def key(entry: Any) -> tuple:
+        return tuple(getattr(entry, field) for field in ENTRY_KEY)
+
+    changes: list[Change] = []
+    doors_before = sorted({key(e) for e in old.entry_points}, key=str)
+    doors_after = sorted({key(e) for e in new.entry_points}, key=str)
+    if doors_before != doors_after:
+        changes.append(
+            Change(
+                node=name,
+                kind=_JUNCTION,
+                field="entry_points",
+                before=_render(doors_before),
+                after=_render(doors_after),
+            )
         )
-    ]
+    for door in sorted(set(doors_before) & set(doors_after), key=str):
+        olds, news = _unmatched(
+            [e for e in old.entry_points if key(e) == door],
+            [e for e in new.entry_points if key(e) == door],
+            ENTRY_FIELDS,
+        )
+        if len(olds) != len(news):
+            # Two entries at one door is not a shape the trigger slice makes;
+            # said rather than paired, since there is nothing to pair them by.
+            changes.append(
+                Change(
+                    node=f"{name} ← {door[0]} {door[1]}",
+                    kind=_JUNCTION,
+                    field="entry_points",
+                    before=f"{len(olds)} unmatched",
+                    after=f"{len(news)} unmatched",
+                )
+            )
+        for old_entry, new_entry in zip(olds, news, strict=False):
+            for field in ENTRY_FIELDS:
+                old_value = _render(getattr(old_entry, field))
+                new_value = _render(getattr(new_entry, field))
+                if old_value != new_value:
+                    changes.append(
+                        Change(
+                            node=f"{name} ← {door[0]} {door[1]}",
+                            kind=_JUNCTION,
+                            field=field,
+                            before=old_value,
+                            after=new_value,
+                        )
+                    )
+    return changes
 
 
 def _node_changes(kind: str, name: str, old: Any, new: Any) -> list[Change]:

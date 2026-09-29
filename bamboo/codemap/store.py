@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from bamboo.codemap.models import MapFragment
+from bamboo.codemap.models import MAP_NODE_GROUPS, MapFragment
 from bamboo.database.graph_database_client import GraphDatabaseClient
 
 logger = logging.getLogger(__name__)
@@ -49,18 +49,7 @@ async def store_fragment(
     Returns:
         Counts of what was written, per node kind.
     """
-    written = {
-        "cleared": 0,
-        "value_enums": 0,
-        "subjects": 0,
-        "entities": 0,
-        "junctions": 0,
-        "boundaries": 0,
-        "filter_stages": 0,
-        "loop_cuts": 0,
-        "log_sites": 0,
-        "read_sites": 0,
-    }
+    written = {"cleared": 0, **dict.fromkeys(MAP_NODE_GROUPS, 0)}
 
     if replace_map:
         removed = await graph_db.clear_map(fragment.map_id)
@@ -71,33 +60,10 @@ async def store_fragment(
         )
         written["cleared"] = removed
 
-    for enum in fragment.value_enums:
-        await graph_db.merge_map_node(enum)
-        written["value_enums"] += 1
-    for subject in fragment.subjects:
-        await graph_db.merge_map_node(subject)
-        written["subjects"] += 1
-    for entity in fragment.entities:
-        await graph_db.merge_map_node(entity)
-        written["entities"] += 1
-    for junction in fragment.junctions:
-        await graph_db.merge_map_node(junction)
-        written["junctions"] += 1
-    for boundary in fragment.boundaries:
-        await graph_db.merge_map_node(boundary)
-        written["boundaries"] += 1
-    for stage in fragment.filter_stages:
-        await graph_db.merge_map_node(stage)
-        written["filter_stages"] += 1
-    for cut in fragment.loop_cuts:
-        await graph_db.merge_map_node(cut)
-        written["loop_cuts"] += 1
-    for site in fragment.log_sites:
-        await graph_db.merge_map_node(site)
-        written["log_sites"] += 1
-    for site in fragment.read_sites:
-        await graph_db.merge_map_node(site)
-        written["read_sites"] += 1
+    for group in MAP_NODE_GROUPS:
+        for node in getattr(fragment, group):
+            await graph_db.merge_map_node(node)
+            written[group] += 1
 
     logger.info("store_fragment: wrote %r", written)
     return written

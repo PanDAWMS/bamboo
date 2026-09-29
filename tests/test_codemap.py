@@ -10762,6 +10762,167 @@ def test_two_identical_builds_report_as_identical():
     assert result.unchanged == 1
 
 
+def _stored_kinds() -> dict[str, type]:
+    """``{node kind: model}`` for every part of a fragment the store writes."""
+    import typing
+
+    from bamboo.codemap.models import MAP_NODE_GROUPS
+
+    hints = typing.get_type_hints(MapFragment)
+    kinds = {}
+    for group in MAP_NODE_GROUPS:
+        (model,) = typing.get_args(hints[group])
+        kinds[model.model_fields["node_type"].default.value] = model
+    return kinds
+
+
+def test_every_field_of_a_stored_node_is_compared_or_says_why_not():
+    """The gate for the class ``log_sites``, ``row_precondition`` and
+    ``selected_by`` each belonged to: a field nobody listed compares equal to
+    itself however it changes, and each was found one round at a time.  A field
+    added to a node now fails here until it is put in one list or the other --
+    and a misspelt entry, which read ``None`` on both sides, fails too."""
+    kinds = _stored_kinds()
+
+    assert set(kinds) == set(diff.CONTENT_FIELDS) == set(diff.NOT_COMPARED)
+    for kind, model in kinds.items():
+        compared = set(diff.CONTENT_FIELDS[kind])
+        excused = set(diff.NOT_COMPARED[kind]) | set(diff.COMMON_NOT_COMPARED)
+        assert not compared & excused, kind
+        assert compared | excused == set(model.model_fields), kind
+        assert all(diff.NOT_COMPARED[kind].values()), kind
+
+
+def test_every_field_of_a_branch_and_an_entry_is_compared_or_says_why_not():
+    assert set(diff.BRANCH_FIELDS) | set(diff.BRANCH_NOT_COMPARED) == set(Branch.model_fields)
+    assert not set(diff.BRANCH_FIELDS) & set(diff.BRANCH_NOT_COMPARED)
+    assert set(diff.ENTRY_KEY) | set(diff.ENTRY_FIELDS) == set(EntryPoint.model_fields)
+    assert not set(diff.ENTRY_KEY) & set(diff.ENTRY_FIELDS)
+
+
+def test_every_part_of_a_fragment_is_stored_and_compared_or_says_why_not():
+    """The store and ``diff`` read one tuple of stored parts, and every other
+    part of a fragment is named with the reason it is not compared."""
+    from bamboo.codemap.models import MAP_NODE_GROUPS
+
+    assert not set(MAP_NODE_GROUPS) & set(diff.NOT_COMPARED_PARTS)
+    assert set(MAP_NODE_GROUPS) | set(diff.NOT_COMPARED_PARTS) == set(MapFragment.model_fields)
+
+
+async def test_the_store_writes_every_stored_part():
+    from bamboo.codemap.models import MAP_NODE_GROUPS
+    from bamboo.codemap.store import store_fragment
+
+    fragment = _fragment_of(
+        _stage_for_diff("-disk", ["a"], 100),
+        _junction_for_diff([Branch(outcome="ready", order=0)]),
+    )
+    graph = AsyncMock()
+    graph.clear_map.return_value = 0
+
+    written = await store_fragment(fragment, graph)
+
+    assert set(written) == {"cleared", *MAP_NODE_GROUPS}
+    assert written["filter_stages"] == 1 and written["junctions"] == 1
+    assert graph.merge_map_node.await_count == 2
+
+
+def test_extending_a_fragment_merges_every_part():
+    """``extend`` listed the parts by hand, a second copy of the model."""
+    one = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    other = _fragment_of(_stage_for_diff("-disk", ["a"], 100))
+    other.declaration_yields["JobSpec (x.py)"] = 3
+    other.reading_stops.append(ReadingStop(reason="r"))
+
+    one.extend(other)
+
+    assert len(one.filter_stages) == 1
+    assert one.declaration_yields == {"JobSpec (x.py)": 3}
+    assert len(one.reading_stops) == 1
+
+
+def test_an_edit_to_one_of_two_branches_of_one_outcome_is_drift():
+    """107 of 680 junctions have an outcome reached two ways, and matched on
+    the outcome alone the last branch stood for all: ``add_sub.py::main``
+    could lose the condition on either way it closes a job and the report
+    would have said nothing about the first."""
+    old = _fragment_of(
+        _junction_for_diff(
+            [
+                Branch(outcome="closed", path_condition=["a"], order=0),
+                Branch(outcome="closed", path_condition=["b"], order=1),
+            ]
+        )
+    )
+    new = _fragment_of(
+        _junction_for_diff(
+            [
+                Branch(outcome="closed", path_condition=["a2"], order=0),
+                Branch(outcome="closed", path_condition=["b"], order=1),
+            ]
+        )
+    )
+
+    result = diff.compare(old, new)
+
+    (drifted,) = result.drift()
+    assert drifted.node == "j:setStatus → closed"
+    assert (drifted.before, drifted.after) == ("[a]", "[a2]")
+    assert diff.compare(old, old).identical
+
+
+def test_a_second_branch_to_the_same_outcome_is_reported():
+    one = _junction_for_diff([Branch(outcome="closed", path_condition=["a"], order=0)])
+    two = _junction_for_diff(
+        [
+            Branch(outcome="closed", path_condition=["a"], order=0),
+            Branch(outcome="closed", path_condition=["b"], order=1),
+        ]
+    )
+
+    (change,) = diff.compare(_fragment_of(one), _fragment_of(two)).changes
+
+    assert (change.field, change.before, change.after) == ("branch", "—", "closed")
+
+
+def test_a_reworded_branch_message_is_reported():
+    """The message is what a reader names the branch by from a log."""
+    old = _fragment_of(
+        _junction_for_diff([Branch(outcome="ready", messages=["set ready"], order=0)])
+    )
+    new = _fragment_of(
+        _junction_for_diff([Branch(outcome="ready", messages=["ready now"], order=0)])
+    )
+
+    (change,) = diff.compare(old, new).changes
+
+    assert change.field == "messages"
+
+
+def test_an_entry_that_hands_over_something_else_is_reported():
+    """Same door, different arguments: a guard that fires on one path only."""
+    def junction(binding):
+        node = _junction_for_diff([Branch(outcome="ready", order=0)])
+        node.entry_points = [
+            EntryPoint(
+                trigger="polled",
+                entry="JobGenerator.py",
+                via="start",
+                arg_binding=binding,
+                reached_by="dispatch",
+            )
+        ]
+        return node
+
+    (change,) = diff.compare(
+        _fragment_of(junction({"inputList": "inputList"})),
+        _fragment_of(junction({"inputList": "inputList", "resource_types": "r"})),
+    ).changes
+
+    assert change.field == "arg_binding"
+    assert change.node == "j:setStatus ← polled JobGenerator.py"
+
+
 # ---------------------------------------------------------------------------
 # Comparing two builds of the *same* source, made by two versions of this code
 # ---------------------------------------------------------------------------
