@@ -134,7 +134,11 @@ class Budget(NamedTuple):
     #: walk said about the function before it could.
     crossed_files: int = 24
     crossed_functions: int = 60
-    crossed_steps: int = 240
+    crossed_steps: int = 480
+    #: Depth is counted from the arm, and a call adds a hop for the return
+    #: and one for each argument: ``scoutVal`` to the percentile behind it is
+    #: nine hops, six of them inside ``getScoutJobData_JEDI``.
+    crossed_depth: int = 8
 
 
 DEFAULT_BUDGET = Budget()
@@ -903,6 +907,10 @@ def _dominates(site: ast.AST, target: ast.AST) -> bool:
 
 #: How many of a function's call sites a parameter is followed to.
 _MAX_CALLERS = 8
+#: How many calls of a method that sets a field are listed.  More than the
+#: parameters get: each one is a different place the value was set, and
+#: ``set_fatal`` alone is called from nine.
+_MAX_MUTATIONS = 24
 
 
 def _same_node(scope: ast.AST, node: ast.AST) -> Optional[ast.AST]:
@@ -915,6 +923,21 @@ def _same_node(scope: ast.AST, node: ast.AST) -> Optional[ast.AST]:
         ):
             return held
     return None
+
+
+def _keyed_reads(expression: ast.AST) -> list[str]:
+    """``x['k']`` for every item of a local read by a constant key in *expression*."""
+    found: list[str] = []
+    for node in ast.walk(expression):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, (str, int))
+            and isinstance(getattr(node, "ctx", ast.Load()), ast.Load)
+        ):
+            _add(found, f"{node.value.id}[{node.slice.value!r}]")
+    return found
 
 
 def _projected(value: ast.expr, key: Optional[object]) -> ast.expr:
@@ -1153,6 +1176,17 @@ def _mutated_bindings(func: ast.AST, name: str) -> list[ast.expr]:
     """
     found: list[ast.expr] = []
     for node in ast.walk(func):
+        # ``returnMap["ramCount"] = memVal`` puts a value in as much as
+        # ``xmlIDs.add(x)`` does, and it is how the scout's result is built.
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == name
+                ):
+                    found.append(node.value)
+            continue
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         held = node.func.value
@@ -1325,6 +1359,8 @@ class _Walk:
         #: Functions the walk went into: narrowed like the starting one, each
         #: name answered with the writes that reach the statement reading it.
         self.entered: set[tuple[str, str]] = set()
+        #: ``(file, owner, projection)`` already gone into for its returns.
+        self.returned: set[tuple] = set()
 
     # -- source ------------------------------------------------------------
 
@@ -1506,7 +1542,7 @@ class _Walk:
         1002.  Asked once, from 1019, the walk kept 1007 and never asked
         again, so the percentile and both scout settings behind it were cut.
         """
-        if depth > self.budget.depth:
+        if depth > self.budget.depth + (self.budget.crossed_depth if self.crossing else 0):
             self._exhausted("depth")
             return
         for name in names:
@@ -1588,6 +1624,9 @@ class _Walk:
             self.want(frame, own, 1, at)
             for test, names in _guard_tests(statement):
                 self.want(frame, names, 1, test)
+        self._enter_tests(frame, statement, 1)
+        if value is not None:
+            self._ask_keyed(frame, value, 1, statement)
 
     # -- skeleton ----------------------------------------------------------
 
@@ -2169,6 +2208,9 @@ class _Walk:
         if name.startswith("self."):
             self._field(frame, name, depth)
             return
+        if name.endswith("]"):
+            self._keyed(frame, name, depth, at)
+            return
         bindings = list(pathcond.assigned_expressions(frame.func).get(name, []))
         unpacked = _tuple_bindings(frame.func, name)
         slots = {id(node.value): slot for node, slot in unpacked}
@@ -2335,6 +2377,9 @@ class _Walk:
             self.beyond.append(
                 lambda: self._enter(frame, step, expression, slot, depth + 1)
             )
+        if onwards:
+            self._enter_tests(frame, site, depth + 1)
+            self._ask_keyed(frame, expression, depth + 1, site)
         if (
             isinstance(site, ast.AugAssign)
             and isinstance(site.target, ast.Name)
@@ -2348,10 +2393,193 @@ class _Walk:
             # along *it*, not along the value being divided.
             self.want(frame, [name], depth + 1, site)
 
+    def _ask_keyed(self, frame: _Frame, expression: ast.AST, depth: int, at: ast.AST) -> None:
+        """Ask, beyond the function's own answer, for each item read by a constant key.
+
+        ``scoutData["ramCount"]`` is one entry of what ``getScoutJobData_JEDI``
+        returned, and the name ``scoutData`` answers it only as "the whole
+        map": the entry is asked for as itself, after the name has been.
+        """
+        for keyed in _keyed_reads(expression):
+            self.beyond.append(
+                lambda one=keyed: self.want(frame, [one], depth, at)
+            )
+
+    def _keyed(self, frame: _Frame, name: str, depth: int, at: Optional[ast.AST]) -> None:
+        """Explain ``x['k']``: what this function puts there, or what the call ``x`` came from returns there."""
+        try:
+            node = ast.parse(name, mode="eval").body
+        except SyntaxError:
+            return
+        if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)):
+            return
+        base, key = node.value.id, getattr(node.slice, "value", None)
+        written = [
+            one.value
+            for one in _own_nodes(frame.func)
+            if isinstance(one, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+            and one.value is not None
+            and any(
+                _text(target) == name
+                for target in (one.targets if isinstance(one, ast.Assign) else [one.target])
+            )
+        ]
+        written, _loops, _caught = self._reaching(frame, written, [], [], at)
+        for value in sorted(written, key=lambda v: getattr(pathcond.site_of(v), "lineno", 0)):
+            self._binding(frame, name, value, depth)
+        if written:
+            return
+        # Nothing here writes the entry: the whole of ``x`` came from a call, so
+        # the entry is what that call returns under the key.
+        for value in pathcond.assigned_expressions(frame.func).get(base, []):
+            if isinstance(value, ast.Call):
+                self.beyond.append(lambda call=value: self._enter(frame, None, call, (key,), depth))
+            elif isinstance(value, ast.Dict):
+                for held, item in zip(value.keys, value.values, strict=True):
+                    if isinstance(held, ast.Constant) and held.value == key:
+                        self._binding(frame, name, item, depth)
+        for assign, slot in _tuple_bindings(frame.func, base):
+            if slot is not None and isinstance(assign.value, ast.Call):
+                self.beyond.append(
+                    lambda call=assign.value, where=slot: self._enter(frame, None, call, (where, key), depth)
+                )
+
+    def _enter_tests(self, frame: _Frame, site: ast.AST, depth: int) -> None:
+        """Go into the calls a guard above *site* makes, for the value they return.
+
+        ``if self.add_result is None or not self.add_result.is_succeeded():``
+        decides the job fails, and what decides ``is_succeeded`` is inside it.
+        The names the test reads are walked where the test reads them; the
+        calls it makes are entered, after the function's own answer, like a
+        value bound from a call.
+        """
+        tests = [test for test, _names in _guard_tests(site)]
+        if isinstance(site, (ast.If, ast.While)):
+            tests.append(site.test)
+        for test in tests:
+            for node in ast.walk(test):
+                if isinstance(node, ast.Call) and not (
+                    isinstance(node.func, ast.Name) and node.func.id in _BUILTINS
+                ):
+                    self.beyond.append(
+                        lambda call=node: self._enter(frame, None, call, None, depth)
+                    )
+
+    def _block_prints(self, frame: _Frame, statement: ast.AST) -> list[str]:
+        """Patterns of the lines printed on the way to *statement*, nearest first.
+
+        The block that holds it, both sides of it; where that prints nothing,
+        the enclosing blocks, but only what they print *before* the statement
+        that leads here -- a line after it may belong to the path that did not
+        come this way.  ``register_files`` calls ``set_fatal()`` three blocks
+        below the ``self.logger.error(f"{error_message}")`` that says why.
+        """
+        rendered: dict[int, list[str]] = {}
+        for argument, message in self.messages(frame):
+            enclosing = _enclosing_statement(argument)
+            if enclosing is None or message.refused:
+                continue
+            # Written out the way the skeleton writes it, holes filled from
+            # the locals that fill them.
+            for one in self._expanded(frame, message.expr, argument):
+                pattern = (
+                    line_pattern(one)
+                    if isinstance(one, ast.JoinedStr)
+                    else _constant_pattern(one)
+                )
+                if pattern:
+                    rendered.setdefault(id(enclosing), []).append(pattern)
+        below = statement
+        first = True
+        while below is not None and not isinstance(below, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parent = getattr(below, "parent", None)
+            if parent is None:
+                break
+            if isinstance(parent, ast.ExceptHandler):
+                blocks = [("except", parent.body)]
+            elif isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                blocks = [("def", parent.body)]
+            elif isinstance(parent, ast.stmt):
+                blocks = _blocks_of(parent)
+            else:
+                below = parent
+                continue
+            for _header, body in blocks:
+                if below not in body:
+                    continue
+                index = body.index(below)
+                candidates = body if first else body[:index]
+                found: list[str] = []
+                for one in candidates:
+                    for pattern in rendered.get(id(one), []):
+                        if pattern not in found:
+                            found.append(pattern)
+                if found:
+                    return found
+            first = False
+            below = parent
+        return []
+
+    def _mutated_at(
+        self, method_frame: _Frame, field: str, depth: int
+    ) -> None:
+        """Where a method that sets ``self.<field>`` was called, and why it was.
+
+        ``status_code`` is set in ``set_fatal``, ``set_temporary`` and
+        ``set_succeeded`` -- true, and not the answer: the answer is which of
+        the thirteen ``self.result.set_fatal()`` calls in the plugin ran.  Each
+        call placed at the method is a step, and the guards above it are
+        walked in the function that makes it.
+        """
+        cls = self.types.method_class(method_frame.file, method_frame.func)
+        target = calls_mod.Target(
+            method_frame.file, method_frame.func, cls[1] if cls else None
+        )
+        sites = self.calls.callers(target)
+        for site in sites[:_MAX_MUTATIONS]:
+            caller = self.frame(
+                site.file, f"{site.file}::{site.func.name}", line=site.func.lineno  # type: ignore[attr-defined]
+            )
+            if caller is None:
+                continue
+            call = _same_node(caller.func, site.call)
+            if not isinstance(call, ast.Call):
+                continue
+            statement = _enclosing_statement(call) or call
+            guards = _guard_tests(statement)
+            if not self.record(
+                TraceStep(
+                    kind=TRACE_HANDOVER,
+                    name=f"self.{field}",
+                    owner=caller.owner,
+                    file=caller.file,
+                    line=call.lineno,
+                    value=_text(call),
+                    guards=pathcond.path_condition(statement),
+                    unseen=_unseen(statement),
+                    reads=[name for _test, names in guards for name in names],
+                    detail=(
+                        f"calls {getattr(method_frame.func, 'name', '')} here, "
+                        f"which sets {field}"
+                    ),
+                    depth=depth,
+                    printed=self._block_prints(caller, statement),
+                )
+            ):
+                return
+            self.entered.add((caller.file, caller.owner))
+            for test, names in guards:
+                self.want(caller, names, depth + 1, test)
+        if len(sites) > _MAX_MUTATIONS and self.steps:
+            self.steps[-1].detail += (
+                f"; {len(sites) - _MAX_MUTATIONS} more call(s) of "
+                f"{getattr(method_frame.func, 'name', '')} not walked"
+            )
+
     def _enter(
         self,
         frame: _Frame,
-        step: TraceStep,
+        step: Optional[TraceStep],
         expression: ast.expr,
         slot: Optional[int],
         depth: int,
@@ -2369,16 +2597,20 @@ class _Walk:
         here says what would carry it further.
         """
         call = expression
-        key: Optional[object] = slot
+        path: tuple = slot if isinstance(slot, tuple) else ((slot,) if slot is not None else ())
         if isinstance(call, ast.Subscript) and isinstance(call.slice, ast.Constant):
-            key, call = call.slice.value, call.value
+            path, call = (call.slice.value, *path), call.value
         if not isinstance(call, ast.Call):
             return
         if isinstance(call.func, ast.Name) and call.func.id in _BUILTINS:
             return
+        if self.terminal_of(frame, call)[0]:
+            # The database's, a configuration's, another system's: where the
+            # walk stops is the answer, and inside the wrapper is not.
+            return
         placed = self.calls.callees(frame.file, frame.func, call)
         if not placed.targets:
-            if placed.unplaced:
+            if placed.unplaced and step is not None:
                 step.detail = f"not entered: {placed.unplaced}"
             return
         entered: list[str] = []
@@ -2390,13 +2622,26 @@ class _Walk:
                 (frame, call, calls_mod.bind(call, target))
             )
             self.entered.add((callee.file, callee.owner))
+            entered.append(callee.owner)
+            # Once per function and way of taking its value: a second call of
+            # ``percentile`` hands its arguments in beside the first's, and
+            # what it returns is the same statements either way.
+            taken = (callee.file, callee.owner, path)
+            if taken in self.returned:
+                continue
+            self.returned.add(taken)
             for returned in calls_mod.returns(callee.func):
-                value = _projected(returned, key)
+                value, pending = returned, list(path)
+                while pending:
+                    taken = _projected(value, pending[0])
+                    if taken is value:
+                        break
+                    value, pending = taken, pending[1:]
                 statement = pathcond.site_of(returned) if hasattr(returned, "parent") else callee.func
                 terminal, detail = self.terminal_of(callee, value)
                 text = _text(value)
-                if value is returned and key is not None:
-                    text = f"({text})[{key!r}]"
+                if pending:
+                    text = f"({text})" + "".join(f"[{one!r}]" for one in pending)
                 reads = _reads(value)
                 if not self.record(
                     TraceStep(
@@ -2419,8 +2664,12 @@ class _Walk:
                     self.want(callee, reads, depth + 1, statement)
                     for test, names in _guard_tests(statement):
                         self.want(callee, names, depth + 1, test)
-            entered.append(callee.owner)
-        if entered:
+                    if pending and isinstance(value, ast.Name):
+                        # ``return True, returnMap, extraInfo`` taken at slot 1
+                        # and then read at ``["ramCount"]``: the entry.
+                        self.want(callee, [f"{value.id}[{pending[0]!r}]"], depth + 1, statement)
+                    self._ask_keyed(callee, value, depth + 1, statement)
+        if entered and step is not None:
             step.detail = f"returns from {', '.join(entered)}"
 
     def _callee_frame(self, target: calls_mod.Target) -> Optional[_Frame]:
@@ -2663,7 +2912,62 @@ class _Walk:
                         break
                     self._binding(other, name, expression, depth)
                     answered = True
+                if other is not None and method.name != "__init__":
+                    self.beyond.append(
+                        lambda held=other: self._mutated_at(held, field, depth + 1)
+                    )
+        # Bases declared in other files are read beyond the function's own
+        # answer: ``AdderAtlasPlugin``'s ``self.result`` is assigned in
+        # ``AdderPluginBase.__init__``, one file over.
+        for where, holder in self.types.lineage(frame.file, cls)[1:]:
+            if where == frame.file:
+                continue
+            for method in pathcond.methods_of(holder):
+                if not pathcond.attribute_expressions(method, field):
+                    continue
+                self.beyond.append(
+                    lambda place=where, one=method: self._inherited_field(
+                        place, one, name, field, depth
+                    )
+                )
+                answered = True
+        if not answered:
+            # ``rc_fatal = 2`` in the class body: a constant every instance
+            # reads until one assigns its own, and here none does.
+            for holder in [cls, *pathcond.bases_in(tree, cls)]:
+                for node in holder.body:
+                    if (
+                        isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == field for target in node.targets)
+                    ):
+                        self.record(
+                            TraceStep(
+                                kind=TRACE_BINDING,
+                                name=name,
+                                owner=f"{frame.file}::{holder.name}",
+                                file=frame.file,
+                                line=node.lineno,
+                                value=_text(node.value),
+                                reads=_reads(node.value),
+                                unseen=["class body: the value every instance reads until it assigns its own"],
+                                depth=depth,
+                            )
+                        )
+                        answered = True
         return answered
+
+    def _inherited_field(
+        self, file: str, method: ast.AST, name: str, field: str, depth: int
+    ) -> None:
+        """``self.<field>`` as a base class in another file assigns it."""
+        other = self.frame(file, f"{file}::{getattr(method, 'name', '')}", line=method.lineno)
+        if other is None:
+            return
+        self.entered.add((other.file, other.owner))
+        for expression in pathcond.attribute_expressions(other.func, field):
+            self._binding(other, name, expression, depth)
+        if getattr(method, "name", "") != "__init__":
+            self._mutated_at(other, field, depth + 1)
 
     def _field(self, frame: _Frame, name: str, depth: int) -> None:
         field = name.split(".", 1)[1]

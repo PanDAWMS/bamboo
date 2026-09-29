@@ -43,6 +43,9 @@ UNPLACED_FORWARDED = "the receiver forwards every call through __getattr__"
 UNPLACED_NO_METHOD = "the declared class has no such method"
 UNPLACED_DYNAMIC = "the callee is chosen at run time"
 UNPLACED_NAME = "the name is bound to something that is not a function here"
+#: Beside targets, not instead of them: the receiver is one of these classes
+#: or another one some way of building it does not show.
+UNPLACED_OPEN = "and possibly a class this reading cannot name"
 
 
 #: Parsed modules shared by every reading of the same files.  A walk is made
@@ -204,6 +207,17 @@ class Calls:
             return self._method_of(named, called.attr)
         declared = self.types.of_expression(file, func, receiver)
         if declared is None:
+            # Nothing declares it -- or it is declared ``Any`` -- so read what
+            # it was built from.  Every class it can be is a target; where some
+            # way of building it cannot be read, that is said beside them.
+            classes, opened = self.types.candidates(file, func, receiver)
+            targets: list[Target] = []
+            for where, name in sorted(classes):
+                cls = self.types.class_def(where, name)
+                if cls is not None:
+                    targets.extend(self._method_of((where, cls), called.attr).targets)
+            if targets:
+                return Placed(tuple(targets), UNPLACED_OPEN if opened else "")
             root = receiver
             while isinstance(root, ast.Attribute):
                 root = root.value
@@ -836,3 +850,139 @@ class Types:
                 where, method = found
                 return self.annotated(where, method.returns)
         return None
+
+    # -- what a value can be, where nothing declares it --------------------
+
+    def candidates(
+        self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
+    ) -> tuple[frozenset[tuple[str, str]], bool]:
+        """``({(file, class name)}, open)``: the classes *expression* can be an instance of.
+
+        Asked where the declaration says nothing -- no annotation, or ``Any``.
+        ``AdderGen`` declares ``self.adder_plugin: Any`` and builds it as
+        ``self.adder_plugin_class(...)``, where ``adder_plugin_class`` is what
+        ``get_plugin_class`` returns: ``AdderAtlasPlugin``, or a class the
+        configuration names.  Read from the values rather than the
+        declaration, that is ``{AdderAtlasPlugin}`` and *open* -- there is
+        another way, and this reading cannot say which class it is.
+        """
+        declared = self.of_expression(file, func, expression, 0)
+        if declared is not None:
+            return frozenset({(declared[0], declared[1].name)}), False
+        return self._values(file, func, expression, depth, instances=True, seen=frozenset())
+
+    def class_def(self, file: str, name: str) -> Optional[ast.ClassDef]:
+        tree = self.tree(file)
+        for node in ast.walk(tree) if tree is not None else ():
+            if isinstance(node, ast.ClassDef) and node.name == name:
+                return node
+        return None
+
+    def _values(
+        self,
+        file: str,
+        func: ast.AST,
+        expression: ast.expr,
+        depth: int,
+        *,
+        instances: bool,
+        seen: frozenset,
+    ) -> tuple[frozenset[tuple[str, str]], bool]:
+        """Classes an expression holds -- instances of, or the class objects themselves."""
+        if depth > self.DEPTH:
+            return frozenset(), True
+        key = (file, id(func), ast.unparse(expression), instances)
+        if key in seen:
+            return frozenset(), False
+        seen = seen | {key}
+        found: set[tuple[str, str]] = set()
+        opened = False
+
+        def add(result: tuple[frozenset, bool]) -> None:
+            nonlocal opened
+            found.update(result[0])
+            opened = opened or result[1]
+
+        if isinstance(expression, ast.Constant) and expression.value is None:
+            return frozenset(), False
+        if isinstance(expression, ast.Call):
+            if instances:
+                # An instance of whatever class the callee is: ``Cls(...)``,
+                # or ``self.plugin_class(...)`` holding a class.
+                add(self._values(file, func, expression.func, depth + 1, instances=False, seen=seen))
+                return frozenset(found), opened
+            # A call that returns a class: what its body returns.
+            owner = self._owner_of(file, func, expression.func)
+            if owner is None:
+                return frozenset(), True
+            where, method = owner
+            for node in ast.walk(method):
+                if isinstance(node, ast.Return) and node.value is not None:
+                    add(self._values(where, method, node.value, depth + 1, instances=False, seen=seen))
+            return frozenset(found), opened
+        if isinstance(expression, ast.Name):
+            if not instances:
+                named = self.class_named(file, expression)
+                if named is not None:
+                    return frozenset({(named[0], named[1].name)}), False
+            bound = [
+                value
+                for value in self.assigned(func).get(expression.id, [])
+                if not (isinstance(value, ast.Constant) and value.value is None)
+            ]
+            if not bound:
+                return frozenset(), True
+            for value in bound:
+                add(self._values(file, func, value, depth + 1, instances=instances, seen=seen))
+            return frozenset(found), opened
+        if (
+            isinstance(expression, ast.Attribute)
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id == "self"
+        ):
+            holder = self.method_class(file, func)
+            if holder is None:
+                return frozenset(), True
+            any_value = False
+            for where, cls in self.lineage(*holder):
+                for method in pathcond.methods_of(cls):
+                    for value in pathcond.attribute_expressions(method, expression.attr):
+                        if isinstance(value, ast.Constant) and value.value is None:
+                            continue
+                        any_value = True
+                        add(self._values(where, method, value, depth + 1, instances=instances, seen=seen))
+            return frozenset(found), opened or not any_value
+        if isinstance(expression, ast.Attribute):
+            # ``obj.field`` where ``obj`` is one of some classes: what each assigns it.
+            owners, owner_open = self.candidates(file, func, expression.value, depth + 1)
+            opened = owner_open
+            for where, name in owners:
+                cls = self.class_def(where, name)
+                if cls is None:
+                    continue
+                typed = self.of_field(where, cls, expression.attr, depth + 1)
+                if typed is not None and instances:
+                    found.add((typed[0], typed[1].name))
+                    continue
+                for place, holder in self.lineage(where, cls):
+                    for method in pathcond.methods_of(holder):
+                        for value in pathcond.attribute_expressions(method, expression.attr):
+                            if isinstance(value, ast.Constant) and value.value is None:
+                                continue
+                            add(self._values(place, method, value, depth + 1, instances=instances, seen=seen))
+            return frozenset(found), opened
+        return frozenset(), True
+
+    def _owner_of(self, file: str, func: ast.AST, called: ast.expr) -> Optional[tuple[str, ast.AST]]:
+        """The function *called* names, for a call on ``self`` or a plain name."""
+        if (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Name)
+            and called.value.id == "self"
+        ):
+            holder = self.method_class(file, func)
+            if holder is None:
+                return None
+            return self.method(holder[0], holder[1], called.attr)
+        return None
+

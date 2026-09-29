@@ -2589,3 +2589,165 @@ def test_a_print_line_from_another_tree_is_refused(tmp_path):
 
     assert walked.steps == []
     assert "not the one that was mapped" in walked.note
+
+
+# ---------------------------------------------------------------------------
+# Across a function's edge: calls, parameters, methods that change an object
+# ---------------------------------------------------------------------------
+
+
+def _walked_in(roots, file, owner, lines, **kwargs):
+    return trace_mod.walk(
+        roots,
+        file=f"{PACKAGE}/{file}",
+        owner=f"{PACKAGE}/{file}::{owner}",
+        lines=lines,
+        classify=provenance.classify,
+        reaching=True,
+        **kwargs,
+    )
+
+
+def _said(walked):
+    return [(s.kind, s.name, s.owner.rsplit("::", 1)[-1], s.line, s.value) for s in walked.steps]
+
+
+def test_a_value_bound_from_a_call_is_what_the_call_returns(tmp_path):
+    """``where, binds = self.construct(site)`` is answered inside ``construct``."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+class Proxy:
+    def construct(self, site, mem):
+        where = "WHERE site=:site "
+        if mem:
+            where += "AND ram<=:mem "
+        return where, {":site": site}
+
+    def get_jobs(self, site, mem):
+        where, binds = self.construct(site, mem)
+        sql = "SELECT id FROM jobs " + where
+        spec.status = sql
+''',
+    )
+
+    walked = _walked_in(roots, "m", "get_jobs", [11])
+    said = _said(walked)
+
+    assert ("return", "construct()", "construct", 6, "where") in said
+    assert ("binding", "where", "construct", 5, "'AND ram<=:mem '") in said
+    # The parameter the fragment depends on, handed in by the call.
+    assert ("handover", "mem", "get_jobs", 9, "mem") in said
+
+
+def test_the_answer_about_the_function_itself_does_not_change_when_the_walk_goes_further(tmp_path):
+    """Going into a call is spent from an allowance of its own, afterwards."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def helper(x):
+    return x + 1
+
+def f(a):
+    b = helper(a)
+    spec.status = b
+''',
+    )
+
+    walked = _walked_in(roots, "m", "f", [6])
+    own = [step for step in walked.steps if step.owner.endswith("::f")]
+
+    assert [(s.kind, s.name, s.line) for s in own][:2] == [("write", "", 6), ("binding", "b", 5)]
+    assert walked.steps[1].detail == f"returns from {PACKAGE}/m::helper"
+
+
+def test_a_guard_that_asks_a_method_names_the_calls_that_changed_its_answer(tmp_path):
+    """``not self.result.is_succeeded()`` is decided by which ``set_*()`` ran --
+    listed at the calls that made them, with what printed beside each."""
+    roots = _tree(
+        tmp_path,
+        **{"result.py": '''\
+class Result:
+    rc_ok = 0
+    rc_fatal = 2
+
+    def __init__(self):
+        self.status_code = None
+
+    def set_fatal(self):
+        self.status_code = self.rc_fatal
+
+    def is_succeeded(self):
+        return self.status_code == self.rc_ok
+''',
+        "plugin.py": '''\
+from pandajedi.result import Result
+
+class Plugin:
+    def __init__(self):
+        self.result = Result()
+
+    def register(self, log, ok):
+        if not ok:
+            log.error("registration failed for good")
+            self.result.set_fatal()
+''',
+        "gen.py": '''\
+from pandajedi.plugin import Plugin
+
+class Gen:
+    def run(self, job):
+        self.plugin = Plugin()
+        self.add_result = self.plugin.result
+        if not self.add_result.is_succeeded():
+            job.status = "failed"
+'''},
+    )
+
+    walked = _walked_in(roots, "gen.py", "run", [8])
+    said = _said(walked)
+
+    assert ("return", "is_succeeded()", "is_succeeded", 12, "self.status_code == self.rc_ok") in said
+    (called,) = [s for s in walked.steps if s.value == "self.result.set_fatal()"]
+    assert (called.owner.rsplit("::", 1)[-1], called.line) == ("register", 10)
+    assert called.printed == [r"registration\ failed\ for\ good"]
+    assert ("binding", "self.rc_fatal", "Result", 3, "2") in said
+
+
+def test_an_entry_read_by_its_key_is_what_the_callee_put_under_it(tmp_path):
+    """``ok, data = get(...)`` then ``data["ram"]``: the callee's ``returnMap["ram"] = ...``."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def get(task):
+    returnMap = {}
+    returnMap["ram"] = task.maxPSS * 2
+    returnMap["wall"] = task.wall
+    return True, returnMap
+
+def f(task):
+    ok, data = get(task)
+    spec.ramCount = data["ram"]
+''',
+    )
+
+    walked = _walked_in(roots, "m", "f", [9])
+    said = _said(walked)
+
+    assert ("binding", "returnMap['ram']", "get", 3, "task.maxPSS * 2") in said
+
+
+def test_a_container_filled_by_item_is_what_went_into_it(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(task):
+    returnMap = {}
+    returnMap["ram"] = task.maxPSS
+    spec.values = returnMap
+''',
+    )
+
+    said = _said(_walked_in(roots, "m", "f", [4]))
+
+    assert ("binding", "returnMap", "f", 3, "task.maxPSS") in said

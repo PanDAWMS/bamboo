@@ -3007,6 +3007,14 @@ class TraceStep(BaseModel):
     )
     detail: str = Field(default="", description="Which interface, key or caller.")
     depth: int = Field(default=0, description="Hops from the arm.")
+    printed: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Patterns of the lines the same block prints, where the step is a "
+            "place something was set: which of thirteen ``set_fatal()`` calls "
+            "ran is told by what printed beside it."
+        ),
+    )
 
 
 class StatementExit(BaseModel):
