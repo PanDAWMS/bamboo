@@ -55,6 +55,14 @@ INTERFACE_CLASSES = {
     "pandaserver/dataservice/ddm.py::RucioAPI": "DDM / Rucio",
 }
 
+#: The system -> the package PanDA reaches it through, where PanDA calls it.
+#: Declared beside the interface, because "outside the corpus" alone takes in
+#: pandacommon's logger as readily as the Rucio client.  ``SiteMapper`` reads
+#: CRIC's declarations already loaded and calls nothing out, so it has none.
+OUTSIDE_PACKAGES = {
+    "DDM / Rucio": ("rucio",),
+}
+
 #: ``self.<attribute>`` -> the system on the other side of it.
 #:
 #: The spelling, kept where the class cannot be read yet.  JEDI builds its

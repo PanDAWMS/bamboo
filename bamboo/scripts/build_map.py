@@ -317,6 +317,14 @@ def _report(
             "\nboundaries: "
             + ", ".join(f"{system}={count}" for system, count in systems.most_common())
         )
+        sent = [b for b in fragment.boundaries if b.direction == "outbound"]
+        if sent:
+            verbs = Counter(verb for b in sent for verb in b.verbs)
+            click.echo(
+                f"  outbound ({len(sent)} method(s), {sum(len(b.call_sites) for b in sent)} call site(s)): "
+                + ", ".join(f"{verb}={count}" for verb, count in verbs.most_common())
+                + "  -- verbs by the far side's method names"
+            )
         shared = [b for b in fragment.boundaries if b.transport == "shared_table"]
         if shared:
             # Listed rather than counted: a shared table is investigated by

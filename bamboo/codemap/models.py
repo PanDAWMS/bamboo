@@ -1310,7 +1310,35 @@ class BoundaryNode(BaseNode):
     )
     interface: str = Field(
         ...,
-        description="Receiving-side function, or ``schema.table`` for a shared table.",
+        description=(
+            "Receiving-side function, or ``schema.table`` for a shared table; for "
+            "an outbound boundary, the PanDA method that makes the call out."
+        ),
+    )
+    direction: str = Field(
+        default="inbound",
+        description=(
+            "``inbound`` -- another system reaches PanDA here -- or ``outbound``: "
+            "PanDA calls another system here (``RucioAPI.register_dataset``).  "
+            "The inbound fields below say nothing about an outbound one, which "
+            "carries ``verbs``, ``calls_out`` and ``call_sites`` instead."
+        ),
+    )
+    verbs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Outbound: what the call out does -- creates, attaches, changes, "
+            "removes, asks -- read from the outside methods' names, which are the "
+            "far side's API and still names."
+        ),
+    )
+    calls_out: list[str] = Field(
+        default_factory=list,
+        description="Outbound: the outside methods called, ``rucio.client.Client.add_dataset``.",
+    )
+    call_sites: list[str] = Field(
+        default_factory=list,
+        description="Outbound: ``file:line`` of each call in PanDA placed at this method.",
     )
     carried_values: list[str] = Field(
         default_factory=list,

@@ -129,6 +129,10 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "accepts_arbitrary",
         "version_binding",
         "resolution",
+        "direction",
+        "verbs",
+        "calls_out",
+        "call_sites",
     ),
     NodeType.FILTER_STAGE.value: (
         "owner",

@@ -789,3 +789,40 @@ def test_a_function_is_said_to_be_called_through_the_door_that_forwards_to_it(tm
         "pkg/cmd.py:4 -> pkg/tb.py:8",
         "pkg/cmd.py:5 -> pkg/tb.py:8",
     ]
+
+
+def test_an_interface_method_calling_the_far_system_is_an_outbound_boundary(tmp_path, monkeypatch):
+    from bamboo.codemap.panda.recognizers import outbound
+
+    roots = _tree(
+        tmp_path,
+        ddm=(
+            "from rucio.client import Client as RucioClient\n"
+            "from pandacommon.log import Logger\n"
+            "\n"
+            "class API:\n"
+            "    def _client(self) -> RucioClient:\n"
+            "        return RucioClient()\n"
+            "\n"
+            "    def register(self, name):\n"
+            "        client = self._client()\n"
+            "        client.add_dataset(name=name)\n"
+            "        client.add_files_to_dataset(name=name, files=[])\n"
+            "\n"
+            "    def scope(self, name, log: Logger):\n"
+            "        log.debug(name)\n"
+            "        return name.split(':')[0]\n"
+            "\n"
+            "api = API()\n"
+        ),
+        setup="from pkg.ddm import api\n\ndef run():\n    api.register('user.x')\n",
+    )
+    monkeypatch.setattr(outbound, "INTERFACE_CLASSES", {"pkg/ddm.py::API": "DDM"})
+    monkeypatch.setattr(outbound, "OUTSIDE_PACKAGES", {"DDM": ("rucio",)})
+
+    (node,) = outbound.extract([], _calls(roots), "m", "v")
+
+    assert (node.interface, node.direction, node.kind) == ("pkg/ddm.py::API.register", "outbound", "transports_causation")
+    assert node.verbs == ["attaches", "creates"]
+    assert node.calls_out == ["rucio.client.Client.add_dataset", "rucio.client.Client.add_files_to_dataset"]
+    assert node.call_sites == ["pkg/setup.py:4"]

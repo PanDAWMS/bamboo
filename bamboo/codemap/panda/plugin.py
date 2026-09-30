@@ -41,6 +41,7 @@ from bamboo.codemap.panda.attribution import (
     spec_annotation_forms,
 )
 from bamboo.codemap.panda.pathcond import functions_with_owner
+from bamboo.codemap.panda.recognizers import outbound
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -208,6 +209,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             {channel.interface.split(".")[-1] for channel in channels},
         )
         fragment.boundaries.extend(gates)
+        # What PanDA sends out: the other direction, read from the interface
+        # classes' methods and the calls placed at them.
+        if self._calls is not None:
+            fragment.boundaries.extend(
+                outbound.extract(self._modules, self._calls, self.map_id, self._version)
+            )
 
         filter_stages, selection_coverage, self._unexplained_steps = selection.extract(
             self._modules, self.map_id, self._version
