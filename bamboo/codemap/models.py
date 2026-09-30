@@ -1046,6 +1046,15 @@ class ReadSiteNode(BaseNode):
             "``selects``: ``status<>'done'`` picks up every row but the done ones."
         ),
     )
+    keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Subjects this statement asks rows by with a value chosen at run "
+            "time, sorted: ``JobSpec.jediTaskID`` for ``WHERE "
+            "jediTaskID=:jediTaskID``, or a bind nothing in the map settles.  "
+            "A statement asking by these alone is still a reader of the rows."
+        ),
+    )
     tables: list[str] = Field(
         default_factory=list,
         description="The tables the statement reads, as the source spells them.",

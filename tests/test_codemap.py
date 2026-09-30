@@ -8016,6 +8016,39 @@ def test_a_value_a_statement_passes_over_is_an_exclude_not_a_select():
     assert set(side.values["JediTaskSpec.status"]) == {"running"}
 
 
+def test_a_statement_asking_by_a_key_alone_is_a_read_site():
+    """``WHERE jediTaskID=:jediTaskID`` reads the task's rows though it names no value."""
+    source = (
+        "class TaskModule:\n"
+        "    def tasks(self, jediTaskID):\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        sqlA = f'SELECT status FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "    def touch(self, jediTaskID):\n"
+        "        varMap3 = {}\n"
+        "        varMap3[':status'] = 'ready'\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap3)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+    nodes = sqlwrite.read_site_nodes(side.statements, MAP_ID, VERSION)
+
+    # The read, not the update: an update by key is a write, and the map
+    # already holds it as one.
+    assert [(n.owner, n.selects, n.keys, n.tables) for n in nodes] == [
+        ("x.py::tasks", [], ["JediTaskSpec.jediTaskID"], ["JEDI_Tasks"])
+    ]
+
+
 def test_the_forwarded_form_carries_the_region_its_binds_are_filled_in():
     """``var_map = {}`` twice is the code declaring its own block boundaries.
 

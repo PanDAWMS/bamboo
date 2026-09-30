@@ -960,6 +960,9 @@ class ReadStatement(NamedTuple):
     #: ``{(subject, value)}`` the statement asks rows *not* to hold --
     #: ``<>``, ``!=``, ``NOT IN``.
     excludes: set[tuple[str, str]]
+    #: Subjects the statement asks rows by with a value chosen at run time --
+    #: ``jediTaskID=:jediTaskID``, or a bind nothing here settles.
+    keys: set[str]
     tables: set[str]
     #: What the ``WHERE`` asks of a row beside those values, rendered, with
     #: ``@<line>`` on the binds a walk can be seeded at.
@@ -1652,6 +1655,7 @@ def read_side(
                     window=window,
                     selects=set(),
                     excludes=set(),
+                    keys=set(),
                     tables=set(),
                     conditions=[],
                     unresolved=tuple(
@@ -1673,8 +1677,11 @@ def read_side(
                             attributor, spec_class, table, column
                         )
                         subject = SubjectNode.make_name(qualifier, attribute)
-                        for value in bound(func, run, key, module.rel_path):
+                        values_of = bound(func, run, key, module.rel_path)
+                        for value in values_of:
                             record(subject, value, owner, verb, at)
+                        if not values_of and verb == "read":
+                            statements.setdefault((at.owner, at.line), at).keys.add(subject)
                     if verb == "read":
                         for column, key in sql.exclusions(run.sql):
                             qualifier, attribute, _kind = _subject_of(
@@ -1745,6 +1752,7 @@ def read_site_nodes(
                 owner=owner,
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
                 excludes=sorted(f"{subject}={value}" for subject, value in at.excludes),
+                keys=sorted(at.keys),
                 tables=sorted(at.tables),
                 # Empty only where the call names no varmap to read -- one
                 # statement in the corpus, ``querySQLS(sql.format(t), {})``,

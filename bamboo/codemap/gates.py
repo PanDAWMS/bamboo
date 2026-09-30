@@ -764,7 +764,7 @@ def mover_reason(
     if known:
         reason = (
             MOVER_OTHER_TERMS
-            if any(s.selects or s.conditions for s in known)
+            if any(s.selects or s.conditions or s.keys or s.excludes for s in known)
             else MOVER_ASKS_NOTHING
         )
         return reason, ", ".join(f"@{s.anchor.line_start}" for s in known)
