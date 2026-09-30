@@ -2864,7 +2864,7 @@ def test_one_loop_variable_in_two_fragments_takes_one_value_at_a_time():
 
 
 def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
-    """A run-time filler is not guessed at; the statement stays as written."""
+    """A run-time filler is not guessed at; the field stays a hole, spelled as every hole is."""
     source = (
         "def f(self, order_by_policy):\n"
         "    sqlR = 'UPDATE ATLAS_PANDA.{0} SET status=:status WHERE x=:x '\n"
@@ -2873,7 +2873,7 @@ def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
     func = _func(source)
 
     assert [run.sql for run in sql.executions(func)] == [
-        "UPDATE ATLAS_PANDA.{0} SET status=:status WHERE x=:x "
+        "UPDATE ATLAS_PANDA.{} SET status=:status WHERE x=:x "
     ]
 
 

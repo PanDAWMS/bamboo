@@ -62,7 +62,7 @@ from bamboo.codemap.panda.pathcond import (
     targets_of,
     written_value,
 )
-from bamboo.codemap.panda.values import rendered_text
+from bamboo.codemap.panda.values import blank_fields, rendered_text
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
@@ -2230,7 +2230,12 @@ def _substituted(
             filled = [
                 one.replace(_BARE_FIELD, value) for one in filled for value in values
             ]
-    return filled
+    # A field no argument filled is a hole like any other, and spelled like
+    # one.  Left as ``{0}``, the table in ``getUserJobMetadata``'s ``FROM {0}
+    # j,{1} m`` -- filled from a loop over pairs this cannot read -- was taken
+    # for a table named ``{0}``, and then for a boundary to a system that keeps
+    # it.  After the loop, because the markers are what it fills by.
+    return [blank_fields(one) for one in filled]
 
 
 def _call_site_fill(

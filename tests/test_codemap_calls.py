@@ -781,6 +781,36 @@ def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
     assert [run.sql for run in cached] == ["SELECT /*+ RESULT_CACHE */ a FROM t WHERE b=:b "]
 
 
+def test_a_format_field_the_call_cannot_fill_is_a_hole_like_any_other(tmp_path):
+    from bamboo.codemap.panda import sql
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def metadata(cur, pairs):\n"
+            "    sqlC = 'SELECT j.PandaID FROM {0} j,{1} m '\n"
+            "    sqlC += 'WHERE j.jediTaskID=:t AND m.PandaID=j.PandaID '\n"
+            "    for a, m in pairs:\n"
+            "        sql = sqlC.format(a, m)\n"
+            "        cur.execute(sql, {':t': 1})\n"
+            "\n"
+            "def chunk(cur, n, m):\n"
+            "    sql_read = 'SELECT * FROM (SELECT fileID FROM t WHERE f=:f ORDER BY {0}) WHERE rownum <= {1}'\n"
+            "    cur.execute(sql_read.format('fileID', n - m), {':f': 1})\n"
+        ),
+    )
+    calls = _calls(roots)
+    _func, runs = _runs(calls, "db", "metadata")
+    _func, chunk = _runs(calls, "db", "chunk")
+
+    (run,) = runs
+    assert run.sql == "SELECT j.PandaID FROM {} j,{} m WHERE j.jediTaskID=:t AND m.PandaID=j.PandaID "
+    assert [table for table, _columns in sql.reads(run.sql)] == ["{}"]
+    assert [run.sql for run in chunk] == [
+        "SELECT * FROM (SELECT fileID FROM t WHERE f=:f ORDER BY fileID) WHERE rownum <= {}"
+    ]
+
+
 def test_a_function_is_said_to_be_called_through_the_door_that_forwards_to_it(tmp_path):
     roots = _tree(tmp_path, **_FLAGGED)
     calls = _calls(roots)

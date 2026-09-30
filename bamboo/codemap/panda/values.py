@@ -75,6 +75,17 @@ def decision_tags(text: str) -> set[str]:
     return set(_TAG.findall(text))
 
 
+def blank_fields(template: str) -> str:
+    """*template* with every ``str.format`` field spelled ``{}``.
+
+    ``{}`` is the one spelling of a hole every reader of rendered text keys on
+    -- the table pattern, the schema strip, the boundary a table nobody writes
+    becomes.  A ``{0}`` left standing is a hole none of them recognise: read as
+    a table, it became a system named ``{0}`` that some other system maintains.
+    """
+    return _FIELD.sub("{}", template)
+
+
 def rendered_text(node: ast.expr) -> Optional[str]:
     """Render a string expression, marking the parts only run time knows as ``{}``.
 
@@ -112,7 +123,7 @@ def rendered_text(node: ast.expr) -> Optional[str]:
         # status, so the map read a dozen task states as ones nothing ever
         # selects on.
         text = rendered_text(node.func.value)
-        return None if text is None else _FIELD.sub("{}", text)
+        return None if text is None else blank_fields(text)
     return None
 
 
