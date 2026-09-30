@@ -2764,8 +2764,14 @@ class _Walk:
         The names the test reads are walked where the test reads them; the
         calls it makes are entered, after the function's own answer, like a
         value bound from a call.
+
+        ``_guard_tests`` hands back each ``if`` itself, the statement its names
+        are read at.  Its test is what decides: walking the whole ``if`` entered
+        every call in its body as though the guard made it -- over fifty
+        thousand entries for one arm of ``insertFilesForDataset_JEDI``, whose
+        returns then filled the allowance beyond the function.
         """
-        tests = [test for test, _names in _guard_tests(site)]
+        tests = [guard.test for guard, _names in _guard_tests(site)]
         if isinstance(site, (ast.If, ast.While)):
             tests.append(site.test)
         for test in tests:

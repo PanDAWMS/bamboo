@@ -2715,6 +2715,31 @@ class Gen:
     assert ("binding", "self.rc_fatal", "Result", 3, "2") in said
 
 
+def test_a_guard_enters_the_calls_its_test_makes_and_not_the_calls_under_it(tmp_path):
+    """The ``if`` decides by its test; a call in its body is another statement."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def decides(x):
+    return x > 1
+
+def unrelated(y):
+    return y * 2
+
+def f(a, b):
+    if decides(a):
+        c = unrelated(b)
+        spec.status = "done"
+''',
+    )
+
+    walked = _walked_in(roots, "m", "f", [10])
+    entered = {s.name for s in walked.steps if s.kind == "return"}
+
+    assert "decides()" in entered
+    assert "unrelated()" not in entered
+
+
 def test_an_entry_read_by_its_key_is_what_the_callee_put_under_it(tmp_path):
     """``ok, data = get(...)`` then ``data["ram"]``: the callee's ``returnMap["ram"] = ...``."""
     roots = _tree(
