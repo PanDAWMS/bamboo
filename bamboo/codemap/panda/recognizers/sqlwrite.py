@@ -1052,16 +1052,30 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
         for func, _owner in functions_with_owner(module.tree):
             assembled = _assembled_queries(func)
             candidates += len(assembled)
-            run = {
-                statement
-                for execution in sql.executions(func)
-                for statement in (execution.sql,)
-            }
+            executions = sql.executions(func)
+            run = {execution.sql for execution in executions}
             # In the spelling the runs use.  A ``.format`` field the call could
             # not fill is ``{}`` in the run and still ``{0}`` in the statement
             # assembled, and comparing them as written counted
             # ``getUserJobMetadata``'s query as one nothing runs.
             seen = {text for text in assembled if values.blank_fields(text) in run}
+            # A field the call did fill is the table or the ordering in the
+            # run, and the template still has the hole: ``sqlR.format(table)``
+            # runs over jobsDefined4 and jobsActive4 and matched neither, which
+            # listed thirteen queries the reader does read as ones it cannot
+            # follow.  Matched as a template, against the runs of its own name
+            # only: the holes fit anything, and ``getOriginalConsumers``' sqlJ
+            # fits sqlC2's statement as well as its own.
+            seen |= {
+                text
+                for text, name in assembled.items()
+                if text not in seen
+                and any(
+                    execution.variable == name
+                    and values.template_matches(values.blank_fields(text), execution.sql)
+                    for execution in executions
+                )
+            }
             explained += len(seen)
             for text, name in sorted(assembled.items()):
                 if text in seen:

@@ -2916,6 +2916,31 @@ def test_a_query_whose_table_the_call_leaves_open_counts_as_read():
     assert unexplained == []
 
 
+def test_a_query_the_call_fills_in_counts_as_read_by_its_own_runs_only():
+    """A template is read when a run of the same name fills it; another name's run does not count."""
+    source = (
+        "def f(self, other):\n"
+        "    sqlR = 'SELECT commandToPilot FROM ATLAS_PANDA.{0} WHERE PandaID=:PandaID '\n"
+        "    for table in ('jobsDefined4', 'jobsActive4'):\n"
+        "        self.cur.execute(sqlR.format(table) + comment, varMap)\n"
+        "    sqlC2 = 'SELECT computingSite FROM ATLAS_PANDA.jobsArchived4 WHERE PandaID=:PandaID '\n"
+        "    self.cur.execute(sqlC2 + comment, varMap)\n"
+        "    sqlJ = 'SELECT {0} FROM ATLAS_PANDA.{1} WHERE PandaID=:PandaID '\n"
+        "    other(sqlJ)\n"
+    )
+
+    (stat,), unexplained = sqlwrite.read_coverage(
+        [_module(source, "pandaserver/taskbuffer/db_proxy_mods/job_standalone_module.py")]
+    )
+
+    # sqlR by its two fills, sqlC2 as written; sqlJ's holes fit sqlC2's run,
+    # which is not one of its own.
+    assert (stat.candidates, stat.explained) == (3, 2)
+    assert [(one.table, one.reason) for one in unexplained] == [
+        ("sqlJ", f"{sqlwrite.RUN_THROUGH_OTHER_FORM}: other")
+    ]
+
+
 def test_an_unreadable_piece_leaves_a_hole_rather_than_dropping_the_statement():
     """A run-time operand is a hole, the same as one inside an f-string."""
     source = (
