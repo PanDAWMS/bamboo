@@ -3569,6 +3569,13 @@ def walk(
 ) -> Walked:
     """Explain the arms at *lines*, and say why the answer is short when it is.
 
+    *reaching* keeps its default for callers outside this package -- the
+    querier's driver calls ``walk`` and leaves it out -- but every call in
+    bamboo states it (``tests/test_codemap_trace.py`` checks): whether a
+    binding must be able to reach the arm is a choice each caller makes for a
+    reason of its own, and the default made it for two answer paths that never
+    said.
+
     *lines* are the arms of one function, walked together so that a flag they
     share is explained once.  Returns the steps and a note -- empty when the
     walk finished on its own, which the measurement says is the usual case.

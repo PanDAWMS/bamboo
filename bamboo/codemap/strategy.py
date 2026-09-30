@@ -2528,6 +2528,9 @@ def attach_reader_traces(
                 # by line 360 and the twenty-five other assignments in that
                 # function are answers to other queries.
                 reading_at=entry.line,
+                # ``reading_at`` scopes the bindings to the ones that reach
+                # the statement; reaching the seeds is not the question.
+                reaching=False,
             )
             entry.trace = walked.steps
             entry.trace_note = walked.note
@@ -2589,6 +2592,8 @@ def _attach_exit_traces(entry, roots: dict, strategy: Strategy, classify) -> Non
             classify=classify,
             region=(first, last),
             bindings_within=ours,
+            # ``bindings_within`` is the scope: the exit's own stretch.
+            reaching=False,
             # The line the exit is decided at, not the line it is taken on: a
             # ``continue`` carries no test, and the write a reader wants is
             # the one the ``if`` above it saw.  Without this the walk falls

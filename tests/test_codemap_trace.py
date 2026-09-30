@@ -45,6 +45,9 @@ def _tree(tmp_path: Path, **files: str) -> dict[str, Path]:
 
 
 def _walked(roots, *, file, owner, lines, **kwargs):
+    # ``walk`` takes no default for ``reaching``; these tests were written
+    # against the one it had, and say so here once.
+    kwargs.setdefault("reaching", False)
     return trace_mod.walk(
         roots,
         file=f"{PACKAGE}/{file}",
@@ -2323,6 +2326,7 @@ def test_a_site_mapper_is_known_by_what_it_is_declared_to_be(tmp_path, method, l
 
     walked = trace_mod.walk(
         roots,
+        reaching=False,
         file="pandaserver/dataservice/plugin.py",
         owner=f"pandaserver/dataservice/plugin.py::Plugin.{method}",
         lines=[line],
@@ -2341,6 +2345,7 @@ def test_a_class_that_is_only_named_like_the_interface_is_not_it(tmp_path):
 
     walked = trace_mod.walk(
         roots,
+        reaching=False,
         file="pandaserver/daemons/other.py",
         owner="pandaserver/daemons/other.py::Other.run",
         lines=[10],
@@ -2891,6 +2896,7 @@ def register(self, files):
 
     walked = trace_mod.walk(
         roots,
+        reaching=False,
         file="pandaserver/dataservice/plugin.py",
         owner="pandaserver/dataservice/plugin.py::register",
         lines=[12],
@@ -3137,3 +3143,25 @@ def build():
     assert handed["cls"].detail == "the object columns is called on"
     assert handed["cls"].value == "Spec"
     assert all("passed through * or **" not in s.detail for s in walked.steps)
+
+
+def test_every_walk_in_bamboo_says_whether_bindings_must_reach():
+    """``reaching`` is a choice each caller makes; a call that leaves it out made it by default."""
+    import ast as ast_mod
+
+    root = Path(trace_mod.__file__).resolve().parents[1]
+    silent = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast_mod.parse(path.read_text())
+        for node in ast_mod.walk(tree):
+            if not (isinstance(node, ast_mod.Call) and isinstance(node.func, (ast_mod.Attribute, ast_mod.Name))):
+                continue
+            called = node.func.attr if isinstance(node.func, ast_mod.Attribute) else node.func.id
+            receiver = ast_mod.unparse(node.func.value) if isinstance(node.func, ast_mod.Attribute) else ""
+            is_walk = (called == "walk" and receiver in ("trace", "trace_mod")) or (
+                path.name == "trace.py" and isinstance(node.func, ast_mod.Name) and called == "walk"
+            )
+            if is_walk and not any(keyword.arg in ("reaching", None) for keyword in node.keywords):
+                silent.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert silent == []
