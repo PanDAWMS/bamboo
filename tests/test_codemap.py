@@ -7947,6 +7947,47 @@ def test_two_queries_in_one_function_are_two_read_sites():
     assert [(n.anchor.line_start, n.anchor.line_end) for n in nodes] == [(7, 7), (12, 12)]
 
 
+def test_a_value_a_statement_passes_over_is_an_exclude_not_a_select():
+    """``status<>:s`` asks for every row but the value, so it is no reader of it.
+
+    Filed as a select, the 36 excluding predicates of the corpus each named a
+    function as picking up rows in the one state it skips.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'running'\n"
+        "        varMap[':old'] = 'done'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += \"WHERE status=:status AND oldStatus<>:old AND NOT status IN ('broken','failed') \"\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "    def touch(self, jediTaskID):\n"
+        "        varMap3 = {}\n"
+        "        varMap3[':status'] = 'ready'\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap3)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+    (node,) = sqlwrite.read_site_nodes(side.statements, MAP_ID, VERSION)
+
+    assert node.selects == ["JediTaskSpec.status=running"]
+    assert node.excludes == [
+        "JediTaskSpec.oldStatus=done",
+        "JediTaskSpec.status=broken",
+        "JediTaskSpec.status=failed",
+    ]
+    assert "done" not in side.values.get("JediTaskSpec.oldStatus", {})
+    assert set(side.values["JediTaskSpec.status"]) == {"running"}
+
+
 def test_the_forwarded_form_carries_the_region_its_binds_are_filled_in():
     """``var_map = {}`` twice is the code declaring its own block boundaries.
 

@@ -80,6 +80,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     # between a status something carries a row out of and one it does not.
     NodeType.READ_SITE.value: (
         "selects",
+        "excludes",
         "tables",
         "bind_window",
         "conditions",

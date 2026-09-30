@@ -945,6 +945,9 @@ class ReadStatement(NamedTuple):
     window: Optional[tuple[int, int]]
     #: ``{(subject, value)}`` the predicates name, for the read verb only.
     selects: set[tuple[str, str]]
+    #: ``{(subject, value)}`` the statement asks rows *not* to hold --
+    #: ``<>``, ``!=``, ``NOT IN``.
+    excludes: set[tuple[str, str]]
     tables: set[str]
     #: What the ``WHERE`` asks of a row beside those values, rendered, with
     #: ``@<line>`` on the binds a walk can be seeded at.
@@ -1348,6 +1351,12 @@ def read_side(
                 unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved)))
             )
 
+    def exclude(subject: str, value: str, at: ReadStatement) -> None:
+        """File a value the statement passes over.  Not a use of the value:
+        ``status<>'done'`` is no reader of ``done`` rows."""
+        kept = statements.setdefault((at.owner, at.line), at)
+        kept.excludes.add((subject, value))
+
     def bound(func, run, key: str, file: str) -> list[str]:
         values_of: list[str] = []
         for bind in sql.bound_values(func, run.varmap or "", key, run.window, across=True):
@@ -1630,6 +1639,7 @@ def read_side(
                     line=run.call.lineno,
                     window=window,
                     selects=set(),
+                    excludes=set(),
                     tables=set(),
                     conditions=[],
                     unresolved=tuple(
@@ -1653,6 +1663,19 @@ def read_side(
                         subject = SubjectNode.make_name(qualifier, attribute)
                         for value in bound(func, run, key, module.rel_path):
                             record(subject, value, owner, verb, at)
+                    if verb == "read":
+                        for column, key in sql.exclusions(run.sql):
+                            qualifier, attribute, _kind = _subject_of(
+                                attributor, spec_class, table, column
+                            )
+                            subject = SubjectNode.make_name(qualifier, attribute)
+                            for value in bound(func, run, key, module.rel_path):
+                                exclude(subject, value, at)
+                        for column, value in sql.excluded_literals(run.sql):
+                            qualifier, attribute, _kind = _subject_of(
+                                attributor, spec_class, table, column
+                            )
+                            exclude(SubjectNode.make_name(qualifier, attribute), value, at)
                     for column, value in sql.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
@@ -1709,6 +1732,7 @@ def read_site_nodes(
                 name=ReadSiteNode.make_name(map_id, owner, line),
                 owner=owner,
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
+                excludes=sorted(f"{subject}={value}" for subject, value in at.excludes),
                 tables=sorted(at.tables),
                 # Empty only where the call names no varmap to read -- one
                 # statement in the corpus, ``querySQLS(sql.format(t), {})``,
@@ -2264,7 +2288,7 @@ def selection_gates(
                     if not bounds:
                         continue
                     spec_class = attributor.class_for_table(table)
-                    for column, _key in sql.predicates(run.sql):
+                    for column, _key in [*sql.predicates(run.sql), *sql.exclusions(run.sql)]:
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
                         )

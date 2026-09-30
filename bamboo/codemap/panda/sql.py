@@ -2889,13 +2889,27 @@ def deletes(sql: str) -> list[str]:
 
 
 _PREDICATE_BIND = re.compile(
-    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*(?:=|<>|!=)\s*(:\w+)", re.IGNORECASE
+    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*=\s*(:\w+)", re.IGNORECASE
+)
+#: ``status<>:s`` / ``status!='done'``: a row is asked for by *not* having
+#: the value.
+_EXCLUDING_BIND = re.compile(
+    r"(?:WHERE|AND|OR)\s+\(*\s*(?:\w+\.)?([A-Za-z_]\w*)\s*(?:<>|!=)\s*(:\w+)", re.IGNORECASE
+)
+_EXCLUDING_LITERAL = re.compile(
+    r"(?:WHERE|AND|OR)\s+\(*\s*(?:\w+\.)?([A-Za-z_]\w*)\s*(?:<>|!=)\s*'([^']*)'", re.IGNORECASE
+)
+#: ``status NOT IN (...)`` and ``NOT status IN (...)``.
+_EXCLUDING_IN = re.compile(
+    r"(?:WHERE|AND|OR)\s+\(*\s*(?:(?:\w+\.)?([A-Za-z_]\w*)\s+NOT\s+IN|NOT\s+(?:\w+\.)?([A-Za-z_]\w*)\s+IN)"
+    r"\s*\(([^)]*)\)",
+    re.IGNORECASE,
 )
 _PREDICATE_IN = re.compile(
     r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s+IN\s*\(([^)]*)\)", re.IGNORECASE
 )
 _PREDICATE_LITERAL = re.compile(
-    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*(?:=|<>|!=)\s*'([^']*)'", re.IGNORECASE
+    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*=\s*'([^']*)'", re.IGNORECASE
 )
 _BIND_KEY = re.compile(r":\w+")
 _QUOTED = re.compile(r"'([^']*)'")
@@ -2912,10 +2926,35 @@ def predicates(sql: str) -> list[tuple[str, str]]:
 
     Bind keys only; :func:`selected_literals` returns the values written into
     the statement itself, which need no lookup in Python.
+
+    Equality and ``IN`` only.  ``status<>:s`` asks for every row *but* the
+    value, and reading it here filed 36 predicates of the corpus as asking
+    for the one value they pass over -- :func:`exclusions` reads those.
     """
     found = [(column, key) for column, key in _PREDICATE_BIND.findall(sql)]
     for column, inner in _PREDICATE_IN.findall(sql):
         found.extend((column, key) for key in _BIND_KEY.findall(inner))
+    return found
+
+
+def exclusions(sql: str) -> list[tuple[str, str]]:
+    """``(column, bind key)`` for each predicate asking for rows *without* the value.
+
+    ``<>``, ``!=``, ``NOT IN`` and ``NOT col IN``.
+    """
+    found = [(column, key) for column, key in _EXCLUDING_BIND.findall(sql)]
+    for before, after, inner in _EXCLUDING_IN.findall(sql):
+        found.extend((before or after, key) for key in _BIND_KEY.findall(inner))
+    return found
+
+
+def excluded_literals(sql: str) -> list[tuple[str, str]]:
+    """:func:`exclusions` for the values written into the statement itself."""
+    found = [(column, value) for column, value in _EXCLUDING_LITERAL.findall(sql)]
+    for before, after, inner in _EXCLUDING_IN.findall(sql):
+        if "SELECT" in inner.upper():
+            continue
+        found.extend((before or after, value) for value in _QUOTED.findall(inner))
     return found
 
 
@@ -3139,7 +3178,9 @@ def conditions(sql: str) -> list[Condition]:
     clause = where_clause(sql)
     if not clause:
         return []
-    held = {key for _column, key in predicates(sql)}
+    # An excluding term is read into ``excludes`` the way an equality is read
+    # into ``selects``, so it is held the same way.
+    held = {key for _column, key in [*predicates(sql), *_EXCLUDING_BIND.findall(sql)]}
     tree = _prune(_parse_clause(clause), held, False)
     if tree is None:
         return []

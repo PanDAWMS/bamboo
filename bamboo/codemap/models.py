@@ -1038,6 +1038,14 @@ class ReadSiteNode(BaseNode):
             "'starting')`` asks for both."
         ),
     )
+    excludes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``subject=value`` for every pair this statement asks rows *not* "
+            "to hold -- ``<>``, ``!=``, ``NOT IN`` -- sorted.  Kept apart from "
+            "``selects``: ``status<>'done'`` picks up every row but the done ones."
+        ),
+    )
     tables: list[str] = Field(
         default_factory=list,
         description="The tables the statement reads, as the source spells them.",
