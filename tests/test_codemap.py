@@ -8049,6 +8049,38 @@ def test_a_statement_asking_by_a_key_alone_is_a_read_site():
     ]
 
 
+def test_binds_written_into_the_call_are_read_and_windowed_there():
+    """``querySQLS(sql, {":status": "running"})`` fills its binds in the call itself."""
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self, taskBuffer):\n"
+        "        res = taskBuffer.querySQLS(\n"
+        "            'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:status ',\n"
+        "            {':status': 'running'},\n"
+        "        )\n"
+        "    def touch(self, jediTaskID):\n"
+        "        varMap3 = {}\n"
+        "        varMap3[':status'] = 'ready'\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap3)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+    (node,) = sqlwrite.read_site_nodes(side.statements, MAP_ID, VERSION)
+
+    assert (node.owner, node.selects, node.bind_window) == (
+        "x.py::sweep",
+        ["JediTaskSpec.status=running"],
+        [3, 6],
+    )
+
+
 def test_the_forwarded_form_carries_the_region_its_binds_are_filled_in():
     """``var_map = {}`` twice is the code declaring its own block boundaries.
 

@@ -3722,6 +3722,26 @@ def scan_binds(
     )
 
 
+def inline_binds(call: ast.Call, key: Optional[str] = None) -> list[Bind]:
+    """The binds a dict literal written into the call fills: ``querySQLS(sql, {":name": name})``.
+
+    All of them, or those for *key*.  The site is the statement holding the
+    call, which is where the value is chosen.
+    """
+    if len(call.args) < 2 or not isinstance(call.args[1], ast.Dict):
+        return []
+    site = call
+    for ancestor in ancestors(call):
+        if isinstance(ancestor, ast.stmt):
+            site = ancestor
+            break
+    return [
+        Bind(value, site)  # type: ignore[arg-type]
+        for spelled, value in zip(call.args[1].keys, call.args[1].values, strict=True)
+        if isinstance(spelled, ast.Constant) and (key is None or spelled.value == key)
+    ]
+
+
 def _copied_from(value: ast.expr) -> Optional[str]:
     """The name a varmap is a copy of: ``copy.copy(x)``, ``copy.deepcopy(x)``, ``dict(x)``, ``x.copy()``."""
     if not isinstance(value, ast.Call):

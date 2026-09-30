@@ -1400,7 +1400,10 @@ def read_side(
 
     def bound(func, run, key: str, file: str) -> list[str]:
         values_of: list[str] = []
-        for bind in sql.bound_values(func, run.varmap or "", key, run.window, across=True):
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True)
+        if not run.varmap:
+            binds = binds + sql.inline_binds(run.call, key)
+        for bind in binds:
             # Read where the value is written: one a call handed the varmap
             # sits in the callee, an imported ``IN`` list at the top of
             # another module, and their names are theirs.
@@ -1463,11 +1466,20 @@ def read_side(
                 if line not in per_line:
                     entry = f"{route} ({said}): not run"
                 elif tables != kept.tables or pairs != kept.selects:
-                    entry = f"{route} ({said}): reads {', '.join(sorted(tables)) or 'no table'}"
-                    if pairs != kept.selects:
-                        entry += "; selects " + (
-                            ", ".join(f"{subject}={value}" for subject, value in sorted(pairs)) or "nothing"
-                        )
+                    # What differs from the statement's own reading, not the
+                    # whole reading again.
+                    said_here: list[str] = []
+                    if tables != kept.tables:
+                        said_here.append("reads " + (", ".join(sorted(tables)) or "no table"))
+                    for label, held in (
+                        ("does not select", sorted(kept.selects - pairs)),
+                        ("also selects", sorted(pairs - kept.selects)),
+                    ):
+                        if held:
+                            shown = ", ".join(f"{subject}={value}" for subject, value in held[:6])
+                            more = f" and {len(held) - 6} more" if len(held) > 6 else ""
+                            said_here.append(f"{label} {shown}{more}")
+                    entry = f"{route} ({said}): " + "; ".join(said_here)
                 else:
                     continue
                 statements[(owner, line)] = kept._replace(call_sites=(*kept.call_sites, entry))
@@ -1733,6 +1745,10 @@ def read_side(
                 window = run.window
                 if window is None and run.varmap:
                     window = sql.binding_window(func, run.varmap, run.call.lineno)
+                if window is None and sql.inline_binds(run.call):
+                    # ``querySQLS(sql, {":name": name})``: the binds are
+                    # filled in the call itself.
+                    window = (run.call.lineno, run.call.end_lineno or run.call.lineno)
                 at = ReadStatement(
                     owner=owner,
                     package=module.package,
