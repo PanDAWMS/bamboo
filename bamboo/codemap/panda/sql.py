@@ -3174,10 +3174,31 @@ def predicates(sql: str) -> list[tuple[str, str]]:
     return found
 
 
-_ORDER_BY = re.compile(
-    r"\bORDER\s+BY\s+(.+?)\s*(?=\)|\bFOR\s+UPDATE\b|\bFETCH\b|\bLIMIT\b|\bOFFSET\b|$)",
-    re.IGNORECASE | re.DOTALL,
-)
+_ORDER_BY = re.compile(r"\bORDER\s+BY\s+", re.IGNORECASE)
+#: Where an ``ORDER BY`` ends at its own depth.
+_ORDER_END = re.compile(r"\b(?:FOR\s+UPDATE|FETCH|LIMIT|OFFSET)\b", re.IGNORECASE)
+
+
+def _order_clause(sql: str, start: int) -> str:
+    """The ``ORDER BY`` list from *start*: to the paren closing the query it is in, or a keyword at its depth.
+
+    Counted, not matched: ``ORDER BY (CASE ... END), currentpriority desc``
+    holds a paren of its own.
+    """
+    depth = 0
+    index = start
+    while index < len(sql):
+        char = sql[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and _ORDER_END.match(sql, index):
+            break
+        index += 1
+    return re.sub(r"\s+", " ", sql[start:index]).strip()
 _LIMIT = re.compile(
     r"\bROWNUM\s*(<=?)\s*(:\w+|\d+|\{\d*\})"
     r"|\bFETCH\s+FIRST\s+(:\w+|\d+|\{\d*\})\s+ROWS?\s+ONLY"
@@ -3194,7 +3215,7 @@ def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
     ``ROWNUM <= :njobs``.  Limits are ``(bind or number, strict)`` -- ``<``
     keeps one fewer than ``<=``.
     """
-    orders = [re.sub(r"\s+", " ", match.group(1)).strip() for match in _ORDER_BY.finditer(sql)]
+    orders = [_order_clause(sql, match.end()) for match in _ORDER_BY.finditer(sql)]
     limits: list[tuple[str, bool]] = []
     for match in _LIMIT.finditer(sql):
         if match.group(2):

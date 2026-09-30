@@ -746,6 +746,8 @@ def test_order_and_limit_are_read_off_the_statement():
 
     assert sql.ordering(text) == (["currentPriority DESC, PandaID ASC"], [(":njobs", False)])
     assert sql.ordering("SELECT a FROM t WHERE rownum<3 ORDER BY a FOR UPDATE") == (["a"], [("3", True)])
+    nested = "SELECT * FROM (SELECT a FROM t ORDER BY (CASE {} ELSE {} END), b desc) WHERE ROWNUM <= :n"
+    assert sql.ordering(nested)[0] == ["(CASE {} ELSE {} END), b desc"]
 
 
 def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
