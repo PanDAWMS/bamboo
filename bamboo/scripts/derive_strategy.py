@@ -1234,7 +1234,7 @@ def _report_from_line(
     line = int(line_text)
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
     expected = asyncio.run(_mapped_blob(map_id, version, file))
-    walked = trace_mod.walk_from_print(
+    walked = trace_mod.walk_from_line(
         roots, file=file, line=line, expected_sha=expected or "", classify=classify
     )
     click.echo(f"from the line  {file}:{line}")
@@ -1264,16 +1264,13 @@ def _report_from_line(
     # Said once, under the walk, rather than as a stop on every step it
     # applies to: the steps are shared with the other entries, and a new
     # terminal there would end walks that go on through such a binding today.
-    entered = [
-        step
-        for step in walked.steps
-        if step.kind == models_mod.TRACE_BINDING and not step.terminal and "(" in step.value
-    ]
-    if entered:
-        click.echo(
-            f"        {len(entered)} step(s) bind what a call returns, and the walk "
-            "does not go into the call yet"
-        )
+    unentered: dict[str, int] = {}
+    for step in walked.steps:
+        if step.detail.startswith("not entered: "):
+            reason = step.detail[len("not entered: "):]
+            unentered[reason] = unentered.get(reason, 0) + 1
+    for reason, count in sorted(unentered.items(), key=lambda item: -item[1]):
+        click.echo(f"        {count} call(s) not gone into: {reason}")
 
 
 @click.command("derive-strategy")
@@ -1373,10 +1370,10 @@ def _report_from_line(
     default=None,
     metavar="FILE:LINE",
     help=(
-        "Start from a line production printed rather than from a symptom: the "
-        "logging call on FILE:LINE, or the message it prints written there, "
-        "walked back from the names the message reads.  FILE is relative to "
-        "the source root, as the map spells it."
+        "Start from a line rather than from a symptom: the logging call on "
+        "FILE:LINE, or the message it prints written there, walked back from "
+        "the names the message reads -- or, for any other statement, from what "
+        "it computes.  FILE is relative to the source root, as the map spells it."
     ),
 )
 @click.option("--full", is_flag=True, help="Print every folded row, with conditions and anchors.")

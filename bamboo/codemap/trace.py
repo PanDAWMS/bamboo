@@ -665,6 +665,11 @@ def _constant_pattern(message: ast.expr) -> str:
     return ""
 
 
+def _called_name(call: ast.Call) -> str:
+    called = call.func
+    return called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+
+
 def _holes_of(message: ast.expr) -> list[SkeletonHole]:
     """Every hole of a rendered message, with the expression that fills it."""
     if not isinstance(message, ast.JoinedStr):
@@ -882,6 +887,101 @@ def _format_pieces(template: str, call: ast.Call) -> Optional[list[ast.expr]]:
             )
         )
     return pieces
+
+
+class _Unknown(NamedTuple):
+    """A part of a folded string this reading cannot say: a hole."""
+
+    expression: str
+
+
+#: Methods of ``str`` a constant can be folded through.
+_FOLDABLE = frozenset({"strip", "lstrip", "rstrip", "lower", "upper"})
+
+
+def _fold(expression: Optional[ast.expr], env: dict[str, list], depth: int = 0) -> Optional[list]:
+    """*expression* as a string: literal text, and ``_Unknown`` holes; ``None`` if it is not one.
+
+    Straight arithmetic on strings only -- constants, names in *env*,
+    f-strings, ``+``, and ``split(sep)[i]`` or ``strip()`` on a string that is
+    all literal.  Enough to say what ``comment.split(" ")[-2].split(".")[-1]``
+    is for ``comment = " /* DBProxy.activateJob */"``, and no more.
+    """
+    if expression is None or depth > 8:
+        return None
+    if isinstance(expression, ast.Constant):
+        return [expression.value] if isinstance(expression.value, str) else None
+    if isinstance(expression, ast.Name):
+        return env.get(expression.id)
+    if isinstance(expression, ast.JoinedStr):
+        out: list = []
+        for part in expression.values:
+            if isinstance(part, ast.Constant):
+                out.append(str(part.value))
+                continue
+            inner = _fold(part.value, env, depth + 1) if part.format_spec is None else None
+            out.extend(inner if inner is not None else [_Unknown(_text(part.value))])
+        return out
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+        left = _fold(expression.left, env, depth + 1)
+        right = _fold(expression.right, env, depth + 1)
+        return left + right if left is not None and right is not None else None
+    index = _integer(expression.slice) if isinstance(expression, ast.Subscript) else None
+    if isinstance(expression, ast.Subscript) and index is not None:
+        called = expression.value
+        if (
+            isinstance(called, ast.Call)
+            and isinstance(called.func, ast.Attribute)
+            and called.func.attr == "split"
+        ):
+            text = _literal_only(_fold(called.func.value, env, depth + 1))
+            separator = _literal_only(_fold(called.args[0], env, depth + 1)) if called.args else None
+            if text is None or (called.args and separator is None):
+                return None
+            pieces = text.split(separator) if called.args else text.split()
+            return [pieces[index]] if -len(pieces) <= index < len(pieces) else None
+        return None
+    if (
+        isinstance(expression, ast.Call)
+        and isinstance(expression.func, ast.Attribute)
+        and expression.func.attr in _FOLDABLE
+        and not expression.args
+    ):
+        text = _literal_only(_fold(expression.func.value, env, depth + 1))
+        return [getattr(text, expression.func.attr)()] if text is not None else None
+    return None
+
+
+def _integer(node: ast.AST) -> Optional[int]:
+    """An integer written as a constant, ``-2`` included (a unary minus in the tree)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, int)
+    ):
+        return -node.operand.value
+    return None
+
+
+def _literal_only(pieces: Optional[list]) -> Optional[str]:
+    if pieces is None or any(isinstance(piece, _Unknown) for piece in pieces):
+        return None
+    return "".join(pieces)
+
+
+def _folded_pattern(pieces: list) -> str:
+    """A pattern for folded text: literal escaped, each hole lazy."""
+    out = ""
+    for piece in pieces:
+        if isinstance(piece, _Unknown):
+            if not out.endswith(".*?"):
+                out += ".*?"
+        else:
+            out += re.escape(piece)
+    return out
 
 
 def _dominates(site: ast.AST, target: ast.AST) -> bool:
@@ -1364,6 +1464,12 @@ class _Walk:
         #: hundred logging calls asks for the same local a hundred times.
         self._sites: dict[tuple[int, str], tuple] = {}
         self._asked: dict[str, str] = {}
+        self._prefixes: dict[tuple[str, str, str], str] = {}
+        #: The role the name being explained was asked in -- see
+        #: ``TraceStep.role`` -- and the role each queued asking carries.
+        self._role = ""
+        self._roles: dict[tuple, str] = {}
+        self._constants: dict[int, dict[str, list]] = {}
         self.types = _Types(roots, self.parsed)
         self._declared: dict[tuple[str, str, str], Optional[str]] = {}
         self.calls = calls_mod.Calls(self.types)
@@ -1490,6 +1596,8 @@ class _Walk:
         return said
 
     def record(self, step: TraceStep) -> bool:
+        if self._role and not step.role:
+            step.role = self._role
         if step.terminal == STOP_UPSTREAM and step.detail and " " not in step.detail:
             asked = self.database_asked(step.detail)
             if asked:
@@ -1519,15 +1627,24 @@ class _Walk:
         self.crossing = False
         while self.queue:
             held, name, depth, at = self.queue.popleft()
-            self.explain(held, name, depth, at)
+            self._explain_as(self._roles.get((held.file, held.owner, name, id(at)), ""), held, name, depth, at)
         self.crossing = True
         while self.queue or self.beyond:
             if self.queue:
                 held, name, depth, at = self.queue.popleft()
-                self.explain(held, name, depth, at)
+                self._explain_as(self._roles.get((held.file, held.owner, name, id(at)), ""), held, name, depth, at)
             else:
+                self._role = ""
                 self.beyond.popleft()()
         self.crossing = False
+        self._role = ""
+
+    def _explain_as(self, role: str, frame: _Frame, name: str, depth: int, at) -> None:
+        self._role = role
+        try:
+            self.explain(frame, name, depth, at)
+        finally:
+            self._role = ""
 
     def notes(self) -> str:
         """The note, and the crossing's own where it ran out."""
@@ -1618,13 +1735,15 @@ class _Walk:
             if key in self.seen:
                 continue
             self.seen.add(key)
+            role = self._role
             if (frame.file, frame.owner) in self.entered:
                 self.beyond.append(
-                    lambda held=frame, one=name, deep=depth, where=at: self.explain(
-                        held, one, deep, where
+                    lambda held=frame, one=name, deep=depth, where=at, part=role: self._explain_as(
+                        part, held, one, deep, where
                     )
                 )
             else:
+                self._roles[(frame.file, frame.owner, name, id(at))] = role
                 self.queue.append((frame, name, depth, at))
 
     # -- the walk ----------------------------------------------------------
@@ -1688,6 +1807,8 @@ class _Walk:
         self._enter_tests(frame, statement, 1)
         if value is not None:
             self._ask_keyed(frame, value, 1, statement)
+            if not terminal:
+                self.beyond.append(lambda: self._enter(frame, step, value, None, 1))
 
     # -- skeleton ----------------------------------------------------------
 
@@ -1869,6 +1990,93 @@ class _Walk:
         if len(ways) + len(refused) > _MAX_EXPANDED and depth:
             return [[_hole(expr)]], []
         return ways, refused
+
+    def prefix_of(self, frame: _Frame, argument: ast.expr) -> str:
+        """The pattern a logging call's logger writes before *argument*, or ``""``.
+
+        ``LogWrapper(logger, prefix)`` writes ``prefix + " " + message``.  A
+        logger built here says its prefix; one built by a call -- the proxy's
+        ``create_tagged_logger(comment, tag)`` -- says it in the function it
+        is built in, read with the call's arguments folded in.  Nothing else
+        is guessed at: a logger built outside the function has a prefix this
+        call site does not state.
+        """
+        call = getattr(argument, "parent", None)
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
+            return ""
+        receiver = call.func.value
+        if not isinstance(receiver, ast.Name):
+            return ""
+        key = (frame.file, frame.owner, receiver.id)
+        if key in self._prefixes:
+            return self._prefixes[key]
+        said = ""
+        bound = pathcond.single_definition(frame.func, receiver.id)
+        if isinstance(bound, ast.Call):
+            pieces = self._logger_prefix(frame, bound)
+            if pieces:
+                said = _folded_pattern(pieces) + r"\ "
+        self._prefixes[key] = said
+        return said
+
+    def _logger_prefix(self, frame: _Frame, built: ast.Call, depth: int = 0) -> Optional[list]:
+        """The folded prefix of the ``LogWrapper`` *built* makes, directly or by returning one."""
+        env = self._constant_env(frame.func)
+        if _called_name(built) == "LogWrapper" and len(built.args) >= 2:
+            return _fold(built.args[1], env)
+        if depth > 1:
+            return None
+        placed = self.calls.callees(frame.file, frame.func, built)
+        if len(placed.targets) != 1:
+            return None
+        (target,) = placed.targets
+        bound = calls_mod.bind(built, target)
+        callee_env = {
+            name: (_fold(value, env) if value is not None else None)
+            for name, value in bound.items()
+        }
+        callee_env = {name: value for name, value in callee_env.items() if value is not None}
+        loggers: dict[str, Optional[list]] = {}
+        for statement in target.func.body:  # type: ignore[attr-defined]
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
+                value = statement.value
+                if isinstance(value, ast.Call) and _called_name(value) == "LogWrapper" and len(value.args) >= 2:
+                    loggers[statement.targets[0].id] = _fold(value.args[1], callee_env)
+                    continue
+                folded = _fold(value, callee_env)
+                callee_env[statement.targets[0].id] = folded if folded is not None else [_Unknown(statement.targets[0].id)]
+            elif isinstance(statement, ast.AugAssign) and isinstance(statement.target, ast.Name) and isinstance(statement.op, ast.Add):
+                held = callee_env.get(statement.target.id)
+                folded = _fold(statement.value, callee_env)
+                callee_env[statement.target.id] = (held or [_Unknown(statement.target.id)]) + (folded or [_Unknown("...")])
+            elif isinstance(statement, ast.If):
+                # Whatever a branch assigns is not known to have run.
+                for node in ast.walk(statement):
+                    if isinstance(node, ast.Assign):
+                        for held in node.targets:
+                            if isinstance(held, ast.Name):
+                                callee_env[held.id] = [_Unknown(held.id)]
+            elif isinstance(statement, ast.Return):
+                returned = statement.value
+                if isinstance(returned, ast.Name):
+                    return loggers.get(returned.id)
+                if isinstance(returned, ast.Call) and _called_name(returned) == "LogWrapper" and len(returned.args) >= 2:
+                    return _fold(returned.args[1], callee_env)
+                return None
+        return None
+
+    def _constant_env(self, func: ast.AST) -> dict[str, list]:
+        """Locals bound once, to a string this reading can fold."""
+        key = id(func)
+        if key not in self._constants:
+            env: dict[str, list] = {}
+            for name, values in pathcond.assigned_expressions(func).items():
+                if len(values) == 1:
+                    folded = _fold(values[0], {})
+                    if folded is not None:
+                        env[name] = folded
+            self._constants[key] = env
+        return self._constants[key]
 
     def _value_hole(
         self, frame: _Frame, message: ast.JoinedStr, arms: Sequence[ast.stmt]
@@ -2063,6 +2271,7 @@ class _Walk:
                         refused=refused,
                         keyed=bool(pattern) and keyed(message),
                         holes=_holes_of(message),
+                        prefix=self.prefix_of(frame, argument) if pattern else "",
                         arms=sorted(arms),
                         value=value,
                         hole=hole,
@@ -2408,6 +2617,19 @@ class _Walk:
         own = list(reads)
         for read in _guard_reads(site):
             _add(reads, read)
+        if (
+            not detail
+            and isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Name)
+            and expression.func.id in ("max", "min")
+            and len(expression.args) > 1
+        ):
+            # ``max(task.ramCount, ram_count)``: either can be the value, and
+            # which one was is the question a sieve that rejected a site asks.
+            detail = (
+                f"the {'larger' if expression.func.id == 'max' else 'smaller'} of "
+                f"{len(expression.args)} values, and each is walked"
+            )
         step = TraceStep(
             kind=TRACE_BINDING,
             name=name,
@@ -2881,8 +3103,16 @@ class _Walk:
             reads=reads,
             depth=depth,
         )
-        if self.record(step):
-            self.want(frame, reads, depth + 1, loop)
+        # What the loop was on is a fact about which row this pass was, not
+        # about how the value was worked out: told apart, so two guards'
+        # derivations can be compared without the rows each loop visited.
+        held = self._role
+        self._role = "iteration"
+        try:
+            if self.record(step):
+                self.want(frame, reads, depth + 1, loop)
+        finally:
+            self._role = held
 
     def _caught(
         self, frame: _Frame, name: str, handler: ast.ExceptHandler, depth: int
@@ -3409,3 +3639,45 @@ def walk_from_print(
         state.want(frame, reads, 1, statement)
     state.drain()
     return Walked(state.steps, state.notes(), state.skeleton(frame))
+
+
+def walk_from_line(
+    roots: dict[str, Path],
+    *,
+    file: str,
+    line: int,
+    expected_sha: str = "",
+    classify: Optional[Classifier] = None,
+    budget: Budget = DEFAULT_BUDGET,
+) -> Walked:
+    """Explain the statement on *line*: what it prints if it prints, else what it computes.
+
+    A printed line is walked from the names its message reads -- see
+    :func:`walk_from_print`.  Any other statement is walked as an arm is,
+    narrowed at itself: ``AtlasProdJobBroker.py:903``,
+    ``origMinRamCount = inputChunk.getMaxRamCount()``, is the sieve's input,
+    and what decides it is inside ``getMaxRamCount``.
+    """
+    walked = walk_from_print(
+        roots, file=file, line=line, expected_sha=expected_sha, classify=classify, budget=budget
+    )
+    if walked.note != "no logging call prints what is on this line":
+        return walked
+    state = _Walk(roots, _nothing, budget)
+    parsed = state.module(file)
+    if parsed is None:
+        return walked
+    func = containing_function(parsed[1], line, "")
+    if func is None:
+        return Walked([], "no function holds this line")
+    return walk(
+        roots,
+        file=file,
+        owner=f"{file}::{func.name}",
+        lines=[line],
+        expected_sha=expected_sha,
+        classify=classify,
+        budget=budget,
+        reaching=True,
+    )
+

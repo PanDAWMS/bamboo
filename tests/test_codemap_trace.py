@@ -2855,3 +2855,121 @@ def run(self, jediTaskID, log):
     (step,) = [s for s in walked.steps if s.name == "pandaIDs"]
     assert step.terminal == models.STOP_UPSTREAM
     assert step.detail == "getPandaIDsWithTask_JEDI -- reads jobsActive4 by :jediTaskID"
+
+
+def test_a_logger_built_by_a_helper_says_its_prefix_through_the_helper(tmp_path):
+    """``start`` is printed by hundreds of proxy methods; the prefix
+    ``create_tagged_logger`` builds from ``comment`` is what names this one."""
+    roots = _tree(
+        tmp_path,
+        **{
+            "base.py": '''\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+
+class Base:
+    def create_tagged_logger(self, comment, tag=None):
+        """Create logger from function comment and tag."""
+        method_name = comment.split(" ")[-2].split(".")[-1]
+        if tag is None:
+            tag = now()
+        method_name += f" < {tag} >"
+        tmp_log = LogWrapper(self._log_stream, method_name)
+        return tmp_log
+''',
+            "proxy.py": '''\
+from pandajedi.base import Base
+
+
+class Proxy(Base):
+    def getPandaIDs(self, jediTaskID):
+        comment = " /* JediDBProxy.getPandaIDs */"
+        tmpLog = self.create_tagged_logger(comment, f"jediTaskID={jediTaskID}")
+        tmpLog.debug("start")
+        spec.status = "done"
+''',
+        },
+    )
+
+    walked = _walked_in(roots, "proxy.py", "getPandaIDs", [9])
+    (row,) = [r for r in walked.skeleton if r.kind == models.SKELETON_PRINT]
+
+    assert row.pattern == "start"
+    assert row.prefix == r"getPandaIDs\ <\ .*?\ >\ "
+
+
+def test_a_logger_built_here_says_its_prefix(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, job):
+    tmp_log = LogWrapper(self.logger, "<setup_destination>")
+    tmp_log.debug(f"made sub:{job.name} for nFiles=3")
+    job.status = "done"
+''',
+    )
+
+    (row,) = _printed(roots, file="m", owner="f", lines=[4])
+
+    assert row.prefix == r"<setup_destination>\ "
+
+
+def test_the_rows_a_loop_is_on_are_told_apart_from_how_a_value_was_worked_out(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, limit):
+    for job in self.jobs:
+        size = job.size * 2
+        if size > limit:
+            job.status = "failed"
+''',
+    )
+
+    walked = _walked_in(roots, "m", "f", [5])
+    roles = {(s.name, s.role) for s in walked.steps if s.owner.endswith("::f")}
+
+    assert ("job", "iteration") in roles
+    assert ("size", "") in roles
+
+
+def test_a_line_that_prints_nothing_is_walked_from_what_it_computes(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m='''\
+def ram(task):
+    return max(task.ramCount, 2000)
+
+def f(task):
+    minRam = ram(task)
+    return minRam
+''',
+    )
+
+    walked = trace_mod.walk_from_line(roots, file=f"{PACKAGE}/m", line=5, classify=provenance.classify)
+    said = _said(walked)
+
+    assert ("return", "ram()", "ram", 2, "max(task.ramCount, 2000)") in said
+
+
+def test_a_decision_whose_silent_branch_reads_configuration_is_listed(tmp_path):
+    from bamboo.scripts.panda import silent_exits
+
+    root = tmp_path / "pandaserver"
+    (root / "daemons").mkdir(parents=True)
+    (root / "daemons" / "m.py").write_text(
+        """\
+def f(self, jobs, log):
+    for job in jobs:
+        limit = self.taskBuffer.getConfigValue("dog", "LIMIT", "jedi")
+        if job.n > limit:
+            continue
+        log.info("kept a job")
+"""
+    )
+
+    listed = silent_exits.scan(tmp_path, {"config"})
+
+    (entry,) = listed
+    assert (entry["at"], entry["branch"], entry["leaves"]) == ("pandaserver/daemons/m.py:4", "body", True)
+    assert entry["reads"] == ["a configuration value, set outside the code -- dog.LIMIT.jedi"]

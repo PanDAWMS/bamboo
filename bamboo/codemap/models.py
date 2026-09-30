@@ -2937,6 +2937,19 @@ class SkeletonLine(BaseModel):
         default_factory=list,
         description="Every hole of the pattern, in order, with what fills it.",
     )
+    prefix: str = Field(
+        default="",
+        description=(
+            "What the logger writes before the message, as a pattern: the "
+            "prefix a ``LogWrapper`` was built with here, or by the function "
+            "that built it -- ``getPandaIDsWithTask_JEDI\\ <\\ .*?\\ >\\ `` "
+            "for a proxy method's ``create_tagged_logger``.  Apart from "
+            "``pattern`` because the line holds it before the message, and it "
+            "names the writer where the message alone -- ``start``, ``done`` "
+            "-- is shared by many.  Empty where the logger is built outside "
+            "this function."
+        ),
+    )
     arms: list[int] = Field(
         default_factory=list,
         description=(
@@ -3007,6 +3020,16 @@ class TraceStep(BaseModel):
     )
     detail: str = Field(default="", description="Which interface, key or caller.")
     depth: int = Field(default=0, description="Hops from the arm.")
+    role: str = Field(
+        default="",
+        description=(
+            "``iteration`` for a step that says which row or file a loop was "
+            "on -- the element and what it was drawn from -- rather than how a "
+            "value the guard reads was derived.  A reader comparing two "
+            "guards' derivations leaves these out, or the loop's own rows read "
+            "as a difference between them."
+        ),
+    )
     printed: list[str] = Field(
         default_factory=list,
         description=(
