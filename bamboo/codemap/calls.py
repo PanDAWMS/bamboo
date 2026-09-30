@@ -155,6 +155,34 @@ def bind(call: ast.Call, target: Target) -> dict[str, Optional[ast.expr]]:
     return bound
 
 
+def said(call: ast.Call, target: Target) -> set[str]:
+    """The parameters *call* fills itself, by position or by keyword -- not by default.
+
+    ``self``/``cls`` is not among them: the call names the object it is made
+    on, which is a different thing from passing it.
+    """
+    args = target.func.args  # type: ignore[attr-defined]
+    positional = [*args.posonlyargs, *args.args]
+    if target.cls is not None and not _is_static(target.func) and positional:
+        positional = positional[1:]
+    filled = {
+        parameter.arg
+        for index, parameter in enumerate(positional)
+        if index < len(call.args) and not any(isinstance(one, ast.Starred) for one in call.args[: index + 1])
+    }
+    filled |= {keyword.arg for keyword in call.keywords if keyword.arg}
+    return filled
+
+
+def receiver_parameter(target: Target) -> Optional[str]:
+    """``self`` or ``cls`` -- the parameter a method call fills with the object it is made on."""
+    args = target.func.args  # type: ignore[attr-defined]
+    positional = [*args.posonlyargs, *args.args]
+    if target.cls is None or _is_static(target.func) or not positional:
+        return None
+    return positional[0].arg
+
+
 class Calls:
     """Calls read against one tree, with a corpus index built the first time it is asked."""
 

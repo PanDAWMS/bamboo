@@ -3004,32 +3004,62 @@ class _Walk:
         held = self.passed.get((frame.file, frame.owner))
         if not held:
             return False
+        cls = self.types.method_class(frame.file, frame.func)
+        target = calls_mod.Target(frame.file, frame.func, cls[1] if cls else None)
         for caller, call, bound in held:
-            argument = bound.get(name)
-            statement = _enclosing_statement(call) or call
-            reads = _reads(argument) if argument is not None else []
-            step = TraceStep(
-                kind=TRACE_HANDOVER,
-                name=name,
-                owner=caller.owner,
-                file=caller.file,
-                line=getattr(call, "lineno", 0),
-                value=_text(argument) if argument is not None else name,
-                guards=pathcond.path_condition(statement),
-                unseen=_unseen(statement),
-                reads=reads,
-                detail=(
-                    f"passed to {getattr(frame.func, 'name', '')} here"
-                    if argument is not None
-                    else "passed through * or ** here, so which argument it is is not said"
-                ),
-                depth=depth,
-            )
+            step, statement = self._handed_step(caller, call, target, name, bound, depth)
             if not self.record(step):
                 return True
-            if reads:
-                self.want(caller, reads, depth + 1, statement)
+            if step.reads:
+                self.want(caller, step.reads, depth + 1, statement)
         return True
+
+    def _handed_step(
+        self,
+        caller: _Frame,
+        call: ast.Call,
+        target: "calls_mod.Target",
+        name: str,
+        bound: dict,
+        depth: int,
+    ) -> tuple[TraceStep, ast.AST]:
+        """The step saying what *call* hands the parameter *name*, and the statement to walk from.
+
+        Four answers, and only the first is "passed here": an argument the
+        call writes; the default the signature holds, which the call leaves
+        alone and whose names are the callee's module's, not the caller's;
+        the object a method is called on, for ``self`` and ``cls``; and an
+        argument hidden in ``*``/``**``.
+        """
+        callee = getattr(target.func, "name", "")
+        statement = _enclosing_statement(call) or call
+        argument = bound.get(name)
+        if argument is not None and name in calls_mod.said(call, target):
+            value, reads, detail = _text(argument), _reads(argument), f"passed to {callee} here"
+        elif argument is not None:
+            # Evaluated where the ``def`` is, once: nothing on the path to
+            # this call chose it, so there is nothing further to walk.
+            value, reads, detail = _text(argument), [], f"left to the default {callee}'s signature gives it"
+        elif name == calls_mod.receiver_parameter(target) and isinstance(call.func, ast.Attribute):
+            value = _text(call.func.value)
+            reads = _reads(call.func.value)
+            detail = f"the object {callee} is called on"
+        else:
+            value, reads, detail = name, [], "passed through * or ** here, so which argument it is is not said"
+        step = TraceStep(
+            kind=TRACE_HANDOVER,
+            name=name,
+            owner=caller.owner,
+            file=caller.file,
+            line=getattr(call, "lineno", 0),
+            value=value,
+            guards=pathcond.path_condition(statement),
+            unseen=_unseen(statement),
+            reads=reads,
+            detail=detail,
+            depth=depth,
+        )
+        return step, statement
 
     def _called_from(self, frame: _Frame, name: str, depth: int, stopped: TraceStep) -> bool:
         """Answer a parameter from the calls placed at this function, where nothing brought the walk in.
@@ -3067,32 +3097,14 @@ class _Walk:
             call = _same_node(caller.func, site.call)
             if not isinstance(call, ast.Call):
                 continue
-            argument = calls_mod.bind(call, target).get(name)
-            statement = _enclosing_statement(call) or call
-            reads = _reads(argument) if argument is not None else []
-            if not self.record(
-                TraceStep(
-                    kind=TRACE_HANDOVER,
-                    name=name,
-                    owner=caller.owner,
-                    file=caller.file,
-                    line=call.lineno,
-                    value=_text(argument) if argument is not None else name,
-                    guards=pathcond.path_condition(statement),
-                    unseen=_unseen(statement),
-                    reads=reads,
-                    detail=(
-                        f"passed to {getattr(frame.func, 'name', '')} here"
-                        if argument is not None
-                        else "passed through * or ** here, so which argument it is is not said"
-                    ),
-                    depth=depth,
-                )
-            ):
+            step, statement = self._handed_step(
+                caller, call, target, name, calls_mod.bind(call, target), depth
+            )
+            if not self.record(step):
                 return True
-            if reads:
+            if step.reads:
                 self.entered.add((caller.file, caller.owner))
-                self.want(caller, reads, depth + 1, statement)
+                self.want(caller, step.reads, depth + 1, statement)
         return True
 
     def _module_binding(

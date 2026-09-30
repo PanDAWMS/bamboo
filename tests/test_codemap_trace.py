@@ -3030,3 +3030,32 @@ class Plugin:
     (bound,) = [s for s in walked.steps if s.name == "dst"]
     assert bound.terminal == models.STOP_EXTERNAL
     assert ("return", "getSite()", "getSite", 4, "self.siteSpecList[site_name]") in said
+
+
+def test_a_default_and_the_called_object_are_not_said_to_be_passed(tmp_path):
+    """A parameter the call leaves alone holds the signature's default; ``cls`` holds the class called on."""
+    roots = _tree(
+        tmp_path,
+        **{"m.py": '''\
+class Spec:
+    @classmethod
+    def columns(cls, prefix=None):
+        if prefix:
+            names = prefix
+        else:
+            names = cls.attributes
+        spec.status = names
+
+def build():
+    Spec.columns()
+'''},
+    )
+
+    walked = _walked_in(roots, "m.py", "columns", [8])
+    handed = {s.name: s for s in walked.steps if s.kind == "handover"}
+
+    assert handed["prefix"].detail == "left to the default columns's signature gives it"
+    assert (handed["prefix"].value, handed["prefix"].reads) == ("None", [])
+    assert handed["cls"].detail == "the object columns is called on"
+    assert handed["cls"].value == "Spec"
+    assert all("passed through * or **" not in s.detail for s in walked.steps)
