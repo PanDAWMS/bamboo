@@ -112,6 +112,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "attribution",
         "structural_subject",
         "calls",
+        "called_from",
         "joined_entities",
         "dispatch",
     ),

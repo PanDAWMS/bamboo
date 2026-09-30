@@ -796,6 +796,19 @@ class JunctionNode(BaseNode):
             "mistake this corpus has already charged for twice."
         ),
     )
+    called_from: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file:line`` of each call placed at the owner, sorted -- and, "
+            "where that call is made by a function that is itself called, "
+            "``outer file:line -> inner file:line``, one hop further.  "
+            "``activateJob`` is called only by ``TaskBuffer.activateJobs``, and "
+            "what moves a job to ``activated`` is who calls that: the setupper, "
+            "the activator, the dataset manager.  Placed by what the receiver "
+            "is declared to be (``calls.Calls.callers``), not by name.  Capped: "
+            "a last entry ``… N more`` says how many were not listed."
+        ),
+    )
     joined_entities: list[str] = Field(
         default_factory=list,
         description=(

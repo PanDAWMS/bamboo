@@ -777,3 +777,15 @@ def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
         "SELECT computingSite FROM ATLAS_PANDA.jobsDefined4 WHERE jobStatus=:s ",
     ]
     assert [run.sql for run in cached] == ["SELECT /*+ RESULT_CACHE */ a FROM t WHERE b=:b "]
+
+
+def test_a_function_is_said_to_be_called_through_the_door_that_forwards_to_it(tmp_path):
+    roots = _tree(tmp_path, **_FLAGGED)
+    calls = _calls(roots)
+    func = _function(calls, "db", "ids")
+    cls = calls.types.method_class("pkg/db.py", func)
+
+    assert calls.called_from(calls_mod.Target("pkg/db.py", func, cls[1])) == [
+        "pkg/cmd.py:4 -> pkg/tb.py:8",
+        "pkg/cmd.py:5 -> pkg/tb.py:8",
+    ]

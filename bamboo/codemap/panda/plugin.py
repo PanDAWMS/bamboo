@@ -521,6 +521,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # edge out of a junction that a reader can follow without resolving a
         # name, and the only route from an arm to the aggregate it decided on.
         self._consults = trigger.attach_calls(fragment.junctions, self._modules)
+        # Who calls each owner, by what the receiver is declared to be -- the
+        # other direction from ``calls``, and the one a transition's movers
+        # are answered from.
+        if self._calls is not None:
+            _attach_called_from(fragment.junctions, self._calls)
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the
@@ -840,3 +845,27 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 skipped_tests,
             )
         return modules, skipped_tests
+
+
+def _attach_called_from(junctions, calls) -> None:
+    """Fill ``JunctionNode.called_from`` for every junction, one owner at a time."""
+    from bamboo.codemap.calls import Target
+
+    by_owner: dict[str, list[str]] = {}
+    for junction in junctions:
+        if junction.owner not in by_owner:
+            file, _, name = junction.owner.partition("::")
+            tree = calls.types.tree(file)
+            found: list[str] = []
+            for func in ast.walk(tree) if tree is not None else ():
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or func.name != name:
+                    continue
+                if junction.anchor is not None and not (
+                    func.lineno <= junction.anchor.line_start <= (func.end_lineno or func.lineno)
+                ):
+                    continue
+                owned = calls.types.method_class(file, func)
+                found = calls.called_from(Target(file, func, owned[1] if owned else None))
+                break
+            by_owner[junction.owner] = found
+        junction.called_from = by_owner[junction.owner]

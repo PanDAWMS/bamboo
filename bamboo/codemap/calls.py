@@ -381,6 +381,28 @@ class Calls:
         _CALLERS[shared] = kept
         return kept
 
+    #: How many chains ``called_from`` lists before it counts the rest.
+    CALLED_FROM = 16
+
+    def called_from(self, target: Target) -> list[str]:
+        """``file:line`` of each call placed at *target*, and one hop out where its caller is called.
+
+        Sorted, capped at :data:`CALLED_FROM` with a closing ``… N more``.
+        """
+        chains: list[str] = []
+        for site in self.callers(target):
+            at = f"{site.file}:{site.call.lineno}"
+            owned = self.types.method_class(site.file, site.func)
+            outer = self.callers(Target(site.file, site.func, owned[1] if owned else None))
+            if outer:
+                chains.extend(f"{one.file}:{one.call.lineno} -> {at}" for one in outer)
+            else:
+                chains.append(at)
+        chains = sorted(set(chains))
+        if len(chains) > self.CALLED_FROM:
+            return [*chains[: self.CALLED_FROM], f"… {len(chains) - self.CALLED_FROM} more"]
+        return chains
+
     #: How many calls out a constant is looked for, and how many calls one
     #: function may have before its callers are not read one by one.
     CONSTANT_HOPS = 3
