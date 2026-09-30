@@ -2877,6 +2877,28 @@ def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
     ]
 
 
+def test_a_named_field_no_argument_fills_is_a_hole_the_reading_stops_on():
+    """``.format(q=...)`` fills nothing here; the field is a hole, not text the WHERE drops."""
+    source = (
+        "def f(self, statuses):\n"
+        "    tmpl = 'SELECT a FROM ATLAS_PANDA.jobsActive4 WHERE site=:site AND jobStatus IN {q} '\n"
+        "    sql = tmpl.format(q=statuses)\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+        "    lit = \"SELECT a FROM ATLAS_PANDA.jobsActive4 WHERE doc='{k}' \"\n"
+        "    self.cur.execute(lit + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    formatted, literal = sql.executions(func)
+
+    assert formatted.sql == "SELECT a FROM ATLAS_PANDA.jobsActive4 WHERE site=:site AND jobStatus IN {} "
+    assert [(stop.source, stop.reason) for stop in formatted.unresolved] == [
+        ("jobStatus IN {}", sql.BINDS_ARE_A_HOLE)
+    ]
+    # Not a template: its brace is the statement's own text.
+    assert literal.sql == "SELECT a FROM ATLAS_PANDA.jobsActive4 WHERE doc='{k}' "
+
+
 def test_a_query_whose_table_the_call_leaves_open_counts_as_read():
     """The run spells the unfilled field ``{}``; the statement assembled still spells it ``{0}``."""
     source = (

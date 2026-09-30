@@ -2208,17 +2208,23 @@ def _discarded(discards: list[ast.stmt], built: list[ast.stmt], call: ast.AST) -
     )
 
 
+#: How the call fills in the statement it runs, as :func:`_call_site_fill` reads it.
+_BY_PERCENT = "%"
+_BY_FORMAT = "format"
+
+
 def _substituted(
     text: str,
     sources: list[ast.stmt],
     fillers: list[list[str]],
-    percent: bool,
+    spelling: str,
 ) -> list[str]:
     """Return *text* with the call's arguments filled in, or as it stands."""
-    if not fillers:
-        return [text]
-    if percent:
+    if spelling == _BY_PERCENT:
         return [text.replace(_PERCENT_S, value) for value in fillers[0]] or [text]
+    if spelling != _BY_FORMAT:
+        # Not a template: a brace here is the statement's own text.
+        return [text]
     filled = [text]
     for index, values in enumerate(fillers):
         marker = f"{{{index}}}"
@@ -2234,14 +2240,20 @@ def _substituted(
     # one.  Left as ``{0}``, the table in ``getUserJobMetadata``'s ``FROM {0}
     # j,{1} m`` -- filled from a loop over pairs this cannot read -- was taken
     # for a table named ``{0}``, and then for a boundary to a system that keeps
-    # it.  After the loop, because the markers are what it fills by.
+    # it.  Named fields too, which no argument here fills: ``jobStatus IN
+    # {q_status_list_str}`` was neither a condition nor a stop, and dropped
+    # out of the statement silently.  After the loop, because the markers are
+    # what it fills by.
     return [blank_fields(one) for one in filled]
 
 
 def _call_site_fill(
     func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr
-) -> tuple[ast.expr, list[list[str]], bool]:
+) -> tuple[ast.expr, list[list[str]], str]:
     """Split ``execute(...)``'s first argument into statement and substitution.
+
+    The third value says how the call fills the statement in: ``_BY_PERCENT``,
+    ``_BY_FORMAT``, or ``""`` where it does not.
 
     Three spellings put the table name at the call rather than in the
     statement, and until now all three were read as though the name were part
@@ -2264,7 +2276,7 @@ def _call_site_fill(
             ]
         )
     if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Mod):
-        return expression.left, [_literal_values(func, expression.right)], True
+        return expression.left, [_literal_values(func, expression.right)], _BY_PERCENT
     inner = (
         expression.left
         if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add)
@@ -2278,13 +2290,13 @@ def _call_site_fill(
         return (
             inner.func.value,
             [_literal_values(func, argument) for argument in inner.args],
-            False,
+            _BY_FORMAT,
         )
     # ``execute(sqlU + comment, varMap)`` -- the comment is a tracing tag
     # appended at the call, so the statement is everything to its left.
     if isinstance(expression, ast.BinOp):
-        return expression.left, [], False
-    return expression, [], False
+        return expression.left, [], ""
+    return expression, [], ""
 
 
 def executions(
@@ -2363,7 +2375,7 @@ def executions(
         # and a fragment the reader could not follow was missing from all of
         # them.
         stops: list[Stop] = []
-        statement, fillers, percent = _call_site_fill(func, _through_name(func, expression))
+        statement, fillers, spelling = _call_site_fill(func, _through_name(func, expression))
         operands = _concatenated(statement)
         sources: dict[str, list[ast.stmt]] = {}
         reaching: dict[str, list[ast.stmt]] = {}
@@ -2474,7 +2486,7 @@ def executions(
                 continue
             assembled = "".join(combination)
             for text in _substituted(
-                assembled, sources.get(combination[0], []), fillers, percent
+                assembled, sources.get(combination[0], []), fillers, spelling
             ):
                 found.append(
                     Execution(
@@ -2599,7 +2611,7 @@ def _skip_without_binds(
     ``None`` on the same terms as :func:`_skip_without_text`: a wrapper of the
     cursor handing on its caller's statement.
     """
-    statement, _fillers, _percent = _call_site_fill(func, call.args[0])
+    statement, _fillers, _spelling = _call_site_fill(func, call.args[0])
     head = _concatenated(statement)[0]
     texts = _head_texts(func, head)
     if not texts:
