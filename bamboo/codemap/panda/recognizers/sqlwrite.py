@@ -276,6 +276,26 @@ def _skip_stops(skipped: list[sql.Skip], rel_path: str, owner: str) -> list[Read
     return found
 
 
+def distinct_stops(stops: list[ReadingStop]) -> list[ReadingStop]:
+    """One stop per place the reading stopped, the tables of every variant merged.
+
+    A statement is read once per variant -- ``lockJobsForReassign`` builds
+    one per table it may read -- and each variant carried the same stop, so
+    a fragment the build could not render was counted as many times as the
+    statement had shapes.  The count was of shapes, the list of places.
+    """
+    merged: dict[tuple, ReadingStop] = {}
+    for stop in stops:
+        key = (stop.reason, stop.detail, stop.file, stop.owner, stop.line, stop.statement)
+        held = merged.get(key)
+        if held is None:
+            merged[key] = stop.model_copy(update={"reads": list(stop.reads)})
+            continue
+        held.reads = sorted(set(held.reads) | set(stop.reads))
+        held.reads_known = held.reads_known and stop.reads_known
+    return list(merged.values())
+
+
 def statement_stops(
     func: ast.FunctionDef | ast.AsyncFunctionDef, rel_path: str
 ) -> list[ReadingStop]:
@@ -299,7 +319,7 @@ def statement_stops(
         seen.add(key)
         found.extend(_run_stops(run, rel_path, owner))
     found.extend(_skip_stops(skipped, rel_path, owner))
-    return found
+    return distinct_stops(found)
 
 
 def _row_key_source(

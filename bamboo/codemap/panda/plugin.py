@@ -346,7 +346,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # question whose answer is half in the nodes and half in what the
         # build could not read, and a gate that could only see the first half
         # would report every unreadable ``WHERE`` as a disagreement.
-        fragment.reading_stops.extend(reading_stops)
+        fragment.reading_stops.extend(sqlwrite.distinct_stops(reading_stops))
         fragment.subjects.extend(sql_subjects)
         fragment.junctions.extend(sql_junctions)
         fragment.coverage.extend(sql_coverage)
