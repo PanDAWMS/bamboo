@@ -364,3 +364,41 @@ class SiteMapper:
     (target,) = _placed(calls, "m", "collect", "target[name].add").targets
 
     assert target.cls.name == "NucleusSpec"
+
+
+def test_a_name_rebound_from_names_rebound_many_times_is_read_once_per_depth(tmp_path):
+    """Each name read once, not once per path to it.
+
+    ``JobGenerator`` rebinds locals from calls on locals that are themselves
+    rebound, and reading every assignment of every name afresh made one
+    receiver cost the product of their counts -- a census stopped in one file
+    for hours.  Five names, six assignments each: the answer is unchanged and
+    the reading is linear in them.
+    """
+    chain = ["def run(n0: Spec):"]
+    for level in range(1, 5):
+        chain += [f"    n{level} = n{level - 1}.step()"] * 6
+    chain.append("    return n4.step()")
+    roots = _tree(
+        tmp_path,
+        m="class Spec:\n    def step(self) -> 'Spec':\n        return self\n\n\n"
+        + "\n".join(chain)
+        + "\n",
+    )
+    calls = _calls(roots)
+    types = calls.types
+    asked = []
+    read = types.of_expression
+
+    def counted(*args, **kwargs):
+        asked.append(args)
+        return read(*args, **kwargs)
+
+    types.of_expression = counted
+    func = _function(calls, "m", "run")
+    returned = next(node for node in ast.walk(func) if isinstance(node, ast.Return))
+
+    (target,) = calls.callees("pkg/m.py", func, returned.value).targets
+
+    assert target.cls.name == "Spec"
+    assert len(asked) < 100

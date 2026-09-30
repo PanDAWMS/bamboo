@@ -498,6 +498,8 @@ class Types:
         self.parsed: dict[str, Optional[ast.Module]] = {}
         self._imports: dict[str, dict[str, tuple[str, str]]] = {}
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
+        # (file, id(func), name, depth) -> (func, class): see ``of_expression``.
+        self._names: dict[tuple, tuple[ast.AST, Optional[tuple[str, ast.ClassDef]]]] = {}
 
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
         """``pathcond.assigned_expressions``, once per function."""
@@ -911,6 +913,37 @@ class Types:
             return None
         return self._outside_instance(target, held[1], depth + 1)
 
+    def _of_name(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
+        """:meth:`of_expression` for a bare name, read in *func*."""
+        args = getattr(func, "args", None)
+        for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
+            if argument.arg == name:
+                return self.annotated(file, argument.annotation)
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == name
+            ):
+                return self.annotated(file, node.annotation)
+        # Every assignment, less the ``None`` a name is cleared with:
+        # ``siteMapper = SiteMapper(taskBuffer)`` and, at the end of the
+        # daemon, ``siteMapper = None``.  The evidence for a local is all in
+        # this function, so it is read rather than asked for; the answer
+        # is a class only where every assignment says the same one.
+        bound = [
+            value
+            for value in self.assigned(func).get(name, [])
+            if not (isinstance(value, ast.Constant) and value.value is None)
+        ]
+        held = self._with_held(file, func, name, depth)
+        if not bound and held is None and not isinstance(func, ast.Module):
+            return self._outside_instance(file, name, depth)
+        found = {self.of_expression(file, func, value, depth + 1) for value in bound}
+        if held is not None:
+            found.add(held)
+        return found.pop() if len(found) == 1 else None
+
     def of_expression(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
         """The class *expression*, read in *func* of *file*, is declared to be."""
         if depth > self.DEPTH:
@@ -919,34 +952,19 @@ class Types:
         if tree is None:
             return None
         if isinstance(expression, ast.Name):
-            args = getattr(func, "args", None)
-            for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
-                if argument.arg == expression.id:
-                    return self.annotated(file, argument.annotation)
-            for node in ast.walk(func):
-                if (
-                    isinstance(node, ast.AnnAssign)
-                    and isinstance(node.target, ast.Name)
-                    and node.target.id == expression.id
-                ):
-                    return self.annotated(file, node.annotation)
-            # Every assignment, less the ``None`` a name is cleared with:
-            # ``siteMapper = SiteMapper(taskBuffer)`` and, at the end of the
-            # daemon, ``siteMapper = None``.  The evidence for a local is all in
-            # this function, so it is read rather than asked for; the answer
-            # is a class only where every assignment says the same one.
-            bound = [
-                value
-                for value in self.assigned(func).get(expression.id, [])
-                if not (isinstance(value, ast.Constant) and value.value is None)
-            ]
-            held = self._with_held(file, func, expression.id, depth)
-            if not bound and held is None and not isinstance(func, ast.Module):
-                return self._outside_instance(file, expression.id, depth)
-            found = {self.of_expression(file, func, value, depth + 1) for value in bound}
-            if held is not None:
-                found.add(held)
-            return found.pop() if len(found) == 1 else None
+            # What a name is depends on the function, the name and how deep
+            # the question already is -- not on which ``Name`` asked.
+            # ``JobGenerator`` rebinds locals from calls on locals that are
+            # rebound too, and reading each afresh cost the product of their
+            # assignment counts: a census stopped in that one file for hours.
+            # The function is kept with the answer, so its id is not reused.
+            key = (file, id(func), expression.id, depth)
+            hit = self._names.get(key)
+            if hit is not None and hit[0] is func:
+                return hit[1]
+            answer = self._of_name(file, func, expression.id, depth)
+            self._names[key] = (func, answer)
+            return answer
         if (
             isinstance(expression, ast.Attribute)
             and isinstance(expression.value, ast.Name)
