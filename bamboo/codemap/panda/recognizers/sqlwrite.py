@@ -1057,9 +1057,14 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
                 for execution in sql.executions(func)
                 for statement in (execution.sql,)
             }
-            explained += sum(1 for text in assembled if text in run)
+            # In the spelling the runs use.  A ``.format`` field the call could
+            # not fill is ``{}`` in the run and still ``{0}`` in the statement
+            # assembled, and comparing them as written counted
+            # ``getUserJobMetadata``'s query as one nothing runs.
+            seen = {text for text in assembled if values.blank_fields(text) in run}
+            explained += len(seen)
             for text, name in sorted(assembled.items()):
-                if text in run:
+                if text in seen:
                     continue
                 unexplained.append(
                     Unexplained(

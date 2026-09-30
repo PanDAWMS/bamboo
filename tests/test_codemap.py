@@ -2877,6 +2877,23 @@ def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
     ]
 
 
+def test_a_query_whose_table_the_call_leaves_open_counts_as_read():
+    """The run spells the unfilled field ``{}``; the statement assembled still spells it ``{0}``."""
+    source = (
+        "def f(self, pairs):\n"
+        "    sqlC = 'SELECT j.PandaID FROM {0} j WHERE j.jediTaskID=:t '\n"
+        "    for table in pairs:\n"
+        "        self.cur.execute(sqlC.format(table) + comment, varMap)\n"
+    )
+
+    (stat,), unexplained = sqlwrite.read_coverage(
+        [_module(source, "pandaserver/taskbuffer/db_proxy_mods/job_standalone_module.py")]
+    )
+
+    assert (stat.candidates, stat.explained) == (1, 1)
+    assert unexplained == []
+
+
 def test_an_unreadable_piece_leaves_a_hole_rather_than_dropping_the_statement():
     """A run-time operand is a hole, the same as one inside an f-string."""
     source = (
