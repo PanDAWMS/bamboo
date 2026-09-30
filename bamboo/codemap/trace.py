@@ -2383,6 +2383,7 @@ class _Walk:
         bindings: list,
         loops: list,
         caught: list,
+        fills: Sequence[ast.AST] = (),
     ) -> tuple[list, list, list]:
         """Keep only the bindings inside the caller's stretch, when any are.
 
@@ -2397,6 +2398,12 @@ class _Walk:
         no binding in the stretch is one the statement did not fill, and there
         the whole function is the right place to look.  ``xmlIDs`` above the
         same exit is filled far from the statement and still explains it.
+
+        *fills* -- ``seen[k] = []``, ``seen.add(k)`` -- are not evidence that
+        the statement filled the name.  A fill adds to what the name holds and
+        binds nothing anew, so one inside the stretch left ``archiveJob``'s
+        ``toBeClosedSubList = {}``, built above the loop, cut away from the
+        test that reads it first.
 
         The starting function only.  Deeper frames are other files, where
         these line numbers mean something else.
@@ -2415,7 +2422,10 @@ class _Walk:
             )
             return low <= getattr(site, "lineno", 0) <= high
 
-        if not any(here(node) for node in (*bindings, *loops, *caught)):
+        filled = {id(node) for node in fills}
+        if not any(
+            here(node) for node in (*bindings, *loops, *caught) if id(node) not in filled
+        ):
             return bindings, loops, caught
         return (
             [node for node in bindings if here(node)],
@@ -2525,7 +2535,7 @@ class _Walk:
             bindings.extend(mutated)
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
-        bindings, loops, caught = self._within(frame, bindings, loops, caught)
+        bindings, loops, caught = self._within(frame, bindings, loops, caught, mutated)
         bindings, loops, caught = self._reaching(
             frame, bindings, loops, caught, at, [pathcond.site_of(node) for node in mutated]
         )

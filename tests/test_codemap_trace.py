@@ -1276,6 +1276,37 @@ class Sweeper:
     assert [step.line for step in ours if step.kind == models.TRACE_BINDING] == [3]
 
 
+def test_a_fill_in_the_stretch_keeps_the_container_built_outside_it(tmp_path):
+    """A fill adds to what the name holds; it does not bind the name anew.
+
+    ``archiveJob`` builds ``toBeClosedSubList = {}`` above its loop and fills
+    it by item inside the statement's stretch.  Counting the fill as the
+    stretch's own binding dropped the ``{}`` the test on the way reads first.
+    """
+    roots = _tree(
+        tmp_path,
+        sweeper="""\
+class Sweeper:
+    def run(self):
+        seen = {}
+        for row in self.query():
+            if row.key not in seen:
+                seen[row.key] = []
+                row.status = 1
+""",
+    )
+
+    ours, _note = _walk(
+        roots, file="sweeper", owner="run", lines=[7], bindings_within=(4, 7)
+    )
+
+    assert [
+        step.line
+        for step in ours
+        if step.kind == models.TRACE_BINDING and step.name == "seen"
+    ] == [3, 6]
+
+
 def test_a_header_above_a_shown_line_survives_the_region(tmp_path):
     """The nesting is what a reader is here for, so it is not cut by its line.
 
