@@ -32,6 +32,7 @@ and the weaker one: ``self.site_mapper`` is the same ``SiteMapper`` as
 from __future__ import annotations
 
 import ast
+import builtins
 from typing import Callable, Optional
 
 from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
@@ -48,6 +49,10 @@ from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
 #: the class, so a class of the same name elsewhere is not this one.
 INTERFACE_CLASSES = {
     "pandaserver/brokerage/SiteMapper.py::SiteMapper": "CRIC site declaration",
+    # ``rucioAPI = RucioAPI()`` at the foot of ``ddm.py``, imported by name
+    # everywhere the server registers, attaches or erases a dataset.  The
+    # attribute table's ``ddmIF`` is JEDI's; the server's never had a name.
+    "pandaserver/dataservice/ddm.py::RucioAPI": "DDM / Rucio",
 }
 
 #: ``self.<attribute>`` -> the system on the other side of it.
@@ -73,7 +78,15 @@ EXTERNAL_INTERFACES = {
 #: executed a few lines above, and the map has read that statement.
 DATABASE_INTERFACES = {"taskBufferIF", "taskBuffer", "cur"}
 
+#: Where a method the task buffer is asked for runs its statements: every
+#: ``TaskBuffer`` and ``JediTaskBuffer`` method forwards to the proxy's method
+#: of the same name, and the proxy is thirteen mixins of statements.  The
+#: walk reads the statement there to say which table and which key a value
+#: the database supplies was asked with.
+DATABASE_PROXY = ("pandaserver/taskbuffer/OraDBProxy.py", "DBProxy")
+
 _CONFIG_CALL = "getConfigValue"
+_BUILTINS = frozenset(dir(builtins))
 _CONFIG_MODULE = "jedi_config"
 
 Resolver = Callable[[str], Optional[ast.expr]]
@@ -97,18 +110,29 @@ def _called(func: ast.expr) -> str:
 
 
 def _config_key(call: ast.Call) -> str:
-    """The literal arguments of a config lookup, which are its key.
+    """The arguments of a config lookup, which are its key, each as the code spells it.
 
-    Template keys (``SCOUT_NUM_CPU_INEFFICIENT_{label}``) come back as written.
-    Rendering them would need the label, which is another walk; the key as the
-    code spells it is already what a person changes.
+    A template key comes back as written -- ``PENDING_TIMEOUT_{prodSourceLabel}``
+    -- and a name as ``{vo}``: rendering them would need their values, which
+    is another walk, and the key as written is what a person changes.  They
+    were dropped before, so ``getConfigValue("watchdog",
+    f"PENDING_TIMEOUT_{prodSourceLabel}", "jedi", vo)`` said ``watchdog.jedi``,
+    a key that is not in the table.
     """
-    literals = [
-        argument.value
-        for argument in call.args
-        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
-    ]
-    return ".".join(literals) if literals else _text(call)
+    parts: list[str] = []
+    for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            parts.append(argument.value)
+        elif isinstance(argument, ast.JoinedStr):
+            parts.append(
+                "".join(
+                    piece.value if isinstance(piece, ast.Constant) else "{" + _text(piece.value) + "}"
+                    for piece in argument.values
+                )
+            )
+        else:
+            parts.append("{" + _text(argument) + "}")
+    return ".".join(parts) if parts else _text(call)
 
 
 def _base(attribute: ast.Attribute) -> tuple[Optional[ast.expr], str]:
@@ -194,6 +218,28 @@ def _terminal_of(
     return None
 
 
+def _hands_its_arguments_on(call: ast.Call) -> bool:
+    """Whether a call's value is made of its arguments, so they say where it came from.
+
+    ``int(getConfigValue(...))`` is the configuration's value, converted.
+    ``self.adder_plugin_class(self.job, taskBuffer=self.taskBuffer)`` is a
+    plugin built *with* the task buffer, and nothing the database returned: a
+    function of PanDA's own makes its value in its body, and the walk goes
+    there.  So the arguments are read for a builtin, and for a call on a value
+    -- ``x.split(":")``, ``d.get(k)`` -- and not for a call on ``self`` or on a
+    name the code defines.
+    """
+    called = call.func
+    if isinstance(called, ast.Name):
+        return called.id in _BUILTINS
+    if isinstance(called, ast.Attribute):
+        root = called.value
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        return not (isinstance(root, ast.Name) and root.id == "self")
+    return True
+
+
 def classify(
     expression: ast.expr,
     resolve: Optional[Resolver] = None,
@@ -206,9 +252,21 @@ def classify(
     value came from the database call and the config key is an argument to it.
     Returning one rather than all of them keeps the step's answer a single
     category, which is what "where did this come from" means.
+
+    A call's arguments are read only where they make its value -- see
+    :func:`_hands_its_arguments_on`.  Read everywhere, one argument that was
+    the task buffer made a plugin's construction "a value the database
+    supplies", and the walk stopped at the object whose ``result`` it was
+    asking about.
     """
-    for node in ast.walk(expression):
+    queue: list[ast.AST] = [expression]
+    while queue:
+        node = queue.pop(0)
         found = _terminal_of(node, resolve, typed)
         if found is not None:
             return found
+        if isinstance(node, ast.Call) and not _hands_its_arguments_on(node):
+            queue.append(node.func)
+            continue
+        queue.extend(ast.iter_child_nodes(node))
     return "", ""

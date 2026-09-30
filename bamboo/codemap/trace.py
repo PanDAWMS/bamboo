@@ -69,6 +69,7 @@ from bamboo.codemap.models import (
     SKELETON_PRINT,
     STOP_EXTERNAL,
     STOP_PARAMETER,
+    STOP_UPSTREAM,
     TRACE_BINDING,
     TRACE_HANDOVER,
     TRACE_LOOP,
@@ -1291,12 +1292,25 @@ def _raised_in(node: ast.AST, classify: Classifier, resolve, typed=None) -> tupl
         block = getattr(ancestor, "parent", None)
         if not isinstance(block, ast.Try):
             break
+        # Every call in the body that could have raised, not the first: the
+        # handler in ``AdderAtlasPlugin.execute`` was put down to CRIC because
+        # ``getSite`` is the first classifiable call in a body that also
+        # registers files with Rucio.  The category stays the first one's; the
+        # detail names each, so a traceback's frame can be matched to one.
+        found: dict[str, tuple[str, str]] = {}
         for statement in block.body:
             for sub in ast.walk(statement):
                 if isinstance(sub, ast.Call):
                     terminal, detail = classify(sub, resolve, typed)
                     if terminal:
-                        return terminal, detail
+                        found.setdefault(_text(sub.func), (terminal, detail))
+        if len(found) == 1:
+            return next(iter(found.values()))
+        if found:
+            first = next(iter(found.values()))[0]
+            return first, "raised by one of: " + "; ".join(
+                f"{called} ({detail})" for called, (_terminal, detail) in found.items()
+            )
         break
     return "", ""
 
@@ -1349,6 +1363,7 @@ class _Walk:
         #: ``_message_sites`` per (function, spelling): a function with a
         #: hundred logging calls asks for the same local a hundred times.
         self._sites: dict[tuple[int, str], tuple] = {}
+        self._asked: dict[str, str] = {}
         self.types = _Types(roots, self.parsed)
         self._declared: dict[tuple[str, str, str], Optional[str]] = {}
         self.calls = calls_mod.Calls(self.types)
@@ -1442,7 +1457,43 @@ class _Walk:
                 f"the walk's {what} budget ran out; what follows is part of the answer"
             )
 
+    def database_asked(self, method: str) -> str:
+        """``reads jobsDefined4, jobsActive4 by :jediTaskID`` for the proxy's *method*, or ``""``.
+
+        The step that stops at "a value the database supplies" named the
+        method and nothing else: which table the value came from, and by what
+        key, were one proxy method away and unsaid.  Read from the statements
+        the method runs, the way the build reads them.
+        """
+        if method in self._asked:
+            return self._asked[method]
+        from bamboo.codemap.panda import sql as sql_mod
+        from bamboo.codemap.panda.provenance import DATABASE_PROXY
+
+        said = ""
+        cls = self.types.class_def(*DATABASE_PROXY)
+        found = self.types.method(DATABASE_PROXY[0], cls, method) if cls is not None else None
+        if found is not None:
+            _where, func = found
+            tables: list[str] = []
+            keys: list[str] = []
+            for run in sql_mod.executions(func):
+                for reference in sql_mod._TABLE_REFERENCE.findall(run.sql):
+                    _add(tables, sql_mod._table_of(reference))
+                for key in re.findall(r":(\w+)", sql_mod.where_clause(run.sql)):
+                    _add(keys, f":{key}")
+            if tables:
+                said = f"reads {', '.join(tables[:6])}" + (
+                    f" by {', '.join(keys[:6])}" if keys else ""
+                )
+        self._asked[method] = said
+        return said
+
     def record(self, step: TraceStep) -> bool:
+        if step.terminal == STOP_UPSTREAM and step.detail and " " not in step.detail:
+            asked = self.database_asked(step.detail)
+            if asked:
+                step.detail = f"{step.detail} -- {asked}"
         if self.crossing:
             if self.crossed >= self.budget.crossed_steps:
                 self._exhausted("steps")
@@ -1457,14 +1508,24 @@ class _Walk:
         return True
 
     def drain(self) -> None:
-        """Explain everything asked: the function's own names first, then beyond it."""
+        """Explain everything asked: the function's own names first, then beyond it.
+
+        Once the walk has gone beyond the function it stays there for the
+        budget's sake: a name of the function asked again from a call that
+        came back to it -- the argument that filled a parameter -- is spent
+        from the crossing's allowance, not from what the function's own answer
+        was given.
+        """
+        self.crossing = False
+        while self.queue:
+            held, name, depth, at = self.queue.popleft()
+            self.explain(held, name, depth, at)
+        self.crossing = True
         while self.queue or self.beyond:
             if self.queue:
-                self.crossing = False
                 held, name, depth, at = self.queue.popleft()
                 self.explain(held, name, depth, at)
             else:
-                self.crossing = True
                 self.beyond.popleft()()
         self.crossing = False
 

@@ -11,6 +11,7 @@ production.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -2751,3 +2752,106 @@ def f(task):
     said = _said(_walked_in(roots, "m", "f", [4]))
 
     assert ("binding", "returnMap", "f", 3, "task.maxPSS") in said
+
+
+# ---------------------------------------------------------------------------
+# Where a value stops: what it was asked with, and what could have raised
+# ---------------------------------------------------------------------------
+
+
+def test_a_plugin_built_with_the_task_buffer_is_not_the_databases_value():
+    """An argument that is the task buffer does not make the call's value a row."""
+    expression = ast.parse(
+        "self.adder_plugin_class(self.job, taskBuffer=self.taskBuffer)", mode="eval"
+    ).body
+
+    assert provenance.classify(expression) == ("", "")
+
+
+def test_a_builtin_still_hands_on_where_its_argument_came_from():
+    expression = ast.parse(
+        'int(self.getConfigValue("dbproxy", "SCOUT_RAMCOUNT_RANK", "jedi"))', mode="eval"
+    ).body
+
+    assert provenance.classify(expression) == (
+        models.STOP_CONFIG,
+        "dbproxy.SCOUT_RAMCOUNT_RANK.jedi",
+    )
+
+
+def test_a_configuration_key_is_written_as_the_code_spells_every_part_of_it():
+    """``watchdog.jedi`` was a key that is not in the table."""
+    expression = ast.parse(
+        'self.taskBufferIF.getConfigValue("watchdog", f"PENDING_TIMEOUT_{label}", "jedi", vo)',
+        mode="eval",
+    ).body
+
+    assert provenance.classify(expression)[1] == "watchdog.PENDING_TIMEOUT_{label}.jedi.{vo}"
+
+
+def test_a_handler_names_every_call_in_its_body_that_could_have_raised(tmp_path):
+    roots = _server(
+        tmp_path,
+        **{
+            "dataservice/ddm.py": "class RucioAPI:\n    def register(self, x):\n        return x\n\nrucioAPI = RucioAPI()\n",
+            "dataservice/plugin.py": '''\
+from pandaserver.dataservice.ddm import rucioAPI
+
+
+def register(self, files):
+    is_fatal = False
+    try:
+        rucioAPI.register(files)
+        rucioAPI.register(files[0])
+        self.siteMapper.getSite("x")
+    except Exception as e:
+        is_fatal = True
+    return is_fatal
+''',
+        },
+    )
+
+    walked = trace_mod.walk(
+        roots,
+        file="pandaserver/dataservice/plugin.py",
+        owner="pandaserver/dataservice/plugin.py::register",
+        lines=[12],
+        classify=provenance.classify,
+    )
+
+    (step,) = [s for s in walked.steps if s.line == 11 and s.name == "is_fatal"]
+    assert step.terminal == models.STOP_EXTERNAL
+    assert step.detail == (
+        "raised by one of: rucioAPI.register (DDM / Rucio); "
+        "self.siteMapper.getSite (CRIC site declaration)"
+    )
+
+
+def test_a_value_the_database_supplies_says_which_table_and_key_it_was_asked_with(tmp_path):
+    roots = _server(
+        tmp_path,
+        **{
+            "taskbuffer/OraDBProxy.py": '''\
+class DBProxy:
+    def getPandaIDsWithTask_JEDI(self, jediTaskID, onlyActive):
+        sql = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+''',
+            "daemons/commando.py": '''\
+def run(self, jediTaskID, log):
+    pandaIDs = self.taskBufferIF.getPandaIDsWithTask_JEDI(jediTaskID, True)
+    log.info(f"waiting {len(pandaIDs)} jobs for soft finish")
+''',
+        },
+    )
+
+    walked = trace_mod.walk_from_print(
+        roots, file="pandaserver/daemons/commando.py", line=3, classify=provenance.classify
+    )
+
+    (step,) = [s for s in walked.steps if s.name == "pandaIDs"]
+    assert step.terminal == models.STOP_UPSTREAM
+    assert step.detail == "getPandaIDsWithTask_JEDI -- reads jobsActive4 by :jediTaskID"
