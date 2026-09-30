@@ -728,6 +728,14 @@ def _parts(
                         parts.append((node.lineno, "+=", after, node))
                     continue
                 text = rendered_text(_with_lists(node.value, lists))
+                if text is None and not isinstance(node.value, ast.Name):
+                    composed = _composed_texts(func, node.value, seen)
+                    if composed:
+                        # ``sql = sqlH + sqlL`` and ``re.sub(p, r, sql_y)``:
+                        # each statement the names hold, put together or
+                        # rewritten, as alternatives in this one place.
+                        parts.extend((node.lineno, "=", one, node) for one in composed)
+                        continue
                 if text is None and isinstance(node.value, ast.Name):
                     # ``sql = sqlTU`` -- the statement was built under another
                     # name and *chosen* here.  The choosing assignment is the
@@ -802,6 +810,125 @@ def _wrapping(value: ast.expr, name: str) -> Optional[tuple[str, str]]:
         return "".join(one if one is not None else _BARE_FIELD for one in rendered)
 
     return text(operands[: at[0]]), text(operands[at[0] + 1 :])
+
+
+def _composed_texts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, value: ast.expr, seen: frozenset[str]
+) -> list[str]:
+    """The statements *value* builds out of names this function holds statements under.
+
+    Two spellings: a ``+`` of names and literals, each name standing for the
+    one statement it holds (a piece that renders nothing is a hole); and
+    ``re.sub(<literal>, <literal>, <name>)``, run on each statement the name
+    holds -- the pattern and the replacement are written down, so the result is
+    computed, not guessed (see :func:`_rewritten_values`).
+    """
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "sub"
+        and len(value.args) >= 3
+        and _is_literal(value.args[0])
+        and _is_literal(value.args[1])
+        and isinstance(value.args[2], ast.Name)
+    ):
+        try:
+            return [
+                re.sub(value.args[0].value, value.args[1].value, text)
+                for text in variants(func, value.args[2].id, seen)
+            ][:_MAX_BRANCH_VARIANTS]
+        except re.error:
+            return []
+    operands = _concatenated(value)
+    if len(operands) < 2 or not any(isinstance(operand, ast.Name) for operand in operands):
+        return []
+    pieces: list[list[str]] = []
+    for operand in operands:
+        if isinstance(operand, ast.Name):
+            held = variants(func, operand.id, seen)
+            if len(held) > 1:
+                # Two names each built several ways are not crossed: which
+                # header goes with which tail is decided by the branches that
+                # built them, and pairing every one with every other makes
+                # statements no run sends -- a header with no VALUES.
+                return []
+            pieces.append(held or [_BARE_FIELD])
+        elif isinstance(operand, ast.BinOp) and isinstance(operand.op, ast.Mod):
+            pieces.append(_percent_texts(func, operand, seen) or [_BARE_FIELD])
+        else:
+            rendered = rendered_text(operand)
+            pieces.append([rendered if rendered is not None else _BARE_FIELD])
+    if all(piece == [_BARE_FIELD] for piece in pieces):
+        return []
+    if math.prod(len(piece) for piece in pieces) > _MAX_BRANCH_VARIANTS:
+        return []
+    return ["".join(combination) for combination in itertools.product(*pieces)]
+
+
+def _percent_texts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, value: ast.BinOp, seen: frozenset[str]
+) -> list[str]:
+    """``template % (a, b)``: the template's statements, each ``%s`` filled from what its argument holds.
+
+    An argument the source does not write out -- ``JobSpec.columnNames()`` --
+    stays a hole; a table name a loop or a list supplies fills it once per
+    name, as :func:`_table_choices` does for an f-string.
+    """
+    head = _concatenated(value.left)
+    templates: list[str] = [""]
+    for operand in head:
+        if isinstance(operand, ast.Name):
+            held = variants(func, operand.id, seen)
+        else:
+            rendered = rendered_text(operand)
+            held = [rendered] if rendered is not None else []
+        if not held:
+            return []
+        templates = [one + more for one in templates for more in held]
+    arguments = value.right.elts if isinstance(value.right, ast.Tuple) else [value.right]
+    fills = [_literal_values(func, argument) or [_BARE_FIELD] for argument in arguments]
+    found: list[str] = []
+    for template in templates:
+        if template.count(_PERCENT_S) != len(fills):
+            found.append(template.replace(_PERCENT_S, _BARE_FIELD))
+            continue
+        for combination in itertools.product(*fills):
+            text = template
+            for fill in combination:
+                text = text.replace(_PERCENT_S, fill, 1)
+            found.append(text)
+    return found[:_MAX_BRANCH_VARIANTS]
+
+
+def _through_name(func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr) -> ast.expr:
+    """*expression*, or the ``%``/``.format`` expression the name at its head was bound to once.
+
+    ``sql_exe = (sql_jt + comment) % table`` and then ``execute(sql_exe,
+    ...)`` is ``execute((sql_jt + comment) % table, ...)`` read one line
+    apart: the table is filled in by the ``%``, which :func:`_call_site_fill`
+    reads where it is written into the call.
+    """
+    head = _concatenated(expression)[0]
+    if not isinstance(head, ast.Name) or variants(func, head.id):
+        return expression
+    bound = [
+        node.value
+        for node in ast.walk(func)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and node.value is not None
+        and enclosing_function(node) is func
+        and any(isinstance(target, ast.Name) and target.id == head.id for target in targets_of(node))
+    ]
+    if len(bound) != 1:
+        return expression
+    value = bound[0]
+    percent = isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mod)
+    formatted = (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "format"
+    )
+    return value if percent or formatted else expression
 
 
 def _fold(parts: list[tuple[int, str, str, ast.stmt]]) -> str:
@@ -2231,7 +2358,7 @@ def executions(
         # and a fragment the reader could not follow was missing from all of
         # them.
         stops: list[Stop] = []
-        statement, fillers, percent = _call_site_fill(func, expression)
+        statement, fillers, percent = _call_site_fill(func, _through_name(func, expression))
         operands = _concatenated(statement)
         sources: dict[str, list[ast.stmt]] = {}
         reaching: dict[str, list[ast.stmt]] = {}

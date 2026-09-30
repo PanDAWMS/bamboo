@@ -746,3 +746,34 @@ def test_order_and_limit_are_read_off_the_statement():
 
     assert sql.ordering(text) == (["currentPriority DESC, PandaID ASC"], [(":njobs", False)])
     assert sql.ordering("SELECT a FROM t WHERE rownum<3 ORDER BY a FOR UPDATE") == (["a"], [("3", True)])
+
+
+def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
+    from bamboo.codemap.panda import sql
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "import re\n"
+            "\n"
+            "def stats(cur, flag):\n"
+            "    sql_jt = 'SELECT computingSite FROM %s WHERE jobStatus=:s '\n"
+            "    for table in ('ATLAS_PANDA.jobsActive4', 'ATLAS_PANDA.jobsDefined4'):\n"
+            "        sql_exe = sql_jt % table\n"
+            "        cur.execute(sql_exe, {':s': 'running'})\n"
+            "\n"
+            "def cached(cur):\n"
+            "    base = 'SELECT a FROM t WHERE b=:b '\n"
+            "    hinted = re.sub('SELECT ', 'SELECT /*+ RESULT_CACHE */ ', base)\n"
+            "    cur.execute(hinted, {':b': 1})\n"
+        ),
+    )
+    calls = _calls(roots)
+    _func, runs = _runs(calls, "db", "stats")
+    _func, cached = _runs(calls, "db", "cached")
+
+    assert sorted(run.sql for run in runs) == [
+        "SELECT computingSite FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s ",
+        "SELECT computingSite FROM ATLAS_PANDA.jobsDefined4 WHERE jobStatus=:s ",
+    ]
+    assert [run.sql for run in cached] == ["SELECT /*+ RESULT_CACHE */ a FROM t WHERE b=:b "]
