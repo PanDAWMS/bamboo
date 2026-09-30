@@ -141,6 +141,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._version: str = ""
         self._modules: list[SourceModule] = []
         self._calls = None
+        self._stop_disagreements: list[str] = []
 
     @property
     def map_id(self) -> str:
@@ -365,6 +366,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # build could not read, and a gate that could only see the first half
         # would report every unreadable ``WHERE`` as a disagreement.
         fragment.reading_stops.extend(sqlwrite.distinct_stops(reading_stops))
+        self._stop_disagreements = _stops_read_again(
+            self._modules, self._roots, fragment.reading_stops
+        )
         fragment.subjects.extend(sql_subjects)
         fragment.junctions.extend(sql_junctions)
         fragment.coverage.extend(sql_coverage)
@@ -599,6 +603,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def silent_cuts(self) -> int:
         """Guarded ``continue``s in a loop that drop a candidate without saying why."""
         return getattr(self, "_silent_cuts", 0)
+
+    @property
+    def stop_disagreements(self) -> list[str]:
+        """Functions whose stops the answer would read differently from the build -- see ``_stops_read_again``."""
+        return self._stop_disagreements
 
     @property
     def unexplained_steps(self) -> list[str]:
@@ -876,3 +885,39 @@ def _attach_called_from(junctions, calls) -> None:
                 break
             by_owner[junction.owner] = found
         junction.called_from = by_owner[junction.owner]
+
+
+def _stops_read_again(modules, roots, stops) -> list[str]:
+    """``owner: build [...] / answer [...]`` for each function the two readings of its stops disagree on.
+
+    The answer does not store the stops: ``derive-strategy`` reads a mover's
+    statements again with :func:`sqlwrite.statement_stops`, over a reader of
+    the one file it was asked about (``strategy._mover_gaps``).  Two readings
+    of one thing are how two counts come to disagree, so the build reads
+    every function that way as well and says where they part.  The row
+    precondition stops are the write's, and ``statement_stops`` leaves them to
+    ``extract`` -- they are not compared.
+    """
+    from bamboo.codemap.calls import Calls, Types
+
+    built: dict[str, set[tuple]] = {}
+    for stop in stops:
+        if stop.reason == sqlwrite.PRECONDITION_BIND_UNSETTLED:
+            continue
+        built.setdefault(stop.owner, set()).add((stop.reason, stop.detail, stop.line))
+    found: list[str] = []
+    for module in modules:
+        calls = Calls(Types(roots, {module.rel_path: (module.blob_sha, module.tree)}))
+        with sql.across_calls(calls):
+            for func, _cls in functions_with_owner(module.tree):
+                owner = f"{module.rel_path}::{func.name}"
+                again = {
+                    (stop.reason, stop.detail, stop.line)
+                    for stop in sqlwrite.statement_stops(func, module.rel_path)
+                }
+                if again != built.get(owner, set()) and (again or owner in built):
+                    found.append(
+                        f"{owner}: build {sorted(built.get(owner, set()) - again)[:2]}"
+                        f" / answer {sorted(again - built.get(owner, set()))[:2]}"
+                    )
+    return sorted(set(found))

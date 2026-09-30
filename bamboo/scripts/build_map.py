@@ -728,6 +728,21 @@ def main(
             f"\nnot promoted: {dropped[0]} subject(s), {dropped[1]} junction(s) "
             "— no criterion fired"
         )
+    disagreeing = getattr(plugin, "stop_disagreements", None)
+    if disagreeing is not None:
+        # The answer reads a mover's stops again rather than from the map;
+        # a function the two readings part on answers differently from what
+        # the build reported.
+        if disagreeing:
+            all_passed = False
+            click.echo(
+                f"\n[FAIL] stops-read-the-same-way: {len(disagreeing)} function(s) the answer"
+                " would read differently from the build"
+            )
+            for row in disagreeing[:top]:
+                click.echo(f"      - {row}")
+        else:
+            click.echo("\n[PASS] stops-read-the-same-way: the answer re-reads every function's stops as the build did")
     unexplained = getattr(plugin, "unexplained_steps", [])
     if unexplained:
         # The funnel will report candidates disappearing here and the map has
