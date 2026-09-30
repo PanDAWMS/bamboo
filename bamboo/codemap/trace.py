@@ -2940,9 +2940,13 @@ class _Walk:
             callee = self._callee_frame(target)
             if callee is None:
                 continue
-            self.passed.setdefault((callee.file, callee.owner), []).append(
-                (frame, call, calls_mod.bind(call, target))
-            )
+            # One entry per call, however many ways the walk arrived at it: the
+            # ten statements under one ``if`` each enter the test's
+            # ``JediTaskSpec.statusToIncexec()``, and a parameter read there was
+            # handed over once for each of them.
+            held = self.passed.setdefault((callee.file, callee.owner), [])
+            if not any(one is call for _caller, one, _bound in held):
+                held.append((frame, call, calls_mod.bind(call, target)))
             self.entered.add((callee.file, callee.owner))
             entered.append(callee.owner)
             # Once per function and way of taking its value: a second call of

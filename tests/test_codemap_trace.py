@@ -2740,6 +2740,28 @@ def f(a, b):
     assert "unrelated()" not in entered
 
 
+def test_a_call_the_walk_arrives_at_twice_hands_its_arguments_over_once(tmp_path):
+    """Two statements under one ``if`` each enter its test's call; ``x`` was passed once."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def allowed(x):
+    return x in ("a", "b")
+
+def f(s, p, q):
+    if allowed(s):
+        p = 1
+        q = 2
+    spec.status = p + q
+''',
+    )
+
+    walked = _walked_in(roots, "m", "f", [8])
+    handed = [(s.line, s.value) for s in walked.steps if s.kind == "handover" and s.name == "x"]
+
+    assert handed == [(5, "s")]
+
+
 def test_an_entry_read_by_its_key_is_what_the_callee_put_under_it(tmp_path):
     """``ok, data = get(...)`` then ``data["ram"]``: the callee's ``returnMap["ram"] = ...``."""
     roots = _tree(
