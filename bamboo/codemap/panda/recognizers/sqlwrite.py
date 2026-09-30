@@ -538,6 +538,12 @@ def extract(
                             # they bound this write as much as its own does.
                             row_precondition=preconditions,
                             setters=setters,
+                            beside=lambda node, terms=sorted(statement.preconditions.values()): [
+                                sql.settled_precondition(
+                                    term, func, run.varmap, run.window, settle, beside=node
+                                )[0]
+                                for term in terms
+                            ],
                         )
             # The executions nothing was read out of, last: they have no run
             # to hang on, and saying them is what tells "read in full" from
@@ -802,8 +808,14 @@ def _record(
     outcomes: list[tuple[str, int, ast.stmt, list[str], ast.stmt]],
     row_precondition: list[str],
     setters: dict[str, object],
+    beside=None,
 ) -> None:
-    """Add one branch per decided value to this write site's junction."""
+    """Add one branch per decided value to this write site's junction.
+
+    *beside*, where given, settles the row precondition for one branch from
+    the binds that can run with the statement deciding its value -- see
+    :func:`sql.settled_precondition`.
+    """
     subject = SubjectNode.make_name(spec_class, attribute)
     owner = f"{module.rel_path}::{func.name}"
     name = JunctionNode.make_name(map_id, subject, owner)
@@ -851,7 +863,7 @@ def _record(
             Branch(
                 outcome=outcome,
                 path_condition=condition,
-                row_precondition=row_precondition,
+                row_precondition=beside(node) if beside is not None else row_precondition,
                 order=len(junction.branches),
                 tier=tier,
                 tags=tags,

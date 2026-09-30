@@ -2502,6 +2502,7 @@ def settled_precondition(
     varmap: Optional[str],
     window: Optional[tuple[int, int]],
     settle,
+    beside: Optional[ast.stmt] = None,
 ) -> tuple[str, bool]:
     """*term* with its bind replaced by the value, and whether that happened.
 
@@ -2521,13 +2522,22 @@ def settled_precondition(
     Several values is not ambiguity -- a method that runs one statement twice
     binds two -- so they are rendered as the ``IN`` the statement would have
     spelled had they been literals, and a negated test as ``NOT IN``.
+
+    *beside* is one branch's deciding statement: only the binds that can run
+    with it are read.  ``getTasksToExecCommand_JEDI`` resumes a job
+    (``throttled`` -> ``activated``) in one arm and pauses it in the other,
+    and one ``IN (activated,throttled)`` for both said the resume could move
+    an ``activated`` row.
     """
     match = _PRECONDITION_BIND.match(term.strip())
     if match is None or varmap is None:
         return term, False
     column, operator, key = match.groups()
     found: set[str] = set()
+    alongside = path_condition(beside) if beside is not None else None
     for bind in bound_values(func, varmap, key, window):
+        if alongside is not None and exclusive(path_condition(bind.site), alongside):
+            continue
         found.update(settle(bind.value, func))
     if not found:
         return term, False

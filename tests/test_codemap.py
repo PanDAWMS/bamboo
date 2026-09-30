@@ -2921,6 +2921,34 @@ def test_a_negated_guard_on_a_written_column_counts():
     assert statement.preconditions == {"jobStatus": "NOT jobStatus=:ngStatus"}
 
 
+def test_each_branch_carries_the_prior_value_its_own_arm_binds():
+    """A resume and a pause through one statement require opposite rows."""
+    source = '''
+class TaskModule:
+    def command(self, jediTaskID, resume):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        # Two columns: ``status`` alone is declared by several specs, and an
+        # ambiguous table is left unattributed.
+        sqlU += "SET status=:newStatus,oldStatus=NULL "
+        sqlU += "WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        varMap = {}
+        if resume:
+            varMap[":newStatus"] = "running"
+            varMap[":oldStatus"] = "paused"
+        else:
+            varMap[":newStatus"] = "paused"
+            varMap[":oldStatus"] = "running"
+        self.cur.execute(sqlU + comment, varMap)
+'''
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (status,) = [j for j in junctions if j.subject == "JediTaskSpec.status"]
+
+    assert {b.outcome: b.row_precondition for b in status.branches} == {
+        "running": ["status=paused"],
+        "paused": ["status=running"],
+    }
+
+
 def test_a_write_nothing_races_for_records_no_guard():
     """An unguarded write lands whatever the row currently says."""
     text = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
