@@ -130,19 +130,93 @@ def single_definition(
     expression *evaluates to* -- a local holding a declared mapping, which needs
     the tree.
     """
-    found: list[ast.expr] = []
-    for node in ast.walk(func):
-        value = written_value(node)
-        if value is None:
-            continue
-        for target in targets_of(node):
-            if isinstance(target, ast.Name) and target.id == name:
-                found.append(value)
-            elif isinstance(target, ast.Tuple):
-                for element in target.elts:
-                    if isinstance(element, ast.Name) and element.id == name:
-                        found.append(value)
+    found = _index(func).definitions().get(name, ())
     return found[0] if len(found) == 1 else None
+
+
+class _Index:
+    """What one pass over a scope finds, kept on the scope and asked many times.
+
+    Each question used to walk the whole scope: the walk resolves a name at
+    every call it classifies, and ``insertFilesForDataset_JEDI`` is 1100
+    lines, so one arm spent 26 of 91 profiled seconds in
+    :func:`single_definition` alone.  A parsed tree is not changed after it is
+    read, so each pass is made once.  The entries are tuples and every caller
+    gets its own list, so a reader that edits what it was given edits only that.
+
+    Three passes rather than one, because the three questions do not walk the
+    same nodes: :func:`single_definition` and :func:`assigned_expressions`
+    count a nested function's writes and :func:`attribute_expressions` does not.
+    """
+
+    __slots__ = ("scope", "_definitions", "_assigned", "_attributes")
+
+    def __init__(self, scope: ast.AST) -> None:
+        self.scope = scope
+        self._definitions: Optional[dict[str, tuple[ast.expr, ...]]] = None
+        self._assigned: Optional[dict[str, tuple[ast.expr, ...]]] = None
+        self._attributes: Optional[dict[str, tuple[ast.expr, ...]]] = None
+
+    def definitions(self) -> dict[str, tuple[ast.expr, ...]]:
+        """name -> the values an ``=`` writes to it, a tuple's element included."""
+        if self._definitions is None:
+            found: dict[str, list[ast.expr]] = {}
+            for node in ast.walk(self.scope):
+                value = written_value(node)
+                if value is None:
+                    continue
+                for target in targets_of(node):
+                    if isinstance(target, ast.Name):
+                        found.setdefault(target.id, []).append(value)
+                    elif isinstance(target, ast.Tuple):
+                        for element in target.elts:
+                            if isinstance(element, ast.Name):
+                                found.setdefault(element.id, []).append(value)
+            self._definitions = {name: tuple(values) for name, values in found.items()}
+        return self._definitions
+
+    def assigned(self) -> dict[str, tuple[ast.expr, ...]]:
+        """name -> every value bound to it, ``+=`` included (:func:`assigned_expressions`)."""
+        if self._assigned is None:
+            found: dict[str, list[ast.expr]] = {}
+            for node in ast.walk(self.scope):
+                if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                    names = [node.target]
+                else:
+                    names = [t for t in targets_of(node) if isinstance(t, ast.Name)]
+                value = written_value(node)
+                if value is None:
+                    continue
+                for name in names:
+                    found.setdefault(name.id, []).append(value)
+            self._assigned = {name: tuple(values) for name, values in found.items()}
+        return self._assigned
+
+    def attributes(self) -> dict[str, tuple[ast.expr, ...]]:
+        """field -> every value bound to ``self.<field>``, nested functions not entered."""
+        if self._attributes is None:
+            found: dict[str, list[ast.expr]] = {}
+            for node in _own_body(self.scope):
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [node.target]
+                else:
+                    continue
+                for target in targets:
+                    for bound in _bound_names(target):
+                        if node.value is not None:
+                            found.setdefault(bound, []).append(node.value)
+            self._attributes = {field: tuple(values) for field, values in found.items()}
+        return self._attributes
+
+
+def _index(scope: ast.AST) -> _Index:
+    held = getattr(scope, "_pathcond_index", None)
+    if held is None:
+        held = _Index(scope)
+        scope._pathcond_index = held  # type: ignore[attr-defined]
+    return held
 
 
 def assigned_expressions(
@@ -167,18 +241,7 @@ def assigned_expressions(
     f"method {method_name} is forbidden"`` is the write the emit pass has to
     follow to give the 403 any text at all.
     """
-    found: dict[str, list[ast.expr]] = {}
-    for node in ast.walk(func):
-        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-            names = [node.target]
-        else:
-            names = [t for t in targets_of(node) if isinstance(t, ast.Name)]
-        value = written_value(node)
-        if value is None:
-            continue
-        for name in names:
-            found.setdefault(name.id, []).append(value)
-    return found
+    return {name: list(values) for name, values in _index(func).assigned().items()}
 
 
 def attribute_expressions(
@@ -202,19 +265,7 @@ def attribute_expressions(
     ones that reached the arm; the walk would report a condition that never
     dominated the write.
     """
-    found: list[ast.expr] = []
-    for node in _own_body(scope):
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-            targets = [node.target]
-        else:
-            continue
-        for target in targets:
-            for bound in _bound_names(target):
-                if bound == field and node.value is not None:
-                    found.append(node.value)
-    return found
+    return list(_index(scope).attributes().get(field, ()))
 
 
 def _bound_names(target: ast.AST) -> list[str]:

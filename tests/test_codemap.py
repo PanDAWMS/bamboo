@@ -13741,6 +13741,57 @@ def test_a_name_written_twice_explains_no_branch_however_it_is_spelled():
     assert pathcond.single_definition(func, "res") is None
 
 
+def test_a_scope_is_read_once_and_every_caller_gets_answers_of_its_own():
+    """The index kept on a scope answers as a pass over it would, however often asked.
+
+    The three readings walk different nodes -- a nested function's writes count
+    for names and not for ``self.<field>`` -- and a caller editing the list it
+    was handed must not change what the next caller is told."""
+    source = (
+        "def f(self, x):\n"
+        "    a = 1\n"
+        "    a += 2\n"
+        "    b, c = g()\n"
+        "    d: int = 3\n"
+        "    self.status = 'x'\n"
+        "    self.status += 'y'\n"
+        "    self.pair, e = h()\n"
+        "    def inner():\n"
+        "        a = 4\n"
+        "        self.status = 'inner'\n"
+    )
+    func = _func(source)
+
+    def passed_over(name):
+        return [
+            ast.unparse(node.value)
+            for node in ast.walk(func)
+            for target in pathcond.targets_of(node)
+            for element in (target.elts if isinstance(target, ast.Tuple) else [target])
+            if isinstance(element, ast.Name) and element.id == name
+        ]
+
+    for name in ("a", "b", "c", "d", "e", "x"):
+        found = passed_over(name)
+        expected = found[0] if len(found) == 1 else None
+        definition = pathcond.single_definition(func, name)
+        assert (ast.unparse(definition) if definition is not None else None) == expected, name
+    assigned = pathcond.assigned_expressions(func)
+    assert {name: [ast.unparse(v) for v in values] for name, values in assigned.items()} == {
+        "a": ["1", "2", "4"],
+        "d": ["3"],
+    }
+    status = pathcond.attribute_expressions(func, "status")
+    assert [ast.unparse(v) for v in status] == ["'x'", "'y'"]
+    assert [ast.unparse(v) for v in pathcond.attribute_expressions(func, "pair")] == ["h()"]
+
+    assigned["a"].clear()
+    status.clear()
+
+    assert len(pathcond.assigned_expressions(func)["a"]) == 3
+    assert len(pathcond.attribute_expressions(func, "status")) == 2
+
+
 def test_a_branch_is_not_explained_by_the_write_its_else_makes():
     """The same site read through ``path_condition``, which is what the map stores.
 
