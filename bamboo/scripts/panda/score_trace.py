@@ -829,6 +829,72 @@ def _scope_at(roots: dict, file: str, owner: str, line: int):
     return min(holding, key=lambda n: (n.end_lineno or n.lineno) - n.lineno) if holding else tree
 
 
+def _walk_binds(roots: dict, step, where) -> bool:
+    """Whether *step*'s line binds its name by one of the walk's own wider rules.
+
+    Asked of the walk's functions, not restated: a container filled in place
+    (:func:`trace._mutated_bindings`, :func:`trace._self_fills` for a field),
+    a name at the top of the module (:func:`trace._module_bindings`), a field
+    a class body assigns, and an element a key path names.  A
+    second copy of those rules here is the twin that turned twelve honest
+    steps into fabrications once already.
+    """
+    tree = _tree_for(roots, step.file) if step.file else None
+    if where is not None and "[" in step.name:
+        # A key path, ``var_map[':status']``: the line assigns that very
+        # element, or writes the dict with that key in it.
+        held = _statement_holding(where, step.line)
+        targets = (
+            held.targets if isinstance(held, ast.Assign)
+            else [held.target] if isinstance(held, (ast.AugAssign, ast.AnnAssign))
+            else []
+        )
+        if any(ast.unparse(target) == step.name for target in targets):
+            return True
+        try:
+            path = ast.parse(step.name, mode="eval").body
+        except SyntaxError:
+            return False
+        if not isinstance(path, ast.Subscript) or not isinstance(path.slice, ast.Constant):
+            return False
+        value = getattr(held, "value", None)
+        return (
+            any(ast.unparse(target) == ast.unparse(path.value) for target in targets)
+            and isinstance(value, ast.Dict)
+            and any(isinstance(key, ast.Constant) and key.value == path.slice.value for key in value.keys)
+        )
+    if step.name.startswith("self."):
+        field = step.name.split(".", 1)[1]
+        if where is not None:
+            for value in trace_mod._self_fills(where, field):
+                held = _statement_holding(where, value.lineno)
+                if held is not None and held.lineno == step.line:
+                    return True
+        for cls in (node for node in _descend(tree) if isinstance(node, ast.ClassDef)) if tree else ():
+            for statement in cls.body:
+                if statement.lineno != step.line:
+                    continue
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign)
+                    else [statement.target] if isinstance(statement, ast.AnnAssign)
+                    else []
+                )
+                if any(isinstance(target, ast.Name) and target.id == field for target in targets):
+                    return True
+        return False
+    if where is not None:
+        for value in trace_mod._mutated_bindings(where, step.name):
+            held = _statement_holding(where, value.lineno)
+            if held is not None and held.lineno == step.line:
+                return True
+    if tree is not None:
+        for value in trace_mod._module_bindings(tree, step.name):
+            held = _statement_holding(tree, value.lineno)
+            if held is not None and held.lineno == step.line:
+                return True
+    return False
+
+
 def _statement_holding(func: ast.AST, line: int):
     """The innermost statement of *func* on *line*."""
     holding = [
@@ -856,10 +922,15 @@ def _structures_over(func: ast.AST, line: int) -> list[tuple[str, int]]:
         elif isinstance(node, ast.Try) and node.handlers:
             if node.body and node.body[0].lineno <= line <= (node.body[-1].end_lineno or 0):
                 out.append(("try", start))
+        # The body, as for a loop and a ``try``: ``except ... as e`` and
+        # ``with ... as proxy`` bind on their own line, which is the
+        # structure's header and not under it.
         elif isinstance(node, ast.ExceptHandler):
-            out.append(("except", start))
+            if node.body and node.body[0].lineno <= line <= (node.body[-1].end_lineno or 0):
+                out.append(("except", start))
         elif isinstance(node, (ast.With, ast.AsyncWith)):
-            out.append(("with", start))
+            if node.body and node.body[0].lineno <= line <= (node.body[-1].end_lineno or 0):
+                out.append(("with", start))
     return out
 
 
@@ -889,6 +960,7 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
     names = names_complete = 0
     step_total = step_exists = 0
     honest_total = honest_said = 0
+    unsaid_rows: list[str] = []
     calls_total = calls_listed = 0
     module_arms = 0
     stratum_outgrown = 0
@@ -1002,6 +1074,40 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
                     step_exists += 1
                 else:
                     ghost.append(f"{cid}  arm@{step.line} is no statement of this function")
+            elif step.kind == models_mod.TRACE_RETURN:
+                # What a call hands back: the line is a ``return`` of the
+                # function the step names, which is where the value is decided.
+                held = _statement_holding(where, step.line)
+                # A function that falls off its end returns ``None``, and the
+                # step points at its ``def``.
+                implicit = getattr(where, "lineno", None) == step.line and step.value == "None"
+                if isinstance(held, ast.Return) or implicit:
+                    step_exists += 1
+                else:
+                    ghost.append(f"{cid}  {step.name}@{step.line} is no return of {step.owner}")
+            elif step.kind == models_mod.TRACE_HANDOVER and getattr(where, "lineno", None) != step.line:
+                # A crossing: the call on this line of the caller hands the
+                # value over.  Scored against that contract -- the line holds
+                # a call, and what the step says was handed is written in it.
+                held = _statement_holding(where, step.line)
+                text = ast.unparse(held) if held is not None else ""
+                handed = (step.value or "").split("  [")[0][:40]
+                calls_here = [node for node in _descend(held) if isinstance(node, ast.Call)] if held else []
+                # A default is the one value a call does not write: what can
+                # be checked here is that this call does not name the
+                # parameter, and so leaves it to the signature.
+                defaulted = step.detail.startswith("left to the default") and not any(
+                    keyword.arg == step.name for node in calls_here for keyword in node.keywords
+                )
+                spread = step.detail.startswith("passed through * or **") and any(
+                    isinstance(argument, ast.Starred) for node in calls_here for argument in node.args
+                ) or any(keyword.arg is None for node in calls_here for keyword in node.keywords)
+                if calls_here and (handed in text or defaulted or spread):
+                    step_exists += 1
+                else:
+                    ghost.append(
+                        f"{cid}  {step.name}@{step.line} is no call handing {handed!r} in {step.owner}"
+                    )
             elif step.kind == models_mod.TRACE_HANDOVER:
                 # A handover's line is the ``def`` line of the function that
                 # supplied the field -- ``line=getattr(other.func, "lineno")``
@@ -1023,6 +1129,8 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
                     )
             elif step.name and step.line in _binding_lines(where, step.name):
                 step_exists += 1
+            elif step.name and _walk_binds(roots, step, where):
+                step_exists += 1
             else:
                 ghost.append(f"{cid}  {step.name}@{step.line} binds nothing in the source")
 
@@ -1037,10 +1145,17 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
             if not wants:
                 continue
             honest_total += 1
-            honest_said += all(
-                any(said.startswith(f"{kind} at {start}:") for said in step.unseen)
+            unsaid = [
+                f"{kind} at {start}"
                 for kind, start in wants
-            )
+                if not any(said.startswith(f"{kind} at {start}:") for said in step.unseen)
+            ]
+            honest_said += not unsaid
+            if unsaid:
+                unsaid_rows.append(
+                    f"{cid}  {step.kind} {step.name}@{step.line} in {step.owner} "
+                    f"does not say it is under {', '.join(unsaid)}"
+                )
 
         func = _scope_at(roots, case["file"], case["owner"], case["line"])
         if func is None:
@@ -1144,7 +1259,12 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
     click.echo(f"\nbelow it but inside a loop it is in too: {len(in_a_shared_loop)} step(s)")
     for line in in_a_shared_loop:
         click.echo(f"    {line}")
-    for label, rows_ in (("missing", missing), ("fabricated", ghost), ("silent", silent)):
+    for label, rows_ in (
+        ("missing", missing),
+        ("fabricated", ghost),
+        ("silent", silent),
+        ("unsaid", unsaid_rows),
+    ):
         click.echo(f"\n{label}: {len(rows_)}")
         for line in rows_:
             click.echo(f"    {line}")
