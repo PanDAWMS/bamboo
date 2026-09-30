@@ -52,7 +52,7 @@ import re
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from bamboo.codemap.calls import Calls, Types
+from bamboo.codemap.calls import Calls, Target, Types
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -986,6 +986,9 @@ class ReadStatement(NamedTuple):
     #: statement is offered the expression to open next rather than a
     #: ``conditions`` list that is silently short.
     unresolved: tuple[str, ...] = ()
+    #: ``"<call> <- <call> (flag=True): reads a, b"`` for each call site whose
+    #: constants narrow what the statement reads -- see ``place_call_sites``.
+    call_sites: tuple[str, ...] = ()
 
 
 def _render_condition(condition: "sql.Condition", seeds: dict[str, list[int]]) -> str:
@@ -1249,6 +1252,25 @@ def _rows_of(
     return names or fetched
 
 
+def _flag_parameters(func: ast.AST) -> set[str]:
+    """The parameters *func* tests in an ``if`` and never rebinds: the ones a call's constant can decide."""
+    args = func.args  # type: ignore[attr-defined]
+    parameters = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)} - {"self", "cls"}
+    tested = {
+        name.id
+        for node in ast.walk(func)
+        if isinstance(node, ast.If) and enclosing_function(node) is func
+        for name in ast.walk(node.test)
+        if isinstance(name, ast.Name) and name.id in parameters
+    }
+    rebound = {
+        node.id
+        for node in ast.walk(func)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+    }
+    return tested - rebound
+
+
 def _module_of(node: ast.AST) -> Optional[ast.Module]:
     while getattr(node, "parent", None) is not None:
         node = node.parent  # type: ignore[attr-defined]
@@ -1384,6 +1406,67 @@ def read_side(
                 at_file = calls.types.file_of(where) or file
             values_of.extend(one.value for one in settle(bind.value, where, at_file))
         return values_of
+
+    def reading_of(func, run, file: str) -> tuple[set[str], set[tuple[str, str]]]:
+        """The tables one run reads and the pairs it selects by -- what a call site can narrow."""
+        tables: set[str] = set()
+        pairs: set[tuple[str, str]] = set()
+        for verb, table in _table_verbs(run.sql):
+            if verb != "read":
+                continue
+            tables.add(table)
+            spec_class = attributor.class_for_table(table)
+            for column, key in sql.predicates(run.sql):
+                qualifier, attribute, _kind = _subject_of(attributor, spec_class, table, column)
+                subject = SubjectNode.make_name(qualifier, attribute)
+                pairs.update((subject, value) for value in bound(func, run, key, file))
+            for column, value in sql.selected_literals(run.sql):
+                qualifier, attribute, _kind = _subject_of(attributor, spec_class, table, column)
+                pairs.add((SubjectNode.make_name(qualifier, attribute), value))
+        return tables, pairs
+
+    def place_call_sites(func, owner: str, file: str, executions: list) -> None:
+        """Say, per call site that narrows a statement, what it reads there.
+
+        The statement's own reading is every run any call can make.  A call
+        handing a flag parameter a constant runs fewer: ``TaskCommando.py:143``
+        calls ``getPandaIDsWithTask_JEDI(jediTaskID, True)``, and under
+        ``onlyActive`` the loop reads two tables, not four.  Asked only for a
+        parameter the function tests and never rebinds, and recorded only
+        where the call's reading differs from the statement's.
+        """
+        if calls is None or not any((owner, run.call.lineno) in statements for run in executions):
+            return
+        tested = _flag_parameters(func)
+        if not tested:
+            return
+        owned = calls.types.method_class(file, func)
+        target = Target(file, func, owned[1] if owned else None)
+        for via, handed in calls.handed_constants(target, tested):
+            per_line: dict[int, tuple[set[str], set[tuple[str, str]]]] = {}
+            with sql.at_call(func, handed):
+                for run in sql.executions(func):
+                    tables, pairs = reading_of(func, run, file)
+                    held = per_line.setdefault(run.call.lineno, (set(), set()))
+                    held[0].update(tables)
+                    held[1].update(pairs)
+            said = ", ".join(f"{name}={value!r}" for name, value in sorted(handed.items()))
+            route = " <- ".join(reversed(via))
+            for (own, line), kept in list(statements.items()):
+                if own != owner:
+                    continue
+                tables, pairs = per_line.get(line, (set(), set()))
+                if line not in per_line:
+                    entry = f"{route} ({said}): not run"
+                elif tables != kept.tables or pairs != kept.selects:
+                    entry = f"{route} ({said}): reads {', '.join(sorted(tables)) or 'no table'}"
+                    if pairs != kept.selects:
+                        entry += "; selects " + (
+                            ", ".join(f"{subject}={value}" for subject, value in sorted(pairs)) or "nothing"
+                        )
+                else:
+                    continue
+                statements[(owner, line)] = kept._replace(call_sites=(*kept.call_sites, entry))
 
     def touch(table: str, owner: str, verb: str) -> None:
         use = rows.setdefault(table.lower(), EntityUse(set(), set(), set(), set(), set()))
@@ -1716,6 +1799,7 @@ def read_side(
             # Regions first: the exits are read inside the stretch it settles.
             place_regions(func, owner, executions)
             place_exits(func, owner)
+            place_call_sites(func, owner, module.rel_path, executions)
     return ReadSide(
         values=found,
         entities=rows,
@@ -1753,6 +1837,7 @@ def read_site_nodes(
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
                 excludes=sorted(f"{subject}={value}" for subject, value in at.excludes),
                 keys=sorted(at.keys),
+                call_sites=list(at.call_sites),
                 tables=sorted(at.tables),
                 # Empty only where the call names no varmap to read -- one
                 # statement in the corpus, ``querySQLS(sql.format(t), {})``,

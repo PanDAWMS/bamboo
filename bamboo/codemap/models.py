@@ -1055,6 +1055,16 @@ class ReadSiteNode(BaseNode):
             "A statement asking by these alone is still a reader of the rows."
         ),
     )
+    call_sites: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<call> <- <call> (flag=True): reads a, b[; selects ...]`` for "
+            "each call site whose constants narrow what the statement reads: "
+            "the statement's own tables and selects are every run any call can "
+            "make.  Only calls that differ are listed; ``not run`` where the "
+            "call's constants rule the statement out."
+        ),
+    )
     tables: list[str] = Field(
         default_factory=list,
         description="The tables the statement reads, as the source spells them.",

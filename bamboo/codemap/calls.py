@@ -381,6 +381,55 @@ class Calls:
         _CALLERS[shared] = kept
         return kept
 
+    #: How many calls out a constant is looked for, and how many calls one
+    #: function may have before its callers are not read one by one.
+    CONSTANT_HOPS = 3
+    CONSTANT_CALLERS = 16
+
+    def handed_constants(
+        self, target: Target, names: set[str], depth: int = 0
+    ) -> list[tuple[tuple[str, ...], dict[str, object]]]:
+        """Per call placed at *target*: where it came from, and the constants it hands *names*.
+
+        ``(("pkg/tb.py:551", "pkg/cmd.py:143"), {"onlyActive": True})`` -- the
+        call into *target* first.  A name the caller hands on from a parameter
+        of its own that it never rebinds is looked for at that caller's
+        callers, so ``JediTaskBuffer``'s forwarding method is read through to
+        ``TaskCommando``.  A call handing none of *names* a constant is left
+        out: it runs the function as the general reading already reads it.
+        """
+        sites = self.callers(target)
+        if not sites or len(sites) > self.CONSTANT_CALLERS:
+            return []
+        found: list[tuple[tuple[str, ...], dict[str, object]]] = []
+        for site in sites:
+            bound = bind(site.call, target)
+            at = f"{site.file}:{site.call.lineno}"
+            values: dict[str, object] = {}
+            forwarded: dict[str, str] = {}
+            for name in names:
+                handed = bound.get(name)
+                if isinstance(handed, ast.Constant):
+                    values[name] = handed.value
+                elif (
+                    isinstance(handed, ast.Name)
+                    and handed.id in _parameter_names(site.func)
+                    and not _rebinds(site.func, handed.id)
+                ):
+                    forwarded[name] = handed.id
+            outer: list[tuple[tuple[str, ...], dict[str, object]]] = []
+            if forwarded and depth + 1 < self.CONSTANT_HOPS:
+                owned = self.types.method_class(site.file, site.func)
+                caller = Target(site.file, site.func, owned[1] if owned else None)
+                outer = self.handed_constants(caller, set(forwarded.values()), depth + 1)
+            for via, more in outer:
+                merged = dict(values)
+                merged.update({name: more[held] for name, held in forwarded.items() if held in more})
+                found.append(((at, *via), merged))
+            if not outer and values:
+                found.append(((at,), values))
+        return found
+
     # -- what a method changes on its object --------------------------------
 
     def writes(self, target: Target, depth: int = 0) -> list[tuple[str, ast.expr, ast.AST, Target]]:
@@ -421,6 +470,21 @@ class Calls:
 #: The methods that put a value into a container.  The removals take one out
 #: and so answer no question about where a value came from.
 FILLERS = ("append", "add", "update", "extend", "setdefault", "insert")
+
+
+def _parameter_names(func: ast.AST) -> set[str]:
+    args = getattr(func, "args", None)
+    if args is None:
+        return set()
+    return {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+
+
+def _rebinds(func: ast.AST, name: str) -> bool:
+    """Whether *func*'s own body binds *name* anywhere -- so a parameter's value may not be the one handed in."""
+    return any(
+        isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
+        for node in own_nodes(func)
+    )
 
 
 def _self_field(node: ast.AST) -> str:

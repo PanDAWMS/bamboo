@@ -672,3 +672,65 @@ def test_an_imported_in_list_is_read_with_the_values_its_module_builds_it_from(t
         "pp_input",
         "pseudo_input",
     ]
+
+
+_FLAGGED = {
+    "db": (
+        "class Proxy:\n"
+        "    def ids(self, cur, task_id, only_active):\n"
+        "        tables = ['jobsDefined4', 'jobsActive4']\n"
+        "        if not only_active:\n"
+        "            tables += ['jobsArchived4']\n"
+        "        for table in tables:\n"
+        "            sql = f'SELECT PandaID FROM {table} WHERE jediTaskID=:t '\n"
+        "            cur.execute(sql, {':t': task_id})\n"
+    ),
+    "tb": (
+        "from pkg.db import Proxy\n"
+        "\n"
+        "class Buffer:\n"
+        "    def __init__(self):\n"
+        "        self.proxy = Proxy()\n"
+        "\n"
+        "    def ids(self, task_id, only_active):\n"
+        "        return self.proxy.ids(None, task_id, only_active)\n"
+    ),
+    "cmd": (
+        "from pkg.tb import Buffer\n"
+        "\n"
+        "def run(task_id):\n"
+        "    Buffer().ids(task_id, True)\n"
+        "    Buffer().ids(task_id, False)\n"
+    ),
+}
+
+
+def test_a_flag_a_call_hands_is_followed_through_a_forwarding_method(tmp_path):
+    roots = _tree(tmp_path, **_FLAGGED)
+    calls = _calls(roots)
+    func = _function(calls, "db", "ids")
+    cls = calls.types.method_class("pkg/db.py", func)
+    target = calls_mod.Target("pkg/db.py", func, cls[1])
+
+    found = calls.handed_constants(target, {"only_active"})
+
+    assert sorted(found) == [
+        (("pkg/tb.py:8", "pkg/cmd.py:4"), {"only_active": True}),
+        (("pkg/tb.py:8", "pkg/cmd.py:5"), {"only_active": False}),
+    ]
+
+
+def test_a_call_sites_constant_rules_out_what_its_flag_decides_against(tmp_path):
+    from bamboo.codemap.panda import sql
+
+    roots = _tree(tmp_path, **_FLAGGED)
+    calls = _calls(roots)
+    func = _function(calls, "db", "ids")
+
+    with sql.across_calls(calls):
+        every = sorted(run.sql for run in sql.executions(func))
+        with sql.at_call(func, {"only_active": True}):
+            active = sorted(run.sql for run in sql.executions(func))
+
+    assert [text.split()[3] for text in every] == ["jobsActive4", "jobsArchived4", "jobsDefined4"]
+    assert [text.split()[3] for text in active] == ["jobsActive4", "jobsDefined4"]

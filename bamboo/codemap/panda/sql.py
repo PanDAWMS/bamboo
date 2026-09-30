@@ -594,6 +594,100 @@ def _handed_texts(
     return texts[:_MAX_BRANCH_VARIANTS]
 
 
+#: The function being read as one call site runs it, and the constants that
+#: call hands its parameters -- see :func:`at_call`.
+_AT_CALL: Optional[tuple[ast.AST, dict[str, object]]] = None
+
+#: A test the call site's constants do not settle.
+_UNDECIDED = object()
+
+
+@contextlib.contextmanager
+def at_call(func: ast.AST, values: dict[str, object]) -> Iterator[None]:
+    """Read *func*, for the length of the block, as one call site runs it.
+
+    *values* are constants the call hands parameters *func* never rebinds.
+    A fragment, a table list's member or a bind under an ``if`` those
+    constants decide against is not part of what that call runs:
+    ``TaskCommando.py:143`` calls ``getPandaIDsWithTask_JEDI(jediTaskID,
+    True)``, and the two archive tables are appended under ``if not
+    onlyActive``.  Only *func*'s own nodes are ruled on: a callee the reader
+    follows has parameters of its own, whatever they are called.
+    """
+    global _AT_CALL
+    previous, _AT_CALL = _AT_CALL, (func, values)
+    try:
+        yield
+    finally:
+        _AT_CALL = previous
+
+
+def decided(test: ast.expr, values: dict[str, object]) -> object:
+    """``True`` or ``False`` where *values* settle *test*, else :data:`_UNDECIDED`.
+
+    A name's truth, ``not``, ``and``/``or``, and one comparison of a name
+    with a literal -- the shapes a flag parameter is tested in.
+    """
+    if isinstance(test, ast.Name):
+        return bool(values[test.id]) if test.id in values else _UNDECIDED
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = decided(test.operand, values)
+        return inner if inner is _UNDECIDED else not inner
+    if isinstance(test, ast.BoolOp):
+        results = [decided(value, values) for value in test.values]
+        stop = isinstance(test.op, ast.Or)
+        if any(result is stop for result in results):
+            return stop
+        return (not stop) if all(result is (not stop) for result in results) else _UNDECIDED
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.left, ast.Name)
+        and test.left.id in values
+    ):
+        left = values[test.left.id]
+        try:
+            right = ast.literal_eval(test.comparators[0])
+        except (ValueError, SyntaxError, TypeError):
+            return _UNDECIDED
+        compare = {
+            ast.Is: lambda a, b: a is b,
+            ast.IsNot: lambda a, b: a is not b,
+            ast.Eq: lambda a, b: a == b,
+            ast.NotEq: lambda a, b: a != b,
+            ast.In: lambda a, b: a in b,
+            ast.NotIn: lambda a, b: a not in b,
+        }.get(type(test.ops[0]))
+        if compare is None:
+            return _UNDECIDED
+        try:
+            return bool(compare(left, right))
+        except TypeError:
+            return _UNDECIDED
+    return _UNDECIDED
+
+
+def ruled_out(node: ast.AST) -> bool:
+    """Whether the call site being read (:func:`at_call`) never runs *node*."""
+    if not _AT_CALL:
+        return False
+    func, values = _AT_CALL
+    if enclosing_function(node) is not func:
+        return False
+    child = node
+    for ancestor in ancestors(node):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            break
+        if isinstance(ancestor, ast.If):
+            result = decided(ancestor.test, values)
+            if result is False and any(child is one for one in ancestor.body):
+                return True
+            if result is True and any(child is one for one in ancestor.orelse):
+                return True
+        child = ancestor
+    return False
+
+
 def _parts(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     name: str,
@@ -615,6 +709,8 @@ def _parts(
     lists = in_lists(func)
     parts: list[tuple[int, str, str, ast.stmt]] = []
     for node in ast.walk(func):
+        if _AT_CALL and ruled_out(node):
+            continue
         if targets := targets_of(node):
             for target in targets:
                 if not (isinstance(target, ast.Name) and target.id == name):
@@ -1383,6 +1479,8 @@ def _sequence_values(
     found: list[str] = []
     assigned = False
     for node in ast.walk(func):
+        if _AT_CALL and ruled_out(node):
+            continue
         if any(
             isinstance(target, ast.Name) and target.id == name
             for target in targets_of(node)
@@ -2116,6 +2214,8 @@ def executions(
             continue
         forwarded = node.func.attr in _FORWARDED
         if not forwarded and node.func.attr not in {"execute", "executemany"}:
+            continue
+        if _AT_CALL and ruled_out(node):
             continue
         if not node.args:
             continue
@@ -3350,6 +3450,8 @@ def scan_binds(
 
     lists = {one.values_map: one for one in in_lists(func).values()}
     for node in ast.walk(func):
+        if _AT_CALL and ruled_out(node):
+            continue
         if (
             lists
             and isinstance(node, ast.Expr)
