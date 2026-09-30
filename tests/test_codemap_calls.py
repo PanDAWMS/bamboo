@@ -734,3 +734,15 @@ def test_a_call_sites_constant_rules_out_what_its_flag_decides_against(tmp_path)
 
     assert [text.split()[3] for text in every] == ["jobsActive4", "jobsArchived4", "jobsDefined4"]
     assert [text.split()[3] for text in active] == ["jobsActive4", "jobsDefined4"]
+
+
+def test_order_and_limit_are_read_off_the_statement():
+    from bamboo.codemap.panda import sql
+
+    text = (
+        "SELECT * FROM (SELECT PandaID FROM jobsActive4 WHERE jobStatus=:s "
+        "ORDER BY currentPriority DESC, PandaID ASC) WHERE ROWNUM <= :njobs"
+    )
+
+    assert sql.ordering(text) == (["currentPriority DESC, PandaID ASC"], [(":njobs", False)])
+    assert sql.ordering("SELECT a FROM t WHERE rownum<3 ORDER BY a FOR UPDATE") == (["a"], [("3", True)])

@@ -3047,6 +3047,36 @@ def predicates(sql: str) -> list[tuple[str, str]]:
     return found
 
 
+_ORDER_BY = re.compile(
+    r"\bORDER\s+BY\s+(.+?)\s*(?=\)|\bFOR\s+UPDATE\b|\bFETCH\b|\bLIMIT\b|\bOFFSET\b|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_LIMIT = re.compile(
+    r"\bROWNUM\s*(<=?)\s*(:\w+|\d+|\{\d*\})"
+    r"|\bFETCH\s+FIRST\s+(:\w+|\d+|\{\d*\})\s+ROWS?\s+ONLY"
+    r"|\bLIMIT\s+(:\w+|\d+|\{\d*\})",
+    re.IGNORECASE,
+)
+
+
+def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
+    """``ORDER BY`` clauses and row limits: which rows come back first, and how many.
+
+    A row that passes the ``WHERE`` can still lose on order and not come back:
+    ``getJobs`` sorts by share, priority and ``PandaID`` and keeps
+    ``ROWNUM <= :njobs``.  Limits are ``(bind or number, strict)`` -- ``<``
+    keeps one fewer than ``<=``.
+    """
+    orders = [re.sub(r"\s+", " ", match.group(1)).strip() for match in _ORDER_BY.finditer(sql)]
+    limits: list[tuple[str, bool]] = []
+    for match in _LIMIT.finditer(sql):
+        if match.group(2):
+            limits.append((match.group(2), match.group(1) == "<"))
+        else:
+            limits.append((match.group(3) or match.group(4), False))
+    return [order for order in orders if order], limits
+
+
 def exclusions(sql: str) -> list[tuple[str, str]]:
     """``(column, bind key)`` for each predicate asking for rows *without* the value.
 

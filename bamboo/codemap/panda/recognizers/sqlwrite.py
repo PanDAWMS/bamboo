@@ -963,6 +963,10 @@ class ReadStatement(NamedTuple):
     #: Subjects the statement asks rows by with a value chosen at run time --
     #: ``jediTaskID=:jediTaskID``, or a bind nothing here settles.
     keys: set[str]
+    #: ``ORDER BY`` clauses, one per way the statement is built.
+    order_by: set[str]
+    #: How many rows come back at most: ``<= 10``, ``<= :njobs``.
+    limits: set[str]
     tables: set[str]
     #: What the ``WHERE`` asks of a row beside those values, rendered, with
     #: ``@<line>`` on the binds a walk can be seeded at.
@@ -1739,6 +1743,8 @@ def read_side(
                     selects=set(),
                     excludes=set(),
                     keys=set(),
+                    order_by=set(),
+                    limits=set(),
                     tables=set(),
                     conditions=[],
                     unresolved=tuple(
@@ -1795,6 +1801,17 @@ def read_side(
                 kept = statements.get((owner, run.call.lineno))
                 if kept is not None:
                     kept.tables.update(read_tables)
+                    orders, limits = sql.ordering(run.sql)
+                    kept.order_by.update(orders)
+                    for bound_to, strict in limits:
+                        values_of = (
+                            bound(func, run, bound_to, module.rel_path)
+                            if bound_to.startswith(":")
+                            else [bound_to]
+                        )
+                        kept.limits.update(
+                            f"{'<' if strict else '<='} {value}" for value in values_of or [bound_to]
+                        )
             place_conditions(func, owner, executions)
             # Regions first: the exits are read inside the stretch it settles.
             place_regions(func, owner, executions)
@@ -1837,6 +1854,8 @@ def read_site_nodes(
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
                 excludes=sorted(f"{subject}={value}" for subject, value in at.excludes),
                 keys=sorted(at.keys),
+                order_by=sorted(at.order_by),
+                limits=sorted(at.limits),
                 call_sites=list(at.call_sites),
                 tables=sorted(at.tables),
                 # Empty only where the call names no varmap to read -- one

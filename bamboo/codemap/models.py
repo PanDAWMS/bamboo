@@ -1055,6 +1055,21 @@ class ReadSiteNode(BaseNode):
             "A statement asking by these alone is still a reader of the rows."
         ),
     )
+    order_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The ``ORDER BY`` clauses the statement can be built with, sorted.  "
+            "A row that passes the ``WHERE`` can still lose on order and not "
+            "come back when a limit is set."
+        ),
+    )
+    limits: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<= 10`` / ``<= :njobs`` -- how many rows come back at most, with "
+            "a bind's value where the map settles it."
+        ),
+    )
     call_sites: list[str] = Field(
         default_factory=list,
         description=(
