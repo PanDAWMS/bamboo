@@ -2973,3 +2973,60 @@ def f(self, jobs, log):
     (entry,) = listed
     assert (entry["at"], entry["branch"], entry["leaves"]) == ("pandaserver/daemons/m.py:4", "body", True)
     assert entry["reads"] == ["a configuration value, set outside the code -- dog.LIMIT.jedi"]
+
+
+def test_a_parameter_placed_at_many_calls_is_said_and_not_walked(tmp_path):
+    """The first eight of twelve callers are as arbitrary as any eight."""
+    callers = "\n".join(f"def c{i}():\n    return g({i})\n" for i in range(12))
+    roots = _tree(tmp_path, **{"m.py": f"def g(x):\n    spec.status = x\n\n{callers}"})
+
+    walked = _walked_in(roots, "m.py", "g", [2])
+
+    (stopped,) = [s for s in walked.steps if s.name == "x" and s.kind == "unbound"]
+    assert stopped.detail == "a parameter; 12 calls are placed at g, too many to follow"
+    assert not [s for s in walked.steps if s.kind == "handover"]
+
+
+def test_a_call_to_another_systems_interface_is_gone_into_on_this_side(tmp_path):
+    """``SiteMapper.getSite`` is CRIC's answer, and it is also PanDA code that
+    resolves ``nucleus:X`` to one of its sites first."""
+    roots = _server(
+        tmp_path,
+        **{
+            "brokerage/SiteMapper.py": '''\
+class SiteMapper:
+    def getSite(self, site_name):
+        site_name = self.clean(site_name)
+        return self.siteSpecList[site_name]
+
+    def clean(self, site_name):
+        return site_name.split(":")[-1]
+''',
+            "dataservice/plugin.py": '''\
+from pandaserver.brokerage.SiteMapper import SiteMapper
+
+
+class Plugin:
+    def __init__(self, siteMapper: SiteMapper):
+        self.siteMapper = siteMapper
+
+    def run(self, job):
+        dst = self.siteMapper.getSite(job.destinationSE)
+        job.dst = dst
+''',
+        },
+    )
+
+    walked = trace_mod.walk(
+        roots,
+        file="pandaserver/dataservice/plugin.py",
+        owner="pandaserver/dataservice/plugin.py::run",
+        lines=[10],
+        classify=provenance.classify,
+        reaching=True,
+    )
+    said = _said(walked)
+
+    (bound,) = [s for s in walked.steps if s.name == "dst"]
+    assert bound.terminal == models.STOP_EXTERNAL
+    assert ("return", "getSite()", "getSite", 4, "self.siteSpecList[site_name]") in said

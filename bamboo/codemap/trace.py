@@ -67,6 +67,7 @@ from bamboo.codemap.models import (
     SKELETON_ARM,
     SKELETON_BRANCH,
     SKELETON_PRINT,
+    STOP_CONFIG,
     STOP_EXTERNAL,
     STOP_PARAMETER,
     STOP_UPSTREAM,
@@ -1041,6 +1042,34 @@ def _keyed_reads(expression: ast.AST) -> list[str]:
     return found
 
 
+def _self_fills(method: ast.AST, field: str) -> list[ast.expr]:
+    """What *method* puts into ``self.<field>``: ``append``, ``add`` and the like, and ``[k] =``."""
+    found: list[ast.expr] = []
+    for node in _own_nodes(method):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Attribute)
+                    and isinstance(target.value.value, ast.Name)
+                    and target.value.value.id == "self"
+                    and target.value.attr == field
+                ):
+                    found.append(node.value)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _FILLERS
+            and isinstance(node.func.value, ast.Attribute)
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "self"
+            and node.func.value.attr == field
+            and node.args
+        ):
+            found.append(node.args[-1])
+    return found
+
+
 def _projected(value: ast.expr, key: Optional[object]) -> ast.expr:
     """The part of a returned *value* a caller took: a tuple's slot, a literal dict's key."""
     if key is None:
@@ -1807,7 +1836,7 @@ class _Walk:
         self._enter_tests(frame, statement, 1)
         if value is not None:
             self._ask_keyed(frame, value, 1, statement)
-            if not terminal:
+            if not terminal or terminal == STOP_EXTERNAL:
                 self.beyond.append(lambda: self._enter(frame, step, value, None, 1))
 
     # -- skeleton ----------------------------------------------------------
@@ -2656,7 +2685,7 @@ class _Walk:
             self.want(frame, own, depth + 1, site)
             for test, names in _guard_tests(site):
                 self.want(frame, names, depth + 1, test)
-        if not terminal:
+        if not terminal or terminal == STOP_EXTERNAL:
             self.beyond.append(
                 lambda: self._enter(frame, step, expression, slot, depth + 1)
             )
@@ -2887,13 +2916,17 @@ class _Walk:
             return
         if isinstance(call.func, ast.Name) and call.func.id in _BUILTINS:
             return
-        if self.terminal_of(frame, call)[0]:
-            # The database's, a configuration's, another system's: where the
-            # walk stops is the answer, and inside the wrapper is not.
+        if self.terminal_of(frame, call)[0] in (STOP_CONFIG, STOP_UPSTREAM):
+            # The database's or a configuration's: where the walk stops is the
+            # answer, and inside the wrapper is not -- the statement's table and
+            # key are said on the step instead.  Another system's interface is
+            # still PanDA's code on this side: ``SiteMapper.getSite`` resolves
+            # ``nucleus:UNI-FREIBURG`` to one of its sites before CRIC's
+            # declaration is read, and that resolution is gone into.
             return
         placed = self.calls.callees(frame.file, frame.func, call)
         if not placed.targets:
-            if placed.unplaced and step is not None:
+            if placed.unplaced and step is not None and not step.terminal:
                 step.detail = f"not entered: {placed.unplaced}"
             return
         entered: list[str] = []
@@ -2952,7 +2985,7 @@ class _Walk:
                         # and then read at ``["ramCount"]``: the entry.
                         self.want(callee, [f"{value.id}[{pending[0]!r}]"], depth + 1, statement)
                     self._ask_keyed(callee, value, depth + 1, statement)
-        if entered and step is not None:
+        if entered and step is not None and not step.terminal:
             step.detail = f"returns from {', '.join(entered)}"
 
     def _callee_frame(self, target: calls_mod.Target) -> Optional[_Frame]:
@@ -3012,11 +3045,20 @@ class _Walk:
         sites = self.calls.callers(target)
         if not sites:
             return False
+        if len(sites) > _MAX_CALLERS:
+            # A function built or called from everywhere -- ``SiteMapper`` is
+            # constructed by every daemon -- has no one caller to answer with,
+            # and the first eight would be as arbitrary as any.  Said, not walked.
+            stopped.detail = (
+                f"a parameter; {len(sites)} calls are placed at "
+                f"{getattr(frame.func, 'name', '')}, too many to follow"
+            )
+            return True
         stopped.detail = (
-            f"a parameter; followed to {min(len(sites), _MAX_CALLERS)} of the "
-            f"{len(sites)} call(s) placed at {getattr(frame.func, 'name', '')}"
+            f"a parameter; followed to the {len(sites)} call(s) placed at "
+            f"{getattr(frame.func, 'name', '')}"
         )
-        for site in sites[:_MAX_CALLERS]:
+        for site in sites:
             caller = self.frame(
                 site.file, f"{site.file}::{site.func.name}", line=site.func.lineno  # type: ignore[attr-defined]
             )
@@ -3197,7 +3239,10 @@ class _Walk:
                 if method is frame.func:
                     continue
                 other = None
-                for expression in pathcond.attribute_expressions(method, field):
+                # What a sibling assigns, and what it puts into the field --
+                # ``self.allPandaSites.append(siteName)`` in ``add`` is how a
+                # nucleus learns its sites.
+                for expression in [*pathcond.attribute_expressions(method, field), *_self_fills(method, field)]:
                     other = other or self._sibling(frame, method)
                     if other is None:
                         break

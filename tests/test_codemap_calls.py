@@ -302,3 +302,65 @@ def f(one: A, two: B, other):
     sites = calls.callers(calls_mod.Target(file, run, cls))
 
     assert [ast.unparse(site.call.func) for site in sites] == ["one.run"]
+
+
+def test_a_function_is_what_its_return_annotation_says_it_returns(tmp_path):
+    """``get_task_utils_module(self)``, declared ``-> TaskUtilsModule``."""
+    roots = _tree(
+        tmp_path,
+        utils='''\
+class TaskUtilsModule:
+    def getScout(self, task_id):
+        return task_id
+
+
+def get_task_utils_module(base) -> TaskUtilsModule:
+    return base.get_composite_module("task_utils")
+''',
+        m="from pkg.utils import get_task_utils_module\n\ndef f(self, t):\n    return get_task_utils_module(self).getScout(t)\n",
+    )
+    calls = _calls(roots)
+
+    (target,) = _placed(calls, "m", "f", "get_task_utils_module(self).getScout").targets
+
+    assert (target.cls.name, target.func.name) == ("TaskUtilsModule", "getScout")
+
+
+def test_a_module_instance_declared_with_an_annotation_is_of_that_class(tmp_path):
+    """``global_task_buffer: TaskBuffer = None``: the annotation, not the placeholder."""
+    roots = _tree(
+        tmp_path,
+        tb="class TaskBuffer:\n    def peek(self, i):\n        return i\n",
+        m="from pkg.tb import TaskBuffer\n\nglobal_task_buffer: TaskBuffer = None\n\ndef f():\n    return global_task_buffer.peek(1)\n",
+    )
+    calls = _calls(roots)
+
+    (target,) = _placed(calls, "m", "f", "global_task_buffer.peek").targets
+
+    assert target.cls.name == "TaskBuffer"
+
+
+def test_an_item_of_a_declared_container_is_of_its_element_class_through_an_alias(tmp_path):
+    """``target = self.nuclei`` then ``target[name].add(...)``, with
+    ``self.nuclei: dict[str, NucleusSpec]``."""
+    roots = _tree(
+        tmp_path,
+        nucleus="class NucleusSpec:\n    def add(self, site):\n        return site\n",
+        m='''\
+from pkg.nucleus import NucleusSpec
+
+
+class SiteMapper:
+    def __init__(self):
+        self.nuclei: dict[str, NucleusSpec] = {}
+
+    def collect(self, name, site):
+        target = self.nuclei
+        target[name].add(site)
+''',
+    )
+    calls = _calls(roots)
+
+    (target,) = _placed(calls, "m", "collect", "target[name].add").targets
+
+    assert target.cls.name == "NucleusSpec"

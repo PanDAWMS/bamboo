@@ -179,6 +179,9 @@ class Calls:
         if not isinstance(called, ast.Attribute):
             return Placed((), UNPLACED_DYNAMIC)
         receiver = called.value
+        if isinstance(receiver, (ast.Constant, ast.JoinedStr, ast.List, ast.Dict, ast.Set, ast.Tuple)):
+            # ``",".join(...)``, ``f"...".format``: a builtin type's method.
+            return Placed((), UNPLACED_OUTSIDE)
         if isinstance(receiver, ast.Name) and receiver.id in ("self", "cls"):
             cls = self.types.method_class(file, func)
             if cls is None:
@@ -409,6 +412,21 @@ def _unquoted(annotation: ast.expr) -> ast.expr:
         except SyntaxError:
             return annotation
     return annotation
+
+def _element_annotation(annotation: ast.expr) -> Optional[ast.expr]:
+    """The element type a container annotation states: ``dict[K, V]`` -> ``V``, ``list[T]`` -> ``T``."""
+    annotation = _unquoted(annotation)
+    if not isinstance(annotation, ast.Subscript):
+        return None
+    wrapper = annotation.value
+    name = wrapper.attr if isinstance(wrapper, ast.Attribute) else getattr(wrapper, "id", "")
+    inner = annotation.slice
+    if name in ("dict", "Dict", "Mapping", "MutableMapping", "defaultdict", "OrderedDict"):
+        return inner.elts[1] if isinstance(inner, ast.Tuple) and len(inner.elts) == 2 else None
+    if name in ("list", "List", "Sequence", "set", "Set", "frozenset", "Iterable"):
+        return inner
+    return None
+
 
 #: What a context manager is declared to yield its element through.
 _YIELDING = frozenset(
@@ -758,6 +776,73 @@ class Types:
                 return self.annotated(where, returned)
         return None
 
+    def _annotation_of(
+        self, file: str, func: ast.AST, expression: ast.expr, seen: frozenset = frozenset()
+    ) -> Optional[tuple[str, ast.expr]]:
+        """The annotation *expression* was declared with: a field's, a parameter's or a local's."""
+        if (
+            isinstance(expression, ast.Attribute)
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id == "self"
+        ):
+            holder = self.method_class(file, func)
+            if holder is None:
+                return None
+            for where, cls in self.lineage(*holder):
+                for node in cls.body:
+                    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == expression.attr:
+                        return where, node.annotation
+                for method in pathcond.methods_of(cls):
+                    for node in ast.walk(method):
+                        if (
+                            isinstance(node, ast.AnnAssign)
+                            and isinstance(node.target, ast.Attribute)
+                            and isinstance(node.target.value, ast.Name)
+                            and node.target.value.id == "self"
+                            and node.target.attr == expression.attr
+                        ):
+                            return where, node.annotation
+            return None
+        if isinstance(expression, ast.Name):
+            args = getattr(func, "args", None)
+            for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
+                if argument.arg == expression.id and argument.annotation is not None:
+                    return file, argument.annotation
+            for node in ast.walk(func):
+                if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == expression.id:
+                    return file, node.annotation
+            # ``target = self.nuclei`` or ``target = self.satellites``: an
+            # alias carries what every value it is bound to was declared as.
+            bound = self.assigned(func).get(expression.id, [])
+            if bound and expression.id not in seen:
+                found = [
+                    self._annotation_of(file, func, value, seen | {expression.id}) for value in bound
+                ]
+                texts = {ast.unparse(one[1]) for one in found if one is not None}
+                if len(texts) == 1 and all(one is not None for one in found):
+                    return found[0]
+        return None
+
+    def _function_named(self, file: str, name: str) -> Optional[tuple[str, ast.AST]]:
+        """The module-level function *name* is in *file*: defined there or imported."""
+        tree = self.tree(file)
+        if tree is None:
+            return None
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+                return file, node
+        held = self.imports(file).get(name)
+        if held is None or not held[1]:
+            return None
+        target = self.module_file(held[0])
+        if target is None or target == file:
+            return None
+        other = self.tree(target)
+        for node in other.body if other is not None else ():
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == held[1]:
+                return target, node
+        return None
+
     def _outside_instance(self, file: str, name: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
         """The class of a name this function does not bind: a module's own instance.
 
@@ -770,6 +855,17 @@ class Types:
         tree = self.tree(file)
         if tree is None:
             return None
+        for node in tree.body:
+            # ``global_task_buffer: TaskBuffer = None``: the annotation is the
+            # declaration, whatever the placeholder value is.
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == name
+            ):
+                declared = self.annotated(file, node.annotation)
+                if declared is not None:
+                    return declared
         values = [
             node.value
             for node in tree.body
@@ -830,16 +926,31 @@ class Types:
         ):
             cls = pathcond.class_of(tree, func)
             return self.of_field(file, cls, expression.attr, depth + 1) if cls is not None else None
+        if isinstance(expression, ast.Subscript):
+            # ``self.nuclei[name]``, where ``self.nuclei: dict[str, NucleusSpec]``.
+            container = self._annotation_of(file, func, expression.value)
+            if container is not None:
+                where, annotation = container
+                element = _element_annotation(annotation)
+                if element is not None:
+                    return self.annotated(where, element)
+            return None
         if isinstance(expression, ast.Call):
             called = expression.func
             constructed = self.class_named(file, called) if isinstance(called, (ast.Name, ast.Attribute)) else None
             if constructed is not None:
                 return constructed
+            if isinstance(called, ast.Name):
+                # ``get_task_utils_module(self)``, declared ``-> TaskUtilsModule``.
+                function = self._function_named(file, called.id)
+                if function is not None:
+                    where, definition = function
+                    return self.annotated(where, definition.returns)
+                return None
             if isinstance(called, ast.Attribute):
                 receiver = called.value
                 if isinstance(receiver, ast.Name) and receiver.id == "self":
-                    cls = pathcond.class_of(tree, func)
-                    owner = (file, cls) if cls is not None else None
+                    owner = self.method_class(file, func)
                 else:
                     owner = self.of_expression(file, func, receiver, depth + 1)
                 if owner is None:
