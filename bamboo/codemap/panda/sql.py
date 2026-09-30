@@ -41,12 +41,13 @@ than guessed at, which is what the coverage matrix is for.
 from __future__ import annotations
 
 import ast
+import contextlib
 import itertools
 import logging
 import math
 import re
 import string
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +55,7 @@ from bamboo.codemap.panda.pathcond import (
     ancestors,
     attach_parents,
     can_reach,
+    enclosing_function,
     exclusive,
     loops_over,
     path_condition,
@@ -61,6 +63,9 @@ from bamboo.codemap.panda.pathcond import (
     written_value,
 )
 from bamboo.codemap.panda.values import rendered_text
+
+if TYPE_CHECKING:
+    from bamboo.codemap.calls import Calls
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +332,268 @@ _SCHEMA_HOLE = re.compile(r"\{\d*\}\.")
 _CLAUSE_JOIN = re.compile(r"\b(?:AND|OR)\b", re.IGNORECASE)
 
 
+#: The helper every ``IN`` list in the corpus is built with: it returns the
+#: placeholders as one string and their values as a map, and both are spliced
+#: in -- ``f"jobStatus IN ({names})"`` and ``varMap.update(values)``.  It is
+#: pandacommon's, outside the corpus, and what it does is stated here once.
+IN_LIST_HELPER = "get_sql_IN_bind_variables"
+
+
+class InList(NamedTuple):
+    """One ``IN`` list: the placeholder it stands for, and what fills it."""
+
+    names: str
+    values_map: str
+    values: ast.expr
+    bind: str
+    site: ast.stmt
+
+
+def in_lists(func: ast.AST) -> dict[str, InList]:
+    """``{name holding the placeholders: InList}`` for each list *func* builds.
+
+    ``stat_var_names_str, stat_var_map = get_sql_IN_bind_variables(statList,
+    prefix=":stat")``: the statement spells the list as one placeholder,
+    ``:stat__in``, whose values are ``statList`` -- so ``jobStatus IN
+    ({stat_var_names_str})`` reads as a predicate on a bind like any other,
+    where it was a hole.
+    """
+    found = dict(_own_lists(func))
+    if _CALLS is not None:
+        for name, held in _imported_lists(func).items():
+            found.setdefault(name, held)
+    return found
+
+
+def _own_lists(scope: ast.AST) -> dict[str, InList]:
+    """The lists *scope* builds itself; a module's, at its top level."""
+    held = getattr(scope, "_in_lists", None)
+    if held is not None:
+        return held
+    found: dict[str, InList] = {}
+    nodes = scope.body if isinstance(scope, ast.Module) else ast.walk(scope)
+    for node in nodes:
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Tuple)
+            and len(node.targets[0].elts) == 2
+            and all(isinstance(one, ast.Name) for one in node.targets[0].elts)
+            and isinstance(node.value, ast.Call)
+            and node.value.args
+        ):
+            continue
+        called = node.value.func
+        if (called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")) != IN_LIST_HELPER:
+            continue
+        prefix = next(
+            (
+                keyword.value.value
+                for keyword in node.value.keywords
+                if keyword.arg == "prefix" and isinstance(keyword.value, ast.Constant)
+            ),
+            None,
+        )
+        if prefix is None and len(node.value.args) > 1 and isinstance(node.value.args[1], ast.Constant):
+            prefix = node.value.args[1].value
+        prefix = prefix if isinstance(prefix, str) and prefix else ":in"
+        names, values_map = (one.id for one in node.targets[0].elts)  # type: ignore[attr-defined]
+        found[names] = InList(names, values_map, node.value.args[0], f"{prefix}__in", node)
+    scope._in_lists = found  # type: ignore[attr-defined]
+    return found
+
+
+def _imported_lists(func: ast.AST) -> dict[str, InList]:
+    """The lists another module builds at its top level and *func*'s module imports.
+
+    ``INPUT_TYPES_var_str, INPUT_TYPES_var_map = get_sql_IN_bind_variables(
+    JediDatasetSpec.getInputTypes(), ...)`` is written once in
+    ``JediDatasetSpec.py`` and spliced into statements across the proxy
+    modules, under the names they import it as.
+    """
+    assert _CALLS is not None
+    cached = getattr(func, "_imported_lists", None)
+    if cached is not None and cached[0] == id(_CALLS):
+        return cached[1]
+    file = _CALLS.types.file_of(func)
+    imports = _CALLS.types.imports(file) if file is not None else {}
+    local = {held: name for name, held in imports.items()}
+    found: dict[str, InList] = {}
+    for name, (module, attribute) in imports.items():
+        where = _CALLS.types.module_file(module)
+        tree = _CALLS.types.tree(where) if where else None
+        held = _own_lists(tree).get(attribute) if tree is not None else None
+        if held is None:
+            continue
+        values_map = local.get((module, held.values_map))
+        if values_map is None:
+            continue
+        found[name] = held._replace(names=name, values_map=values_map)
+    func._imported_lists = (id(_CALLS), found)  # type: ignore[attr-defined]
+    return found
+
+
+def _with_lists(node: ast.expr, lists: dict[str, InList]) -> ast.expr:
+    """*node* with each hole holding an ``IN`` list's placeholders spelled as its bind."""
+    if not lists or not isinstance(node, ast.JoinedStr):
+        return node
+    values: list[ast.expr] = []
+    changed = False
+    for part in node.values:
+        if (
+            isinstance(part, ast.FormattedValue)
+            and isinstance(part.value, ast.Name)
+            and part.value.id in lists
+        ):
+            values.append(ast.Constant(value=lists[part.value.id].bind))
+            changed = True
+        else:
+            values.append(part)
+    return ast.JoinedStr(values=values) if changed else node
+
+
+#: The corpus's calls, while a build reads statements through them.
+_CALLS: Optional["Calls"] = None
+
+#: How many calls out a statement's text or binds are followed.  ``getJobs``
+#: is two: its ``WHERE`` is a closure's return, which is
+#: ``construct_where_clause``'s.
+RETURN_HOPS = 3
+
+
+@contextlib.contextmanager
+def across_calls(calls: Optional["Calls"]) -> Iterator[None]:
+    """Read statements, for the length of the block, through the calls that hand their pieces in.
+
+    ``sqlP += sql_where_clause`` appends what ``build_where_clause()``
+    returned, and the text is only there.  Set for a whole build rather than
+    passed to each reader, because every slice that reads a statement has to
+    read the same one: a read side seeing ``getJobs``'s ``WHERE`` and a write
+    side not seeing it would be the map describing one statement twice.
+    """
+    global _CALLS
+    previous, _CALLS = _CALLS, calls
+    try:
+        yield
+    finally:
+        _CALLS = previous
+
+
+def _slot(target: ast.expr, name: str) -> Optional[int]:
+    """``-1`` where *target* is *name*, its index where *target* unpacks into it, else ``None``."""
+    if isinstance(target, ast.Name):
+        return -1 if target.id == name else None
+    if isinstance(target, (ast.Tuple, ast.List)):
+        for index, element in enumerate(target.elts):
+            if isinstance(element, ast.Name) and element.id == name:
+                return index
+    return None
+
+
+def returned(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]]:
+    """``(callee, expression)`` for what each call *name* is bound from hands back.
+
+    ``a, b = f()`` binds ``b`` to the second element of each tuple ``f``
+    returns; a return that is not a tuple of that length says nothing about it
+    and is passed over.  Empty outside :func:`across_calls`, and for a call the
+    corpus's calls do not place.
+    """
+    if _CALLS is None:
+        return []
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
+            continue
+        if enclosing_function(node) is not func:
+            continue
+        for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+            slot = _slot(target, name)
+            if slot is not None:
+                found.extend(_called(func, node.value, slot, 0))
+    unique: dict[tuple[int, int], tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = {}
+    for callee, value in found:
+        unique.setdefault((id(callee), id(value)), (callee, value))
+    return list(unique.values())
+
+
+def _called(
+    func: ast.AST, call: ast.Call, slot: int, hops: int
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]]:
+    """What each function *call* lands in returns, at *slot* (``-1`` for all of it)."""
+    if _CALLS is None or hops >= RETURN_HOPS:
+        return []
+    file = _CALLS.types.file_of(func)
+    if file is None:
+        return []
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
+    for callee in _CALLS.callees(file, func, call).targets:
+        for value in _returns(callee.func):
+            found.extend(_at_slot(callee.func, value, slot, hops + 1))  # type: ignore[arg-type]
+    return found
+
+
+def _at_slot(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, value: ast.expr, slot: int, hops: int
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]]:
+    """*value*, returned by *func*, at *slot*: through a returned call, and a returned name bound to a tuple.
+
+    ``return self.getCriteriaByAge(...)`` hands back what that call does, and
+    ``return ret_empty`` what ``ret_empty = "", {}`` wrote.
+    """
+    if isinstance(value, ast.Call):
+        return _called(func, value, slot, hops)
+    if slot < 0:
+        return [(func, value)]
+    if isinstance(value, ast.Tuple):
+        return [(func, value.elts[slot])] if slot < len(value.elts) else []
+    if isinstance(value, ast.Name):
+        return [
+            (func, element)
+            for node in ast.walk(func)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and node.value is not None
+            and enclosing_function(node) is func
+            and any(
+                isinstance(target, ast.Name) and target.id == value.id
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            )
+            and isinstance(node.value, ast.Tuple)
+            and slot < len(node.value.elts)
+            for element in [node.value.elts[slot]]
+        ]
+    return []
+
+
+def _returns(func: ast.AST) -> list[ast.expr]:
+    from bamboo.codemap.calls import returns
+
+    return returns(func)
+
+
+def _handed_texts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, seen: frozenset[str]
+) -> list[str]:
+    """The statements local *name* holds, where a call hands it: one per variant the callee builds."""
+    if sum(":" in one for one in seen) >= RETURN_HOPS:
+        return []
+    texts: list[str] = []
+    for callee, value in returned(func, name):
+        if isinstance(value, ast.Name):
+            found = variants(callee, value.id, seen | {f"{id(callee)}:{value.id}"})
+            found = found or _handed_texts(callee, value.id, seen | {f"{id(callee)}:{value.id}"})
+        else:
+            rendered = rendered_text(value)
+            found = [rendered] if rendered is not None else []
+        # An empty one is left out: ``ret_empty = "", {}`` is what a callee
+        # hands back when there is nothing to append, and the fragment
+        # appending it sits under ``if sorting_sql:`` -- a run appending the
+        # empty text is a run that skipped the fragment.
+        texts.extend(text for text in found if text and text not in texts)
+    return texts[:_MAX_BRANCH_VARIANTS]
+
+
 def _parts(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     name: str,
@@ -345,13 +612,26 @@ def _parts(
     if name in seen:
         return []
     seen = seen | {name}
+    lists = in_lists(func)
     parts: list[tuple[int, str, str, ast.stmt]] = []
     for node in ast.walk(func):
         if targets := targets_of(node):
             for target in targets:
                 if not (isinstance(target, ast.Name) and target.id == name):
                     continue
-                text = rendered_text(node.value)
+                wrapped = _wrapping(_with_lists(node.value, lists), name)
+                if wrapped is not None:
+                    # ``sqlP = "SELECT * FROM (" + sqlP`` puts text around
+                    # what the name holds; read as a new statement, it is
+                    # one that starts with ``SELECT * FROM (`` and has no
+                    # table.
+                    before, after = wrapped
+                    if before:
+                        parts.append((node.lineno, PREFIX, before, node))
+                    if after:
+                        parts.append((node.lineno, "+=", after, node))
+                    continue
+                text = rendered_text(_with_lists(node.value, lists))
                 if text is None and isinstance(node.value, ast.Name):
                     # ``sql = sqlTU`` -- the statement was built under another
                     # name and *chosen* here.  The choosing assignment is the
@@ -360,6 +640,15 @@ def _parts(
                     # picked in the ``else`` of the timeout test, so the reason
                     # is on the alias and nowhere else.
                     text = _fold(_parts(func, node.value.id, seen))
+                    if not text:
+                        # ``sql = where_clause`` where a call handed the
+                        # name its text: one fragment per statement the
+                        # callee builds, as alternatives in one place.
+                        parts.extend(
+                            (node.lineno, "=", one, node)
+                            for one in _handed_texts(func, node.value.id, seen)
+                        )
+                        continue
                 if text:
                     parts.append((node.lineno, "=", text, node))
         elif (
@@ -368,7 +657,18 @@ def _parts(
             and node.target.id == name
             and isinstance(node.op, ast.Add)
         ):
-            text = rendered_text(node.value)
+            text = rendered_text(_with_lists(node.value, lists))
+            if text is None and isinstance(node.value, ast.Name):
+                # ``sql += scout_filter`` appends text the function wrote
+                # down under another name; ``sqlP += sql_where_clause`` text a
+                # call handed it.  Either way each statement the name can
+                # hold is one alternative, appended in this one place.
+                held = variants(func, node.value.id, seen) or _handed_texts(
+                    func, node.value.id, seen
+                )
+                if held:
+                    parts.extend((node.lineno, "+=", one, node) for one in held)
+                    continue
             if text is not None:
                 parts.append((node.lineno, "+=", text, node))
             elif stops is not None:
@@ -383,11 +683,41 @@ def _parts(
     return parts
 
 
+#: The operator of a fragment written in front of what the name holds.
+PREFIX = "=+"
+
+
+def _wrapping(value: ast.expr, name: str) -> Optional[tuple[str, str]]:
+    """``(before, after)`` where *value* concatenates text around *name* itself, once.
+
+    An operand that renders nothing is a hole, as it is at the call.
+    """
+    operands = _concatenated(value)
+    at = [
+        index
+        for index, operand in enumerate(operands)
+        if isinstance(operand, ast.Name) and operand.id == name
+    ]
+    if len(at) != 1 or len(operands) < 2:
+        return None
+
+    def text(pieces: list[ast.expr]) -> str:
+        rendered = [rendered_text(piece) for piece in pieces]
+        return "".join(one if one is not None else _BARE_FIELD for one in rendered)
+
+    return text(operands[: at[0]]), text(operands[at[0] + 1 :])
+
+
 def _fold(parts: list[tuple[int, str, str, ast.stmt]]) -> str:
     """Concatenate one ``=``-started run of fragments."""
     assembled = ""
     for _line, operator, text, _node in parts:
-        assembled = text if operator == "=" else assembled + text
+        if operator == "=":
+            assembled = text
+        elif operator == PREFIX:
+            assembled = text + assembled
+        else:
+            assembled += text
     return assembled
 
 
@@ -419,11 +749,15 @@ def _compatible_sets(
     """
     indices = list(range(start, len(parts)))
     conditions = {index: path_condition(parts[index][3]) for index in indices}
+    # Two fragments one statement appends in one place are alternatives: the
+    # statements a name handed in can hold, of which a run appends one.
     agrees = {
         index: {
             other
             for other in indices
-            if other != index and not exclusive(conditions[index], conditions[other])
+            if other != index
+            and not (parts[other][3] is parts[index][3] and parts[other][1] == parts[index][1])
+            and not exclusive(conditions[index], conditions[other])
         }
         for index in indices
     }
@@ -681,6 +1015,12 @@ def _fold_filled(
         if operator == "=":
             assembled = ""
             spans = []
+        if operator == PREFIX:
+            spans = [Span(node, 0, len(text))] + [
+                Span(span.node, span.start + len(text), span.end + len(text)) for span in spans
+            ]
+            assembled = text + assembled
+            continue
         spans.append(Span(node, len(assembled), len(assembled) + len(text)))
         assembled += text
     return assembled, spans
@@ -756,7 +1096,9 @@ def _run_variants(
     return found
 
 
-def variants(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
+def variants(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, seen: frozenset[str] = frozenset()
+) -> list[str]:
     """Return every statement local *name* can hold.
 
     Two things make one name hold several statements, and both were learned by
@@ -777,7 +1119,7 @@ def variants(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[st
     the column regexes cannot tell from a wider ``SET``.
     """
     runs: list[list[tuple[int, str, str, ast.stmt]]] = []
-    for part in _parts(func, name):
+    for part in _parts(func, name, seen):
         if part[1] == "=" or not runs:
             runs.append([])
         runs[-1].append(part)
@@ -1857,7 +2199,9 @@ def executions(
         pieces: list[list[str]] = [head]
         for operand in operands[1:]:
             if isinstance(operand, ast.Name):
-                pieces.append(variants(func, operand.id) or ["{}"])
+                pieces.append(
+                    variants(func, operand.id) or _handed_texts(func, operand.id, frozenset()) or ["{}"]
+                )
                 continue
             rendered = rendered_text(operand)
             pieces.append([rendered if rendered is not None else "{}"])
@@ -2853,6 +3197,7 @@ def bound_values(
     varmap: str,
     key: str,
     window: Optional[tuple[int, int]] = None,
+    across: bool = False,
 ) -> list[Bind]:
     """Return the assignments filling ``<varmap>[<key>]`` in *func*.
 
@@ -2878,7 +3223,7 @@ def bound_values(
     itself because the two forms do not share a node: what the caller needs is
     the value, and the statement it sits in for the guards that reached it.
     """
-    return scan_binds(func, varmap, key, window).binds
+    return scan_binds(func, varmap, key, window, across).binds
 
 
 class BindScan(NamedTuple):
@@ -2930,12 +3275,21 @@ def scan_binds(
     varmap: str,
     key: str,
     window: Optional[tuple[int, int]] = None,
+    across: bool = False,
+    hops: int = 0,
 ) -> BindScan:
     """:func:`bound_values`, with the census of what the walk passed over.
 
     One walk, so the binds and the account of why there are none cannot
     disagree.  See :class:`BindScan` for what is counted and what ignores
     *window*.
+
+    *across* also reads a varmap this function copies from another name
+    (``getValMap = copy.copy(getValMapOrig)``) and one a call hands it
+    (``..., getValMapOrig = build_where_clause()``, inside
+    :func:`across_calls`).  A bind found that way sits in the other function,
+    so its ``site`` is not a line of *func*: a caller anchoring on the site
+    asks for it only where it reads the value and nothing else.
     """
     found: list[Bind] = []
     assigned = False
@@ -2943,7 +3297,31 @@ def scan_binds(
     spelled_keys: set[str] = set()
     excluded = 0
 
+    lists = {one.values_map: one for one in in_lists(func).values()}
     for node in ast.walk(func):
+        if (
+            lists
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "update"
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == varmap
+            and len(node.value.args) == 1
+            and isinstance(node.value.args[0], ast.Name)
+            and node.value.args[0].id in lists
+        ):
+            # ``varMap.update(stat_var_map)``: the list's values, under the
+            # one placeholder the statement spells it as.
+            held = lists[node.value.args[0].id]
+            assigned = True
+            spelled_keys.add(held.bind)
+            if held.bind == key:
+                if window is None or window[0] <= node.lineno <= window[1]:
+                    found.append(Bind(held.values, node))
+                else:
+                    excluded += 1
+            continue
         targets = targets_of(node)
         if not targets:
             continue
@@ -2979,6 +3357,15 @@ def scan_binds(
                     excluded += 1
             elif isinstance(target, ast.Name) and target.id == varmap:
                 assigned = True
+                copied = _copied_from(node.value) if across else None
+                if copied is not None and hops < RETURN_HOPS:
+                    inner = scan_binds(func, copied, key, None, across, hops + 1)
+                    spelled_keys |= inner.constant_keys
+                    if in_window:
+                        found.extend(inner.binds)
+                    else:
+                        excluded += len(inner.binds)
+                    continue
                 # The dict literal form.  Only constant keys: a computed one
                 # (``var_map[f":{column}"] = val``, which the worker modules
                 # also use) names a placeholder the statement itself does not
@@ -2999,6 +3386,23 @@ def scan_binds(
                     else:
                         excluded += 1
 
+    if across and hops < RETURN_HOPS:
+        for callee, value in returned(func, varmap):
+            if not isinstance(value, ast.Name):
+                continue
+            assigned = True
+            inner = scan_binds(callee, value.id, key, None, across, hops + 1)
+            spelled_keys |= inner.constant_keys
+            found.extend(inner.binds)
+    if across:
+        # One callee's bind reaches here once per call that hands its varmap
+        # over, and once per copy: ``getJobs`` builds its ``WHERE`` in two
+        # places from one closure.
+        unique: dict[tuple[int, int], Bind] = {}
+        for bind in found:
+            unique.setdefault((id(bind.value), id(bind.site)), bind)
+        found = list(unique.values())
+
     return BindScan(
         binds=found,
         varmap_assigned=assigned,
@@ -3006,3 +3410,23 @@ def scan_binds(
         constant_keys=frozenset(spelled_keys),
         outside_window=excluded,
     )
+
+
+def _copied_from(value: ast.expr) -> Optional[str]:
+    """The name a varmap is a copy of: ``copy.copy(x)``, ``copy.deepcopy(x)``, ``dict(x)``, ``x.copy()``."""
+    if not isinstance(value, ast.Call):
+        return None
+    called = value.func
+    if (
+        isinstance(called, ast.Attribute)
+        and called.attr == "copy"
+        and not value.args
+        and isinstance(called.value, ast.Name)
+        and called.value.id != "copy"
+    ):
+        return called.value.id
+    spelled = ast.unparse(called)
+    if spelled in {"copy.copy", "copy.deepcopy", "dict"} and len(value.args) == 1:
+        if isinstance(value.args[0], ast.Name):
+            return value.args[0].id
+    return None

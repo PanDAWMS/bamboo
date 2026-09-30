@@ -500,6 +500,7 @@ class Types:
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
         # (file, id(func), name, depth) -> (func, class): see ``of_expression``.
         self._names: dict[tuple, tuple[ast.AST, Optional[tuple[str, ast.ClassDef]]]] = {}
+        self._files: dict[int, str] = {}
 
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
         """``pathcond.assigned_expressions``, once per function."""
@@ -535,6 +536,18 @@ class Types:
                     _PARSED[key] = tree
             self.parsed[file] = tree
         return self.parsed[file]
+
+    def file_of(self, node: ast.AST) -> Optional[str]:
+        """The corpus file *node* belongs to, if it is in a tree this reader holds."""
+        module = node
+        while getattr(module, "parent", None) is not None:
+            module = module.parent  # type: ignore[attr-defined]
+        if not isinstance(module, ast.Module):
+            return None
+        if id(module) not in self._files:
+            self._files.update({id(tree): file for file, (_sha, tree) in self.walked.items()})
+            self._files.update({id(tree): file for file, tree in self.parsed.items() if tree is not None})
+        return self._files.get(id(module))
 
     def corpus_files(self) -> list[str]:
         """Every module of the corpus, as the map spells a file; tests left out."""

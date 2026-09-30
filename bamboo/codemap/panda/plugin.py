@@ -139,6 +139,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._roots: dict[str, Path] = {}
         self._version: str = ""
         self._modules: list[SourceModule] = []
+        self._calls = None
 
     @property
     def map_id(self) -> str:
@@ -162,9 +163,19 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         return self._version
 
     def run(self) -> MapFragment:
-        """Extract the fragment.  Requires :meth:`prepare` to have run."""
+        """Extract the fragment.  Requires :meth:`prepare` to have run.
+
+        Every slice reads statements through the corpus's calls (see
+        :func:`sql.across_calls`), so that two slices reading one statement
+        read the same text.
+        """
         if not self._modules:
             raise RuntimeError("prepare() must be called before run()")
+        self._calls = sqlwrite.corpus_calls(self._modules, self._roots)
+        with sql.across_calls(self._calls):
+            return self._run()
+
+    def _run(self) -> MapFragment:
 
         fragment = MapFragment(map_id=self.map_id, derived_from=self._version)
         enums, enum_coverage = errorcode.extract(self._modules, self.map_id, self._version)
@@ -357,7 +368,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # the subject rather than kept apart, so the invariants can compare them
         # with what the junctions write; the rows become their own nodes,
         # because a pair of class and attribute can only describe a column.
-        side = sqlwrite.read_side(self._modules, attributor)
+        side = sqlwrite.read_side(self._modules, attributor, self._calls)
         # The read side's denominator.  Without it a query form the slice
         # does not recognise can go missing without a single number moving.
         read_cov, self._unexplained_reads = sqlwrite.read_coverage(self._modules)

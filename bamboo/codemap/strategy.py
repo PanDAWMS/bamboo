@@ -2414,7 +2414,9 @@ def attach_mover_gaps(strategy: Strategy, roots: dict) -> None:
 def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[str]:
     """``["@2391 sql_where_clause, sorting_sql -- <why>"]`` for one function, or none."""
     from bamboo.codemap import gates
+    from bamboo.codemap.calls import Calls, Types
     from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.panda import sql
     from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner
     from bamboo.codemap.panda.recognizers import sqlwrite
 
@@ -2432,12 +2434,16 @@ def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[str]:
         return ["not read: this tree is not the one that was mapped"]
     attach_parents(tree)
     name = owner.rpartition("::")[2]
-    stops = [
-        stop
-        for func, _cls in functions_with_owner(tree)
-        if func.name == name
-        for stop in sqlwrite.statement_stops(func, file)
-    ]
+    # Read through the calls the build read through, or a statement the build
+    # followed into a callee reads here as one that stopped.
+    calls = Calls(Types(roots, {file: (sha, tree)}))
+    with sql.across_calls(calls):
+        stops = [
+            stop
+            for func, _cls in functions_with_owner(tree)
+            if func.name == name
+            for stop in sqlwrite.statement_stops(func, file)
+        ]
     reason, where = gates.mover_reason(
         follow.spec_class, follow.mover_sites.get(owner, []), stops, follow.table_kinds
     )

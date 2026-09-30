@@ -49,8 +49,10 @@ from __future__ import annotations
 
 import ast
 import re
+from pathlib import Path
 from typing import NamedTuple, Optional
 
+from bamboo.codemap.calls import Calls, Types
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -68,6 +70,7 @@ from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
+    enclosing_function,
     functions_with_owner,
     handed_in,
     literal_values,
@@ -1228,7 +1231,32 @@ def _rows_of(
     return names or fetched
 
 
-def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSide:
+def _module_of(node: ast.AST) -> Optional[ast.Module]:
+    while getattr(node, "parent", None) is not None:
+        node = node.parent  # type: ignore[attr-defined]
+    return node if isinstance(node, ast.Module) else None
+
+
+def corpus_calls(modules: list[SourceModule], roots: Optional[dict[str, Path]]) -> Optional[Calls]:
+    """The corpus's calls, read over the build's own trees; ``None`` without *roots*.
+
+    The trees are the modules' so that a caller :meth:`Calls.callers` finds is
+    a function the build has already parsed and attached parents to.
+    """
+    if not roots:
+        return None
+    walked = {}
+    for module in modules:
+        attach_parents(module.tree)
+        walked[module.rel_path] = (module.blob_sha, module.tree)
+    return Calls(Types(roots, walked))
+
+
+def read_side(
+    modules: list[SourceModule],
+    attributor: SpecAttributor,
+    calls: Optional[Calls] = None,
+) -> ReadSide:
     """Return what the corpus's statements ask for: which values, and whose rows.
 
     **The rows are half of it, and the half the map had nowhere to put.**  A
@@ -1282,7 +1310,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
     here: ``dummy`` was not among the values reported as written-but-unselected
     for this subject, so nothing is hidden by it.
     """
-    settle = values.resolver(values.declared_mappings(modules))
+    settle = values.handed(values.resolver(values.declared_mappings(modules)), calls)
     found: dict[str, dict[str, ValueUse]] = {}
     rows: dict[str, EntityUse] = {}
     unreadable: dict[str, int] = {}
@@ -1319,6 +1347,19 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
             statements[(at.owner, at.line)] = kept._replace(
                 unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved)))
             )
+
+    def bound(func, run, key: str, file: str) -> list[str]:
+        values_of: list[str] = []
+        for bind in sql.bound_values(func, run.varmap or "", key, run.window, across=True):
+            # Read where the value is written: one a call handed the varmap
+            # sits in the callee, an imported ``IN`` list at the top of
+            # another module, and their names are theirs.
+            where = enclosing_function(bind.value) or _module_of(bind.value) or func
+            at_file = file
+            if where is not func and calls is not None:
+                at_file = calls.types.file_of(where) or file
+            values_of.extend(one.value for one in settle(bind.value, where, at_file))
+        return values_of
 
     def touch(table: str, owner: str, verb: str) -> None:
         use = rows.setdefault(table.lower(), EntityUse(set(), set(), set(), set(), set()))
@@ -1610,11 +1651,8 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                             attributor, spec_class, table, column
                         )
                         subject = SubjectNode.make_name(qualifier, attribute)
-                        for bind in sql.bound_values(
-                            func, run.varmap or "", key, run.window
-                        ):
-                            for value in settle(bind.value, func):
-                                record(subject, value, owner, verb, at)
+                        for value in bound(func, run, key, module.rel_path):
+                            record(subject, value, owner, verb, at)
                     for column, value in sql.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column

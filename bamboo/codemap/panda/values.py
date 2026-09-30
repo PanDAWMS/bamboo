@@ -41,10 +41,14 @@ from __future__ import annotations
 import ast
 import json
 import re
-from typing import Optional, Union
+from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 from bamboo.codemap.models import SourceModule
+from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.pathcond import functions_with_owner, single_definition
+
+if TYPE_CHECKING:
+    from bamboo.codemap.calls import Calls
 
 # A literal mapping, nested as deeply as the source nests it.
 Mapping = dict[str, Union[str, "Mapping"]]
@@ -381,3 +385,195 @@ def resolver(mappings: dict[str, Mapping]):
         return mapping_values(expression, func=func, mappings=mappings)
 
     return resolve
+
+
+#: How many calls one parameter is followed into.  Past it the parameter is
+#: left unsettled rather than settled by a sample of its callers.
+HANDED_CALLERS = 16
+
+#: How many functions out a value is followed.  ``lockJobsForReassign``'s
+#: status list is two: the ``DBProxy`` method's parameter is ``TaskBuffer``'s,
+#: which is the list ``copyArchive.main`` writes down.
+HANDED_DEPTH = 4
+
+
+class Handed(NamedTuple):
+    """One value an expression can take, and the calls it came in through."""
+
+    value: str
+    #: ``file:line`` of each call the value was handed through, the one into
+    #: the function asked about first.  Empty where the function says it.
+    via: tuple[str, ...] = ()
+
+
+def handed(resolve, calls: Optional["Calls"]):
+    """Widen *resolve* to the values a name is handed, in the function and by its callers.
+
+    *resolve* settles what one expression states -- a constant, a declared
+    mapping.  Around it, three ways a statement's bind is given its value
+    without stating it:
+
+    * a list, tuple or set literal, element by element -- what an ``IN`` list
+      is bound from;
+    * a local name, through each ``=`` or ``+=`` in the function that writes
+      it -- and only where every one of them settles (see ``bindings``);
+    * a parameter, through what each call :meth:`Calls.callers` places at the
+      function hands it (``calls.bind``), read in the caller the same way.
+
+    Returns ``(expression, func, file) -> [Handed, ...]``.  Without *calls*
+    only the function's own writes are read.
+
+    A union, not a choice: a statement that three callers hand three lists
+    asks, over its runs, for every value any of them names.  Which caller
+    asked for which is kept in ``via``.
+    """
+    from bamboo.codemap.calls import Target, bind
+    from bamboo.codemap.calls import returns as calls_returns
+
+    def parameters(func: ast.AST) -> set[str]:
+        args = getattr(func, "args", None)
+        if args is None:
+            return set()
+        return {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+
+    def in_scope(node: ast.AST, func: ast.AST) -> bool:
+        owner = pathcond.enclosing_function(node)
+        return owner is func if owner is not None else isinstance(func, ast.Module)
+
+    def listed(expression: ast.expr) -> bool:
+        """Whether a ``+`` chain concatenates sequences: one of its operands is written as one."""
+        if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+            return True
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+            return listed(expression.left) or listed(expression.right)
+        return False
+
+    def bindings(func: ast.AST, name: str) -> Optional[list[ast.expr]]:
+        """What each binding of *name* in *func* writes; ``None`` if one writes what cannot be read here.
+
+        All or nothing, because the values are claimed as what the name
+        holds: ``pandaID = 0`` before a loop that rebinds it from the rows is
+        not a value any statement asks by, and settling the one literal of
+        two writes said it was.
+        """
+        found: list[ast.expr] = []
+        for node in ast.walk(func):
+            if node is func or not in_scope(node, func):
+                continue
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == name:
+                        found.append(node.value)
+                    elif any(isinstance(one, ast.Name) and one.id == name for one in ast.walk(target)):
+                        return None
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                if isinstance(node.target, ast.Name) and node.target.id == name and node.value is not None:
+                    found.append(node.value)
+            elif isinstance(node, ast.AugAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == name:
+                    # ``statList += ["x"]`` adds members; ``text += "x"``
+                    # makes a different string.
+                    if not isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
+                        return None
+                    found.append(node.value)
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith, ast.ExceptHandler)):
+                targets = (
+                    [node.target] if isinstance(node, (ast.For, ast.AsyncFor))
+                    else [item.optional_vars for item in node.items if item.optional_vars is not None]
+                    if isinstance(node, (ast.With, ast.AsyncWith))
+                    else []
+                )
+                if isinstance(node, ast.ExceptHandler) and node.name == name:
+                    return None
+                if any(
+                    isinstance(one, ast.Name) and one.id == name
+                    for target in targets
+                    for one in ast.walk(target)
+                ):
+                    return None
+            elif isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
+                names = [alias.asname or alias.name for alias in node.names] if isinstance(
+                    node, (ast.Import, ast.ImportFrom)
+                ) else node.names
+                if name in names:
+                    return None
+        return found
+
+    def settle(
+        expression: ast.expr, func: ast.AST, file: str, depth: int, seen: frozenset
+    ) -> list[Handed]:
+        stated = resolve(expression, func)
+        if stated:
+            return [Handed(value) for value in stated]
+        if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+            return [
+                one
+                for element in expression.elts
+                if not isinstance(element, ast.Starred)
+                for one in settle(element, func, file, depth, seen)
+            ]
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add) and listed(expression):
+            # ``cls.getInputTypes() + ["pp_input"]``: every member of both.
+            left = settle(expression.left, func, file, depth, seen)
+            right = settle(expression.right, func, file, depth, seen)
+            return left + right if left and right else []
+        if isinstance(expression, ast.Call):
+            return returned(expression, func, file, depth, seen)
+        if not isinstance(expression, ast.Name):
+            return []
+        key = (file, getattr(func, "lineno", 0), expression.id)
+        if key in seen:
+            return []
+        seen = seen | {key}
+        written = bindings(func, expression.id)
+        if written is None:
+            return []
+        found: list[Handed] = []
+        for value in written:
+            settled = settle(value, func, file, depth, seen)
+            if not settled:
+                return []
+            found.extend(settled)
+        if expression.id not in parameters(func):
+            return found
+        if calls is None or depth >= HANDED_DEPTH:
+            return []
+        owned = calls.types.method_class(file, func)
+        target = Target(file, func, owned[1] if owned else None)
+        sites = calls.callers(target)
+        if not sites or len(sites) > HANDED_CALLERS:
+            return []
+        for site in sites:
+            passed = bind(site.call, target).get(expression.id)
+            if passed is None:
+                continue
+            at = f"{site.file}:{site.call.lineno}"
+            found.extend(
+                Handed(one.value, (at, *one.via))
+                for one in settle(passed, site.func, site.file, depth + 1, seen)
+            )
+        return found
+
+    def returned(call: ast.Call, func: ast.AST, file: str, depth: int, seen: frozenset) -> list[Handed]:
+        """What the functions *call* lands in return, where each of their returns settles."""
+        if calls is None or depth >= HANDED_DEPTH:
+            return []
+        placed = calls.callees(file, func, call)
+        if not placed.targets or placed.unplaced:
+            return []
+        found: list[Handed] = []
+        for target in placed.targets:
+            key = (target.file, target.func.lineno, "<return>")  # type: ignore[attr-defined]
+            if key in seen:
+                return []
+            for value in calls_returns(target.func):
+                settled = settle(value, target.func, target.file, depth + 1, seen | {key})
+                if not settled:
+                    return []
+                found.extend(settled)
+        return found
+
+    def settled(expression: ast.expr, func: ast.AST, file: str) -> list[Handed]:
+        return settle(expression, func, file, 0, frozenset())
+
+    return settled

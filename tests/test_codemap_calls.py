@@ -402,3 +402,273 @@ def test_a_name_rebound_from_names_rebound_many_times_is_read_once_per_depth(tmp
 
     assert target.cls.name == "Spec"
     assert len(asked) < 100
+
+
+# -- statements and binds read through calls (``sql.across_calls``) ---------
+
+
+def _runs(calls, file, name):
+    from bamboo.codemap.panda import sql
+
+    func = _function(calls, file, name)
+    with sql.across_calls(calls):
+        return func, sql.executions(func)
+
+
+def test_an_in_list_helper_is_read_as_one_bind_holding_the_list(tmp_path):
+    from bamboo.codemap.panda import sql
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def lock(cur, statList):\n"
+            "    varMap = {}\n"
+            "    sql = 'SELECT PandaID FROM jobsActive4 WHERE a=1 '\n"
+            "    names, stat_map = get_sql_IN_bind_variables(statList, prefix=':stat')\n"
+            "    sql += f'AND jobStatus IN ({names}) '\n"
+            "    varMap.update(stat_map)\n"
+            "    cur.execute(sql, varMap)\n"
+        ),
+    )
+    calls = _calls(roots)
+    func, runs = _runs(calls, "db", "lock")
+
+    (run,) = runs
+    assert "jobStatus IN (:stat__in)" in run.sql
+    assert run.unresolved == ()
+    (bind,) = sql.bound_values(func, "varMap", ":stat__in")
+    assert ast.unparse(bind.value) == "statList"
+
+
+def test_a_value_is_settled_through_the_list_a_caller_hands_the_parameter(tmp_path):
+    from bamboo.codemap.panda import values
+
+    roots = _tree(
+        tmp_path,
+        db="def lock(statList):\n    return statList\n",
+        tb="from pkg.db import lock\n\ndef forward(stats):\n    return lock(stats)\n",
+        main="from pkg.tb import forward\n\ndef run():\n    forward(['activated', 'throttled'])\n",
+    )
+    calls = _calls(roots)
+    func = _function(calls, "db", "lock")
+    settle = values.handed(values.resolver({}), calls)
+
+    found = settle(ast.Name(id="statList"), func, "pkg/db.py")
+
+    assert sorted(one.value for one in found) == ["activated", "throttled"]
+    assert {one.via for one in found} == {("pkg/tb.py:4", "pkg/main.py:4")}
+
+
+def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):
+    from bamboo.codemap.panda import sql
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "class DB:\n"
+            "    def where(self, label):\n"
+            "        vm = {':status': 'activated'}\n"
+            "        clause = 'WHERE jobStatus=:status '\n"
+            "        if label:\n"
+            "            clause += 'AND label=:label '\n"
+            "            vm[':label'] = label\n"
+            "        return clause, vm\n"
+            "\n"
+            "    def get(self, cur, label):\n"
+            "        def build():\n"
+            "            c, v = self.where(label)\n"
+            "            return c, v\n"
+            "        clause, orig = build()\n"
+            "        vm = dict(orig)\n"
+            "        sql = 'SELECT PandaID FROM jobsActive4 '\n"
+            "        sql += clause\n"
+            "        cur.execute(sql, vm)\n"
+        ),
+    )
+    calls = _calls(roots)
+    func, runs = _runs(calls, "db", "get")
+
+    (run,) = runs
+    assert run.sql == "SELECT PandaID FROM jobsActive4 WHERE jobStatus=:status AND label=:label "
+    assert run.unresolved == ()
+    with sql.across_calls(calls):
+        binds = sql.bound_values(func, "vm", ":status", across=True)
+        assert sql.bound_values(func, "vm", ":status") == []
+    assert [ast.unparse(bind.value) for bind in binds] == ["'activated'"]
+
+
+def test_a_callee_building_two_statements_hands_over_two_alternatives_not_one(tmp_path):
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def order(by_age):\n"
+            "    if by_age:\n"
+            "        text = 'ORDER BY age'\n"
+            "    else:\n"
+            "        text = 'ORDER BY share'\n"
+            "    return text\n"
+            "\n"
+            "def get(cur, by_age):\n"
+            "    tail = order(by_age)\n"
+            "    sql = 'SELECT PandaID FROM jobsActive4 '\n"
+            "    sql += tail\n"
+            "    cur.execute(sql, {})\n"
+        ),
+    )
+    calls = _calls(roots)
+    _func, runs = _runs(calls, "db", "get")
+
+    assert sorted(run.sql for run in runs) == [
+        "SELECT PandaID FROM jobsActive4 ORDER BY age",
+        "SELECT PandaID FROM jobsActive4 ORDER BY share",
+    ]
+
+
+def test_a_returned_call_and_a_returned_name_are_followed_to_their_text(tmp_path):
+    roots = _tree(
+        tmp_path,
+        db=(
+            "class DB:\n"
+            "    def criteria(self, fast):\n"
+            "        if fast:\n"
+            "            return self.by_age()\n"
+            "        return self.by_share()\n"
+            "\n"
+            "    def by_age(self):\n"
+            "        empty = '', {}\n"
+            "        if self.enabled:\n"
+            "            return ' ORDER BY age', {}\n"
+            "        return empty\n"
+            "\n"
+            "    def by_share(self):\n"
+            "        return ' ORDER BY share', {}\n"
+            "\n"
+            "    def get(self, cur, fast):\n"
+            "        sorting, _vm = self.criteria(fast)\n"
+            "        sql = 'SELECT PandaID FROM jobsActive4'\n"
+            "        if sorting:\n"
+            "            sql += sorting\n"
+            "        cur.execute(sql, {})\n"
+        ),
+    )
+    calls = _calls(roots)
+    _func, runs = _runs(calls, "db", "get")
+
+    # The empty text ``by_age`` hands back when disabled is the run that skips
+    # the ``if``, not a third alternative.
+    assert sorted(run.sql for run in runs) == [
+        "SELECT PandaID FROM jobsActive4 ORDER BY age",
+        "SELECT PandaID FROM jobsActive4 ORDER BY share",
+    ]
+
+
+def test_a_statement_wrapped_around_itself_keeps_what_it_held(tmp_path):
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def get(cur, limit):\n"
+            "    sql = 'SELECT PandaID FROM jobsActive4 WHERE a=:a '\n"
+            "    if limit:\n"
+            "        sql = 'SELECT * FROM (' + sql\n"
+            "        sql += ') WHERE ROWNUM <= :n'\n"
+            "    cur.execute(sql, {':a': 1})\n"
+        ),
+    )
+    calls = _calls(roots)
+    _func, runs = _runs(calls, "db", "get")
+
+    assert [run.sql for run in runs] == [
+        "SELECT * FROM (SELECT PandaID FROM jobsActive4 WHERE a=:a ) WHERE ROWNUM <= :n"
+    ]
+
+
+def test_a_fragment_held_under_a_local_name_is_appended_as_its_text(tmp_path):
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def get(cur, failed_only):\n"
+            "    failed = \"AND jobStatus IN ('failed','closed') \"\n"
+            "    sql = 'SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:t '\n"
+            "    if failed_only:\n"
+            "        sql += failed\n"
+            "    cur.execute(sql, {':t': 1})\n"
+        ),
+    )
+    calls = _calls(roots)
+    _func, runs = _runs(calls, "db", "get")
+
+    (run,) = runs
+    assert run.sql == "SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:t AND jobStatus IN ('failed','closed') "
+    assert run.unresolved == ()
+
+
+def test_a_local_name_settles_only_where_every_binding_of_it_does(tmp_path):
+    """``pandaID = 0`` before the loop that rebinds it from the rows is no value asked by."""
+    from bamboo.codemap.panda import values
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def get(cur, rows, labels):\n"
+            "    pandaID = 0\n"
+            "    for pandaID, other in rows:\n"
+            "        break\n"
+            "    status = 'activated'\n"
+            "    if labels:\n"
+            "        status = 'throttled'\n"
+            "    return pandaID, status\n"
+        ),
+    )
+    calls = _calls(roots)
+    func = _function(calls, "db", "get")
+    settle = values.handed(values.resolver({}), calls)
+
+    assert settle(ast.Name(id="pandaID"), func, "pkg/db.py") == []
+    assert sorted(one.value for one in settle(ast.Name(id="status"), func, "pkg/db.py")) == [
+        "activated",
+        "throttled",
+    ]
+
+
+def test_an_imported_in_list_is_read_with_the_values_its_module_builds_it_from(tmp_path):
+    from bamboo.codemap.panda import sql, values
+
+    roots = _tree(
+        tmp_path,
+        spec=(
+            "class DatasetSpec:\n"
+            "    @classmethod\n"
+            "    def input_types(cls):\n"
+            "        return ['input', 'pseudo_input']\n"
+            "\n"
+            "    @classmethod\n"
+            "    def process_types(cls):\n"
+            "        return cls.input_types() + ['pp_input']\n"
+            "\n"
+            "TYPES_var_str, TYPES_var_map = get_sql_IN_bind_variables(DatasetSpec.process_types(), prefix=':type_')\n"
+        ),
+        db=(
+            "from pkg.spec import TYPES_var_str, TYPES_var_map\n"
+            "\n"
+            "def get(cur):\n"
+            "    varMap = {}\n"
+            "    sql = 'SELECT datasetID FROM JEDI_Datasets '\n"
+            "    sql += f'WHERE type IN ({TYPES_var_str}) '\n"
+            "    varMap.update(TYPES_var_map)\n"
+            "    cur.execute(sql, varMap)\n"
+        ),
+    )
+    calls = _calls(roots)
+    func, runs = _runs(calls, "db", "get")
+
+    (run,) = runs
+    assert run.sql == "SELECT datasetID FROM JEDI_Datasets WHERE type IN (:type___in) "
+    with sql.across_calls(calls):
+        (bind,) = sql.bound_values(func, "varMap", ":type___in", across=True)
+    settle = values.handed(values.resolver({}), calls)
+    where = calls.types.tree("pkg/spec.py")
+    assert sorted(one.value for one in settle(bind.value, where, "pkg/spec.py")) == [
+        "input",
+        "pp_input",
+        "pseudo_input",
+    ]
