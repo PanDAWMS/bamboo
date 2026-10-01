@@ -1317,8 +1317,13 @@ def _run_variants(
     and :func:`_accumulated` writes it out pass by pass first.
     """
     parts = _accumulated(func, parts, name)
-    start = 1 if parts and parts[0][1] == "=" else 0
+    heads = [index for index, part in enumerate(parts) if part[1] == "="]
+    # One head is the statement and is never dropped.  Several are the arms of
+    # one ``if``/``else`` (see :func:`_runs`), and each set takes one of them.
+    start = 1 if heads == [0] else 0
     statements = _compatible_sets(parts, start)
+    if len(heads) > 1:
+        statements = [members for members in statements if members & set(heads)]
     per_part, choices = _table_choices(func, parts)
     key_fills = _key_fills(func, parts)
     assignments = _assignments(choices)
@@ -1340,13 +1345,17 @@ def _run_variants(
 
     every = set(range(start, len(parts)))
     found: list[tuple[str, list[Span]]] = []
-    seen: set[str] = set()
+    # Per arm, as when each arm was a run of its own: two arms writing the
+    # same text are two places the statement is built, and a call in the
+    # second arm is reached only by the second's fragments.
+    seen: set[tuple[Optional[int], str]] = set()
     for members in statements:
         dropped = every - members
+        arm = min(members & set(heads)) if len(heads) > 1 else None
         for assignment in assignments:
             text, spans = _fold_filled(parts, per_part, assignment, dropped, key_fills)
-            if text and text not in seen:
-                seen.add(text)
+            if text and (arm, text) not in seen:
+                seen.add((arm, text))
                 found.append((text, spans))
     return found
 
@@ -1373,12 +1382,37 @@ def variants(
     concatenating runs one statement's ``SET`` clause into the next one's, which
     the column regexes cannot tell from a wider ``SET``.
     """
+    return [text for run in _runs(_parts(func, name, seen)) for text, _spans in _run_variants(func, run, name) if text]
+
+
+def _runs(parts: list[tuple[int, str, str, ast.stmt]]) -> list[list[tuple[int, str, str, ast.stmt]]]:
+    """*parts* cut into the runs one statement each is built by, at each ``=``.
+
+    **Except a ``=`` that is another arm of the same ``if``.**  ``getNumberJobsUser``
+    writes::
+
+        if workingGroup is not None:
+            sql = "SELECT ... AND workingGroup=:workingGroup "
+        else:
+            sql = "SELECT ... AND workingGroup IS NULL "
+        sql += "AND NOT jobStatus IN (:failed,:merging) "
+
+    and cut at each ``=``, the shared ``+=`` went to the ``else`` arm alone:
+    the ``if`` arm's statement never refused ``failed``.  A ``=`` exclusive
+    with everything the current run holds opens an alternative of it rather
+    than a new run, and :func:`_run_variants` gives each set one arm.
+    """
     runs: list[list[tuple[int, str, str, ast.stmt]]] = []
-    for part in _parts(func, name, seen):
+    for part in parts:
+        if part[1] == "=" and runs and any(one[1] == "=" for one in runs[-1]):
+            condition = path_condition(part[3])
+            if all(exclusive(path_condition(one[3]), condition) for one in runs[-1]):
+                runs[-1].append(part)
+                continue
         if part[1] == "=" or not runs:
             runs.append([])
         runs[-1].append(part)
-    return [text for run in runs for text, _spans in _run_variants(func, run, name) if text]
+    return runs
 
 
 def variant_spans(
@@ -1406,14 +1440,9 @@ def variant_spans(
     All that was missing is which fragment contributed which stretch, so this
     returns that rather than inventing a second decomposition.
     """
-    runs: list[list[tuple[int, str, str, ast.stmt]]] = []
-    for part in _parts(func, name):
-        if part[1] == "=" or not runs:
-            runs.append([])
-        runs[-1].append(part)
     return [
         (text, spans)
-        for run in runs
+        for run in _runs(_parts(func, name))
         for text, spans in _run_variants(func, run, name)
         if text
     ]

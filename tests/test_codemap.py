@@ -14443,6 +14443,26 @@ def test_two_arms_building_the_same_statement_do_not_lose_the_second_one():
     assert {r.sql for r in runs} == {"UPDATE ATLAS_PANDA.filesTable4 SET x=:x "}
 
 
+def test_a_fragment_both_arms_share_is_appended_to_each_arm():
+    """``getNumberJobsUser``: the ``+=`` after an ``if``/``else`` that assigns in each arm belongs to both."""
+    source = (
+        "def f(self, workingGroup):\n"
+        "    if workingGroup is not None:\n"
+        "        sql = 'SELECT COUNT(*) FROM ATLAS_PANDA.jobsActive4 WHERE workingGroup=:workingGroup '\n"
+        "    else:\n"
+        "        sql = 'SELECT COUNT(*) FROM ATLAS_PANDA.jobsActive4 WHERE workingGroup IS NULL '\n"
+        "    sql += 'AND NOT jobStatus IN (:failed,:merging) '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    runs = sql.executions(_func(source))
+
+    assert sorted(r.sql for r in runs) == [
+        "SELECT COUNT(*) FROM ATLAS_PANDA.jobsActive4 WHERE workingGroup IS NULL AND NOT jobStatus IN (:failed,:merging) ",
+        "SELECT COUNT(*) FROM ATLAS_PANDA.jobsActive4 WHERE workingGroup=:workingGroup AND NOT jobStatus IN (:failed,:merging) ",
+    ]
+
+
 def test_a_call_carrying_its_own_statement_has_no_fragment_to_place():
     """"No fragment reaches this call" and "there is no fragment" are
     different answers.  Thirty pairs in the corpus write the statement into
