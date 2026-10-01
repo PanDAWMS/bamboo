@@ -56,6 +56,7 @@ from bamboo.codemap.panda.pathcond import (
     exclusive,
     loops_over,
     path_condition,
+    ruled_out_by,
     targets_of,
     written_value,
 )
@@ -512,9 +513,6 @@ def _handed_texts(
 #: call hands its parameters -- see :func:`at_call`.
 _AT_CALL: Optional[tuple[ast.AST, dict[str, object]]] = None
 
-#: A test the call site's constants do not settle.
-_UNDECIDED = object()
-
 
 @contextlib.contextmanager
 def at_call(func: ast.AST, values: dict[str, object]) -> Iterator[None]:
@@ -536,70 +534,12 @@ def at_call(func: ast.AST, values: dict[str, object]) -> Iterator[None]:
         _AT_CALL = previous
 
 
-def decided(test: ast.expr, values: dict[str, object]) -> object:
-    """``True`` or ``False`` where *values* settle *test*, else :data:`_UNDECIDED`.
-
-    A name's truth, ``not``, ``and``/``or``, and one comparison of a name
-    with a literal -- the shapes a flag parameter is tested in.
-    """
-    if isinstance(test, ast.Name):
-        return bool(values[test.id]) if test.id in values else _UNDECIDED
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        inner = decided(test.operand, values)
-        return inner if inner is _UNDECIDED else not inner
-    if isinstance(test, ast.BoolOp):
-        results = [decided(value, values) for value in test.values]
-        stop = isinstance(test.op, ast.Or)
-        if any(result is stop for result in results):
-            return stop
-        return (not stop) if all(result is (not stop) for result in results) else _UNDECIDED
-    if (
-        isinstance(test, ast.Compare)
-        and len(test.ops) == 1
-        and isinstance(test.left, ast.Name)
-        and test.left.id in values
-    ):
-        left = values[test.left.id]
-        try:
-            right = ast.literal_eval(test.comparators[0])
-        except (ValueError, SyntaxError, TypeError):
-            return _UNDECIDED
-        compare = {
-            ast.Is: lambda a, b: a is b,
-            ast.IsNot: lambda a, b: a is not b,
-            ast.Eq: lambda a, b: a == b,
-            ast.NotEq: lambda a, b: a != b,
-            ast.In: lambda a, b: a in b,
-            ast.NotIn: lambda a, b: a not in b,
-        }.get(type(test.ops[0]))
-        if compare is None:
-            return _UNDECIDED
-        try:
-            return bool(compare(left, right))
-        except TypeError:
-            return _UNDECIDED
-    return _UNDECIDED
-
-
 def ruled_out(node: ast.AST) -> bool:
     """Whether the call site being read (:func:`at_call`) never runs *node*."""
     if not _AT_CALL:
         return False
     func, values = _AT_CALL
-    if enclosing_function(node) is not func:
-        return False
-    child = node
-    for ancestor in ancestors(node):
-        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            break
-        if isinstance(ancestor, ast.If):
-            result = decided(ancestor.test, values)
-            if result is False and any(child is one for one in ancestor.body):
-                return True
-            if result is True and any(child is one for one in ancestor.orelse):
-                return True
-        child = ancestor
-    return False
+    return ruled_out_by(node, func, values)
 
 
 def _parts(

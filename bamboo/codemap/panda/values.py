@@ -527,16 +527,43 @@ def handed(resolve, calls: Optional["Calls"]):
         sites = calls.callers(target)
         if not sites or len(sites) > HANDED_CALLERS:
             return []
+        passed_over = [] if written else never_reaching(expression, func, target)
         for site in sites:
             passed = bind(site.call, target).get(expression.id)
             if passed is None:
                 continue
             at = f"{site.file}:{site.call.lineno}"
-            found.extend(
-                Handed(one.value, (at, *one.via))
-                for one in settle(passed, site.func, site.file, depth + 1, seen)
-            )
+            for one in settle(passed, site.func, site.file, depth + 1, seen):
+                via = (at, *one.via)
+                if not any(via[: len(route)] == route for route in passed_over):
+                    found.append(Handed(one.value, via))
         return found
+
+    def never_reaching(expression: ast.Name, func: ast.AST, target: "Target") -> list[tuple[str, ...]]:
+        """The calls whose constant for *expression* rules out the code that reads it.
+
+        ``getEventRanges`` binds ``:datasetID`` from ``segment_id`` under ``if
+        segment_id is not None:``, and both its callers hand ``None``: neither
+        runs the bind, so ``None`` is not a value the statement is asked with.
+        A parameter's value at one place in the function is what the calls
+        reaching that place hand it, not what every call hands.  Only a test
+        of the parameter itself is ruled on -- :func:`pathcond.decided` --
+        so a call ruled out through another argument still hands its value.
+        """
+        tested = {
+            name.id
+            for ancestor in pathcond.ancestors(expression)
+            if isinstance(ancestor, ast.If) and pathcond.enclosing_function(ancestor) is func
+            for name in ast.walk(ancestor.test)
+            if isinstance(name, ast.Name)
+        }
+        if expression.id not in tested or calls is None:
+            return []
+        return [
+            via
+            for via, constants in calls.handed_constants(target, {expression.id})
+            if pathcond.ruled_out_by(expression, func, constants)
+        ]
 
     def returned(call: ast.Call, func: ast.AST, file: str, depth: int, seen: frozenset) -> list[Handed]:
         """What the functions *call* lands in return, where each of their returns settles."""

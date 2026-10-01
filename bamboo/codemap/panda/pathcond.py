@@ -557,6 +557,77 @@ def exclusive(one: list[str], other: list[str]) -> bool:
     )
 
 
+#: A test the constants at hand do not settle.
+UNDECIDED = object()
+
+
+def decided(test: ast.expr, values: dict[str, object]) -> object:
+    """``True`` or ``False`` where *values* settle *test*, else :data:`UNDECIDED`.
+
+    A name's truth, ``not``, ``and``/``or``, and one comparison of a name
+    with a literal -- the shapes a flag parameter is tested in.
+    """
+    if isinstance(test, ast.Name):
+        return bool(values[test.id]) if test.id in values else UNDECIDED
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = decided(test.operand, values)
+        return inner if inner is UNDECIDED else not inner
+    if isinstance(test, ast.BoolOp):
+        results = [decided(value, values) for value in test.values]
+        stop = isinstance(test.op, ast.Or)
+        if any(result is stop for result in results):
+            return stop
+        return (not stop) if all(result is (not stop) for result in results) else UNDECIDED
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.left, ast.Name)
+        and test.left.id in values
+    ):
+        left = values[test.left.id]
+        try:
+            right = ast.literal_eval(test.comparators[0])
+        except (ValueError, SyntaxError, TypeError):
+            return UNDECIDED
+        compare = {
+            ast.Is: lambda a, b: a is b,
+            ast.IsNot: lambda a, b: a is not b,
+            ast.Eq: lambda a, b: a == b,
+            ast.NotEq: lambda a, b: a != b,
+            ast.In: lambda a, b: a in b,
+            ast.NotIn: lambda a, b: a not in b,
+        }.get(type(test.ops[0]))
+        if compare is None:
+            return UNDECIDED
+        try:
+            return bool(compare(left, right))
+        except TypeError:
+            return UNDECIDED
+    return UNDECIDED
+
+
+def ruled_out_by(node: ast.AST, func: ast.AST, values: dict[str, object]) -> bool:
+    """Whether *func* never runs *node* when its parameters hold *values*.
+
+    Only *func*'s own ``if`` statements are ruled on: a nested function or
+    lambda has parameters of its own, whatever they are called.
+    """
+    if enclosing_function(node) is not func:
+        return False
+    child = node
+    for ancestor in ancestors(node):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            break
+        if isinstance(ancestor, ast.If):
+            result = decided(ancestor.test, values)
+            if result is False and any(child is one for one in ancestor.body):
+                return True
+            if result is True and any(child is one for one in ancestor.orelse):
+                return True
+        child = ancestor
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Whether what one site writes can be what another site reads
 # ---------------------------------------------------------------------------

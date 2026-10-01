@@ -459,6 +459,44 @@ def test_a_value_is_settled_through_the_list_a_caller_hands_the_parameter(tmp_pa
     assert {one.via for one in found} == {("pkg/tb.py:4", "pkg/main.py:4")}
 
 
+def test_a_value_a_test_around_the_read_rules_out_is_not_handed_there(tmp_path):
+    """``getEventRanges`` binds ``:datasetID`` under ``if segment_id is not None:``; a call handing None never runs it."""
+    from bamboo.codemap.panda import values
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def get(segment_id):\n"
+            "    vm = {}\n"
+            "    if segment_id is not None:\n"
+            "        vm[':datasetID'] = segment_id\n"
+            "    return vm\n"
+        ),
+        tb="from pkg.db import get\n\ndef forward(segment_id):\n    return get(segment_id)\n",
+        main=(
+            "from pkg.db import get\n"
+            "from pkg.tb import forward\n"
+            "\n"
+            "def run():\n"
+            "    get(None)\n"
+            "    forward(None)\n"
+            "    get(7)\n"
+        ),
+    )
+    calls = _calls(roots)
+    func = _function(calls, "db", "get")
+    settle = values.handed(values.resolver(), calls)
+    (read,) = [
+        node.value for node in ast.walk(func) if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+    ]
+
+    found = settle(read, func, "pkg/db.py")
+
+    assert [(one.value, one.via) for one in found] == [("7", ("pkg/main.py:7",))]
+    # Where nothing tests it, every call's value is the parameter's.
+    assert sorted(one.value for one in settle(ast.Name(id="segment_id"), func, "pkg/db.py")) == ["7", "None", "None"]
+
+
 def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):
     from bamboo.codemap.panda import sql
 
