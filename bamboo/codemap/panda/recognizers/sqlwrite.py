@@ -1943,7 +1943,7 @@ def read_side(
                 # ``NOT EXISTS`` subquery's value as one the statement asks for.
                 for term in reading.terms:
                     subject = _term_subject(attributor, term)
-                    if term.scope == sqltext.NEGATED:
+                    if term.scope in (sqltext.NEGATED, sqltext.PICKS):
                         continue
                     if term.scope == sqltext.CONSULT:
                         if not term.excluding:

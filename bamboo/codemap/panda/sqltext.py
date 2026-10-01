@@ -961,7 +961,10 @@ UNKNOWN_QUALIFIER = "the qualifier names no table of the statement"
 #: job exists and returns none of them.  ``negated``: such a subquery under an
 #: odd number of ``NOT``, where the value is one the rows must *not* have
 #: company in, and reading it as asked for is reading it backwards.
-ROW, CONSULT, NEGATED = "row", "consult", "negated"
+#: ``picks``: the subquery an ``UPDATE`` or ``DELETE`` chooses its own rows by
+#: (:func:`_picks_own_rows`) -- neither a question about other rows nor the
+#: rows a reader is handed.
+ROW, CONSULT, NEGATED, PICKS = "row", "consult", "negated", "picks"
 
 _SCHEMA: Optional[dict[str, frozenset[str]]] = None
 
@@ -988,7 +991,7 @@ class Term(NamedTuple):
     #: Whose rows the term picks: ``read``, ``updated`` or ``deleted``.  An
     #: ``INSERT ... SELECT`` picks rows to read.
     verb: str
-    #: :data:`ROW`, :data:`CONSULT` or :data:`NEGATED`.
+    #: :data:`ROW`, :data:`CONSULT`, :data:`NEGATED` or :data:`PICKS`.
     scope: str
     #: ``<>``, ``!=``, ``NOT IN``: rows without the value.
     excluding: bool
@@ -1175,7 +1178,7 @@ class _Root(NamedTuple):
 
 def _kind(scope) -> str:
     """:data:`ROW`, or the kind of subquery *scope* is inside, by the ``NOT``\\ s above it."""
-    negations, inside = 0, False
+    negations, inside, picks = 0, False, False
     while scope is not None:
         if scope.scope_type == ScopeType.SUBQUERY:
             inside = True
@@ -1183,11 +1186,47 @@ def _kind(scope) -> str:
             while node is not None and not isinstance(node, (exp.Where, exp.Select, exp.Update, exp.Delete)):
                 if isinstance(node, exp.Not):
                     negations += 1
+                picks = picks or _picks_own_rows(node)
                 node = node.parent
         scope = scope.parent
     if not inside:
         return ROW
-    return NEGATED if negations % 2 else CONSULT
+    if negations % 2:
+        return NEGATED
+    return PICKS if picks else CONSULT
+
+
+def _picks_own_rows(node: exp.Expression) -> bool:
+    """Whether *node* is the ``key IN (SELECT ...)`` an ``UPDATE`` or ``DELETE`` picks its own rows by.
+
+    ``getEventRanges`` reserves events with ``UPDATE JEDI_Events SET ... WHERE
+    (jediTaskID,PandaID,...) IN (SELECT jediTaskID,PandaID,... FROM (SELECT
+    ... FROM JEDI_Events WHERE status=:eventStatus ...) WHERE rownum<=N)``:
+    the subquery reads the very rows the statement then changes, to take the
+    first ``N``.  It asks nothing about other rows, which is what a consult
+    does.  The key is the statement's own columns and the subquery's rows
+    come from the same table, through any derived tables but no join.
+    """
+    if not isinstance(node, exp.In) or node.args.get("query") is None:
+        return False
+    statement = node.find_ancestor(exp.Select, exp.Update, exp.Delete)
+    if not isinstance(statement, (exp.Update, exp.Delete)) or not isinstance(statement.this, exp.Table):
+        return False
+    target = statement.this
+    names = {target.name.lower(), target.alias_or_name.lower()}
+    keys = list(node.this.expressions) if isinstance(node.this, exp.Tuple) else [node.this]
+    if not all(isinstance(key, exp.Column) and (key.table or target.name).lower() in names for key in keys):
+        return False
+    query = node.args["query"]
+    select = query.this if isinstance(query, exp.Subquery) else query
+    while isinstance(select, exp.Select) and not select.args.get("joins"):
+        source = select.args.get("from_")
+        rows = source.this if source is not None else None
+        if isinstance(rows, exp.Subquery):
+            select = rows.this
+            continue
+        return isinstance(rows, exp.Table) and rows.name.lower() == target.name.lower()
+    return False
 
 
 def _compared(column: exp.Column) -> Optional[tuple[bool, list[exp.Expression], bool]]:
@@ -1599,8 +1638,9 @@ def _term_kind(term: exp.Expression, scope, root) -> str:
     if isinstance(node, exp.Exists) or (isinstance(node, exp.In) and node.args.get("query") is not None):
         # ``EXISTS (...)`` looks rows up and is ``consults``; ``NOT EXISTS``
         # turns the subquery's terms round, and only the term as a whole says
-        # what it asks.
-        return _KEEP if negations % 2 else _DROP
+        # what it asks.  So does the subquery an ``UPDATE`` picks its own
+        # rows by, which no other field holds.
+        return _KEEP if negations % 2 or _picks_own_rows(node) else _DROP
     select = None if isinstance(scope, _Root) else scope.expression
     own = _own(node, select)
     if not own:
@@ -1806,7 +1846,8 @@ def conditions(sql: str) -> tuple[Condition, ...]:
       meet, not why a row was passed over.
     * **A term that names none of the rows' columns**: ``ROWNUM <= :n`` is
       ``limits``, ``EXISTS (...)`` is ``consults``.  ``NOT EXISTS (...)`` is
-      kept whole: what it asks is the subquery turned round.
+      kept whole: what it asks is the subquery turned round.  So is the
+      ``key IN (SELECT ...)`` an ``UPDATE`` picks its own rows by.
     * **A disjunction that lost a branch to any of those.**  It no longer
       constrains anything, and recording what is left would over-state it.
     * **A statement that does not parse**, which ``unresolved`` reports.

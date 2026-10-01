@@ -317,6 +317,37 @@ def test_a_subquerys_values_are_consulted_not_selected():
     assert node.consults == ["JediDatasetSpec.jediTaskID=1", "JediDatasetSpec.status=merging"]
 
 
+def test_the_subquery_an_update_picks_its_own_rows_by_is_not_a_consult():
+    """``getEventRanges``: the subquery reads the rows the ``UPDATE`` changes -- no reader to send anyone to.
+
+    The statement gets no read site, since nothing it asks lands as a value;
+    its ``conditions`` would keep the term whole.
+    """
+    picking = (
+        "UPDATE ATLAS_PANDA.JEDI_Events tab SET PandaID=:pandaID,status=:newEventStatus "
+        "WHERE (jediTaskID,PandaID,fileID) IN (SELECT jediTaskID,PandaID,fileID FROM ("
+        "SELECT jediTaskID,PandaID,fileID FROM ATLAS_PANDA.JEDI_Events tab "
+        "WHERE jediTaskID=:jediTaskID AND status=:eventStatus ORDER BY fileID) WHERE rownum<=3) "
+    )
+    side = _read_side(
+        "class TaskModule:\n"
+        "    def reserve(self):\n"
+        f"        sql = {picking!r}\n"
+        "        self.cur.execute(sql, {':pandaID': 1, ':newEventStatus': 'sent', ':jediTaskID': 2, ':eventStatus': 'ready'})\n"
+        + _TEACH
+    )
+
+    assert {term.scope for term in sqltext.terms(picking).terms} == {sqltext.PICKS}
+    assert [owner for owner, _line in side.statements if owner == "x.py::reserve"] == []
+    (condition,) = sqltext.conditions(picking)
+    (branch,) = condition.branches
+    assert branch.terms[0].startswith("(jediTaskID,PandaID,fileID) IN (SELECT")
+    assert branch.binds == (":jediTaskID", ":eventStatus")
+    # Another table's rows are a consult, as before.
+    other = "UPDATE ATLAS_PANDA.jobsActive4 SET a=1 WHERE PandaID IN (SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE jobStatus=:s)"
+    assert [term.scope for term in sqltext.terms(other).terms if term.column == "jobStatus"] == [sqltext.CONSULT]
+
+
 def test_a_statement_that_does_not_parse_is_kept_and_says_so():
     """Not read some other way, and not dropped: the tables are known, the terms are not."""
     side = _read_side(
