@@ -610,3 +610,19 @@ def test_a_statement_that_does_not_parse_still_names_its_tables():
     """``getJobs``'s query and ``updateDataset_JEDI``'s update do not parse; their tables are still theirs."""
     assert sqltext.reads("SELECT {} FROM ATLAS_PANDA.Datasets AND {}=:{}") == [("Datasets", [])]
     assert sqltext.updates("UPDATE {}.JEDI_Datasets SET {} WHERE AND {}={}") == ["JEDI_Datasets"]
+
+
+def test_every_table_a_statement_names_is_listed_in_the_order_it_names_them():
+    """A proxy step said ``reads jobsDefined4, NOWAIT``, and named one table of a join."""
+    assert sqltext.tables_named(
+        "WITH w AS (SELECT PandaID FROM {}.filesTable4 WHERE d=:d) "
+        "SELECT j.PandaID FROM {}.jobsActive4 j, w, dual WHERE j.PandaID=w.PandaID"
+    ) == ["filesTable4", "jobsActive4"]
+    assert sqltext.tables_named("SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE PandaID=:p FOR UPDATE NOWAIT") == [
+        "jobsDefined4"
+    ]
+    assert sqltext.tables_named("SELECT a FROM {}.JEDI_Tasks t, {}.JEDI_Datasets d WHERE t.x=d.x") == [
+        "JEDI_Tasks", "JEDI_Datasets"
+    ]
+    # A fragment of an f-string, read off its text.
+    assert sqltext.tables_named("INSERT INTO ATLAS_PANDA.filesTable4 ({}) VALUES ") == ["filesTable4"]

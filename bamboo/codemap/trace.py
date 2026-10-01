@@ -1614,8 +1614,8 @@ class _Walk:
             tables: list[str] = []
             keys: list[str] = []
             for run in sql_mod.executions(func):
-                for reference in sql_mod._TABLE_REFERENCE.findall(run.sql):
-                    _add(tables, sqltext._table_of(reference))
+                for table in sqltext.tables_named(run.sql):
+                    _add(tables, table)
                 for key in re.findall(r":(\w+)", sqltext.where_clause(run.sql)):
                     _add(keys, f":{key}")
             if tables:

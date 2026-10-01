@@ -2790,7 +2790,6 @@ def fragment_holding(spans: list[Span], offset: int) -> Optional[ast.stmt]:
 # ``f"INSERT INTO ATLAS_PANDA.filesTable4 ({FileSpec.columnNames()}) "`` -- the
 # statement names the spec class that owns the row, in the interpolation.
 _COLUMN_NAMES = re.compile(r"^(\w+)\.column_?[Nn]ames\s*\(")
-_TABLE_REFERENCE = re.compile(r"\b(?:INSERT\s+INTO|UPDATE|FROM)\s+([\w.{}]+)", re.IGNORECASE)
 
 
 def declared_row_classes(
@@ -2826,10 +2825,10 @@ def declared_row_classes(
                     classes.append(match.group(1))
         if len(classes) != 1:
             continue
-        reference = _TABLE_REFERENCE.search(text)
-        if reference is None:
+        named = sqltext.tables_named(text)
+        if not named:
             continue
-        table = sqltext._table_of(reference.group(1))
+        table = named[0]
         # ``{}`` means the table name was itself interpolated, so the statement
         # does not say which table this is.
         if table and table != "{}":

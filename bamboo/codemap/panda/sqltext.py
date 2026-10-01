@@ -636,6 +636,31 @@ def deletes(sql: str) -> list[str]:
     return _deletes_in_text(sql) if found is None else found
 
 
+#: ``INSERT INTO t``, ``UPDATE t``, ``FROM t`` -- where a statement names a
+#: table, for :func:`tables_named` to fall back on.
+_TABLE_REFERENCE = re.compile(r"\b(?:INSERT\s+INTO|UPDATE|FROM)\s+([\w.{}]+)", re.IGNORECASE)
+
+
+def tables_named(sql: str) -> list[str]:
+    """Every table *sql* names, whatever it does with it, in the order it names them.
+
+    For what wants the tables and not the verbs: the class an ``INSERT``'s
+    f-string declares for its table, and the tables a proxy method's step is
+    said to read.  ``{}`` where the name is interpolated -- the caller decides
+    whether a table nobody can name is worth saying.  Read off the text where
+    the statement, or the fragment of one, does not parse.
+    """
+    read = _tables_tree(sql)
+    if read is None:
+        return list(dict.fromkeys(_table_of(name) for name in _TABLE_REFERENCE.findall(sql)))
+    tree, defined = read
+    # By where the text names them: a tree puts a ``WITH`` clause after the
+    # query that uses it.
+    placed = sorted(tree.find_all(exp.Table), key=lambda table: table.this.meta.get("start", 0))
+    found = (_named_table(table, defined) for table in placed)
+    return list(dict.fromkeys(table for table in found if table is not None))
+
+
 _BIND_KEY = re.compile(r":\w+")
 _QUOTED = re.compile(r"'([^']*)'")
 
