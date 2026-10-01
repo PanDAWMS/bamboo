@@ -850,7 +850,7 @@ def _follow_up(
         if returned:
             question += (
                 f"; {len(returned)} statement(s) return such rows by excluding other "
-                "values (listed below)"
+                "values (listed above)"
             )
     if reader_acts == READS_ONLY_FOR_A_CALLER:
         # Appended rather than replacing the sentence: everything it says is

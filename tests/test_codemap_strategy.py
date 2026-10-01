@@ -753,7 +753,7 @@ async def test_a_statement_that_passes_over_other_values_is_answered_beside_the_
     assert follow.selected is False
     assert follow.selected_by == []
     assert follow.reader_statements == []
-    assert "1 statement(s) return such rows by excluding other values" in follow.question
+    assert "1 statement(s) return such rows by excluding other values (listed above)" in follow.question
 
 
 def test_the_statements_beside_the_readers_print_under_headings_of_their_own():
