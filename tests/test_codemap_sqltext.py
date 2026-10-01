@@ -504,6 +504,26 @@ def test_only_an_exclusion_every_row_meets_is_a_refusal():
     assert _refused("SELECT jediTaskID FROM JEDI_Tasks WHERE status NOT IN (") == []
 
 
+def test_a_value_left_out_of_rows_that_may_be_null_is_still_a_refusal():
+    """``(relocationFlag IS NULL OR relocationFlag<>:f)`` -- a row holding ``f`` fails both branches."""
+    assert _refused("SELECT jediTaskID FROM JEDI_Tasks t WHERE (t.status IS NULL OR t.status NOT IN (:a,:b))") == [
+        [("JEDI_Tasks", "status", (":a", ":b"), ())]
+    ]
+    # Another column, a test that rows are *not* null, or a second exclusion:
+    # each lets a row holding the value through one branch.
+    assert _refused("SELECT jediTaskID FROM JEDI_Tasks WHERE (status IS NULL OR vo<>:x)") == [[]]
+    assert _refused("SELECT jediTaskID FROM JEDI_Tasks WHERE (status IS NOT NULL OR status<>:x)") == [[]]
+    assert _refused("SELECT jediTaskID FROM JEDI_Tasks WHERE (status IS NULL OR status<>:x OR status<>:y)") == [[]]
+
+
+def test_a_variant_is_recognised_in_the_statement_its_holes_were_filled_into():
+    """``sql % tableName`` in a loop: the variant says ``FROM %s``, the run names the table."""
+    variant = "SELECT PandaID FROM %s WHERE jobStatus NOT IN (:a,:b)  AND rownum <= 1"
+    assert sqlwrite._spelled_by(variant, "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a,:b) AND rownum <= 1")
+    assert sqlwrite._spelled_by("SELECT a FROM {}.JEDI_Tasks WHERE b=:b", "SELECT a FROM ATLAS_PANDA.JEDI_Tasks WHERE b=:b")
+    assert not sqlwrite._spelled_by(variant, "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a)")
+
+
 def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():
     """Built two ways, bound two ways: what is left out of every row on every run.
 

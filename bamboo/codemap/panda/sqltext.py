@@ -1481,11 +1481,52 @@ def _conjuncts(node: exp.Expression) -> Iterator[exp.Expression]:
         yield node
 
 
+def _disjuncts(node: exp.Expression) -> list[exp.Expression]:
+    """The terms *node* ``OR``\\ s together, through parentheses."""
+    if isinstance(node, exp.Paren):
+        return _disjuncts(node.this)
+    if isinstance(node, exp.Or):
+        return _disjuncts(node.this) + _disjuncts(node.expression)
+    return [node]
+
+
+def _null_safe(conjunct: exp.Expression) -> Optional[exp.Column]:
+    """The column of ``(col IS NULL OR col<>:v)``, or ``None`` for any other ``OR``.
+
+    The one disjunction that still leaves a value out of every row: a row
+    holding ``v`` is not null and fails the other branch.  Five statements in
+    the corpus spell "not this value" that way, ``lockJobsForReassign``'s
+    ``relocationFlag`` among them, for the rows that never had one.
+    """
+    def spelled(column: exp.Column) -> tuple[str, str]:
+        return (column.table or "").lower(), column.name.lower()
+
+    branches = _disjuncts(conjunct)
+    nulls = [b for b in branches if isinstance(b, exp.Is) and isinstance(b.expression, exp.Null)]
+    rest = [b for b in branches if not any(b is n for n in nulls)]
+    if not nulls or len(rest) != 1 or not all(isinstance(n.this, exp.Column) for n in nulls):
+        return None
+    columns = list(rest[0].find_all(exp.Column))
+    if len(columns) != 1 or {spelled(n.this) for n in nulls} != {spelled(columns[0])}:
+        return None
+    return columns[0]
+
+
 def _outright(where: exp.Where, scope, root, verb: str, kind: str) -> tuple[Term, ...]:
-    """The exclusions *where* makes of every row: its own terms outside any ``OR``."""
+    """The exclusions *where* makes of every row: its own terms outside any ``OR``.
+
+    And inside one where it is ``col IS NULL OR`` the exclusion -- see
+    :func:`_null_safe`.
+    """
     found: list[Term] = []
     own = {id(column) for column in _own_columns(scope)}
     for conjunct in _conjuncts(where.this):
+        guarded = _null_safe(conjunct) if isinstance(conjunct, (exp.Or, exp.Paren)) else None
+        if guarded is not None and id(guarded) in own:
+            term = _term(guarded, scope, root, verb, kind)
+            if isinstance(term, Term) and term.excluding:
+                found.append(term)
+            continue
         for column in conjunct.find_all(exp.Column):
             if id(column) not in own:
                 continue

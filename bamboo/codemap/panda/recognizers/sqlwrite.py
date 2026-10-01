@@ -1050,33 +1050,55 @@ def _on_some_paths(fragment: ast.stmt, call: ast.Call) -> bool:
     return False
 
 
-def _every_run_text(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[str]:
+#: A hole of the reassembly, wherever a variant has one: ``{}`` for a
+#: ``.format`` or f-string, ``%s`` for ``sql % tableName``.
+_VARIANT_HOLE = re.compile(r"\{[^{}]*\}|%(?:\([^)]*\))?[sdr]")
+
+
+def _spelled_by(variant: str, statement: str) -> bool:
+    """Whether *statement* is *variant* with its holes filled in.
+
+    A table loop the reassembly writes out, ``FROM {}`` turned into ``FROM
+    ATLAS_PANDA.jobsActive4``, is the same variant and no longer the same text.
+    """
+    pieces = [re.escape(" ".join(piece.split())) for piece in _VARIANT_HOLE.split(variant)]
+    return re.fullmatch(r"\s*(.*?)\s*".join(pieces), " ".join(statement.split())) is not None
+
+
+def _every_run_texts(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[list[str]]:
     """*run*'s statement with each fragment appended on some paths only cut out.
 
-    ``run.sql`` itself where nothing is; ``None`` where something is and the
-    variant that built this run cannot be told -- a run whose text was
-    rewritten after it was assembled matches none of them.
+    ``[run.sql]`` itself where nothing is; one text per variant that could
+    have built the run where more than one could; ``None`` where a fragment
+    is optional and no variant is the run's -- a run whose text was rewritten
+    past recognising.
     """
     if not run.variable:
-        return run.sql
+        return [run.sql]
     spelled = " ".join(run.sql.split())
     variants = sql.variant_spans(func, run.variable)
-    for text, spans in variants:
-        if " ".join(text.split()) != spelled:
-            continue
+    matching = [one for one in variants if " ".join(one[0].split()) == spelled] or [
+        one for one in variants if _spelled_by(one[0], run.sql)
+    ]
+    if not matching:
+        if any(_on_some_paths(span.node, run.call) for _text, spans in variants for span in spans):
+            return None
+        return [run.sql]
+    texts: list[str] = []
+    for text, spans in matching:
         cut = sorted(
             (span for span in spans if _on_some_paths(span.node, run.call)),
             key=lambda span: span.start,
             reverse=True,
         )
-        if not cut:
-            return run.sql
         for span in cut:
             text = text[: span.start] + " " + text[span.end :]
-        return text
-    if any(_on_some_paths(span.node, run.call) for _text, spans in variants for span in spans):
-        return None
-    return run.sql
+        texts.append(text)
+    if len(matching) == 1 and not any(
+        _on_some_paths(span.node, run.call) for span in matching[0][1]
+    ):
+        return [run.sql]
+    return texts
 
 
 def _refused_terms(
@@ -1084,26 +1106,31 @@ def _refused_terms(
 ) -> tuple[tuple["sqltext.Term", ...], ...]:
     """The exclusions every row of *run* meets, however the paths to it went.
 
-    Read off the text with the optional fragments cut out, and kept only where
-    the whole text makes them too: a fragment appending ``OR ...`` would take
-    rows back that the shorter text leaves out.
+    The terms are *run*'s own -- they name the tables the run reads -- and
+    one is kept only where the text with the optional fragments cut out makes
+    it too.  Both, because a fragment appending ``OR ...`` would take rows
+    back that the shorter text leaves out.
     """
     whole = sqltext.refusals(run.sql)
     # Before the fragments are asked for: they are the expensive half, and
     # most statements leave nothing out of every row to begin with.
     if not any(whole):
         return whole
-    floor = _every_run_text(func, run)
-    if floor is None:
+    floors = _every_run_texts(func, run)
+    if floors is None:
         return ()
-    if floor is run.sql:
+    if floors == [run.sql]:
         return whole
 
     def key(term):
         return (term.column.lower(), term.binds, term.literals)
 
-    everywhere = set.intersection(*({key(t) for t in one} for one in whole))
-    return tuple(tuple(t for t in one if key(t) in everywhere) for one in sqltext.refusals(floor))
+    everywhere: Optional[set] = None
+    for floor in floors:
+        found = sqltext.refusals(floor)
+        keys = set.intersection(*({key(t) for t in one} for one in found)) if found else set()
+        everywhere = keys if everywhere is None else everywhere & keys
+    return tuple(tuple(t for t in one if key(t) in (everywhere or set())) for one in whole)
 
 
 def _render_condition(condition: "sqltext.Condition", seeds: dict[str, list[int]]) -> str:
