@@ -437,3 +437,13 @@ def test_rownum_equal_to_one_is_a_limit_of_one():
         [],
         [("1", False)],
     )
+
+
+def test_an_order_with_no_column_in_it_is_still_read():
+    """``ORDER BY DBMS_RANDOM.value`` comes back from sqlglot as a ``RAND()`` with no position."""
+    orders, _limits = sqltext.ordering(
+        "SELECT {} FROM ( SELECT {} FROM {}.JEDI_Dataset_Contents WHERE jediTaskID=:jediTaskID "
+        "ORDER BY DBMS_RANDOM.value) t"
+    )
+
+    assert orders == ["DBMS_RANDOM.value"]

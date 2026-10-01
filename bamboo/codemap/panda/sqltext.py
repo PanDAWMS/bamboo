@@ -1508,12 +1508,23 @@ def _bound(node: exp.Expression, sql: str) -> Optional[str]:
     return None
 
 
-def _order_text(order: exp.Order, read: Parsed, sql: str, tokens: list) -> str:
-    """*order*'s list as the statement spells it."""
-    placed = [node.meta["start"] for node in order.find_all(exp.Identifier, exp.Literal) if "start" in node.meta]
-    if not placed:
-        return ""
-    opened = [index for index, token in enumerate(tokens) if token.token_type == _T.ORDER_BY and token.start < min(placed)]
+def _order_text(query: exp.Expression, order: exp.Order, read: Parsed, sql: str, tokens: list) -> str:
+    """*order*'s list as the statement spells it.
+
+    Found as the first ``ORDER BY`` after the rest of *query* that comes
+    before it, not by the list's own positions: ``DBMS_RANDOM.value`` is read
+    as a ``RAND()`` with none.
+    """
+    before = [
+        node.meta["start"]
+        for part in ("expressions", "from_", "joins", "where", "group", "having", "this", "expression")
+        for value in ([query.args.get(part)] if not isinstance(query.args.get(part), list) else query.args.get(part))
+        if isinstance(value, exp.Expression)
+        for node in value.find_all(exp.Identifier, exp.Literal)
+        if "start" in node.meta
+    ]
+    after = max(before) if before else -1
+    opened = [index for index, token in enumerate(tokens) if token.token_type == _T.ORDER_BY and token.start > after][:1]
     if not opened:
         return ""
     depth, last = 0, len(tokens)
@@ -1557,7 +1568,7 @@ def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
     for query in _rows_from(read.tree, {}, set()):
         order = query.args.get("order")
         if isinstance(order, exp.Order):
-            text = _order_text(order, read, sql, tokens)
+            text = _order_text(query, order, read, sql, tokens)
             if text and text not in orders:
                 orders.append(text)
         limit = query.args.get("limit")
