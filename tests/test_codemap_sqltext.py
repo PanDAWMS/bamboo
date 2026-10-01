@@ -196,6 +196,25 @@ def test_a_json_path_and_a_pseudo_column_are_not_columns():
     assert unresolved == (f"sc.data.jobseed -- {sqltext.JSON_PATH}",)
 
 
+def test_a_name_spelled_through_a_hole_is_not_a_column_or_a_bind():
+    """``getNumUnprocessedEvents_JEDI`` adds ``tabT.{0}=:{0}`` per criterion.
+
+    Read as a column called ``__h2``, that came out as a key ``JEDI_Tasks``
+    has no column for.  A bind named through a hole has no value to look up,
+    so its column is asked on a value the statement does not decide.
+    """
+    terms, unresolved = _said(
+        "SELECT COUNT(1) FROM {}.JEDI_Tasks tabT WHERE tabT.vo=:vo "
+        "AND tabT.{}=:{} AND tabT.{}<>:neg_{} AND tabT.status=:{}"
+    )
+
+    assert terms == [
+        ("JEDI_Tasks", "vo", "read", "row", False, (":vo",), (), False),
+        ("JEDI_Tasks", "status", "read", "row", False, (), (), True),
+    ]
+    assert unresolved == ()
+
+
 def test_the_schema_is_read_by_paren_depth(tmp_path):
     """A column's type has parentheses of its own, and a body ends at the paren that opened it."""
     (tmp_path / "ATLAS_PANDA.sql").write_text(

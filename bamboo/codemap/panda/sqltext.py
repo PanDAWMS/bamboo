@@ -1251,7 +1251,10 @@ def terms(sql: str) -> Reading:
     scopes, root = _scopes(tree)
     for scope, verb, kind in scopes:
         for column in _own_columns(scope):
-            if _is_hole(column) or column.name.lower() in _PSEUDO_NAMES:
+            # ``tabT.{0}=:{0}`` -- a column Python names at run time, which the
+            # reassembly already reports.  Read as a column called ``__h4``, it
+            # came out as a key no table has.
+            if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_NAMES:
                 continue
             holder = _filtering(column)
             if holder is None:
@@ -1260,6 +1263,11 @@ def terms(sql: str) -> Reading:
             if compared is None:
                 continue
             excluding, values, undecided = compared
+            # ``status=:{}`` -- a bind whose name is interpolated has no value
+            # to look up, so it is a value the statement does not decide.
+            placeholders = [value for value in values if isinstance(value, exp.Placeholder)]
+            binds = tuple(f":{value.name}" for value in placeholders if not _NAMED_HOLE.search(value.name))
+            undecided = undecided or len(binds) < len(placeholders)
             negations = _negations(column.parent)
             if negations is None:
                 continue
@@ -1276,7 +1284,7 @@ def terms(sql: str) -> Reading:
                     verb=verb,
                     scope=kind,
                     excluding=excluding != bool(negations % 2),
-                    binds=tuple(f":{value.name}" for value in values if isinstance(value, exp.Placeholder)),
+                    binds=binds,
                     literals=tuple(
                         value.this for value in values if isinstance(value, exp.Literal) and value.is_string
                     ),
