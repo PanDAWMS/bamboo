@@ -566,3 +566,47 @@ def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():
     assert killed.refuses == frozenset()
     (chosen,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::choose"]
     assert chosen.refuses == {(status, "done")}
+
+
+def test_a_table_and_its_columns_are_read_off_the_tree():
+    """Each shape the text reading got wrong on the corpus, read as the statement says.
+
+    A hint hid the column after it and the ``INTO`` after ``INSERT``; ``,FROM``
+    hid the table; an outer projection over a subquery was filed under the
+    subquery's table; a function's argument was taken for a column the row
+    carries.
+    """
+    assert sqltext.reads("SELECT /*+ INDEX(tab IDX) */ PandaID,status FROM ATLAS_PANDA.filesTable4 tab") == [
+        ("filesTable4", ["PandaID", "status"])
+    ]
+    assert sqltext.reads("SELECT t.jediTaskID, COALESCE(t.currentPriority, t.taskPriority) FROM {}.JEDI_Tasks t") == [
+        ("JEDI_Tasks", ["jediTaskID"])
+    ]
+    assert sqltext.reads(
+        "SELECT jediTaskID,t_status FROM (SELECT tabT.jediTaskID,tabT.status AS t_status FROM {}.JEDI_Tasks tabT)"
+    ) == [("JEDI_Tasks", ["jediTaskID"])]
+    assert sqltext.reads("SELECT tabT.jediTaskID,tabD.type,FROM {}.JEDI_Tasks tabT,{}.JEDI_Datasets tabD") == [
+        ("JEDI_Tasks", ["jediTaskID", "type"])
+    ]
+    assert sqltext.creates(
+        "INSERT /*+ ignore_row_on_dupkey_index (e(region)) */ INTO ATLAS_PANDA.CARBON_REGION_EMISSIONS e "
+        "(REGION, VALUE) VALUES(:region, :value)"
+    ) == ["CARBON_REGION_EMISSIONS"]
+    assert sqltext.updates("SELECT status FROM {}.JEDI_Tasks WHERE jediTaskID=:t FOR UPDATE NOWAIT") == []
+
+
+def test_a_join_partner_is_read_through_the_alias_it_is_joined_by():
+    statement = (
+        "DELETE FROM ATLAS_PANDA.Task_Evaluation te WHERE te.jediTaskID IN (SELECT jt.jediTaskID "
+        "FROM ATLAS_PANDA.JEDI_Tasks jt JOIN ATLAS_PANDA.Task_Evaluation tez ON tez.jediTaskID=jt.jediTaskID "
+        "WHERE te.metric=:m AND jt.status IN ('done'))"
+    )
+    assert sqltext.joins(statement) == ["Task_Evaluation"]
+    assert sqltext.joined_columns(statement, "Task_Evaluation") == ["jediTaskID"]
+    assert sqltext.deletes(statement) == ["Task_Evaluation"]
+
+
+def test_a_statement_that_does_not_parse_still_names_its_tables():
+    """``getJobs``'s query and ``updateDataset_JEDI``'s update do not parse; their tables are still theirs."""
+    assert sqltext.reads("SELECT {} FROM ATLAS_PANDA.Datasets AND {}=:{}") == [("Datasets", [])]
+    assert sqltext.updates("UPDATE {}.JEDI_Datasets SET {} WHERE AND {}={}") == ["JEDI_Datasets"]

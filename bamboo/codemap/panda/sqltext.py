@@ -8,12 +8,13 @@ takes the statement as a string.
 
 Two readings, for now.  What a reader asks of rows -- the values
 (:func:`terms`), what else a row had to be (:func:`conditions`), the order and
-the limit (:func:`ordering`) -- is read off sqlglot's tree (:func:`parsed`),
-because only the tree says which table a column belongs to and which terms
-are a subquery's.  The tables a statement touches and what it writes are
-still regexes over the text, enough for ``UPDATE ... SET`` and ``INSERT INTO
-... VALUES`` and nothing more.  Either way, what cannot be read is reported
-rather than guessed at.
+the limit (:func:`ordering`) -- and the tables a statement touches
+(:func:`reads`, :func:`joins`, :func:`creates` ...) are read off sqlglot's
+tree (:func:`parsed`), because only the tree says which table a column belongs
+to and which terms are a subquery's.  What a statement writes is still regexes
+over the text, enough for ``UPDATE ... SET`` and ``INSERT INTO ... VALUES`` and
+nothing more.  Either way, what cannot be read is reported rather than guessed
+at.
 """
 
 from __future__ import annotations
@@ -373,20 +374,13 @@ _SELECT = re.compile(r"\bSELECT\s+(?:DISTINCT\s+)?(.*?)\s+FROM\s+([\w{}.]+)", re
 _DELETE = re.compile(r"\bDELETE\s+FROM\s+([\w{}.]+)", re.IGNORECASE)
 
 
-def reads(sql: str) -> list[tuple[str, list[str]]]:
-    """Return ``(table, selected columns)`` for each ``SELECT`` in *sql*.
+def _reads_in_text(sql: str) -> list[tuple[str, list[str]]]:
+    """:func:`reads` for a statement that does not parse, off its text.
 
-    Only the columns that are plain names are kept.  A projection built from
-    expressions (``COUNT(1)``, ``CASE WHEN ...``) says what the query computes
-    rather than what the row carries, and a boundary is about the latter.  A
-    bare word that is one of SQL's own -- see :data:`_PSEUDO_COLUMNS` -- is
-    dropped for that same reason, written without the parentheses that would
-    have given it away.
-
-    An interpolated projection keeps no column at all.  ``SELECT {}, FROM ...``
-    is what the assembler sees when a statement builds its column list in a
-    loop and then slices the trailing comma off, and the empty part after that
-    comma is not a name either.
+    Fifteen statements of the corpus do not, five of them reading a table --
+    ``getJobs``'s ``jobsActive4`` among them -- and dropping their tables
+    would take readers off entities and could turn a table into one nothing
+    writes.
     """
     defined = {match.group(1).lower() for match in _CTE.finditer(sql)}
     found: list[tuple[str, list[str]]] = []
@@ -405,28 +399,8 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
     return found
 
 
-def joins(sql: str) -> list[str]:
-    """Return the tables *sql* names in a ``FROM`` beyond the first.
-
-    Separate from :func:`reads`, which answers *where the row came from* and so
-    keeps naming the leading table.  This answers a different question -- *what
-    bounds which rows can be seen at all* -- and a join partner is the usual
-    way that bound is written::
-
-        FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
-        WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID
-
-    A task below ``min_jediTaskID`` is invisible to that query no matter what
-    its status is, so a stale ``JEDI_AUX_Status_MinTaskID`` silently narrows
-    thirty-one functions at once -- which is a real stall this map could not
-    explain, because ``reads`` stopped at the first table and the auxiliary one
-    had never been seen.
-
-    A name the statement defines for itself is not one of these.
-    ``checkDuplication_JEDI`` builds ``WITH tmpTab AS (...)`` and then joins
-    ``tmpTab`` to itself, which is a step in the query rather than a dependency
-    on anything outside it.
-    """
+def _joins_in_text(sql: str) -> list[str]:
+    """:func:`joins` for a statement that does not parse, off its text."""
     defined = {match.group(1).lower() for match in _CTE.finditer(sql)}
     found: list[str] = []
 
@@ -448,13 +422,8 @@ def joins(sql: str) -> list[str]:
     return found
 
 
-def joined_columns(sql: str, table: str) -> list[str]:
-    """Columns of *table* the statement names, found through its alias.
-
-    The alias is how a join predicate refers to a table --
-    ``tabA.min_jediTaskID`` -- so without resolving it the most useful thing
-    about a join, *which column bounds the rows*, cannot be read.
-    """
+def _joined_columns_in_text(sql: str, table: str) -> list[str]:
+    """:func:`joined_columns` for a statement that does not parse, off its text."""
     found: dict[str, str] = {}
     for match in _FROM_LIST.finditer(sql):
         for part in match.group(1).split(","):
@@ -475,6 +444,166 @@ def joined_columns(sql: str, table: str) -> list[str]:
 _INSERT_HEAD = re.compile(r"\bINSERT\s+INTO\s+([\w{}.]+)", re.IGNORECASE)
 
 
+def _creates_in_text(sql: str) -> list[str]:
+    """:func:`creates` for a statement that does not parse, off its text."""
+    return [_table_of(match.group(1)) for match in _INSERT_HEAD.finditer(sql)]
+
+
+def _updates_in_text(sql: str) -> list[str]:
+    """:func:`updates` for a statement that does not parse, off its text."""
+    return [_table_of(match.group(1)) for match in _UPDATE.finditer(sql)]
+
+
+def _deletes_in_text(sql: str) -> list[str]:
+    """:func:`deletes` for a statement that does not parse, off its text."""
+    return [_table_of(match.group(1)) for match in _DELETE.finditer(sql)]
+
+
+def _named_table(node, defined: set[str]) -> Optional[str]:
+    """*node*'s table as a statement's tables are spelled, if it names one that stores rows."""
+    if not isinstance(node, exp.Table):
+        return None
+    table = _table_name(node)
+    return table if _names_a_table(table, defined) else None
+
+
+def _tables_tree(sql: str):
+    """*sql*'s tree and the names its ``WITH`` clauses define, or ``None`` where it does not parse."""
+    tree = parsed(sql).tree
+    if tree is None:
+        return None
+    return tree, {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+
+
+def _selects(tree: exp.Expression) -> list[exp.Select]:
+    """Every ``SELECT`` in *tree*, in the order the text writes them."""
+    return list(tree.find_all(exp.Select, bfs=False))
+
+
+def _sources(select: exp.Select) -> list[exp.Expression]:
+    """What a ``SELECT`` reads rows from: its ``FROM``, then each join, comma or ``JOIN``."""
+    head = select.args.get("from_")
+    return ([head.this] if head is not None else []) + [join.this for join in select.args.get("joins") or []]
+
+
+def reads(sql: str) -> list[tuple[str, list[str]]]:
+    """Return ``(table, selected columns)`` for each ``SELECT`` in *sql*.
+
+    The table is the one the ``SELECT`` names first in its ``FROM``; one whose
+    ``FROM`` is a subquery reads that subquery's rows, and the subquery is a
+    ``SELECT`` of its own.  The text reading this replaced took the first name
+    after the next ``FROM`` it found, which for ``SELECT t_status ... FROM
+    (SELECT tabT.status AS t_status ... FROM JEDI_Tasks tabT ...)`` filed the
+    outer projection under ``JEDI_Tasks``.
+
+    Only the columns that are plain names are kept.  A projection built from
+    expressions (``COUNT(1)``, ``CASE WHEN ...``, ``COALESCE(t.currentPriority,
+    ...)``) says what the query computes rather than what the row carries, and
+    a boundary is about the latter.  A bare word that is one of SQL's own --
+    see :data:`_PSEUDO_COLUMNS` -- is dropped for that same reason, written
+    without the parentheses that would have given it away.  A hint before the
+    first column (``SELECT /*+ INDEX(...) */ PandaID``) is a comment, and the
+    text reading lost the column behind it.
+
+    An interpolated column is no name.  A statement that does not parse is
+    read off its text, as before -- see :func:`_reads_in_text`.
+    """
+    read = _tables_tree(sql)
+    if read is None:
+        return _reads_in_text(sql)
+    tree, defined = read
+    found: list[tuple[str, list[str]]] = []
+    for select in _selects(tree):
+        sources = _sources(select)
+        table = _named_table(sources[0], defined) if sources else None
+        if table is None:
+            continue
+        columns = [
+            column.name
+            for column in select.expressions
+            if isinstance(column, exp.Column)
+            and not column.name.startswith(_HOLE_NAME)
+            and _IDENTIFIER.fullmatch(column.name)
+            and column.name.lower() not in _PSEUDO_COLUMNS
+        ]
+        found.append((table, columns))
+    return found
+
+
+def joins(sql: str) -> list[str]:
+    """Return the tables *sql* reads beside the first of a ``FROM``.
+
+    Separate from :func:`reads`, which answers *where the row came from* and so
+    keeps naming the leading table.  This answers a different question -- *what
+    bounds which rows can be seen at all* -- and a join partner is the usual
+    way that bound is written::
+
+        FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
+        WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID
+
+    A task below ``min_jediTaskID`` is invisible to that query no matter what
+    its status is, so a stale ``JEDI_AUX_Status_MinTaskID`` silently narrows
+    thirty-one functions at once.  A comma and a ``JOIN`` are the same partner.
+
+    A name the statement defines for itself is not one of these
+    (``checkDuplication_JEDI`` joins its own ``tmpTab``), and neither is an
+    interpolated name: a partner nobody can name bounds nothing.
+    """
+    read = _tables_tree(sql)
+    if read is None:
+        return _joins_in_text(sql)
+    tree, defined = read
+    found: list[str] = []
+    for select in _selects(tree):
+        for source in _sources(select)[1:]:
+            table = _named_table(source, defined)
+            if table is not None and table != "{}" and table not in found:
+                found.append(table)
+    return found
+
+
+def joined_columns(sql: str, table: str) -> list[str]:
+    """Columns of *table* the statement names, found through the alias it joins it by.
+
+    The alias is how a join predicate refers to a table --
+    ``tabA.min_jediTaskID`` -- so without resolving it the most useful thing
+    about a join, *which column bounds the rows*, cannot be read.  Only the
+    aliases the table is read by: ``DELETE FROM Task_Evaluation te WHERE ...
+    IN (SELECT ... FROM JEDI_Tasks jt, Task_Evaluation tez ...)`` joins it as
+    ``tez``, and ``te``'s columns are the rows being deleted.
+    """
+    read = _tables_tree(sql)
+    if read is None:
+        return _joined_columns_in_text(sql, table)
+    tree, defined = read
+    aliases = {
+        source.alias
+        for select in _selects(tree)
+        for source in _sources(select)
+        if source.alias and _named_table(source, defined) == table
+    }
+    found: dict[str, str] = {}
+    for column in tree.find_all(exp.Column, bfs=False):
+        if column.table and column.table in aliases:
+            found.setdefault(column.name.lower(), column.name)
+    return sorted(found.values())
+
+
+def _targets(sql: str, kind: type) -> Optional[list[str]]:
+    """The tables *sql*'s statements of *kind* write to, or ``None`` where it does not parse."""
+    read = _tables_tree(sql)
+    if read is None:
+        return None
+    tree, defined = read
+    found: list[str] = []
+    for node in tree.find_all(kind, bfs=False):
+        target = node.this.this if isinstance(node.this, exp.Schema) else node.this
+        table = _named_table(target, defined)
+        if table is not None:
+            found.append(table)
+    return found
+
+
 def creates(sql: str) -> list[str]:
     """Return the tables *sql* inserts rows into.
 
@@ -482,20 +611,18 @@ def creates(sql: str) -> list[str]:
     and *which kind of row is being made* are two questions, and deriving the
     second from the first made a table look externally maintained whenever the
     first could not be answered: ``TASK_ATTEMPTS`` is filled by an
-    ``INSERT ... SELECT`` in ``log_task_attempt_start``, and the map said
-    something outside PanDA keeps it current.
+    ``INSERT ... SELECT`` in ``log_task_attempt_start``.  A hint between
+    ``INSERT`` and ``INTO`` hid ``CARBON_REGION_EMISSIONS`` from the text
+    reading the same way.
     """
-    return [_table_of(match.group(1)) for match in _INSERT_HEAD.finditer(sql)]
+    found = _targets(sql, exp.Insert)
+    return _creates_in_text(sql) if found is None else found
 
 
 def updates(sql: str) -> list[str]:
-    """Return the tables *sql* changes rows in.
-
-    Matched with :data:`_UPDATE`, which requires the ``SET``, rather than with
-    a bare ``UPDATE <name>``: ``SELECT ... FOR UPDATE NOWAIT`` otherwise reads
-    as a statement updating a table called ``nowait``.
-    """
-    return [_table_of(match.group(1)) for match in _UPDATE.finditer(sql)]
+    """Return the tables *sql* changes rows in.  ``SELECT ... FOR UPDATE`` changes none."""
+    found = _targets(sql, exp.Update)
+    return _updates_in_text(sql) if found is None else found
 
 
 def deletes(sql: str) -> list[str]:
@@ -505,7 +632,8 @@ def deletes(sql: str) -> list[str]:
     ``INSERT`` on a command table is not bookkeeping: it means a second command
     silently replaces one that was never picked up.
     """
-    return [_table_of(match.group(1)) for match in _DELETE.finditer(sql)]
+    found = _targets(sql, exp.Delete)
+    return _deletes_in_text(sql) if found is None else found
 
 
 _BIND_KEY = re.compile(r":\w+")
