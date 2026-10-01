@@ -599,6 +599,31 @@ def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():
     assert chosen.refuses == {(status, "done")}
 
 
+def test_conditions_drop_what_some_paths_append_and_invent_nothing_from_the_cut():
+    """``if not force_read:`` appends a test some runs never ask; a cut list leaves no ``IN ( )``."""
+    side = _read_side(
+        "class TaskModule:\n"
+        "    def feed(self, force_read):\n"
+        "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND oldStatus IS NULL '\n"
+        "        if not force_read:\n"
+        "            sql += 'AND lockedBy IS NULL '\n"
+        "        self.cur.execute(sql, {':vo': 'atlas'})\n"
+        "    def sites(self, sites):\n"
+        "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND oldStatus IS NULL AND site IN ('\n"
+        "        var_map = {':vo': 'atlas'}\n"
+        "        for idx, site in enumerate(sites):\n"
+        "            var_map[f':s_{idx}'] = site\n"
+        "            sql += f':s_{idx},'\n"
+        "        sql = sql[:-1] + ') '\n"
+        "        self.cur.execute(sql, var_map)\n" + _TEACH
+    )
+
+    (fed,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::feed"]
+    assert fed.conditions == ["oldStatus IS NULL"]
+    (sited,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::sites"]
+    assert sited.conditions == ["oldStatus IS NULL"]
+
+
 def test_a_stated_in_list_refuses_every_member_and_a_handed_one_none():
     """``NOT IN ({names})`` of a list the function states passes over all of it on every run.
 

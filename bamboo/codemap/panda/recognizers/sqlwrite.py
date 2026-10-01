@@ -1193,8 +1193,12 @@ def _folded_conditions(
         window = run.window
         if window is None and run.varmap:
             window = sql.binding_window(func, run.varmap, line)
+        whole = set(sqltext.conditions(run.sql))
         for text in _every_run_texts(func, run) or [run.sql]:
-            found = sqltext.conditions(text)
+            # Only what the run itself requires: a cut inside a term leaves
+            # one the statement never has -- ``computingSite IN ( )`` once the
+            # loop filling the list is cut out.
+            found = [condition for condition in sqltext.conditions(text) if condition in whole]
             seeds: dict[str, list[int]] = {}
             for condition in found:
                 for key in condition.binds:
