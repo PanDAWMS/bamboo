@@ -497,6 +497,7 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         selects=list(site.selects),
         keys=list(site.keys),
         excludes=list(site.excludes),
+        refuses=list(site.refuses),
         consults=list(site.consults),
         tables=list(site.tables),
         order_by=list(site.order_by),
@@ -661,6 +662,7 @@ def _follow_up(
     changing: set[str],
     guarded: Sequence[GuardReading] = (),
     excluding: Sequence[ReadSiteNode] = (),
+    refusing: Sequence[ReadSiteNode] = (),
     consulting: Sequence[ReadSiteNode] = (),
 ) -> FollowUp:
     """Whether anything will move the value on, and what to ask if not.
@@ -699,14 +701,16 @@ def _follow_up(
     move would be the same mistake facing the other way.
 
     **Returned is not selected either.**  A statement that passes over other
-    values (*excluding*) and one whose subquery only checks the value
-    (*consulting*) are carried beside the readers and change none of the
-    above.  The first is said in the question where nothing selects the
-    value, because there "ask who wrote the step before it" is the answer to a
-    row that a ``NOT IN`` picks up every cycle.
+    values (*excluding*), one that passes over this one (*refusing*) and one
+    whose subquery only checks the value (*consulting*) are carried beside the
+    readers and change none of the above.  The first two are said in the
+    question where nothing selects the value, because there "ask who wrote the
+    step before it" is the answer to a row that a ``NOT IN`` picks up every
+    cycle, or that a reassign leaves alone every cycle.
     """
     selected = observed in selected_values
     returned = [_statement_reading(site) for site in excluding]
+    refused = [_statement_reading(site) for site in refusing]
     # Junctions first, so that an owner which both settles a value and reads
     # one is answered from the node that carries the rest of its story.  Two
     # thirds of the readers the map names settle nothing, and looking only
@@ -852,6 +856,8 @@ def _follow_up(
                 f"; {len(returned)} statement(s) return such rows by excluding other "
                 "values (listed above)"
             )
+        if refused:
+            question += f"; {len(refused)} statement(s) leave such rows out (listed above)"
     if reader_acts == READS_ONLY_FOR_A_CALLER:
         # Appended rather than replacing the sentence: everything it says is
         # still true, and this only stops the named reader being read as the
@@ -878,6 +884,7 @@ def _follow_up(
         reader_statements_elsewhere=statements_elsewhere,
         guarded_by=list(guarded),
         returned_by_exclusion=returned,
+        refused_by=refused,
         consulted_by=[_statement_reading(site) for site in consulting],
         selection_gates=list(selection_gates),
         triggers=triggers,
@@ -1226,6 +1233,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
 
     guarded_here = await code_map.guarded_on(subject, symptom.observed)
     excluding_here = await code_map.read_sites_excluding(symptom.subject, symptom.observed)
+    refusing_here = await code_map.read_sites_refusing(symptom.subject, symptom.observed)
     consulting_here = await code_map.read_sites_consulting(symptom.subject, symptom.observed)
     strategy = Strategy(
         symptom=symptom,
@@ -1254,6 +1262,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
                 subject.selected_by.get(symptom.observed, []),
             ),
             excluding=excluding_here,
+            refusing=refusing_here,
             consulting=consulting_here,
         ),
         # Map edges first, so that when both suppliers name one field the fold

@@ -515,3 +515,19 @@ async def test_a_statement_consults_a_value_only_where_its_subquery_names_it():
     consulting = await code_map.read_sites_consulting(status, "merging")
 
     assert [site.anchor.line_start for site in consulting] == [1]
+
+
+async def test_a_statement_leaves_a_value_out_only_where_the_map_says_every_row_does():
+    """``excludes`` names a value; only ``refuses`` says no row the statement returns holds it."""
+    flag = "JobSpec.relocationFlag"
+    sites = [
+        _read_site(1, excludes=[f"{flag}=2"], refuses=[f"{flag}=2"]),
+        _read_site(2, excludes=[f"{flag}=2"]),
+        _read_site(3, excludes=[f"{flag}=3"], refuses=[f"{flag}=3"]),
+    ]
+    code_map = await _stored(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
+
+    refusing = await code_map.read_sites_refusing(flag, "2")
+
+    assert [site.anchor.line_start for site in refusing] == [1]
+    assert refusing[0].refuses == [f"{flag}=2"]

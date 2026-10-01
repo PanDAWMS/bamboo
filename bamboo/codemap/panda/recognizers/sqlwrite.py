@@ -69,6 +69,7 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
+    ancestors,
     attach_parents,
     enclosing_function,
     functions_with_owner,
@@ -1004,6 +1005,105 @@ class ReadStatement(NamedTuple):
     #: ``"<call> <- <call> (flag=True): reads a, b"`` for each call site whose
     #: constants narrow what the statement reads -- see ``place_call_sites``.
     call_sites: tuple[str, ...] = ()
+    #: ``{(subject, value)}`` no row this statement returns holds, however it
+    #: is built -- the part of ``excludes`` that holds of every row.  Known
+    #: once every run of the statement is, so it arrives by ``_replace``.
+    refuses: frozenset[tuple[str, str]] = frozenset()
+
+
+def _decided_chain(node: ast.If) -> bool:
+    """Whether an ``if``/``elif`` chain ends in an ``else``, so one of its branches always runs."""
+    while node.orelse:
+        if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
+            node = node.orelse[0]
+            continue
+        return True
+    return False
+
+
+def _on_some_paths(fragment: ast.stmt, call: ast.Call) -> bool:
+    """Whether *fragment* is appended on some of the paths to *call* only.
+
+    The reassembly keeps such a fragment in every variant -- reading an extra
+    ``AND`` was the safe direction for what it was built for -- so a statement
+    read off one names it as though every run carried it.  Under an ``if``
+    whose chain has no ``else``, in a loop that may not run, or in an
+    ``except`` it is not.  Branches of a chain that does end in an ``else``
+    are variants of their own, and in each the fragment is certain.
+    """
+    around_call = {id(node) for node in ancestors(call)}
+    previous: ast.AST = fragment
+    for node in ancestors(fragment):
+        if id(node) in around_call:
+            return False
+        if isinstance(node, ast.If):
+            head = node
+            while isinstance(getattr(head, "parent", None), ast.If) and head.parent.orelse == [head]:
+                head = head.parent
+            if not _decided_chain(head):
+                return True
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.Match)):
+            return True
+        elif isinstance(node, ast.Try) and previous not in node.body and previous not in node.finalbody:
+            return True
+        previous = node
+    return False
+
+
+def _every_run_text(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[str]:
+    """*run*'s statement with each fragment appended on some paths only cut out.
+
+    ``run.sql`` itself where nothing is; ``None`` where something is and the
+    variant that built this run cannot be told -- a run whose text was
+    rewritten after it was assembled matches none of them.
+    """
+    if not run.variable:
+        return run.sql
+    spelled = " ".join(run.sql.split())
+    variants = sql.variant_spans(func, run.variable)
+    for text, spans in variants:
+        if " ".join(text.split()) != spelled:
+            continue
+        cut = sorted(
+            (span for span in spans if _on_some_paths(span.node, run.call)),
+            key=lambda span: span.start,
+            reverse=True,
+        )
+        if not cut:
+            return run.sql
+        for span in cut:
+            text = text[: span.start] + " " + text[span.end :]
+        return text
+    if any(_on_some_paths(span.node, run.call) for _text, spans in variants for span in spans):
+        return None
+    return run.sql
+
+
+def _refused_terms(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
+) -> tuple[tuple["sqltext.Term", ...], ...]:
+    """The exclusions every row of *run* meets, however the paths to it went.
+
+    Read off the text with the optional fragments cut out, and kept only where
+    the whole text makes them too: a fragment appending ``OR ...`` would take
+    rows back that the shorter text leaves out.
+    """
+    whole = sqltext.refusals(run.sql)
+    # Before the fragments are asked for: they are the expensive half, and
+    # most statements leave nothing out of every row to begin with.
+    if not any(whole):
+        return whole
+    floor = _every_run_text(func, run)
+    if floor is None:
+        return ()
+    if floor is run.sql:
+        return whole
+
+    def key(term):
+        return (term.column.lower(), term.binds, term.literals)
+
+    everywhere = set.intersection(*({key(t) for t in one} for one in whole))
+    return tuple(tuple(t for t in one if key(t) in everywhere) for one in sqltext.refusals(floor))
 
 
 def _render_condition(condition: "sqltext.Condition", seeds: dict[str, list[int]]) -> str:
@@ -1390,6 +1490,10 @@ def read_side(
     joins: dict[str, set[frozenset[str]]] = {}
 
     statements: dict[tuple[str, int], ReadStatement] = {}
+    # What every run of a statement so far passes over, by (owner, line) --
+    # kept for runs that file nothing too, since a run that refuses nothing
+    # is the run that returns the row.
+    refused: dict[tuple[str, int], set[tuple[str, str]]] = {}
 
     def record(
         subject: str,
@@ -1847,6 +1951,32 @@ def read_side(
                             statements.setdefault((at.owner, at.line), at).keys.add(subject)
                     for value in term.literals:
                         record(subject, value, owner, term.verb, at)
+                # Narrower than ``exclude`` above, which files every value a
+                # term names: here only what every row of every branch is
+                # without, and only a value the run settles -- ``jobStatus<>
+                # :jobStatus`` bound to ``dummy`` on one path and ``running``
+                # on another passes over neither on every run.
+                refuses_here: Optional[set[tuple[str, str]]] = None
+                for alternative in _refused_terms(func, run):
+                    passed_over: set[tuple[str, str]] = set()
+                    for term in alternative:
+                        if term.verb != "read" or term.scope != sqltext.ROW:
+                            continue
+                        subject = _term_subject(attributor, term)
+                        for key in term.binds:
+                            values_of = bound(func, run, key, module.rel_path)
+                            if len(set(values_of)) == 1:
+                                passed_over.add((subject, values_of[0]))
+                        passed_over.update((subject, value) for value in term.literals)
+                    refuses_here = (
+                        passed_over if refuses_here is None else refuses_here & passed_over
+                    )
+                site = (owner, run.call.lineno)
+                refused[site] = (
+                    (refuses_here or set()) & refused[site]
+                    if site in refused
+                    else (refuses_here or set())
+                )
                 if not reading.parsed and read_tables:
                     # Not read some other way, and not dropped either: a
                     # statement whose text does not parse still reads these
@@ -1879,6 +2009,8 @@ def read_side(
             place_regions(func, owner, executions)
             place_exits(func, owner)
             place_call_sites(func, owner, module.rel_path, executions)
+    for site, at in statements.items():
+        statements[site] = at._replace(refuses=frozenset(refused.get(site, ())))
     return ReadSide(
         values=found,
         entities=rows,
@@ -1915,6 +2047,7 @@ def read_site_nodes(
                 owner=owner,
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
                 excludes=sorted(f"{subject}={value}" for subject, value in at.excludes),
+                refuses=sorted(f"{subject}={value}" for subject, value in at.refuses),
                 consults=sorted(f"{subject}={value}" for subject, value in at.consults),
                 keys=sorted(at.keys),
                 order_by=sorted(at.order_by),

@@ -740,6 +740,12 @@ async def test_a_statement_that_passes_over_other_values_is_answered_beside_the_
                 ),
                 _read_site("z.py::g", 7, excludes=[f"{status}=holding", f"{status}={{}}"]),
                 _read_site("w.py::h", 9, consults=[f"{status}=defined"]),
+                _read_site(
+                    "v.py::k",
+                    11,
+                    excludes=[f"{status}=defined", f"{status}=running"],
+                    refuses=[f"{status}=defined"],
+                ),
             ],
         )
     )
@@ -754,6 +760,9 @@ async def test_a_statement_that_passes_over_other_values_is_answered_beside_the_
     assert follow.selected_by == []
     assert follow.reader_statements == []
     assert "1 statement(s) return such rows by excluding other values (listed above)" in follow.question
+    assert [(s.owner, s.line) for s in follow.refused_by] == [("v.py::k", 11)]
+    assert follow.refused_by[0].refuses == [f"{status}=defined"]
+    assert "1 statement(s) leave such rows out (listed above)" in follow.question
 
 
 def test_the_statements_beside_the_readers_print_under_headings_of_their_own():
@@ -778,6 +787,15 @@ def test_the_statements_beside_the_readers_print_under_headings_of_their_own():
                     tables=["jobsActive4", "jobsDefined4"],
                 )
             ],
+            refused_by=[
+                models.StatementReading(
+                    owner="v.py::k",
+                    file="v.py",
+                    line=11,
+                    excludes=[f"{status}=defined", f"{status}=running"],
+                    refuses=[f"{status}=defined"],
+                )
+            ],
             consulted_by=[
                 models.StatementReading(
                     owner="w.py::h", file="w.py", line=9, consults=[f"{status}=defined"]
@@ -795,6 +813,9 @@ def test_the_statements_beside_the_readers_print_under_headings_of_their_own():
     assert "reads  jobsActive4, jobsDefined4" in output
     assert "not counted as a query that selects it" in output
     assert f"  what only checks it exists      {strategy_mod.short_owner('w.py::h')}\n" in output
+    assert f"  what leaves it out              {strategy_mod.short_owner('v.py::k')}\n" in output
+    assert "v.py:11  leaves out JobSpec.jobStatus=defined\n" in output
+    assert "no row it returns holds this value" in output
     assert "w.py:9  checks JobSpec.jobStatus=defined" in output
     assert "picks none of them up" in output
     assert "which query selects it" not in output

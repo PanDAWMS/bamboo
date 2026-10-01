@@ -465,3 +465,84 @@ def test_an_exclusion_the_map_cannot_name_is_still_filed():
 
     (statement,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::pick"]
     assert statement.excludes == {("JediTaskSpec.status", "{}")}
+
+
+def _refused(sql: str) -> list[list[tuple[str, str, tuple[str, ...], tuple[str, ...]]]]:
+    with sqltext.with_schema(_SCHEMA):
+        return [
+            [(t.table, t.column, t.binds, t.literals) for t in alternative]
+            for alternative in sqltext.refusals(sql)
+        ]
+
+
+def test_only_an_exclusion_every_row_meets_is_a_refusal():
+    """``getFailureCountsForTask_JEDI`` names ``relocationFlag<>:r`` in one branch of an ``OR``.
+
+    Its other branches return those rows, so the term is an exclusion the
+    statement names and not one it makes of every row.  Each branch of a
+    ``UNION`` is a way a row comes back, and is kept apart for the caller.
+    """
+    assert _refused(
+        "SELECT COUNT(*) FROM JEDI_Tasks WHERE jediTaskID=:t AND "
+        "((status=:f AND vo<>'x') OR (status=:c AND prodSourceLabel<>:r) OR status=:fin)"
+    ) == [[]]
+    assert _refused(
+        "SELECT jediTaskID FROM JEDI_Tasks WHERE NOT status IN (:a) AND (vo<>'x') "
+        "AND NOT (prodSourceLabel=:p AND jediTaskID=:t)"
+    ) == [[("JEDI_Tasks", "status", (":a",), ()), ("JEDI_Tasks", "vo", (), ("x",))]]
+    assert _refused(
+        "SELECT COUNT(*) FROM (SELECT jediTaskID FROM JEDI_Tasks WHERE status NOT IN (:a,:b) "
+        "UNION ALL SELECT jediTaskID FROM JEDI_Datasets WHERE status<>:a) t"
+    ) == [
+        [("JEDI_Tasks", "status", (":a", ":b"), ())],
+        [("JEDI_Datasets", "status", (":a",), ())],
+    ]
+    assert _refused(
+        "SELECT jediTaskID FROM JEDI_Tasks WHERE vo=:vo AND NOT EXISTS "
+        "(SELECT 1 FROM JEDI_Datasets d WHERE d.jediTaskID=JEDI_Tasks.jediTaskID AND d.status<>:s)"
+    ) == [[]]
+    assert _refused("SELECT jediTaskID FROM JEDI_Tasks WHERE status NOT IN (") == []
+
+
+def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():
+    """Built two ways, bound two ways: what is left out of every row on every run.
+
+    ``done`` is appended under an ``if`` with no ``else``, ``broken`` sits
+    inside an ``OR``, and ``:st`` is ``running`` on one path and ``dummy`` on
+    the other -- all named, none passed over every time.  Where both branches
+    of an ``if``/``else`` leave ``done`` out, every run does.
+    """
+    side = _read_side(
+        "class TaskModule:\n"
+        "    def pick(self, flag):\n"
+        "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo '\n"
+        "        if flag:\n"
+        "            sql += \"AND status<>'done' \"\n"
+        "        sql += \"AND status<>'failed' AND (status<>:a OR prodSourceLabel=:p)\"\n"
+        "        self.cur.execute(sql, {':vo': 'atlas', ':a': 'broken', ':p': 'user'})\n"
+        "    def kill(self, hard):\n"
+        "        varMap = {':vo': 'atlas'}\n"
+        "        if hard:\n"
+        "            varMap[':st'] = 'running'\n"
+        "        else:\n"
+        "            varMap[':st'] = 'dummy'\n"
+        "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status<>:st'\n"
+        "        self.cur.execute(sql, varMap)\n"
+        "    def choose(self, user):\n"
+        "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo '\n"
+        "        if user:\n"
+        "            sql += \"AND status<>'done' AND prodSourceLabel='user' \"\n"
+        "        else:\n"
+        "            sql += \"AND status<>'done' \"\n"
+        "        self.cur.execute(sql, {':vo': 'atlas'})\n" + _TEACH
+    )
+
+    (picked,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::pick"]
+    (killed,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::kill"]
+    status = "JediTaskSpec.status"
+    assert picked.excludes == {(status, "done"), (status, "failed"), (status, "broken")}
+    assert picked.refuses == {(status, "failed")}
+    assert killed.excludes == {(status, "running"), (status, "dummy")}
+    assert killed.refuses == frozenset()
+    (chosen,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::choose"]
+    assert chosen.refuses == {(status, "done")}

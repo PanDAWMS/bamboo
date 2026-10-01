@@ -81,6 +81,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     NodeType.READ_SITE.value: (
         "selects",
         "excludes",
+        "refuses",
         "consults",
         "keys",
         "order_by",

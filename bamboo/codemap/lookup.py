@@ -645,6 +645,12 @@ class CodeMap:
         ]
         return sorted(sites, key=lambda s: (s.owner, s.anchor.line_start))
 
+    async def read_sites_refusing(self, subject: str, value: str) -> list[ReadSiteNode]:
+        """The statements no row of which holds *value* -- :attr:`ReadSiteNode.refuses`."""
+        pair = f"{subject}={value}"
+        sites = [site for site in await self._find(ReadSiteNode) if pair in site.refuses]
+        return sorted(sites, key=lambda s: (s.owner, s.anchor.line_start))
+
     async def read_sites_consulting(self, subject: str, value: str) -> list[ReadSiteNode]:
         """The statements whose subquery checks whether rows holding *value* exist."""
         pair = f"{subject}={value}"

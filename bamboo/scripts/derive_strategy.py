@@ -366,13 +366,23 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
         "  what returns it by exclusion",
         follow.returned_by_exclusion,
         "excluding",
+        "excludes",
         "never asks for it and passes over other values -- not counted as a query "
         "that selects it",
+    )
+    _report_returned(
+        "  what leaves it out",
+        follow.refused_by,
+        "leaves out",
+        "refuses",
+        "no row it returns holds this value, however it is built -- it passes over "
+        "rows like this one",
     )
     _report_returned(
         "  what only checks it exists",
         follow.consulted_by,
         "checks",
+        "consults",
         "checks whether rows holding it exist and picks none of them up",
     )
     if follow.selection_gates:
@@ -400,20 +410,20 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
         click.echo(line)
 
 
-def _report_returned(heading: str, entries, label: str, note: str) -> None:
+def _report_returned(heading: str, entries, label: str, field: str, note: str) -> None:
     """Statements that touch rows holding the value without selecting on it.
 
     After both halves of "what moves it on" and under a heading of their own,
     for the reason they are kept out of ``selected_by``: a ``NOT IN`` that
-    happens to let the value through, or an ``EXISTS`` that only looks, is not
-    the query that was meant to pick the row up, and printed among those it
-    would read as one.  The tables come with them, because whether a row of
+    happens to let the value through, one that leaves it out, or an ``EXISTS``
+    that only looks, is not the query that was meant to pick the row up, and
+    printed among those it would read as one.  The tables come with them, because whether a row of
     this kind is in a table at all is the reader's to judge.
     """
     for index, entry in enumerate(entries):
         lead = heading.ljust(33) if index == 0 else " " * 33
         click.echo(f"{lead} {strategy_mod.short_owner(entry.owner)}")
-        said = entry.excludes if label == "excluding" else entry.consults
+        said = getattr(entry, field)
         click.echo(
             f"                                     {entry.file}:{entry.line}"
             f"  {label} {', '.join(said)}"

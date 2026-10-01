@@ -621,12 +621,14 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
     before, _SCHEMA = _SCHEMA, columns
     terms.cache_clear()
     conditions.cache_clear()
+    refusals.cache_clear()
     try:
         yield
     finally:
         _SCHEMA = before
         terms.cache_clear()
         conditions.cache_clear()
+        refusals.cache_clear()
 
 
 _CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
@@ -957,47 +959,53 @@ def terms(sql: str) -> Reading:
     scopes, root = _scopes(tree)
     for scope, verb, kind in scopes:
         for column in _own_columns(scope):
-            # ``tabT.{0}=:{0}`` -- a column Python names at run time, which the
-            # reassembly already reports.  Read as a column called ``__h4``, it
-            # came out as a key no table has.
-            if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_NAMES:
-                continue
-            holder = _filtering(column)
-            if holder is None:
-                continue
-            compared = _compared(column)
-            if compared is None:
-                continue
-            excluding, values, undecided = compared
-            # ``status=:{}`` -- a bind whose name is interpolated has no value
-            # to look up, so it is a value the statement does not decide.
-            placeholders = [value for value in values if isinstance(value, exp.Placeholder)]
-            binds = tuple(f":{value.name}" for value in placeholders if not _NAMED_HOLE.search(value.name))
-            undecided = undecided or len(binds) < len(placeholders)
-            negations = _negations(column.parent)
-            if negations is None:
-                continue
-            owners, why = _owner(column, scope, root)
-            if why:
-                spelled = column.sql(dialect="oracle")
-                among = f" ({', '.join(owners)})" if owners else ""
-                unresolved.add(f"{spelled}{among} -- {why}")
-                continue
-            found.append(
-                Term(
-                    table=owners[0],
-                    column=column.name,
-                    verb=verb,
-                    scope=kind,
-                    excluding=excluding != bool(negations % 2),
-                    binds=binds,
-                    literals=tuple(
-                        value.this for value in values if isinstance(value, exp.Literal) and value.is_string
-                    ),
-                    undecided=undecided,
-                )
-            )
+            term = _term(column, scope, root, verb, kind)
+            if isinstance(term, Term):
+                found.append(term)
+            elif term is not None:
+                unresolved.add(term)
     return Reading(tuple(found), tuple(sorted(unresolved)), True)
+
+
+def _term(column: exp.Column, scope, root, verb: str, kind: str) -> Optional[Term | str]:
+    """The term *column* is compared in, why its table is not known, or ``None``."""
+    # ``tabT.{0}=:{0}`` -- a column Python names at run time, which the
+    # reassembly already reports.  Read as a column called ``__h4``, it
+    # came out as a key no table has.
+    if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_NAMES:
+        return None
+    holder = _filtering(column)
+    if holder is None:
+        return None
+    compared = _compared(column)
+    if compared is None:
+        return None
+    excluding, values, undecided = compared
+    # ``status=:{}`` -- a bind whose name is interpolated has no value
+    # to look up, so it is a value the statement does not decide.
+    placeholders = [value for value in values if isinstance(value, exp.Placeholder)]
+    binds = tuple(f":{value.name}" for value in placeholders if not _NAMED_HOLE.search(value.name))
+    undecided = undecided or len(binds) < len(placeholders)
+    negations = _negations(column.parent)
+    if negations is None:
+        return None
+    owners, why = _owner(column, scope, root)
+    if why:
+        spelled = column.sql(dialect="oracle")
+        among = f" ({', '.join(owners)})" if owners else ""
+        return f"{spelled}{among} -- {why}"
+    return Term(
+        table=owners[0],
+        column=column.name,
+        verb=verb,
+        scope=kind,
+        excluding=excluding != bool(negations % 2),
+        binds=binds,
+        literals=tuple(
+            value.this for value in values if isinstance(value, exp.Literal) and value.is_string
+        ),
+        undecided=undecided,
+    )
 
 
 class Branch(NamedTuple):
@@ -1460,6 +1468,111 @@ def conditions(sql: str) -> tuple[Condition, ...]:
         if one not in found:
             found.append(one)
     return tuple(found)
+
+
+def _conjuncts(node: exp.Expression) -> Iterator[exp.Expression]:
+    """The terms *node* ``AND``\\ s together, through parentheses."""
+    if isinstance(node, exp.Paren):
+        yield from _conjuncts(node.this)
+    elif isinstance(node, exp.And):
+        yield from _conjuncts(node.this)
+        yield from _conjuncts(node.expression)
+    else:
+        yield node
+
+
+def _outright(where: exp.Where, scope, root, verb: str, kind: str) -> tuple[Term, ...]:
+    """The exclusions *where* makes of every row: its own terms outside any ``OR``."""
+    found: list[Term] = []
+    own = {id(column) for column in _own_columns(scope)}
+    for conjunct in _conjuncts(where.this):
+        for column in conjunct.find_all(exp.Column):
+            if id(column) not in own:
+                continue
+            walk, inside = column.parent, False
+            while walk is not None and walk is not conjunct.parent:
+                inside = inside or isinstance(walk, (exp.And, exp.Or))
+                walk = walk.parent
+            if inside:
+                continue
+            term = _term(column, scope, root, verb, kind)
+            if isinstance(term, Term) and term.excluding:
+                found.append(term)
+    return tuple(found)
+
+
+@functools.lru_cache(maxsize=None)
+def refusals(sql: str) -> tuple[tuple[Term, ...], ...]:
+    """The exclusions every row *sql* returns satisfies, one tuple per way a row comes back.
+
+    Narrower than the excluding :func:`terms`, which say a statement *names* a
+    value to pass over.  ``getFailureCountsForTask_JEDI`` names
+    ``relocationFlag<>:relThrottled`` inside one branch of an ``OR``, and its
+    other branches return throttled jobs all the same; a reader told it leaves
+    them out would stop looking at a query that picks them up.
+
+    So a term counts only where every row has to meet it: a conjunct of the
+    ``WHERE`` outside any ``OR``, of the statement or of the derived table or
+    ``WITH`` clause the rows come from.  A ``UNION`` returns rows from any of
+    its branches, and each branch is a tuple of its own -- the caller names
+    the values and keeps the ones every branch passes over, since which
+    subject a table's column is, is not this module's to say.  ``()`` for a
+    statement that does not parse.
+    """
+    read = parsed(sql)
+    if read.tree is None:
+        return ()
+    scopes, root = _scopes(read.tree)
+    scope_of = {id(scope.expression): (scope, verb, kind) for scope, verb, kind in scopes}
+    ctes: dict[str, exp.Expression] = {}
+    entered: set[int] = set()
+
+    def rows(node: Optional[exp.Expression]) -> list[tuple[Term, ...]]:
+        if node is None or id(node) in entered:
+            return [()]
+        entered.add(id(node))
+        if isinstance(node, exp.Subquery):
+            return rows(node.this)
+        if isinstance(node, exp.Union):
+            return [one for operand in _set_operands(node, type(node)) for one in rows(operand)]
+        if isinstance(node, exp.Intersect):
+            return [
+                tuple(term for part in parts for term in part)
+                for parts in itertools.product(*(rows(one) for one in _set_operands(node, exp.Intersect)))
+            ]
+        if isinstance(node, exp.Except):
+            return rows(node.this)
+        if isinstance(node, exp.Insert):
+            return rows(node.expression) if isinstance(node.expression, (exp.Query, exp.Subquery)) else [()]
+        if not isinstance(node, (exp.Select, exp.Update, exp.Delete)):
+            return [()]
+        for cte in (node.args.get("with_") or exp.With()).expressions:
+            ctes[cte.alias_or_name.lower()] = cte.this
+        where = node.args.get("where")
+        if isinstance(node, (exp.Update, exp.Delete)):
+            entry = (root, "updated" if isinstance(node, exp.Update) else "deleted", ROW)
+        else:
+            entry = scope_of.get(id(node))
+        own: tuple[Term, ...] = ()
+        if where is not None and entry is not None and entry[0] is not None:
+            scope, verb, kind = entry
+            own = _outright(where, scope, root, verb, kind)
+        found = [own]
+        sources = [node.args.get("from_")] + list(node.args.get("joins") or [])
+        for source in (one.this for one in sources if one is not None):
+            if isinstance(source, exp.Subquery):
+                inner = rows(source)
+            elif isinstance(source, exp.Table) and source.name.lower() in ctes:
+                inner = rows(ctes[source.name.lower()])
+            else:
+                continue
+            found = [mine + theirs for mine in found for theirs in inner]
+        return found
+
+    if isinstance(read.tree, exp.Query):
+        for cte in (read.tree.args.get("with_") or exp.With()).expressions:
+            ctes[cte.alias_or_name.lower()] = cte.this
+    return tuple(rows(read.tree))
 
 
 #: What ends an ``ORDER BY`` list at its own depth.

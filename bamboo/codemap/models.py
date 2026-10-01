@@ -1100,6 +1100,18 @@ class ReadSiteNode(BaseNode):
             "-- so that the statement does not read as passing over nothing."
         ),
     )
+    refuses: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The part of ``excludes`` no row this statement returns holds, "
+            "however it is built, sorted: a conjunct outside any ``OR``, in "
+            "every branch of a ``UNION`` and every way the text is assembled, "
+            "with a value every run settles.  ``excludes`` says what a term "
+            "names; ``relocationFlag<>:relThrottled`` in one branch of an "
+            "``OR`` is there and not here, since the other branches return "
+            "those rows."
+        ),
+    )
     consults: list[str] = Field(
         default_factory=list,
         description=(
@@ -2708,6 +2720,17 @@ class FollowUp(BaseModel):
             "answer for a value a ``NOT IN`` picks up every cycle."
         ),
     )
+    refused_by: list[StatementReading] = Field(
+        default_factory=list,
+        description=(
+            "Statements no row of which holds the observed value: they pass "
+            "over it outright, in every branch and every way they are built "
+            "-- :attr:`ReadSiteNode.refuses`.  The answer to a row that sits "
+            "on a value: ``copyArchive``'s reassign and ``lockJobsForReassign`` "
+            "both say ``relocationFlag<>2``, so a job holding 2 is one they "
+            "leave alone."
+        ),
+    )
     consulted_by: list[StatementReading] = Field(
         default_factory=list,
         description=(
@@ -3344,6 +3367,10 @@ class StatementReading(BaseModel):
     excludes: list[str] = Field(
         default_factory=list,
         description="``subject=value`` the statement asks rows *not* to hold -- :attr:`ReadSiteNode.excludes`.",
+    )
+    refuses: list[str] = Field(
+        default_factory=list,
+        description="``subject=value`` no row the statement returns holds -- :attr:`ReadSiteNode.refuses`.",
     )
     consults: list[str] = Field(
         default_factory=list,
