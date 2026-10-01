@@ -413,3 +413,19 @@ def test_the_branches_of_a_union_are_alternatives():
     )
 
     assert required == [[("modificationTime>(CURRENT_DATE-30)",), ("lockedBy IS NULL",)]]
+
+
+def test_only_the_rows_that_come_back_are_ordered_and_limited():
+    """A subquery's ``ROWNUM`` and an ``OVER (ORDER BY ...)`` say nothing about the rows returned.
+
+    The text reading took every ``ORDER BY`` and ``ROWNUM`` in the statement.
+    """
+    orders, limits = sqltext.ordering(
+        "SELECT * FROM (SELECT PandaID, ROW_NUMBER() OVER (PARTITION BY computingSite ORDER BY modificationTime) rn "
+        "FROM ATLAS_PANDA.jobsActive4 tab WHERE jobStatus=:s AND NOT EXISTS "
+        "(SELECT 1 FROM ATLAS_PANDA.jobsDefined4 d WHERE d.PandaID=tab.PandaID AND ROWNUM<=1) "
+        "ORDER BY currentPriority DESC) WHERE ROWNUM <= :limit AND rn < {}"
+    )
+
+    assert orders == ["currentPriority DESC"]
+    assert limits == [(":limit", False)]

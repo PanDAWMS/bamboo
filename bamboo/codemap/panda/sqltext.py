@@ -6,10 +6,14 @@ columns it writes and with what, which values it asks rows by, and in what
 order and how many come back.  Nothing here looks at Python: every function
 takes the statement as a string.
 
-Not attempted: parsing SQL properly.  These are regexes over reassembled
-strings, which is enough for ``UPDATE ... SET`` and ``INSERT INTO ... VALUES``
-and nothing more.  Anything they cannot read is reported as unexplained rather
-than guessed at, which is what the coverage matrix is for.
+Two readings, for now.  What a reader asks of rows -- the values
+(:func:`terms`), what else a row had to be (:func:`conditions`), the order and
+the limit (:func:`ordering`) -- is read off sqlglot's tree (:func:`parsed`),
+because only the tree says which table a column belongs to and which terms
+are a subquery's.  The tables a statement touches and what it writes are
+still regexes over the text, enough for ``UPDATE ... SET`` and ``INSERT INTO
+... VALUES`` and nothing more.  Either way, what cannot be read is reported
+rather than guessed at.
 """
 
 from __future__ import annotations
@@ -506,57 +510,6 @@ def deletes(sql: str) -> list[str]:
 
 _BIND_KEY = re.compile(r":\w+")
 _QUOTED = re.compile(r"'([^']*)'")
-
-
-_ORDER_BY = re.compile(r"\bORDER\s+BY\s+", re.IGNORECASE)
-#: Where an ``ORDER BY`` ends at its own depth.
-_ORDER_END = re.compile(r"\b(?:FOR\s+UPDATE|FETCH|LIMIT|OFFSET)\b", re.IGNORECASE)
-
-
-def _order_clause(sql: str, start: int) -> str:
-    """The ``ORDER BY`` list from *start*: to the paren closing the query it is in, or a keyword at its depth.
-
-    Counted, not matched: ``ORDER BY (CASE ... END), currentpriority desc``
-    holds a paren of its own.
-    """
-    depth = 0
-    index = start
-    while index < len(sql):
-        char = sql[index]
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            if depth == 0:
-                break
-            depth -= 1
-        elif depth == 0 and _ORDER_END.match(sql, index):
-            break
-        index += 1
-    return re.sub(r"\s+", " ", sql[start:index]).strip()
-_LIMIT = re.compile(
-    r"\bROWNUM\s*(<=?)\s*(:\w+|\d+|\{\d*\})"
-    r"|\bFETCH\s+FIRST\s+(:\w+|\d+|\{\d*\})\s+ROWS?\s+ONLY"
-    r"|\bLIMIT\s+(:\w+|\d+|\{\d*\})",
-    re.IGNORECASE,
-)
-
-
-def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
-    """``ORDER BY`` clauses and row limits: which rows come back first, and how many.
-
-    A row that passes the ``WHERE`` can still lose on order and not come back:
-    ``getJobs`` sorts by share, priority and ``PandaID`` and keeps
-    ``ROWNUM <= :njobs``.  Limits are ``(bind or number, strict)`` -- ``<``
-    keeps one fewer than ``<=``.
-    """
-    orders = [_order_clause(sql, match.end()) for match in _ORDER_BY.finditer(sql)]
-    limits: list[tuple[str, bool]] = []
-    for match in _LIMIT.finditer(sql):
-        if match.group(2):
-            limits.append((match.group(2), match.group(1) == "<"))
-        else:
-            limits.append((match.group(3) or match.group(4), False))
-    return [order for order in orders if order], limits
 
 
 #: Where the ``WHERE`` clause ends.  Everything after is about the rows that
@@ -1507,3 +1460,125 @@ def conditions(sql: str) -> tuple[Condition, ...]:
         if one not in found:
             found.append(one)
     return tuple(found)
+
+
+#: What ends an ``ORDER BY`` list at its own depth.
+_ENDS_AN_ORDER = frozenset(
+    {_T.FOR, _T.FETCH, _T.LIMIT, _T.OFFSET, _T.UNION, _T.EXCEPT, _T.INTERSECT, _T.SEMICOLON}
+)
+
+
+def _rows_from(node: Optional[exp.Expression], ctes: dict[str, exp.Expression], entered: set[int]) -> Iterator[exp.Expression]:
+    """Every query whose rows *node* returns: itself, a set operation's sides, its derived tables and ``WITH`` clauses."""
+    if node is None or id(node) in entered:
+        return
+    entered.add(id(node))
+    if isinstance(node, exp.Query):
+        for cte in (node.args.get("with_") or exp.With()).expressions:
+            ctes[cte.alias_or_name.lower()] = cte.this
+    if isinstance(node, exp.Subquery):
+        yield from _rows_from(node.this, ctes, entered)
+        return
+    if isinstance(node, exp.Insert):
+        yield from _rows_from(node.expression, ctes, entered)
+        return
+    yield node
+    if isinstance(node, exp.SetOperation):
+        yield from _rows_from(node.this, ctes, entered)
+        if not isinstance(node, exp.Except):
+            yield from _rows_from(node.expression, ctes, entered)
+        return
+    if isinstance(node, exp.Select):
+        sources = [node.args.get("from_")] + list(node.args.get("joins") or [])
+        for source in (one.this for one in sources if one is not None):
+            if isinstance(source, exp.Subquery):
+                yield from _rows_from(source, ctes, entered)
+            elif isinstance(source, exp.Table) and source.name.lower() in ctes:
+                yield from _rows_from(ctes[source.name.lower()], ctes, entered)
+
+
+def _bound(node: exp.Expression, sql: str) -> Optional[str]:
+    """A row limit as written: a bind key, a number, or the hole it is spelled through."""
+    if isinstance(node, exp.Placeholder):
+        return _respelled(f":{node.name}", sql)
+    if isinstance(node, exp.Literal) and not node.is_string:
+        return node.this
+    if _is_hole(node):
+        return _respelled(node.name, sql)
+    return None
+
+
+def _order_text(order: exp.Order, read: Parsed, sql: str, tokens: list) -> str:
+    """*order*'s list as the statement spells it."""
+    placed = [node.meta["start"] for node in order.find_all(exp.Identifier, exp.Literal) if "start" in node.meta]
+    if not placed:
+        return ""
+    opened = [index for index, token in enumerate(tokens) if token.token_type == _T.ORDER_BY and token.start < min(placed)]
+    if not opened:
+        return ""
+    depth, last = 0, len(tokens)
+    for index in range(opened[-1] + 1, len(tokens)):
+        kind = tokens[index].token_type
+        if kind == _T.L_PAREN:
+            depth += 1
+        elif kind == _T.R_PAREN:
+            if depth == 0:
+                last = index
+                break
+            depth -= 1
+        elif depth == 0 and kind in _ENDS_AN_ORDER:
+            last = index
+            break
+    if last <= opened[-1] + 1:
+        return ""
+    start, end = tokens[opened[-1] + 1].start, tokens[last - 1].end
+    return " ".join(_respelled(read.text[start : end + 1], sql).split())
+
+
+def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
+    """``ORDER BY`` clauses and row limits: which rows come back first, and how many.
+
+    A row that passes the ``WHERE`` can still lose on order and not come back:
+    ``getJobs`` sorts by share, priority and ``PandaID`` and keeps
+    ``ROWNUM <= :njobs``.  Limits are ``(bind or number, strict)`` -- ``<``
+    keeps one fewer than ``<=``.
+
+    Read off the tree, from the queries whose rows come back -- see
+    :func:`_rows_from`.  The text reading took every ``ORDER BY`` and
+    ``ROWNUM`` in the statement, a subquery's and an ``OVER (...)``'s too.
+    A statement that does not parse has neither, and ``unresolved`` says so.
+    """
+    read = parsed(sql)
+    if read.tree is None:
+        return [], []
+    tokens = _tokens(read.text)
+    orders: list[str] = []
+    limits: list[tuple[str, bool]] = []
+    for query in _rows_from(read.tree, {}, set()):
+        order = query.args.get("order")
+        if isinstance(order, exp.Order):
+            text = _order_text(order, read, sql, tokens)
+            if text and text not in orders:
+                orders.append(text)
+        limit = query.args.get("limit")
+        if isinstance(limit, (exp.Limit, exp.Fetch)):
+            counted = limit.args.get("count") if isinstance(limit, exp.Fetch) else limit.expression
+            value = _bound(counted, sql) if counted is not None else None
+            if value is not None:
+                limits.append((value, False))
+        where = query.args.get("where")
+        if where is None:
+            continue
+        for comparison in where.find_all(exp.LT, exp.LTE, exp.GT, exp.GTE):
+            if comparison.find_ancestor(exp.Select, exp.Update, exp.Delete) is not query:
+                continue
+            left, right = comparison.this, comparison.expression
+            if isinstance(left, exp.Column) and left.name.lower() == "rownum" and isinstance(comparison, (exp.LT, exp.LTE)):
+                value = _bound(right, sql)
+            elif isinstance(right, exp.Column) and right.name.lower() == "rownum" and isinstance(comparison, (exp.GT, exp.GTE)):
+                value = _bound(left, sql)
+            else:
+                continue
+            if value is not None:
+                limits.append((value, isinstance(comparison, (exp.LT, exp.GT))))
+    return orders, limits
