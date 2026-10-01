@@ -1732,6 +1732,38 @@ def test_an_optional_fragment_does_not_split_the_statement():
     assert "frozenTime=NULL" in texts[0]
 
 
+def test_a_loop_that_runs_nothing_builds_one_statement_over_its_tables():
+    """Nothing in the loop runs a statement, so the loop is writing one, pass by pass.
+
+    ``getQueuedPandaIDsWithTask_JEDI``.  Split per table, every pass kept the
+    ``UNION ALL`` -- ``if sqlP != ""`` reads what earlier passes appended --
+    and each read as a statement no parser takes.  A loop that runs the
+    statement on every pass is still one statement per table.
+    """
+    func = _func(
+        "def f(self):\n"
+        "    tables = ['ATLAS_PANDA.jobsDefined4', 'ATLAS_PANDA.jobsActive4']\n"
+        "    sqlP = ''\n"
+        "    for tableName in tables:\n"
+        "        if sqlP != '':\n"
+        "            sqlP += 'UNION ALL '\n"
+        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE jediTaskID=:t '\n"
+        "        if tableName == 'ATLAS_PANDA.jobsActive4':\n"
+        "            sqlP += 'AND jobStatus<>:st '\n"
+        "    self.cur.execute(sqlP, varMap)\n"
+        "    for table in tables:\n"
+        "        sqlC = f'SELECT COUNT(*) FROM {table} WHERE x=:x '\n"
+        "        self.cur.execute(sqlC, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(func)] == [
+        "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE jediTaskID=:t "
+        "UNION ALL SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jediTaskID=:t AND jobStatus<>:st ",
+        "SELECT COUNT(*) FROM ATLAS_PANDA.jobsDefined4 WHERE x=:x ",
+        "SELECT COUNT(*) FROM ATLAS_PANDA.jobsActive4 WHERE x=:x ",
+    ]
+
+
 def test_a_cut_off_the_end_of_a_statement_is_applied():
     """``sql = sql[:-4]`` drops the ``AND `` a loop leaves after its last term.
 
@@ -2874,12 +2906,12 @@ def test_more_tables_than_the_cap_allows_are_not_split_at_all():
     reader would take for the whole list.
     """
     names = ", ".join(f"'ATLAS_PANDA.t{index}'" for index in range(40))
+    # One statement per table: the loop runs it on every pass.
     source = (
         "def f(self):\n"
-        "    sqlP = ''\n"
         f"    for tableName in ({names}):\n"
-        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
-        "    self.cur.execute(sqlP + comment, varMap)\n"
+        "        sqlP = f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
+        "        self.cur.execute(sqlP + comment, varMap)\n"
     )
 
     assert [run.sql for run in sql.executions(_func(source))] == [

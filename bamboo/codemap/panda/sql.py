@@ -1231,6 +1231,101 @@ def _fold_filled(
     return assembled, spans
 
 
+def _accumulated(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    parts: list[tuple[int, str, str, ast.stmt]],
+    name: str,
+) -> list[tuple[int, str, str, ast.stmt]]:
+    """*parts*, with a loop that builds one statement over a list of tables written out.
+
+    A loop over table names reads as one statement per table when the
+    statement runs inside it.  When nothing in the loop runs a statement, the
+    loop is building one::
+
+        sqlP = ""
+        for tableName in tables:
+            if sqlP != "":
+                sqlP += "UNION ALL "
+            sqlP += f"SELECT PandaID FROM {tableName} WHERE jediTaskID=:jediTaskID "
+
+    and split per table, every pass kept the ``UNION ALL``: the test reads
+    what earlier passes appended, which no single pass can say, so each one
+    read as a statement beginning ``UNION ALL`` that PanDA never sends.
+    Written out pass by pass, that test is answered by what is assembled so
+    far, and a test on the table by :func:`_test_value`.  One neither can
+    decide keeps its fragment, as an optional fragment is kept everywhere
+    else.
+    """
+    per_part, choices = _table_choices(func, parts)
+    for (_line, _operator, _text, node), (expressions, holes) in zip(parts, per_part, strict=True):
+        for hole in holes:
+            variable = ast.unparse(expressions[hole])
+            loop = next(
+                (
+                    one
+                    for one in ancestors(node)
+                    if isinstance(one, ast.For)
+                    and isinstance(one.target, ast.Name)
+                    and one.target.id == variable
+                ),
+                None,
+            )
+            if loop is None or any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr in RUNNERS
+                for call in ast.walk(loop)
+            ):
+                continue
+            body = [
+                index
+                for index, part in enumerate(parts)
+                if any(one is loop for one in ancestors(part[3]))
+            ]
+            # Only a run of ``+=`` the loop owns outright: a ``=`` inside it
+            # starts a statement per pass, and that is the split's case.
+            if body != list(range(body[0], body[-1] + 1)) or any(parts[i][1] != "+=" for i in body):
+                return parts
+            assembled = _fold(parts[: body[0]])
+            text = ""
+            for value in choices[variable]:
+                for index in body:
+                    _at, _op, fragment, held = parts[index]
+                    if _guarded(held, loop, {variable: value, name: assembled + text}) is False:
+                        continue
+                    fragment_expressions, fragment_holes = per_part[index]
+                    text += _fill(
+                        fragment,
+                        {
+                            hole: value
+                            for hole in fragment_holes
+                            if ast.unparse(fragment_expressions[hole]) == variable
+                        },
+                    )
+            return _accumulated(
+                func, parts[: body[0]] + [(loop.lineno, "+=", text, loop)] + parts[body[-1] + 1 :], name
+            )
+    return parts
+
+
+def _guarded(node: ast.AST, loop: ast.For, bound: dict[str, str]) -> Optional[bool]:
+    """Whether the ``if``\\ s between *node* and *loop* let it through for *bound*; ``None`` if undecided."""
+    decided: Optional[bool] = True
+    child: ast.AST = node
+    for one in ancestors(node):
+        if one is loop:
+            break
+        if isinstance(one, ast.If):
+            value = _test_value(one.test, bound, loop)
+            taken = any(statement is child for statement in one.body)
+            if value is None:
+                decided = None
+            elif value is not taken:
+                return False
+        child = one
+    return decided
+
+
 def _run_variants(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     parts: list[tuple[int, str, str, ast.stmt]],
@@ -1265,8 +1360,11 @@ def _run_variants(
     source writes out is four statements, one per table, and read as one it is
     a statement about a table called ``{}``.  That is what hid the helper
     fetching a task's jobs: the rows it selects belong to a table the map had
-    no name for.
+    no name for.  That holds where the statement runs inside the loop; where
+    nothing in the loop runs one, the loop is building a single statement,
+    and :func:`_accumulated` writes it out pass by pass first.
     """
+    parts = _accumulated(func, parts, name)
     start = 1 if parts and parts[0][1] == "=" else 0
     statements = _compatible_sets(parts, start)
     per_part, choices = _table_choices(func, parts)
