@@ -42,6 +42,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "beautifulsoup4>=4.12.0",
     "textual>=0.60.0",
+    "sqlglot>=30.21,<31",
 ]
 
 [project.optional-dependencies]

@@ -39,7 +39,7 @@ import click
 from bamboo.codemap import gates
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import SCOPE_OF_STOPS, MapFragment
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 from bamboo.codemap.store import store_fragment
 
@@ -507,6 +507,23 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             f"    {terms} condition(s) over {len(conditioned)} statement(s); "
             f"{len(reads) - len(conditioned)} ask on the value alone"
         )
+        consulting = [r for r in reads if r.consults]
+        click.echo(
+            f"    {sum(len(r.consults) for r in reads)} value(s) a subquery checks rows by, "
+            f"over {len(consulting)} statement(s); schema {getattr(plugin, 'schema_stamp', 'none')}"
+        )
+        # Where reading a statement's terms stopped, by reason: one that does
+        # not parse is read not at all, a column whose table is not decided
+        # is left out of a statement read otherwise, and a build given no
+        # schema says so here rather than reading fewer columns quietly.
+        stopped = Counter(
+            stop.rsplit(" -- ", 1)[-1]
+            for r in reads
+            for stop in r.unresolved
+            if stop.rsplit(" -- ", 1)[-1] in _TERM_STOPS
+        )
+        for reason, count in stopped.most_common():
+            click.echo(f"    {count:4}  {reason}")
         # Where the rows go after the statement has them: dropped one by one,
         # not there at all, or handed to something the map already answers
         # for.  Counted separately because an empty ``exits`` is an answer --
@@ -647,6 +664,32 @@ async def _store(fragment: MapFragment) -> dict[str, int]:
         await graph_db.close()
 
 
+#: Why reading a statement's terms stopped -- see :func:`sqltext.terms`.
+_TERM_STOPS = frozenset(
+    {
+        sqltext.NOT_PARSED,
+        sqltext.NO_SCHEMA,
+        sqltext.OWNER_UNDECIDED,
+        sqltext.JSON_PATH,
+        sqltext.UNKNOWN_QUALIFIER,
+    }
+)
+
+#: Shared by every command that builds a map: a build without the definitions
+#: reads fewer columns, and two builds compared must have read the same ones.
+schema_root_option = click.option(
+    "--schema-root",
+    default=None,
+    metavar="PATH",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help=(
+        "The target system's table definitions -- for PanDA, panda-database's "
+        "schema/oracle.  They say which table an unqualified column of a join "
+        "belongs to; without them such a column is reported, not read."
+    ),
+)
+
+
 @click.command("build-map")
 @click.option(
     "--map-id",
@@ -665,6 +708,7 @@ async def _store(fragment: MapFragment) -> dict[str, int]:
         "installed next to bamboo."
     ),
 )
+@schema_root_option
 @click.option(
     "--dry-run",
     is_flag=True,
@@ -685,6 +729,7 @@ async def _store(fragment: MapFragment) -> dict[str, int]:
 def main(
     map_id: str,
     source_root: Optional[Path],
+    schema_root: Optional[Path],
     dry_run: bool,
     strict: bool,
     top: int,
@@ -701,7 +746,7 @@ def main(
         ) from exc
 
     try:
-        plugin.prepare(source_root)
+        plugin.prepare(source_root, schema_root)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 

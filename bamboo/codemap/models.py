@@ -1059,6 +1059,15 @@ class ReadSiteNode(BaseNode):
             "``selects``: ``status<>'done'`` picks up every row but the done ones."
         ),
     )
+    consults: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``subject=value`` for every pair a subquery of this statement checks "
+            "rows by -- ``EXISTS (SELECT 1 ... WHERE jobStatus=:st_merging)`` -- "
+            "sorted.  Kept out of ``selects``: the rows it looks at are not the "
+            "rows it returns, and nothing here picks them up."
+        ),
+    )
     keys: list[str] = Field(
         default_factory=list,
         description=(

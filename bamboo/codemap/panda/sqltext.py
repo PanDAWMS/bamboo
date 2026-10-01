@@ -14,10 +14,18 @@ than guessed at, which is what the coverage matrix is for.
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import itertools
 import re
-from typing import NamedTuple, Optional
+from pathlib import Path
+from typing import Iterator, NamedTuple, Optional
 
+import sqlglot
 from pydantic import BaseModel, Field
+from sqlglot import exp
+from sqlglot.errors import ErrorLevel, ParseError, SqlglotError
+from sqlglot.optimizer.scope import ScopeType, traverse_scope
 
 # ``UPDATE [/*+ hint */] <schema>.<table> [alias] SET <assignments> [WHERE ...]``.
 # The schema is usually an f-string placeholder, which reassembly leaves as
@@ -504,20 +512,8 @@ _PREDICATE_BIND = re.compile(
 _EXCLUDING_BIND = re.compile(
     r"(?:WHERE|AND|OR)\s+\(*\s*(?:\w+\.)?([A-Za-z_]\w*)\s*(?:<>|!=)\s*(:\w+)", re.IGNORECASE
 )
-_EXCLUDING_LITERAL = re.compile(
-    r"(?:WHERE|AND|OR)\s+\(*\s*(?:\w+\.)?([A-Za-z_]\w*)\s*(?:<>|!=)\s*'([^']*)'", re.IGNORECASE
-)
-#: ``status NOT IN (...)`` and ``NOT status IN (...)``.
-_EXCLUDING_IN = re.compile(
-    r"(?:WHERE|AND|OR)\s+\(*\s*(?:(?:\w+\.)?([A-Za-z_]\w*)\s+NOT\s+IN|NOT\s+(?:\w+\.)?([A-Za-z_]\w*)\s+IN)"
-    r"\s*\(([^)]*)\)",
-    re.IGNORECASE,
-)
 _PREDICATE_IN = re.compile(
     r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s+IN\s*\(([^)]*)\)", re.IGNORECASE
-)
-_PREDICATE_LITERAL = re.compile(
-    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*=\s*'([^']*)'", re.IGNORECASE
 )
 _BIND_KEY = re.compile(r":\w+")
 _QUOTED = re.compile(r"'([^']*)'")
@@ -526,18 +522,14 @@ _QUOTED = re.compile(r"'([^']*)'")
 def predicates(sql: str) -> list[tuple[str, str]]:
     """Return ``(column, bind key)`` for each predicate testing a bind.
 
-    The other half of the same statements.  ``writes`` reads the ``SET`` clause
-    to learn what a value becomes; this reads the ``WHERE`` clause to learn
-    which rows were asked for, and the two together are what makes a state
-    machine out of a pile of writes: a status nothing selects on is one nothing
-    ever moves a task out of.
-
-    Bind keys only; :func:`selected_literals` returns the values written into
-    the statement itself, which need no lookup in Python.
+    What :func:`conditions` holds back as already said in ``selects``.  The
+    values themselves -- which rows a statement asks for, on which table --
+    are read off the tree by :func:`terms`; this is the text reading of the
+    same ``=`` and ``IN``, kept until ``conditions`` is read off the tree too.
 
     Equality and ``IN`` only.  ``status<>:s`` asks for every row *but* the
     value, and reading it here filed 36 predicates of the corpus as asking
-    for the one value they pass over -- :func:`exclusions` reads those.
+    for the one value they pass over.
     """
     found = [(column, key) for column, key in _PREDICATE_BIND.findall(sql)]
     for column, inner in _PREDICATE_IN.findall(sql):
@@ -594,27 +586,6 @@ def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
         else:
             limits.append((match.group(3) or match.group(4), False))
     return [order for order in orders if order], limits
-
-
-def exclusions(sql: str) -> list[tuple[str, str]]:
-    """``(column, bind key)`` for each predicate asking for rows *without* the value.
-
-    ``<>``, ``!=``, ``NOT IN`` and ``NOT col IN``.
-    """
-    found = [(column, key) for column, key in _EXCLUDING_BIND.findall(sql)]
-    for before, after, inner in _EXCLUDING_IN.findall(sql):
-        found.extend((before or after, key) for key in _BIND_KEY.findall(inner))
-    return found
-
-
-def excluded_literals(sql: str) -> list[tuple[str, str]]:
-    """:func:`exclusions` for the values written into the statement itself."""
-    found = [(column, value) for column, value in _EXCLUDING_LITERAL.findall(sql)]
-    for before, after, inner in _EXCLUDING_IN.findall(sql):
-        if "SELECT" in inner.upper():
-            continue
-        found.extend((before or after, value) for value in _QUOTED.findall(inner))
-    return found
 
 
 #: One ``WHERE`` term, whole.  Used to recognise a leaf of the clause rather
@@ -862,17 +833,434 @@ def where_clause(sql: str) -> str:
     return rest[: closed.start()] if closed else rest
 
 
-def selected_literals(sql: str) -> list[tuple[str, str]]:
-    """Return ``(column, value)`` for each predicate testing a literal.
+#: A hole the reassembly left where the source interpolates -- ``{}``,
+#: ``{0}``.  Read as a name, which is what most of them are: the schema, a
+#: table, a column.
+_HOLE = re.compile(r"\{\d*\}")
+_HOLE_NAME = "__h"
+_NAMED_HOLE = re.compile(rf"{_HOLE_NAME}\d+")
 
-    Both forms occur on the same fields and the pair is the whole answer:
-    ``WHERE status=:oldStatus`` puts the value in Python, ``AND status IN
-    ('running','scouting')`` puts it in the statement.  Reading only one of
-    them reports states nothing selects on that something plainly does.
+#: sqlglot's word for a part the grammar requires and the text lacks.
+_REQUIRED = "Required keyword"
+
+#: Oracle's pseudo-columns -- a row's number, its depth in a tree, its address.
+#: Compared with a value they limit or walk the rows; no row holds them.
+_PSEUDO_NAMES = frozenset({"rownum", "level", "rowid"})
+
+NOT_PARSED = "the statement does not parse"
+NO_SCHEMA = "no schema was given to say which of the statement's tables holds the column"
+OWNER_UNDECIDED = "the schema does not decide which of the statement's tables holds the column"
+JSON_PATH = "a path into a JSON column, which this build does not read"
+UNKNOWN_QUALIFIER = "the qualifier names no table of the statement"
+
+#: Where a compared column sits.  ``row``: the statement's own rows -- its
+#: ``WHERE``, a ``WITH`` clause, a derived table, a ``UNION`` branch.
+#: ``consult``: a subquery the statement asks *about* rows through --
+#: ``EXISTS (SELECT 1 ... WHERE jobStatus=:st_merging)`` checks that a merging
+#: job exists and returns none of them.  ``negated``: such a subquery under an
+#: odd number of ``NOT``, where the value is one the rows must *not* have
+#: company in, and reading it as asked for is reading it backwards.
+ROW, CONSULT, NEGATED = "row", "consult", "negated"
+
+_SCHEMA: Optional[dict[str, frozenset[str]]] = None
+
+
+class Parsed(NamedTuple):
+    """A statement as a tree, or why it is not one."""
+
+    tree: Optional[exp.Expression]
+    failure: str
+
+
+class Term(NamedTuple):
+    """One column a statement compares with a value."""
+
+    #: The table the column belongs to, schema stripped; ``{}`` for a table
+    #: name the reassembly could not render.
+    table: str
+    column: str
+    #: Whose rows the term picks: ``read``, ``updated`` or ``deleted``.  An
+    #: ``INSERT ... SELECT`` picks rows to read.
+    verb: str
+    #: :data:`ROW`, :data:`CONSULT` or :data:`NEGATED`.
+    scope: str
+    #: ``<>``, ``!=``, ``NOT IN``: rows without the value.
+    excluding: bool
+    #: The bind keys and the quoted values it is compared with, as written.
+    binds: tuple[str, ...]
+    literals: tuple[str, ...]
+    #: Compared with something whose value the statement does not say -- a
+    #: hole, or a subquery.
+    undecided: bool
+
+
+class Reading(NamedTuple):
+    """What a statement compares, and where reading it stopped."""
+
+    terms: tuple[Term, ...]
+    #: ``<expression> -- <reason>``, the spelling ``ReadSiteNode.unresolved`` uses.
+    unresolved: tuple[str, ...]
+    parsed: bool
+
+
+@contextlib.contextmanager
+def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
+    """Decide unqualified columns by *columns*, ``{table: columns}`` lowered, inside.
+
+    A statement joining two tables may name a column without saying whose it
+    is -- valid only because one of them has it, and which one is not in the
+    text.  ``read_schema`` reads the answer from panda-database.
     """
-    found = [(column, value) for column, value in _PREDICATE_LITERAL.findall(sql)]
-    for column, inner in _PREDICATE_IN.findall(sql):
-        if "SELECT" in inner.upper():
-            continue  # The quotes belong to the subquery, not to this column.
-        found.extend((column, value) for value in _QUOTED.findall(inner))
+    global _SCHEMA
+    before, _SCHEMA = _SCHEMA, columns
+    terms.cache_clear()
+    try:
+        yield
+    finally:
+        _SCHEMA = before
+        terms.cache_clear()
+
+
+_CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
+_COLUMN_DEFINITION = re.compile(r'^\s*"(\w+)"\s+[A-Za-z]')
+
+
+def read_schema(directory: Path) -> dict[str, frozenset[str]]:
+    """``{table: columns}``, both lowered, from the ``CREATE TABLE`` statements under *directory*.
+
+    panda-database's ``schema/oracle`` is one DDL file per schema owner.  The
+    body of each table is read by paren depth rather than up to a closing
+    pattern: a column's type has parentheses of its own -- ``NUMBER(11,0)`` --
+    and a pattern looking for the ``)`` that ends the body ran one table into
+    the next, which lost ``JOBSARCHIVED4`` and four others.
+    """
+    found: dict[str, set[str]] = {}
+    for path in sorted(Path(directory).glob("*.sql")):
+        text = path.read_text()
+        for match in _CREATE_TABLE.finditer(text):
+            columns = found.setdefault(match.group(2).lower(), set())
+            for part in _top_level_parts(text, match.end()):
+                column = _COLUMN_DEFINITION.match(part)
+                if column is not None:
+                    columns.add(column.group(1).lower())
+    return {table: frozenset(columns) for table, columns in found.items()}
+
+
+def _top_level_parts(text: str, start: int) -> list[str]:
+    """The comma-separated parts of the parenthesised body opening before *start*."""
+    parts: list[str] = []
+    depth, index, begun = 1, start, start
+    while index < len(text) and depth:
+        char = text[index]
+        if char == "'":
+            closing = text.find("'", index + 1)
+            index = len(text) if closing < 0 else closing
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 1:
+            parts.append(text[begun:index])
+            begun = index + 1
+        index += 1
+    parts.append(text[begun : index - 1])
+    return parts
+
+
+def _named_holes(sql: str) -> str:
+    """*sql* with each hole a name, ``__h1``, ``__h2`` ..., spaced off a word it was glued to."""
+    count = itertools.count(1)
+
+    def name(match: re.Match) -> str:
+        after = sql[match.end() : match.end() + 1]
+        # ``SET {}WHERE`` -- the fragment after the hole began without a space.
+        return f"{_HOLE_NAME}{next(count)}" + (" " if after.isalpha() else "")
+
+    return _HOLE.sub(name, sql)
+
+
+def _is_hole(node: exp.Expression) -> bool:
+    return isinstance(node, exp.Column) and not node.table and node.name.startswith(_HOLE_NAME)
+
+
+def _holes_stand_for_what_is_missing(tree: exp.Expression) -> bool:
+    """Whether every node missing a required part has a hole as a direct part.
+
+    ``CASE {} ELSE {} END`` -- ``getJobs`` orders by a ``CASE`` whose ``WHEN``
+    arms Python joins from a list -- parses into a ``CASE`` with no arms and
+    the hole where they go.  ``... AND status IN (:s) AND`` parses into an
+    ``AND`` with nothing on its right and no hole beside it: that statement is
+    cut short, and taking it would hide what cut it.
+    """
+    unfinished = [
+        node
+        for node in tree.walk()
+        if any(required and node.args.get(key) in (None, []) for key, required in node.arg_types.items())
+    ]
+    return bool(unfinished) and all(
+        any(
+            _is_hole(value)
+            for values in node.args.values()
+            for value in (values if isinstance(values, list) else [values])
+            if isinstance(value, exp.Expression)
+        )
+        for node in unfinished
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def parsed(sql: str) -> Parsed:
+    """*sql* as a tree, its holes read as names.
+
+    Two holes are not names, and each is let through on one condition.  A hole
+    standing for a part the grammar requires leaves a node with that part
+    missing, and the tree is kept when the hole is a direct part of every such
+    node -- see :func:`_holes_stand_for_what_is_missing`.  A hole the parser
+    stops at is read as empty and the statement parsed again:
+    ``do_preassign``'s ``) {} {} {} AND EXISTS`` is three ``.format`` fields
+    holding either nothing or ``AND ...``.
+
+    Nothing else is forgiven.  A statement that does not parse is not read
+    some other way; it is reported, see :data:`NOT_PARSED`.
+    """
+    text = _named_holes(sql)
+    for _attempt in range(len(_NAMED_HOLE.findall(text)) + 1):
+        try:
+            return Parsed(sqlglot.parse_one(text, read="oracle"), "")
+        except ParseError as error:
+            said = [one.get("description") or "" for one in error.errors]
+            if said and all(_REQUIRED in one for one in said):
+                tree = sqlglot.parse_one(text, read="oracle", error_level=ErrorLevel.IGNORE)
+                if tree is not None and _holes_stand_for_what_is_missing(tree):
+                    return Parsed(tree, "")
+                return Parsed(None, said[0])
+            hole = _NAMED_HOLE.match(error.errors[0].get("highlight") or "") if error.errors else None
+            if hole is None:
+                return Parsed(None, said[0] if said else str(error))
+            text = re.sub(rf"\b{hole.group(0)}\b", "", text, count=1)
+        except SqlglotError as error:
+            return Parsed(None, str(error).splitlines()[0])
+    return Parsed(None, "every hole was read as empty and it still does not parse")
+
+
+def _table_name(table: exp.Table) -> str:
+    return "{}" if table.name.startswith(_HOLE_NAME) else table.name
+
+
+class _Root(NamedTuple):
+    """An ``UPDATE``'s or ``DELETE``'s own rows: sqlglot builds no scope for them."""
+
+    expression: exp.Expression
+    sources: dict
+    parent: None = None
+    scope_type: None = None
+
+
+def _kind(scope) -> str:
+    """:data:`ROW`, or the kind of subquery *scope* is inside, by the ``NOT``\\ s above it."""
+    negations, inside = 0, False
+    while scope is not None:
+        if scope.scope_type == ScopeType.SUBQUERY:
+            inside = True
+            node = scope.expression.parent
+            while node is not None and not isinstance(node, (exp.Where, exp.Select, exp.Update, exp.Delete)):
+                if isinstance(node, exp.Not):
+                    negations += 1
+                node = node.parent
+        scope = scope.parent
+    if not inside:
+        return ROW
+    return NEGATED if negations % 2 else CONSULT
+
+
+def _compared(column: exp.Column) -> Optional[tuple[bool, list[exp.Expression], bool]]:
+    """``(excluding, values, undecided)`` when *column* is compared with a value.
+
+    ``None`` for a column compared with another column -- a join says how two
+    tables meet, not which rows were asked for -- and for anything but ``=``,
+    ``<>``/``!=`` and ``IN``, the comparisons a value can be read off.
+    """
+    parent = column.parent
+    if isinstance(parent, exp.In) and parent.this is column:
+        if parent.args.get("query") is not None:
+            return False, [], True
+        values = list(parent.expressions)
+        return False, values, any(_is_hole(value) for value in values)
+    if isinstance(parent, (exp.EQ, exp.NEQ)):
+        other = parent.expression if parent.this is column else parent.this
+        if isinstance(other, exp.Column) and not _is_hole(other):
+            return None
+        return isinstance(parent, exp.NEQ), [other], _is_hole(other)
+    return None
+
+
+def _negations(node: exp.Expression) -> Optional[int]:
+    """The ``NOT``\\ s between *node* and the clause it is a term of.
+
+    ``None`` when one covers an ``AND`` or ``OR`` above the comparison:
+    ``NOT (a=:x AND b=:y)`` admits rows with ``a=:x``, so it neither asks for
+    the value nor excludes it.
+    """
+    count, compound = 0, False
+    walk = node.parent
+    while walk is not None and not isinstance(walk, (exp.Where, exp.Join, exp.Select)):
+        if isinstance(walk, (exp.And, exp.Or)):
+            compound = True
+        elif isinstance(walk, exp.Not):
+            if compound:
+                return None
+            count += 1
+        walk = walk.parent
+    return count
+
+
+def _chain(scope, root) -> list:
+    found = []
+    while scope is not None:
+        found.append(scope)
+        scope = scope.parent
+    if root is not None and root not in found:
+        found.append(root)
     return found
+
+
+def _projected(name: str, source) -> Optional[tuple[exp.Column, object]]:
+    """The column a derived table or ``WITH`` clause hands out as *name*, and its scope."""
+    for projection in source.expression.selects:
+        if projection.alias_or_name.lower() == name and isinstance(projection.unalias(), exp.Column):
+            return projection.unalias(), source
+    return None
+
+
+def _owner(column: exp.Column, scope, root, depth: int = 0) -> tuple[tuple[str, ...], str]:
+    """The table *column* belongs to, as ``((table,), "")``, or the candidates and why not."""
+    name = column.name.lower()
+    qualifier = (column.table or "").lower()
+    chain = _chain(scope, root)
+    if qualifier:
+        for one in chain:
+            for key, source in one.sources.items():
+                if key.lower() != qualifier:
+                    continue
+                if isinstance(source, exp.Table):
+                    return (_table_name(source),), ""
+                projected = _projected(name, source)
+                if projected is not None and depth < 8:
+                    return _owner(projected[0], projected[1], None, depth + 1)
+                return (), OWNER_UNDECIDED
+        if column.args.get("db") is not None:
+            return (), JSON_PATH
+        return (), UNKNOWN_QUALIFIER
+    for one in chain:
+        tables = [source for source in one.sources.values() if isinstance(source, exp.Table)]
+        derived = [source for source in one.sources.values() if not isinstance(source, exp.Table)]
+        if one is chain[0] and len(tables) == 1 and not derived:
+            return (_table_name(tables[0]),), ""
+        if _SCHEMA is None:
+            if tables or derived:
+                return tuple(sorted({_table_name(t) for t in tables})), NO_SCHEMA
+            continue
+        having = [t for t in tables if name in _SCHEMA.get(t.name.lower(), ())]
+        handing = [source for source in derived if _projected(name, source) is not None]
+        unknown = [t for t in tables if t.name.lower() not in _SCHEMA]
+        if len(having) + len(handing) == 1 and not unknown:
+            if having:
+                return (_table_name(having[0]),), ""
+            projected = _projected(name, handing[0])
+            if depth < 8:
+                return _owner(projected[0], projected[1], None, depth + 1)
+        if having or handing or unknown:
+            return tuple(sorted({_table_name(t) for t in tables})), OWNER_UNDECIDED
+        # No table here has it: a correlated reference to a scope outside.
+    return (), OWNER_UNDECIDED
+
+
+def _scopes(tree: exp.Expression) -> tuple[list[tuple[object, str]], Optional[_Root]]:
+    """Every scope of *tree* with the verb whose rows it picks, and the ``UPDATE``/``DELETE`` root."""
+    root: Optional[_Root] = None
+    found: list[tuple[object, str]] = []
+    if isinstance(tree, (exp.Update, exp.Delete)):
+        target = tree.this
+        sources = {target.alias_or_name: target} if isinstance(target, exp.Table) else {}
+        root = _Root(tree, sources)
+        found.append((root, "updated" if isinstance(tree, exp.Update) else "deleted"))
+    found.extend((scope, "read") for scope in traverse_scope(tree))
+    return found, root
+
+
+def _own_columns(scope) -> list[exp.Column]:
+    if isinstance(scope, _Root):
+        where = scope.expression.args.get("where")
+        return [c for c in (where.find_all(exp.Column) if where is not None else []) if c.find_ancestor(exp.Select) is None]
+    # A scope's columns include those of the subqueries in its ``WHERE``; each
+    # of those is read in its own scope.
+    return [c for c in scope.columns if c.find_ancestor(exp.Select) is scope.expression]
+
+
+def _filtering(column: exp.Column) -> Optional[exp.Expression]:
+    """The ``WHERE`` or inner join ``ON`` *column* is a term of, or ``None``."""
+    holder = column.find_ancestor(exp.Where, exp.Join, exp.Select, exp.Update, exp.Delete)
+    if isinstance(holder, exp.Where):
+        return holder
+    if isinstance(holder, exp.Join) and not holder.side and column.find_ancestor(exp.Where) is None:
+        # ``JOIN ... ON a.id=b.id AND b.status=:s`` drops the rows an inner
+        # join cannot match; an outer join keeps them.
+        return holder.args.get("on")
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def terms(sql: str) -> Reading:
+    """The columns *sql* compares with a value, each with its table and whose rows it picks.
+
+    Read off the tree, and only because reading the text could not say three
+    things: which table an aliased column belongs to (``tabD.status`` was filed
+    against every table the statement reads), which one an unqualified column
+    belongs to when the statement reads several, and whether a term is the
+    statement's own or a subquery's (``NOT EXISTS (... status=:s)`` was filed
+    as asking for ``s``).  The values are read as the text readers read them --
+    bind keys and quoted literals, ``=`` and ``IN`` asking, ``<>``, ``!=`` and
+    ``NOT IN`` excluding.  A number is not read.
+    """
+    tree = parsed(sql).tree
+    if tree is None:
+        return Reading((), (f"{' '.join(sql.split())[:72]} -- {NOT_PARSED}",), False)
+    found: list[Term] = []
+    unresolved: set[str] = set()
+    scopes, root = _scopes(tree)
+    for scope, verb in scopes:
+        kind = ROW if isinstance(scope, _Root) else _kind(scope)
+        for column in _own_columns(scope):
+            if _is_hole(column) or column.name.lower() in _PSEUDO_NAMES:
+                continue
+            holder = _filtering(column)
+            if holder is None:
+                continue
+            compared = _compared(column)
+            if compared is None:
+                continue
+            excluding, values, undecided = compared
+            negations = _negations(column.parent)
+            if negations is None:
+                continue
+            owners, why = _owner(column, scope, root)
+            if why:
+                spelled = column.sql(dialect="oracle")
+                among = f" ({', '.join(owners)})" if owners else ""
+                unresolved.add(f"{spelled}{among} -- {why}")
+                continue
+            found.append(
+                Term(
+                    table=owners[0],
+                    column=column.name,
+                    verb=verb,
+                    scope=kind,
+                    excluding=excluding != bool(negations % 2),
+                    binds=tuple(f":{value.name}" for value in values if isinstance(value, exp.Placeholder)),
+                    literals=tuple(
+                        value.this for value in values if isinstance(value, exp.Literal) and value.is_string
+                    ),
+                    undecided=undecided,
+                )
+            )
+    return Reading(tuple(found), tuple(sorted(unresolved)), True)

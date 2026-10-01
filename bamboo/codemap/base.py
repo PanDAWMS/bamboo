@@ -36,7 +36,7 @@ class CodeMapPlugin(ABC):
         """
 
     @abstractmethod
-    def prepare(self, source_root: Path | None = None) -> str:
+    def prepare(self, source_root: Path | None = None, schema_root: Path | None = None) -> str:
         """Resolve the source snapshot and return its version stamp.
 
         Called before :meth:`run`.  The stamp is recorded on every node as
@@ -48,6 +48,10 @@ class CodeMapPlugin(ABC):
             source_root: Analyse this directory instead of whatever is
                 installed.  Passing a checkout is how a specific release is
                 mapped rather than an accident of the local environment.
+            schema_root: The target system's table definitions.  A statement
+                may name a column without the table it belongs to, and the
+                definitions say which; without them such a column is reported
+                rather than read.
 
         Returns:
             Version stamp, e.g. ``"panda-server-source 1.0.2"``.

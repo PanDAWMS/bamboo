@@ -228,6 +228,14 @@ def _subject_of(
     return table, column, "table"
 
 
+def _term_subject(attributor: SpecAttributor, term: "sqltext.Term") -> str:
+    """The subject a statement's term is about, named as a write to that column would be."""
+    qualifier, attribute, _kind = _subject_of(
+        attributor, attributor.class_for_table(term.table), term.table, term.column
+    )
+    return SubjectNode.make_name(qualifier, attribute)
+
+
 def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingStop]:
     """Where reading one statement that *was* read stopped.
 
@@ -960,6 +968,9 @@ class ReadStatement(NamedTuple):
     #: ``{(subject, value)}`` the statement asks rows *not* to hold --
     #: ``<>``, ``!=``, ``NOT IN``.
     excludes: set[tuple[str, str]]
+    #: ``{(subject, value)}`` a subquery of the statement checks rows by --
+    #: ``EXISTS (SELECT 1 ... WHERE jobStatus=:st_merging)``.
+    consults: set[tuple[str, str]]
     #: Subjects the statement asks rows by with a value chosen at run time --
     #: ``jediTaskID=:jediTaskID``, or a bind nothing here settles.
     keys: set[str]
@@ -1368,10 +1379,9 @@ def read_side(
     the statement runs.  Left in rather than modelled: the guard is a
     ``continue`` above the execution, which is not the dominating-``if`` shape
     the path conditions read, and building that for one site would be a
-    mechanism for one site.  Over-crediting is the direction this function
-    already takes -- see :func:`_tables_of` -- and it costs nothing measurable
-    here: ``dummy`` was not among the values reported as written-but-unselected
-    for this subject, so nothing is hidden by it.
+    mechanism for one site.  It costs nothing measurable here: ``dummy`` was
+    not among the values reported as written-but-unselected for this subject,
+    so nothing is hidden by it.
     """
     settle = values.handed(values.resolver(), calls)
     found: dict[str, dict[str, ValueUse]] = {}
@@ -1417,6 +1427,12 @@ def read_side(
         kept = statements.setdefault((at.owner, at.line), at)
         kept.excludes.add((subject, value))
 
+    def consult(subject: str, value: str, at: ReadStatement) -> None:
+        """File a value a subquery of the statement checks rows by.  Not a use
+        of the value either: ``EXISTS (... jobStatus=:st_merging)`` asks whether
+        a merging job exists and hands none of them on."""
+        statements.setdefault((at.owner, at.line), at).consults.add((subject, value))
+
     def bound(func, run, key: str, file: str) -> list[str]:
         values_of: list[str] = []
         binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True)
@@ -1435,20 +1451,17 @@ def read_side(
 
     def reading_of(func, run, file: str) -> tuple[set[str], set[tuple[str, str]]]:
         """The tables one run reads and the pairs it selects by -- what a call site can narrow."""
-        tables: set[str] = set()
+        tables = {table for verb, table in _table_verbs(run.sql) if verb == "read"}
         pairs: set[tuple[str, str]] = set()
-        for verb, table in _table_verbs(run.sql):
-            if verb != "read":
+        # The same terms ``selects`` is filled from, read the same way, or a
+        # call site would differ from the statement by the reading alone.
+        for term in sqltext.terms(run.sql).terms:
+            if term.scope != sqltext.ROW or term.excluding or term.verb != "read":
                 continue
-            tables.add(table)
-            spec_class = attributor.class_for_table(table)
-            for column, key in sqltext.predicates(run.sql):
-                qualifier, attribute, _kind = _subject_of(attributor, spec_class, table, column)
-                subject = SubjectNode.make_name(qualifier, attribute)
+            subject = _term_subject(attributor, term)
+            for key in term.binds:
                 pairs.update((subject, value) for value in bound(func, run, key, file))
-            for column, value in sqltext.selected_literals(run.sql):
-                qualifier, attribute, _kind = _subject_of(attributor, spec_class, table, column)
-                pairs.add((SubjectNode.make_name(qualifier, attribute), value))
+            pairs.update((subject, value) for value in term.literals)
         return tables, pairs
 
     def place_call_sites(func, owner: str, file: str, executions: list) -> None:
@@ -1768,6 +1781,7 @@ def read_side(
                     # ``querySQLS(sql, {":name": name})``: the binds are
                     # filled in the call itself.
                     window = (run.call.lineno, run.call.end_lineno or run.call.lineno)
+                reading = sqltext.terms(run.sql)
                 at = ReadStatement(
                     owner=owner,
                     package=module.package,
@@ -1777,6 +1791,7 @@ def read_side(
                     window=window,
                     selects=set(),
                     excludes=set(),
+                    consults=set(),
                     keys=set(),
                     order_by=set(),
                     limits=set(),
@@ -1784,56 +1799,59 @@ def read_side(
                     conditions=[],
                     unresolved=tuple(
                         sorted(
-                            {
-                                f"{stop.source} -- {stop.reason}"
-                                for stop in run.unresolved
-                            }
+                            {f"{stop.source} -- {stop.reason}" for stop in run.unresolved}
+                            | set(reading.unresolved)
                         )
                     ),
                 )
-                read_tables: set[str] = set()
-                for verb, table in _table_verbs(run.sql):
-                    spec_class = attributor.class_for_table(table)
-                    if verb == "read":
-                        read_tables.add(table)
-                    for column, key in sqltext.predicates(run.sql):
-                        qualifier, attribute, _kind = _subject_of(
-                            attributor, spec_class, table, column
-                        )
-                        subject = SubjectNode.make_name(qualifier, attribute)
+                read_tables = {table for verb, table in _table_verbs(run.sql) if verb == "read"}
+                # Each term once, on the table it belongs to and under the verb
+                # whose rows it picks.  Read off the text, one term was filed
+                # against every table the statement named and under every verb:
+                # ``tabD.status`` came out as a reader of task statuses, and a
+                # ``NOT EXISTS`` subquery's value as one the statement asks for.
+                for term in reading.terms:
+                    subject = _term_subject(attributor, term)
+                    if term.scope == sqltext.NEGATED:
+                        continue
+                    if term.scope == sqltext.CONSULT:
+                        if not term.excluding:
+                            for key in term.binds:
+                                for value in bound(func, run, key, module.rel_path):
+                                    consult(subject, value, at)
+                            for value in term.literals:
+                                consult(subject, value, at)
+                        continue
+                    if term.excluding:
+                        if term.verb == "read":
+                            for key in term.binds:
+                                for value in bound(func, run, key, module.rel_path):
+                                    exclude(subject, value, at)
+                            for value in term.literals:
+                                exclude(subject, value, at)
+                        continue
+                    for key in term.binds:
                         values_of = bound(func, run, key, module.rel_path)
                         for value in values_of:
-                            record(subject, value, owner, verb, at)
-                        if not values_of and verb == "read":
+                            record(subject, value, owner, term.verb, at)
+                        if not values_of and term.verb == "read":
                             statements.setdefault((at.owner, at.line), at).keys.add(subject)
-                    if verb == "read":
-                        for column, key in sqltext.exclusions(run.sql):
-                            qualifier, attribute, _kind = _subject_of(
-                                attributor, spec_class, table, column
-                            )
-                            subject = SubjectNode.make_name(qualifier, attribute)
-                            for value in bound(func, run, key, module.rel_path):
-                                exclude(subject, value, at)
-                        for column, value in sqltext.excluded_literals(run.sql):
-                            qualifier, attribute, _kind = _subject_of(
-                                attributor, spec_class, table, column
-                            )
-                            exclude(SubjectNode.make_name(qualifier, attribute), value, at)
-                    for column, value in sqltext.selected_literals(run.sql):
-                        qualifier, attribute, _kind = _subject_of(
-                            attributor, spec_class, table, column
-                        )
-                        record(
-                            SubjectNode.make_name(qualifier, attribute),
-                            value,
-                            owner,
-                            verb,
-                            at,
-                        )
-                # After the verbs, and onto whichever record was kept: a join
+                    for value in term.literals:
+                        record(subject, value, owner, term.verb, at)
+                if not reading.parsed and read_tables:
+                    # Not read some other way, and not dropped either: a
+                    # statement whose text does not parse still reads these
+                    # tables, and ``unresolved`` says why nothing else is known.
+                    statements.setdefault((at.owner, at.line), at)
+                # After the terms, and onto whichever record was kept: a join
                 # reads two tables in one statement, and the second one would
                 # otherwise land on the copy ``setdefault`` discarded.
                 kept = statements.get((owner, run.call.lineno))
+                if kept is not None and kept is not at and at.unresolved:
+                    kept = kept._replace(
+                        unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved)))
+                    )
+                    statements[(owner, run.call.lineno)] = kept
                 if kept is not None:
                     kept.tables.update(read_tables)
                     orders, limits = sqltext.ordering(run.sql)
@@ -1888,6 +1906,7 @@ def read_site_nodes(
                 owner=owner,
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
                 excludes=sorted(f"{subject}={value}" for subject, value in at.excludes),
+                consults=sorted(f"{subject}={value}" for subject, value in at.consults),
                 keys=sorted(at.keys),
                 order_by=sorted(at.order_by),
                 limits=sorted(at.limits),
@@ -2433,9 +2452,11 @@ def selection_gates(
                 }
                 if not gates:
                     continue
-                for table in _tables_of(run.sql):
+                for term in sqltext.terms(run.sql).terms:
+                    if term.scope != sqltext.ROW or not term.binds:
+                        continue
                     # A table does not bound itself.  The statement's gates are
-                    # read once and offered to every table in it, so a subject
+                    # read once and offered to every term in it, so a subject
                     # sitting on the gating table got its own table back as the
                     # thing limiting which of its rows can be seen --
                     # ``JEDI_AUX_Status_MinTaskID.status`` bounded by
@@ -2443,17 +2464,9 @@ def selection_gates(
                     # fifty-eight gated subjects were that, and the verdict
                     # they produce tells a reader to go and find out who
                     # maintains a table they are already looking at.
-                    bounds = {gate for gate in gates if gate.lower() != table.lower()}
-                    if not bounds:
-                        continue
-                    spec_class = attributor.class_for_table(table)
-                    for column, _key in [*sqltext.predicates(run.sql), *sqltext.exclusions(run.sql)]:
-                        qualifier, attribute, _kind = _subject_of(
-                            attributor, spec_class, table, column
-                        )
-                        found.setdefault(
-                            SubjectNode.make_name(qualifier, attribute), set()
-                        ).update(bounds)
+                    bounds = {gate for gate in gates if gate.lower() != term.table.lower()}
+                    if bounds:
+                        found.setdefault(_term_subject(attributor, term), set()).update(bounds)
     return found
 
 
@@ -2465,12 +2478,9 @@ _UNREAD_TABLE = re.compile(r"(?:\{\d*\})+")
 def _rows_touched(statement: str) -> list[tuple[str, str]]:
     """``[("read" | "created" | "updated" | "deleted", table)]`` for *statement*.
 
-    The same three readings :func:`_tables_of` folds together, kept apart.  A
-    predicate does not care which verb brought the table in -- an ``UPDATE``'s
-    ``WHERE`` says which rows it was willing to act on as much as a query's
-    does -- but "who reads a task's jobs" cares about nothing else.  Folding
-    the verbs is how an ``UPDATE ... WHERE`` came to be reported as a query
-    that selects on a value.
+    "Who reads a task's jobs" cares about the verb and nothing else, and
+    folding the verbs is how an ``UPDATE ... WHERE`` came to be reported as a
+    query that selects on a value.
     """
     touched: list[tuple[str, str]] = [
         ("read", table) for table, _columns in sqltext.reads(statement)
@@ -2498,25 +2508,7 @@ def _rows_touched(statement: str) -> list[tuple[str, str]]:
 def _table_verbs(statement: str) -> list[tuple[str, str]]:
     """``(verb, table)`` for each way *statement* touches a table, deduplicated.
 
-    :func:`_tables_of` with the verb kept, for the reading that needs it.  A
-    statement naming one table under both verbs -- ``INSERT INTO a SELECT FROM
-    a`` -- yields both, which is what it does.
+    A statement naming one table under both verbs -- ``INSERT INTO a SELECT
+    FROM a`` -- yields both, which is what it does.
     """
     return sorted(set(_rows_touched(statement)))
-
-
-def _tables_of(statement: str) -> list[str]:
-    """Return the tables a statement names, so a predicate can be qualified.
-
-    All four verbs, not just ``SELECT``: most of the interesting predicates are
-    on an ``UPDATE`` -- ``SET status=:status WHERE status=:oldStatus`` is one
-    statement that both writes a status and says which one it is willing to
-    move away from, and reading only the queries loses every one of them.
-
-    A statement joining two tables qualifies its predicates against both, which
-    over-reads: ``status`` in a task/dataset join is attributed to each.  That
-    is the safe direction here -- the values answer whether *anything* selects
-    on a status, so one credited too widely weakens a report while a missing
-    one would invent a dead end.
-    """
-    return sorted({table for _verb, table in _rows_touched(statement)})

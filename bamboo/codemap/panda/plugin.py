@@ -17,6 +17,7 @@ cost of a build-time dependency.
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -33,7 +34,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import promotion, sql
+from bamboo.codemap.panda import promotion, sql, sqltext
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
@@ -130,6 +131,15 @@ def _is_test_module(rel_path: str) -> bool:
     return bool(_TEST_PATH.search(rel_path) or _TEST_FILE.search(Path(rel_path).stem))
 
 
+def _schema_stamp(root: Path, schema: dict[str, frozenset[str]]) -> str:
+    """``<root>: <n> table(s), <digest>`` -- the digest over the definition files, as read."""
+    digest = hashlib.sha256()
+    for path in sorted(root.glob("*.sql")):
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return f"{root}: {len(schema)} table(s), {digest.hexdigest()[:16]}"
+
+
 class PandaCodeMapPlugin(CodeMapPlugin):
     """Builds the ``panda`` Code Map from installed or checked-out source."""
 
@@ -142,13 +152,20 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._modules: list[SourceModule] = []
         self._calls = None
         self._stop_disagreements: list[str] = []
+        self._schema: Optional[dict[str, frozenset[str]]] = None
+        self._schema_stamp = "none"
 
     @property
     def map_id(self) -> str:
         return "panda"
 
-    def prepare(self, source_root: Optional[Path] = None) -> str:
+    def prepare(
+        self, source_root: Optional[Path] = None, schema_root: Optional[Path] = None
+    ) -> str:
         """Resolve the source snapshot, parse it, and return the version stamp."""
+        if schema_root is not None:
+            self._schema = sqltext.read_schema(schema_root)
+            self._schema_stamp = _schema_stamp(Path(schema_root), self._schema)
         self._roots = self._resolve_roots(source_root)
         if not self._roots:
             raise FileNotFoundError(
@@ -174,8 +191,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if not self._modules:
             raise RuntimeError("prepare() must be called before run()")
         self._calls = sqlwrite.corpus_calls(self._modules, self._roots)
-        with sql.across_calls(self._calls):
+        with sql.across_calls(self._calls), sqltext.with_schema(self._schema):
             return self._run()
+
+    @property
+    def schema_stamp(self) -> str:
+        """Which table definitions decided the unqualified columns, or ``none``."""
+        return self._schema_stamp
 
     def _run(self) -> MapFragment:
 

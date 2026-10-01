@@ -10121,7 +10121,8 @@ def test_a_statement_built_with_str_format_is_read():
     assert sql.reconstruct(func, "sqlR").startswith(
         "SELECT jediTaskID FROM {}.JEDI_Tasks tabT "
     )
-    assert sqltext.selected_literals(sql.reconstruct(func, "sqlR")) == [("status", "running")]
+    ((term,),) = [sqltext.terms(sql.reconstruct(func, "sqlR")).terms]
+    assert (term.table, term.column, term.literals) == ("JEDI_Tasks", "status", ("running",))
 
 
 # ---------------------------------------------------------------------------
@@ -11323,7 +11324,7 @@ def test_a_dumped_build_reads_back_as_the_same_map(tmp_path, monkeypatch):
         _stage_for_diff("-disk", ["a < b"], 100),
         _stage_for_diff("-rse", ["c"], 200),
     )
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root: built)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: built)
 
     target = _dumped(tmp_path)
 
@@ -11333,11 +11334,11 @@ def test_a_dumped_build_reads_back_as_the_same_map(tmp_path, monkeypatch):
 def test_a_baseline_file_stands_in_for_the_older_build(tmp_path, monkeypatch):
     """The point of the pair: the source is fixed and the map moved anyway."""
     before = _fragment_of(_stage_for_diff("-disk", ["a < b"], 100))
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root: before)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: before)
     target = _dumped(tmp_path)
 
     after = _fragment_of(_stage_for_diff("-disk", ["a <= b"], 100))
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root: after)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: after)
     result = click.testing.CliRunner().invoke(
         diff_map.main, ["--baseline", str(target)]
     )
@@ -11355,7 +11356,7 @@ def test_comparing_a_baseline_with_a_source_tree_is_refused(tmp_path, monkeypatc
     source by the same code, reported as no difference at all.
     """
     monkeypatch.setattr(
-        diff_map, "_build", lambda map_id, root: _fragment_of(_stage_for_diff("-d", ["a"], 1))
+        diff_map, "_build", lambda map_id, root, schema: _fragment_of(_stage_for_diff("-d", ["a"], 1))
     )
     target = _dumped(tmp_path)
     runner = click.testing.CliRunner()

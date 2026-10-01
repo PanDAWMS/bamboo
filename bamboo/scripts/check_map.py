@@ -63,6 +63,7 @@ import click
 from bamboo.codemap import evidence, gates
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import MapFragment
+from bamboo.scripts.build_map import schema_root_option
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +507,7 @@ def _say_if_the_stored_map_is_a_different_release(
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Check the map built from PATH instead of the installed distribution.",
 )
+@schema_root_option
 @click.option(
     "--evidence",
     "evidence_path",
@@ -572,6 +574,7 @@ def _say_if_the_stored_map_is_a_different_release(
 def main(
     map_id: str,
     source_root: Optional[Path],
+    schema_root: Optional[Path],
     evidence_path: Path,
     fetch: bool,
     log_file_specs: tuple[str, ...],
@@ -593,7 +596,7 @@ def main(
         ) from exc
 
     try:
-        plugin.prepare(source_root)
+        plugin.prepare(source_root, schema_root)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
