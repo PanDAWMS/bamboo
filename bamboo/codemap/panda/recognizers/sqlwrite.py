@@ -1735,9 +1735,12 @@ def read_side(
         Narrower than ``excludes``, which files every value a term names: here
         only what every row of every branch is without, and only a value the
         run settles -- ``jobStatus<>:jobStatus`` bound to ``dummy`` on one path
-        and ``running`` on another passes over neither on every run.
+        and ``running`` on another passes over neither on every run.  An
+        ``IN`` list the function states is the exception (:func:`stated_list`):
+        all its members are passed over at once.
         """
         refuses_here: Optional[set[tuple[str, str]]] = None
+        lists = {one.bind for one in sql.in_lists(func).values()}
         for alternative in _refused_terms(func, run):
             passed_over: set[tuple[str, str]] = set()
             for term in alternative:
@@ -1745,12 +1748,52 @@ def read_side(
                     continue
                 subject = _term_subject(attributor, term)
                 for key in term.binds:
+                    members = stated_list(func, run, key, file) if key in lists else None
+                    if members:
+                        passed_over.update((subject, value) for value in members)
+                        continue
                     values_of = bound(func, run, key, file)
                     if len(set(values_of)) == 1:
                         passed_over.add((subject, values_of[0]))
                 passed_over.update((subject, value) for value in term.literals)
             refuses_here = passed_over if refuses_here is None else refuses_here & passed_over
         return refuses_here
+
+    def stated_list(func, run, key: str, file: str) -> Optional[list[str]]:
+        """The members of the ``IN`` list bound to *key*, where every run holds all of them.
+
+        ``get_task_ids_with_dataset_attributes`` asks ``tabT.status NOT IN
+        ({task_var_names_str})`` of ``JediTaskSpec.statusToRejectExtChange()``:
+        one placeholder for ten values, every one passed over on each run.
+        That holds only for a list the function states -- one assignment, of
+        a literal, a declaration or a name written once -- and not for one a
+        caller hands, where different calls hand different lists and the
+        union is no run's.
+        """
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True)
+        if len(binds) != 1:
+            return None
+        value = binds[0].value
+        where = enclosing_function(value) or _module_of(value) or func
+        if isinstance(value, ast.Name):
+            written = [
+                node
+                for node in ast.walk(where)
+                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                and any(
+                    isinstance(target, ast.Name) and target.id == value.id
+                    for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                )
+            ]
+            if len(written) != 1 or isinstance(written[0], ast.AugAssign):
+                return None
+        at_file = file
+        if where is not func and calls is not None:
+            at_file = calls.types.file_of(where) or file
+        handed = settle(value, where, at_file)
+        if not handed or any(one.via for one in handed):
+            return None
+        return [one.value for one in handed]
 
     def place_call_sites(func, owner: str, file: str, executions: list) -> None:
         """Say, per call site that narrows a statement, what it reads there.

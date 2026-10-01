@@ -599,6 +599,38 @@ def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():
     assert chosen.refuses == {(status, "done")}
 
 
+def test_a_stated_in_list_refuses_every_member_and_a_handed_one_none():
+    """``NOT IN ({names})`` of a list the function states passes over all of it on every run.
+
+    ``get_task_ids_with_dataset_attributes``' ten task statuses are one
+    placeholder.  A list a caller hands is no run's in particular.
+    """
+    side = _read_side(
+        "class TaskModule:\n"
+        "    def active(self):\n"
+        "        var_map = {':vo': 'atlas'}\n"
+        "        names, listed = get_sql_IN_bind_variables(['done', 'failed'], prefix=':st_')\n"
+        "        var_map.update(listed)\n"
+        "        sql = f'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status NOT IN ({names})'\n"
+        "        self.cur.execute(sql, var_map)\n"
+        "    def handed(self, statuses):\n"
+        "        var_map = {':vo': 'atlas'}\n"
+        "        names, listed = get_sql_IN_bind_variables(statuses, prefix=':st_')\n"
+        "        var_map.update(listed)\n"
+        "        sql = f'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status NOT IN ({names})'\n"
+        "        self.cur.execute(sql, var_map)\n"
+        "    def run(self):\n"
+        "        self.handed(['done'])\n"
+        "        self.handed(['broken'])\n" + _TEACH
+    )
+
+    (active,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::active"]
+    status = "JediTaskSpec.status"
+    assert active.refuses == {(status, "done"), (status, "failed")}
+    handed = [s for (owner, _line), s in side.statements.items() if owner == "x.py::handed"]
+    assert all(statement.refuses == frozenset() for statement in handed)
+
+
 def test_a_table_and_its_columns_are_read_off_the_tree():
     """Each shape the text reading got wrong on the corpus, read as the statement says.
 
