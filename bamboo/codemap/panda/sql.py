@@ -49,9 +49,11 @@ from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional
 
 from bamboo.codemap.panda import sqltext
 from bamboo.codemap.panda.pathcond import (
+    UNDECIDED,
     ancestors,
     attach_parents,
     can_reach,
+    decided,
     enclosing_function,
     exclusive,
     loops_over,
@@ -540,6 +542,16 @@ def ruled_out(node: ast.AST) -> bool:
         return False
     func, values = _AT_CALL
     return ruled_out_by(node, func, values)
+
+
+def decided_here(test: ast.expr) -> object:
+    """What the call site being read (:func:`at_call`) makes of *test*: ``True``, ``False`` or ``UNDECIDED``."""
+    if not _AT_CALL:
+        return UNDECIDED
+    func, values = _AT_CALL
+    if enclosing_function(test) is not func:
+        return UNDECIDED
+    return decided(test, values)
 
 
 def _parts(

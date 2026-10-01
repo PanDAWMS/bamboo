@@ -48,6 +48,7 @@ map holds rather than one it has no room for.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import re
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -69,6 +70,7 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
+    UNDECIDED,
     ancestors,
     attach_parents,
     enclosing_function,
@@ -1029,7 +1031,10 @@ def _on_some_paths(fragment: ast.stmt, call: ast.Call) -> bool:
     read off one names it as though every run carried it.  Under an ``if``
     whose chain has no ``else``, in a loop that may not run, or in an
     ``except`` it is not.  Branches of a chain that does end in an ``else``
-    are variants of their own, and in each the fragment is certain.
+    are variants of their own, and in each the fragment is certain.  So is a
+    branch the call being read (:func:`sql.at_call`) takes for certain:
+    ``copyArchive`` hands ``lockJobsForReassign`` ``onlyReassignable=True``,
+    and every run of that call appends the ``relocationFlag`` test.
     """
     around_call = {id(node) for node in ancestors(call)}
     previous: ast.AST = fragment
@@ -1037,6 +1042,10 @@ def _on_some_paths(fragment: ast.stmt, call: ast.Call) -> bool:
         if id(node) in around_call:
             return False
         if isinstance(node, ast.If):
+            taken = sql.decided_here(node.test)
+            if taken is not UNDECIDED and taken == any(previous is one for one in node.body):
+                previous = node
+                continue
             head = node
             while isinstance(getattr(head, "parent", None), ast.If) and head.parent.orelse == [head]:
                 head = head.parent
@@ -1157,6 +1166,108 @@ def _render_condition(condition: "sqltext.Condition", seeds: dict[str, list[int]
                 text = re.sub(re.escape(key) + r"\b", f"{key}@{placed}", text)
         parts.append(f"({text})" if len(branch.terms) > 1 and len(condition.branches) > 1 else text)
     return " OR ".join(parts)
+
+
+def _folded_conditions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, variants: list
+) -> list[str]:
+    """What every one of a statement's *variants* requires, and what they require between them.
+
+    The variants are folded as what they are, a disjunction: ``(A and B) or
+    (A and C)`` is ``A``, required outright, and ``B or C`` as one condition.
+    A variant that requires nothing beyond the common part makes that
+    disjunction free, and then it is not recorded at all.
+    """
+    rendered: list[list[str]] = []
+    for run in variants:
+        window = run.window
+        if window is None and run.varmap:
+            window = sql.binding_window(func, run.varmap, line)
+        found = sqltext.conditions(run.sql)
+        seeds: dict[str, list[int]] = {}
+        for condition in found:
+            for key in condition.binds:
+                if key in seeds:
+                    continue
+                at_lines = sorted(
+                    {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window)}
+                )
+                if at_lines:
+                    seeds[key] = at_lines
+        rendered.append([_render_condition(c, seeds) for c in found])
+    common = set.intersection(*(set(one) for one in rendered))
+    folded = sorted(common)
+    remainders: list[tuple[str, ...]] = []
+    for one in rendered:
+        shape = tuple(entry for entry in one if entry not in common)
+        if shape not in remainders:
+            remainders.append(shape)
+    if len(remainders) == 1:
+        folded.extend(remainders[0])
+    elif all(remainders):
+        folded.append(
+            " OR ".join(f"({' AND '.join(shape)})" if len(shape) > 1 else shape[0] for shape in remainders)
+        )
+    return folded
+
+
+#: ``:key@412,415`` -- where a condition's bind is filled, which two readings
+#: of one statement may place differently without reading it differently.
+_SEEDED = re.compile(r"(:\w+)@[\d,]+")
+
+
+@dataclasses.dataclass
+class _CallReading:
+    """What the runs one call site makes of a statement read and ask by."""
+
+    tables: set[str]
+    selects: set[tuple[str, str]] = dataclasses.field(default_factory=set)
+    excludes: set[tuple[str, str]] = dataclasses.field(default_factory=set)
+    consults: set[tuple[str, str]] = dataclasses.field(default_factory=set)
+
+    def add(self, other: "_CallReading") -> None:
+        self.tables |= other.tables
+        self.selects |= other.selects
+        self.excludes |= other.excludes
+        self.consults |= other.consults
+
+
+def _shown(held: list[str], joined: str = ", ") -> str:
+    more = f" and {len(held) - 6} more" if len(held) > 6 else ""
+    return joined.join(held[:6]) + more
+
+
+def _narrowed(
+    kept: "ReadStatement",
+    reading: _CallReading,
+    refuses: set[tuple[str, str]],
+    refuses_here: set[tuple[str, str]],
+    conditions: list[str],
+) -> list[str]:
+    """What one call's reading of a statement says that the statement's own does not, field by field."""
+    said: list[str] = []
+    if reading.tables != kept.tables:
+        said.append("reads " + (", ".join(sorted(reading.tables)) or "no table"))
+    for verb, here, general in (
+        ("select", reading.selects, kept.selects),
+        ("exclude", reading.excludes, kept.excludes),
+        ("consult", reading.consults, kept.consults),
+        ("refuse", refuses_here, set(refuses)),
+    ):
+        for label, held in ((f"does not {verb}", general - here), (f"also {verb}s", here - general)):
+            if held:
+                said.append(f"{label} " + _shown([f"{subject}={value}" for subject, value in sorted(held)]))
+    # Compared without where the binds are filled: the same condition is the
+    # same requirement wherever the walk would start.
+    general_conditions = {_SEEDED.sub(r"\1", one) for one in kept.conditions}
+    here_conditions = {_SEEDED.sub(r"\1", one) for one in conditions}
+    for label, held in (
+        ("does not require", [one for one in kept.conditions if _SEEDED.sub(r"\1", one) not in here_conditions]),
+        ("also requires", [one for one in conditions if _SEEDED.sub(r"\1", one) not in general_conditions]),
+    ):
+        if held:
+            said.append(f"{label} " + _shown(held, " AND "))
+    return said
 
 
 READ_SLICE_NAME = "sql-read"
@@ -1580,20 +1691,55 @@ def read_side(
             values_of.extend(one.value for one in settle(bind.value, where, at_file))
         return values_of
 
-    def reading_of(func, run, file: str) -> tuple[set[str], set[tuple[str, str]]]:
-        """The tables one run reads and the pairs it selects by -- what a call site can narrow."""
-        tables = {table for verb, table in _table_verbs(run.sql) if verb == "read"}
-        pairs: set[tuple[str, str]] = set()
-        # The same terms ``selects`` is filled from, read the same way, or a
-        # call site would differ from the statement by the reading alone.
+    def reading_of(func, run, file: str) -> _CallReading:
+        """What one run reads and asks by -- what a call site can narrow."""
+        reading = _CallReading({table for verb, table in _table_verbs(run.sql) if verb == "read"})
+        # The same terms the statement's own fields are filled from, read the
+        # same way, or a call site would differ from the statement by the
+        # reading alone.
         for term in sqltext.terms(run.sql).terms:
-            if term.scope != sqltext.ROW or term.excluding or term.verb != "read":
+            if term.verb != "read" or term.scope not in (sqltext.ROW, sqltext.CONSULT):
                 continue
             subject = _term_subject(attributor, term)
+            if term.scope == sqltext.CONSULT:
+                if not term.excluding:
+                    for key in term.binds:
+                        reading.consults.update((subject, value) for value in bound(func, run, key, file))
+                    reading.consults.update((subject, value) for value in term.literals)
+                continue
+            into = reading.excludes if term.excluding else reading.selects
+            unsaid = term.undecided
             for key in term.binds:
-                pairs.update((subject, value) for value in bound(func, run, key, file))
-            pairs.update((subject, value) for value in term.literals)
-        return tables, pairs
+                values_of = bound(func, run, key, file)
+                unsaid = unsaid or not values_of
+                into.update((subject, value) for value in values_of)
+            into.update((subject, value) for value in term.literals)
+            if term.excluding and unsaid:
+                into.add((subject, "{}"))
+        return reading
+
+    def run_refuses(func, run, file: str) -> Optional[set[tuple[str, str]]]:
+        """What no row of *run* holds, however it was built; ``None`` where nothing is read.
+
+        Narrower than ``excludes``, which files every value a term names: here
+        only what every row of every branch is without, and only a value the
+        run settles -- ``jobStatus<>:jobStatus`` bound to ``dummy`` on one path
+        and ``running`` on another passes over neither on every run.
+        """
+        refuses_here: Optional[set[tuple[str, str]]] = None
+        for alternative in _refused_terms(func, run):
+            passed_over: set[tuple[str, str]] = set()
+            for term in alternative:
+                if term.verb != "read" or term.scope != sqltext.ROW:
+                    continue
+                subject = _term_subject(attributor, term)
+                for key in term.binds:
+                    values_of = bound(func, run, key, file)
+                    if len(set(values_of)) == 1:
+                        passed_over.add((subject, values_of[0]))
+                passed_over.update((subject, value) for value in term.literals)
+            refuses_here = passed_over if refuses_here is None else refuses_here & passed_over
+        return refuses_here
 
     def place_call_sites(func, owner: str, file: str, executions: list) -> None:
         """Say, per call site that narrows a statement, what it reads there.
@@ -1604,6 +1750,12 @@ def read_side(
         ``onlyActive`` the loop reads two tables, not four.  Asked only for a
         parameter the function tests and never rebinds, and recorded only
         where the call's reading differs from the statement's.
+
+        Every field a flag can change is compared, not only the tables and
+        ``selects``: ``copyArchive`` hands ``lockJobsForReassign``
+        ``onlyReassignable=True`` at two of its four calls, and only there
+        does the statement refuse ``relocationFlag=2`` -- which the
+        statement's own reading, over every call, cannot say.
         """
         if calls is None or not any((owner, run.call.lineno) in statements for run in executions):
             return
@@ -1613,38 +1765,37 @@ def read_side(
         owned = calls.types.method_class(file, func)
         target = Target(file, func, owned[1] if owned else None)
         for via, handed in calls.handed_constants(target, tested):
-            per_line: dict[int, tuple[set[str], set[tuple[str, str]]]] = {}
+            per_line: dict[int, _CallReading] = {}
+            variants: dict[int, list] = {}
+            refuses_at: dict[int, set[tuple[str, str]]] = {}
             with sql.at_call(func, handed):
                 for run in sql.executions(func):
-                    tables, pairs = reading_of(func, run, file)
-                    held = per_line.setdefault(run.call.lineno, (set(), set()))
-                    held[0].update(tables)
-                    held[1].update(pairs)
+                    line = run.call.lineno
+                    one = reading_of(func, run, file)
+                    per_line.setdefault(line, _CallReading(set())).add(one)
+                    if all(run.sql != other.sql for other in variants.setdefault(line, [])):
+                        variants[line].append(run)
+                    here = run_refuses(func, run, file) or set()
+                    refuses_at[line] = refuses_at[line] & here if line in refuses_at else here
+                conditions_at = {line: _folded_conditions(func, line, runs) for line, runs in variants.items()}
             said = ", ".join(f"{name}={value!r}" for name, value in sorted(handed.items()))
             route = " <- ".join(reversed(via))
             for (own, line), kept in list(statements.items()):
                 if own != owner:
                     continue
-                tables, pairs = per_line.get(line, (set(), set()))
                 if line not in per_line:
                     entry = f"{route} ({said}): not run"
-                elif tables != kept.tables or pairs != kept.selects:
-                    # What differs from the statement's own reading, not the
-                    # whole reading again.
-                    said_here: list[str] = []
-                    if tables != kept.tables:
-                        said_here.append("reads " + (", ".join(sorted(tables)) or "no table"))
-                    for label, held in (
-                        ("does not select", sorted(kept.selects - pairs)),
-                        ("also selects", sorted(pairs - kept.selects)),
-                    ):
-                        if held:
-                            shown = ", ".join(f"{subject}={value}" for subject, value in held[:6])
-                            more = f" and {len(held) - 6} more" if len(held) > 6 else ""
-                            said_here.append(f"{label} {shown}{more}")
-                    entry = f"{route} ({said}): " + "; ".join(said_here)
                 else:
-                    continue
+                    said_here = _narrowed(
+                        kept,
+                        per_line[line],
+                        refused.get((owner, line), set()),
+                        refuses_at[line],
+                        conditions_at[line],
+                    )
+                    if not said_here:
+                        continue
+                    entry = f"{route} ({said}): " + "; ".join(said_here)
                 statements[(owner, line)] = kept._replace(call_sites=(*kept.call_sites, entry))
 
     def touch(table: str, owner: str, verb: str) -> None:
@@ -1663,12 +1814,9 @@ def read_side(
         so **over-states** the requirement: 24 of the corpus's statements have
         variants that disagree, over 66 terms, and a reader ruling a row out
         against a term the text that ran never carried is the failure this
-        field exists to prevent.
-
-        So the variants are folded as what they are, a disjunction:
-        ``(A and B) or (A and C)`` is ``A``, required outright, and ``B or C``
-        as one condition.  A variant that requires nothing beyond the common
-        part makes that disjunction free, and then it is not recorded at all.
+        field exists to prevent.  So the variants are folded as what they are,
+        a disjunction -- :func:`_folded_conditions`, which a call site's
+        reading folds by too.
         """
         runs: dict[int, list] = {}
         for run in executions:
@@ -1679,44 +1827,7 @@ def read_side(
             kept = statements.get((owner, line))
             if kept is None:
                 continue
-            rendered: list[list[str]] = []
-            for run in variants:
-                window = run.window
-                if window is None and run.varmap:
-                    window = sql.binding_window(func, run.varmap, line)
-                found = sqltext.conditions(run.sql)
-                seeds: dict[str, list[int]] = {}
-                for condition in found:
-                    for key in condition.binds:
-                        if key in seeds:
-                            continue
-                        at_lines = sorted(
-                            {
-                                bind.site.lineno
-                                for bind in sql.bound_values(
-                                    func, run.varmap or "", key, window
-                                )
-                            }
-                        )
-                        if at_lines:
-                            seeds[key] = at_lines
-                rendered.append([_render_condition(c, seeds) for c in found])
-            common = set.intersection(*(set(one) for one in rendered))
-            kept.conditions.extend(sorted(common))
-            remainders: list[tuple[str, ...]] = []
-            for one in rendered:
-                shape = tuple(entry for entry in one if entry not in common)
-                if shape not in remainders:
-                    remainders.append(shape)
-            if len(remainders) == 1:
-                kept.conditions.extend(remainders[0])
-            elif all(remainders):
-                kept.conditions.append(
-                    " OR ".join(
-                        f"({' AND '.join(shape)})" if len(shape) > 1 else shape[0]
-                        for shape in remainders
-                    )
-                )
+            kept.conditions.extend(_folded_conditions(func, line, variants))
 
     def place_regions(
         func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
@@ -1978,26 +2089,7 @@ def read_side(
                             statements.setdefault((at.owner, at.line), at).keys.add(subject)
                     for value in term.literals:
                         record(subject, value, owner, term.verb, at)
-                # Narrower than ``exclude`` above, which files every value a
-                # term names: here only what every row of every branch is
-                # without, and only a value the run settles -- ``jobStatus<>
-                # :jobStatus`` bound to ``dummy`` on one path and ``running``
-                # on another passes over neither on every run.
-                refuses_here: Optional[set[tuple[str, str]]] = None
-                for alternative in _refused_terms(func, run):
-                    passed_over: set[tuple[str, str]] = set()
-                    for term in alternative:
-                        if term.verb != "read" or term.scope != sqltext.ROW:
-                            continue
-                        subject = _term_subject(attributor, term)
-                        for key in term.binds:
-                            values_of = bound(func, run, key, module.rel_path)
-                            if len(set(values_of)) == 1:
-                                passed_over.add((subject, values_of[0]))
-                        passed_over.update((subject, value) for value in term.literals)
-                    refuses_here = (
-                        passed_over if refuses_here is None else refuses_here & passed_over
-                    )
+                refuses_here = run_refuses(func, run, module.rel_path)
                 site = (owner, run.call.lineno)
                 refused[site] = (
                     (refuses_here or set()) & refused[site]

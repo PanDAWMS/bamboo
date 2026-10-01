@@ -497,6 +497,49 @@ def test_a_value_a_test_around_the_read_rules_out_is_not_handed_there(tmp_path):
     assert sorted(one.value for one in settle(ast.Name(id="segment_id"), func, "pkg/db.py")) == ["7", "None", "None"]
 
 
+def test_a_call_handing_a_flag_says_what_the_statement_refuses_and_requires_there(tmp_path):
+    """``copyArchive`` hands ``lockJobsForReassign`` ``onlyReassignable=True`` at two calls of four.
+
+    Only there is ``relocationFlag=2`` refused -- the statement's own reading,
+    over every call, cannot say it -- and only there is the test required.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "def lock(cur, status, onlyReassignable):\n"
+        "    varMap = {':status': status, ':relocationFlag': 2}\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE jobStatus=:status '\n"
+        "    if onlyReassignable:\n"
+        "        sql += 'AND (relocationFlag IS NULL OR relocationFlag<>:relocationFlag) '\n"
+        "    cur.execute(sql, varMap)\n"
+    )
+    main = "from pkg.db import lock\n\ndef run(cur):\n    lock(cur, 'defined', False)\n    lock(cur, 'activated', True)\n"
+    roots = _tree(tmp_path, db=db, main=main)
+    modules = [
+        SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/{name}.py", tree=ast.parse(text), source=text, blob_sha=blob_sha(text))
+        for name, text in (("db", db), ("main", main))
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    assert statement.refuses == frozenset()
+    unreassignable, reassignable = statement.call_sites
+    assert unreassignable == (
+        "pkg/main.py:4 (onlyReassignable=False): does not exclude jobsDefined4.relocationFlag=2; "
+        "does not require relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2"
+    )
+    assert reassignable.startswith("pkg/main.py:5 (onlyReassignable=True): ")
+    assert "also refuses jobsDefined4.relocationFlag=2" in reassignable
+    assert "require" not in reassignable
+
+
 def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):
     from bamboo.codemap.panda import sql
 
