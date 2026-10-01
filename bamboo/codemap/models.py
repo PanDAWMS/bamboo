@@ -2393,6 +2393,15 @@ class Candidate(BaseModel):
     )
     triggers: list[str] = Field(default_factory=list)
     entries: list[str] = Field(default_factory=list)
+    called_from: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file:line`` of each call placed at the owner -- "
+            ":attr:`JunctionNode.called_from`.  What moves a job to "
+            "``activated`` is whoever calls ``activateJob``, and the map held "
+            "that on the junction without the answer ever saying it."
+        ),
+    )
     handovers: list[Handover] = Field(
         default_factory=list,
         description=(
@@ -3252,6 +3261,42 @@ class StatementReading(BaseModel):
     line: int = Field(default=0, description="The line the statement runs on.")
     selects: list[str] = Field(
         default_factory=list, description="``subject=value`` this statement asks rows by."
+    )
+    keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Subjects the statement asks rows by with a value chosen at run "
+            "time -- :attr:`ReadSiteNode.keys`.  Carried because a statement "
+            "asking by these alone printed an empty ``asks on``, which reads "
+            "as a query that filters on nothing."
+        ),
+    )
+    excludes: list[str] = Field(
+        default_factory=list,
+        description="``subject=value`` the statement asks rows *not* to hold -- :attr:`ReadSiteNode.excludes`.",
+    )
+    tables: list[str] = Field(
+        default_factory=list,
+        description="The tables the statement reads -- :attr:`ReadSiteNode.tables`.",
+    )
+    order_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The ``ORDER BY`` clauses it can be built with -- "
+            ":attr:`ReadSiteNode.order_by`.  With ``limits``, why a row that "
+            "passes the ``WHERE`` can still not come back."
+        ),
+    )
+    limits: list[str] = Field(
+        default_factory=list,
+        description="How many rows come back at most -- :attr:`ReadSiteNode.limits`.",
+    )
+    call_sites: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What each call site whose constants narrow the statement reads "
+            "there -- :attr:`ReadSiteNode.call_sites`."
+        ),
     )
     conditions: list[str] = Field(
         default_factory=list,

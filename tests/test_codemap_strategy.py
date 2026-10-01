@@ -598,6 +598,146 @@ def test_a_statement_read_only_in_part_says_so_beside_its_conditions():
     assert "not read here  jobStatus IN ({})" in output
 
 
+_COPY_ARCHIVE = "pandaserver/daemons/scripts/copyArchive.py::main"
+
+
+async def test_the_answer_carries_what_the_map_holds_on_a_statement_and_its_writer():
+    """Fields the map stored and the answer dropped are fields nobody read.
+
+    The read site has held its keys, exclusions, tables, order and limit since
+    they were extracted, and the junction who calls it, and the strategy built
+    from the stored map passed none of them on.  Stored and read back, so a
+    field the encoding loses fails here rather than printing nothing.
+    """
+    site = models.ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="r:381",
+        owner=_COPY_ARCHIVE,
+        anchor=Anchor(
+            package="pandaserver",
+            file="pandaserver/daemons/scripts/copyArchive.py",
+            line_start=381,
+            line_end=381,
+        ),
+        selects=["JobSpec.jobStatus=holding"],
+        keys=["JobSpec.computingSite"],
+        excludes=["JobSpec.processingType=pmerge"],
+        tables=["jobsActive4"],
+        order_by=["PandaID"],
+        limits=["<= :rlimit"],
+        call_sites=["x.py:7 (onlyActive=True): reads jobsActive4"],
+    )
+    writer = _junction(
+        "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::activateJob",
+        Branch(outcome="holding", tier=1),
+        subject="JobSpec.jobStatus",
+    ).model_copy(update={"called_from": ["pandaserver/taskbuffer/TaskBuffer.py:928"]})
+    code_map = await _map(
+        MapFragment(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            subjects=[
+                _subject(
+                    ["holding"],
+                    name="JobSpec.jobStatus",
+                    selected_by={"holding": [_COPY_ARCHIVE]},
+                )
+            ],
+            junctions=[writer],
+            read_sites=[site],
+        )
+    )
+
+    strategy = await strategy_mod.derive(
+        code_map, Symptom(subject="JobSpec.jobStatus", observed="holding")
+    )
+
+    (statement,) = strategy.follow_up.reader_statements
+    assert statement.keys == ["JobSpec.computingSite"]
+    assert statement.excludes == ["JobSpec.processingType=pmerge"]
+    assert statement.tables == ["jobsActive4"]
+    assert statement.order_by == ["PandaID"]
+    assert statement.limits == ["<= :rlimit"]
+    assert statement.call_sites == ["x.py:7 (onlyActive=True): reads jobsActive4"]
+    (candidate,) = strategy.candidates
+    assert candidate.called_from == ["pandaserver/taskbuffer/TaskBuffer.py:928"]
+
+
+def test_a_statement_prints_each_field_it_has_and_none_it_lacks():
+    """``asks on`` was the only line, so a statement asking by a task id alone printed an empty one."""
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_follow_up
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject="JobSpec.jobStatus", observed="activated"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        follow_up=models.FollowUp(
+            selected=True,
+            selected_by=["x.py::getQueued"],
+            reader_statements=[
+                models.StatementReading(
+                    owner="x.py::getQueued",
+                    file="x.py",
+                    line=1528,
+                    keys=["JobSpec.jediTaskID"],
+                    excludes=["JobSpec.jobStatus=holding", "JobSpec.jobStatus=running"],
+                    tables=["jobsActive4", "jobsDefined4"],
+                    call_sites=["y.py:9 (onlyActive=True): reads jobsActive4"],
+                )
+            ],
+        ),
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_follow_up(strategy, False))
+    output = runner.invoke(command).output
+
+    assert "by key  JobSpec.jediTaskID" in output
+    assert "excluding  JobSpec.jobStatus=holding, JobSpec.jobStatus=running" in output
+    assert "reads  jobsActive4, jobsDefined4" in output
+    assert "when called from y.py:9 (onlyActive=True): reads jobsActive4" in output
+    assert "ordered by" not in output
+    assert "limit" not in output
+
+
+def test_a_candidate_names_a_few_of_its_call_sites_and_counts_the_rest():
+    """A helper called from seventeen places would otherwise bury the candidates after it."""
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_candidates
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject="JobSpec.jobStatus", observed="activated"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        candidates=[
+            models.Candidate(
+                owner="a.py::activateJob",
+                called_from=[f"c{index}.py:{index}" for index in range(5)],
+            )
+        ],
+    )
+    runner = click.testing.CliRunner()
+
+    folded = runner.invoke(
+        click.Command("x", callback=lambda: _report_candidates(strategy, 10, False, False))
+    ).output
+    full = runner.invoke(
+        click.Command("x", callback=lambda: _report_candidates(strategy, 10, True, False))
+    ).output
+
+    assert [f"called at c{index}.py:{index}" in folded for index in range(5)] == [
+        True, True, True, False, False
+    ]
+    assert "… 2 more call site(s) (--full)" in folded
+    assert all(f"called at c{index}.py:{index}" in full for index in range(5))
+    assert "more call site(s)" not in full
+
+
 _GET_JOBS = "taskbuffer/db_proxy_mods/job_complex_module.py::getJobs"
 _EXEC_COMMAND = "taskbuffer/db_proxy_mods/task_complex_module.py::getTasksToExecCommand_JEDI"
 _THROTTLE_USER = "taskbuffer/db_proxy_mods/job_standalone_module.py::throttleUserJobs"

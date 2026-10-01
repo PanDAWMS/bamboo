@@ -372,6 +372,7 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
         ],
         triggers=sorted({entry.trigger for entry in junction.entry_points}),
         entries=sorted({entry.entry for entry in junction.entry_points}),
+        called_from=list(junction.called_from),
         # One row per distinct handover, not per entry point.  A module that
         # both polls and reads a command row carries two entries for the one
         # construction, and they hand over the same thing -- the trigger is a
@@ -528,6 +529,12 @@ def _reader_statements(
                     blob_sha=site.anchor.blob_sha or "",
                     line=site.anchor.line_start,
                     selects=list(site.selects),
+                    keys=list(site.keys),
+                    excludes=list(site.excludes),
+                    tables=list(site.tables),
+                    order_by=list(site.order_by),
+                    limits=list(site.limits),
+                    call_sites=list(site.call_sites),
                     conditions=list(site.conditions),
                     unresolved=list(site.unresolved),
                     bind_window=list(site.bind_window),

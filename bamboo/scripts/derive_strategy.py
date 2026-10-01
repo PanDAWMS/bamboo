@@ -142,6 +142,10 @@ def _report_verdict(strategy: Strategy, evaluated: bool) -> None:
 #: made in twelve places, which is itself the answer to "where does one come
 #: from" -- so the count is printed rather than the list quietly cut.
 _TOP_CREATORS = 4
+#: Call sites shown under one candidate.  Half the corpus's junctions have one
+#: and 148 of 680 have more than three, so a few say who calls it and the count
+#: says how many more do.
+_TOP_CALLERS = 3
 #: Steps shown under one reader statement.  A walk from a time limit is three
 #: or four steps; the cap is here so one statement cannot push the next one
 #: off the page, and the count of what was cut is printed.
@@ -299,6 +303,21 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
                     f"                                     {where}"
                     f"  asks on {', '.join(entry.selects)}"
                 )
+                # The rest of what the map holds on the statement, one line a
+                # field and only where it says something.  Without ``by key``
+                # a statement asking by a task id alone printed an empty
+                # ``asks on``; without ``excluding`` a ``NOT IN`` was invisible.
+                for label, said in (
+                    ("by key", entry.keys),
+                    ("excluding", entry.excludes),
+                    ("reads", entry.tables),
+                    ("ordered by", entry.order_by),
+                    ("limit", entry.limits),
+                ):
+                    if said:
+                        click.echo(f"                                       {label}  {', '.join(said)}")
+                for narrowed in entry.call_sites:
+                    click.echo(f"                                       when called from {narrowed}")
                 # What else the row had to be.  The question this answers is
                 # "it held the value and did not come back", and until the
                 # conditions were recorded the map's answer stopped one line
@@ -474,6 +493,16 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
             click.echo(
                 f"  {'':<10} only lands on a row where "
                 f"{' and '.join(candidate.row_precondition)}"
+            )
+        # Who calls the writer, where the map placed the calls.  Folded to a
+        # few under the default listing and counted, as the creators are: a
+        # helper called from seventeen places would otherwise bury the rest.
+        callers = candidate.called_from if full else candidate.called_from[:_TOP_CALLERS]
+        for where in callers:
+            click.echo(f"  {'':<10} called at {where}")
+        if len(candidate.called_from) > len(callers):
+            click.echo(
+                f"  {'':<10} … {len(candidate.called_from) - len(callers)} more call site(s) (--full)"
             )
         for branch in candidate.named:
             # Always shown: when one arm is named, which arm it is *is* the
