@@ -447,3 +447,21 @@ def test_an_order_with_no_column_in_it_is_still_read():
     )
 
     assert orders == ["DBMS_RANDOM.value"]
+
+
+def test_an_exclusion_the_map_cannot_name_is_still_filed():
+    """``status NOT IN (SELECT ...)`` and ``status<>:s`` with ``:s`` from the caller pass over values.
+
+    Filed as ``{}``: a reader asking whether its value is one of them has to
+    be told the statement might pass it over, not that it asks nothing.
+    """
+    side = _read_side(
+        "class TaskModule:\n"
+        "    def pick(self, given):\n"
+        "        sql = ('SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status<>:given '\n"
+        "               'AND status NOT IN (SELECT status FROM ATLAS_PANDA.JEDI_Datasets WHERE type=:ty)')\n"
+        "        self.cur.execute(sql, {':vo': 'atlas', ':given': given, ':ty': 'input'})\n" + _TEACH
+    )
+
+    (statement,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::pick"]
+    assert statement.excludes == {("JediTaskSpec.status", "{}")}

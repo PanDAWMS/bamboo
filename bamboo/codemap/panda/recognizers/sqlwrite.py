@@ -1824,11 +1824,20 @@ def read_side(
                         continue
                     if term.excluding:
                         if term.verb == "read":
+                            unsaid = term.undecided
                             for key in term.binds:
-                                for value in bound(func, run, key, module.rel_path):
+                                values_of = bound(func, run, key, module.rel_path)
+                                unsaid = unsaid or not values_of
+                                for value in values_of:
                                     exclude(subject, value, at)
                             for value in term.literals:
                                 exclude(subject, value, at)
+                            # ``NOT IN (SELECT ...)``, a hole, a bind nothing
+                            # here fills: the statement passes over values the
+                            # map cannot name, and a reader asking whether its
+                            # value is one of them has to be told it might be.
+                            if unsaid:
+                                exclude(subject, "{}", at)
                         continue
                     for key in term.binds:
                         values_of = bound(func, run, key, module.rel_path)
