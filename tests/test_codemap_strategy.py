@@ -703,6 +703,103 @@ def test_a_statement_prints_each_field_it_has_and_none_it_lacks():
     assert "limit" not in output
 
 
+_GET_QUEUED = "x.py::getQueuedPandaIDsWithTask_JEDI"
+
+
+def _read_site(owner: str, line: int, **asks: list[str]) -> models.ReadSiteNode:
+    return models.ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=f"r:{line}",
+        owner=owner,
+        anchor=Anchor(package="pandaserver", file=owner.split("::")[0], line_start=line, line_end=line),
+        **asks,
+    )
+
+
+async def test_a_statement_that_passes_over_other_values_is_answered_beside_the_readers():
+    """``jobStatus NOT IN (holding, running)`` picks up every defined job and never names one.
+
+    Said beside the readers and in the question, and nowhere the readers are
+    judged: ``selected`` and ``selected_by`` stay what the map's readers make
+    them.  The statement whose ``NOT IN`` runs a subquery is not listed, since
+    it may pass over ``defined`` too.
+    """
+    status = "JobSpec.jobStatus"
+    code_map = await _map(
+        MapFragment(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            subjects=[_subject(["activated"], name=status, selected_by={"activated": ["y.py::f"]})],
+            read_sites=[
+                _read_site(
+                    _GET_QUEUED,
+                    1528,
+                    excludes=[f"{status}=holding", f"{status}=running"],
+                    tables=["jobsActive4"],
+                ),
+                _read_site("z.py::g", 7, excludes=[f"{status}=holding", f"{status}={{}}"]),
+                _read_site("w.py::h", 9, consults=[f"{status}=defined"]),
+            ],
+        )
+    )
+
+    strategy = await strategy_mod.derive(code_map, Symptom(subject=status, observed="defined"))
+    follow = strategy.follow_up
+
+    assert [(s.owner, s.line) for s in follow.returned_by_exclusion] == [(_GET_QUEUED, 1528)]
+    assert follow.returned_by_exclusion[0].tables == ["jobsActive4"]
+    assert [(s.owner, s.line) for s in follow.consulted_by] == [("w.py::h", 9)]
+    assert follow.selected is False
+    assert follow.selected_by == []
+    assert follow.reader_statements == []
+    assert "1 statement(s) return such rows by excluding other values" in follow.question
+
+
+def test_the_statements_beside_the_readers_print_under_headings_of_their_own():
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_follow_up
+
+    status = "JobSpec.jobStatus"
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=status, observed="defined"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        follow_up=models.FollowUp(
+            selected=False,
+            returned_by_exclusion=[
+                models.StatementReading(
+                    owner=_GET_QUEUED,
+                    file="x.py",
+                    line=1528,
+                    excludes=[f"{status}=holding", f"{status}=running"],
+                    tables=["jobsActive4", "jobsDefined4"],
+                )
+            ],
+            consulted_by=[
+                models.StatementReading(
+                    owner="w.py::h", file="w.py", line=9, consults=[f"{status}=defined"]
+                )
+            ],
+        ),
+    )
+    runner = click.testing.CliRunner()
+    output = runner.invoke(
+        click.Command("x", callback=lambda: _report_follow_up(strategy, False))
+    ).output
+
+    assert f"  what returns it by exclusion    {strategy_mod.short_owner(_GET_QUEUED)}\n" in output
+    assert "x.py:1528  excluding JobSpec.jobStatus=holding, JobSpec.jobStatus=running" in output
+    assert "reads  jobsActive4, jobsDefined4" in output
+    assert "not counted as a query that selects it" in output
+    assert f"  what only checks it exists      {strategy_mod.short_owner('w.py::h')}\n" in output
+    assert "w.py:9  checks JobSpec.jobStatus=defined" in output
+    assert "picks none of them up" in output
+    assert "which query selects it" not in output
+
+
 def test_a_candidate_names_a_few_of_its_call_sites_and_counts_the_rest():
     """A helper called from seventeen places would otherwise bury the candidates after it."""
     import click

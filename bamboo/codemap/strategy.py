@@ -487,6 +487,31 @@ def _statement_exit(text: str) -> StatementExit:
     )
 
 
+def _statement_reading(site: ReadSiteNode) -> StatementReading:
+    """What the answer carries of one read site -- every field it was stored with."""
+    return StatementReading(
+        owner=site.owner,
+        file=site.anchor.file,
+        blob_sha=site.anchor.blob_sha or "",
+        line=site.anchor.line_start,
+        selects=list(site.selects),
+        keys=list(site.keys),
+        excludes=list(site.excludes),
+        consults=list(site.consults),
+        tables=list(site.tables),
+        order_by=list(site.order_by),
+        limits=list(site.limits),
+        call_sites=list(site.call_sites),
+        conditions=list(site.conditions),
+        unresolved=list(site.unresolved),
+        bind_window=list(site.bind_window),
+        region=list(site.region),
+        rows_handled=list(site.rows_handled),
+        exits=[_statement_exit(text) for text in site.exits],
+        crosses_to=list(site.crosses_to),
+    )
+
+
 def _reader_statements(
     read_statements: dict[str, list[ReadSiteNode]], observed: str
 ) -> tuple[list[StatementReading], dict[str, int]]:
@@ -521,29 +546,7 @@ def _reader_statements(
             if any(pair.endswith(f"={observed}") for pair in site.selects)
         ]
         shown = asking or sites
-        for site in shown:
-            readings.append(
-                StatementReading(
-                    owner=owner,
-                    file=site.anchor.file,
-                    blob_sha=site.anchor.blob_sha or "",
-                    line=site.anchor.line_start,
-                    selects=list(site.selects),
-                    keys=list(site.keys),
-                    excludes=list(site.excludes),
-                    tables=list(site.tables),
-                    order_by=list(site.order_by),
-                    limits=list(site.limits),
-                    call_sites=list(site.call_sites),
-                    conditions=list(site.conditions),
-                    unresolved=list(site.unresolved),
-                    bind_window=list(site.bind_window),
-                    region=list(site.region),
-                    rows_handled=list(site.rows_handled),
-                    exits=[_statement_exit(text) for text in site.exits],
-                    crosses_to=list(site.crosses_to),
-                )
-            )
+        readings.extend(_statement_reading(site) for site in shown)
         if asking and len(asking) < len(sites):
             elsewhere[owner] = len(sites) - len(asking)
     return readings, elsewhere
@@ -657,6 +660,8 @@ def _follow_up(
     entities: list[EntityNode],
     changing: set[str],
     guarded: Sequence[GuardReading] = (),
+    excluding: Sequence[ReadSiteNode] = (),
+    consulting: Sequence[ReadSiteNode] = (),
 ) -> FollowUp:
     """Whether anything will move the value on, and what to ask if not.
 
@@ -692,8 +697,16 @@ def _follow_up(
     The other twenty-five are getters with no trigger, where what acts is the
     caller, so there the map says that and no more: claiming the row will not
     move would be the same mistake facing the other way.
+
+    **Returned is not selected either.**  A statement that passes over other
+    values (*excluding*) and one whose subquery only checks the value
+    (*consulting*) are carried beside the readers and change none of the
+    above.  The first is said in the question where nothing selects the
+    value, because there "ask who wrote the step before it" is the answer to a
+    row that a ``NOT IN`` picks up every cycle.
     """
     selected = observed in selected_values
+    returned = [_statement_reading(site) for site in excluding]
     # Junctions first, so that an owner which both settles a value and reads
     # one is answered from the node that carries the rest of its story.  Two
     # thirds of the readers the map names settle nothing, and looking only
@@ -834,6 +847,11 @@ def _follow_up(
             f"no query in the map selects on {observed!r} -- ask who wrote the step "
             f"before it: {carried_or_writers}"
         )
+        if returned:
+            question += (
+                f"; {len(returned)} statement(s) return such rows by excluding other "
+                "values (listed below)"
+            )
     if reader_acts == READS_ONLY_FOR_A_CALLER:
         # Appended rather than replacing the sentence: everything it says is
         # still true, and this only stops the named reader being read as the
@@ -859,6 +877,8 @@ def _follow_up(
         reader_statements=statement_readings,
         reader_statements_elsewhere=statements_elsewhere,
         guarded_by=list(guarded),
+        returned_by_exclusion=returned,
+        consulted_by=[_statement_reading(site) for site in consulting],
         selection_gates=list(selection_gates),
         triggers=triggers,
         self_repairing=repairing,
@@ -1205,6 +1225,8 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
     )
 
     guarded_here = await code_map.guarded_on(subject, symptom.observed)
+    excluding_here = await code_map.read_sites_excluding(symptom.subject, symptom.observed)
+    consulting_here = await code_map.read_sites_consulting(symptom.subject, symptom.observed)
     strategy = Strategy(
         symptom=symptom,
         map_id=code_map.map_id,
@@ -1231,6 +1253,8 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
                 guarded_here,
                 subject.selected_by.get(symptom.observed, []),
             ),
+            excluding=excluding_here,
+            consulting=consulting_here,
         ),
         # Map edges first, so that when both suppliers name one field the fold
         # in ``evaluate`` keeps the deterministic one.  Not folded here: doing

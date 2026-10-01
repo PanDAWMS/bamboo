@@ -544,6 +544,44 @@ def required_values(term: str) -> Optional[tuple[str, list[str]]]:
             return match.group(1).rsplit(".", 1)[-1].lower(), values
     return None
 
+
+#: What a read site files for an exclusion whose values the map cannot name --
+#: ``NOT IN (SELECT ...)``, a hole, a bind nothing settles.
+UNNAMED_EXCLUSION = "{}"
+
+
+def admits_by_exclusion(site: "ReadSiteNode", subject: str, value: str) -> bool:
+    """Whether *site* returns rows holding *value* by passing over other values.
+
+    ``getQueuedPandaIDsWithTask_JEDI`` asks for ``jobStatus NOT IN (holding,
+    running, transferring)``: it never names ``defined`` and picks up every
+    defined job of the task.  It is not a reader of ``defined`` -- the map's
+    readers name the value, and counting this one would make every value but
+    three selected by it -- so it is answered beside the readers, not among them.
+
+    True only when the statement says nothing else about the subject:
+
+    * it excludes some value of the subject, and none of those is *value*;
+    * none of them is :data:`UNNAMED_EXCLUSION` -- a ``NOT IN (SELECT ...)``
+      may pass over *value* too, and "it is not excluded" would then be a
+      confident wrong answer;
+    * it does not select on the subject, by a value or by a key settled at run
+      time (``keys``): ``jobStatus<>:a AND jobStatus=:b`` returns the rows
+      ``:b`` names, which nothing here says is *value*.
+
+    Not a claim that a row holding *value* comes back.  The rest of the
+    ``WHERE`` still applies, and so does the table: ``jobsArchived4`` holds no
+    ``defined`` job whatever its ``NOT IN`` passes over.
+    """
+    prefix = f"{subject}="
+    passed_over = [pair[len(prefix):] for pair in site.excludes if pair.startswith(prefix)]
+    if not passed_over or value in passed_over or UNNAMED_EXCLUSION in passed_over:
+        return False
+    if any(pair.startswith(prefix) for pair in site.selects):
+        return False
+    return subject not in site.keys
+
+
 # How work arrives at a junction.  Declared with the field that carries it
 # rather than in the recognizer that assigns it, because both halves of the map
 # read them: the extraction to label an entry, and an investigation to decide
@@ -1056,7 +1094,10 @@ class ReadSiteNode(BaseNode):
         description=(
             "``subject=value`` for every pair this statement asks rows *not* "
             "to hold -- ``<>``, ``!=``, ``NOT IN`` -- sorted.  Kept apart from "
-            "``selects``: ``status<>'done'`` picks up every row but the done ones."
+            "``selects``: ``status<>'done'`` picks up every row but the done ones.  "
+            "``subject={}`` where some of the values it passes over cannot be "
+            "named -- ``NOT IN (SELECT ...)``, a hole, a bind nothing here fills "
+            "-- so that the statement does not read as passing over nothing."
         ),
     )
     consults: list[str] = Field(
@@ -2656,6 +2697,26 @@ class FollowUp(BaseModel):
             "a share -- and leave the value where it is."
         ),
     )
+    returned_by_exclusion: list[StatementReading] = Field(
+        default_factory=list,
+        description=(
+            "Statements that never ask for the observed value and return rows "
+            "holding it anyway, because what they pass over is other values -- "
+            "see :func:`admits_by_exclusion`.  Not readers: counted among them, "
+            "``status NOT IN ('done')`` would select every value but one.  "
+            "Without them, ``no query selects on 'defined'`` was the whole "
+            "answer for a value a ``NOT IN`` picks up every cycle."
+        ),
+    )
+    consulted_by: list[StatementReading] = Field(
+        default_factory=list,
+        description=(
+            "Statements whose subquery checks whether rows holding the observed "
+            "value exist -- ``EXISTS (SELECT 1 ... WHERE jobStatus=:st)`` -- and "
+            "pick none of them up.  Not readers either: the rows they return "
+            "are other rows, and whether those move depends on these."
+        ),
+    )
     triggers: list[str] = Field(
         default_factory=list,
         description=(
@@ -3283,6 +3344,13 @@ class StatementReading(BaseModel):
     excludes: list[str] = Field(
         default_factory=list,
         description="``subject=value`` the statement asks rows *not* to hold -- :attr:`ReadSiteNode.excludes`.",
+    )
+    consults: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``subject=value`` a subquery of the statement checks rows by -- "
+            ":attr:`ReadSiteNode.consults`."
+        ),
     )
     tables: list[str] = Field(
         default_factory=list,

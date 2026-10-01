@@ -50,6 +50,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     Symptom,
     ValueEnumNode,
+    admits_by_exclusion,
     outcome_excludes,
     required_values,
 )
@@ -629,6 +630,26 @@ class CodeMap:
         for sites in found.values():
             sites.sort(key=lambda s: s.anchor.line_start)
         return found
+
+    async def read_sites_excluding(self, subject: str, value: str) -> list[ReadSiteNode]:
+        """The statements that return rows holding *value* by passing over other values.
+
+        Asked of every statement rather than of the subject's readers: these
+        are exactly the statements ``selected_by`` does not hold, because they
+        never name the value.  What counts is :func:`admits_by_exclusion`.
+        """
+        sites = [
+            site
+            for site in await self._find(ReadSiteNode)
+            if admits_by_exclusion(site, subject, value)
+        ]
+        return sorted(sites, key=lambda s: (s.owner, s.anchor.line_start))
+
+    async def read_sites_consulting(self, subject: str, value: str) -> list[ReadSiteNode]:
+        """The statements whose subquery checks whether rows holding *value* exist."""
+        pair = f"{subject}={value}"
+        sites = [site for site in await self._find(ReadSiteNode) if pair in site.consults]
+        return sorted(sites, key=lambda s: (s.owner, s.anchor.line_start))
 
     async def log_sites(self, owners: list[str]) -> dict[str, LogSiteNode]:
         """The log rows for *owners* that settle nothing themselves.

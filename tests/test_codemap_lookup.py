@@ -20,6 +20,7 @@ from bamboo.codemap.models import (
     FilterStageNode,
     JunctionNode,
     MapFragment,
+    ReadSiteNode,
     SubjectNode,
     Symptom,
 )
@@ -465,3 +466,52 @@ async def test_which_log_to_read_is_answered_per_writer():
             "caller": ["panda-AtlasTaskWithholderWatchDog.log"],
         },
     }
+
+
+def _read_site(line: int, **asks: list[str]) -> ReadSiteNode:
+    return ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=f"r:{line}",
+        owner="x.py::getJobs",
+        anchor=Anchor(package="pandaserver", file="x.py", line_start=line, line_end=line),
+        **asks,
+    )
+
+
+async def test_a_statement_returns_a_value_by_exclusion_only_where_it_says_nothing_else_of_it():
+    """``jobStatus NOT IN (holding, running)`` returns defined jobs; nothing else here does.
+
+    Each of the others names the subject in a way that leaves ``defined`` open
+    or shut by something the exclusion does not say, and listing it would be a
+    claim the map cannot back.
+    """
+    status = "JobSpec.jobStatus"
+    sites = [
+        _read_site(1, excludes=[f"{status}=holding", f"{status}=running"]),
+        _read_site(2, excludes=[f"{status}=defined"]),
+        _read_site(3, excludes=[f"{status}=holding", f"{status}={{}}"]),
+        _read_site(4, excludes=[f"{status}=holding"], selects=[f"{status}=activated"]),
+        _read_site(5, excludes=[f"{status}=holding"], keys=[status]),
+        _read_site(6, excludes=["JobSpec.processingType=pmerge"]),
+        _read_site(7, selects=[f"{status}=defined"]),
+    ]
+    code_map = await _stored(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
+
+    returned = await code_map.read_sites_excluding(status, "defined")
+
+    assert [site.anchor.line_start for site in returned] == [1]
+
+
+async def test_a_statement_consults_a_value_only_where_its_subquery_names_it():
+    status = "JobSpec.jobStatus"
+    sites = [
+        _read_site(1, consults=[f"{status}=merging"]),
+        _read_site(2, selects=[f"{status}=merging"]),
+        _read_site(3, consults=[f"{status}=running"]),
+    ]
+    code_map = await _stored(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
+
+    consulting = await code_map.read_sites_consulting(status, "merging")
+
+    assert [site.anchor.line_start for site in consulting] == [1]

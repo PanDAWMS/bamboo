@@ -362,6 +362,19 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
                     "in this function, asking on other values"
                 )
     _report_guarded(follow)
+    _report_returned(
+        "  what returns it by exclusion",
+        follow.returned_by_exclusion,
+        "excluding",
+        "never asks for it and passes over other values -- not counted as a query "
+        "that selects it",
+    )
+    _report_returned(
+        "  what only checks it exists",
+        follow.consulted_by,
+        "checks",
+        "checks whether rows holding it exist and picks none of them up",
+    )
     if follow.selection_gates:
         click.echo(f"  what bounds that query's reach   {', '.join(follow.selection_gates)}")
         click.echo("                                   nothing in the map writes these")
@@ -385,6 +398,30 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
         follow.question, width=_WIDTH, initial_indent="  → ", subsequent_indent="    "
     ).splitlines():
         click.echo(line)
+
+
+def _report_returned(heading: str, entries, label: str, note: str) -> None:
+    """Statements that touch rows holding the value without selecting on it.
+
+    After both halves of "what moves it on" and under a heading of their own,
+    for the reason they are kept out of ``selected_by``: a ``NOT IN`` that
+    happens to let the value through, or an ``EXISTS`` that only looks, is not
+    the query that was meant to pick the row up, and printed among those it
+    would read as one.  The tables come with them, because whether a row of
+    this kind is in a table at all is the reader's to judge.
+    """
+    for index, entry in enumerate(entries):
+        lead = heading.ljust(33) if index == 0 else " " * 33
+        click.echo(f"{lead} {strategy_mod.short_owner(entry.owner)}")
+        said = entry.excludes if label == "excluding" else entry.consults
+        click.echo(
+            f"                                     {entry.file}:{entry.line}"
+            f"  {label} {', '.join(said)}"
+        )
+        if entry.tables:
+            click.echo(f"                                       reads  {', '.join(entry.tables)}")
+    if entries:
+        click.echo(f"                                   {note}")
 
 
 def _report_guarded(follow) -> None:
