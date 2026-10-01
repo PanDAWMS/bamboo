@@ -626,3 +626,81 @@ def test_every_table_a_statement_names_is_listed_in_the_order_it_names_them():
     ]
     # A fragment of an f-string, read off its text.
     assert sqltext.tables_named("INSERT INTO ATLAS_PANDA.filesTable4 ({}) VALUES ") == ["filesTable4"]
+
+
+def _written(sql: str) -> list[tuple[str, str, dict, dict, dict]]:
+    return [
+        (w.kind, w.table, {c: (v.kind, v.text) for c, v in w.columns.items()}, w.preconditions, w.keys)
+        for w in sqltext.writes(sql)
+    ]
+
+
+def test_what_a_statement_writes_is_read_off_the_tree_in_its_own_spelling():
+    """A comma inside a function, nested ``VALUES``, ``INSERT ... SELECT`` and a hinted ``INSERT``."""
+    assert _written("UPDATE {}.JEDI_Tasks SET nFiles=NVL(nFiles, 0)+1, status=:status WHERE jediTaskID=:t") == [
+        (
+            "update",
+            "JEDI_Tasks",
+            {"nFiles": ("expression", "NVL(nFiles, 0)+1"), "status": ("bind", ":status")},
+            {},
+            {"jediTaskID": ":t"},
+        )
+    ]
+    assert _written("INSERT INTO {}.JEDI_Events (jediTaskID,fileID,status) VALUES (:t,(SELECT MAX(f) FROM x),'ready')") == [
+        (
+            "insert",
+            "JEDI_Events",
+            {"jediTaskID": ("bind", ":t"), "fileID": ("expression", "(SELECT MAX(f) FROM x)"), "status": ("literal", "ready")},
+            {},
+            {},
+        )
+    ]
+    assert _written("INSERT INTO {}.TASK_ATTEMPTS (jeditaskid, attemptnr) SELECT jediTaskID, attemptNr FROM {}.JEDI_Tasks") == [
+        (
+            "insert",
+            "TASK_ATTEMPTS",
+            {"jeditaskid": ("expression", "jediTaskID"), "attemptnr": ("expression", "attemptNr")},
+            {},
+            {},
+        )
+    ]
+    assert _written("INSERT /*+ ignore_row_on_dupkey_index (e(r)) */ INTO ATLAS_PANDA.CARBON_REGION_EMISSIONS e (REGION) VALUES(:r)") == [
+        ("insert", "CARBON_REGION_EMISSIONS", {"REGION": ("bind", ":r")}, {}, {})
+    ]
+    # A column Python names at run time is no column.
+    assert _written("UPDATE {}.JEDI_Tasks SET merge{}={} WHERE jediTaskID=:jediTaskID") == []
+
+
+def test_a_write_is_guarded_only_by_what_every_row_it_changes_meets():
+    """The lock is the whole ``OR``; a subquery's and an ``OR``'s terms name no row."""
+    ((_kind, _table, _columns, preconditions, keys),) = _written(
+        "UPDATE {}.JEDI_Tasks SET lockedBy=:lockedBy,lockedTime=CURRENT_DATE,"
+        "workqueue_id=(SELECT queue_id FROM {}.JEDI_Work_Queue WHERE queue_name=:queueName) "
+        "WHERE jediTaskID=:jediTaskID AND (lockedBy IS NULL OR lockedTime<:timeLimit) AND NOT status=:ng "
+        "AND (PandaID=:p OR jobsetID=:p)"
+    )
+    assert preconditions == {
+        "lockedBy": "(lockedBy IS NULL OR lockedTime<:timeLimit)",
+        "lockedTime": "(lockedBy IS NULL OR lockedTime<:timeLimit)",
+    }
+    assert keys == {"jediTaskID": ":jediTaskID"}
+
+
+def test_where_a_value_is_written_is_an_offset_into_the_text_as_assembled():
+    """The variant keeps its holes, and the fragment a value came from is found by the offset."""
+    statement = "UPDATE {}.JEDI_Tasks SET status=:status, oldStatus=NULL WHERE jediTaskID=:t"
+    end = sqltext.supplied_at(statement, "update", "oldStatus", sqltext.ColumnValue(kind="literal", text="None"))
+    assert statement[:end].endswith("oldStatus=NULL")
+    insert = "INSERT INTO {}.JEDI_Tasks (jediTaskID,status) VALUES (:t,'ready')"
+    end = sqltext.supplied_at(insert, "insert", "status", sqltext.ColumnValue(kind="literal", text="ready"))
+    assert insert[:end].endswith("'ready'")
+    assert sqltext.supplied_at(insert, "update", "status", sqltext.ColumnValue(kind="literal", text="ready")) is None
+
+
+def test_every_test_of_a_written_column_is_its_precondition():
+    """``(ramCount IS NOT NULL AND ramCount>:ramCount)`` is two conjuncts on the column the update sets."""
+    ((_kind, _table, _columns, preconditions, _keys),) = _written(
+        "UPDATE {}.JEDI_Dataset_Contents SET ramCount=:ramCount WHERE jediTaskID=:jediTaskID "
+        "AND (ramCount IS NOT NULL AND ramCount>:ramCount)"
+    )
+    assert preconditions == {"ramCount": "ramCount IS NOT NULL AND ramCount>:ramCount"}

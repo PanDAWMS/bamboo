@@ -218,8 +218,8 @@ def _keys(clause: str, columns: set[str]) -> dict[str, str]:
     return found
 
 
-def writes(sql: str) -> list[SqlWrite]:
-    """Return the write statements in *sql*, as far as they can be read."""
+def _writes_in_text(sql: str) -> list[SqlWrite]:
+    """:func:`writes` for a statement that does not parse, off its text."""
     found: list[SqlWrite] = []
     for match in _UPDATE.finditer(sql):
         columns = {
@@ -276,20 +276,10 @@ def _insert_supplies(match: re.Match) -> list[tuple[str, ColumnValue, tuple[int,
     return supplies
 
 
-def supplied_at(
+def _supplied_at_in_text(
     statement: str, kind: str, column: str, supplied: ColumnValue
 ) -> Optional[int]:
-    """Where *statement* writes *supplied* into *column*, as an end offset.
-
-    ``None`` when this statement does not write that value into that column.
-
-    **The reading is chosen by kind rather than tried in turn.**  An UPSERT
-    builds its ``INSERT`` and its ``UPDATE`` through one local -- seven
-    functions here do -- and both spell the same column with the same value, so
-    a reading that accepted either would answer for the ``INSERT`` when asked
-    about the ``UPDATE``.  That is the same mis-answer this whole path exists
-    to remove, arriving from the other side.
-    """
+    """:func:`supplied_at` for a statement that does not parse, off its text."""
     if kind == "insert":
         for match in _INSERT.finditer(statement):
             for name, value, (_start, end) in _insert_supplies(match):
@@ -634,6 +624,261 @@ def deletes(sql: str) -> list[str]:
     """
     found = _targets(sql, exp.Delete)
     return _deletes_in_text(sql) if found is None else found
+
+
+def _statement(sql: str):
+    """*sql*'s ``UPDATE`` or ``INSERT`` node and its tokens, or ``None`` for any other statement.
+
+    The tokens are of *sql* itself, holes and all, so an offset taken from
+    them is an offset into what the caller holds -- the assembled variant a
+    fragment's span is measured in -- and not into the text the tree was
+    parsed from, where every hole is a name of another length.
+    """
+    tree = parsed(sql).tree
+    while isinstance(tree, exp.Subquery):
+        tree = tree.this
+    if not isinstance(tree, (exp.Update, exp.Insert)):
+        return None
+    return tree, _tokens(sql)
+
+
+def _spelled(sql: str, tokens: list, lo: int, hi: int) -> str:
+    """``tokens[lo:hi]`` as *sql* spells them."""
+    return sql[tokens[lo].start : tokens[hi - 1].end + 1].strip() if hi > lo else ""
+
+
+def _at_depth(tokens: list, start: int, kinds, stop: Optional[int] = None) -> Optional[int]:
+    """The first token from *start* of a type in *kinds*, outside any parentheses opened after it."""
+    depth = 0
+    for index in range(start, len(tokens) if stop is None else stop):
+        kind = tokens[index].token_type
+        if kind in _OPENS:
+            depth += 1
+        elif kind in _CLOSES:
+            depth -= 1
+        elif depth == 0 and kind in kinds:
+            return index
+    return None
+
+
+def _items(tokens: list, lo: int, hi: int) -> list[tuple[int, int]]:
+    """``tokens[lo:hi]`` cut at its own commas, as ``(lo, hi)`` per item."""
+    bounds = [lo - 1, *_cuts(tokens, lo, hi, _T.COMMA), hi]
+    return [(a + 1, b) for a, b in zip(bounds, bounds[1:], strict=False)]
+
+
+def _supplied(node: exp.Expression, spelled: str, insert: bool) -> ColumnValue:
+    """What *node*, spelled *spelled*, writes into a column.
+
+    The kind is :func:`classify`'s, read off the spelling, unless the tree
+    says the value is not one of the simple four: ``'a' || :b`` starts with a
+    quoted value and is an expression.  An ``INSERT`` has no prior row to copy
+    from, so a bare word in it is a sequence or a function, not a source
+    column -- calling it one would invent a passthrough edge.
+    """
+    value = classify(spelled)
+    simple = (
+        isinstance(node, (exp.Placeholder, exp.Literal, exp.Null))
+        or (isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal) and not node.this.is_string)
+        or (isinstance(node, exp.Column) and not node.table)
+    )
+    if not simple or (insert and value.kind == "column"):
+        value = ColumnValue(kind="expression", text=spelled)
+    return value
+
+
+def _update_pairs(node: exp.Update, sql: str, tokens: list) -> Optional[list[tuple[str, int, ColumnValue]]]:
+    """``(column, end offset, value)`` for each ``SET`` item of *node*, or ``None`` where the two readings disagree."""
+    update = _at_depth(tokens, 0, {_T.UPDATE})
+    assign = _at_depth(tokens, update + 1, {_T.SET}) if update is not None else None
+    if assign is None:
+        return None
+    end = _at_depth(tokens, assign + 1, _ENDS_A_CLAUSE | {_T.WHERE})
+    spans = _items(tokens, assign + 1, len(tokens) if end is None else end)
+    if len(spans) != len(node.expressions):
+        return None
+    found: list[tuple[str, int, ColumnValue]] = []
+    for (lo, hi), item in zip(spans, node.expressions, strict=True):
+        if not isinstance(item, exp.EQ) or not isinstance(item.this, exp.Column):
+            continue
+        # ``SET merge{}={}`` -- a column Python names at run time.
+        name = item.this.name
+        equals = _at_depth(tokens, lo, {_T.EQ}, hi)
+        if _NAMED_HOLE.search(name) or equals is None:
+            continue
+        found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi), False)))
+    return found
+
+
+def _insert_pairs(node: exp.Insert, sql: str, tokens: list) -> Optional[list[tuple[str, int, ColumnValue]]]:
+    """``(column, end offset, value)`` for each column *node* names, or ``None`` where it names none.
+
+    Paired by position, the names in one parenthesised run and the values in
+    another.  ``INSERT ... SELECT`` pairs a column with the select list's item
+    in its place: what that copies is read when the statement runs, so it is
+    an expression here.
+    """
+    target = node.this
+    if not isinstance(target, exp.Schema):
+        return None
+    names = [column.name for column in target.expressions]
+    insert = _at_depth(tokens, 0, {_T.INSERT})
+    source = node.expression
+    spans: list[tuple[int, int]] = []
+    values: list[exp.Expression] = []
+    if isinstance(source, exp.Values) and source.expressions and isinstance(source.expressions[0], exp.Tuple):
+        given = _at_depth(tokens, insert + 1, {_T.VALUES}) if insert is not None else None
+        if given is None or given + 1 >= len(tokens) or tokens[given + 1].token_type != _T.L_PAREN:
+            return None
+        closing = _closing(tokens, given + 1, len(tokens))
+        spans = _items(tokens, given + 2, closing if closing > 0 else len(tokens))
+        values = list(source.expressions[0].expressions)
+    elif isinstance(source, exp.Select):
+        chosen = _at_depth(tokens, insert + 1, {_T.SELECT}) if insert is not None else None
+        stop = _at_depth(tokens, chosen + 1, {_T.FROM}) if chosen is not None else None
+        if chosen is None:
+            return None
+        spans = _items(tokens, chosen + 1, len(tokens) if stop is None else stop)
+        values = [exp.Anonymous(this="select") for _item in source.expressions]
+    else:
+        return None
+    found: list[tuple[str, int, ColumnValue]] = []
+    for name, (lo, hi), value in zip(names, spans, values, strict=False):
+        if not _IDENTIFIER.fullmatch(name) or _NAMED_HOLE.search(name):
+            continue
+        found.append((name, tokens[hi - 1].end + 1, _supplied(value, _spelled(sql, tokens, lo, hi), True)))
+    return found
+
+
+def _conjunct_spans(tokens: list, lo: int, hi: int) -> list[tuple[int, int]]:
+    """``tokens[lo:hi]`` cut at its own ``AND``\\ s, through parentheses that hold nothing but those.
+
+    The tree's :func:`_conjuncts` does the same to the clause, so the two
+    readings line up term for term.
+    """
+    while hi - lo >= 2 and tokens[lo].token_type == _T.L_PAREN and _closing(tokens, lo, hi) == hi - 1:
+        if not _cuts(tokens, lo + 1, hi - 1, _T.AND):
+            break
+        lo, hi = lo + 1, hi - 1
+    cuts = _cuts(tokens, lo, hi, _T.AND)
+    if not cuts:
+        return [(lo, hi)]
+    bounds = [lo - 1, *cuts, hi]
+    return [span for a, b in zip(bounds, bounds[1:], strict=False) for span in _conjunct_spans(tokens, a + 1, b)]
+
+
+def _guards(node: exp.Update, sql: str, tokens: list, written: set[str]) -> Optional[tuple[dict[str, str], dict[str, str]]]:
+    """``(preconditions, keys)`` of an ``UPDATE``, off its tree and in its own spelling.
+
+    A term counts only where every row has to meet it -- a conjunct of the
+    ``WHERE`` -- and only its own columns do: the text reading took a term
+    inside a subquery for one on the row (``queue_name=:queueName`` of a
+    ``SET workqueue_id=(SELECT ...)``), and the branch after an ``OR`` for the
+    whole of the test.  A conjunct naming a column the statement writes is a
+    precondition, kept whole -- ``(lockedBy IS NULL OR lockedTime<:t)`` is the
+    lock a compare-and-set takes, and neither half of it is.  ``None`` where
+    the two readings of the clause disagree on its terms.
+    """
+    where = node.args.get("where")
+    preconditions: dict[str, str] = {}
+    keys: dict[str, str] = {}
+    if where is None:
+        return preconditions, keys
+    at = _at_depth(tokens, (_at_depth(tokens, 0, {_T.SET}) or 0) + 1, {_T.WHERE})
+    if at is None:
+        return None
+    lo, hi = _clause(tokens, at)
+    spans = _conjunct_spans(tokens, lo, hi)
+    terms = list(_conjuncts(where.this))
+    if len(spans) != len(terms):
+        return None
+    lowered = {column.lower(): column for column in written}
+    testing: dict[str, list[str]] = {}
+    for (a, b), term in zip(spans, terms, strict=True):
+        spelled = re.sub(r"\s+", " ", _spelled(sql, tokens, a, b)).strip()
+        own = [column for column in term.find_all(exp.Column) if column.find_ancestor(exp.Select) is None]
+        hits = list(dict.fromkeys(lowered[column.name.lower()] for column in own if column.name.lower() in lowered))
+        # Every test of the column, joined: ``(ramCount IS NOT NULL AND
+        # ramCount>:ramCount)`` is two conjuncts on one column, and keeping
+        # the first dropped the one that says which rows are moved.
+        for owner in hits:
+            testing.setdefault(owner, []).append(spelled)
+        if (
+            not hits
+            and isinstance(term, exp.EQ)
+            and isinstance(term.this, exp.Column)
+            and isinstance(term.expression, exp.Placeholder)
+            and not _NAMED_HOLE.search(term.expression.name)
+        ):
+            keys.setdefault(term.this.name, f":{term.expression.name}")
+    preconditions.update((owner, " AND ".join(dict.fromkeys(said))) for owner, said in testing.items())
+    return preconditions, keys
+
+
+def writes(sql: str) -> list[SqlWrite]:
+    """Return the write statements in *sql*, as far as they can be read.
+
+    Off the tree, with each value spelled as *sql* spells it.  The text
+    reading this replaced cut a ``SET`` at every comma (``NVL(b, 0)`` came
+    apart), read no ``INSERT ... SELECT`` and no ``INSERT`` whose values
+    nested parentheses, and took a subquery's terms for the row's.  A
+    statement that does not parse, or whose two readings disagree on its
+    parts, is read off its text as before -- see :func:`_writes_in_text`.
+    """
+    read = _statement(sql)
+    if read is None:
+        return _writes_in_text(sql) if parsed(sql).tree is None else []
+    node, tokens = read
+    table = _named_table(node.this.this if isinstance(node.this, exp.Schema) else node.this, set())
+    if isinstance(node, exp.Update):
+        pairs = _update_pairs(node, sql, tokens)
+        if pairs is None:
+            return _writes_in_text(sql)
+        columns = {name: value for name, _end, value in pairs}
+        if not columns or table is None:
+            return []
+        guarded = _guards(node, sql, tokens, set(columns))
+        if guarded is None:
+            return _writes_in_text(sql)
+        preconditions, keys = guarded
+        return [SqlWrite(kind="update", table=table, columns=columns, preconditions=preconditions, keys=keys)]
+    pairs = _insert_pairs(node, sql, tokens)
+    if pairs is None:
+        return _writes_in_text(sql)
+    columns = {name: value for name, _end, value in pairs}
+    return [SqlWrite(kind="insert", table=table, columns=columns)] if columns and table is not None else []
+
+
+def supplied_at(
+    statement: str, kind: str, column: str, supplied: ColumnValue
+) -> Optional[int]:
+    """Where *statement* writes *supplied* into *column*, as an end offset.
+
+    ``None`` when this statement does not write that value into that column.
+    The offset is into *statement* as given -- the tokens are its own -- so a
+    caller holding an assembled variant maps it to the fragment that wrote it.
+
+    **The reading is chosen by kind rather than tried in turn.**  An UPSERT
+    builds its ``INSERT`` and its ``UPDATE`` through one local -- seven
+    functions here do -- and both spell the same column with the same value, so
+    a reading that accepted either would answer for the ``INSERT`` when asked
+    about the ``UPDATE``.  That is the same mis-answer this whole path exists
+    to remove, arriving from the other side.
+    """
+    read = _statement(statement)
+    if read is None:
+        return _supplied_at_in_text(statement, kind, column, supplied) if parsed(statement).tree is None else None
+    node, tokens = read
+    if kind == "insert":
+        pairs = _insert_pairs(node, statement, tokens) if isinstance(node, exp.Insert) else []
+    else:
+        pairs = _update_pairs(node, statement, tokens) if isinstance(node, exp.Update) else []
+    if pairs is None:
+        return _supplied_at_in_text(statement, kind, column, supplied)
+    for name, end, value in pairs:
+        if name == column and value == supplied:
+            return end
+    return None
 
 
 #: ``INSERT INTO t``, ``UPDATE t``, ``FROM t`` -- where a statement names a
