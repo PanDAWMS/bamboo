@@ -1732,6 +1732,51 @@ def test_an_optional_fragment_does_not_split_the_statement():
     assert "frozenTime=NULL" in texts[0]
 
 
+def test_a_cut_off_the_end_of_a_statement_is_applied():
+    """``sql = sql[:-4]`` drops the ``AND `` a loop leaves after its last term.
+
+    Left unread, the statement ``updateTask_JEDI`` runs ended in ``AND`` --
+    not SQL, and not what PanDA sends.  The ``+ ") "`` spelling closes the
+    bracket a loop left a comma in, and the comma cut before ``FROM`` is what
+    let ``reads`` see the table at all: ``SELECT {},FROM t`` has no space for
+    its ``FROM`` to stand after.
+    """
+    func = _func(
+        "def f(self, criteria, sites, attrs):\n"
+        "    sql = 'SELECT status FROM t WHERE '\n"
+        "    for key in criteria:\n"
+        "        sql += f'{key}=:{key} AND '\n"
+        "    sql += 'status IN (:a,:b) AND '\n"
+        "    sql = sql[:-4]\n"
+        "    self.cur.execute(sql, varMap)\n"
+        "    sqlI = 'SELECT PandaID FROM j WHERE site IN ('\n"
+        "    for site in sites:\n"
+        "        sqlI += ':s,'\n"
+        "    sqlI = sqlI[:-1] + ') '\n"
+        "    self.cur.execute(sqlI, varMap)\n"
+        "    sqlA = 'SELECT '\n"
+        "    for attr in attrs:\n"
+        "        sqlA += f'{attr},'\n"
+        "    sqlA = sqlA[:-1] + ' '\n"
+        "    sqlA += 'FROM d WHERE id=:id '\n"
+        "    self.cur.execute(sqlA, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(func)] == [
+        "SELECT status FROM t WHERE {}=:{} AND status IN (:a,:b) ",
+        "SELECT PandaID FROM j WHERE site IN (:s) ",
+        "SELECT {} FROM d WHERE id=:id ",
+    ]
+    assert sqltext.reads("SELECT {} FROM d WHERE id=:id ") == [("d", [])]
+    # Each fragment keeps the stretch it still has, and no more.
+    ((text, spans),) = sql.variant_spans(func, "sqlI")
+    assert [text[span.start : span.end] for span in spans] == [
+        "SELECT PandaID FROM j WHERE site IN (",
+        ":s",
+        ") ",
+    ]
+
+
 def test_a_statement_executed_in_three_pieces_is_read_whole():
     """``execute(sqlU + sql + comment, varMap)`` -- the ``WHERE`` is a name too.
 

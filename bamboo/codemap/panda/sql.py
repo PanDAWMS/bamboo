@@ -629,6 +629,16 @@ def _parts(
             for target in targets:
                 if not (isinstance(target, ast.Name) and target.id == name):
                     continue
+                trimmed = _trimmed(_with_lists(node.value, lists), name)
+                if trimmed is not None:
+                    # ``sql = sql[:-4]`` cuts the ``AND `` a loop left after
+                    # its last term.  Left unread, the statement ends in
+                    # ``AND`` -- a text PanDA never runs.
+                    _count, rest = trimmed
+                    parts.append((node.lineno, TRIM, "", node))
+                    if rest:
+                        parts.append((node.lineno, "+=", _joined(rest), node))
+                    continue
                 wrapped = _wrapping(_with_lists(node.value, lists), name)
                 if wrapped is not None:
                     # ``sqlP = "SELECT * FROM (" + sqlP`` puts text around
@@ -691,9 +701,9 @@ def _parts(
                 parts.append((node.lineno, "+=", text, node))
             elif stops is not None:
                 # Only ``+=``.  A ``=`` that renders nothing starts no
-                # statement, so nothing was dropped from one -- and 12 of the
-                # 14 in the corpus are ``sql = sql[:-1]`` trimming a trailing
-                # comma, which ``executions`` already reads as a discard.
+                # statement, so nothing was dropped from one; and
+                # ``sql = sql[:-1]``, once most of them, is read above as a
+                # cut.
                 stops.append(
                     Stop(node.lineno, ast.unparse(node.value), FRAGMENT_NOT_RENDERED)
                 )
@@ -703,6 +713,60 @@ def _parts(
 
 #: The operator of a fragment written in front of what the name holds.
 PREFIX = "=+"
+
+#: The operator of a fragment that cuts the end off what the name holds.  Its
+#: text is empty and the count is read off the node -- see :func:`_cut_of`.
+TRIM = "[:-]"
+
+
+def _trimmed(value: ast.expr, name: str) -> Optional[tuple[int, list[ast.expr]]]:
+    """``(count, rest)`` where *value* is *name* with its last *count* characters cut, then *rest*.
+
+    The two spellings the corpus runs a statement through, 15 times over 14
+    functions, each cutting what a loop left after its last item -- a comma,
+    or ``AND ``::
+
+        sql = sql[:-4]
+        sql_to_get_ids = sql_to_get_ids[:-1] + ") "
+    """
+    operands = _concatenated(value)
+    head = operands[0]
+    if not (
+        isinstance(head, ast.Subscript)
+        and isinstance(head.value, ast.Name)
+        and head.value.id == name
+        and isinstance(head.slice, ast.Slice)
+        and head.slice.lower is None
+        and head.slice.step is None
+    ):
+        return None
+    upper = head.slice.upper
+    if (
+        isinstance(upper, ast.UnaryOp)
+        and isinstance(upper.op, ast.USub)
+        and isinstance(upper.operand, ast.Constant)
+        and type(upper.operand.value) is int
+        and upper.operand.value > 0
+    ):
+        return upper.operand.value, operands[1:]
+    return None
+
+
+def _cut_of(node: ast.stmt) -> int:
+    """How many characters a :data:`TRIM` fragment cuts."""
+    value = written_value(node)
+    for target in targets_of(node):
+        if isinstance(target, ast.Name) and value is not None:
+            trimmed = _trimmed(value, target.id)
+            if trimmed is not None:
+                return trimmed[0]
+    return 0
+
+
+def _joined(pieces: list[ast.expr]) -> str:
+    """The text of a run of ``+`` operands, a piece that renders nothing being a hole."""
+    rendered = [rendered_text(piece) for piece in pieces]
+    return "".join(one if one is not None else _BARE_FIELD for one in rendered)
 
 
 def _wrapping(value: ast.expr, name: str) -> Optional[tuple[str, str]]:
@@ -718,12 +782,7 @@ def _wrapping(value: ast.expr, name: str) -> Optional[tuple[str, str]]:
     ]
     if len(at) != 1 or len(operands) < 2:
         return None
-
-    def text(pieces: list[ast.expr]) -> str:
-        rendered = [rendered_text(piece) for piece in pieces]
-        return "".join(one if one is not None else _BARE_FIELD for one in rendered)
-
-    return text(operands[: at[0]]), text(operands[at[0] + 1 :])
+    return _joined(operands[: at[0]]), _joined(operands[at[0] + 1 :])
 
 
 def _composed_texts(
@@ -848,11 +907,13 @@ def _through_name(func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.
 def _fold(parts: list[tuple[int, str, str, ast.stmt]]) -> str:
     """Concatenate one ``=``-started run of fragments."""
     assembled = ""
-    for _line, operator, text, _node in parts:
+    for _line, operator, text, node in parts:
         if operator == "=":
             assembled = text
         elif operator == PREFIX:
             assembled = text + assembled
+        elif operator == TRIM:
+            assembled = assembled[: max(len(assembled) - _cut_of(node), 0)]
         else:
             assembled += text
     return assembled
@@ -1133,6 +1194,13 @@ def _fold_filled(
     spans: list[Span] = []
     for index, (_line, operator, text, node) in enumerate(parts):
         if index in dropped:
+            continue
+        if operator == TRIM:
+            # Cut from every fragment it reaches into, so no value is placed
+            # in a stretch the statement no longer has.
+            kept = max(len(assembled) - _cut_of(node), 0)
+            assembled = assembled[:kept]
+            spans = [Span(span.node, min(span.start, kept), min(span.end, kept)) for span in spans]
             continue
         if key_fills is not None and key_fills[index] is not None:
             text = key_fills[index]
@@ -2274,8 +2342,9 @@ def executions(
             # statement that reads its own name is not one of these:
             # ``sql_to_get_ids = sql_to_get_ids[:-1] + ") "`` closes a bracket
             # on what is already there, and counting it cost three real read
-            # edges, measured.  Most of that spelling never reaches ``_parts``,
-            # which keeps only what renders -- ``sql = f"{sql} AND x"`` does.
+            # edges, measured.  It reaches ``_parts`` as a :data:`TRIM` and a
+            # ``+=``, not as a ``=``; the rest of that spelling only where it
+            # renders -- ``sql = f"{sql} AND x"`` does.
             built = _parts(func, base.id, stops=stops)
             discards = [
                 part
