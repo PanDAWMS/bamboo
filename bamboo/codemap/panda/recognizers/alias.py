@@ -55,6 +55,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
+from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import CERTAIN, SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
@@ -129,30 +130,26 @@ def find_aliases(
     return aliases
 
 
-class Producer:
-    """A method whose return value settles a subject."""
-
-    def __init__(self, defining_class: str, method: str) -> None:
-        self.defining_class = defining_class
-        self.method = method
-        # (literal, the conditions inside the method)
-        self.values: list[tuple[str, list[str]]] = []
-        # Whether it can also return something this slice could not resolve.
-        self.opaque = False
-
-
 def _returned_values(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    func: ast.FunctionDef | ast.AsyncFunctionDef, hops: int = 0
 ) -> tuple[list[tuple[str, list[str]]], bool]:
-    """``([(literal, inner conditions)], whether anything is unresolved)``.
+    """``([(literal, conditions)], whether anything is unresolved)`` for *func*'s returns.
 
-    Two shapes are read: a literal returned outright, and a local returned after
-    a guarded chain assigned it, which is the shape that matters here and is
-    what :func:`literal_values` answers.  Anything else -- a call, a computed
+    Three shapes are read: a literal returned outright; a local returned after
+    a guarded chain assigned it, which is what :func:`literal_values` answers;
+    and a call returned outright, followed into what *it* returns (see
+    :func:`_produced`) -- ``return self.other(...)`` hands back that method's
+    literals under that method's guards.  Anything else -- a computed
     expression, ``True`` -- is counted as unresolved so the junction can say the
     value may be something other than what was listed, rather than implying the
     list is closed.
+
+    Each condition is marked with the method it is tested in.  A reader who
+    cannot tell the caller's guard from the helper's cannot tell a caller that
+    never ran from a helper that decided otherwise, and the same holds one
+    helper further in.
     """
+    mark = f"  [in {func.name}()]"
     values: list[tuple[str, list[str]]] = []
     opaque = False
     for node in ast.walk(func):
@@ -160,45 +157,65 @@ def _returned_values(
             continue
         if enclosing_function(node) is not func:
             continue
+        returning = path_condition(node)
         if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            values.append((node.value.value, path_condition(node)))
+            values.append((node.value.value, [test + mark for test in returning]))
         elif isinstance(node.value, ast.Name):
             resolved = literal_values(func, node.value.id)
             if resolved:
                 # The return's own guards as well: a chain assigning the local
                 # can sit inside a branch of the function.
-                returning = path_condition(node)
                 values.extend(
-                    (literal, returning + [c for c in conditions if c not in returning])
+                    (
+                        literal,
+                        [
+                            test + mark
+                            for test in returning + [c for c in conditions if c not in returning]
+                        ],
+                    )
                     for literal, conditions, _line in resolved
                 )
             else:
                 opaque = True
+        elif isinstance(node.value, ast.Call):
+            followed = _produced(func, node.value, hops + 1)
+            if followed is None:
+                opaque = True
+                continue
+            deeper, deeper_opaque = followed
+            values.extend(
+                (literal, [test + mark for test in returning] + inner) for literal, inner in deeper
+            )
+            opaque = opaque or deeper_opaque
         else:
             opaque = True
     return values, opaque
 
 
-def find_producers(modules: list[SourceModule]) -> dict[str, list[Producer]]:
-    """Return ``{method name: [producer, ...]}`` over the whole corpus.
+def _produced(
+    func: ast.AST, call: ast.Call, hops: int = 0
+) -> Optional[tuple[list[tuple[str, list[str]]], bool]]:
+    """What *call* hands back, read in each function it lands in; ``None`` where it lands nowhere.
 
-    Keyed by name for the same reason the aliases are: a call site offers the
-    name, and where exactly one class defines it no further evidence is needed.
+    Placed by the corpus's calls, so the helper is the one the receiver's
+    class declares or inherits.  Found by name instead, a method defined once
+    anywhere in the corpus answered for every ``self.<name>()``, whatever
+    ``self`` was, and a name two classes declared answered for none unless the
+    caller's family held one of them.  A call that may land somewhere the
+    calls cannot name leaves the list open.
     """
-    producers: dict[str, list[Producer]] = {}
-    for module in modules:
-        attach_parents(module.tree)
-        for func, owner in functions_with_owner(module.tree):
-            if owner is None:
-                continue
-            values, opaque = _returned_values(func)
-            if not values:
-                continue
-            producer = Producer(owner, func.name)
-            producer.values = values
-            producer.opaque = opaque
-            producers.setdefault(func.name, []).append(producer)
-    return producers
+    if hops > sql.RETURN_HOPS:
+        return None
+    where = sql.placed(func, call)
+    if where is None or not where.targets:
+        return None
+    values: list[tuple[str, list[str]]] = []
+    opaque = bool(where.unplaced)
+    for target in where.targets:
+        found, unresolved = _returned_values(target.func, hops)  # type: ignore[arg-type]
+        values.extend(found)
+        opaque = opaque or unresolved
+    return values, opaque
 
 
 def extract_producers(
@@ -222,7 +239,6 @@ def extract_producers(
     still counts only the resolved ones, so the coverage figure keeps saying how
     much of the shape was actually followed.
     """
-    producers = find_producers(modules)
     junctions: dict[str, JunctionNode] = {}
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str]] = set()
@@ -253,8 +269,8 @@ def extract_producers(
                 candidates += 1
                 attributed.add((spec_class, target.attr))
                 caller = path_condition(node)
-                producer = _producer_at(producers, call.func.attr, owner_class, attributor)
-                if producer is None:
+                followed = _produced(func, call) if func is not None else None
+                if followed is None or not followed[0]:
                     # The helper returns something this slice cannot follow --
                     # a computed value, or another call.  The writer is still
                     # the answer to "who set this", which is what localize and
@@ -274,7 +290,8 @@ def extract_producers(
                     )
                     continue
                 explained += 1
-                for literal, inner in producer.values:
+                produced, opaque = followed
+                for literal, inner in produced:
                     _record(
                         junctions,
                         map_id=map_id,
@@ -285,10 +302,9 @@ def extract_producers(
                         spec_class=spec_class,
                         attribute=target.attr,
                         literal=literal,
-                        condition=caller
-                        + [f"{test}  [in {producer.method}()]" for test in inner],
+                        condition=caller + inner,
                     )
-                if producer.opaque:
+                if opaque:
                     # Says the list is not closed rather than letting it read as
                     # complete: the helper has a return this slice cannot follow.
                     _record(
@@ -300,7 +316,7 @@ def extract_producers(
                         owner=f"{module.rel_path}::{func.name if func else '<module>'}",
                         spec_class=spec_class,
                         attribute=target.attr,
-                        literal=f"runtime({producer.method}())",
+                        literal=f"runtime({call.func.attr}())",
                         condition=caller,
                         tier=2,
                     )
@@ -326,32 +342,6 @@ def extract_producers(
         for spec_class, attribute in sorted(attributed)
     ]
     return subjects, list(junctions.values()), coverage
-
-
-def _producer_at(
-    producers: dict[str, list[Producer]],
-    method: str,
-    owner_class: Optional[str],
-    attributor: SpecAttributor,
-) -> Optional[Producer]:
-    """Return the producer ``self.<method>()`` resolves to.
-
-    ``self`` names the class the call sits in, so a producer defined there or in
-    one of its bases is the answer.  Where the name is defined once in the whole
-    corpus that check is unnecessary, which is the common case.
-    """
-    candidates = producers.get(method)
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    if owner_class is None:
-        return None
-    family = attributor.family(owner_class)
-    for producer in candidates:
-        if producer.defining_class in family:
-            return producer
-    return None
 
 
 def _alias_at(

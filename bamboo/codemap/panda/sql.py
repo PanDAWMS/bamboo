@@ -65,7 +65,7 @@ from bamboo.codemap.panda.pathcond import (
 from bamboo.codemap.panda.values import blank_fields, rendered_text
 
 if TYPE_CHECKING:
-    from bamboo.codemap.calls import Calls
+    from bamboo.codemap.calls import Calls, Placed
 
 logger = logging.getLogger(__name__)
 
@@ -570,6 +570,20 @@ def _returns(func: ast.AST) -> list[ast.expr]:
     from bamboo.codemap.calls import returns
 
     return returns(func)
+
+
+def placed(func: ast.AST, call: ast.Call) -> Optional["Placed"]:
+    """Where *call*, made in *func*, lands; ``None`` outside :func:`across_calls`.
+
+    For a slice that reads a callee its own way.  The build's calls are held
+    here so that every slice asking where a call goes gets the same answer.
+    """
+    if _CALLS is None:
+        return None
+    file = _CALLS.types.file_of(func)
+    if file is None:
+        return None
+    return _CALLS.callees(file, func, call)
 
 
 def every_return(

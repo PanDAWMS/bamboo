@@ -4814,7 +4814,8 @@ def _producer_extract(*sources: tuple[str, str]):
     modules += [_module(text, rel) for text, rel in sources]
     declarations = progress.spec_attributes(modules)
     attributor = attribution.SpecAttributor(declarations, attribution.class_bases(modules))
-    return alias.extract_producers(modules, MAP_ID, VERSION, declarations, attributor)
+    with _with_calls(modules):
+        return alias.extract_producers(modules, MAP_ID, VERSION, declarations, attributor)
 
 
 def test_a_status_decided_inside_a_helper_reaches_the_map():
@@ -4860,6 +4861,7 @@ def test_the_callers_conditions_come_first_and_are_not_marked():
     """A reader who cannot tell the caller's guard from the helper's cannot tell
     a caller that never ran from a helper that decided otherwise."""
     caller = (
+        "from .PostProcessorBase import PostProcessorBase\n"
         "class AtlasProdPostProcessor(PostProcessorBase):\n"
         "    def doPostProcess(self, taskSpec):\n"
         "        if taskSpec.gshare != 'Test':\n"
@@ -4920,6 +4922,56 @@ def test_only_a_bare_self_receiver_is_followed():
 
     assert not any("TaskRefinerBase" in j.owner for j in junctions)
     assert not any(c.file.endswith("TaskRefinerBase.py") for c in coverage)
+
+
+def test_a_helper_returning_another_methods_call_is_followed_into_it():
+    """``return self.decide(taskSpec)`` hands back what ``decide`` returns.
+    Read one hop deep, the helper was a call it could not follow and the write
+    had no outcome at all.  Each guard is marked with the method it is in."""
+    source = (
+        "class JobGenerator(object):\n"
+        "    def generate(self, taskSpec):\n"
+        "        taskSpec.status = self.finalStatus(taskSpec)\n"
+        "    def finalStatus(self, taskSpec):\n"
+        "        if taskSpec.ready:\n"
+        "            return self.decide(taskSpec)\n"
+        "        return 'pending'\n"
+        "    def decide(self, taskSpec):\n"
+        "        if taskSpec.broken:\n"
+        "            return 'broken'\n"
+        "        return 'running'\n"
+    )
+
+    _subjects, junctions, coverage = _producer_extract((source, "pandajedi/jediorder/JobGenerator.py"))
+
+    branches = {b.outcome: b.path_condition for j in junctions for b in j.branches}
+    assert set(branches) == {"broken", "running", "pending"}
+    assert branches["broken"] == [
+        "taskSpec.ready  [in finalStatus()]",
+        "taskSpec.broken  [in decide()]",
+    ]
+    assert [(c.candidates, c.explained) for c in coverage] == [(1, 1)]
+
+
+def test_a_helper_another_class_declares_does_not_answer_for_this_self():
+    """Found by name, a method declared once in the corpus answered for every
+    ``self.<name>()``.  ``Refiner`` neither declares nor inherits
+    ``getFinalTaskStatus``, so whatever its ``self`` runs, it is not that."""
+    source = (
+        "class Refiner(object):\n"
+        "    def refine(self, taskSpec):\n"
+        "        taskSpec.status = self.getFinalTaskStatus(taskSpec)\n"
+    )
+
+    _subjects, junctions, coverage = _producer_extract(
+        (_POST_PROCESSOR, "pandajedi/jedipprocess/PostProcessorBase.py"),
+        (source, "pandajedi/jedirefine/TaskRefinerBase.py"),
+    )
+
+    refined = [j for j in junctions if "TaskRefinerBase" in j.owner]
+    assert [(b.outcome, b.tier) for j in refined for b in j.branches] == [
+        ("runtime(getFinalTaskStatus())", 2)
+    ]
 
 
 # --------------------------------------------------------------------------- #
