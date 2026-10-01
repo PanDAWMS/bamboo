@@ -3654,7 +3654,7 @@ def test_a_bind_filled_from_a_declared_mapping_resolves_to_its_values():
     """``newTaskStatus = commandStatusMap[commandStr]["doing"]`` reaches the
     database through a bind, which is where the statuses only this mapping
     produces actually live."""
-    source = (
+    source = _IMPORTS_TASK_SPEC + (
         "class M:\n"
         "    def f(self, commandStr):\n"
         "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,oldStatus=:oldStatus '\n"
@@ -3671,9 +3671,10 @@ def test_a_bind_filled_from_a_declared_mapping_resolves_to_its_values():
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
-    _s, junctions, _c, _u, _d, _x, _stops = sqlwrite.extract(
-        modules, MAP_ID, VERSION, attributor
-    )
+    with _with_calls(modules):
+        _s, junctions, _c, _u, _d, _x, _stops = sqlwrite.extract(
+            modules, MAP_ID, VERSION, attributor
+        )
     status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
 
     assert {(b.outcome, b.tier) for b in status[0].branches} == {
@@ -4097,6 +4098,10 @@ def test_exclusive_siblings_do_not_negate_each_other():
 # ``commandStatusMap()`` is the one declaration in the corpus that is complete
 # rather than a sample: it *is* the command-to-status relation.  Two statuses
 # PanDA declares exist nowhere else, so nothing else can account for them.
+#
+# Read through the corpus's calls, as a build reads it: the call lands in the
+# method the receiver's class declares, and what that method returns is the
+# mapping.
 
 _COMMAND_MAP = """
 class JediTaskSpec(object):
@@ -4112,42 +4117,58 @@ class JediTaskSpec(object):
     commandStatusMap = classmethod(commandStatusMap)
 """
 
+_IMPORTS_TASK_SPEC = "from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec\n"
 
-def _mappings(*sources: str):
-    modules = [_module(text, f"pandaserver/taskbuffer/m{i}.py") for i, text in enumerate(sources)]
-    return values.declared_mappings(modules)
+
+def _with_calls(modules):
+    """The corpus's calls over in-memory *modules*, for the length of a block."""
+    from pathlib import Path
+
+    roots = {package: Path("/nonexistent") / package for package in ("pandaserver", "pandajedi")}
+    return sql.across_calls(sqlwrite.corpus_calls(modules, roots))
+
+
+def _settled(caller: str, *others: tuple[str, str]) -> list[list[str]]:
+    """What each assignment in ``f`` settles to, with the command map in the corpus."""
+    modules = [
+        _module(_COMMAND_MAP, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        *(_module(text, rel) for text, rel in others),
+        _module(_IMPORTS_TASK_SPEC + caller, "pandaserver/taskbuffer/caller.py"),
+    ]
+    func = next(
+        node
+        for node in ast.walk(modules[-1].tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "f"
+    )
+    settle = values.resolver()
+    with _with_calls(modules):
+        return [settle(node.value, func) for node in ast.walk(func) if isinstance(node, ast.Assign)]
 
 
 def test_a_run_time_key_enumerates_the_level_a_stated_one_narrows_it():
     """``[commandStr]["done"]`` cannot say which command ran, but it can say the
     six statuses a completed command leaves behind -- and ``["kill"]["doing"]``
     resolves to exactly one."""
-    mappings = _mappings(_COMMAND_MAP)
-    func = _func(
+    done, doing = _settled(
         "def f(self, commandStr):\n"
         "    a = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
         "    b = JediTaskSpec.commandStatusMap()['kill']['doing']\n"
     )
-    settle = values.resolver(mappings)
-    assignments = [n for n in ast.walk(func) if isinstance(n, ast.Assign)]
 
-    assert settle(assignments[0].value, func) == ["dummy", "passed", "toabort"]
-    assert settle(assignments[1].value, func) == ["aborting"]
+    assert done == ["dummy", "passed", "toabort"]
+    assert doing == ["aborting"]
 
 
 def test_a_local_holding_the_mapping_resolves_too():
     """``commandStatusMap = JediTaskSpec.commandStatusMap()`` sits at the top of
     the method that subscripts it a hundred lines further down."""
-    mappings = _mappings(_COMMAND_MAP)
-    func = _func(
+    _held, written = _settled(
         "def f(self, commandStr):\n"
         "    commandStatusMap = JediTaskSpec.commandStatusMap()\n"
         "    newTaskStatus = commandStatusMap[commandStr]['doing']\n"
     )
-    settle = values.resolver(mappings)
-    written = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][1]
 
-    assert settle(written.value, func) == ["aborting", "finishing", "paused"]
+    assert written == ["aborting", "finishing", "paused"]
 
 
 def test_a_loop_over_the_mapping_reaches_the_same_values():
@@ -4160,70 +4181,125 @@ def test_a_loop_over_the_mapping_reaches_the_same_values():
     subscript is why every command-in-progress status looked like a value no
     query asks for -- a state a task enters and never leaves.
     """
-    mappings = _mappings(_COMMAND_MAP)
-    func = _func(
+    *_held, bound = _settled(
         "def f(self):\n"
         "    commandStatusMap = JediTaskSpec.commandStatusMap()\n"
         "    for commandStr, taskStatusMap in commandStatusMap.items():\n"
         "        varMap[':status'] = taskStatusMap['doing']\n"
     )
-    settle = values.resolver(mappings)
-    bound = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
 
-    assert settle(bound.value, func) == ["aborting", "finishing", "paused"]
+    assert bound == ["aborting", "finishing", "paused"]
 
 
 def test_the_key_half_of_the_loop_is_not_a_value():
     """Binding it would enumerate command names as if they were statuses."""
-    mappings = _mappings(_COMMAND_MAP)
-    func = _func(
+    *_held, bound = _settled(
         "def f(self):\n"
         "    commandStatusMap = JediTaskSpec.commandStatusMap()\n"
         "    for commandStr, taskStatusMap in commandStatusMap.items():\n"
         "        varMap[':status'] = commandStr['doing']\n"
     )
-    settle = values.resolver(mappings)
-    bound = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
 
-    assert settle(bound.value, func) == []
+    assert bound == []
 
 
 def test_a_mapping_with_one_computed_entry_resolves_to_nothing():
     """Elimination treats a short candidate list as complete, so a value set
     missing a member is worse than no value set: the caller then records an
     honest run-time branch instead of a closed set that is not closed."""
-    mappings = _mappings(
-        "class Spec(object):\n"
-        "    def statusMap(cls):\n"
-        "        return {'kill': 'aborting', 'finish': compute()}\n"
-        "    statusMap = classmethod(statusMap)\n"
+    (written,) = _settled(
+        "from pandaserver.taskbuffer.spec import Spec\n"
+        "def f(self):\n"
+        "    a = Spec.statusMap()['kill']\n",
+        (
+            "class Spec(object):\n"
+            "    def statusMap(cls):\n"
+            "        return {'kill': 'aborting', 'finish': compute()}\n"
+            "    statusMap = classmethod(statusMap)\n",
+            "pandaserver/taskbuffer/spec.py",
+        ),
     )
 
-    assert mappings == {}
+    assert written == []
 
 
-def test_two_classes_disagreeing_on_a_name_drop_it():
-    """A call site offers the method name and not the class, so where the name
-    means two different mappings it cannot be told which one it reached."""
-    mappings = _mappings(
-        "class A(object):\n"
-        "    def statusMap(cls):\n"
-        "        return {'kill': 'aborting'}\n",
-        "class B(object):\n"
-        "    def statusMap(cls):\n"
-        "        return {'kill': 'toabort'}\n",
+def test_two_classes_declaring_one_name_each_answer_for_their_own_receiver():
+    """Read by method name, ``A.statusMap()`` and ``B.statusMap()`` were one
+    entry holding two different mappings, and both were dropped because a call
+    site could not be told which it reached.  The receiver's class tells it."""
+    first, second = _settled(
+        "from pandaserver.taskbuffer.ab import A, B\n"
+        "def f(self):\n"
+        "    a = A.statusMap()['kill']\n"
+        "    b = B.statusMap()['kill']\n",
+        (
+            "class A(object):\n"
+            "    def statusMap(cls):\n"
+            "        return {'kill': 'aborting'}\n"
+            "class B(object):\n"
+            "    def statusMap(cls):\n"
+            "        return {'kill': 'toabort'}\n",
+            "pandaserver/taskbuffer/ab.py",
+        ),
     )
 
-    assert mappings == {}
+    assert (first, second) == (["aborting"], ["toabort"])
+
+
+def test_a_method_taking_a_parameter_is_read_when_every_return_is_a_mapping():
+    """Read by name, a parameter meant the mapping was built for a caller, and
+    the method was passed over.  Followed through the call, each return is
+    read, and a subscript reaches into all of them."""
+    (written,) = _settled(
+        "from pandaserver.taskbuffer.spec import Spec\n"
+        "def f(self, flag):\n"
+        "    a = Spec.statusMap(flag)['kill']\n",
+        (
+            "class Spec(object):\n"
+            "    def statusMap(cls, flag):\n"
+            "        if flag:\n"
+            "            return {'kill': 'aborting'}\n"
+            "        return {'kill': 'toabort'}\n",
+            "pandaserver/taskbuffer/spec.py",
+        ),
+    )
+
+    assert written == ["aborting", "toabort"]
+
+
+def test_a_return_the_calls_cannot_follow_leaves_no_value_set():
+    """``return other.statusMap()`` on one branch, with nothing saying what
+    ``other`` is, would read as the literal branch alone."""
+    (written,) = _settled(
+        "from pandaserver.taskbuffer.spec import Spec\n"
+        "def f(self, flag):\n"
+        "    a = Spec.statusMap(flag)['kill']\n",
+        (
+            "class Spec(object):\n"
+            "    def statusMap(cls, flag):\n"
+            "        if flag:\n"
+            "            return {'kill': 'aborting'}\n"
+            "        return other.statusMap()\n",
+            "pandaserver/taskbuffer/spec.py",
+        ),
+    )
+
+    assert written == []
 
 
 def test_a_stated_key_the_mapping_lacks_resolves_to_nothing():
     """Two parts of the source disagreeing is not this resolver's to settle."""
-    settle = values.resolver(_mappings(_COMMAND_MAP))
-    func = _func("def f(self):\n    a = JediTaskSpec.commandStatusMap()['resume']['done']\n")
-    written = next(n for n in ast.walk(func) if isinstance(n, ast.Assign))
+    (written,) = _settled("def f(self):\n    a = JediTaskSpec.commandStatusMap()['resume']['done']\n")
 
-    assert settle(written.value, func) == []
+    assert written == []
+
+
+def test_outside_a_build_a_mapping_is_not_read():
+    """No calls, no claim: which method a call lands in is the calls' to say."""
+    func = _func("def f(self):\n    a = JediTaskSpec.commandStatusMap()['kill']['doing']\n")
+    written = next(node for node in ast.walk(func) if isinstance(node, ast.Assign))
+
+    assert values.resolver()(written.value, func) == []
 
 
 def test_assembled_text_is_indexed_and_a_bare_literal_is_not():
@@ -4606,15 +4682,18 @@ def test_a_constant_two_enumerations_share_is_not_a_binding():
 
 def test_the_attribute_slice_reads_a_subscript_of_a_declared_mapping():
     """``TaskCommando.py:178`` -- the write that accounts for ``passed``."""
-    caller = (
+    caller = _IMPORTS_TASK_SPEC + (
         "def runImpl(self, tmpTaskSpec, commandStr):\n"
         "    if commandStr in ['kill', 'finish']:\n"
         "        tmpTaskSpec.status = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
     )
-    _subjects, junctions, _cov = _progress_multi(
-        (_COMMAND_MAP, "pandaserver/taskbuffer/JediTaskSpec.py"),
-        (caller, "pandajedi/jediorder/TaskCommando.py"),
-    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_COMMAND_MAP, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(caller, "pandajedi/jediorder/TaskCommando.py"),
+    ]
+    with _with_calls(modules):
+        _subjects, junctions, _cov, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
     written = [j for j in junctions if j.owner.endswith("::runImpl")]
 
     assert _outcomes(written) == [("dummy", 1), ("passed", 1), ("toabort", 1)]
@@ -9573,7 +9652,7 @@ def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
     leaves -- while the write side resolved the same mapping through the other
     spelling.  One map, two slices, one fact, two answers.
     """
-    source = (
+    source = _IMPORTS_TASK_SPEC + (
         "class TaskModule:\n"
         "    def rescue(self):\n"
         "        sqlT = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
@@ -9588,14 +9667,15 @@ def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
     )
     modules = [
         _module(_COMMAND_MAP, "pandaserver/taskbuffer/JediTaskSpec.py"),
-        _module(source, "x.py"),
+        _module(source, "pandaserver/taskbuffer/x.py"),
     ]
     attributor = attribution.SpecAttributor(
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
 
-    selected = sqlwrite.read_side(modules, attributor).values
+    with _with_calls(modules):
+        selected = sqlwrite.read_side(modules, attributor).values
 
     assert set(selected["JediTaskSpec.status"]) == {"aborting", "finishing", "paused"}
 

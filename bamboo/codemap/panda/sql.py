@@ -572,6 +572,45 @@ def _returns(func: ast.AST) -> list[ast.expr]:
     return returns(func)
 
 
+def every_return(
+    func: ast.AST, call: ast.Call, hops: int = 0
+) -> Optional[list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]]]:
+    """``(callee, value)`` for every value *call* can hand back; ``None`` if one cannot be followed.
+
+    :func:`returned` reads a statement's text, where a piece that cannot be
+    followed stays a hole and the rest is still worth reading.  A value set is
+    used differently -- to eliminate -- so one short of a member is a false
+    one: a helper returning a literal on one branch and an unplaced call on
+    another would read as returning the literal alone.  So every function the
+    call can land in, every ``return`` in each, and every call such a return
+    makes are followed, or nothing is claimed.
+
+    Empty outside :func:`across_calls` is ``None`` too: no calls, no claim.
+    """
+    if _CALLS is None or hops >= RETURN_HOPS:
+        return None
+    file = _CALLS.types.file_of(func)
+    if file is None:
+        return None
+    placed = _CALLS.callees(file, func, call)
+    if not placed.targets or placed.unplaced:
+        return None
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
+    for target in placed.targets:
+        values = _returns(target.func)
+        if not values:
+            return None
+        for value in values:
+            if isinstance(value, ast.Call):
+                deeper = every_return(target.func, value, hops + 1)
+                if deeper is None:
+                    return None
+                found.extend(deeper)
+            else:
+                found.append((target.func, value))  # type: ignore[arg-type]
+    return found
+
+
 def _handed_texts(
     func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, seen: frozenset[str]
 ) -> list[str]:

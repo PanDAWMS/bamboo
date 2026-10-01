@@ -830,7 +830,7 @@ def extract(
     attributor.learn_self_attributes(modules)
     attributor.learn_return_types(modules)
     attributor.learn_import_aliases(modules)
-    settle = values.resolver(values.declared_mappings(modules))
+    settle = values.resolver()
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --

@@ -152,7 +152,7 @@ def flush_methods(
     # threaded through ``attach``: both halves of a ``row_precondition`` have
     # to be settled by one rule, and the rule is ``sql.settled_precondition``
     # -- what each caller supplies is only the table of declared constants.
-    settle = values.resolver(values.declared_mappings(modules))
+    settle = values.resolver()
     declared = logfile.declared_files(modules)
     inherited = logfile.inherited_files(modules, declared)
     found: dict[str, Flush] = {}

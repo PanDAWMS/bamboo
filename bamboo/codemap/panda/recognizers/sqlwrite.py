@@ -402,7 +402,7 @@ def extract(
     uncovered: set[str] = set()
     diagnostics: list[DiagnosticTemplate] = []
     unexplained: list[Unexplained] = []
-    settle = values.resolver(values.declared_mappings(modules))
+    settle = values.resolver()
     # The same census the attribute slice makes, for the same reading: which
     # call persists a message into a declared column.  Asked of the attributor
     # rather than recomputed from the source, so the two halves of the map
@@ -1373,7 +1373,7 @@ def read_side(
     here: ``dummy`` was not among the values reported as written-but-unselected
     for this subject, so nothing is hidden by it.
     """
-    settle = values.handed(values.resolver(values.declared_mappings(modules)), calls)
+    settle = values.handed(values.resolver(), calls)
     found: dict[str, dict[str, ValueUse]] = {}
     rows: dict[str, EntityUse] = {}
     unreadable: dict[str, int] = {}

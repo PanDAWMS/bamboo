@@ -39,13 +39,11 @@ field it ignores.
 from __future__ import annotations
 
 import ast
-import json
 import re
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
-from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.pathcond import functions_with_owner, single_definition
+from bamboo.codemap.panda.pathcond import single_definition
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
@@ -202,75 +200,55 @@ def _literal_mapping(node: ast.expr) -> Optional[Mapping]:
     return mapping or None
 
 
-def declared_mappings(modules: list[SourceModule]) -> dict[str, Mapping]:
-    """Return ``{method name: the literal mapping it returns}``.
-
-    Keyed by method name for the reason the aliases and producers are: a call
-    site offers the name, and the class is what is often being resolved.  Where
-    two classes return different mappings from the same name the entry is
-    dropped -- the call site cannot be told which one it reached, and a wrong
-    value set is worse than none.
-
-    Restricted to methods taking nothing but ``cls``/``self``.  A parameter means
-    the mapping is built for a caller rather than declared, and the returned dict
-    would then be one of several the method can produce.
-    """
-    found: dict[str, list[Mapping]] = {}
-    for module in modules:
-        for func, owner in functions_with_owner(module.tree):
-            if owner is None:
-                continue
-            arguments = [*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs]
-            if len(arguments) > 1 or func.args.vararg or func.args.kwarg:
-                continue
-            for node in ast.walk(func):
-                if not isinstance(node, ast.Return) or node.value is None:
-                    continue
-                mapping = _literal_mapping(node.value)
-                if mapping is not None:
-                    found.setdefault(func.name, []).append(mapping)
-    return {
-        name: mappings[0]
-        for name, mappings in found.items()
-        # ``json`` rather than a set: a nested dict is not hashable, and the
-        # comparison wanted here is on content.
-        if len({json.dumps(m, sort_keys=True) for m in mappings}) == 1
-    }
-
-
 def _mapping_behind(
     node: ast.expr,
     func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
-    mappings: dict[str, Mapping],
-) -> Optional[Mapping]:
-    """Return the declared mapping *node* evaluates to.
+) -> Optional[list[Mapping]]:
+    """Return the literal mappings *node* can evaluate to.
 
     Two shapes, both real in the corpus: the call itself, and a local holding
     it -- ``commandStatusMap = JediTaskSpec.commandStatusMap()`` sits at the top
     of the method that subscripts it a hundred lines further down.
+
+    The call is followed through the corpus's calls to what it returns
+    (:func:`sql.every_return`), so it is the class the receiver *is* that
+    answers, not every class declaring a method of that name.  Read by name, two
+    classes returning different mappings under one name had to be dropped, and
+    a method taking a parameter could not be read at all.  Every return has to
+    be a literal mapping, or the expression has no value set: enumeration
+    eliminates, and a set short of a member is a confident wrong answer.
     """
     if isinstance(node, ast.Call):
-        callee = node.func
-        name = (
-            callee.id
-            if isinstance(callee, ast.Name)
-            else callee.attr
-            if isinstance(callee, ast.Attribute)
-            else None
-        )
-        return mappings.get(name) if name else None
+        if func is None:
+            return None
+        from bamboo.codemap.panda import sql
+
+        returned = sql.every_return(func, node)
+        if returned is None:
+            return None
+        found: list[Mapping] = []
+        for callee, value in returned:
+            if isinstance(value, ast.Name):
+                definition = single_definition(callee, value.id)
+                if definition is not None:
+                    value = definition
+            mapping = _literal_mapping(value)
+            if mapping is None:
+                return None
+            if mapping not in found:
+                found.append(mapping)
+        return found or None
     if isinstance(node, ast.Name) and func is not None:
         definition = single_definition(func, node.id)
         if definition is not None and definition is not node:
-            return _mapping_behind(definition, func, mappings)
+            return _mapping_behind(definition, func)
     return None
 
 
 def _mapping_iterated(
     name: str,
     func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
-    mappings: dict[str, Mapping],
-) -> Optional[Mapping]:
+) -> Optional[list[Mapping]]:
     """The declared mapping *name* takes an entry of, when a loop binds it.
 
     ``for commandStr, taskStatusMap in commandStatusMap.items()`` binds
@@ -303,9 +281,9 @@ def _mapping_iterated(
             and node.iter.func.attr == "items"
         ):
             continue
-        mapping = _mapping_behind(node.iter.func.value, func, mappings)
-        if mapping is not None:
-            return mapping
+        mappings = _mapping_behind(node.iter.func.value, func)
+        if mappings is not None:
+            return mappings
     return None
 
 
@@ -313,7 +291,6 @@ def mapping_values(
     expression: ast.expr,
     *,
     func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
-    mappings: dict[str, Mapping],
 ) -> list[str]:
     """The values a subscript of a declared mapping can produce, if it is one.
 
@@ -338,18 +315,14 @@ def mapping_values(
     if not keys:
         return []
     level: list[Union[str, Mapping]]
-    mapping = _mapping_behind(node, func, mappings)
-    if mapping is not None:
-        level = [mapping]
+    mappings = _mapping_behind(node, func)
+    if mappings is not None:
+        level = list(mappings)
     else:
-        iterated = (
-            _mapping_iterated(node.id, func, mappings)
-            if isinstance(node, ast.Name)
-            else None
-        )
+        iterated = _mapping_iterated(node.id, func) if isinstance(node, ast.Name) else None
         if iterated is None:
             return []
-        level = list(iterated.values())
+        level = [entry for mapping in iterated for entry in mapping.values()]
 
     for key in reversed(keys):
         stepped: list[Union[str, Mapping]] = []
@@ -368,7 +341,7 @@ def mapping_values(
     return sorted({entry for entry in level if isinstance(entry, str)})
 
 
-def resolver(mappings: dict[str, Mapping]):
+def resolver():
     """Return a ``(expression, func) -> [value, ...]`` callable for one build.
 
     Handed to :func:`bamboo.codemap.panda.pathcond.literal_values` so that a
@@ -393,7 +366,7 @@ def resolver(mappings: dict[str, Mapping]):
             if isinstance(expression.value, str):
                 return [expression.value]
             return [ast.unparse(expression)]
-        return mapping_values(expression, func=func, mappings=mappings)
+        return mapping_values(expression, func=func)
 
     return resolve
 

@@ -451,7 +451,7 @@ def test_a_value_is_settled_through_the_list_a_caller_hands_the_parameter(tmp_pa
     )
     calls = _calls(roots)
     func = _function(calls, "db", "lock")
-    settle = values.handed(values.resolver({}), calls)
+    settle = values.handed(values.resolver(), calls)
 
     found = settle(ast.Name(id="statList"), func, "pkg/db.py")
 
@@ -621,7 +621,7 @@ def test_a_local_name_settles_only_where_every_binding_of_it_does(tmp_path):
     )
     calls = _calls(roots)
     func = _function(calls, "db", "get")
-    settle = values.handed(values.resolver({}), calls)
+    settle = values.handed(values.resolver(), calls)
 
     assert settle(ast.Name(id="pandaID"), func, "pkg/db.py") == []
     assert sorted(one.value for one in settle(ast.Name(id="status"), func, "pkg/db.py")) == [
@@ -665,7 +665,7 @@ def test_an_imported_in_list_is_read_with_the_values_its_module_builds_it_from(t
     assert run.sql == "SELECT datasetID FROM JEDI_Datasets WHERE type IN (:type___in) "
     with sql.across_calls(calls):
         (bind,) = sql.bound_values(func, "varMap", ":type___in", across=True)
-    settle = values.handed(values.resolver({}), calls)
+    settle = values.handed(values.resolver(), calls)
     where = calls.types.tree("pkg/spec.py")
     assert sorted(one.value for one in settle(bind.value, where, "pkg/spec.py")) == [
         "input",

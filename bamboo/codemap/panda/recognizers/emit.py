@@ -265,7 +265,7 @@ def attach(
     """
     declared = logfile.declared_files(modules)
     inherited = logfile.inherited_files(modules, declared)
-    settle = values.resolver(values.declared_mappings(modules))
+    settle = values.resolver()
 
     by_owner: dict[str, list[JunctionNode]] = {}
     for junction in fragment.junctions:
