@@ -1569,13 +1569,15 @@ def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
         where = query.args.get("where")
         if where is None:
             continue
-        for comparison in where.find_all(exp.LT, exp.LTE, exp.GT, exp.GTE):
+        # ``ROWNUM = 1`` keeps the first row, which is ``<= 1``: Oracle numbers
+        # a row only once it has passed, so no other ``=`` returns anything.
+        for comparison in where.find_all(exp.LT, exp.LTE, exp.GT, exp.GTE, exp.EQ):
             if comparison.find_ancestor(exp.Select, exp.Update, exp.Delete) is not query:
                 continue
             left, right = comparison.this, comparison.expression
-            if isinstance(left, exp.Column) and left.name.lower() == "rownum" and isinstance(comparison, (exp.LT, exp.LTE)):
+            if isinstance(left, exp.Column) and left.name.lower() == "rownum" and isinstance(comparison, (exp.LT, exp.LTE, exp.EQ)):
                 value = _bound(right, sql)
-            elif isinstance(right, exp.Column) and right.name.lower() == "rownum" and isinstance(comparison, (exp.GT, exp.GTE)):
+            elif isinstance(right, exp.Column) and right.name.lower() == "rownum" and isinstance(comparison, (exp.GT, exp.GTE, exp.EQ)):
                 value = _bound(left, sql)
             else:
                 continue

@@ -429,3 +429,11 @@ def test_only_the_rows_that_come_back_are_ordered_and_limited():
 
     assert orders == ["currentPriority DESC"]
     assert limits == [(":limit", False)]
+
+
+def test_rownum_equal_to_one_is_a_limit_of_one():
+    """``ppEventServiceJob`` asks ``rownum=1``; read as no limit, it was in the map nowhere."""
+    assert sqltext.ordering("SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jediTaskID=:t AND rownum=1") == (
+        [],
+        [("1", False)],
+    )
