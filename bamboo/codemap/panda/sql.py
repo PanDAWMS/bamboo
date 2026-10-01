@@ -1849,28 +1849,6 @@ def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
     return "", None
 
 
-def _returned_slot(call_target: ast.expr, name: str) -> Optional[int]:
-    """Which element of a returned tuple *name* was unpacked from."""
-    if isinstance(call_target, ast.Name):
-        return None if call_target.id != name else -1
-    if isinstance(call_target, ast.Tuple):
-        for index, element in enumerate(call_target.elts):
-            if isinstance(element, ast.Name) and element.id == name:
-                return index
-    return None
-
-
-def _module_of(node: ast.AST) -> Optional[ast.Module]:
-    """The file *node* was parsed from, when the parent links reach it.
-
-    Every recognizer that reads a statement attaches them over the whole tree
-    first, so this is the usual case; where it is not, the keys are simply not
-    resolved.  Guessing from the name alone would attach one method's columns
-    to a same-named method in another file.
-    """
-    return next((one for one in ancestors(node) if isinstance(one, ast.Module)), None)
-
-
 def _literal_keys(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
     """The keys *func* writes into the mapping it binds to *name*, in source order.
 
@@ -1898,53 +1876,29 @@ def _literal_keys(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> li
 def _mapping_keys(
     func: ast.FunctionDef | ast.AsyncFunctionDef, mapping: ast.expr
 ) -> list[str]:
-    """The keys the mapping behind *mapping* can hold, read one call out.
+    """The keys the mapping behind *mapping* can hold, read where a call hands it back.
 
     ``setScoutJobData_JEDI`` builds its ``SET`` clause from the map the scout
     returned, so the columns it writes are stated in ``getScoutJobData_JEDI``
     and nowhere else -- which is why the map had the scout writing no column
     of ``JediTaskSpec`` at all.
 
-    One hop, and only where the source says all of it: the mapping is bound in
-    *func* from a call, the callee is a function of the same file found by
-    name, and the name it returns is subscripted with literal strings.  A
-    mapping that arrives as a **parameter** is not resolved here -- its keys
-    are the caller's to state, and five of the corpus's seven mapping loops
-    are that shape.  Returning nothing there is the map saying it does not
-    know the columns, which is true; filling them in from one caller would
-    make it say something false about the others.
+    Only where the source says all of it: the mapping is bound in *func* from
+    a call, the call lands where the corpus's calls place it (:func:`returned`
+    -- the class the receiver is, not a same-named function of the same file),
+    and the name returned at the slot the mapping is unpacked from is
+    subscripted with literal strings.  A mapping that arrives as a
+    **parameter** is not resolved here -- its keys are the caller's to state,
+    and five of the corpus's seven mapping loops are that shape.  Returning
+    nothing there is the map saying it does not know the columns, which is
+    true; filling them in from one caller would make it say something false
+    about the others.
     """
     if not isinstance(mapping, ast.Name):
         return []
-    module = _module_of(func)
-    if module is None:
-        return []
-    for node in ast.walk(func):
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
-            continue
-        slots = [_returned_slot(target, mapping.id) for target in node.targets]
-        slot = next((one for one in slots if one is not None), None)
-        if slot is None:
-            continue
-        callee = node.value.func
-        called = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", "")
-        for other in ast.walk(module):
-            if (
-                not isinstance(other, (ast.FunctionDef, ast.AsyncFunctionDef))
-                or other.name != called
-                or other is func
-            ):
-                continue
-            for returned in ast.walk(other):
-                if not isinstance(returned, ast.Return) or returned.value is None:
-                    continue
-                value = returned.value
-                if slot >= 0:
-                    if not isinstance(value, ast.Tuple) or slot >= len(value.elts):
-                        continue
-                    value = value.elts[slot]
-                if isinstance(value, ast.Name) and (keys := _literal_keys(other, value.id)):
-                    return keys
+    for callee, value in returned(func, mapping.id):
+        if isinstance(value, ast.Name) and (keys := _literal_keys(callee, value.id)):
+            return keys
     return []
 
 

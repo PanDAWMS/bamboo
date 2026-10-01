@@ -14,6 +14,7 @@ PanDA source forced corrections to:
 from __future__ import annotations
 
 import ast
+import contextlib
 from collections import Counter
 from unittest.mock import AsyncMock
 
@@ -14845,6 +14846,19 @@ class Proxy:
 '''
 
 
+@contextlib.contextmanager
+def _in_build(source: str, name: str, rel: str = "pandaserver/taskbuffer/db_proxy_mods/scout.py"):
+    """*name* from *source*, read the way a build reads it: through the corpus's calls."""
+    modules = [_module(source, rel)]
+    func = next(
+        node
+        for node in ast.walk(modules[0].tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+    )
+    with _with_calls(modules):
+        yield func
+
+
 def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
     """The scout's columns are stated in the method that built the mapping.
 
@@ -14852,9 +14866,8 @@ def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
     so reassembly saw ``"{}={},"`` and the statement named no column at all --
     which is why the map had the scout writing nothing of ``JediTaskSpec``.
     """
-    func = _func(_SCOUT_SOURCE, "set_scout_data")
-
-    statements = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
+    with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
+        statements = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
 
     (statement,) = statements
     assert sorted(statement.columns) == ["ramCount", "walltime"]
@@ -14862,9 +14875,8 @@ def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
 
 def test_a_key_the_loop_passes_over_is_not_a_column():
     """``if scoutKey in ["newNG"]: continue`` -- the statement never writes it."""
-    func = _func(_SCOUT_SOURCE, "set_scout_data")
-
-    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+    with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
 
     assert "newNG" not in columns
 
@@ -14877,9 +14889,8 @@ def test_a_skip_written_as_a_prefix_test_is_read_too():
         '            if scoutKey in ["newNG"]:',
         '            if not scoutKey.startswith("wall"):',
     )
-    func = _func(source, "set_scout_data")
-
-    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+    with _in_build(source, "set_scout_data") as func:
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
 
     assert columns == {"walltime"}
 
@@ -14890,9 +14901,8 @@ def test_a_skip_this_cannot_read_leaves_the_column_unnamed():
         '            if scoutKey in ["newNG"]:',
         "            if self.excluded(scoutKey):",
     )
-    func = _func(source, "set_scout_data")
-
-    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+    with _in_build(source, "set_scout_data") as func:
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
 
     assert columns == set()
 
@@ -14903,9 +14913,8 @@ def test_a_literal_before_the_key_stays_in_the_column_name():
         '            sqlTSD += f"{scoutKey}={tmpScoutKey},"',
         '            sqlTSD += f"merge{scoutKey}={tmpScoutKey},"',
     )
-    func = _func(source, "set_scout_data")
-
-    columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+    with _in_build(source, "set_scout_data") as func:
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
 
     assert columns == {"mergeramCount", "mergewalltime"}
 
@@ -14916,15 +14925,29 @@ def test_the_placeholder_the_loop_computes_is_resolved_with_the_column():
     Left as a hole the value reads as an expression rather than a bind, and the
     walk cannot follow it to ``varMap[tmpScoutKey] = scoutVal``.
     """
-    func = _func(_SCOUT_SOURCE, "set_scout_data")
-
-    (statement,) = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
+    with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
+        (statement,) = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
+        bound = [ast.unparse(b.value) for b in sql.bound_values(func, "varMap", ":ramCount")]
 
     assert statement.columns["ramCount"].kind == "bind"
     assert statement.columns["ramCount"].text == ":ramCount"
-    assert [ast.unparse(b.value) for b in sql.bound_values(func, "varMap", ":ramCount")] == [
-        "scoutVal"
-    ]
+    assert bound == ["scoutVal"]
+
+
+def test_the_mapping_is_read_from_the_method_the_call_lands_in():
+    """Found by name in the file, the first ``get_scout_data`` the walk met was
+    read -- here another class's, naming a column the statement never writes."""
+    source = (
+        "class Other:\n"
+        "    def get_scout_data(self, task_id):\n"
+        "        returnMap = {}\n"
+        "        returnMap['cpuTime'] = t\n"
+        "        return True, returnMap, extra\n"
+    ) + _SCOUT_SOURCE
+    with _in_build(source, "set_scout_data") as func:
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+
+    assert columns == {"ramCount", "walltime"}
 
 
 def test_a_mapping_that_arrives_as_a_parameter_is_the_callers_to_state():
