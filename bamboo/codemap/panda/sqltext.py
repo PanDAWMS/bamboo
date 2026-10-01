@@ -870,6 +870,8 @@ class Parsed(NamedTuple):
 
     tree: Optional[exp.Expression]
     failure: str
+    #: The text around where the parser stopped, holes spelled ``{}`` again.
+    near: str = ""
 
 
 class Term(NamedTuple):
@@ -1024,6 +1026,10 @@ def parsed(sql: str) -> Parsed:
     some other way; it is reported, see :data:`NOT_PARSED`.
     """
     text = _named_holes(sql)
+
+    def failed(failure: str, near: str) -> Parsed:
+        return Parsed(None, failure, " ".join(_NAMED_HOLE.sub("{}", near).split()))
+
     for _attempt in range(len(_NAMED_HOLE.findall(text)) + 1):
         try:
             return Parsed(sqlglot.parse_one(text, read="oracle"), "")
@@ -1033,14 +1039,17 @@ def parsed(sql: str) -> Parsed:
                 tree = sqlglot.parse_one(text, read="oracle", error_level=ErrorLevel.IGNORE)
                 if tree is not None and _holes_stand_for_what_is_missing(tree):
                     return Parsed(tree, "")
-                return Parsed(None, said[0])
-            hole = _NAMED_HOLE.match(error.errors[0].get("highlight") or "") if error.errors else None
+                return failed(said[0], " ".join(text.split()[-8:]))
+            first = error.errors[0] if error.errors else {}
+            hole = _NAMED_HOLE.match(first.get("highlight") or "")
             if hole is None:
-                return Parsed(None, said[0] if said else str(error))
+                before = " ".join((first.get("start_context") or "").split()[-4:])
+                near = f"{before} {first.get('highlight') or ''}".strip()
+                return failed(said[0] if said else str(error), near or " ".join(text.split()[:8]))
             text = re.sub(rf"\b{hole.group(0)}\b", "", text, count=1)
         except SqlglotError as error:
-            return Parsed(None, str(error).splitlines()[0])
-    return Parsed(None, "every hole was read as empty and it still does not parse")
+            return failed(str(error).splitlines()[0], " ".join(text.split()[:8]))
+    return failed("every hole was read as empty and it still does not parse", " ".join(text.split()[-8:]))
 
 
 def _table_name(table: exp.Table) -> str:
@@ -1175,16 +1184,27 @@ def _owner(column: exp.Column, scope, root, depth: int = 0) -> tuple[tuple[str, 
     return (), OWNER_UNDECIDED
 
 
-def _scopes(tree: exp.Expression) -> tuple[list[tuple[object, str]], Optional[_Root]]:
-    """Every scope of *tree* with the verb whose rows it picks, and the ``UPDATE``/``DELETE`` root."""
+def _scopes(tree: exp.Expression) -> tuple[list[tuple[object, str, str]], Optional[_Root]]:
+    """Every scope of *tree* with the verb whose rows it picks and its kind, and the ``UPDATE``/``DELETE`` root."""
     root: Optional[_Root] = None
-    found: list[tuple[object, str]] = []
+    found: list[tuple[object, str, str]] = []
     if isinstance(tree, (exp.Update, exp.Delete)):
         target = tree.this
         sources = {target.alias_or_name: target} if isinstance(target, exp.Table) else {}
         root = _Root(tree, sources)
-        found.append((root, "updated" if isinstance(tree, exp.Update) else "deleted"))
-    found.extend((scope, "read") for scope in traverse_scope(tree))
+        found.append((root, "updated" if isinstance(tree, exp.Update) else "deleted", ROW))
+    scopes = list(traverse_scope(tree))
+    found.extend((scope, "read", _kind(scope)) for scope in scopes)
+    if isinstance(tree, exp.Insert) and not scopes:
+        # ``INSERT ... VALUES (:a, (SELECT datasetID FROM ... WHERE ...))``:
+        # sqlglot builds no scope below a ``VALUES`` list.  Each subquery
+        # there looks rows up for a value, which is a consult.
+        for select in tree.find_all(exp.Select):
+            if select.find_ancestor(exp.Select) is None:
+                found.extend(
+                    (scope, "read", CONSULT if _kind(scope) == ROW else _kind(scope))
+                    for scope in traverse_scope(select)
+                )
     return found, root
 
 
@@ -1222,14 +1242,14 @@ def terms(sql: str) -> Reading:
     bind keys and quoted literals, ``=`` and ``IN`` asking, ``<>``, ``!=`` and
     ``NOT IN`` excluding.  A number is not read.
     """
-    tree = parsed(sql).tree
+    read = parsed(sql)
+    tree = read.tree
     if tree is None:
-        return Reading((), (f"{' '.join(sql.split())[:72]} -- {NOT_PARSED}",), False)
+        return Reading((), (f"{read.near} -- {NOT_PARSED}",), False)
     found: list[Term] = []
     unresolved: set[str] = set()
     scopes, root = _scopes(tree)
-    for scope, verb in scopes:
-        kind = ROW if isinstance(scope, _Root) else _kind(scope)
+    for scope, verb, kind in scopes:
         for column in _own_columns(scope):
             if _is_hole(column) or column.name.lower() in _PSEUDO_NAMES:
                 continue

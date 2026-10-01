@@ -115,6 +115,23 @@ def test_a_subquerys_term_is_not_the_statements_own():
     ]
 
 
+def test_a_subquery_in_a_values_list_is_consulted():
+    """``INSERT ... VALUES (:t, (SELECT datasetID FROM ... WHERE type=:type))`` looks a row up.
+
+    sqlglot builds no scope below a ``VALUES`` list, so the subquery read as
+    nothing at all (``insertHpoEventAboutIdds_JEDI``).
+    """
+    terms, _unresolved = _said(
+        "INSERT INTO {}.JEDI_Events (jediTaskID,datasetID) VALUES(:jediTaskID,"
+        "(SELECT datasetID FROM {}.JEDI_Datasets WHERE jediTaskID=:jediTaskID AND type=:type))"
+    )
+
+    assert terms == [
+        ("JEDI_Datasets", "jediTaskID", "read", "consult", False, (":jediTaskID",), (), False),
+        ("JEDI_Datasets", "type", "read", "consult", False, (":type",), (), False),
+    ]
+
+
 def test_an_update_picks_its_own_rows_and_a_negated_term_excludes():
     """An ``UPDATE``'s ``WHERE`` picks the rows it updates -- sqlglot gives it no scope of its own.
 
@@ -156,9 +173,15 @@ def test_a_hole_is_a_name_and_a_part_the_grammar_needs_but_never_a_cut():
 
     terms, unresolved = _said("SELECT status FROM {}.JEDI_Tasks WHERE jediTaskID=:t AND")
     assert terms == []
+    # Said where it stopped, not where it starts: a head clipped short put
+    # the cut inside an optimizer hint and made the hint look to blame.
     assert unresolved == (
         f"SELECT status FROM {{}}.JEDI_Tasks WHERE jediTaskID=:t AND -- {sqltext.NOT_PARSED}",
     )
+    terms, unresolved = _said(
+        "SELECT /*+ index(tab FILESTABLE4_DESTDBLOCK_IDX) */ COUNT(*) FROM ATLAS_PANDA.filesTable4 tab AND {}=:{}"
+    )
+    assert unresolved == (f"COUNT(*) FROM ATLAS_PANDA.filesTable4 tab AND -- {sqltext.NOT_PARSED}",)
 
 
 def test_a_json_path_and_a_pseudo_column_are_not_columns():
