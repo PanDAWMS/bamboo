@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from bamboo.codemap.models import Anchor, BoundaryNode, CoverageStat, SourceModule
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     targets_of,
@@ -339,11 +339,11 @@ def tables_never_written(modules: list[SourceModule]) -> dict[str, str]:
                 # ``TASK_ATTEMPTS`` is filled by an ``INSERT ... SELECT`` and
                 # ``Metrics`` by a positional insert; both were claimed here as
                 # kept current by something outside PanDA.
-                written.update(table.lower() for table in sql.creates(run.sql))
-                written.update(table.lower() for table in sql.updates(run.sql))
-                written.update(table.lower() for table in sql.deletes(run.sql))
-                read.update(table for table, _columns in sql.reads(run.sql))
-                read.update(sql.joins(run.sql))
+                written.update(table.lower() for table in sqltext.creates(run.sql))
+                written.update(table.lower() for table in sqltext.updates(run.sql))
+                written.update(table.lower() for table in sqltext.deletes(run.sql))
+                read.update(table for table, _columns in sqltext.reads(run.sql))
+                read.update(sqltext.joins(run.sql))
     spellings: dict[str, list[str]] = {}
     for table in read:
         if table.lower() in written or table == "{}":
@@ -412,10 +412,10 @@ def extract_read_only_tables(
                     # Folded for the lookups and kept as written for the
                     # columns: this statement spells the table its own way, and
                     # that spelling is what ``joined_columns`` has to match.
-                    (table, sql.joined_columns(run.sql, table))
-                    for table in sql.joins(run.sql)
+                    (table, sqltext.joined_columns(run.sql, table))
+                    for table in sqltext.joins(run.sql)
                 ]
-                readings += list(sql.reads(run.sql))
+                readings += list(sqltext.reads(run.sql))
                 for table, columns in readings:
                     folded = table.lower()
                     if folded not in never_written or folded in known:
@@ -520,17 +520,17 @@ def _absorb(
 ) -> bool:
     """Fold one statement into its table's channel.  True if anything was read."""
     found = False
-    for table, columns in sql.reads(statement):
+    for table, columns in sqltext.reads(statement):
         channel = _channel_for(channels, system, schema, table, module, node)
         channel.receives(columns)
         channel.operations.add("SELECT")
         found = True
-    for write in sql.writes(statement):
+    for write in sqltext.writes(statement):
         channel = _channel_for(channels, system, schema, write.table, module, node)
         channel.hands_over(write.columns)
         channel.operations.add(write.kind.upper())
         found = True
-    for table in sql.deletes(statement):
+    for table in sqltext.deletes(statement):
         channel = _channel_for(channels, system, schema, table, module, node)
         channel.operations.add("DELETE")
         found = True

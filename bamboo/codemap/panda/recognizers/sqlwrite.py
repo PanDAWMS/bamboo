@@ -66,7 +66,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import sql, values
+from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
@@ -328,7 +328,7 @@ def statement_stops(
 def _row_key_source(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     run: sql.Execution,
-    statement: sql.SqlWrite,
+    statement: sqltext.SqlWrite,
     rel_path: str,
 ) -> RowKeySource:
     """Where a guarded write's row keys were filled from -- see :class:`RowKeySource`."""
@@ -429,7 +429,7 @@ def extract(
                     continue
                 seen.add(key)
                 stopped.extend(_run_stops(run, module.rel_path, owner))
-                for statement in sql.writes(run.sql):
+                for statement in sqltext.writes(run.sql):
                     spec_class = attributor.class_for_table(statement.table)
                     # Settled once per statement, not once per column: every
                     # column of one ``SET`` is bounded by the same ``WHERE``,
@@ -604,7 +604,7 @@ def _deciding_fragment(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     run: sql.Execution,
     column: str,
-    supplied: sql.ColumnValue,
+    supplied: sqltext.ColumnValue,
     kind: str,
 ) -> Optional[ast.stmt]:
     """Return the statement fragment that put ``<column>=<value>`` into the SQL.
@@ -640,7 +640,7 @@ def _deciding_fragment(
     if not run.variable:
         return run.call
     for statement, spans in sql.variant_spans(func, run.variable):
-        at = sql.supplied_at(statement, kind, column, supplied)
+        at = sqltext.supplied_at(statement, kind, column, supplied)
         if at is not None:
             return sql.fragment_holding(spans, at)
     return None
@@ -651,9 +651,9 @@ def _outcomes(
     *,
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     run: sql.Execution,
-    statement: sql.SqlWrite,
+    statement: sqltext.SqlWrite,
     column: str,
-    supplied: sql.ColumnValue,
+    supplied: sqltext.ColumnValue,
     spec_class: Optional[str],
     settle,
     templates: list[tuple[str, ast.stmt]],
@@ -995,7 +995,7 @@ class ReadStatement(NamedTuple):
     call_sites: tuple[str, ...] = ()
 
 
-def _render_condition(condition: "sql.Condition", seeds: dict[str, list[int]]) -> str:
+def _render_condition(condition: "sqltext.Condition", seeds: dict[str, list[int]]) -> str:
     """One condition as the map stores it, with its walkable binds placed.
 
     ``@<line>`` marks a bind an assignment in this run's window fills, so a
@@ -1442,11 +1442,11 @@ def read_side(
                 continue
             tables.add(table)
             spec_class = attributor.class_for_table(table)
-            for column, key in sql.predicates(run.sql):
+            for column, key in sqltext.predicates(run.sql):
                 qualifier, attribute, _kind = _subject_of(attributor, spec_class, table, column)
                 subject = SubjectNode.make_name(qualifier, attribute)
                 pairs.update((subject, value) for value in bound(func, run, key, file))
-            for column, value in sql.selected_literals(run.sql):
+            for column, value in sqltext.selected_literals(run.sql):
                 qualifier, attribute, _kind = _subject_of(attributor, spec_class, table, column)
                 pairs.add((SubjectNode.make_name(qualifier, attribute), value))
         return tables, pairs
@@ -1540,7 +1540,7 @@ def read_side(
                 window = run.window
                 if window is None and run.varmap:
                     window = sql.binding_window(func, run.varmap, line)
-                found = sql.conditions(run.sql)
+                found = sqltext.conditions(run.sql)
                 seeds: dict[str, list[int]] = {}
                 for condition in found:
                     for key in condition.binds:
@@ -1796,7 +1796,7 @@ def read_side(
                     spec_class = attributor.class_for_table(table)
                     if verb == "read":
                         read_tables.add(table)
-                    for column, key in sql.predicates(run.sql):
+                    for column, key in sqltext.predicates(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
                         )
@@ -1807,19 +1807,19 @@ def read_side(
                         if not values_of and verb == "read":
                             statements.setdefault((at.owner, at.line), at).keys.add(subject)
                     if verb == "read":
-                        for column, key in sql.exclusions(run.sql):
+                        for column, key in sqltext.exclusions(run.sql):
                             qualifier, attribute, _kind = _subject_of(
                                 attributor, spec_class, table, column
                             )
                             subject = SubjectNode.make_name(qualifier, attribute)
                             for value in bound(func, run, key, module.rel_path):
                                 exclude(subject, value, at)
-                        for column, value in sql.excluded_literals(run.sql):
+                        for column, value in sqltext.excluded_literals(run.sql):
                             qualifier, attribute, _kind = _subject_of(
                                 attributor, spec_class, table, column
                             )
                             exclude(SubjectNode.make_name(qualifier, attribute), value, at)
-                    for column, value in sql.selected_literals(run.sql):
+                    for column, value in sqltext.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
                         )
@@ -1836,7 +1836,7 @@ def read_side(
                 kept = statements.get((owner, run.call.lineno))
                 if kept is not None:
                     kept.tables.update(read_tables)
-                    orders, limits = sql.ordering(run.sql)
+                    orders, limits = sqltext.ordering(run.sql)
                     kept.order_by.update(orders)
                     for bound_to, strict in limits:
                         values_of = (
@@ -2428,7 +2428,7 @@ def selection_gates(
                 # it, so one table does not reach a reader under two names.
                 gates = {
                     never_written[t.lower()]
-                    for t in sql.joins(run.sql)
+                    for t in sqltext.joins(run.sql)
                     if t.lower() in never_written
                 }
                 if not gates:
@@ -2447,7 +2447,7 @@ def selection_gates(
                     if not bounds:
                         continue
                     spec_class = attributor.class_for_table(table)
-                    for column, _key in [*sql.predicates(run.sql), *sql.exclusions(run.sql)]:
+                    for column, _key in [*sqltext.predicates(run.sql), *sqltext.exclusions(run.sql)]:
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
                         )
@@ -2473,25 +2473,25 @@ def _rows_touched(statement: str) -> list[tuple[str, str]]:
     that selects on a value.
     """
     touched: list[tuple[str, str]] = [
-        ("read", table) for table, _columns in sql.reads(statement)
+        ("read", table) for table, _columns in sqltext.reads(statement)
     ]
-    # The rest of the ``FROM`` list too.  :func:`sql.reads` keeps naming the
+    # The rest of the ``FROM`` list too.  :func:`sqltext.reads` keeps naming the
     # leading table because it answers *where the row came from*; the question
     # here is which kinds of row the statement touches at all, and a join
     # partner's rows are read as surely as the first table's.  Sixty-one
     # (function, entity) readings were missing for the difference, sixteen of
     # them on datasets and sixteen on files -- the two a task waits for.
-    touched.extend(("read", table) for table in sql.joins(statement))
+    touched.extend(("read", table) for table in sqltext.joins(statement))
     # The three writing verbs stay apart.  Making a row, changing one and
     # removing one are three different claims about a kind of row, and pooling
     # them is why nothing downstream could ask where an object enters the
-    # system.  ``sql.deletes``'s own docstring already said what that costs: a
+    # system.  ``sqltext.deletes``'s own docstring already said what that costs: a
     # DELETE followed by an INSERT on a command table means a second command
     # silently replaced one that was never picked up, and the map had nowhere
     # to put it.
-    touched.extend(("created", table) for table in sql.creates(statement))
-    touched.extend(("updated", table) for table in sql.updates(statement))
-    touched.extend(("deleted", table) for table in sql.deletes(statement))
+    touched.extend(("created", table) for table in sqltext.creates(statement))
+    touched.extend(("updated", table) for table in sqltext.updates(statement))
+    touched.extend(("deleted", table) for table in sqltext.deletes(statement))
     return touched
 
 

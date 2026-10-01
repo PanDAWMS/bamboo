@@ -54,7 +54,7 @@ import re
 from typing import Iterator, NamedTuple, Optional
 
 from bamboo.codemap.models import Emit, JunctionNode, RowKeySource, SourceModule, SubjectNode
-from bamboo.codemap.panda import sql, values
+from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
@@ -183,12 +183,12 @@ def flush_methods(
             parameters = _parameters(func)
             guards: dict[str, tuple[str, frozenset[str]]] = {}
             for run in sql.executions(func):
-                for match in sql._UPDATE.finditer(run.sql):
+                for match in sqltext._UPDATE.finditer(run.sql):
                     if match.group(2).strip().strip(",") not in ("{}", ""):
                         # A readable ``SET`` is the SQL slice's business; this
                         # reader exists for the clause that is a single hole.
                         continue
-                    for raw, column in sql._TERM.findall(run.sql[match.end(2) :]):
+                    for raw, column in sqltext._TERM.findall(run.sql[match.end(2) :]):
                         if column in guards:
                             continue
                         term = re.sub(r"\s+", " ", raw).strip()

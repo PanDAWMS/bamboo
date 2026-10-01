@@ -64,7 +64,7 @@ from bamboo.codemap.models import (
     JunctionNode,
     SourceModule,
 )
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.attribution import (
     annotated_class,
     annotated_generic,
@@ -140,7 +140,7 @@ def foreign_readers(
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             for run in sql.executions(func):
-                if any(table in foreign_tables for table, _cols in sql.reads(run.sql)):
+                if any(table in foreign_tables for table, _cols in sqltext.reads(run.sql)):
                     found.add(func.name)
     return found
 

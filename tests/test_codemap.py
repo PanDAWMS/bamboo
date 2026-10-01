@@ -45,7 +45,7 @@ from bamboo.codemap.models import (
     ValueEnumNode,
     required_values,
 )
-from bamboo.codemap.panda import attribution, pathcond, promotion, sql, values
+from bamboo.codemap.panda import attribution, pathcond, promotion, sql, sqltext, values
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -1578,17 +1578,17 @@ def test_a_bind_in_a_where_clause_is_not_a_write():
     Both are in the same function, so the bind key alone cannot tell them
     apart; only the ``SET`` clause can.
     """
-    writes = sql.writes("UPDATE {}.JEDI_Tasks SET lockedBy=NULL WHERE status=:status ")
+    writes = sqltext.writes("UPDATE {}.JEDI_Tasks SET lockedBy=NULL WHERE status=:status ")
 
     assert set(writes[0].columns) == {"lockedBy"}
 
 
 def test_inline_values_are_kept_without_a_bind():
     """``stateChangeTime=CURRENT_DATE`` is a write whose value is in the statement."""
-    writes = sql.writes("UPDATE {}.JEDI_Tasks SET status=:status,stateChangeTime=CURRENT_DATE ")
+    writes = sqltext.writes("UPDATE {}.JEDI_Tasks SET status=:status,stateChangeTime=CURRENT_DATE ")
 
-    assert writes[0].columns["status"] == sql.ColumnValue(kind="bind", text=":status")
-    assert writes[0].columns["stateChangeTime"] == sql.ColumnValue(
+    assert writes[0].columns["status"] == sqltext.ColumnValue(kind="bind", text=":status")
+    assert writes[0].columns["stateChangeTime"] == sqltext.ColumnValue(
         kind="expression", text="CURRENT_DATE"
     )
 
@@ -1600,15 +1600,15 @@ def test_a_column_copied_from_another_column_is_told_from_a_literal():
     the right of an ``=``.  It is what turns "a task left pending" into an edge
     the backward walk can follow.
     """
-    writes = sql.writes("UPDATE {}.JEDI_Tasks SET status=oldStatus,oldStatus=NULL ")
+    writes = sqltext.writes("UPDATE {}.JEDI_Tasks SET status=oldStatus,oldStatus=NULL ")
 
-    assert writes[0].columns["status"] == sql.ColumnValue(kind="column", text="oldStatus")
+    assert writes[0].columns["status"] == sqltext.ColumnValue(kind="column", text="oldStatus")
     # ``NULL`` is bare-looking too, and it is neither a column nor unsettled:
     # the statement says exactly what the field will hold afterwards.
-    assert writes[0].columns["oldStatus"] == sql.ColumnValue(kind="literal", text="None")
+    assert writes[0].columns["oldStatus"] == sqltext.ColumnValue(kind="literal", text="None")
 
-    literal = sql.writes("UPDATE ATLAS_PANDA.filesTable4 SET status='ready' ")
-    assert literal[0].columns["status"] == sql.ColumnValue(kind="literal", text="ready")
+    literal = sqltext.writes("UPDATE ATLAS_PANDA.filesTable4 SET status='ready' ")
+    assert literal[0].columns["status"] == sqltext.ColumnValue(kind="literal", text="ready")
 
 
 def test_an_update_is_read_through_a_hint_and_a_table_alias():
@@ -1617,14 +1617,14 @@ def test_an_update_is_read_through_a_hint_and_a_table_alias():
     Both forms occur on ``filesTable4`` and neither is exotic; without the
     allowance the statement reads as no statement at all, which is silent.
     """
-    writes = sql.writes(
+    writes = sqltext.writes(
         "UPDATE /*+ index(tab FILESTABLE4_IDX) */ ATLAS_PANDA.filesTable4 tab "
         "SET status='ready' WHERE PandaID=:PandaID "
     )
 
     assert len(writes) == 1
     assert writes[0].table == "filesTable4"
-    assert writes[0].columns["status"] == sql.ColumnValue(kind="literal", text="ready")
+    assert writes[0].columns["status"] == sqltext.ColumnValue(kind="literal", text="ready")
 
 
 def test_a_statement_chosen_through_another_variable_is_still_read():
@@ -1648,7 +1648,7 @@ def test_a_statement_chosen_through_another_variable_is_still_read():
     )
     func = ast.parse(source).body[0]
 
-    statements = [w for text in sql.variants(func, "sql") for w in sql.writes(text)]
+    statements = [w for text in sql.variants(func, "sql") for w in sqltext.writes(text)]
 
     assert [w.columns["status"].text for w in statements] == [":newStatus", "oldStatus"]
 
@@ -1674,7 +1674,7 @@ def test_a_statement_assembled_across_an_if_else_is_two_statements():
     )
     func = _func(source)
 
-    statements = [w for text in sql.variants(func, "sqlTU") for w in sql.writes(text)]
+    statements = [w for text in sql.variants(func, "sqlTU") for w in sqltext.writes(text)]
 
     assert [w.columns["status"].kind for w in statements] == ["bind", "column"]
     assert [w.columns["status"].text for w in statements] == [":status", "oldStatus"]
@@ -1700,7 +1700,7 @@ def test_two_independent_if_elses_give_every_combination():
     )
     func = _func(source)
 
-    statements = [w for text in sql.variants(func, "sqlTU") for w in sql.writes(text)]
+    statements = [w for text in sql.variants(func, "sqlTU") for w in sqltext.writes(text)]
 
     assert [(w.columns["status"].text, w.columns["oldStatus"].text) for w in statements] == [
         (":status", "None"),
@@ -1863,7 +1863,7 @@ def test_a_row_precondition_is_stored_with_the_value_its_bind_holds():
     )
     func = _func(source)
     (run,) = sql.executions(func)
-    (statement,) = sql.writes(run.sql)
+    (statement,) = sqltext.writes(run.sql)
 
     settled, done = sql.settled_precondition(
         statement.preconditions["jobStatus"], func, run.varmap, run.window, lambda v, f: []
@@ -1898,7 +1898,7 @@ def test_a_row_precondition_whose_bind_arrives_from_outside_keeps_its_bind():
     )
     func = _func(source)
     (run,) = sql.executions(func)
-    (statement,) = sql.writes(run.sql)
+    (statement,) = sqltext.writes(run.sql)
 
     assert sql.settled_precondition(
         statement.preconditions["jobStatus"], func, run.varmap, run.window, lambda v, f: []
@@ -1922,7 +1922,7 @@ def test_a_table_the_call_substitutes_is_read_from_the_loop_that_supplies_it():
     )
     func = _func(source)
 
-    tables = [w.table for run in sql.executions(func) for w in sql.writes(run.sql)]
+    tables = [w.table for run in sql.executions(func) for w in sqltext.writes(run.sql)]
 
     assert tables == ["jobsDefined4", "jobsActive4"]
 
@@ -1937,7 +1937,7 @@ def test_an_indexed_placeholder_is_filled_from_the_matching_argument():
     )
     func = _func(source)
 
-    writes = [w for run in sql.executions(func) for w in sql.writes(run.sql)]
+    writes = [w for run in sql.executions(func) for w in sqltext.writes(run.sql)]
 
     assert [(w.table, sorted(w.columns)) for w in writes] == [
         ("jobsActive4", ["currentPriority"])
@@ -1963,11 +1963,11 @@ def test_a_bare_placeholder_is_filled_only_where_no_f_string_built_the_text():
         "    self.cur.execute(sqlU.format('jobsActive4') + comment, varMap)\n"
     )
 
-    assert [w.table for run in sql.executions(_func(plain)) for w in sql.writes(run.sql)] == [
+    assert [w.table for run in sql.executions(_func(plain)) for w in sqltext.writes(run.sql)] == [
         "jobsActive4"
     ]
     assert [
-        w.table for run in sql.executions(_func(interpolated)) for w in sql.writes(run.sql)
+        w.table for run in sql.executions(_func(interpolated)) for w in sqltext.writes(run.sql)
     ] == ["JEDI_Tasks"]
 
 
@@ -2094,7 +2094,7 @@ def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
     func = _func(source)
 
     tables = [
-        table for run in sql.executions(func) for table, _columns in sql.reads(run.sql)
+        table for run in sql.executions(func) for table, _columns in sqltext.reads(run.sql)
     ]
 
     assert tables == ["jobsDefined4", "jobsActive4", "jobsArchived"]
@@ -2140,7 +2140,7 @@ def test_a_schema_qualified_hole_is_still_the_table_position():
         "    self.cur.execute(sql1 + comment, varMap)\n"
     )
 
-    created = [table for run in sql.executions(_func(source)) for table in sql.creates(run.sql)]
+    created = [table for run in sql.executions(_func(source)) for table in sqltext.creates(run.sql)]
 
     assert sorted(created) == ["jobsActive4", "jobsDefined4"]
 
@@ -2179,7 +2179,7 @@ def test_a_bind_variable_after_into_is_not_a_table():
         "    self.cur.execute(sql1 + comment, varMap)\n"
     )
 
-    created = [table for run in sql.executions(_func(source)) for table in sql.creates(run.sql)]
+    created = [table for run in sql.executions(_func(source)) for table in sqltext.creates(run.sql)]
 
     assert created == ["jobsDefined4"]
 
@@ -2204,8 +2204,8 @@ def test_a_name_the_statement_defines_for_itself_is_not_a_table_it_reads():
     # The real tables are still both there: the one inside the common table
     # expression is its own ``SELECT``, and the outer query's partner is a
     # join.  Only the self-defined name goes.
-    assert [table for table, _columns in sql.reads(statement)] == ["jobsActive4"]
-    assert sql.joins(statement) == ["jobs_statuslog"]
+    assert [table for table, _columns in sqltext.reads(statement)] == ["jobsActive4"]
+    assert sqltext.joins(statement) == ["jobs_statuslog"]
 
 
 def test_oracle_s_one_row_pseudo_table_is_not_a_table():
@@ -2219,7 +2219,7 @@ def test_oracle_s_one_row_pseudo_table_is_not_a_table():
     """
     statement = "SELECT ATLAS_PANDA.JOBSDEFINED4_PANDAID_SEQ.nextval FROM dual"
 
-    assert sql.reads(statement) == []
+    assert sqltext.reads(statement) == []
 
 
 def test_a_literal_written_where_a_column_goes_is_not_a_column():
@@ -2242,7 +2242,7 @@ def test_a_literal_written_where_a_column_goes_is_not_a_column():
         "WHERE PandaID=:PandaID AND type IN (:type1,:type2)"
     )
 
-    assert sql.reads(statement) == [
+    assert sqltext.reads(statement) == [
         ("filesTable4", ["fileID", "datasetID", "lfn"]),
         ("filesTable_ARCH", ["fileID", "datasetID", "lfn"]),
     ]
@@ -2256,12 +2256,12 @@ def test_the_database_s_own_clock_is_not_a_column_the_row_carries():
     time, and ``base_module`` stamps ``CURRENT_TIMESTAMP`` into a status log.
     Neither names anything ``JEDI_Tasks`` stores.
     """
-    assert sql.reads(
+    assert sqltext.reads(
         "SELECT CURRENT_DATE,status FROM ATLAS_PANDA.JEDI_Tasks "
         "WHERE jediTaskID=:jediTaskID"
     ) == [("JEDI_Tasks", ["status"])]
 
-    assert sql.reads(
+    assert sqltext.reads(
         "SELECT jediTaskID,CURRENT_TIMESTAMP,status,attemptNr "
         "FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID"
     ) == [("JEDI_Tasks", ["jediTaskID", "status", "attemptNr"])]
@@ -2282,7 +2282,7 @@ def test_an_upper_case_column_name_is_still_a_column():
         "FROM ATLAS_PANDA.GLOBAL_SHARES"
     )
 
-    assert sql.reads(statement) == [
+    assert sqltext.reads(statement) == [
         (
             "GLOBAL_SHARES",
             [
@@ -2313,7 +2313,7 @@ def test_a_projection_the_caller_decides_leaves_no_column_behind():
     matched.  The truthful answer is that this projection names nothing the
     statement decides.
     """
-    assert sql.reads("SELECT {}, FROM {}.JEDI_Tasks WHERE jediTaskID=:jediTaskID") == [
+    assert sqltext.reads("SELECT {}, FROM {}.JEDI_Tasks WHERE jediTaskID=:jediTaskID") == [
         ("JEDI_Tasks", [])
     ]
 
@@ -2335,7 +2335,7 @@ def test_a_join_written_with_the_keyword_names_the_same_partner():
         "JOIN ATLAS_PANDA.resource_types rt ON jss.resource_type=rt.resource_name"
     )
 
-    assert sql.joins(comma) == sql.joins(keyword) == ["resource_types"]
+    assert sqltext.joins(comma) == sqltext.joins(keyword) == ["resource_types"]
 
 
 def test_a_join_key_is_not_a_condition_on_a_value():
@@ -2353,15 +2353,15 @@ def test_a_join_key_is_not_a_condition_on_a_value():
         "WHERE j.jobStatus=:jobStatus"
     )
 
-    assert sql.joins(joined) == ["schedconfig_json"]
-    assert sql.predicates(joined) == [("jobStatus", ":jobStatus")]
+    assert sqltext.joins(joined) == ["schedconfig_json"]
+    assert sqltext.predicates(joined) == [("jobStatus", ":jobStatus")]
 
 
 def _conditions(statement: str) -> list[str]:
-    """``sql.conditions`` rendered the way a reader reads it."""
+    """``sqltext.conditions`` rendered the way a reader reads it."""
     return [
         " OR ".join(" AND ".join(branch.terms) for branch in condition.branches)
-        for condition in sql.conditions(statement)
+        for condition in sqltext.conditions(statement)
     ]
 
 
@@ -2380,7 +2380,7 @@ def test_a_paren_hides_a_condition_from_predicates_but_not_from_conditions():
         "AND endTime<:endTime))"
     )
 
-    assert sql.predicates(statement) == [("jobStatus", ":jobStatus")]
+    assert sqltext.predicates(statement) == [("jobStatus", ":jobStatus")]
     assert _conditions(statement) == [
         "modificationTime<:modificationTime OR endTime IS NOT NULL AND endTime<:endTime"
     ]
@@ -2447,7 +2447,7 @@ def test_a_branch_of_an_or_group_keeps_the_terms_that_go_together():
 
     assert [
         [branch.terms for branch in condition.branches]
-        for condition in sql.conditions(statement)
+        for condition in sqltext.conditions(statement)
     ] == [
         [
             ("jobStatus=:jobFailed", "pilotErrorCode IS NOT NULL"),
@@ -2474,7 +2474,7 @@ def test_a_top_level_or_is_one_condition_even_with_no_parens_of_its_own():
 
     assert [
         [branch.terms for branch in condition.branches]
-        for condition in sql.conditions(statement)
+        for condition in sqltext.conditions(statement)
     ] == [
         [
             ("status in ('submitted')", "pilotStatus='running'"),
@@ -2498,7 +2498,7 @@ def test_a_disjunction_inside_a_branch_keeps_its_parentheses():
 
     assert [
         [branch.terms for branch in condition.branches]
-        for condition in sql.conditions(statement)
+        for condition in sqltext.conditions(statement)
     ] == [
         [
             ("a='1'", "b<:p"),
@@ -2540,7 +2540,7 @@ def test_a_condition_that_names_no_bind_is_still_returned():
     """
     statement = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE lockedBy IS NULL"
 
-    assert [condition.binds for condition in sql.conditions(statement)] == [()]
+    assert [condition.binds for condition in sqltext.conditions(statement)] == [()]
     assert _conditions(statement) == ["lockedBy IS NULL"]
 
 
@@ -2554,8 +2554,8 @@ def test_an_interpolated_table_is_still_reported_as_a_read():
     """
     statement = "SELECT PandaID FROM {} WHERE jediTaskID=:jediTaskID"
 
-    assert [table for table, _columns in sql.reads(statement)] == ["{}"]
-    assert sql.joins(statement) == []
+    assert [table for table, _columns in sqltext.reads(statement)] == ["{}"]
+    assert sqltext.joins(statement) == []
 
 
 def test_an_f_string_that_only_glues_reads_as_the_concatenation_it_is():
@@ -2617,7 +2617,7 @@ def test_one_f_string_elsewhere_does_not_disqualify_the_other_statements():
     tables = {
         table
         for run in sql.executions(_func(source, name="main"))
-        for table, _columns in sql.reads(run.sql)
+        for table, _columns in sqltext.reads(run.sql)
     }
 
     assert {"JOBS_SHARE_STATS", "JOBSDEFINED_SHARE_STATS"} <= tables
@@ -2640,7 +2640,7 @@ def test_every_clause_of_a_multi_part_with_defines_a_name():
         ") SELECT name FROM gshare_results UNION SELECT name FROM wq_results"
     )
 
-    assert [table for table, _columns in sql.reads(statement)] == [
+    assert [table for table, _columns in sqltext.reads(statement)] == [
         "JOBS_SHARE_STATS",
         "JEDI_WORK_QUEUE",
     ]
@@ -2665,7 +2665,7 @@ def test_a_table_name_derived_by_substitution_is_read_from_the_literals():
         "        self.cur.execute(sql_get_meta + comment, var_map)\n"
     )
 
-    assert [table for run in sql.executions(_func(source)) for table, _c in sql.reads(run.sql)] == [
+    assert [table for run in sql.executions(_func(source)) for table, _c in sqltext.reads(run.sql)] == [
         "metaTable_ARCH"
     ]
 
@@ -2707,7 +2707,7 @@ def test_a_default_argument_names_the_table_the_function_writes():
         "    self.cur.execute(sql1 + comment, dataset.valuesMap())\n"
     )
 
-    created = [table for run in sql.executions(_func(source)) for table in sql.creates(run.sql)]
+    created = [table for run in sql.executions(_func(source)) for table in sqltext.creates(run.sql)]
 
     assert created == ["Datasets"]
 
@@ -2969,7 +2969,7 @@ def test_a_write_tested_against_the_column_it_writes_records_the_guard():
         "WHERE jediTaskID=:jediTaskID AND status IN (:old_1,:old_2) "
     )
 
-    statement = sql.writes(text)[0]
+    statement = sqltext.writes(text)[0]
 
     assert statement.preconditions == {"status": "status IN (:old_1,:old_2)"}
 
@@ -2981,7 +2981,7 @@ def test_a_negated_guard_on_a_written_column_counts():
         "WHERE PandaID=:PandaID AND NOT jobStatus=:ngStatus "
     )
 
-    statement = sql.writes(text)[0]
+    statement = sqltext.writes(text)[0]
 
     assert statement.preconditions == {"jobStatus": "NOT jobStatus=:ngStatus"}
 
@@ -3018,7 +3018,7 @@ def test_a_write_nothing_races_for_records_no_guard():
     """An unguarded write lands whatever the row currently says."""
     text = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
 
-    assert sql.writes(text)[0].preconditions == {}
+    assert sqltext.writes(text)[0].preconditions == {}
 
 
 def test_the_branch_carries_the_row_the_write_needed():
@@ -5129,9 +5129,9 @@ def test_the_second_table_in_a_from_list_is_read():
         "WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID"
     )
 
-    assert [table for table, _c in sql.reads(statement)] == ["JEDI_Tasks"]
-    assert sql.joins(statement) == ["JEDI_AUX_Status_MinTaskID"]
-    assert sql.joined_columns(statement, "JEDI_AUX_Status_MinTaskID") == [
+    assert [table for table, _c in sqltext.reads(statement)] == ["JEDI_Tasks"]
+    assert sqltext.joins(statement) == ["JEDI_AUX_Status_MinTaskID"]
+    assert sqltext.joined_columns(statement, "JEDI_AUX_Status_MinTaskID") == [
         "min_jediTaskID",
         "status",
     ]
@@ -5145,7 +5145,7 @@ def test_a_name_the_statement_defines_for_itself_is_not_a_join_partner():
         "SELECT a.PandaID FROM tmpTab a,tmpTab b WHERE a.PandaID=b.PandaID"
     )
 
-    assert sql.joins(statement) == []
+    assert sqltext.joins(statement) == []
 
 
 _READ_ONLY_SOURCE = """
@@ -10076,7 +10076,7 @@ def test_a_statement_built_with_str_format_is_read():
     assert sql.reconstruct(func, "sqlR").startswith(
         "SELECT jediTaskID FROM {}.JEDI_Tasks tabT "
     )
-    assert sql.selected_literals(sql.reconstruct(func, "sqlR")) == [("status", "running")]
+    assert sqltext.selected_literals(sql.reconstruct(func, "sqlR")) == [("status", "running")]
 
 
 # ---------------------------------------------------------------------------
@@ -14703,7 +14703,7 @@ def test_the_reading_is_chosen_by_kind_so_an_upsert_keeps_its_two_reasons():
         if isinstance(n, ast.FunctionDef) and n.name == "claim"
     )
     pathcond.attach_parents(modules[1].tree)
-    running = sql.ColumnValue(kind="literal", text="running")
+    running = sqltext.ColumnValue(kind="literal", text="running")
     runs = {run.sql.split()[0].upper(): run for run in sql.executions(func)}
 
     insert_at = sqlwrite._deciding_fragment(func, runs["INSERT"], "jobStatus", running, "insert")
@@ -14726,7 +14726,7 @@ def test_creating_a_row_is_not_the_same_verb_as_changing_one():
     """An INSERT is an object entering the system; an UPDATE is one moving.
 
     Both were reported as ``written``, so nothing downstream could ask where a
-    kind of row comes into existence.  ``sql.deletes``'s own docstring already
+    kind of row comes into existence.  ``sqltext.deletes``'s own docstring already
     said why that matters -- a DELETE followed by an INSERT on a command table
     means a second command silently replaced one that was never picked up --
     and the map had nowhere to put it.
@@ -14919,7 +14919,7 @@ def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
     which is why the map had the scout writing nothing of ``JediTaskSpec``.
     """
     with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
-        statements = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
+        statements = [w for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text)]
 
     (statement,) = statements
     assert sorted(statement.columns) == ["ramCount", "walltime"]
@@ -14928,7 +14928,7 @@ def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
 def test_a_key_the_loop_passes_over_is_not_a_column():
     """``if scoutKey in ["newNG"]: continue`` -- the statement never writes it."""
     with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert "newNG" not in columns
 
@@ -14942,7 +14942,7 @@ def test_a_skip_written_as_a_prefix_test_is_read_too():
         '            if not scoutKey.startswith("wall"):',
     )
     with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == {"walltime"}
 
@@ -14954,7 +14954,7 @@ def test_a_skip_this_cannot_read_leaves_the_column_unnamed():
         "            if self.excluded(scoutKey):",
     )
     with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == set()
 
@@ -14966,7 +14966,7 @@ def test_a_literal_before_the_key_stays_in_the_column_name():
         '            sqlTSD += f"merge{scoutKey}={tmpScoutKey},"',
     )
     with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == {"mergeramCount", "mergewalltime"}
 
@@ -14978,7 +14978,7 @@ def test_the_placeholder_the_loop_computes_is_resolved_with_the_column():
     walk cannot follow it to ``varMap[tmpScoutKey] = scoutVal``.
     """
     with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
-        (statement,) = [w for text in sql.variants(func, "sqlTSD") for w in sql.writes(text)]
+        (statement,) = [w for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text)]
         bound = [ast.unparse(b.value) for b in sql.bound_values(func, "varMap", ":ramCount")]
 
     assert statement.columns["ramCount"].kind == "bind"
@@ -14997,7 +14997,7 @@ def test_the_mapping_is_read_from_the_method_the_call_lands_in():
         "        return True, returnMap, extra\n"
     ) + _SCOUT_SOURCE
     with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sql.writes(text) for c in w.columns}
+        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == {"ramCount", "walltime"}
 
@@ -15014,7 +15014,7 @@ def test_a_mapping_that_arrives_as_a_parameter_is_the_callers_to_state():
     )
     func = _func(source, "update")
 
-    columns = {c for text in sql.variants(func, "sql") for w in sql.writes(text) for c in w.columns}
+    columns = {c for text in sql.variants(func, "sql") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == set()
     assert sql.key_column_census(func) == sql.KeyColumnCensus(
@@ -15144,7 +15144,7 @@ def test_the_answers_stops_are_the_builds_stops():
 
 
 def test_a_writes_row_keys_are_the_where_terms_it_does_not_guard():
-    (write,) = sql.writes(
+    (write,) = sqltext.writes(
         "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newStatus "
         "WHERE PandaID=:PandaID AND jobStatus=:oldStatus AND NOT x=:y "
         "AND t.jediTaskID = :jediTaskID AND status IN (:a,:b)"

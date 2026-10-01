@@ -1603,6 +1603,7 @@ class _Walk:
         if method in self._asked:
             return self._asked[method]
         from bamboo.codemap.panda import sql as sql_mod
+        from bamboo.codemap.panda import sqltext
         from bamboo.codemap.panda.provenance import DATABASE_PROXY
 
         said = ""
@@ -1614,8 +1615,8 @@ class _Walk:
             keys: list[str] = []
             for run in sql_mod.executions(func):
                 for reference in sql_mod._TABLE_REFERENCE.findall(run.sql):
-                    _add(tables, sql_mod._table_of(reference))
-                for key in re.findall(r":(\w+)", sql_mod.where_clause(run.sql)):
+                    _add(tables, sqltext._table_of(reference))
+                for key in re.findall(r":(\w+)", sqltext.where_clause(run.sql)):
                     _add(keys, f":{key}")
             if tables:
                 said = f"reads {', '.join(tables[:6])}" + (

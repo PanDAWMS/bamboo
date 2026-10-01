@@ -53,7 +53,7 @@ import re
 from typing import Collection, Iterator, NamedTuple, Optional
 
 from bamboo.codemap.models import SourceModule
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
@@ -594,7 +594,7 @@ class SpecAttributor:
                     if run.sql in seen:
                         continue
                     seen.add(run.sql)
-                    for write in sql.writes(run.sql):
+                    for write in sqltext.writes(run.sql):
                         only = self._only_class_declaring(set(write.columns))
                         if only is not None:
                             inferred.setdefault(write.table, set()).add(only)

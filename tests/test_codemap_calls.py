@@ -737,17 +737,17 @@ def test_a_call_sites_constant_rules_out_what_its_flag_decides_against(tmp_path)
 
 
 def test_order_and_limit_are_read_off_the_statement():
-    from bamboo.codemap.panda import sql
+    from bamboo.codemap.panda import sqltext
 
     text = (
         "SELECT * FROM (SELECT PandaID FROM jobsActive4 WHERE jobStatus=:s "
         "ORDER BY currentPriority DESC, PandaID ASC) WHERE ROWNUM <= :njobs"
     )
 
-    assert sql.ordering(text) == (["currentPriority DESC, PandaID ASC"], [(":njobs", False)])
-    assert sql.ordering("SELECT a FROM t WHERE rownum<3 ORDER BY a FOR UPDATE") == (["a"], [("3", True)])
+    assert sqltext.ordering(text) == (["currentPriority DESC, PandaID ASC"], [(":njobs", False)])
+    assert sqltext.ordering("SELECT a FROM t WHERE rownum<3 ORDER BY a FOR UPDATE") == (["a"], [("3", True)])
     nested = "SELECT * FROM (SELECT a FROM t ORDER BY (CASE {} ELSE {} END), b desc) WHERE ROWNUM <= :n"
-    assert sql.ordering(nested)[0] == ["(CASE {} ELSE {} END), b desc"]
+    assert sqltext.ordering(nested)[0] == ["(CASE {} ELSE {} END), b desc"]
 
 
 def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
@@ -782,7 +782,7 @@ def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
 
 
 def test_a_format_field_the_call_cannot_fill_is_a_hole_like_any_other(tmp_path):
-    from bamboo.codemap.panda import sql
+    from bamboo.codemap.panda import sqltext
 
     roots = _tree(
         tmp_path,
@@ -805,7 +805,7 @@ def test_a_format_field_the_call_cannot_fill_is_a_hole_like_any_other(tmp_path):
 
     (run,) = runs
     assert run.sql == "SELECT j.PandaID FROM {} j,{} m WHERE j.jediTaskID=:t AND m.PandaID=j.PandaID "
-    assert [table for table, _columns in sql.reads(run.sql)] == ["{}"]
+    assert [table for table, _columns in sqltext.reads(run.sql)] == ["{}"]
     assert [run.sql for run in chunk] == [
         "SELECT * FROM (SELECT fileID FROM t WHERE f=:f ORDER BY fileID) WHERE rownum <= {}"
     ]
