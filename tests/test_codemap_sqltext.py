@@ -329,3 +329,87 @@ def test_a_statement_that_does_not_parse_is_kept_and_says_so():
     (statement,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::broken"]
     assert statement.selects == set() and statement.keys == set()
     assert [stop.rsplit(" -- ", 1)[1] for stop in statement.unresolved] == [sqltext.NOT_PARSED]
+
+
+def _required(sql: str) -> list[list[tuple[str, ...]]]:
+    with sqltext.with_schema(_SCHEMA):
+        return [[branch.terms for branch in condition.branches] for condition in sqltext.conditions(sql)]
+
+
+def test_a_column_compared_with_one_bind_is_not_a_condition_outside_an_or():
+    """``status<>:s`` is ``excludes``, and one fact is one row.
+
+    Inside an ``OR`` the term stays: there it says the statement accepts that
+    value *or* something else.  ``IN`` and a quoted value stay as the text
+    reading kept them.  ``EXISTS`` is ``consults`` and ``ROWNUM`` is
+    ``limits``; ``NOT EXISTS`` asks the subquery turned round, and only the
+    term as written says that.
+    """
+    required = _required(
+        "SELECT t.jediTaskID FROM {}.JEDI_Tasks t WHERE t.status<>:s0 AND t.status IN (:s1,:s2) "
+        "AND t.vo='atlas' AND (t.status=:s3 OR t.lockedBy IS NULL) "
+        "AND NOT EXISTS (SELECT 1 FROM {}.JEDI_Datasets d WHERE d.jediTaskID=t.jediTaskID AND d.status=:ds) "
+        "AND EXISTS (SELECT 1 FROM {}.JEDI_Datasets d WHERE d.jediTaskID=t.jediTaskID AND d.type='input') "
+        "AND rownum<=:n"
+    )
+
+    assert required == [
+        [("t.status IN (:s1,:s2)",)],
+        [("t.vo='atlas'",)],
+        [("t.status=:s3",), ("t.lockedBy IS NULL",)],
+        [("NOT EXISTS (SELECT 1 FROM {}.JEDI_Datasets d WHERE d.jediTaskID=t.jediTaskID AND d.status=:ds)",)],
+    ]
+
+
+def test_a_term_the_text_readers_passed_over_is_a_condition():
+    """``BETWEEN``, ``LIKE``, arithmetic and functions are requirements too.
+
+    The ``AND`` of a ``BETWEEN`` does not join two terms.  A comparison of two
+    columns under one alias is the row's own; under two it is a join.  A
+    column named through a hole, and a term naming no column, ask nothing
+    the map can say.
+    """
+    required = _required(
+        "SELECT tabD.datasetID FROM {}.JEDI_Datasets tabD, {}.JEDI_Tasks tabT "
+        "WHERE tabD.jediTaskID=tabT.jediTaskID AND tabD.nFiles BETWEEN :lo AND :hi "
+        "AND tabD.datasetName LIKE :pattern AND (tabD.nFiles-tabD.nFilesUsed)>0 "
+        "AND NVL(tabD.nFilesOnHold,0)=0 AND tabD.nFilesUsed<tabD.nFiles AND tabD.{}=:{} AND 1=1"
+    )
+
+    assert required == [
+        [("tabD.nFiles BETWEEN :lo AND :hi",)],
+        [("tabD.datasetName LIKE :pattern",)],
+        [("(tabD.nFiles-tabD.nFilesUsed)>0",)],
+        [("NVL(tabD.nFilesOnHold,0)=0",)],
+        [("tabD.nFilesUsed<tabD.nFiles",)],
+    ]
+
+
+def test_the_rows_a_derived_table_hands_out_met_its_where():
+    """``getJobs`` picks its rows inside, and keeps ``ROWNUM <= :njobs`` of them outside.
+
+    A bind named like a keyword is still a bind: ``:limit`` is not ``LIMIT``.
+    """
+    required = _required(
+        "SELECT * FROM (SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab WHERE jobStatus=:old "
+        "AND tab.modificationTime<:limit ORDER BY (CASE {} ELSE {} END), currentpriority desc) "
+        "WHERE ROWNUM <= :njobs"
+    )
+
+    assert required == [[("tab.modificationTime<:limit",)]]
+
+
+def test_the_branches_of_a_union_are_alternatives():
+    """A row from either table met that branch's ``WHERE``, not both.
+
+    Read as one clause, the first branch's age limit was a requirement on
+    every job the statement returns.
+    """
+    required = _required(
+        "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE jediTaskID=:t "
+        "AND modificationTime>(CURRENT_DATE-30) "
+        "UNION ALL SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jediTaskID=:t "
+        "AND jobStatus<>:a AND lockedBy IS NULL"
+    )
+
+    assert required == [[("modificationTime>(CURRENT_DATE-30)",), ("lockedBy IS NULL",)]]

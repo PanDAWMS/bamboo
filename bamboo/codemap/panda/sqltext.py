@@ -504,37 +504,8 @@ def deletes(sql: str) -> list[str]:
     return [_table_of(match.group(1)) for match in _DELETE.finditer(sql)]
 
 
-_PREDICATE_BIND = re.compile(
-    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*=\s*(:\w+)", re.IGNORECASE
-)
-#: ``status<>:s`` / ``status!='done'``: a row is asked for by *not* having
-#: the value.
-_EXCLUDING_BIND = re.compile(
-    r"(?:WHERE|AND|OR)\s+\(*\s*(?:\w+\.)?([A-Za-z_]\w*)\s*(?:<>|!=)\s*(:\w+)", re.IGNORECASE
-)
-_PREDICATE_IN = re.compile(
-    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s+IN\s*\(([^)]*)\)", re.IGNORECASE
-)
 _BIND_KEY = re.compile(r":\w+")
 _QUOTED = re.compile(r"'([^']*)'")
-
-
-def predicates(sql: str) -> list[tuple[str, str]]:
-    """Return ``(column, bind key)`` for each predicate testing a bind.
-
-    What :func:`conditions` holds back as already said in ``selects``.  The
-    values themselves -- which rows a statement asks for, on which table --
-    are read off the tree by :func:`terms`; this is the text reading of the
-    same ``=`` and ``IN``, kept until ``conditions`` is read off the tree too.
-
-    Equality and ``IN`` only.  ``status<>:s`` asks for every row *but* the
-    value, and reading it here filed 36 predicates of the corpus as asking
-    for the one value they pass over.
-    """
-    found = [(column, key) for column, key in _PREDICATE_BIND.findall(sql)]
-    for column, inner in _PREDICATE_IN.findall(sql):
-        found.extend((column, key) for key in _BIND_KEY.findall(inner))
-    return found
 
 
 _ORDER_BY = re.compile(r"\bORDER\s+BY\s+", re.IGNORECASE)
@@ -588,28 +559,6 @@ def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
     return [order for order in orders if order], limits
 
 
-#: One ``WHERE`` term, whole.  Used to recognise a leaf of the clause rather
-#: than to find one: the splitting is done by :func:`_parse_clause`, which
-#: reads the ``AND``/``OR`` structure the parens declare.  ``predicates``
-#: cannot use this -- it answers "which value does this select on", and
-#: ``modificationTime<:limit`` names no value.
-_CONDITION_TERM = re.compile(
-    r"^(?:NOT\s+)?(?:\w+\.)?[A-Za-z_]\w*\s*"
-    r"(?:(?:=|<>|!=|<=|>=|<|>)\s*.+"
-    r"|(?:NOT\s+)?IN\s*\(.*\)|IS\s+(?:NOT\s+)?NULL)$",
-    re.IGNORECASE | re.DOTALL,
-)
-#: A term that is nothing but ``<column> <equality> <bind>`` -- the shape
-#: :func:`predicates` returns, used to tell "already in ``selects``" from
-#: "said nowhere".
-_CONDITION_EQUALITY = re.compile(r"^[^=<>!]*(?:=|<>|!=)\s*(:\w+)\s*$")
-#: ``<column> <op> <column>``.  Qualified on either side it is a join;
-#: unqualified it is the statement comparing two of a row's own columns, which
-#: is a reason a row was passed over and nothing else in the map records.
-_CONDITION_COMPARISON = re.compile(
-    r"^(?:NOT\s+)?((?:\w+\.)?\w+)\s*(?:=|<>|!=|<=|>=|<|>)\s*((?:\w+\.)?\w+)\s*$",
-    re.IGNORECASE,
-)
 #: Where the ``WHERE`` clause ends.  Everything after is about the rows that
 #: did come back, not about which ones do.
 _CLAUSE_END = re.compile(
@@ -617,213 +566,12 @@ _CLAUSE_END = re.compile(
 )
 
 
-class Branch(NamedTuple):
-    """One alternative of a condition: the terms a row can satisfy together."""
-
-    #: The terms, joined by ``AND`` as the statement writes them.
-    terms: tuple[str, ...]
-    #: Every bind key named anywhere in ``terms``, in the order they appear.
-    binds: tuple[str, ...]
-
-
-class Condition(NamedTuple):
-    """One thing a statement requires of a row, beside the values it selects on.
-
-    A conjunction of branches is not what this is: the *list* of conditions is
-    the conjunction, and each condition is a disjunction of :class:`Branch`.
-    One branch is the ordinary case -- ``modificationTime<:modificationTime``
-    is required outright -- and several is an ``OR``, which has to stay one
-    condition or the list stops reading as "all of these must hold".
-    """
-
-    branches: tuple[Branch, ...]
-
-    @property
-    def binds(self) -> tuple[str, ...]:
-        """Every bind key this condition names, across all its branches."""
-        return tuple(key for branch in self.branches for key in branch.binds)
-
-
-def _top_level(text: str, keyword: str) -> list[tuple[int, int]]:
-    """Spans of *text* between its ``keyword``s at paren depth zero."""
-    spans: list[tuple[int, int]] = []
-    start = 0
-    depth = 0
-    for token in re.finditer(r"\(|\)|\b" + keyword + r"\b", text, re.IGNORECASE):
-        found = token.group(0)
-        if found == "(":
-            depth += 1
-        elif found == ")":
-            depth -= 1
-        elif depth == 0:
-            spans.append((start, token.start()))
-            start = token.end()
-    spans.append((start, len(text)))
-    return spans
-
-
-def _parse_clause(text: str):
-    """The ``AND``/``OR`` tree of a ``WHERE`` clause, as nested lists.
-
-    ``("or", [child, …])``, ``("and", [child, …])`` or ``("term", text)``.
-    Read rather than pattern-matched because the two readings that came before
-    it were both wrong in ways a regex cannot see: ``AND (`` hides a term from
-    anything that wants whitespace, and looking outward for an enclosing paren
-    misses ``(A AND B) OR (C AND D) AND E``, where the disjunction is at the
-    top and has no parens of its own.
-
-    ``AND`` binds tighter than ``OR``, so the ``OR`` split happens first --
-    which is what makes ``E`` above part of the second alternative and not a
-    requirement in its own right.
-    """
-    text = text.strip()
-    while text.startswith("(") and text.endswith(")"):
-        depth = 0
-        for index, char in enumerate(text):
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0 and index < len(text) - 1:
-                    return _parse_clause_split(text)
-        text = text[1:-1].strip()
-    return _parse_clause_split(text)
-
-
-def _parse_clause_split(text: str):
-    for keyword, kind in (("OR", "or"), ("AND", "and")):
-        spans = _top_level(text, keyword)
-        if len(spans) > 1:
-            return (kind, [_parse_clause(text[lo:hi]) for lo, hi in spans])
-    return ("term", re.sub(r"\s+", " ", text).strip())
-
-
-def _keep_term(term: str, held: set[str], in_or: bool) -> bool:
-    """Whether *term* is a reason a row was passed over that the map lacks."""
-    if not _CONDITION_TERM.match(term):
-        return False
-    equality = _CONDITION_EQUALITY.match(term)
-    # Dropped as "already in ``selects``" only outside a disjunction.  Inside
-    # one it is not the same fact: ``selects`` says the statement asks by the
-    # value outright, and the alternative says it accepts that *or* something
-    # else.  ``predicates`` also picks up a group's later branches while the
-    # paren hides its first, so dropping them hands a reader half a
-    # disjunction and no sign that the rest exists.
-    if not in_or and equality and equality.group(1) in held:
-        return False
-    if not _BIND_KEY.search(term):
-        sides = _CONDITION_COMPARISON.match(term)
-        if sides and ("." in sides.group(1) or "." in sides.group(2)):
-            return False  # a join says how two tables meet, not why a row was skipped
-    return True
-
-
-def _prune(node, held: set[str], in_or: bool):
-    """Drop what is not an answer, and drop a disjunction that lost a branch.
-
-    An ``OR`` with one branch gone is satisfied by that branch whatever the
-    row does, so recording the rest would state a requirement the statement
-    does not make -- the direction that gets a row ruled out for failing a
-    test it never faced.
-    """
-    kind, body = node
-    if kind == "term":
-        return node if _keep_term(body, held, in_or) else None
-    children = [_prune(child, held, in_or or kind == "or") for child in body]
-    if kind == "or":
-        return (kind, children) if all(children) else None
-    kept = [child for child in children if child]
-    return (kind, kept) if kept else None
-
-
-def _terms_of(node) -> tuple[str, ...]:
-    """A branch's terms, with a nested disjunction kept whole as one term.
-
-    Parenthesised, because the terms around it are joined by ``AND`` and
-    ``AND`` binds tighter: ``X AND a OR b`` reads as ``(X AND a) OR b``, which
-    is not what the statement said and is the looser of the two -- a row that
-    fails ``X`` would be reported as still able to come back.
-    """
-    kind, body = node
-    if kind == "term":
-        return (body,)
-    if kind == "and":
-        return tuple(term for child in body for term in _terms_of(child))
-    return (f"({' OR '.join(_render_branch(child) for child in body)})",)
-
-
-def _render_branch(node) -> str:
-    terms = _terms_of(node)
-    return f"({' AND '.join(terms)})" if len(terms) > 1 else terms[0]
-
-
-def _as_condition(node) -> Condition:
-    kind, body = node
-    parts = body if kind == "or" else [node]
-    return Condition(
-        tuple(
-            Branch(
-                _terms_of(part),
-                tuple(key for term in _terms_of(part) for key in _BIND_KEY.findall(term)),
-            )
-            for part in parts
-        )
-    )
-
-
-def conditions(sql: str) -> list[Condition]:
-    """Return what *sql* asks of a row beyond the values it selects on.
-
-    Beside :func:`predicates` rather than inside it, and the two answer
-    different questions.  ``predicates`` says *which value* a statement asks
-    rows by, so it reads equalities on a bind and nothing else -- that is what
-    a subject's vocabulary is made of.  This says *what else had to be true*,
-    which is the question a row that holds the value and never came back
-    raises: ``copyArchive.py``'s ``holding`` query also requires
-    ``modificationTime<:modificationTime``, and the map had no way to say so.
-
-    **The list reads as a conjunction**, so a disjunction is one entry with
-    its alternatives joined -- split up, ``(status=:running OR
-    status=:scouting)`` asks for a row whose status is both, which no row can
-    be.  That is why the clause is parsed rather than scanned for terms.
-
-    What is left out, and why:
-
-    * **Terms ``predicates`` already returns, where they stand alone.**  Those
-      are the ``selects`` list; repeating them would make one fact two rows.
-      Inside a disjunction they are kept -- see :func:`_keep_term`.
-    * **Join terms.**  ``c1.jediTaskID=d.jediTaskID`` says how two tables meet,
-      not why a row was passed over.  182 of the corpus's terms are joins, and
-      left in they bury the ones that are answers -- one statement in
-      ``entity_module.py`` carries six.
-    * **A disjunction that lost a branch to either of those.**  It no longer
-      constrains anything, and recording what is left would over-state it.
-
-    What is kept and cannot be walked is still returned: an ``IS NULL`` and a
-    column compared against another column name no value to go looking for,
-    and saying the term is there is the point.  The caller decides what to do
-    with :attr:`Branch.binds`, which is empty for exactly those.
-    """
-    clause = where_clause(sql)
-    if not clause:
-        return []
-    # An excluding term is read into ``excludes`` the way an equality is read
-    # into ``selects``, so it is held the same way.
-    held = {key for _column, key in [*predicates(sql), *_EXCLUDING_BIND.findall(sql)]}
-    tree = _prune(_parse_clause(clause), held, False)
-    if tree is None:
-        return []
-    kind, body = tree
-    return [_as_condition(child) for child in body] if kind == "and" else [_as_condition(tree)]
-
-
 def where_clause(sql: str) -> str:
     """The text between ``WHERE`` and whatever ends the clause, or ``""``.
 
-    One spelling, because two readers want it for opposite questions -- which
-    terms the statement makes, and whether the placeholders in them are
-    readable at all -- and a second copy of "where the clause ends" is how the
-    two would come to disagree about a statement with a ``UNION`` in it.
+    Asked by the readers of holes -- whether the placeholders a statement
+    filters on are readable at all.  What the clause requires of a row is
+    read off the tree, by :func:`conditions`.
     """
     opened = _WHERE.search(sql)
     if opened is None:
@@ -872,6 +620,9 @@ class Parsed(NamedTuple):
     failure: str
     #: The text around where the parser stopped, holes spelled ``{}`` again.
     near: str = ""
+    #: The text the tree was parsed from: holes named, and any read as empty
+    #: gone.  The tree's positions are offsets into this.
+    text: str = ""
 
 
 class Term(NamedTuple):
@@ -916,11 +667,13 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
     global _SCHEMA
     before, _SCHEMA = _SCHEMA, columns
     terms.cache_clear()
+    conditions.cache_clear()
     try:
         yield
     finally:
         _SCHEMA = before
         terms.cache_clear()
+        conditions.cache_clear()
 
 
 _CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
@@ -1032,13 +785,13 @@ def parsed(sql: str) -> Parsed:
 
     for _attempt in range(len(_NAMED_HOLE.findall(text)) + 1):
         try:
-            return Parsed(sqlglot.parse_one(text, read="oracle"), "")
+            return Parsed(sqlglot.parse_one(text, read="oracle"), "", "", text)
         except ParseError as error:
             said = [one.get("description") or "" for one in error.errors]
             if said and all(_REQUIRED in one for one in said):
                 tree = sqlglot.parse_one(text, read="oracle", error_level=ErrorLevel.IGNORE)
                 if tree is not None and _holes_stand_for_what_is_missing(tree):
-                    return Parsed(tree, "")
+                    return Parsed(tree, "", "", text)
                 return failed(said[0], " ".join(text.split()[-8:]))
             first = error.errors[0] if error.errors else {}
             hole = _NAMED_HOLE.match(first.get("highlight") or "")
@@ -1292,3 +1045,465 @@ def terms(sql: str) -> Reading:
                 )
             )
     return Reading(tuple(found), tuple(sorted(unresolved)), True)
+
+
+class Branch(NamedTuple):
+    """One alternative of a condition: the terms a row can satisfy together."""
+
+    #: The terms, joined by ``AND`` as the statement writes them.
+    terms: tuple[str, ...]
+    #: Every bind key named anywhere in ``terms``, in the order they appear.
+    binds: tuple[str, ...]
+
+
+class Condition(NamedTuple):
+    """One thing a statement requires of a row, beside the values it selects on.
+
+    A conjunction of branches is not what this is: the *list* of conditions is
+    the conjunction, and each condition is a disjunction of :class:`Branch`.
+    One branch is the ordinary case -- ``modificationTime<:modificationTime``
+    is required outright -- and several is an ``OR``, which has to stay one
+    condition or the list stops reading as "all of these must hold".
+    """
+
+    branches: tuple[Branch, ...]
+
+    @property
+    def binds(self) -> tuple[str, ...]:
+        """Every bind key this condition names, across all its branches."""
+        return tuple(key for branch in self.branches for key in branch.binds)
+
+
+_TOKENIZE = sqlglot.Dialect.get_or_raise("oracle").tokenize
+_T = sqlglot.TokenType
+#: What ends a ``WHERE`` clause at its own depth.  ``START WITH`` comes out of
+#: the tokenizer as ``BEGIN`` and ``WITH``.
+_ENDS_A_CLAUSE = frozenset(
+    {
+        _T.GROUP_BY,
+        _T.ORDER_BY,
+        _T.HAVING,
+        _T.UNION,
+        _T.EXCEPT,
+        _T.INTERSECT,
+        _T.FOR,
+        _T.CONNECT_BY,
+        _T.BEGIN,
+        _T.FETCH,
+        _T.LIMIT,
+        _T.OFFSET,
+        _T.RETURNING,
+        _T.SEMICOLON,
+    }
+)
+_OPENS = frozenset({_T.L_PAREN, _T.CASE})
+_CLOSES = frozenset({_T.R_PAREN, _T.END})
+#: What a term is to the conditions list.  ``_KEEP`` is a reason a row was
+#: passed over; ``_HELD`` is a column compared with one bind, which
+#: ``selects``, ``excludes`` or ``keys`` already carries; ``_DROP`` is not a
+#: requirement on the row at all.
+_KEEP, _HELD, _DROP = "keep", "held", "drop"
+_COMPARISONS = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
+
+
+class _Token(NamedTuple):
+    token_type: object
+    start: int
+    end: int
+
+
+def _tokens(text: str) -> list[_Token]:
+    """*text*'s tokens, a bind one token with its name.
+
+    The tokenizer reads ``:limit`` as a colon and the keyword ``LIMIT``, and
+    ``:end`` as one that closes a ``CASE``.
+    """
+    found: list[_Token] = []
+    for token in _TOKENIZE(text):
+        if found and found[-1].token_type == _T.COLON and token.start == found[-1].end + 1:
+            found[-1] = _Token(_T.PLACEHOLDER, found[-1].start, token.end)
+        else:
+            found.append(_Token(token.token_type, token.start, token.end))
+    return found
+
+
+def _clause(tokens: list, where: int) -> tuple[int, int]:
+    """The tokens of the ``WHERE`` at *where*, up to what ends it at its depth."""
+    depth = 0
+    for index in range(where + 1, len(tokens)):
+        kind = tokens[index].token_type
+        if kind == _T.L_PAREN:
+            depth += 1
+        elif kind == _T.R_PAREN:
+            if depth == 0:
+                return where + 1, index
+            depth -= 1
+        elif depth == 0 and kind in _ENDS_A_CLAUSE:
+            return where + 1, index
+    return where + 1, len(tokens)
+
+
+def _closing(tokens: list, opened: int, end: int) -> int:
+    depth = 0
+    for index in range(opened, end):
+        kind = tokens[index].token_type
+        if kind == _T.L_PAREN:
+            depth += 1
+        elif kind == _T.R_PAREN:
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def _cuts(tokens: list, lo: int, hi: int, keyword) -> list[int]:
+    """Where *keyword* joins terms at the depth of ``tokens[lo:hi]``.
+
+    Not inside parentheses or a ``CASE``, and not the ``AND`` of a ``BETWEEN``.
+    """
+    depth, between, found = 0, False, []
+    for index in range(lo, hi):
+        kind = tokens[index].token_type
+        if kind in _OPENS:
+            depth += 1
+        elif kind in _CLOSES:
+            depth -= 1
+        elif depth == 0:
+            if kind == _T.BETWEEN:
+                between = True
+            elif kind == _T.AND and between:
+                between = False
+            elif kind == keyword:
+                found.append(index)
+    return found
+
+
+def _split(tokens: list, lo: int, hi: int):
+    """``tokens[lo:hi]`` as ``("or"|"and", [child, ...])`` or ``("leaf", lo, hi)``.
+
+    ``AND`` binds tighter than ``OR``, so the ``OR`` split happens first:
+    ``(A AND B) OR (C AND D) AND E`` is two alternatives, ``E`` part of the
+    second.
+    """
+    while hi - lo >= 2 and tokens[lo].token_type == _T.L_PAREN and _closing(tokens, lo, hi) == hi - 1:
+        lo, hi = lo + 1, hi - 1
+    for kind, keyword in (("or", _T.OR), ("and", _T.AND)):
+        cuts = _cuts(tokens, lo, hi, keyword)
+        if cuts:
+            bounds = [lo - 1, *cuts, hi]
+            return (kind, [_split(tokens, a + 1, b) for a, b in zip(bounds, bounds[1:])])
+    return ("leaf", lo, hi)
+
+
+def _connectives(where: exp.Where) -> set[int]:
+    """The ``AND``, ``OR`` and grouping parentheses of *where*'s own clause."""
+    found: set[int] = set()
+    stack = [where.this]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (exp.And, exp.Or)):
+            found.add(id(node))
+            stack.extend((node.this, node.expression))
+        elif isinstance(node, exp.Paren) and isinstance(node.this, (exp.And, exp.Or, exp.Paren)):
+            found.add(id(node))
+            stack.append(node.this)
+    return found
+
+
+def _term_holding(node: exp.Expression, where: exp.Where, joins: set[int]) -> exp.Expression:
+    """The term of *where*'s clause that *node* is part of, its brackets off."""
+    while node.parent is not None and node.parent is not where and id(node.parent) not in joins:
+        node = node.parent
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return node
+
+
+def _own(node: exp.Expression, select: Optional[exp.Expression]) -> list[exp.Column]:
+    return [
+        column
+        for column in node.find_all(exp.Column)
+        if column.find_ancestor(exp.Select) is select
+        and not _NAMED_HOLE.search(column.name)
+        and column.name.lower() not in _PSEUDO_NAMES
+    ]
+
+
+def _term_kind(term: exp.Expression, scope, root) -> str:
+    """:data:`_KEEP`, :data:`_HELD` or :data:`_DROP`, read off the tree."""
+    node, negations = term, 0
+    while isinstance(node, (exp.Not, exp.Paren)):
+        negations += isinstance(node, exp.Not)
+        node = node.this
+    if isinstance(node, exp.Exists) or (isinstance(node, exp.In) and node.args.get("query") is not None):
+        # ``EXISTS (...)`` looks rows up and is ``consults``; ``NOT EXISTS``
+        # turns the subquery's terms round, and only the term as a whole says
+        # what it asks.
+        return _KEEP if negations % 2 else _DROP
+    select = None if isinstance(scope, _Root) else scope.expression
+    own = _own(node, select)
+    if not own:
+        return _DROP  # ``ROWNUM <= :n`` is ``limits``; ``1=1`` asks nothing
+    if isinstance(node, _COMPARISONS):
+        sides = (node.this, node.expression)
+        if all(isinstance(side, exp.Column) and not _NAMED_HOLE.search(side.name) for side in sides):
+            if (sides[0].table or "").lower() != (sides[1].table or "").lower():
+                return _DROP  # a join says how two tables meet, not why a row was skipped
+    if isinstance(node, (exp.EQ, exp.NEQ)):
+        # ``status=:s`` and ``status<>:s``, the shape the text reading held
+        # back.  ``IN`` and a quoted value are kept as that reading kept them:
+        # a bind written in a kept condition is where a reader's walk starts.
+        for column in own:
+            if column.parent is not node or _compared(column) is None:
+                continue
+            other = node.expression if node.this is column else node.this
+            if not isinstance(other, exp.Placeholder) or _NAMED_HOLE.search(other.name):
+                continue
+            if not _owner(column, scope, root)[1]:
+                return _HELD
+    return _KEEP
+
+
+def _respelled(fragment: str, sql: str) -> str:
+    """*fragment* of the parsed text with each named hole spelled as *sql* has it."""
+    holes = [(match.group(0), sql[match.end() : match.end() + 1].isalpha()) for match in _HOLE.finditer(sql)]
+
+    def back(match: re.Match) -> str:
+        number = int(match.group(1)) - 1
+        if number >= len(holes):
+            return match.group(0)
+        spelled, padded = holes[number]
+        return spelled if padded or not match.group(2) else spelled + match.group(2)
+
+    return re.sub(rf"{_HOLE_NAME}(\d+)( ?)", back, fragment)
+
+
+def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: list):
+    """*where*'s clause as a tree of ``("term", text, kind)``, or ``None``.
+
+    Split on the tokens, so each term keeps the statement's own spelling --
+    a tree regenerated by sqlglot respells it (``endTime IS NOT NULL`` comes
+    back as ``NOT endTime IS NULL``).  Each piece is then matched to the term
+    of the tree it spans, which says what it is.  ``None`` when the two do not
+    agree on where a term begins and ends.
+    """
+    placed = [
+        (node.meta["start"], node)
+        for node in where.this.find_all(exp.Identifier, exp.Literal)
+        if "start" in node.meta
+    ]
+    if not placed:
+        return None
+    first = min(start for start, _node in placed)
+    opened = [index for index, token in enumerate(tokens) if token.token_type == _T.WHERE and token.start < first]
+    if not opened:
+        return None
+    lo, hi = _clause(tokens, opened[-1])
+    if hi <= lo or any(not tokens[lo].start <= start <= tokens[hi - 1].end for start, _node in placed):
+        return None
+    joins = _connectives(where)
+    agreed = True
+
+    def build(node):
+        nonlocal agreed
+        if node[0] != "leaf":
+            return (node[0], [build(child) for child in node[1]])
+        _leaf, a, b = node
+        if a >= b:
+            agreed = False
+            return ("term", "", _DROP)
+        start, end = tokens[a].start, tokens[b - 1].end
+        held = {id(_term_holding(n, where, joins)): _term_holding(n, where, joins) for s, n in placed if start <= s <= end}
+        text = " ".join(_respelled(read.text[start : end + 1], sql).split())
+        if len(held) > 1:
+            agreed = False
+        if len(held) != 1:
+            return ("term", text, _DROP)
+        return ("term", text, _term_kind(next(iter(held.values())), scope, root))
+
+    tree = build(_split(tokens, lo, hi))
+    return tree if agreed else None
+
+
+def _prune(node, in_or: bool):
+    """Drop what is not an answer, and drop a disjunction that lost a branch.
+
+    An ``OR`` with one branch gone is satisfied by that branch whatever the
+    row does, so recording the rest would state a requirement the statement
+    does not make -- the direction that gets a row ruled out for failing a
+    test it never faced.  A term ``selects`` already carries is dropped only
+    outside a disjunction: inside one it is not the same fact, since
+    ``selects`` says the statement asks by the value outright.
+    """
+    if node[0] == "term":
+        _term, _text, kind = node
+        return node if kind == _KEEP or (kind == _HELD and in_or) else None
+    kind, body = node
+    children = [_prune(child, in_or or kind == "or") for child in body]
+    if kind == "or":
+        return (kind, children) if all(children) else None
+    kept = [child for child in children if child]
+    return (kind, kept) if kept else None
+
+
+def _terms_of(node) -> tuple[str, ...]:
+    """A branch's terms, with a nested disjunction kept whole as one term.
+
+    Parenthesised, because the terms around it are joined by ``AND`` and
+    ``AND`` binds tighter: ``X AND a OR b`` reads as ``(X AND a) OR b``, which
+    is not what the statement said and is the looser of the two -- a row that
+    fails ``X`` would be reported as still able to come back.
+    """
+    if node[0] == "term":
+        return (node[1],)
+    kind, body = node
+    if kind == "and":
+        return tuple(term for child in body for term in _terms_of(child))
+    return (f"({' OR '.join(_render_branch(child) for child in body)})",)
+
+
+def _render_branch(node) -> str:
+    terms = _terms_of(node)
+    return f"({' AND '.join(terms)})" if len(terms) > 1 else terms[0]
+
+
+def _branch(terms: tuple[str, ...]) -> Branch:
+    return Branch(terms, tuple(key for term in terms for key in _BIND_KEY.findall(term)))
+
+
+def _as_condition(node) -> Condition:
+    parts = node[1] if node[0] == "or" else [node]
+    return Condition(tuple(_branch(_terms_of(part)) for part in parts))
+
+
+def _as_terms(condition: Condition) -> tuple[str, ...]:
+    """*condition* as terms of a branch: its own, or its disjunction as one."""
+    if len(condition.branches) == 1:
+        return condition.branches[0].terms
+    rendered = [
+        f"({' AND '.join(branch.terms)})" if len(branch.terms) > 1 else branch.terms[0]
+        for branch in condition.branches
+    ]
+    return (f"({' OR '.join(rendered)})",)
+
+
+def _either(alternatives: list[list[Condition]]) -> list[Condition]:
+    """What a row from any one of *alternatives* is required to satisfy.
+
+    ``(A and B) or (A and C)`` is ``A``, required outright, and ``B or C`` as
+    one condition; an alternative that requires nothing beyond the common
+    part makes that disjunction free, and then it is not recorded.
+    """
+    common = [one for one in alternatives[0] if all(one in other for other in alternatives[1:])]
+    remainders: list[tuple[Condition, ...]] = []
+    for alternative in alternatives:
+        rest = tuple(one for one in alternative if one not in common)
+        if rest not in remainders:
+            remainders.append(rest)
+    if len(remainders) == 1:
+        return common + list(remainders[0])
+    if not all(remainders):
+        return common
+    return common + [
+        Condition(tuple(_branch(tuple(term for one in rest for term in _as_terms(one))) for rest in remainders))
+    ]
+
+
+def _set_operands(node: exp.Expression, kind: type) -> list[exp.Expression]:
+    if isinstance(node, kind) and type(node) is kind:
+        return [*_set_operands(node.this, kind), *_set_operands(node.expression, kind)]
+    return [node]
+
+
+@functools.lru_cache(maxsize=None)
+def conditions(sql: str) -> tuple[Condition, ...]:
+    """Return what *sql* asks of a row beyond the values it selects on.
+
+    Beside :func:`terms` rather than inside it, and the two answer different
+    questions.  ``terms`` says *which value* a statement asks rows by -- that
+    is what a subject's vocabulary is made of.  This says *what else had to
+    be true*, which is the question a row that holds the value and never came
+    back raises: ``copyArchive.py``'s ``holding`` query also requires
+    ``modificationTime<:modificationTime``, and the map had no way to say so.
+
+    **The list reads as a conjunction**, so a disjunction is one entry with
+    its alternatives joined -- split up, ``(status=:running OR
+    status=:scouting)`` asks for a row whose status is both, which no row can
+    be.  The rows' own ``WHERE``\\ s are read: the statement's, each branch of
+    a ``UNION`` (folded as the alternatives they are, see :func:`_either`),
+    and those of the derived tables and ``WITH`` clauses the rows come from,
+    which hold as well as the outer one.
+
+    What is left out, and why:
+
+    * **A column compared with one bind** -- ``status=:s``, ``status<>:s``
+      -- where it stands alone: ``selects``, ``excludes`` or ``keys`` has it,
+      and one fact is one row.  Inside a disjunction it is kept, see
+      :func:`_prune`.  ``IN`` and a quoted value are kept, as the text
+      reading kept them.
+    * **Join terms.**  ``c1.jediTaskID=d.jediTaskID`` says how two tables
+      meet, not why a row was passed over.
+    * **A term that names none of the rows' columns**: ``ROWNUM <= :n`` is
+      ``limits``, ``EXISTS (...)`` is ``consults``.  ``NOT EXISTS (...)`` is
+      kept whole: what it asks is the subquery turned round.
+    * **A disjunction that lost a branch to any of those.**  It no longer
+      constrains anything, and recording what is left would over-state it.
+    * **A statement that does not parse**, which ``unresolved`` reports.
+
+    What is kept and cannot be walked is still returned: an ``IS NULL`` names
+    no value to go looking for, and saying the term is there is the point.
+    The caller decides what to do with :attr:`Branch.binds`, which is empty
+    for exactly those.
+    """
+    read = parsed(sql)
+    if read.tree is None:
+        return ()
+    tokens = _tokens(read.text)
+    scopes, root = _scopes(read.tree)
+    scope_of = {id(scope.expression): scope for scope, _verb, _kind in scopes}
+    ctes: dict[str, exp.Expression] = {}
+    entered: set[int] = set()
+
+    def required(node: Optional[exp.Expression]) -> list[Condition]:
+        if node is None or id(node) in entered:
+            return []
+        entered.add(id(node))
+        if isinstance(node, exp.Subquery):
+            return required(node.this)
+        if isinstance(node, exp.Union):
+            return _either([required(one) for one in _set_operands(node, type(node))])
+        if isinstance(node, exp.Intersect):
+            return [one for operand in _set_operands(node, exp.Intersect) for one in required(operand)]
+        if isinstance(node, exp.Except):
+            # ``A MINUS B``: what came back met ``A``; ``B`` only took rows away.
+            return required(node.this)
+        if isinstance(node, exp.Insert):
+            return required(node.expression) if isinstance(node.expression, (exp.Query, exp.Subquery)) else []
+        if not isinstance(node, (exp.Select, exp.Update, exp.Delete)):
+            return []
+        for cte in (node.args.get("with_") or exp.With()).expressions:
+            ctes[cte.alias_or_name.lower()] = cte.this
+        found: list[Condition] = []
+        where = node.args.get("where")
+        scope = root if isinstance(node, (exp.Update, exp.Delete)) else scope_of.get(id(node))
+        if where is not None and scope is not None:
+            clause = _where_tree(where, scope, root, read, sql, tokens)
+            kept = _prune(clause, False) if clause is not None else None
+            if kept is not None:
+                found.extend(_as_condition(child) for child in (kept[1] if kept[0] == "and" else [kept]))
+        sources = [node.args.get("from_")] + list(node.args.get("joins") or [])
+        for source in (one.this for one in sources if one is not None):
+            if isinstance(source, exp.Subquery):
+                found.extend(required(source))
+            elif isinstance(source, exp.Table) and source.name.lower() in ctes:
+                found.extend(required(ctes[source.name.lower()]))
+        return found
+
+    if isinstance(read.tree, exp.Query):
+        for cte in (read.tree.args.get("with_") or exp.With()).expressions:
+            ctes[cte.alias_or_name.lower()] = cte.this
+    found: list[Condition] = []
+    for one in required(read.tree):
+        if one not in found:
+            found.append(one)
+    return tuple(found)

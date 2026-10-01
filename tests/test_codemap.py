@@ -2431,7 +2431,10 @@ def test_a_join_key_is_not_a_condition_on_a_value():
     )
 
     assert sqltext.joins(joined) == ["schedconfig_json"]
-    assert sqltext.predicates(joined) == [("jobStatus", ":jobStatus")]
+    assert [(term.column, term.binds) for term in sqltext.terms(joined).terms] == [
+        ("jobStatus", (":jobStatus",))
+    ]
+    assert _conditions(joined) == []
 
 
 def _conditions(statement: str) -> list[str]:
@@ -2442,14 +2445,13 @@ def _conditions(statement: str) -> list[str]:
     ]
 
 
-def test_a_paren_hides_a_condition_from_predicates_but_not_from_conditions():
-    """The two readers disagree on this statement, and both are right.
+def test_a_condition_is_spelled_as_the_statement_spells_it():
+    """``endTime IS NOT NULL`` comes back from sqlglot as ``NOT endTime IS NULL``.
 
-    ``_PREDICATE_BIND`` wants whitespace after ``AND``, so the term behind
-    ``AND (`` is invisible to it -- sixteen of the corpus's equalities are lost
-    that way, and fixing that moves ``selects`` and everything downstream of
-    it.  ``conditions`` reads the paren, which is why it can say what
-    ``selects`` does not: the row also had to be older than a time limit.
+    So each term is cut from the statement's own text, where a reader can find
+    it in the source, and only what it is comes off the tree:
+    ``jobStatus=:jobStatus`` is the ``selects`` list, and the row also had to
+    be older than a time limit, which nothing else says.
     """
     statement = (
         "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus "
@@ -2457,7 +2459,9 @@ def test_a_paren_hides_a_condition_from_predicates_but_not_from_conditions():
         "AND endTime<:endTime))"
     )
 
-    assert sqltext.predicates(statement) == [("jobStatus", ":jobStatus")]
+    assert [(term.column, term.binds) for term in sqltext.terms(statement).terms] == [
+        ("jobStatus", (":jobStatus",))
+    ]
     assert _conditions(statement) == [
         "modificationTime<:modificationTime OR endTime IS NOT NULL AND endTime<:endTime"
     ]
