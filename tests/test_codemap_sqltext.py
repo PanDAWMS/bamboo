@@ -655,11 +655,17 @@ def test_what_a_statement_writes_is_read_off_the_tree_in_its_own_spelling():
             {},
         )
     ]
-    assert _written("INSERT INTO {}.TASK_ATTEMPTS (jeditaskid, attemptnr) SELECT jediTaskID, attemptNr FROM {}.JEDI_Tasks") == [
+    assert _written(
+        "INSERT INTO {}.JEDI_Events (jediTaskID,status,attemptNr) SELECT jediTaskID,:newStatus,attemptNr-1 FROM {}.JEDI_Events"
+    ) == [
         (
             "insert",
-            "TASK_ATTEMPTS",
-            {"jeditaskid": ("expression", "jediTaskID"), "attemptnr": ("expression", "attemptNr")},
+            "JEDI_Events",
+            {
+                "jediTaskID": ("expression", "jediTaskID"),
+                "status": ("bind", ":newStatus"),
+                "attemptNr": ("expression", "attemptNr-1"),
+            },
             {},
             {},
         )

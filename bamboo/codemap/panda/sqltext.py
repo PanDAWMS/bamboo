@@ -715,8 +715,10 @@ def _insert_pairs(node: exp.Insert, sql: str, tokens: list) -> Optional[list[tup
 
     Paired by position, the names in one parenthesised run and the values in
     another.  ``INSERT ... SELECT`` pairs a column with the select list's item
-    in its place: what that copies is read when the statement runs, so it is
-    an expression here.
+    in its place: a bind or a literal there is the value, and a column there
+    is copied from the row selected, which is read when the statement runs.
+    ``ppEventServiceJob`` inserts ``:newStatus`` into ``JEDI_Events.status``
+    that way.
     """
     target = node.this
     if not isinstance(target, exp.Schema):
@@ -739,7 +741,7 @@ def _insert_pairs(node: exp.Insert, sql: str, tokens: list) -> Optional[list[tup
         if chosen is None:
             return None
         spans = _items(tokens, chosen + 1, len(tokens) if stop is None else stop)
-        values = [exp.Anonymous(this="select") for _item in source.expressions]
+        values = [item.unalias() for item in source.expressions]
     else:
         return None
     found: list[tuple[str, int, ColumnValue]] = []
