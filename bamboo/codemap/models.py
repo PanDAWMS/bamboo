@@ -3182,6 +3182,17 @@ class TraceStep(BaseModel):
     kind: str = Field(..., description="One of the TRACE_* kinds.")
     name: str = Field(default="", description="The name this step explains.")
     owner: str = Field(default="", description="module::function the site is in.")
+    cls: str = Field(
+        default="",
+        description=(
+            "``file::Class`` whose method holds the step's statement; empty at "
+            "module level or where the walk cannot tell.  ``owner`` names the "
+            "function alone, and one file can define a method of that name in "
+            "several classes -- ``TaskBroker.py``'s three ``__init__`` -- so a "
+            "reader keeping the bindings of ``self.<field>`` that belong to one "
+            "object asks this, with the class's bases, and not ``owner``."
+        ),
+    )
     file: str = Field(default="")
     line: int = Field(default=0)
     value: str = Field(default="", description="The expression, as source.")

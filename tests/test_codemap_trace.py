@@ -464,6 +464,54 @@ class Adder:
     assert bound[0].guards == ["why is None"]
 
 
+def test_another_classs_method_of_the_same_name_is_not_the_siblings(tmp_path):
+    # ``ThreadUtils.py`` and ``JobGenerator.py`` define ``__init__`` in two
+    # classes.  The frame for one was keyed by the file and the name alone,
+    # so the second class's walk read the first class's ``__init__``.  Each
+    # step says which class's method it is.
+    roots = _tree(
+        tmp_path,
+        threads='''\
+class Lock:
+    def __init__(self):
+        self.mode = "shared"
+
+    def take(self):
+        spec.mode = self.mode
+
+
+class Worker:
+    def __init__(self):
+        self.mode = "exclusive"
+
+    def run(self):
+        spec.mode = self.mode
+''',
+    )
+
+    first, _ = _walk(roots, file="threads", owner="take", lines=[6])
+    steps, _ = _walk(roots, file="threads", owner="run", lines=[14])
+
+    assert [(s.line, s.value, s.cls) for s in first if s.name == "self.mode"] == [
+        (3, "'shared'", f"{PACKAGE}/threads::Lock")
+    ]
+    assert [(s.line, s.value, s.cls) for s in steps if s.name == "self.mode"] == [
+        (11, "'exclusive'", f"{PACKAGE}/threads::Worker")
+    ]
+    # One walk entering both: the second ``__init__`` asked for, by line and
+    # as a sibling, is not handed the first one's frame.
+    walk = trace_mod._Walk(roots, provenance.classify, trace_mod.Budget())
+    file = f"{PACKAGE}/threads"
+    locked = walk.frame(file, f"{file}::__init__", line=3)
+    working = walk.frame(file, f"{file}::__init__", line=11)
+    assert (locked.func.lineno, working.func.lineno) == (2, 10)
+    assert working.owner == f"{file}::Worker.__init__"
+    run = walk.frame(file, f"{file}::run", line=14)
+    worker_init = working.func
+    walk.frames.pop((file, working.owner))
+    assert walk._sibling(run, worker_init).func is worker_init
+
+
 def test_a_field_written_in_several_methods_comes_back_as_several_steps(tmp_path):
     # ``self.jobs`` is written in three methods of ``setupper_atlas_plugin``
     # and which of them ran last is a fact about the run.  Folding them would

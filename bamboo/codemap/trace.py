@@ -187,6 +187,12 @@ class _Frame(NamedTuple):
     imports: frozenset[str] = frozenset()
 
 
+def _with_class(file: str, tree: ast.Module, func: ast.AST) -> str:
+    """``file::Class.method``: the owner of *func* told apart from another class's method of its name."""
+    cls = pathcond.class_of(tree, func)
+    return f"{file}::{cls.name if cls is not None else 'module'}.{getattr(func, 'name', '')}"
+
+
 def _text(node: ast.AST) -> str:
     try:
         return ast.unparse(node)
@@ -1470,6 +1476,7 @@ class _Walk:
         self.narrowed = narrowed or (reading_at[:2] if reading_at else None)
         self.parsed: dict[str, tuple[str, ast.Module]] = {}
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
+        self._classes: dict[tuple[str, int, str], str] = {}
         self.steps: list[TraceStep] = []
         self.armed: dict[int, ast.stmt] = {}
         self.seen: set[tuple] = set()
@@ -1548,7 +1555,18 @@ class _Walk:
     ) -> Optional[_Frame]:
         key = (file, owner)
         if key in self.frames:
-            return self.frames[key]
+            held = self.frames[key]
+            if held is None or line is None or held.func.lineno <= line <= (held.func.end_lineno or held.func.lineno):
+                return held
+            # Two classes of one file with a method of one name, and the key
+            # holds the other one's: ``datasetManager.py`` defines ``run`` in
+            # each of its threads, and the line asked about is not in the
+            # ``run`` the walk entered first.  Spelled with the class, as
+            # ``_callee_frame`` spells a call's.
+            func = containing_function(self.parsed[file][1], line, owner) if file in self.parsed else None
+            if func is None or "." in owner.rsplit("::", 1)[-1]:
+                return held
+            return self.frame(file, _with_class(file, self.parsed[file][1], func), line=line, handovers=handovers)
         limit = self.budget.functions + (self.budget.crossed_functions if self.crossing else 0)
         if len(self.frames) >= limit:
             self._exhausted("functions")
@@ -1628,6 +1646,8 @@ class _Walk:
     def record(self, step: TraceStep) -> bool:
         if self._role and not step.role:
             step.role = self._role
+        if not step.cls:
+            step.cls = self._class_at(step)
         if step.terminal == STOP_UPSTREAM and step.detail and " " not in step.detail:
             asked = self.database_asked(step.detail)
             if asked:
@@ -1644,6 +1664,32 @@ class _Walk:
             return False
         self.steps.append(step)
         return True
+
+    def _class_at(self, step: TraceStep) -> str:
+        """``file::Class`` for the method holding *step*'s statement, or ``""``.
+
+        Read off modules the walk has already parsed and nothing else: parsing
+        one here would spend the walk's file budget on a label.  A step with no
+        line -- a stop -- takes the class of the one frame its owner names.
+        """
+        held = self.parsed.get(step.file)
+        if held is None:
+            return ""
+        key = (step.file, step.line, step.owner)
+        if key in self._classes:
+            return self._classes[key]
+        tree = held[1]
+        func = containing_function(tree, step.line, step.owner) if step.line else None
+        if func is None:
+            frames = {
+                id(one.func): one.func
+                for one in self.frames.values()
+                if one is not None and one.file == step.file and one.owner == step.owner
+            }
+            func = next(iter(frames.values())) if len(frames) == 1 else None
+        cls = pathcond.class_of(tree, func) if func is not None else None
+        self._classes[key] = f"{step.file}::{cls.name}" if cls is not None else ""
+        return self._classes[key]
 
     def drain(self) -> None:
         """Explain everything asked: the function's own names first, then beyond it.
@@ -3228,6 +3274,13 @@ class _Walk:
         owner = f"{frame.owner.rsplit('::', 1)[0]}::{method.name}"
         key = (frame.file, owner)
         held = self.frames.get(key)
+        if held is not None and held.func is not method and frame.file in self.parsed:
+            # Another class's method of that name holds the key --
+            # ``ThreadUtils.py`` has an ``__init__`` in each class -- and its
+            # assignments are not this object's.
+            owner = _with_class(frame.file, self.parsed[frame.file][1], method)
+            key = (frame.file, owner)
+            held = self.frames.get(key)
         if held is not None:
             return held
         if key in self.frames:
