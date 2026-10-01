@@ -529,15 +529,16 @@ def test_a_call_handing_a_flag_says_what_the_statement_refuses_and_requires_ther
         side = sqlwrite.read_side(modules, attributor, calls)
 
     (statement,) = side.statements.values()
+    # Over every call the test is appended on some paths only: neither
+    # refused nor required.
     assert statement.refuses == frozenset()
+    assert statement.conditions == []
     unreassignable, reassignable = statement.call_sites
-    assert unreassignable == (
-        "pkg/main.py:4 (onlyReassignable=False): does not exclude jobsDefined4.relocationFlag=2; "
-        "does not require relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2"
+    assert unreassignable == "pkg/main.py:4 (onlyReassignable=False): does not exclude jobsDefined4.relocationFlag=2"
+    assert reassignable == (
+        "pkg/main.py:5 (onlyReassignable=True): also refuses jobsDefined4.relocationFlag=2; "
+        "also requires relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2"
     )
-    assert reassignable.startswith("pkg/main.py:5 (onlyReassignable=True): ")
-    assert "also refuses jobsDefined4.relocationFlag=2" in reassignable
-    assert "require" not in reassignable
 
 
 def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):

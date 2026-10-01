@@ -1177,24 +1177,35 @@ def _folded_conditions(
     (A and C)`` is ``A``, required outright, and ``B or C`` as one condition.
     A variant that requires nothing beyond the common part makes that
     disjunction free, and then it is not recorded at all.
+
+    **A variant is read with what it appends on some paths only cut out**
+    (:func:`_every_run_texts`).  The reassembly keeps such a fragment in every
+    variant, and a fragment in every variant folds as required:
+    ``getDatasetsToFeedContents_JEDI`` appends ``tabT.lockedTime IS NULL OR
+    tabT.lockedTime<:lockTimeLimit`` under ``if not force_read:``, and a run
+    with ``force_read`` never asked it.  What is cut is not recorded at all,
+    even where it travels with the value a reader asks by -- saying less is
+    the direction this field can afford.  A run whose variant cannot be told
+    is read as it is.
     """
     rendered: list[list[str]] = []
     for run in variants:
         window = run.window
         if window is None and run.varmap:
             window = sql.binding_window(func, run.varmap, line)
-        found = sqltext.conditions(run.sql)
-        seeds: dict[str, list[int]] = {}
-        for condition in found:
-            for key in condition.binds:
-                if key in seeds:
-                    continue
-                at_lines = sorted(
-                    {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window)}
-                )
-                if at_lines:
-                    seeds[key] = at_lines
-        rendered.append([_render_condition(c, seeds) for c in found])
+        for text in _every_run_texts(func, run) or [run.sql]:
+            found = sqltext.conditions(text)
+            seeds: dict[str, list[int]] = {}
+            for condition in found:
+                for key in condition.binds:
+                    if key in seeds:
+                        continue
+                    at_lines = sorted(
+                        {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window)}
+                    )
+                    if at_lines:
+                        seeds[key] = at_lines
+            rendered.append([_render_condition(c, seeds) for c in found])
     common = set.intersection(*(set(one) for one in rendered))
     folded = sorted(common)
     remainders: list[tuple[str, ...]] = []
