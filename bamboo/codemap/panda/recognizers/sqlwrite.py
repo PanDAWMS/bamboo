@@ -2451,7 +2451,8 @@ def _reached_by(
     reuse P1-54 met on the exits, met again a function further out.
     ``pathcond.surviving_writes`` is the same answer here as it was there: at
     the construction on line 906 the ``res`` in scope is the one from line
-    896, and the six others were overwritten or had not run.
+    896, and the six others were overwritten or had not run.  Read as the
+    function runs, as the walk reads it.
     """
     writes = [
         node
@@ -2463,7 +2464,7 @@ def _reached_by(
     def theirs(use: ast.AST) -> bool:
         """Whether the rows that reached *use* are the ones that arrived here."""
         site = use if isinstance(use, ast.stmt) else site_of(use)
-        return arrived in surviving_writes(writes, site)
+        return arrived in surviving_writes(writes, site, as_run=True)
 
     reached: set[str] = set()
     built: dict[str, ast.AST] = {}

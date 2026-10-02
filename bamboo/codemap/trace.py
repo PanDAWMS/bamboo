@@ -2027,9 +2027,9 @@ class _Walk:
         if held is None:
             held = self._sites[(id(frame.func), spelled)] = _message_sites(frame.func, spelled)
         plain, appended, opaque = held
-        plain = [value for value in plain if pathcond.can_reach(value, at)]
-        appended = [value for value in appended if pathcond.can_reach(value, at)]
-        opaque = [site for site in opaque if pathcond.can_reach(site, at)]
+        plain = [value for value in plain if pathcond.can_reach(value, at, current=True)]
+        appended = [value for value in appended if pathcond.can_reach(value, at, current=True)]
+        opaque = [site for site in opaque if pathcond.can_reach(site, at, current=True)]
         if not plain and not opaque:
             if not isinstance(expr, ast.Name):
                 return [], [REFUSED_SET_ELSEWHERE]
@@ -2301,7 +2301,9 @@ class _Walk:
             # the position rule would drop exactly the lines that say what the
             # arm went on to do.
             arms = [
-                arm for arm, held in self.armed.items() if pathcond.compatible(held, argument)
+                arm
+                for arm, held in self.armed.items()
+                if pathcond.compatible(held, argument, current=True)
             ]
             if written.refused:
                 if not any(
@@ -3754,7 +3756,8 @@ def walk_from_print(
         targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
         named = {_text(target) for target in targets}
         if any(
-            _text(argument) in named and pathcond.can_reach(statement.value, argument)
+            _text(argument) in named
+            and pathcond.can_reach(statement.value, argument, current=True)
             for argument in calls
         ):
             arguments = [statement.value]

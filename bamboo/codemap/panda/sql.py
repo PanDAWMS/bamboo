@@ -55,8 +55,8 @@ from bamboo.codemap.panda.pathcond import (
     can_reach,
     decided,
     enclosing_function,
-    exclusive,
     loops_over,
+    parted,
     path_condition,
     reachable_when,
     ruled_out_by,
@@ -879,8 +879,9 @@ def _compatible_sets(
     """Return the fragment sets a single run of the code can append, largest first.
 
     One set per statement a reader can meet.  The test between two fragments is
-    :func:`pathcond.exclusive`, reading the negations the path condition already
-    carries; a statement is then a set no two of whose members contradict, and
+    :func:`pathcond.parted`, reading the negations the path condition already
+    carries as the function runs; a statement is then a set no two of whose
+    members contradict, and
     which nothing else can be added to -- a maximal clique of the compatibility
     graph, enumerated with Bron-Kerbosch.
 
@@ -900,7 +901,6 @@ def _compatible_sets(
     set without being special-cased.
     """
     indices = list(range(start, len(parts)))
-    conditions = {index: path_condition(parts[index][3]) for index in indices}
     # Two fragments one statement appends in one place are alternatives: the
     # statements a name handed in can hold, of which a run appends one.
     agrees = {
@@ -909,7 +909,7 @@ def _compatible_sets(
             for other in indices
             if other != index
             and not (parts[other][3] is parts[index][3] and parts[other][1] == parts[index][1])
-            and not exclusive(conditions[index], conditions[other])
+            and not parted(parts[index][3], parts[other][3], exits=False)
         }
         for index in indices
     }
@@ -1407,8 +1407,7 @@ def _runs(parts: list[tuple[int, str, str, ast.stmt]]) -> list[list[tuple[int, s
     runs: list[list[tuple[int, str, str, ast.stmt]]] = []
     for part in parts:
         if part[1] == "=" and runs and any(one[1] == "=" for one in runs[-1]):
-            condition = path_condition(part[3])
-            if all(exclusive(path_condition(one[3]), condition) for one in runs[-1]):
+            if all(parted(one[3], part[3], exits=False) for one in runs[-1]):
                 runs[-1].append(part)
                 continue
         if part[1] == "=" or not runs:
@@ -2508,7 +2507,7 @@ def executions(
         produced = len(found)
         for combination in itertools.product(*pieces):
             built_by = reaching.get(combination[0], [])
-            if built_by and not any(can_reach(fragment, node) for fragment in built_by):
+            if built_by and not any(can_reach(fragment, node, current=True) for fragment in built_by):
                 # Nothing that built this statement can be part of what this
                 # call runs.  Guarded on having a fragment at all, because the
                 # daemon layer writes the statement into the call and has none:
@@ -2774,9 +2773,8 @@ def settled_precondition(
         return term, False
     column, operator, key = match.groups()
     found: set[str] = set()
-    alongside = path_condition(beside) if beside is not None else None
     for bind in bound_values(func, varmap, key, window, at=at):
-        if alongside is not None and exclusive(path_condition(bind.site), alongside):
+        if beside is not None and parted(bind.site, beside, exits=False):
             continue
         found.update(settle(bind.value, func))
     if not found:

@@ -14625,6 +14625,80 @@ def test_a_fragment_both_arms_share_is_appended_to_each_arm():
     ]
 
 
+def test_an_arm_that_uses_the_tested_name_does_not_join_the_other_arm():
+    """``getActiveDebugJobs``: one execution of an ``if`` enters one arm.
+
+    The arm calls ``workingGroup.upper()`` and assigns ``compactDN``, and a
+    reading that drops a test once its name is given a new value since -- the
+    one the walk had -- let the two arms meet and built a statement holding
+    both ``UPPER(workingGroup) IN`` and ``prodUserName=``, which no run sends.
+    """
+    source = (
+        "def f(self, workingGroup, dn):\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE '\n"
+        "    if workingGroup is not None:\n"
+        "        sql += 'UPPER(workingGroup) IN (:wg1) AND '\n"
+        "        varMap[':wg1'] = workingGroup.upper()\n"
+        "        workingGroup = None\n"
+        "    else:\n"
+        "        sql += 'prodUserName=:prodUserName AND '\n"
+        "    sql += 'specialHandling=:sh '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    assert sorted(r.sql for r in sql.executions(_func(source))) == [
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE UPPER(workingGroup) IN (:wg1) AND specialHandling=:sh ",
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE prodUserName=:prodUserName AND specialHandling=:sh ",
+    ]
+
+
+def test_two_tests_of_a_name_given_a_new_value_between_them_can_both_hold():
+    """``getTasksWithCriteria_JEDI``: the second ``for`` gives ``tmpVal`` its new value.
+
+    A list among the task criteria and a scalar among the dataset criteria go
+    into one statement.  Compared as text, ``isinstance(tmpVal, list)`` and
+    ``not (isinstance(tmpVal, list))`` contradict, and the statement was split
+    into variants none of which holds both.
+    """
+    source = (
+        "def f(self, taskCriteria, datasetCriteria):\n"
+        "    sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:status '\n"
+        "    for tmpKey, tmpVal in taskCriteria.items():\n"
+        "        if isinstance(tmpVal, list):\n"
+        "            sql += 'AND a IN (:a) '\n"
+        "        else:\n"
+        "            sql += 'AND a=:a '\n"
+        "    for tmpKey, tmpVal in datasetCriteria.items():\n"
+        "        if isinstance(tmpVal, list):\n"
+        "            sql += 'AND b IN (:b) '\n"
+        "        else:\n"
+        "            sql += 'AND b=:b '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    texts = {r.sql for r in sql.executions(_func(source))}
+
+    assert "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:status AND a IN (:a) AND b=:b " in texts
+    assert "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:status AND a=:a AND b IN (:b) " in texts
+
+
+def test_a_call_inside_a_test_is_not_a_new_value_after_it():
+    """A test spanning lines holds calls below its ``if`` line, and they ran before the test did."""
+    func = _func(
+        "def f(spec, other):\n"
+        "    if (\n"
+        "        spec.isExpress()\n"
+        "        and other\n"
+        "    ):\n"
+        "        a = 1\n"
+        "    if not (spec.isExpress() and other):\n"
+        "        b = 2\n"
+    )
+    first, second = (n for n in ast.walk(func) if isinstance(n, ast.Assign))
+
+    assert pathcond.parted(first, second, exits=False)
+
+
 def test_a_call_carrying_its_own_statement_has_no_fragment_to_place():
     """"No fragment reaches this call" and "there is no fragment" are
     different answers.  Thirty pairs in the corpus write the statement into

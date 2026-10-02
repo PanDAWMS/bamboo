@@ -64,6 +64,7 @@ from bamboo.codemap.panda.pathcond import (
     exclusive,
     functions_with_owner,
     literal_values,
+    parted,
     path_condition,
     targets_of,
     written_value,
@@ -345,7 +346,6 @@ def _reaching(
         ),
         key=lambda node: node.lineno,
     )
-    settled = path_condition(write)
     current: list[ast.stmt] = []
     for definition in definitions:
         if definition.lineno > write.lineno:
@@ -354,13 +354,15 @@ def _reaching(
             current.append(definition)
             continue
         conditions = path_condition(definition)
-        if exclusive(conditions, settled):
+        if parted(definition, write, exits=False):
             # An arm the write's own conditions rule out never ran.  Without
             # this, ``retryTask_JEDI`` -- five refusals in one ``elif`` chain,
             # each assigning the same local -- gave its fifth branch all five
             # messages, since the arms are mutually exclusive with each other
             # and that is exactly what the clause below preserves.
             continue
+        # Read as written: whether *definition* replaced what was held is not
+        # a question of whether the two can meet (see ``pathcond.compatible``).
         current = [
             held for held in current if exclusive(path_condition(held), conditions)
         ] + [definition]

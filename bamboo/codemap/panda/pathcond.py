@@ -829,44 +829,96 @@ def _early_exit_ifs(node: ast.AST) -> list[tuple[str, ast.stmt]]:
     return found
 
 
-def current_conditions(node: ast.AST) -> list[str]:
-    """:func:`reachable_when`, less every condition on a name given a new value since.
+def _tested_by(node: ast.AST, exits: bool) -> list[tuple[str, Optional[ast.stmt]]]:
+    """*node*'s conditions, each with the statement whose test it renders.
 
-    A condition is a string about a name, and it describes the name as it was
-    when its ``if`` ran.  ``AtlasProdWatchDog.doActionForReassign`` skips a
-    task with ``if tmpStat is not True: continue`` and, further down the same
-    loop, sets ``tmpStat`` afresh and fails the task under ``if tmpStat is not
-    True``.  Compared as text, everything below the skip was "not (tmpStat is
-    not True)" and the failure "tmpStat is not True", so the two could never
-    meet -- and a walk narrowed to what reaches ``if isOK`` dropped the one
-    ``isOK = False`` that says why a task was not reassigned.
-
-    Only for deciding whether two sites *can* meet: dropping a condition makes
-    that easier and never harder.  Not for deciding whether one write
-    *replaced* another, where a condition dropped from the replacing side would
-    make replacing easier -- the unsafe direction.
+    :func:`path_condition`'s, and with *exits* :func:`reachable_when`'s early
+    exits too.  A condition ``path_condition`` could not pair with its ``if``
+    -- it skipped a test it could not render -- carries ``None``, and
+    :func:`parted` then reads it as written.  Held on the node, since the
+    reassembly asks it of every pair of a statement's fragments.
     """
-    func = enclosing_function(node)
-    rebinds = _rebinds(func) if func is not None else {}
-    line = getattr(node, "lineno", 0)
-
-    def stale(test: ast.AST, at: int) -> bool:
-        return any(at < bound < line for name in _names_in(test) for bound in rebinds.get(name, ()))
-
+    held: Optional[dict[bool, list[tuple[str, Optional[ast.stmt]]]]] = getattr(
+        node, "_tested_by", None
+    )
+    if held is not None and exits in held:
+        return held[exits]
     ifs = _dominating_ifs(node)
     written = path_condition(node)
-    if len(ifs) != len(written):
-        # A test ``path_condition`` could not render and skipped; the pairing
-        # is lost, so nothing is dropped rather than the wrong thing.
-        kept = list(written)
-    else:
-        kept = [text for text, held in zip(written, ifs) if not stale(held.test, held.lineno)]
-    kept.extend(
-        implied
-        for implied, statement in _early_exit_ifs(node)
-        if not stale(statement.test, statement.lineno)
+    found: list[tuple[str, Optional[ast.stmt]]] = (
+        list(zip(written, ifs, strict=True)) if len(ifs) == len(written) else [(text, None) for text in written]
     )
-    return kept
+    if exits:
+        found.extend(_early_exit_ifs(node))
+    try:
+        if held is None:
+            held = {}
+            node._tested_by = held  # type: ignore[attr-defined]
+        held[exits] = found
+    except AttributeError:
+        pass
+    return found
+
+
+def _given_between(func: ast.AST, earlier: ast.stmt, later: ast.stmt) -> bool:
+    """Whether a name *earlier*'s test reads is given a new value before *later* tests it."""
+    rebinds = _rebinds(func)
+    start = getattr(earlier.test, "end_lineno", None) or earlier.lineno  # type: ignore[attr-defined]
+    return any(
+        start < line < later.lineno
+        for name in _names_in(earlier.test)  # type: ignore[attr-defined]
+        for line in rebinds.get(name, ())
+    )
+
+
+def parted(one: ast.AST, other: ast.AST, exits: bool = True) -> bool:
+    """Whether *one* and *other* cannot both be on one run, read as the function runs.
+
+    :func:`exclusive` compares conditions as text, and a condition describes
+    its name as it was when its test ran.  ``AtlasProdWatchDog.doActionForReassign``
+    skips a task with ``if tmpStat is not True: continue`` and, further down
+    the same loop, sets ``tmpStat`` afresh and fails the task under ``if
+    tmpStat is not True``.  Compared as text, everything below the skip was
+    "not (tmpStat is not True)" and the failure "tmpStat is not True", so the
+    two could never meet -- and a walk narrowed to what reaches ``if isOK``
+    dropped the one ``isOK = False`` that says why a task was not reassigned.
+
+    So a contradiction counts by the statements the two conditions come from.
+    From one statement -- the two arms of an ``if`` -- it always holds: one
+    execution of the ``if`` enters one arm, whatever either arm then assigns.
+    From two statements testing the same thing, it holds unless a name the
+    test reads is given a new value between them.  ``getTasksWithCriteria_JEDI``
+    tests ``isinstance(tmpVal, list)`` in a loop over the task criteria and
+    again in a loop over the dataset criteria, and the second ``for`` gives
+    ``tmpVal`` its new value: a list among the task criteria and a scalar among
+    the dataset criteria go into one statement, which text alone split apart.
+
+    **Dropping the stale condition from each side was the wrong shape.**  The
+    rule this replaces did that, and dropped too much for the build: the arms
+    of one ``if`` lost each other as soon as either arm assigned the name or
+    called a method on it (``elif workingGroup is not None:`` ...
+    ``workingGroup.upper()``), and a multi-line test counted the calls inside
+    it.  Over the corpus's reassembly, 98.5% of the "cannot meet" answers come
+    from one statement's arms; that rule turned 334 of them into "can meet" and
+    would have built statements no run sends.  Read by statement, 12 pairs
+    change there, all in ``getTasksWithCriteria_JEDI``.
+
+    *exits* reads :func:`reachable_when`'s early exits as well as the ``if``
+    tests, as :func:`compatible` does; the reassembly reads the tests alone,
+    as it always has.
+    """
+    func = enclosing_function(one)
+    mine, theirs = _tested_by(one, exits), _tested_by(other, exits)
+    for text, statement in mine:
+        for other_text, other_statement in theirs:
+            if other_text != f"not ({text})" and text != f"not ({other_text})":
+                continue
+            if statement is None or other_statement is None or statement is other_statement:
+                return True
+            earlier, later = sorted((statement, other_statement), key=lambda held: held.lineno)
+            if func is None or not _given_between(func, earlier, later):
+                return True
+    return False
 
 
 def compatible(one: ast.AST, other: ast.AST, current: bool = False) -> bool:
@@ -876,11 +928,14 @@ def compatible(one: ast.AST, other: ast.AST, current: bool = False) -> bool:
     direction that is safe: it separates two sites only where one's condition
     contradicts the other's.
 
-    *current* reads each side's conditions as :func:`current_conditions`,
-    which the walk asks for and the build does not yet -- see there.
+    *current* reads the function as it runs -- :func:`parted` -- rather than
+    comparing each side's conditions as text.  Only for deciding whether two
+    sites *can* meet.  Not for deciding whether one write *replaced* another,
+    where a contradiction read away would make replacing easier -- the unsafe
+    direction.
     """
     if current:
-        return not exclusive(current_conditions(one), current_conditions(other))
+        return not parted(one, other)
     return not exclusive(reachable_when(one), reachable_when(other))
 
 
@@ -1075,10 +1130,9 @@ def surviving_writes(
 
     *as_run* reads the function the way it runs rather than the way it is
     written, in the two places those differ: a test describes its name as it
-    was when the test ran (:func:`current_conditions`), and an exception can
-    carry control past a ``try``'s write (:func:`_skipped_by_a_raise`).  The
-    walk asks for it.  The build does not yet, because the build's answers are
-    stored and compared, and changing them is its own round.
+    was when the test ran (:func:`parted`), and an exception can carry control
+    past a ``try``'s write (:func:`_skipped_by_a_raise`).  The walk and the
+    build both ask for it.
     """
     live = [site for site in sites if can_reach(site, target, as_run)]
     return [
@@ -1118,6 +1172,10 @@ def literal_values(
     Exclusive siblings are skipped, or every branch of a chain would carry the
     negation of every other: ``-dest_blacklisted`` would come out requiring
     ``not (totalQueued >= limit)``, a condition with nothing to do with it.
+    Exclusive as the function runs (:func:`parted`): ``JobGenerator.runImpl``
+    tests ``tmpStat != SC_SUCCEEDED`` three times with a new ``tmpStat``
+    between each, so a later ``tmpErrStr`` can replace an earlier one although
+    the texts contradict.
 
     What counts as settled is the caller's to widen.  By default a string
     literal, and nothing here knows anything else; *resolve* lets a caller that
@@ -1154,7 +1212,7 @@ def literal_values(
         for other, _ in found:
             if other.lineno <= assignment.lineno:
                 continue
-            if exclusive(conditions[assignment], conditions[other]):
+            if parted(assignment, other, exits=False):
                 continue
             test = own_test(other)
             if test and f"not ({test})" not in guards:
