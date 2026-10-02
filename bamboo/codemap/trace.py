@@ -64,6 +64,7 @@ from bamboo.codemap.gitsource import blob_sha as git_blob_sha
 from bamboo.codemap.models import (
     ARRIVES_BY_CALL,
     ARRIVES_BY_DISPATCH,
+    ROLE_ITERATION,
     SKELETON_ARM,
     SKELETON_BRANCH,
     SKELETON_PRINT,
@@ -3234,7 +3235,7 @@ class _Walk:
         # about how the value was worked out: told apart, so two guards'
         # derivations can be compared without the rows each loop visited.
         held = self._role
-        self._role = "iteration"
+        self._role = ROLE_ITERATION
         try:
             if self.record(step):
                 self.want(frame, reads, depth + 1, loop)

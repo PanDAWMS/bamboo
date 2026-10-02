@@ -3039,6 +3039,9 @@ TRACE_LOOP = "loop-target"
 TRACE_HANDOVER = "handover"
 TRACE_UNBOUND = "unbound"
 
+#: :attr:`TraceStep.role` of a step that says which row a loop was on.
+ROLE_ITERATION = "iteration"
+
 
 #: What a skeleton row is.  ``branch`` is a compound statement's header and
 #: carries no pattern; ``print`` is a line production writes; ``arm`` is one of

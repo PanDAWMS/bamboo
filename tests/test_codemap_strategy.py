@@ -4452,3 +4452,33 @@ def test_a_statement_asking_on_another_value_opens_no_lead():
     )
 
     assert leads == []
+
+
+def test_which_row_a_loop_is_on_is_printed_apart_from_why_the_arm_ran():
+    """Two guards' derivations are set side by side, and a loop's rows are not part of either."""
+    from types import SimpleNamespace
+
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_walk
+
+    steps = [
+        models.TraceStep(kind=models.TRACE_BINDING, name="limit", owner="x.py::f", file="x.py", line=3, value="8"),
+        models.TraceStep(
+            kind=models.TRACE_LOOP,
+            name="job",
+            owner="x.py::f",
+            file="x.py",
+            line=2,
+            value="an element of self.jobs",
+            role=models.ROLE_ITERATION,
+        ),
+    ]
+    entry = SimpleNamespace(trace=steps, trace_note="")
+    runner = click.testing.CliRunner()
+    output = runner.invoke(click.Command("x", callback=lambda: _report_walk(entry, 12, False))).output
+    why, rows = output.split("which rows the loops are on")
+
+    assert "limit = 8" in why and "job" not in why
+    assert "job = an element of self.jobs" in rows

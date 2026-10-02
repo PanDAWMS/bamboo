@@ -742,11 +742,25 @@ def _report_walk(entry, top: int, full: bool) -> None:
         click.echo(f"        {entry.trace_note}")
     if not entry.trace:
         return
-    click.echo(
-        "        why it ran -- necessary conditions only; 'also' is what the "
-        "guard cannot say"
-    )
-    shown = entry.trace if full else entry.trace[:top]
+    # Which row a loop is on is a different question from why the arm ran,
+    # and the two were one list: 7 to 21% of a walk's steps over the six
+    # cases say what a ``for`` hands its body, and a reader setting two
+    # guards' derivations side by side read them as part of the reasons.
+    reasons = [step for step in entry.trace if step.role != models_mod.ROLE_ITERATION]
+    rows = [step for step in entry.trace if step.role == models_mod.ROLE_ITERATION]
+    if reasons:
+        click.echo(
+            "        why it ran -- necessary conditions only; 'also' is what the "
+            "guard cannot say"
+        )
+        _report_steps(reasons, top, full)
+    if rows:
+        click.echo("        which rows the loops are on -- what each pass was given, not why it ran")
+        _report_steps(rows, top, full)
+
+
+def _report_steps(steps, top: int, full: bool) -> None:
+    shown = steps if full else steps[:top]
     for step in shown:
         if step.kind == models_mod.TRACE_UNBOUND:
             head = step.name
@@ -769,8 +783,8 @@ def _report_walk(entry, top: int, full: bool) -> None:
             # line that says who handed the value over was being dropped while
             # the candidate block above repeated the whole argument list.
             click.echo(f"                 from   {step.detail}")
-    if len(entry.trace) > len(shown):
-        click.echo(f"          … {len(entry.trace) - len(shown)} more step(s) (--full)")
+    if len(steps) > len(shown):
+        click.echo(f"          … {len(steps) - len(shown)} more step(s) (--full)")
 
 
 def _report_handover(entry) -> None:
