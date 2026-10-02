@@ -755,8 +755,15 @@ def _report_walk(entry, top: int, full: bool) -> None:
         )
         _report_steps(reasons, top, full)
     if rows:
+        # A smaller window: these say where the pass was, and the reasons above
+        # are what the reading is for.  Printed whole, the six cases' answers
+        # grew by a fifth.
         click.echo("        which rows the loops are on -- what each pass was given, not why it ran")
-        _report_steps(rows, top, full)
+        _report_steps(rows, min(top, _ROWS_SHOWN), full)
+
+
+#: How many of a walk's loop-row steps are printed without ``--full``.
+_ROWS_SHOWN = 4
 
 
 def _report_steps(steps, top: int, full: bool) -> None:
