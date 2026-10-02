@@ -3213,3 +3213,50 @@ def test_every_walk_in_bamboo_says_whether_bindings_must_reach():
                 silent.append(f"{path.relative_to(root)}:{node.lineno}")
 
     assert silent == []
+
+
+_RETRY_PROXY = '''\
+def retryJob(jobID, recoverableEsMerge=False):
+    spec.status = recoverableEsMerge
+'''
+
+_RETRY_FACADE = '''\
+from pandajedi import proxy
+
+
+def retryJob(jobID, recoverableEsMerge=False):
+    return proxy.retryJob(jobID, recoverableEsMerge)
+'''
+
+_COPY_ARCHIVE = Handover(
+    entry=f"{PACKAGE}/copyArchive.py",
+    via="retryJob",
+    reached_by="call",
+    fields={"recoverableEsMerge": "True"},
+)
+
+
+def test_a_call_handover_does_not_hide_the_calls_it_does_not_cross(tmp_path):
+    """``retryJob``'s ``recoverableEsMerge``: the handover from ``copyArchive`` crosses the facade's ``retryJob``.
+
+    ``killJobs`` calls the same method itself, and the walk answered from the
+    handover alone.  The facade method the handover goes through is that
+    handover's own call and is not asked again.
+    """
+    killer = _RETRY_FACADE + "\n\ndef killJobs(ids):\n    return proxy.retryJob(ids[0], recoverableEsMerge=True)\n"
+    roots = _tree(tmp_path, **{"proxy.py": _RETRY_PROXY, "facade.py": killer})
+
+    walked = _walked_in(roots, "proxy.py", "retryJob", [2], handovers=[_COPY_ARCHIVE])
+    handed = [(s.owner.rsplit("::", 1)[-1], s.value) for s in walked.steps if s.kind == "handover"]
+
+    assert ("retryJob", "True") in handed
+    assert ("killJobs", "True") in handed
+    assert not [s for s in walked.steps if s.kind == "handover" and s.file.endswith("facade.py") and s.owner.endswith("::retryJob")]
+
+
+def test_a_call_handover_is_the_whole_answer_where_it_crosses_every_call(tmp_path):
+    roots = _tree(tmp_path, **{"proxy.py": _RETRY_PROXY, "facade.py": _RETRY_FACADE})
+
+    walked = _walked_in(roots, "proxy.py", "retryJob", [2], handovers=[_COPY_ARCHIVE])
+
+    assert [s.kind for s in walked.steps if s.name == "recoverableEsMerge"] == ["handover"]

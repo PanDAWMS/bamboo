@@ -3113,7 +3113,24 @@ class _Walk:
         )
         return step, statement
 
-    def _called_from(self, frame: _Frame, name: str, depth: int, stopped: TraceStep) -> bool:
+    def _callers_beside(self, frame: _Frame, spanned: frozenset[str]) -> list:
+        """The call sites ``calls`` places at *frame*'s function outside the functions named *spanned*."""
+        cls = self.types.method_class(frame.file, frame.func)
+        target = calls_mod.Target(frame.file, frame.func, cls[1] if cls else None)
+        return [
+            site
+            for site in self.calls.callers(target) or []
+            if getattr(site.func, "name", "") not in spanned
+        ]
+
+    def _called_from(
+        self,
+        frame: _Frame,
+        name: str,
+        depth: int,
+        stopped: TraceStep,
+        spanned: frozenset[str] = frozenset(),
+    ) -> bool:
         """Answer a parameter from the calls placed at this function, where nothing brought the walk in.
 
         The parameter is chosen at the call site, and until now that was the
@@ -3121,10 +3138,13 @@ class _Walk:
         the expression it hands over, walked in the caller.  At most
         :data:`_MAX_CALLERS` of them, and the rest counted, so a helper called
         from everywhere does not turn one question into sixty.
+
+        *spanned* are the facade methods a map handover already crossed to
+        answer this parameter; their calls are that handover's, not others.
         """
         cls = self.types.method_class(frame.file, frame.func)
         target = calls_mod.Target(frame.file, frame.func, cls[1] if cls else None)
-        sites = self.calls.callers(target)
+        sites = self._callers_beside(frame, spanned)
         if not sites:
             return False
         if len(sites) > _MAX_CALLERS:
@@ -3139,6 +3159,7 @@ class _Walk:
         stopped.detail = (
             f"a parameter; followed to the {len(sites)} call(s) placed at "
             f"{getattr(frame.func, 'name', '')}"
+            + (f" besides the handover through {', '.join(sorted(spanned))}" if spanned else "")
         )
         for site in sites:
             caller = self.frame(
@@ -3473,13 +3494,26 @@ class _Walk:
         # crossing that answers a worker's attribute answers this too.  Kept
         # to parameters of *this* function, since a dispatch's keys name the
         # worker's attributes and could collide with an unrelated local.
+        #
+        # The map's handover runs from an entry straight to here, across the
+        # facade it was called through, so it is not the only call: ``killJobs``
+        # retries an ES merge job through ``proxy.retryJob`` and the handover
+        # from ``copyArchive`` hid it.  The calls ``calls`` places at this
+        # function are asked as well, less the facade method the handover
+        # already crosses (its ``via``); where that leaves none, the handover
+        # is the whole answer, as it was.
         parameter = _is_parameter(frame.func, name)
+        spanned: frozenset[str] = frozenset()
         if parameter:
             for handover in frame.handovers:
                 if handover.reached_by == ARRIVES_BY_CALL and name in handover.fields:
                     self._handover(frame, name, handover, depth)
+                    spanned = frozenset({handover.via})
+                    break
+            if spanned:
+                if not self._callers_beside(frame, spanned):
                     return
-            if self._passed_in(frame, name, depth):
+            elif self._passed_in(frame, name, depth):
                 return
         stopped = TraceStep(
                 kind=TRACE_UNBOUND,
@@ -3501,7 +3535,7 @@ class _Walk:
         if self.record(stopped) and parameter:
             # The parameter's own answer is the stop, as it always was; where
             # it was chosen is looked for beyond this function, afterwards.
-            self.beyond.append(lambda: self._called_from(frame, name, depth, stopped))
+            self.beyond.append(lambda: self._called_from(frame, name, depth, stopped, spanned))
 
 
 class Walked(NamedTuple):
