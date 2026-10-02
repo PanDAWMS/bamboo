@@ -541,6 +541,44 @@ def test_a_call_handing_a_flag_says_what_the_statement_refuses_and_requires_ther
     )
 
 
+def test_a_call_requiring_several_conditions_keeps_an_or_among_them_in_parentheses(tmp_path):
+    """``A AND B OR C`` is ``(A AND B) OR C`` to SQL: the ``OR`` term is one condition and says so."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "def lock(cur, status, onlyReassignable):\n"
+        "    varMap = {':status': status, ':relocationFlag': 2, ':timeLimit': 1}\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE jobStatus=:status '\n"
+        "    if onlyReassignable:\n"
+        "        sql += 'AND modificationTime<:timeLimit '\n"
+        "        sql += 'AND (relocationFlag IS NULL OR relocationFlag<>:relocationFlag) '\n"
+        "    cur.execute(sql, varMap)\n"
+    )
+    main = "from pkg.db import lock\n\ndef run(cur):\n    lock(cur, 'defined', False)\n    lock(cur, 'activated', True)\n"
+    roots = _tree(tmp_path, db=db, main=main)
+    modules = [
+        SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/{name}.py", tree=ast.parse(text), source=text, blob_sha=blob_sha(text))
+        for name, text in (("db", db), ("main", main))
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    _, reassignable = statement.call_sites
+    assert reassignable.endswith(
+        "also requires modificationTime<:timeLimit@2 AND (relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2)"
+    )
+    assert not sqlwrite._or_outside_parentheses("(a OR b) AND c")
+    assert not sqlwrite._or_outside_parentheses("label='OR' AND :ORDER=1")
+    assert sqlwrite._or_outside_parentheses("a IS NULL or a<:b")
+
+
 def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):
     from bamboo.codemap.panda import sql
 

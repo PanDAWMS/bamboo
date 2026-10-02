@@ -1252,6 +1252,41 @@ def _shown(held: list[str], joined: str = ", ") -> str:
     return joined.join(held[:6]) + more
 
 
+def _or_outside_parentheses(term: str) -> bool:
+    """Whether *term* has an ``OR`` of its own, outside its parentheses and quotes."""
+    depth, quoted = 0, False
+    for at, char in enumerate(term):
+        if char == "'":
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif (
+            depth == 0
+            and term[at : at + 2].upper() == "OR"
+            and (at == 0 or not (term[at - 1].isalnum() or term[at - 1] in "_:."))
+            and not (term[at + 2 : at + 3].isalnum() or term[at + 2 : at + 3] == "_")
+        ):
+            return True
+    return False
+
+
+def _conjoined(terms: list[str]) -> str:
+    """*terms* joined by ``AND``, a term with an ``OR`` of its own in parentheses.
+
+    ``modificationTime<:t AND relocationFlag IS NULL OR relocationFlag<>:f``
+    reads, by SQL's precedence, as ``(A AND B) OR C`` -- the opposite of the
+    list it was made from, whose entries are each one condition.  One term
+    alone is left as it is: there is nothing for it to bind with.
+    """
+    if len(terms) < 2:
+        return _shown(terms, " AND ")
+    return _shown([f"({term})" if _or_outside_parentheses(term) else term for term in terms], " AND ")
+
+
 def _narrowed(
     kept: "ReadStatement",
     reading: _CallReading,
@@ -1281,7 +1316,7 @@ def _narrowed(
         ("also requires", [one for one in conditions if _SEEDED.sub(r"\1", one) not in general_conditions]),
     ):
         if held:
-            said.append(f"{label} " + _shown(held, " AND "))
+            said.append(f"{label} " + _conjoined(held))
     return said
 
 
