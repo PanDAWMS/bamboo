@@ -73,6 +73,7 @@ from bamboo.codemap.panda.pathcond import (
     UNDECIDED,
     ancestors,
     attach_parents,
+    containers_changed,
     enclosing_function,
     functions_with_owner,
     handed_in,
@@ -2327,11 +2328,8 @@ def _bound_by(node: ast.AST) -> set[str]:
     found: set[str] = set()
     for target in targets:
         found.update(name for name, _slot, _unpacked in names_bound_by(target))
-        found.update(
-            part.value.id
-            for part in ast.walk(target)
-            if isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name)
-        )
+        # ``retMap[site][status] += cnt`` files rows two keys down.
+        found.update(containers_changed(target))
     return found
 
 

@@ -43,6 +43,8 @@ FORMS = {
     "import": "import x",
     "def": "def x():\n    pass",
     "subscript store": "x[0] = 1",
+    "nested subscript store": "x[0][1] = 1",
+    "read in a subscript": "y[x[0]] = 1",
     "attribute store": "x.attr = 1",
     "method call": "x.add(1)",
     "del": "del x",
@@ -141,7 +143,7 @@ def test_a_new_value_that_parts_two_tests_is_read_with_the_same_syntax(form):
     """``pathcond._rebinds`` adds the in-place changes on purpose -- see there."""
     func = _func(form)
     rebinds = {node.lineno for node in pathcond._rebinds(func).get("x", ())}  # type: ignore[attr-defined]
-    in_place = {"subscript store", "method call"}
+    in_place = {"subscript store", "nested subscript store", "method call"}
 
     assert rebinds == (_own_lines(func) | ({2} if form in in_place else set()))
 
@@ -177,4 +179,4 @@ def test_the_build_takes_a_target_apart_the_same_way(form):
     if isinstance(statement, ast.Assign):
         assert ("x" in sqlwrite._assigned_names(statement)) == by_syntax
     bound = "x" in sqlwrite._bound_by(statement)
-    assert bound == (by_syntax or form in ("augmented", "subscript store"))
+    assert bound == (by_syntax or form in ("augmented", "subscript store", "nested subscript store"))

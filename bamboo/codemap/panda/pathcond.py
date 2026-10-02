@@ -289,6 +289,25 @@ def names_bound_by(target: ast.AST) -> list[tuple[str, Optional[int], bool]]:
     return found
 
 
+def containers_changed(target: ast.AST) -> list[str]:
+    """The names an assignment target changes in place: ``x`` for ``x[k] = v`` and ``x[k][j] = v``.
+
+    Down the chain of subscripts only.  ``d[e[k]] = v`` reads ``e`` and
+    writes ``d``; walking the whole target counted ``bw_map`` as written in
+    ``site_class_n_site_dict[bw_map['class']] += 1``.
+    """
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in containers_changed(element)]
+    if isinstance(target, ast.Starred):
+        return containers_changed(target.value)
+    if not isinstance(target, ast.Subscript):
+        return []
+    base = target.value
+    while isinstance(base, ast.Subscript):
+        base = base.value
+    return [base.id] if isinstance(base, ast.Name) else []
+
+
 def _bindings_at(node: ast.AST, nested: bool) -> list[Binding]:
     """The :class:`Binding` s *node* itself makes."""
     found: list[Binding] = []
@@ -874,9 +893,8 @@ def _rebinds(func: ast.AST) -> dict[str, list[ast.AST]]:
         if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
-                for held_target in ast.walk(target):
-                    if isinstance(held_target, ast.Subscript) and isinstance(held_target.value, ast.Name):
-                        found.setdefault(held_target.value.id, []).append(node)
+                for name in containers_changed(target):
+                    found.setdefault(name, []).append(node)
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
