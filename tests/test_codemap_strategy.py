@@ -4542,7 +4542,8 @@ async def test_a_text_an_arm_assembles_and_nothing_acts_by_is_answered_in_one_li
 
     assert [c.owner for c in strategy.candidates] == ["adder.py::register_files", "free.py::f"]
     assert strategy.follow_up.assembled_as == [_ADDER_FRAME]
-    assert "→ nothing in the map selects, guards or updates rows by" in output
+    assert "→ nothing in the map selects, guards or updates rows by this value" in output
+    assert observed not in output
     assert "a re-evaluating trigger reaches" not in output
     assert "any query selects on this value" not in output
 

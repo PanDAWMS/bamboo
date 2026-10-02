@@ -872,10 +872,12 @@ def _follow_up(
     acted_on = selected or updated_by or guarded or returned or refused or consulting
     assembled_as = sorted(set(assembled)) if assembled and not acted_on else []
     if assembled_as:
+        # Without the value, which the symptom line above already prints: the
+        # sentence is the whole block now, and the value took half of it.
         question = (
-            f"nothing in the map selects, guards or updates rows by {observed!r}, and it "
-            f"fits the text {_frames_phrase(assembled_as)} that the writers above assemble "
-            "at run time -- ask about the row by its other fields"
+            "nothing in the map selects, guards or updates rows by this value, and it fits "
+            f"{_frames_phrase(assembled_as)}, which the writers above assemble at run time "
+            "-- ask about the row by its other fields"
         )
     if reader_acts == READS_ONLY_FOR_A_CALLER:
         # Appended rather than replacing the sentence: everything it says is
