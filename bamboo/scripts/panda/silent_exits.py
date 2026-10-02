@@ -13,7 +13,13 @@ whether that branch leaves (``continue``, ``break``, ``return``, ``raise``).
 Its test is walked, narrowed at the ``if`` and with a small allowance beyond
 the function, and the ``if`` is listed when the walk stops at a configuration
 value, a value another system supplies or one the database supplies -- each
-with what it was asked with.
+with what it was asked with.  The test alone, not the tests above the ``if``:
+those were listed as what it read, so a broker's memory check carried the
+I/O cutoff its function tests at the top.
+
+A walk that ran out of its allowance is said so on the row (``cut``).  The
+list is drawn from what the walk reached, and a cut walk's ``if`` is one
+whose test was not read to the end, not one that reads nothing listed.
 
     python -m bamboo.scripts.panda.silent_exits --source-root <tree> [--only config,external]
 """
@@ -89,6 +95,7 @@ def scan(root: Path, kinds: set[str]) -> list[dict]:
                         classify=classify,
                         budget=_BUDGET,
                         reaching=True,
+                        guards_above=False,
                     )
                     reads = collections.OrderedDict()
                     for step in walked.steps:
@@ -103,6 +110,7 @@ def scan(root: Path, kinds: set[str]) -> list[dict]:
                                 "leaves": leaves,
                                 "test": ast.unparse(node.test)[:160],
                                 "reads": list(reads),
+                                "cut": "budget" in walked.note,
                             }
                         )
     return listed
@@ -129,12 +137,20 @@ def main(source_root: Path, only: str, as_json: Optional[Path]) -> None:
     by_kind = collections.Counter(
         kind for entry in listed for kind in {read.split(" -- ")[0] for read in entry["reads"]}
     )
-    click.echo(f"{len(listed)} silent decision(s) whose test reads {only}")
+    cut = sum(1 for entry in listed if entry["cut"])
+    click.echo(
+        f"{len(listed)} silent decision(s) whose test reads {only}; "
+        f"{cut} of them from a walk its allowance cut short"
+    )
     for kind, count in by_kind.most_common():
         click.echo(f"   {count:>5}  {kind}")
     for entry in listed:
         leaves = ", and leaves" if entry["leaves"] else ""
-        click.echo(f"\n{entry['at']}  {entry['function']}  (the {entry['branch']} prints nothing{leaves})")
+        cut_short = "; the walk was cut short" if entry["cut"] else ""
+        click.echo(
+            f"\n{entry['at']}  {entry['function']}  "
+            f"(the {entry['branch']} prints nothing{leaves}{cut_short})"
+        )
         click.echo(f"    if {entry['test']}")
         for read in entry["reads"][:6]:
             click.echo(f"    reads  {read}")

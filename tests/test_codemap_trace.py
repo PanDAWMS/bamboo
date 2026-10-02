@@ -3105,6 +3105,30 @@ def f(self, jobs, log):
     (entry,) = listed
     assert (entry["at"], entry["branch"], entry["leaves"]) == ("pandaserver/daemons/m.py:4", "body", True)
     assert entry["reads"] == ["a configuration value, set outside the code -- dog.LIMIT.jedi"]
+    assert entry["cut"] is False
+
+
+def test_a_silent_decision_is_listed_by_its_own_test_and_not_the_ones_above(tmp_path):
+    """``if minRamCount > site_maxmemory`` was listed as reading the I/O cutoff
+    its function tests at the top: the guards above the ``if`` were walked as
+    though the test read them."""
+    from bamboo.scripts.panda import silent_exits
+
+    root = tmp_path / "pandaserver"
+    (root / "daemons").mkdir(parents=True)
+    (root / "daemons" / "m.py").write_text(
+        """\
+def f(self, jobs, log):
+    cutoff = self.taskBuffer.getConfigValue("dog", "CUTOFF", "jedi")
+    if cutoff:
+        for job in jobs:
+            if job.n > 5:
+                continue
+            log.info("kept a job")
+"""
+    )
+
+    assert silent_exits.scan(tmp_path, {"config"}) == []
 
 
 def test_a_parameter_placed_at_many_calls_is_said_and_not_walked(tmp_path):

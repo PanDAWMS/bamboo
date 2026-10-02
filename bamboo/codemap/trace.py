@@ -1444,8 +1444,12 @@ class _Walk:
         within: Optional[tuple[str, str, int, int]] = None,
         reading_at: Optional[tuple[str, str, int]] = None,
         narrowed: Optional[tuple[str, str]] = None,
+        guards_above: bool = True,
     ) -> None:
         self.roots = roots
+        #: Whether an arm's walk explains the tests above it as well as its own.
+        #: See :func:`walk`.
+        self.guards_above = guards_above
         self.classify = classify
         self.budget = budget
         self.observed = observed
@@ -1827,7 +1831,7 @@ class _Walk:
             for name in _reads(statement.test):
                 _add(reads, name)
         own = list(reads)
-        for name in _guard_reads(statement):
+        for name in _guard_reads(statement) if self.guards_above else ():
             _add(reads, name)
         terminal, detail = (
             self.terminal_of(frame, value) if value is not None else ("", "")
@@ -1862,9 +1866,9 @@ class _Walk:
             if self.reading_at is not None:
                 at = _statement_at(frame.func, self.reading_at[2]) or statement
             self.want(frame, own, 1, at)
-            for test, names in _guard_tests(statement):
+            for test, names in _guard_tests(statement) if self.guards_above else ():
                 self.want(frame, names, 1, test)
-        self._enter_tests(frame, statement, 1)
+        self._enter_tests(frame, statement, 1, above=self.guards_above)
         if value is not None:
             self._ask_keyed(frame, value, 1, statement)
             if not terminal or terminal == STOP_EXTERNAL:
@@ -2799,7 +2803,7 @@ class _Walk:
                     lambda call=assign.value, where=slot: self._enter(frame, None, call, (where, key), depth)
                 )
 
-    def _enter_tests(self, frame: _Frame, site: ast.AST, depth: int) -> None:
+    def _enter_tests(self, frame: _Frame, site: ast.AST, depth: int, above: bool = True) -> None:
         """Go into the calls a guard above *site* makes, for the value they return.
 
         ``if self.add_result is None or not self.add_result.is_succeeded():``
@@ -2814,7 +2818,7 @@ class _Walk:
         thousand entries for one arm of ``insertFilesForDataset_JEDI``, whose
         returns then filled the allowance beyond the function.
         """
-        tests = [guard.test for guard, _names in _guard_tests(site)]
+        tests = [guard.test for guard, _names in _guard_tests(site)] if above else []
         if isinstance(site, (ast.If, ast.While)):
             tests.append(site.test)
         for test in tests:
@@ -3640,6 +3644,7 @@ def walk(
     bindings_within: Optional[tuple[int, int]] = None,
     reading_at: Optional[int] = None,
     reaching: bool = False,
+    guards_above: bool = True,
 ) -> Walked:
     """Explain the arms at *lines*, and say why the answer is short when it is.
 
@@ -3685,6 +3690,14 @@ def walk(
     junction owns its whole function and has no one statement to answer for.
     Implied by *reading_at*.
 
+    *guards_above* false explains an arm by its own test alone, and not by the
+    tests that reach it.  What a question about one ``if`` wants: the silent
+    decisions are listed by what their test reads, and ``AtlasAnalJobBroker``'s
+    ``if minRamCount > site_maxmemory`` was listed as reading
+    ``IO_INTENSITY_CUTOFF_USER`` because a guard at the head of
+    ``doBrokerage`` does.  Deeper steps keep theirs: which binding a name the
+    test reads got is decided by the tests above that binding.
+
     **A tree that is not the map's is refused rather than warned about.**  A
     trace is shaped like an answer, and reading line 4971 of the wrong release
     produces plausible code that is not the code -- which already happened
@@ -3699,6 +3712,7 @@ def walk(
         within=(file, owner, *bindings_within) if bindings_within else None,
         reading_at=(file, owner, reading_at) if reading_at else None,
         narrowed=(file, owner) if reaching or reading_at else None,
+        guards_above=guards_above,
     )
     parsed = state.module(file)
     if parsed is None:
