@@ -1576,9 +1576,27 @@ class ValueEnumNode(BaseNode):
 #: a count read as "where the map stops" is taken for all of it, and it is the
 #: SQL reader's alone.
 SCOPE_OF_STOPS = (
-    "(the reading of SQL statements only: a method's writes, SiteMapper and "
-    "calls out of PanDA are not in it)"
+    "(the SQL reader's stops only: the calls the map cannot place are a list of "
+    "their own, and a method's writes and SiteMapper are in neither)"
 )
+
+
+class CallStop(BaseModel):
+    """One call the map cannot place, and why: the other list of where it stops.
+
+    :class:`ReadingStop` is the SQL reader's, and its count was read as where
+    the map stops at all.  A call ``calls`` cannot place is a stop of its own
+    kind -- the walk does not enter it and no reader follows a value through
+    it -- and a third of the corpus's calls to its own functions are one.
+    Every one, with its reason, because a ratio says how much and the reason
+    says what would place it.  Not a node, for :class:`ReadingStop`'s reason.
+    """
+
+    reason: str
+    file: str
+    line: int
+    owner: str
+    callee: str = Field(default="", description="The called expression as written, cut to 80 characters.")
 
 
 class ReadingStop(BaseModel):
@@ -1724,6 +1742,14 @@ class MapFragment(BaseModel):
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
     reading_stops: list[ReadingStop] = Field(default_factory=list)
+    call_stops: list[CallStop] = Field(default_factory=list)
+    calls_considered: int = Field(
+        default=0,
+        description=(
+            "How many calls :attr:`call_stops` was drawn from: those naming a "
+            "function or class this corpus defines, a logger's methods left out."
+        ),
+    )
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
@@ -1772,6 +1798,8 @@ class MapFragment(BaseModel):
             held = getattr(self, part)
             if isinstance(held, dict):
                 held.update(getattr(other, part))
+            elif isinstance(held, int):
+                setattr(self, part, held + getattr(other, part))  # a count of what was looked at
             else:
                 held.extend(getattr(other, part))
 

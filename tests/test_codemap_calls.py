@@ -978,3 +978,63 @@ def test_an_interface_method_calling_the_far_system_is_an_outbound_boundary(tmp_
     assert node.verbs == ["attaches", "creates"]
     assert node.calls_out == ["rucio.client.Client.add_dataset", "rucio.client.Client.add_files_to_dataset"]
     assert node.call_sites == ["pkg/setup.py:4"]
+
+
+def test_building_a_class_with_no_init_in_the_corpus_says_so(tmp_path):
+    """``Interaction.JEDITemporaryError(...)``: nothing of the corpus runs, and the reason says why.
+
+    Placed nowhere and given no reason, ninety-nine calls read in the census as
+    a gap with no name -- the one class of stop nobody could act on.
+    """
+    roots = _tree(
+        tmp_path,
+        errors="class Retry(Exception):\n    pass\n\nclass Plain:\n    pass\n",
+        m=(
+            "from pkg import errors\nfrom pkg.errors import Plain\n\n"
+            "def run():\n    errors.Retry('x')\n    Plain()\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    assert _placed(calls, "m", "run", "errors.Retry").unplaced == calls_mod.UNPLACED_NO_INIT
+    assert _placed(calls, "m", "run", "Plain").unplaced == calls_mod.UNPLACED_NO_INIT
+
+
+def test_the_build_lists_every_call_to_its_own_functions_it_cannot_place(tmp_path):
+    """A call to ``json.loads`` names nothing to enter, and a logger's lands in a file."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import plugin
+
+    texts = {
+        "m": (
+            "import json\n\n"
+            "def helper():\n    return 1\n\n"
+            "def debug():\n    return 2\n\n"
+            "def run(spec, logger):\n"
+            "    helper()\n"
+            "    spec.helper()\n"
+            "    logger.debug('x')\n"
+            "    json.loads('1')\n"
+        ),
+    }
+    roots = _tree(tmp_path, **texts)
+    calls = _calls(roots)
+    modules = [
+        SourceModule(
+            package=PACKAGE,
+            rel_path=f"{PACKAGE}/{name}.py",
+            tree=calls.types.tree(f"{PACKAGE}/{name}.py"),
+            source=text,
+            blob_sha=blob_sha(text),
+        )
+        for name, text in texts.items()
+    ]
+
+    considered, stops = plugin._call_stops(calls, modules)
+
+    assert considered == 2  # ``helper()`` and ``spec.helper()``
+    assert [(stop.line, stop.callee, stop.reason) for stop in stops] == [
+        (11, "spec.helper", calls_mod.UNPLACED_RECEIVER)
+    ]
+    assert stops[0].owner == f"{PACKAGE}/m.py::run"

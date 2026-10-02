@@ -1021,6 +1021,8 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
         if len(where) > top:
             click.echo(f"    … {len(where) - top} more function(s)")
 
+    _report_call_stops(fragment, top)
+
     differences = gates.mover_differences(fragment)
     if differences:
         # Every one by name, not folded to ``top``.  The gate beside this used
@@ -1061,6 +1063,36 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
         )
         for slice_name, count in rest.most_common():
             click.echo(f"    {count:>4}  {slice_name}")
+
+
+def _report_call_stops(fragment: MapFragment, top: int) -> None:
+    """The other list of where the map stops: the calls ``calls`` cannot place.
+
+    Beside the SQL reader's stops and apart from them, because the count above
+    was read as where the map stops at all.  A call nobody can place is one
+    the walk does not enter and no reader follows a value through, and the
+    reason is what would place it -- a receiver whose class nothing declares
+    wants a declaration, a ``__getattr__`` wants the class it forwards to.
+    """
+    stops = fragment.call_stops
+    if not fragment.calls_considered:
+        return
+    where = Counter(stop.owner for stop in stops)
+    click.echo(
+        f"\nwhere calls could not be followed: {len(stops)} of {fragment.calls_considered} "
+        f"calls to this corpus's functions, in {len(where)} function(s)"
+    )
+    click.echo("  (calls the map cannot place: the walk does not enter them; a logger's are left out)")
+    for reason, count in Counter(stop.reason for stop in stops).most_common():
+        here = [stop for stop in stops if stop.reason == reason]
+        files = Counter(stop.file for stop in here).most_common(1)[0]
+        click.echo(f"  {count:>5}  {reason}   (most in {files[0]}, {files[1]})")
+        for callee, seen in Counter(stop.callee for stop in here).most_common(3):
+            click.echo(f"        {seen:>4}x  {callee}")
+    for owner, count in where.most_common(top):
+        click.echo(f"  {count:>5}  {owner}")
+    if len(where) > top:
+        click.echo(f"    … {len(where) - top} more function(s)")
 
 
 if __name__ == "__main__":

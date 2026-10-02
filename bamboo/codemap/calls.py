@@ -43,6 +43,10 @@ UNPLACED_FORWARDED = "the receiver forwards every call through __getattr__"
 UNPLACED_NO_METHOD = "the declared class has no such method"
 UNPLACED_DYNAMIC = "the callee is chosen at run time"
 UNPLACED_NAME = "the name is bound to something that is not a function here"
+#: ``Interaction.JEDITemporaryError(...)``, ``DataCarouselRequestSpec()``: the
+#: class and its bases in the corpus define no ``__init__``, so what building
+#: one runs is ``object``'s, ``Exception``'s or a base's outside the corpus.
+UNPLACED_NO_INIT = "the class it builds has no __init__ in the corpus"
 #: Beside targets, not instead of them: the receiver is one of these classes
 #: or another one some way of building it does not show.
 UNPLACED_OPEN = "and possibly a class this reading cannot name"
@@ -294,7 +298,7 @@ class Calls:
         constructed = self.types.class_named(file, ast.Name(id=name, ctx=ast.Load()))
         if constructed is not None:
             init = self._method_of(constructed, "__init__")
-            return init if init.targets else Placed((), "")
+            return init if init.targets else Placed((), UNPLACED_NO_INIT)
         held = self.types.imports(file).get(name)
         if held is not None:
             module, attribute = held
@@ -313,7 +317,7 @@ class Calls:
                 return Placed((Target(file, node, None),))
             if isinstance(node, ast.ClassDef) and node.name == name:
                 init = self._method_of((file, node), "__init__")
-                return init if init.targets else Placed((), "")
+                return init if init.targets else Placed((), UNPLACED_NO_INIT)
         held = self.types.imports(file).get(name)
         if held is not None and held[0]:
             target = self.types.module_file(held[0])
@@ -322,6 +326,10 @@ class Calls:
         return Placed((), UNPLACED_NAME)
 
     # -- who calls a function ----------------------------------------------
+
+    def every_call(self) -> dict[str, list[CallSite]]:
+        """Every call in the corpus, by the name it calls -- see :meth:`_index`."""
+        return self._index()
 
     def _index(self) -> dict[str, list[CallSite]]:
         """Every call in the corpus, by the name it calls -- a candidate list only.

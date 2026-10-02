@@ -252,6 +252,8 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "what the build could not say, not what the map claims -- "
         "see ReadingStop, and the answer reads them again from the source"
     ),
+    "call_stops": "the calls the build could not place -- see CallStop",
+    "calls_considered": _REPORT,
     "row_key_sources": _REPORT,
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,

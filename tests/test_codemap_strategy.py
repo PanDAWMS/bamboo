@@ -4569,3 +4569,44 @@ async def test_a_text_no_arm_assembles_keeps_the_whole_block():
     assert [c.owner for c in strategy.candidates] == ["free.py::f"]
     assert strategy.follow_up.assembled_as == []
     assert "any query selects on this value no" in _follow_up_text(strategy)
+
+
+def test_the_calls_a_walk_did_not_enter_are_listed_once_by_reason():
+    """Written on each step all along and printed on none, so a walk that ended
+    at a call nothing could place read as one with nothing further to say."""
+    from types import SimpleNamespace
+
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_unentered
+
+    def step(line, value, reason):
+        return models.TraceStep(
+            kind=models.TRACE_BINDING,
+            name="x",
+            owner="pkg/a.py::f",
+            file="pkg/a.py",
+            line=line,
+            value=value,
+            detail=f"not entered: {reason}",
+        )
+
+    undeclared = "the receiver's class is not declared"
+    reading = SimpleNamespace(
+        trace=[
+            step(3, "taskSpec.useScout()", undeclared),
+            step(3, "taskSpec.useScout()", undeclared),  # reached twice, one call
+            step(9, "json.loads(text)", "outside the corpus"),
+            models.TraceStep(kind=models.TRACE_BINDING, name="y", file="pkg/a.py", line=4, value="1"),
+        ]
+    )
+    strategy = SimpleNamespace(readings=[reading], follow_up=None)
+    output = click.testing.CliRunner().invoke(
+        click.Command("x", callback=lambda: _report_unentered(strategy, False))
+    ).output
+
+    assert "calls the walks above did not enter: 2 -- the map cannot place them" in output
+    assert f"     1  {undeclared}" in output
+    assert "a.py:3  taskSpec.useScout()" in output
+    assert "a.py:9  json.loads(text)" in output

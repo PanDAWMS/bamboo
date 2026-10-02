@@ -29,6 +29,7 @@ from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
 from bamboo.codemap.models import (
     AnnotationAudit,
+    CallStop,
     JunctionNode,
     MapFragment,
     SourceModule,
@@ -566,6 +567,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # are answered from.
         if self._calls is not None:
             _attach_called_from(fragment.junctions, self._calls)
+            fragment.calls_considered, fragment.call_stops = _call_stops(self._calls, self._modules)
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the
@@ -890,6 +892,51 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 skipped_tests,
             )
         return modules, skipped_tests
+
+
+#: A logger's methods.  What a log call lands in says nothing about a value,
+#: and counting them would make a third of the calls the stops are drawn from.
+_LOG_CALLS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
+
+
+def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]]:
+    """``(considered, stops)``: the build's calls to its own functions, and those ``calls`` cannot place.
+
+    Drawn from the calls whose name some function or class of the build's
+    modules defines -- a call to ``json.loads`` names nothing the walk could
+    enter, so it is not a stop.  Over the build's modules only, test code
+    left out by the build's own rule.
+    """
+    files = {module.rel_path for module in modules}
+    defined = {
+        node.name
+        for module in modules
+        for node in ast.walk(module.tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    considered = 0
+    stops: list[CallStop] = []
+    for name, sites in sorted(calls.every_call().items()):
+        if name not in defined or name in _LOG_CALLS:
+            continue
+        for site in sites:
+            if site.file not in files:
+                continue
+            considered += 1
+            placed = calls.callees(site.file, site.func, site.call)
+            if placed.targets:
+                continue
+            stops.append(
+                CallStop(
+                    reason=placed.unplaced,
+                    file=site.file,
+                    line=site.call.lineno,
+                    owner=site.owner,
+                    callee=ast.unparse(site.call.func)[:80],
+                )
+            )
+    stops.sort(key=lambda stop: (stop.file, stop.line, stop.callee))
+    return considered, stops
 
 
 def _attach_called_from(junctions, calls) -> None:

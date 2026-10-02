@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -1012,6 +1013,61 @@ def _report_reading(
         click.echo(f"  … {len(strategy.readings) - len(shown)} more (--full)")
 
 
+#: What the walk writes on a step whose call the map cannot place.
+_NOT_ENTERED = "not entered: "
+
+
+def _walk_steps(strategy: Strategy):
+    """Every step of every walk the answer holds: the readings', the readers', their exits'."""
+    for entry in strategy.readings:
+        yield from entry.trace
+    follow = strategy.follow_up
+    if follow is None:
+        return
+    for entry in (
+        *follow.reader_statements,
+        *follow.returned_by_exclusion,
+        *follow.refused_by,
+        *follow.consulted_by,
+    ):
+        yield from entry.trace
+        for leaving in entry.exits:
+            yield from leaving.trace
+
+
+def _report_unentered(strategy: Strategy, full: bool) -> None:
+    """The calls the walks above stopped at because the map cannot place them.
+
+    Recorded on each step all along and printed on none, so a walk that ended
+    at ``taskSpec.useScout()`` read as one that had nothing further to say.
+    One table for the answer rather than a line under each step: the same
+    call is reached by several walks, and the reason is what says what would
+    carry them further.  Apart from the SQL reader's stops, which are the
+    other list.
+    """
+    seen: dict[tuple[str, int, str], tuple[str, object]] = {}
+    for step in _walk_steps(strategy):
+        if step.detail.startswith(_NOT_ENTERED):
+            seen.setdefault(
+                (step.file, step.line, step.value), (step.detail[len(_NOT_ENTERED):], step)
+            )
+    if not seen:
+        return
+    click.echo(
+        f"\ncalls the walks above did not enter: {len(seen)} -- the map cannot place them"
+    )
+    for reason, count in Counter(reason for reason, _step in seen.values()).most_common():
+        click.echo(f"  {count:>4}  {reason}")
+        here = [step for said, step in seen.values() if said == reason]
+        for step in here if full else here[:2]:
+            click.echo(
+                f"          {step.file.rsplit('/', 1)[-1]}:{step.line}"  # type: ignore[attr-defined]
+                f"  {' '.join(step.value.split())[:70]}"  # type: ignore[attr-defined]
+            )
+        if not full and len(here) > 2:
+            click.echo(f"          … {len(here) - 2} more (--full)")
+
+
 def _report_findings(strategy: Strategy, top: int, full: bool) -> None:
     for title, rows in (("findings", strategy.findings), ("gaps", strategy.gaps)):
         if not rows:
@@ -1627,6 +1683,7 @@ def main(
         _report_observations(strategy, top, full, evaluated)
         _report_leads(strategy, top, full)
         _report_reading(strategy, roots, top, full)
+        _report_unentered(strategy, full)
         _report_discrimination(strategy)
         _report_findings(strategy, top, full)
 
