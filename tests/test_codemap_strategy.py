@@ -205,11 +205,14 @@ async def test_a_framed_arm_is_not_offered_as_a_way_the_value_was_reached():
         junctions=[
             _junction(
                 "mixed.py::f",
-                Branch(outcome="runtime(f'merge_{s}')", tier=2),
+                Branch(outcome="runtime(f'merge_{s}')", tier=2, value_frames=["merge_{}"]),
                 Branch(outcome="runtime(newStatus)", tier=2),
                 log_files=[KNIGHT_LOG],
             ),
-            _junction("framed.py::g", Branch(outcome="runtime(f'merge_{s}')", tier=2)),
+            _junction(
+                "framed.py::g",
+                Branch(outcome="runtime(f'merge_{s}')", tier=2, value_frames=["merge_{}"]),
+            ),
         ],
     )
     strategy = await strategy_mod.derive(

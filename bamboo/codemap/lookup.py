@@ -51,7 +51,7 @@ from bamboo.codemap.models import (
     Symptom,
     ValueEnumNode,
     admits_by_exclusion,
-    outcome_excludes,
+    branch_excludes,
     required_values,
 )
 from bamboo.database.graph_database_client import GraphDatabaseClient
@@ -251,24 +251,27 @@ class CodeMap:
         an incomplete candidate set into a confident wrong one.
 
         Kept, that is, unless the branch's own text says otherwise.  A tier-2
-        outcome is sometimes a frame with holes in it, and a frame bounds what
+        value is sometimes a frame with holes in it, and a frame bounds what
         can come out: ``runtime(f'merge_{s}')`` cannot have written
         ``es_inaction`` however ``s`` resolved.  That is a syntactic fact about
         the branch, not a completeness claim about some other node, which is
         what keeps it on the safe side of the paragraph above -- see
-        :func:`~bamboo.codemap.models.outcome_excludes`.
+        :func:`~bamboo.codemap.models.branch_excludes`, which also needs to
+        know where the subject's spec cuts the field.
 
         The same rule lives in :func:`~bamboo.codemap.strategy._reaching`, one
         level down, because this answers *which junctions* and that answers
         *which arms of one*.  Both are read by the same report and a reader
         comparing them would see a junction offered with no arm to look at.
         """
+        node = await self.subject(subject)
+        cut = node.truncated_to if node is not None else None
         return [
             junction
             for junction in await self.writers_of(subject)
             if any(
                 b.outcome == outcome
-                or (b.tier == 2 and not outcome_excludes(b.outcome, outcome))
+                or (b.tier == 2 and not branch_excludes(b, outcome, cut))
                 for b in junction.branches
             )
         ]

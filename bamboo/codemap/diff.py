@@ -60,6 +60,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "selected_by",
         "updated_by",
         "selection_gates",
+        "truncated_to",
     ),
     NodeType.ENTITY.value: (
         "tables",
@@ -216,6 +217,7 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 #: What a branch says, compared between two branches of one outcome.  ``tags``
 #: and ``messages`` are the signature production writes when the branch fires,
 #: so a reworded message is a branch a reader can no longer name from a log.
+#: ``value_frames`` is what an observed value rules the branch out by.
 BRANCH_FIELDS: tuple[str, ...] = (
     "path_condition",
     "row_precondition",
@@ -224,6 +226,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "log_level",
     "tags",
     "messages",
+    "value_frames",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",

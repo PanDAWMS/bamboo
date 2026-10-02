@@ -567,6 +567,8 @@ class Resolved(NamedTuple):
     outcome: str
     tier: int
     conditions: tuple[str, ...] = ()
+    #: Every text a run-time value can be -- see ``Branch.value_frames``.
+    frames: tuple[str, ...] = ()
 
 
 def _runtime(value: ast.expr) -> str:
@@ -674,8 +676,10 @@ def _resolve(
     # diagnostic, false of a computed ``lfn``, and nothing distinguishes the two
     # from structure alone (measured: the readings that look like they would --
     # the template reading as prose, the field never being compared -- misclassify
-    # ``errorDialog`` and ``datasetName`` in opposite directions).
-    return [Resolved(_runtime(value), 2)]
+    # ``errorDialog`` and ``datasetName`` in opposite directions).  What it can
+    # be is kept beside it, read back through the locals that build it: that
+    # is a bound on the text, not a claim about what kind of text it is.
+    return [Resolved(_runtime(value), 2, frames=tuple(values.value_frames(value, func)))]
 
 
 #: Class-level names a spec uses to say which database columns it holds.
@@ -769,6 +773,53 @@ def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
         if names:
             declarations.setdefault(cls_name, set()).update(names)
     return declarations
+
+
+#: The class attribute PanDA's specs name their length limits in.
+LENGTH_LIMITS = "_limitLength"
+
+
+def spec_length_limits(modules: list[SourceModule]) -> dict[tuple[str, str], int]:
+    """``{(spec_class, attribute): characters}`` a spec cuts the field to.
+
+    ``JobSpec`` keeps the first 500 characters of a ``ddmErrorDiag`` when it
+    builds the row it stores, and ``JediTaskSpec`` the first 510 of an
+    ``errorDialog`` the moment it is set.  A value read back from the table may
+    so be the head of what the code wrote, which an elimination by the written
+    text has to know -- see ``Branch.value_frames``.
+
+    **The cut, not the name.**  A class counts only where its own body slices
+    by the declaration (``val[: self._limitLength[attr]]``): a dict of numbers
+    by that name states a limit, and the slice is what says the class applies
+    it rather than leaving the database to refuse.
+    """
+    found: dict[tuple[str, str], int] = {}
+    for module in modules:
+        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+            declared: dict[str, int] = {}
+            for stmt in cls.body:
+                if not any(isinstance(t, ast.Name) and t.id == LENGTH_LIMITS for t in targets_of(stmt)):
+                    continue
+                value = getattr(stmt, "value", None)
+                if not isinstance(value, ast.Dict):
+                    continue
+                for key, limit in zip(value.keys, value.values, strict=False):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and isinstance(key.value, str)
+                        and isinstance(limit, ast.Constant)
+                        and type(limit.value) is int
+                    ):
+                        declared[key.value] = limit.value
+            if declared and any(
+                isinstance(node, ast.Slice)
+                and isinstance(node.upper, ast.Subscript)
+                and isinstance(node.upper.value, ast.Attribute)
+                and node.upper.value.attr == LENGTH_LIMITS
+                for node in ast.walk(cls)
+            ):
+                found.update(((cls.name, attribute), limit) for attribute, limit in declared.items())
+    return found
 
 
 def _named_constant(value: ast.expr) -> Optional[str]:
@@ -962,6 +1013,7 @@ def extract(
                         tags=tags,
                         messages=messages,
                         line=node.lineno,
+                        value_frames=list(resolved.frames),
                     )
                 )
         if candidates:

@@ -177,6 +177,261 @@ def diagnostic_template(node: ast.expr) -> Optional[str]:
     return text if text and has_literal_text(text) else None
 
 
+#: How far :func:`value_frames` follows a local back.  Two, because the second
+#: hop is the shape ``setup_destination`` has: ``dest_error[dest] = tmp_msg``,
+#: with ``tmp_msg`` built two lines above.
+FRAME_HOPS = 2
+#: More renderings than this and the part is left a hole rather than listed.
+FRAME_LIMIT = 32
+_HOLE = "{}"
+#: The methods that read a dict without changing what its values can be.
+_READS_A_DICT = frozenset({"get", "keys", "values", "items", "copy", "setdefault"})
+
+
+def value_frames(
+    node: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef]
+) -> list[str]:
+    """Every text *node* can evaluate to, holes as ``{}`` -- all of them, or none.
+
+    What an arm writes when the value is only settled at run time, read far
+    enough to bound it.  ``self.job.ddmErrorDiag = err_msg + extracted_err_str``
+    names no text of its own; ``err_msg = "Could not add files to DDM: "`` two
+    lines above does, and an observed ``ddmErrorDiag`` that does not begin with
+    it was written by some other arm.  Of the nine writers the map offered for
+    one such value, five fall to that -- a local's assignment, a ``+``, a dict
+    of messages filled across the function.
+
+    **Complete or empty**, because the caller eliminates with it: a list
+    missing one text is a confident wrong answer about the arm that writes it.
+    So every part the reading cannot bound is a hole, which matches anything,
+    and a value with nothing but holes left is no frame at all.  Followed back
+    through a local name or a local dict's subscript, :data:`FRAME_HOPS` deep,
+    and through **every** binding that can hold the value where it is read:
+    a parameter, a ``global``, an unpacking, a loop or ``with`` target, a dict
+    handed to another function or changed by a method -- each is a hole.
+
+    Not :func:`progress._reaching`, which a later write in another arm shadows
+    on purpose: it answers which text *belongs* to a write, to attach a tag,
+    and dropping a possible text there costs a tag, here an arm.  And an
+    earlier pass of a loop holds what this one did not assign, so inside a
+    loop around both the two arms of one ``if`` are not kept apart.
+    """
+    try:
+        found = _frames(node, func, pathcond.site_of(node), FRAME_HOPS)
+    except RecursionError:
+        return []
+    if any(_HOLE in frame and not has_literal_text(frame) for frame in found):
+        return []
+    return found
+
+
+def _frames(node: ast.expr, func, at: ast.AST, hops: int) -> list[str]:
+    if isinstance(node, ast.Constant):
+        return [_literal(node.value)] if isinstance(node.value, str) else [_HOLE]
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for part in node.values:
+            if isinstance(part, ast.Constant):
+                parts.append([_literal(part.value)])
+            elif part.conversion == -1 and part.format_spec is None:
+                parts.append(_frames(part.value, func, at, hops))
+            else:
+                # ``{x!r}`` quotes it and ``{x:>8}`` pads it: not the text it holds.
+                parts.append([_HOLE])
+        return _joined(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _frames(node.left, func, at, hops)
+        right = _frames(node.right, func, at, hops)
+        if left == [_HOLE] and right == [_HOLE]:
+            return [_HOLE]  # two numbers, as far as anything here can tell
+        return _joined([left, right])
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+        and isinstance(node.func.value, ast.Constant)
+        and isinstance(node.func.value.value, str)
+    ):
+        text = node.func.value.value
+        if "{{" in text or "}}" in text:
+            return [_HOLE]
+        return [_squeezed(blank_fields(text))]
+    if func is None or hops == 0:
+        return [_HOLE]
+    if isinstance(node, ast.Name):
+        return _held_by_name(node.id, func, at, hops)
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+    ):
+        return _held_by_dict(node.value.id, func, at, hops)
+    return [_HOLE]
+
+
+def _literal(text: str) -> str:
+    # A brace in the text would read as a hole; reading it as one is safe.
+    return _HOLE if "{" in text or "}" in text else text
+
+
+def _squeezed(frame: str) -> str:
+    while _HOLE + _HOLE in frame:
+        frame = frame.replace(_HOLE + _HOLE, _HOLE)
+    return frame
+
+
+def _distinct(frames: list[str]) -> list[str]:
+    return sorted({_squeezed(frame) for frame in frames})
+
+
+def _joined(parts: list[list[str]]) -> list[str]:
+    joined = [""]
+    for options in parts:
+        joined = [head + tail for head in joined for tail in options]
+        if len(joined) > FRAME_LIMIT:
+            return [_HOLE]
+    return _distinct(joined)
+
+
+def _can_hold(site: ast.AST, at: ast.AST) -> bool:
+    """Whether what *site* binds can be what the read at *at* sees."""
+    if site is at:
+        return False
+    if pathcond.loops_over(site) & pathcond.loops_over(at):
+        return True
+    return getattr(site, "lineno", 0) <= getattr(at, "lineno", 0) and not pathcond.parted(
+        site, at, exits=False
+    )
+
+
+def _local(func, name: str) -> bool:
+    arguments = func.args
+    every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+    every += [argument for argument in (arguments.vararg, arguments.kwarg) if argument]
+    if any(argument.arg == name for argument in every):
+        return False
+    return not any(
+        isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names
+        for node in ast.walk(func)
+    )
+
+
+def _held_by_name(name: str, func, at: ast.AST, hops: int) -> list[str]:
+    if not _local(func, name):
+        return [_HOLE]
+    every = pathcond.bindings(func, name)
+    if any(binding.nested and binding.kind == pathcond.BIND_WALRUS for binding in every):
+        return [_HOLE]  # ``[y := f(x) for x in L]`` binds the function's ``y``
+    reaching = [
+        binding for binding in every if not binding.nested and _can_hold(binding.site, at)
+    ]
+    if not reaching:
+        return [_HOLE]
+    found: list[str] = []
+    for binding in reaching:
+        if binding.unpacked or binding.slot is not None or binding.value is None:
+            return [_HOLE]
+        if binding.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED, pathcond.BIND_WALRUS):
+            found += _frames(binding.value, func, binding.site, hops - 1)
+        elif binding.kind == pathcond.BIND_AUGMENTED and isinstance(binding.site.op, ast.Add):
+            # What was there, then this.  The head is a hole rather than the
+            # earlier texts: which of them it was is a second question.
+            found += [_HOLE + frame for frame in _frames(binding.value, func, binding.site, hops - 1)]
+        else:
+            return [_HOLE]
+    return _distinct(found)
+
+
+def _dict_kept_local(name: str, func) -> bool:
+    """Whether every use of *name* reads the dict or stores into it, here."""
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)):
+            continue
+        parent = getattr(node, "parent", None)
+        if isinstance(parent, ast.Subscript) and parent.value is node:
+            continue
+        if (
+            isinstance(parent, ast.Compare)
+            and any(comparator is node for comparator in parent.comparators)
+            and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
+        ):
+            continue
+        if isinstance(parent, ast.Attribute) and parent.attr in _READS_A_DICT:
+            continue
+        if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id == "len":
+            continue
+        # Handed on, aliased, returned, updated: someone else can fill it.
+        # ``setup_source`` passes ``disp_error`` to the method that fills it.
+        return False
+    return True
+
+
+def _held_by_dict(name: str, func, at: ast.AST, hops: int) -> list[str]:
+    if not _local(func, name) or not _dict_kept_local(name, func):
+        return [_HOLE]
+    found: list[str] = []
+    for binding in pathcond.bindings(func, name):
+        if binding.nested:
+            continue
+        value = binding.value
+        if binding.kind not in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED) or binding.slot is not None or binding.unpacked:
+            return [_HOLE]
+        if isinstance(value, ast.Dict) and all(key is not None for key in value.keys):
+            if _can_hold(binding.site, at):
+                for held in value.values:
+                    found += _frames(held, func, binding.site, hops - 1)
+            continue
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "dict"
+            and not value.args
+            and not value.keywords
+        ):
+            continue
+        return [_HOLE]
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == name):
+            continue
+        if isinstance(node.ctx, ast.Load):
+            if (
+                isinstance(node.parent, ast.Attribute)  # type: ignore[attr-defined]
+                and node.parent.attr == "setdefault"  # type: ignore[attr-defined]
+            ):
+                return [_HOLE]  # ``d[k].setdefault(...)``: a value that is a container
+            continue
+        if isinstance(node.ctx, ast.Del):
+            continue
+        statement = node.parent  # type: ignore[attr-defined]
+        # Only a plain ``d[k] = v`` in this function's own body says what was
+        # stored.  An unpacking, a loop target, a closure filling it: a hole.
+        direct = (
+            isinstance(statement, ast.Assign) and any(target is node for target in statement.targets)
+        ) or (isinstance(statement, (ast.AnnAssign, ast.AugAssign)) and statement.target is node)
+        if not direct or pathcond.enclosing_function(statement) is not func:
+            return [_HOLE]
+        if statement.value is None or not _can_hold(statement, at):
+            continue
+        if isinstance(statement, ast.AugAssign):
+            if not isinstance(statement.op, ast.Add):
+                return [_HOLE]
+            found += [_HOLE + frame for frame in _frames(statement.value, func, statement, hops - 1)]
+        else:
+            found += _frames(statement.value, func, statement, hops - 1)
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "setdefault"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+        ):
+            if len(node.args) != 2 or node.keywords or pathcond.enclosing_function(node) is not func:
+                return [_HOLE]
+            found += _frames(node.args[1], func, pathcond.site_of(node), hops - 1)
+    return _distinct(found) if found else [_HOLE]
+
+
 def _literal_mapping(node: ast.expr) -> Optional[Mapping]:
     """Return a dict literal as a plain mapping, or ``None`` if not all literal.
 

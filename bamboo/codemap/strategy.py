@@ -126,7 +126,7 @@ from bamboo.codemap.models import (
     Strategy,
     SubjectNode,
     Symptom,
-    outcome_excludes,
+    branch_excludes,
 )
 
 logger = logging.getLogger(__name__)
@@ -329,26 +329,27 @@ def rows_shape(producers: list[JunctionNode]) -> tuple[Optional[str], list[str]]
     return re.escape(best), sorted(files[best])
 
 
-def _reaching(junction: JunctionNode, observed: str) -> list:
+def _reaching(junction: JunctionNode, observed: str, cut: Optional[int] = None) -> list:
     """The branches that can have produced *observed*.
 
     The ones that state it, or -- when none does -- the ones whose value is
     only settled at run time.  A tier-2 branch is not ruled out by the value,
     because "this one could have" is the honest answer for it -- unless its own
-    text is a frame the value does not fit, which is the one case where the arm
+    frames are ones the value does not fit, which is the one case where the arm
     says so itself.  The junction-level half of the same rule is
     :meth:`~bamboo.codemap.lookup.CodeMap.producers_of`; this one has to agree
     with it, or a surviving junction would be offered with no arm to read.
+    *cut* is where the subject's spec cuts the field (``truncated_to``).
     """
     stated = [b for b in junction.branches if b.outcome == observed]
     return stated or [
         b
         for b in junction.branches
-        if b.tier == 2 and not outcome_excludes(b.outcome, observed)
+        if b.tier == 2 and not branch_excludes(b, observed, cut)
     ]
 
 
-def _candidate(junction: JunctionNode, observed: str) -> Candidate:
+def _candidate(junction: JunctionNode, observed: str, cut: Optional[int] = None) -> Candidate:
     stated = any(b.outcome == observed for b in junction.branches)
     return Candidate(
         owner=junction.owner,
@@ -368,7 +369,7 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
                 conditions=list(branch.path_condition),
                 row_precondition=list(branch.row_precondition),
             )
-            for branch in _reaching(junction, observed)
+            for branch in _reaching(junction, observed, cut)
         ],
         triggers=sorted({entry.trigger for entry in junction.entry_points}),
         entries=sorted({entry.entry for entry in junction.entry_points}),
@@ -1195,7 +1196,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
     upstream = await code_map.carried_from(symptom.subject)
     carried = sorted(upstream)
 
-    candidates = [_candidate(j, symptom.observed) for j in producers]
+    candidates = [_candidate(j, symptom.observed, subject.truncated_to) for j in producers]
     rows_head, rows_files = rows_shape(producers)
     # Scoped to the row: an unscoped row count answers about every write the
     # proxy made, which is no answer about this one.

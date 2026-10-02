@@ -183,6 +183,18 @@ class SubjectNode(BaseNode):
             "is only half an answer without what bounds the selecting."
         ),
     )
+    truncated_to: Optional[int] = Field(
+        default=None,
+        description=(
+            "How many characters the spec cuts this field to before it is "
+            "stored, where the class declares it in ``_limitLength`` and "
+            "cuts by it.  ``JobSpec`` keeps 500 of a ``ddmErrorDiag``, and "
+            "``JediTaskSpec`` 510 of an ``errorDialog`` the moment it is set. "
+            "A value read back at exactly that length may have lost its "
+            "tail, so an arm is ruled out by its frame's head alone -- see "
+            ":func:`branch_excludes`."
+        ),
+    )
 
     @staticmethod
     def make_name(spec_class: str, attribute: str) -> str:
@@ -457,55 +469,97 @@ class Branch(BaseModel):
             "the static outcome."
         ),
     )
+    value_frames: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every text a tier-2 arm's value can be, holes as ``{}``, read "
+            "back through the locals it is built from -- "
+            "``err_msg + extracted_err_str`` is ``Could not add files to DDM: "
+            "{}``.  **All of them or none**: empty whenever one part of one "
+            "of them cannot be bounded, because an observed value that fits "
+            "none of them rules the arm out.  Not ``messages``, which is what "
+            "the block records about the decision rather than what it writes."
+        ),
+    )
 
 
-#: A run-time outcome rendered as an f-string -- ``runtime(f'merge_{s}')``.
-#: The literal chunks around the holes are the *frame*, and a frame is a
-#: constraint on the value, not decoration.
-_FRAMED_OUTCOME = re.compile(r"^runtime\(f(['\"])(.*)\1\)$", re.DOTALL)
-
-#: One substitution hole inside a frame.  Nested braces are not matched on
-#: purpose: an outcome carrying them is left alone rather than split wrongly.
-_OUTCOME_HOLE = re.compile(r"\{[^{}]*\}")
+#: A hole in a frame -- see :attr:`Branch.value_frames`.
+_HOLE = "{}"
 
 
-def outcome_excludes(outcome: Optional[str], value: str) -> bool:
-    """Whether a branch's own text proves it cannot have produced *value*.
+def pooled_frames(one: list[str], other: list[str]) -> list[str]:
+    """The frames of two branches kept as one: both sets, or none if either has none.
+
+    Two writes with the same outcome text and conditions are one branch, but
+    the same text read at two sites need not hold the same locals, and an
+    empty list means the value is unbounded, not that it has no text.  Keeping
+    the first branch's frames would rule the arm out by the other's value.
+    """
+    if not one or not other:
+        return []
+    return sorted(set(one) | set(other))
+
+
+def branch_excludes(branch: Branch, value: str, truncated_to: Optional[int] = None) -> bool:
+    """Whether a tier-2 branch's own frames prove it cannot have produced *value*.
 
     Tier 2 says the writer is known and the value is settled at run time, and
     everywhere else that is read as "this one could have" -- the honest answer
     for ``runtime(newStatus)``, where nothing bounds what the name holds.  It
     is not the honest answer for ``runtime(f'merge_{s}')``: whatever ``s``
     turns out to be, the result begins with ``merge_``, so a row reading
-    ``es_inaction`` was written somewhere else.  Two of the four candidates the
-    map offered for that value were of exactly this kind, and a reader
-    following them opens a hundred and sixty lines that cannot produce it.
+    ``es_inaction`` was written somewhere else.  Nor for ``runtime(err_msg +
+    extracted_err_str)`` where ``err_msg`` was set to ``"Could not add files to
+    DDM: "`` two lines up: of nine writers offered for a ``ddmErrorDiag``, five
+    fall to their own text once the locals are read.
 
-    **Syntactic proof only.**  The frame has to be spelled out in the branch's
-    own text, which is why nothing here consults another node: an elimination
-    resting on some *other* fact being complete is the shape that turns an
-    incomplete candidate set into a confident wrong one.  Copying a value from
-    elsewhere -- ``passthrough(JobSpec.jobStatus)`` -- looks like it bounds the
-    value too, and does not: it would need that subject's value set to be
-    closed, and two of this corpus's hundred and eight subjects have one.
+    **Syntactic proof only.**  The frames are the branch's own value, read back
+    through the locals that build it, and nothing here consults another node:
+    an elimination resting on some *other* fact being complete is the shape
+    that turns an incomplete candidate set into a confident wrong one.
+    Copying a value from elsewhere -- ``passthrough(JobSpec.jobStatus)`` --
+    looks like it bounds the value too, and does not: it would need that
+    subject's value set to be closed, and two of this corpus's hundred and
+    eight subjects have one.  An arm with no frames is kept.
 
-    ``{{`` and ``}}`` are escaped braces rather than holes, so an outcome
-    carrying either is left alone instead of being read with the wrong frame.
+    **Whole, unless the value may have lost its tail.**  A spec that cuts a
+    field cuts it to exactly *truncated_to* characters, so a value of any
+    other length is whole and has to fit a frame end to end, and one of
+    exactly that length may be the head of a longer text, which only a
+    frame's head can rule out.  Reading every value as whole rules out the arm
+    that wrote a long ``ddmErrorDiag`` -- ``JobSpec`` keeps 500 characters and
+    the frame's tail is in what it dropped.  Reading every value as a head
+    gives up 26 eliminations the map makes, ``es_merge`` against
+    ``es_merge_{}`` among them.
     """
-    match = _FRAMED_OUTCOME.match(outcome or "")
-    if not match:
+    if branch.tier != 2 or not branch.value_frames:
         return False
-    frame = match.group(2)
-    if "{{" in frame or "}}" in frame:
+    cut = truncated_to is not None and len(value) == truncated_to
+    return all(not _fits(frame.split(_HOLE), value, cut) for frame in branch.value_frames)
+
+
+def _fits(literals: list[str], value: str, cut: bool) -> bool:
+    """Whether *value* is what a frame of these literal chunks renders, or its head when *cut*."""
+    if len(literals) == 1:
+        return literals[0][: len(value)] == value if cut else literals[0] == value
+    head, *middle, tail = literals
+    if cut and len(head) >= len(value):
+        return head[: len(value)] == value
+    if not value.startswith(head):
         return False
-    literals = _OUTCOME_HOLE.split(frame)
-    if not any(literals):
-        return False
-    if literals[0] and not value.startswith(literals[0]):
+    if cut:
         return True
-    if literals[-1] and not value.endswith(literals[-1]):
-        return True
-    return any(chunk and chunk not in value for chunk in literals[1:-1])
+    # A hole is any text, the empty one and line breaks included, so the
+    # leftmost place each chunk fits is as good as any.
+    cursor, end = len(head), len(value) - len(tail)
+    if end < cursor or not value.endswith(tail):
+        return False
+    for chunk in middle:
+        found = value.find(chunk, cursor, end)
+        if found < 0:
+            return False
+        cursor = found + len(chunk)
+    return True
 
 
 #: ``jobStatus=activated``, ``status='ready'`` -- a settled equality.
@@ -2426,9 +2480,9 @@ class Candidate(BaseModel):
             "1 when a branch states this value outright, 2 when the writer is "
             "known and the value is only settled at run time.  A tier-2 "
             "candidate is not eliminated by the value, because 'this one could "
-            "have' is the honest answer for it -- unless the branch's own text "
-            "is a frame the value does not fit, which is the one case where "
-            "the arm rules itself out.  See ``outcome_excludes``."
+            "have' is the honest answer for it -- unless the branch's own "
+            "frames are ones the value does not fit, which is the one case "
+            "where the arm rules itself out.  See ``branch_excludes``."
         ),
     )
     dispatch: list[DispatchFanout] = Field(

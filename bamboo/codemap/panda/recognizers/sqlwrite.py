@@ -66,6 +66,7 @@ from bamboo.codemap.models import (
     RowKeySource,
     SourceModule,
     SubjectNode,
+    pooled_frames,
 )
 from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
@@ -659,6 +660,18 @@ def _deciding_fragment(
     return None
 
 
+class _Outcome(NamedTuple):
+    """One value a column's write settles to -- see :func:`_outcomes`."""
+
+    outcome: str
+    tier: int
+    node: ast.stmt
+    extra: list[str]
+    decided_at: ast.stmt
+    #: Every text a run-time value can be -- see ``Branch.value_frames``.
+    frames: tuple[str, ...] = ()
+
+
 def _outcomes(
     attributor: SpecAttributor,
     *,
@@ -671,8 +684,8 @@ def _outcomes(
     settle,
     templates: list[tuple[str, ast.stmt]],
     why: list[str],
-) -> list[tuple[str, int, ast.stmt, list[str], ast.stmt]]:
-    """Return ``(outcome, tier, node, extra conditions, decided at)`` for a column.
+) -> list[_Outcome]:
+    """Return ``(outcome, tier, node, extra conditions, decided at, frames)`` for a column.
 
     The node is where the value was decided, which differs by form: a bind is
     decided at the Python assignment filling it, and a literal or a copied
@@ -705,7 +718,7 @@ def _outcomes(
             value, site = bind.value, bind.site
             settled = settle(value, func)
             if settled:
-                found.extend((outcome, 1, site, [], site) for outcome in settled)
+                found.extend(_Outcome(outcome, 1, site, [], site) for outcome in settled)
                 continue
             template = values.diagnostic_template(value)
             if template:
@@ -718,7 +731,7 @@ def _outcomes(
                 if reached:
                     dominating = path_condition(site)
                     found.extend(
-                        (
+                        _Outcome(
                             outcome,
                             1,
                             site,
@@ -735,7 +748,16 @@ def _outcomes(
             # The writer is known, the value is not until run time.
             # Recorded rather than dropped: localize and prune read
             # observed values, so they work from the writer alone.
-            found.append((f"runtime({ast.unparse(value)})", 2, site, [], site))
+            found.append(
+                _Outcome(
+                    f"runtime({ast.unparse(value)})",
+                    2,
+                    site,
+                    [],
+                    site,
+                    tuple(values.value_frames(value, func)),
+                )
+            )
         if not found:
             # Which of the several reasons, from the walk that failed rather
             # than from a second walk asking why -- see ``sql.BindScan``.
@@ -770,7 +792,7 @@ def _outcomes(
         why.append(NO_DECIDING_FRAGMENT)
         return []
     if supplied.kind == "literal":
-        return [(supplied.text, 1, node, [], node)]
+        return [_Outcome(supplied.text, 1, node, [], node)]
     if supplied.kind == "expression":
         # ``stateChangeTime=CURRENT_DATE``, ``nFiles=nFiles+:iFiles``: the
         # database decides, from the clock or from the row's own prior
@@ -780,7 +802,7 @@ def _outcomes(
         # literal writes against all of them, so a column the source only ever
         # increments looked, from its one ``= 0``, like a field with a closed
         # vocabulary of one.
-        return [(f"runtime({supplied.text})", 2, node, [], node)]
+        return [_Outcome(f"runtime({supplied.text})", 2, node, [], node)]
 
     # A copied column.  The source is named as a subject rather than as a bare
     # column so the edge joins: ``passthrough(JediTaskSpec.oldStatus)`` points
@@ -790,7 +812,7 @@ def _outcomes(
         attributor, spec_class, statement.table, supplied.text
     )
     outcome = f"passthrough({SubjectNode.make_name(source, attribute)})"
-    return [(outcome, 2, node, [], node)]
+    return [_Outcome(outcome, 2, node, [], node)]
 
 
 def _statement_at(
@@ -818,7 +840,7 @@ def _record(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     spec_class: str,
     attribute: str,
-    outcomes: list[tuple[str, int, ast.stmt, list[str], ast.stmt]],
+    outcomes: list[_Outcome],
     row_precondition: list[str],
     setters: dict[str, object],
     beside=None,
@@ -851,39 +873,41 @@ def _record(
                 # arm above the first one gave seventeen junctions a span that
                 # ends before it starts.  Nothing complained, because no
                 # production reader looks at ``line_end`` (see ``Anchor``).
-                line_start=min(node.lineno for _o, _t, node, _e, _d in outcomes),
+                line_start=min(found.node.lineno for found in outcomes),
                 line_end=max(
-                    node.end_lineno or node.lineno for _o, _t, node, _e, _d in outcomes
+                    found.node.end_lineno or found.node.lineno for found in outcomes
                 ),
                 blob_sha=module.blob_sha,
             ),
         )
         junctions[name] = junction
 
-    known = {(branch.outcome, tuple(branch.path_condition)) for branch in junction.branches}
-    for outcome, tier, node, extra, decided_at in outcomes:
+    known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
+    for outcome, tier, node, extra, decided_at, frames in outcomes:
         condition = path_condition(node) + extra
-        if (outcome, tuple(condition)) in known:
+        held = known.get((outcome, tuple(condition)))
+        if held is not None:
+            held.value_frames = pooled_frames(held.value_frames, list(frames))
             continue
-        known.add((outcome, tuple(condition)))
         # Read at the deciding statement rather than at the bind.  The two are
         # the same for a literal and far apart for a local: ``retryTask_JEDI``
         # picks the status and writes the reason in one block and binds it
         # after the whole chain has closed, so the bind's block says nothing
         # about which of five refusals this is.
         tags, messages = progress.recorded_signature(decided_at, func, setters)
-        junction.branches.append(
-            Branch(
-                outcome=outcome,
-                path_condition=condition,
-                row_precondition=beside(node) if beside is not None else row_precondition,
-                order=len(junction.branches),
-                tier=tier,
-                tags=tags,
-                messages=messages,
-                line=decided_at.lineno,
-            )
+        branch = Branch(
+            outcome=outcome,
+            path_condition=condition,
+            row_precondition=beside(node) if beside is not None else row_precondition,
+            order=len(junction.branches),
+            tier=tier,
+            tags=tags,
+            messages=messages,
+            line=decided_at.lineno,
+            value_frames=list(frames),
         )
+        known[(outcome, tuple(condition))] = branch
+        junction.branches.append(branch)
 
 
 

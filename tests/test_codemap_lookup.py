@@ -163,8 +163,12 @@ async def test_a_run_time_writer_is_never_eliminated_by_an_observed_value():
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
 
 
+def _framed(*frames: str) -> Branch:
+    return Branch(outcome="runtime(f'merge_{s}')", tier=2, value_frames=list(frames))
+
+
 async def test_a_run_time_writer_whose_frame_the_value_does_not_fit_is_eliminated():
-    """A frame is a bound, and the branch spells it out itself.
+    """A frame is a bound, and it is the branch's own value.
 
     ``f'merge_{s}'`` produces a value beginning with ``merge_`` whatever ``s``
     holds, so a row reading ``pending`` was written somewhere else.  This is
@@ -176,7 +180,7 @@ async def test_a_run_time_writer_whose_frame_the_value_does_not_fit_is_eliminate
         derived_from=VERSION,
         subjects=[_subject()],
         junctions=[
-            _junction("framed.py::f", Branch(outcome="runtime(f'merge_{s}')", tier=2)),
+            _junction("framed.py::f", _framed("merge_{}")),
             _junction("free.py::g", Branch(outcome="runtime(newStatus)", tier=2)),
         ],
     )
@@ -193,7 +197,7 @@ async def test_a_run_time_writer_whose_frame_the_value_fits_is_kept():
         map_id=MAP_ID,
         derived_from=VERSION,
         subjects=[_subject()],
-        junctions=[_junction("framed.py::f", Branch(outcome="runtime(f'merge_{s}')", tier=2))],
+        junctions=[_junction("framed.py::f", _framed("merge_{}"))],
     )
     code_map = await _stored(fragment)
 
@@ -214,7 +218,7 @@ async def test_a_junction_keeps_the_arms_a_frame_does_not_rule_out():
         junctions=[
             _junction(
                 "mixed.py::f",
-                Branch(outcome="runtime(f'merge_{s}')", tier=2),
+                _framed("merge_{}"),
                 Branch(outcome="runtime(newStatus)", tier=2),
             )
         ],
@@ -224,21 +228,67 @@ async def test_a_junction_keeps_the_arms_a_frame_does_not_rule_out():
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
 
 
-async def test_a_frame_of_escaped_braces_is_left_alone():
-    """``{{`` is a literal brace, not a hole, so the frame cannot be read.
+async def test_an_arm_is_ruled_out_only_when_no_frame_of_it_fits():
+    """``err_msg`` set in two arms: the value has to miss both."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[_junction("framed.py::f", _framed("merge_{}", "pend{}"))],
+    )
+    code_map = await _stored(fragment)
 
-    Left as an ordinary tier-2 branch rather than split on the wrong holes:
-    misreading the frame would eliminate on a bound the code never had.
+    assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
+    assert len(await code_map.producers_of("JediTaskSpec.status", "ready")) == 0
+
+
+async def test_the_outcome_text_is_not_read_as_a_frame():
+    """The frames are read off the source, through the locals, by the build.
+
+    Parsing ``runtime(f'...')`` back out of the outcome was the earlier form,
+    and it saw only a value spelled out at the write: the frames include those
+    and the ones a local carries in, so an arm the build gave none is kept.
     """
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
         subjects=[_subject()],
-        junctions=[_junction("braced.py::f", Branch(outcome="runtime(f'{{merge}}')", tier=2))],
+        junctions=[_junction("framed.py::f", _framed())],
     )
     code_map = await _stored(fragment)
 
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
+
+
+async def test_a_value_as_long_as_the_spec_keeps_is_ruled_out_by_its_head_alone():
+    """``JobSpec`` keeps 500 characters of a ``ddmErrorDiag``.
+
+    A value of exactly that length may have lost a tail the frame spells, so
+    only the head can rule an arm out; a value of any other length is whole
+    and has to fit the frame end to end.
+    """
+    subject = _subject("errorDialog").model_copy(update={"truncated_to": 12})
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[subject],
+        junctions=[
+            _junction(
+                "framed.py::f",
+                Branch(outcome="runtime(msg)", tier=2, value_frames=["failed: {} done"]),
+                subject="JediTaskSpec.errorDialog",
+            )
+        ],
+    )
+    code_map = await _stored(fragment)
+
+    def asked(value: str):
+        return code_map.producers_of("JediTaskSpec.errorDialog", value)
+
+    assert len(await asked("failed: abcd")) == 1  # 12 characters: the tail may be cut
+    assert len(await asked("failed: abc")) == 0  # 11: whole, and " done" is missing
+    assert len(await asked("failed: abc done")) == 1
+    assert len(await asked("refused: abc")) == 0  # 12, and the head does not fit
 
 
 async def test_a_passthrough_moves_the_question_to_the_field_it_came_from():

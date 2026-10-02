@@ -33,6 +33,7 @@ from bamboo.codemap.models import (
     MapFragment,
     SourceModule,
     SubjectNode,
+    pooled_frames,
 )
 from bamboo.codemap.panda import promotion, sql, sqltext
 from bamboo.codemap.panda.attribution import (
@@ -89,9 +90,11 @@ def _merge_junctions(junctions: list[JunctionNode]) -> list[JunctionNode]:
         if existing is None:
             merged[junction.name] = junction
             continue
-        known = {(b.outcome, tuple(b.path_condition)) for b in existing.branches}
+        known = {(b.outcome, tuple(b.path_condition)): b for b in existing.branches}
         for branch in junction.branches:
-            if (branch.outcome, tuple(branch.path_condition)) in known:
+            held = known.get((branch.outcome, tuple(branch.path_condition)))
+            if held is not None:
+                held.value_frames = pooled_frames(held.value_frames, branch.value_frames)
                 continue
             branch.order = len(existing.branches)
             existing.branches.append(branch)
@@ -440,6 +443,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # without this the second silently replaces the first's branches.
         fragment.junctions = _merge_junctions(fragment.junctions)
         fragment.subjects = _unique_subjects(fragment.subjects)
+        cut = progress.spec_length_limits(self._modules)
+        for subject in fragment.subjects:
+            if subject.qualifier_kind == "spec":
+                subject.truncated_to = cut.get((subject.spec_class, subject.attribute))
 
         # Which other kind of row one of the owner's queries asks for in the
         # same statement as the rows it decides about.  After the merge because
