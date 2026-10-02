@@ -346,7 +346,7 @@ def _row_key_source(
     handed = ""
     if run.varmap is not None:
         for _column, bind in sorted(statement.keys.items()):
-            for filled in sql.bound_values(func, run.varmap, bind, run.window):
+            for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run.run_at):
                 handed = handed_in(func, filled.value)
                 if handed:
                     break
@@ -450,7 +450,7 @@ def extract(
                     preconditions = []
                     for term in sorted(statement.preconditions.values()):
                         settled, done = sql.settled_precondition(
-                            term, func, run.varmap, run.window, settle
+                            term, func, run.varmap, run.window, settle, at=run.run_at
                         )
                         preconditions.append(settled)
                         if not done and ":" in term:
@@ -551,7 +551,7 @@ def extract(
                             setters=setters,
                             beside=lambda node, terms=sorted(statement.preconditions.values()): [
                                 sql.settled_precondition(
-                                    term, func, run.varmap, run.window, settle, beside=node
+                                    term, func, run.varmap, run.window, settle, beside=node, at=run.run_at
                                 )[0]
                                 for term in terms
                             ],
@@ -697,7 +697,7 @@ def _outcomes(
         if run.varmap is None:
             why.append(NO_VARMAP)
             return []
-        scan = sql.scan_binds(func, run.varmap, supplied.text, run.window)
+        scan = sql.scan_binds(func, run.varmap, supplied.text, run.window, at=run.run_at)
         found = []
         for bind in scan.binds:
             value, site = bind.value, bind.site
@@ -1205,7 +1205,10 @@ def _folded_conditions(
                     if key in seeds:
                         continue
                     at_lines = sorted(
-                        {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window)}
+                        {
+                            bind.site.lineno
+                            for bind in sql.bound_values(func, run.varmap or "", key, window, at=run.run_at)
+                        }
                     )
                     if at_lines:
                         seeds[key] = at_lines
@@ -1727,7 +1730,7 @@ def read_side(
 
     def bound(func, run, key: str, file: str) -> list[str]:
         values_of: list[str] = []
-        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True)
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
         if not run.varmap:
             binds = binds + sql.inline_binds(run.call, key)
         for bind in binds:
@@ -1809,7 +1812,7 @@ def read_side(
         caller hands, where different calls hand different lists and the
         union is no run's.
         """
-        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True)
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
         if len(binds) != 1:
             return None
         value = binds[0].value
@@ -2104,11 +2107,9 @@ def read_side(
                 # pair, and thrown away again if none lands.  The line is the
                 # one the statement *runs* on: the text is assembled further up
                 # and the binds are not in scope there.
-                # Read for both call forms.  ``run.window`` is left alone
-                # below, where it pairs a statement with its varmap: narrowing
-                # the ``execute`` form's bind lookup would drop values from
-                # ``selects``, which is a different question from where a walk
-                # should start.
+                # Read for both call forms: where a walk should start.  The
+                # binds are paired with the run by the call, not by this
+                # window -- see ``sql.bound_values``.
                 window = run.window
                 if window is None and run.varmap:
                     window = sql.binding_window(func, run.varmap, run.call.lineno)

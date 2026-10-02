@@ -202,7 +202,7 @@ def flush_methods(
                         # parameter.
                         gating = _gating_parameters(func, term, parameters)
                         settled, _done = sql.settled_precondition(
-                            term, func, run.varmap, run.window, settle
+                            term, func, run.varmap, run.window, settle, at=run.run_at
                         )
                         guards[column] = (settled, gating)
             found[func.name] = Flush(

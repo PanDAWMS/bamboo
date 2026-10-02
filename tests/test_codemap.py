@@ -1539,6 +1539,7 @@ class TaskModule:
         varMap[":jediTaskID"] = jediTaskID
         if lost:
             varMap[":status"] = "lost"
+            self.cur.execute(sqlU + comment, varMap)
         varMap[":status"] = "finished"
         self.cur.execute(sqlU + comment, varMap)
 ''')
@@ -1548,13 +1549,15 @@ class TaskModule:
     (junction,) = junctions
     assert junction.subject == "JEDI_Tasks.status"
 
-    # Discovery order is not line order: the nested arm comes second.
+    # Discovery order is not line order: the run inside the ``if`` comes
+    # second.  Each run reads its own bind -- ``lost`` is overwritten before
+    # the second one, and ``finished`` is below the first.
     assert [(b.outcome, b.line) for b in junction.branches] == [
-        ("finished", 11),
+        ("finished", 12),
         ("lost", 10),
     ]
     # The span covers both of them anyway.
-    assert (junction.anchor.line_start, junction.anchor.line_end) == (10, 11)
+    assert (junction.anchor.line_start, junction.anchor.line_end) == (10, 12)
 
 
 def test_statement_is_reassembled_from_its_concatenation():
@@ -3093,6 +3096,33 @@ class TaskModule:
         "running": ["status=paused"],
         "paused": ["status=running"],
     }
+
+
+def test_a_status_bound_for_another_tables_statement_is_no_arm_of_the_task():
+    """The querier's round-4 note 9.  ``prepareTasksToBeFinished_JEDI`` binds
+    ``:status`` to ``prepared`` for the output datasets and to the task's new
+    status for the task; each statement's junction gets its own."""
+    source = '''
+class TaskModule:
+    def prepareTask(self, jediTaskID, fileID, newTaskStatus):
+        sqlF = f"UPDATE {panda_config.schemaJEDI}.JEDI_Dataset_Contents "
+        sqlF += "SET status=:status WHERE fileID=:fileID "
+        sqlT = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlT += "SET status=:status WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":fileID"] = fileID
+        varMap[":status"] = "ready"
+        self.cur.execute(sqlF + comment, varMap)
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = "prepared"
+        self.cur.execute(sqlT + comment, varMap)
+'''
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    outcomes = {j.subject: sorted(b.outcome for b in j.branches) for j in junctions}
+
+    assert outcomes["JEDI_Tasks.status"] == ["prepared"]
+    assert outcomes["JEDI_Dataset_Contents.status"] == ["ready"]
 
 
 def test_a_write_nothing_races_for_records_no_guard():
@@ -13954,20 +13984,152 @@ def test_without_the_window_a_forwarded_run_claims_every_bind():
     assert sorted(unwindowed) == ["activated", "holding"]
 
 
-def test_the_execute_form_keeps_reading_every_bind():
-    """Unchanged on purpose.  There the statement is not paired with a varmap,
-    so reading every bind over-reads and an over-read is safe; changing it
-    would move the map."""
+def _bound_at(func, key: str) -> list[list[str]]:
+    """The values each run of *func*, in line order, reads for *key*."""
+    return [
+        sorted(ast.unparse(b.value) for b in sql.bound_values(func, run.varmap, key, run.window, at=run.call))
+        for run in sorted(sql.executions(func), key=lambda r: r.call.lineno)
+    ]
+
+
+def test_an_execute_run_reads_only_the_binds_its_map_holds():
+    """``retryTask_JEDI`` binds ``:status`` for statements on three tables, and
+    every one of them read all its values: the dataset's ``ready`` and
+    ``done`` became the task's.  The window stays ``None`` -- it says where a
+    walk starts, which is not this question."""
     source = (
         "def f(self):\n"
-        "    sqlU = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus '\n"
+        "    sqlD = 'UPDATE ATLAS_PANDA.JEDI_Datasets SET status=:status WHERE datasetID=:datasetID'\n"
+        "    sqlT = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID'\n"
         "    varMap = {}\n"
-        "    varMap[':jobStatus'] = 'holding'\n"
-        "    self.cur.execute(sqlU + comment, varMap)\n"
+        "    varMap[':status'] = 'ready'\n"
+        "    self.cur.execute(sqlD + comment, varMap)\n"
+        "    varMap = {}\n"
+        "    varMap[':status'] = 'running'\n"
+        "    self.cur.execute(sqlT + comment, varMap)\n"
     )
     func = _func(source)
 
-    assert [r.window for r in sql.executions(func)] == [None]
+    assert _bound_at(func, ":status") == [["'ready'"], ["'running'"]]
+    assert sorted(ast.unparse(b.value) for b in sql.bound_values(func, "varMap", ":status")) == [
+        "'ready'",
+        "'running'",
+    ]
+    assert [r.window for r in sql.executions(func)] == [None, None]
+
+
+def test_a_map_rebuilt_in_each_arm_keeps_both_values():
+    """The window cannot say this: it opens at the nearest ``varMap = {}``,
+    which is the second arm's, and loses the first."""
+    source = (
+        "def f(self, broken):\n"
+        "    sqlT = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID'\n"
+        "    if broken:\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'broken'\n"
+        "    else:\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'ready'\n"
+        "    self.cur.execute(sqlT + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_at(func, ":status") == [["'broken'", "'ready'"]]
+    assert [
+        ast.unparse(b.value) for b in sql.bound_values(func, "varMap", ":status", sql.binding_window(func, "varMap", 9))
+    ] == ["'ready'"]
+
+
+def test_a_run_over_a_list_of_maps_reads_the_binds_appended_to_it():
+    """``prepareTasksToBeFinished_JEDI`` fills the input datasets' statuses in
+    one loop and runs them in another.  The loop target is a new map, so the
+    binds above it are cancelled; what the run reads is what was live at the
+    ``append``."""
+    source = (
+        "def f(self, datasets):\n"
+        "    sqlDIU = 'UPDATE ATLAS_PANDA.JEDI_Datasets SET status=:status WHERE datasetID=:datasetID'\n"
+        "    varMap = {}\n"
+        "    varMap[':status'] = 'unrelated'\n"
+        "    varMapList = []\n"
+        "    for datasetID, done in datasets:\n"
+        "        varMap = {}\n"
+        "        if done:\n"
+        "            varMap[':status'] = 'done'\n"
+        "        else:\n"
+        "            varMap[':status'] = 'failed'\n"
+        "        varMapList.append(varMap)\n"
+        "    for varMap in varMapList:\n"
+        "        self.cur.execute(sqlDIU + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_at(func, ":status") == [["'done'", "'failed'"]]
+
+
+def test_a_bind_below_the_run_does_not_reach_it_round_the_loop_past_a_rebuild():
+    """``copyArchive.main``'s loop starts with ``var_map = {}``, checks the
+    site and then binds the job query further down.  The next iteration's
+    run cannot see that bind: the rebuild at the top of the body comes first."""
+    source = (
+        "def f(sites):\n"
+        "    sqlS = 'SELECT status FROM ATLAS_PANDA.SiteData WHERE site=:site'\n"
+        "    sqlJ = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE computingSite=:site'\n"
+        "    for site in sites:\n"
+        "        var_map = {}\n"
+        "        var_map[':site'] = site\n"
+        "        taskBuffer.querySQLS(sqlS, var_map)\n"
+        "        var_map = {}\n"
+        "        var_map[':site'] = site.upper()\n"
+        "        taskBuffer.querySQLS(sqlJ, var_map)\n"
+    )
+    func = _func(source)
+
+    assert _bound_at(func, ":site") == [["site"], ["site.upper()"]]
+
+
+def test_a_test_on_a_name_reassigned_since_does_not_part_a_bind_from_its_run():
+    """Read as written, the unlock sits under ``not toSkip`` and under
+    ``not (not toSkip)``, and its own bind could reach nothing.  The test
+    above it described ``toSkip`` before the reassignment."""
+    source = (
+        "def f(self, tasks):\n"
+        "    sqlTUU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=NULL WHERE jediTaskID=:jediTaskID AND status=:status'\n"
+        "    for task in tasks:\n"
+        "        toSkip = False\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'top'\n"
+        "        if not toSkip:\n"
+        "            if task.bad:\n"
+        "                toSkip = True\n"
+        "            if not toSkip:\n"
+        "                pass\n"
+        "            else:\n"
+        "                varMap = {}\n"
+        "                varMap[':status'] = task.status\n"
+        "                self.cur.execute(sqlTUU + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_at(func, ":status") == [["task.status"]]
+
+
+def test_a_bind_reading_its_own_key_keeps_the_one_above():
+    """``varMap[":diag"] = truncate(varMap[":diag"])`` shortens the text
+    above it rather than replacing it, and the text is the diagnostic
+    template the map files against the column."""
+    source = (
+        "def f(self, batch):\n"
+        "    sqlSUP = 'UPDATE ATLAS_PANDA.jobsActive4 SET supErrorDiag=:diag WHERE PandaID=:PandaID'\n"
+        "    varMap = {}\n"
+        "    varMap[':diag'] = f'invalid batchID={batch}'\n"
+        "    varMap[':diag'] = JobSpec.truncateStringAttr('supErrorDiag', varMap[':diag'])\n"
+        "    self.cur.execute(sqlSUP + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_at(func, ":diag") == [
+        ["JobSpec.truncateStringAttr('supErrorDiag', varMap[':diag'])", "f'invalid batchID={batch}'"]
+    ]
 
 
 # ---------------------------------------------------------------------------

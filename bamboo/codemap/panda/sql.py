@@ -58,7 +58,9 @@ from bamboo.codemap.panda.pathcond import (
     exclusive,
     loops_over,
     path_condition,
+    reachable_when,
     ruled_out_by,
+    surviving_writes,
     targets_of,
     written_value,
 )
@@ -1495,14 +1497,12 @@ class Execution(NamedTuple):
     window: Optional[tuple[int, int]] = None
     """Lines within which this run's binds were filled, for the forwarded form.
 
-    ``None`` for ``execute``, and that is not an omission.  There the binds
-    reachable by key are exactly the values the write site can produce, so
-    reading them all over-reads and an over-read is safe.  Pairing a statement
-    with a varmap makes an over-read a *mis*-read: ``copyArchive.main`` binds
-    ``sql`` 23 times and ``:jobStatus`` to 11 values, and the unwindowed
-    reading would claim all 253.  The window is not guessed -- the same
-    function writes ``var_map = {}`` 31 times, so the code declares its own
-    block boundaries and this only reads them.
+    ``None`` for ``execute``.  The window is not guessed -- ``copyArchive.main``
+    writes ``var_map = {}`` 31 times, so the code declares its own block
+    boundaries and this only reads them -- but it is no longer what pairs a
+    bind with the run: every reader passes the call to :func:`bound_values`,
+    which keeps the binds the run's map can still hold, in both forms.  What
+    is left for the window is where a walk should start.
     """
 
     unresolved: tuple[Stop, ...] = ()
@@ -1513,6 +1513,23 @@ class Execution(NamedTuple):
     reading this field reports a truncated ``WHERE`` as a complete one, which
     is the failure the field exists for.
     """
+
+    calls: tuple[ast.Call, ...] = ()
+    """Every call of the function that runs this statement with this map.
+
+    The readers keep one run per statement and map -- one read site, one set
+    of columns counted -- and read the binds for all of these at once: a
+    statement run from two places binds what either place fills.  Before the
+    binds were paired with the run this was free, because every run read every
+    bind of the key; ``resetStatus`` running one ``UPDATE`` inside an ``if``
+    and again below it would otherwise lose the first run's value to the
+    second's.  See :attr:`run_at`.
+    """
+
+    @property
+    def run_at(self) -> tuple[ast.Call, ...]:
+        """The calls to read this run's binds at -- :attr:`calls`, or its own."""
+        return self.calls or (self.call,)
 
 
 def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -2520,7 +2537,13 @@ def executions(
             # cannot be reached from, or thrown away before it: the call runs
             # something, and nothing here says what.
             skipped.append(Skip(node.lineno, SKIP_UNREACHED, held, tuple(head)))
-    return found
+    together: dict[tuple, dict[ast.Call, None]] = {}
+    for run in found:
+        together.setdefault((run.variable, run.sql, run.varmap, run.window), {})[run.call] = None
+    return [
+        run._replace(calls=tuple(together[(run.variable, run.sql, run.varmap, run.window)]))
+        for run in found
+    ]
 
 
 class Skip(NamedTuple):
@@ -2673,11 +2696,13 @@ def binding_window(
     assignment the window opens at the top of the function, which is the same
     answer the unwindowed reading gives.
 
-    Public because it answers a second question :func:`executions` does not
-    ask.  There it is called only for the forwarded form, which needs a scope
-    to pair a statement with the right varmap; ``execute`` resolves its binds
-    by key and needs none.  But *where a walk should start* is a different
-    question, and the answer is as good for one form as the other -- measured
+    Public because *where a walk should start* is the question it answers,
+    and the answer is as good for one call form as the other.  It no longer
+    pairs a bind with a run -- :func:`bound_values` does that from the call,
+    and a map rebuilt in each arm of an ``if`` is why: the window opens at the
+    second arm and loses the first.  ``execute`` was once thought to need no
+    pairing at all, on the argument that it resolves its binds by key; one
+    function binds a key for statements on several tables.  Measured
     on the corpus, 216 of the 217 ``execute`` statements get a window here,
     median 6 lines and never the whole function, the same shape as the 47 the
     forwarded form already had.
@@ -2714,6 +2739,7 @@ def settled_precondition(
     window: Optional[tuple[int, int]],
     settle,
     beside: Optional[ast.stmt] = None,
+    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
 ) -> tuple[str, bool]:
     """*term* with its bind replaced by the value, and whether that happened.
 
@@ -2739,6 +2765,9 @@ def settled_precondition(
     (``throttled`` -> ``activated``) in one arm and pauses it in the other,
     and one ``IN (activated,throttled)`` for both said the resume could move
     an ``activated`` row.
+
+    *at* is the execution, and only its own binds are read -- see
+    :func:`bound_values`.
     """
     match = _PRECONDITION_BIND.match(term.strip())
     if match is None or varmap is None:
@@ -2746,7 +2775,7 @@ def settled_precondition(
     column, operator, key = match.groups()
     found: set[str] = set()
     alongside = path_condition(beside) if beside is not None else None
-    for bind in bound_values(func, varmap, key, window):
+    for bind in bound_values(func, varmap, key, window, at=at):
         if alongside is not None and exclusive(path_condition(bind.site), alongside):
             continue
         found.update(settle(bind.value, func))
@@ -2836,21 +2865,29 @@ def bound_values(
     key: str,
     window: Optional[tuple[int, int]] = None,
     across: bool = False,
+    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
 ) -> list[Bind]:
     """Return the assignments filling ``<varmap>[<key>]`` in *func*.
 
     Several are normal and correct: a method that runs the same statement twice
-    with different values has two, and both are outcomes of that write.  With
-    no *window* no attempt is made to pair a bind with one particular
-    execution -- the binds reachable by key are exactly the values that write
-    site can produce, and that over-read is safe because the statement is not
-    being paired with them.
+    with different values has two, and both are outcomes of that write.
 
-    *window* is for the forwarded form, where it is.  ``querySQLS(sql,
-    var_map)`` names both halves in one call, so reading every bind in the
-    function would have ``copyArchive.main`` claim its 23 statements each
-    select all 11 values of ``:jobStatus``.  The bounds come from the code:
-    see :func:`binding_window`.
+    *at* is the execution the binds are read for -- a call, or the calls that
+    run one statement (:attr:`Execution.run_at`) -- and only the binds the map
+    it runs with can still hold are returned; see :func:`_live_at`.  Every
+    reader of a run asks this way, in both call forms.  Reading every bind of
+    the key instead was once thought safe for ``execute``, on the argument that
+    the binds reachable by key are exactly the values that write site can
+    produce.  They are not: one function binds ``:status`` for statements on
+    several tables, and ``retryTask_JEDI`` gave ``JEDI_Tasks``,
+    ``JEDI_Datasets`` and ``T_TASK`` the same 32 status writes, among them the
+    dataset's ``ready`` and ``done`` as the task's.
+
+    *window*, with no *at*, keeps the binds on lines inside it.  The bounds are
+    the ones :func:`binding_window` reads off the code; they say where a walk
+    should start, and are too coarse to pair a bind with a run -- a map rebuilt
+    in each arm of an ``if`` opens the window at the second arm and loses the
+    first.
 
     **Two spellings, one meaning.**  ``varMap[":status"] = v`` and ``var_map =
     {":status": v}`` bind the same placeholder to the same value, and reading
@@ -2861,7 +2898,7 @@ def bound_values(
     itself because the two forms do not share a node: what the caller needs is
     the value, and the statement it sits in for the guards that reached it.
     """
-    return scan_binds(func, varmap, key, window, across).binds
+    return scan_binds(func, varmap, key, window, across, at=at).binds
 
 
 class BindScan(NamedTuple):
@@ -2899,12 +2936,11 @@ class BindScan(NamedTuple):
     """Placeholders this function does bind by a spelled-out name."""
 
     outside_window: int = 0
-    """Binds for this key that lay outside *window*.
+    """Binds for this key that the run's map cannot hold, or that lay outside *window*.
 
-    Not a gap: the window exists because ``querySQLS(sql, var_map)`` names both
-    halves in one call, and without it one function's statements each claim
-    every value in it.  Counted so that a bind excluded on purpose is not
-    reported as one nobody wrote.
+    Not a gap: one function binds a key for several statements, and without
+    the pairing each statement claims every value in it.  Counted so that a
+    bind excluded on purpose is not reported as one nobody wrote.
     """
 
 
@@ -2915,12 +2951,13 @@ def scan_binds(
     window: Optional[tuple[int, int]] = None,
     across: bool = False,
     hops: int = 0,
+    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
 ) -> BindScan:
     """:func:`bound_values`, with the census of what the walk passed over.
 
     One walk, so the binds and the account of why there are none cannot
     disagree.  See :class:`BindScan` for what is counted and what ignores
-    *window*.
+    *window* and *at*.
 
     *across* also reads a varmap this function copies from another name
     (``getValMap = copy.copy(getValMapOrig)``) and one a call hands it
@@ -2934,6 +2971,20 @@ def scan_binds(
     computed = 0
     spelled_keys: set[str] = set()
     excluded = 0
+    # Each bind with the write that decides whether the run's map holds it:
+    # its own assignment, or the copy that brought it into *varmap*.  Kept
+    # apart from *found* because which of them survive is asked of all of
+    # them at once -- a later write is what cancels an earlier one.
+    gated: list[tuple[Bind, ast.AST]] = []
+
+    def keep(bind: Bind, gate: ast.AST) -> None:
+        nonlocal excluded
+        if at is not None:
+            gated.append((bind, gate))
+        elif window is None or window[0] <= gate.lineno <= window[1]:
+            found.append(bind)
+        else:
+            excluded += 1
 
     lists = {one.values_map: one for one in in_lists(func).values()}
     for node in ast.walk(func):
@@ -2957,15 +3008,11 @@ def scan_binds(
             assigned = True
             spelled_keys.add(held.bind)
             if held.bind == key:
-                if window is None or window[0] <= node.lineno <= window[1]:
-                    found.append(Bind(held.values, node))
-                else:
-                    excluded += 1
+                keep(Bind(held.values, node), node)
             continue
         targets = targets_of(node)
         if not targets:
             continue
-        in_window = window is None or window[0] <= node.lineno <= window[1]
         for target in targets:
             if (
                 isinstance(target, ast.Subscript)
@@ -2983,28 +3030,25 @@ def scan_binds(
                         computed += 1
                         continue
                     spelled_keys.add(key)
-                    if in_window:
-                        found.append(Bind(node.value, node))
-                    else:
-                        excluded += 1
+                    keep(Bind(node.value, node), node)
                     continue
                 spelled_keys.add(target.slice.value)
                 if target.slice.value != key:
                     continue
-                if in_window:
-                    found.append(Bind(node.value, node))
-                else:
-                    excluded += 1
+                keep(Bind(node.value, node), node)
             elif isinstance(target, ast.Name) and target.id == varmap:
                 assigned = True
                 copied = _copied_from(node.value) if across else None
                 if copied is not None and hops < RETURN_HOPS:
-                    inner = scan_binds(func, copied, key, None, across, hops + 1)
+                    # What the copy holds is what the original held when the
+                    # copy was taken, so the original's binds are paired with
+                    # the copy rather than with the run.
+                    inner = scan_binds(
+                        func, copied, key, None, across, hops + 1, at=node if at is not None else None
+                    )
                     spelled_keys |= inner.constant_keys
-                    if in_window:
-                        found.extend(inner.binds)
-                    else:
-                        excluded += len(inner.binds)
+                    for bind in inner.binds:
+                        keep(bind, node)
                     continue
                 # The dict literal form.  Only constant keys: a computed one
                 # (``var_map[f":{column}"] = val``, which the worker modules
@@ -3021,10 +3065,18 @@ def scan_binds(
                     spelled_keys.add(spelled.value)
                     if spelled.value != key:
                         continue
-                    if in_window:
-                        found.append(Bind(value, node))
-                    else:
-                        excluded += 1
+                    keep(Bind(value, node), node)
+
+    if gated:
+        writes = [gate for _bind, gate in gated]
+        live: set[int] = set()
+        for one in at if isinstance(at, tuple) else (at,):
+            live |= _live_at(func, varmap, writes, one)
+        for bind, gate in gated:
+            if id(gate) in live:
+                found.append(bind)
+            else:
+                excluded += 1
 
     if across and hops < RETURN_HOPS:
         for callee, value in returned(func, varmap):
@@ -3050,6 +3102,146 @@ def scan_binds(
         constant_keys=frozenset(spelled_keys),
         outside_window=excluded,
     )
+
+
+def _renews(func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str) -> list[ast.stmt]:
+    """The statements of *func* that give *varmap* a new map.
+
+    ``varMap = {}`` and every other assignment to the name, and a loop over
+    maps -- ``for varMap in varMapList:`` hands the body a different one each
+    time round.  A subscript assignment is not one: it changes the map it
+    finds.
+    """
+    found: list[ast.stmt] = []
+    for node in ast.walk(func):
+        targets = [node.target] if isinstance(node, (ast.For, ast.AsyncFor)) else targets_of(node)
+        if any(
+            isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store) and name.id == varmap
+            for target in targets
+            for name in ast.walk(target)
+        ):
+            found.append(node)  # type: ignore[arg-type]
+    return found
+
+
+def _appended(func: ast.AST, listing: str, varmap: str) -> list[ast.stmt]:
+    """The ``<listing>.append(<varmap>)`` statements of *func*."""
+    return [
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "append"
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == listing
+        and len(node.value.args) == 1
+        and isinstance(node.value.args[0], ast.Name)
+        and node.value.args[0].id == varmap
+    ]
+
+
+def _live_at(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: str,
+    writes: list[ast.AST],
+    at: ast.AST,
+) -> set[int]:
+    """The ``id`` of each of *writes* whose bind the map *at* runs with can still hold.
+
+    The same reading :func:`pathcond.surviving_writes` makes of a local, with
+    the map's own renewals among the writes: ``varMap = {}`` cancels every
+    bind above it on the way to the run, and a later bind of the same key
+    cancels an earlier one.  Two arms that each rebuild the map are both still
+    live after the ``if``, which is what a window opening at the nearest
+    rebuild could not say.
+
+    A run inside ``for varMap in varMapList:`` gets its map from the list, so
+    its binds are the ones live where a map was appended to that list --
+    ``prepareTasksToBeFinished_JEDI`` fills four statuses for the input
+    datasets that way and runs them after the loop that built them.
+    """
+    renewals = _renews(func, varmap)
+    sites = list({id(site): site for site in [*writes, *renewals]}.values())
+    rereads = [write for write in writes if _rereads(write, varmap)]
+    live = _surviving(sites, at, rereads)
+    for loop in renewals:
+        if (
+            isinstance(loop, (ast.For, ast.AsyncFor))
+            and id(loop) in live
+            and isinstance(loop.iter, ast.Name)
+            and any(ancestor is loop for ancestor in ancestors(at))
+        ):
+            for append in _appended(func, loop.iter.id, varmap):
+                live |= _surviving(sites, append, rereads)
+    return live
+
+
+def _rereads(write: ast.AST, varmap: str) -> bool:
+    """Whether *write* fills a key of *varmap* from what that key held.
+
+    ``varMap[":diag"] = JobSpec.truncateStringAttr("supErrorDiag",
+    varMap[":diag"])`` keeps the text above it, shortened, so it cancels
+    nothing -- the ``AugAssign`` reading of :func:`pathcond._cancels`.  Read as
+    a replacement it took ``updateJobStatus``'s diagnostic template with it.
+    """
+    targets = targets_of(write)
+    if len(targets) != 1 or not isinstance(targets[0], ast.Subscript):
+        return False
+    key = targets[0].slice
+    if not isinstance(key, ast.Constant):
+        return False
+    return any(
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == varmap
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value == key.value
+        for node in ast.walk(write.value)  # type: ignore[attr-defined]
+    )
+
+
+def _surviving(sites: list[ast.AST], at: ast.AST, rereads: list[ast.AST]) -> set[int]:
+    """The ``id`` of each of *sites* still live at *at*, the loop's way round included.
+
+    :func:`pathcond.surviving_writes` lets a write below *at* reach it on the
+    next iteration of a loop holding both, and cancels by position, so it does
+    not see the write that sits between them on that way round.  For a map
+    that write is nearly always there: ``copyArchive.main`` starts its loop
+    body with ``var_map = {}``, runs one statement, and binds ``:site`` again
+    further down for the next -- read as reaching the first, it gave the
+    site check the job query's binds.  A site above *at* in the loop that
+    carries the write round, and under no condition *at* is not under,
+    cancels it.  Kept here rather than in ``pathcond``: the walk reads locals
+    through the same rule, and changing what it keeps is a round of its own.
+
+    Read as the function runs (``as_run``), as the walk reads it.  Read as
+    written, a test on a name reassigned since describes a different value,
+    and ``prepareTasksToBeFinished_JEDI`` -- under ``if not toSkip:``, then
+    in the ``else`` of a second ``if not toSkip:`` after ``toSkip = True`` --
+    had its unlock's own ``:status`` bind ruled unable to reach the unlock,
+    and the top of the loop's bind, three map rebuilds above, kept instead.
+    """
+    kept = surviving_writes(sites, at, rereads, as_run=True)
+    line = getattr(at, "lineno", 0)
+    if any(site.lineno > line for site in kept):
+        around = loops_over(at)
+        held = set(reachable_when(at))
+        before = [
+            site
+            for site in sites
+            if site.lineno < line
+            and not any(site is one for one in rereads)
+            and not (loops_over(site) - around)
+            and set(reachable_when(site)) <= held
+        ]
+        kept = [
+            site
+            for site in kept
+            if site.lineno <= line
+            or not any(loops_over(site) & around & loops_over(other) for other in before)
+        ]
+    return {id(site) for site in kept}
 
 
 def inline_binds(call: ast.Call, key: Optional[str] = None) -> list[Bind]:

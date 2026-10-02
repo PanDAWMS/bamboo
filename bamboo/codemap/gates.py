@@ -477,11 +477,11 @@ def bind_windows_are_known(fragment: MapFragment) -> GateResult:
     the reader is no further on than before the statement became a node.
 
     The gap was a call form, not a missing fact.  ``sql.executions`` computes a
-    window only for the forwarded call, where it needs one to pair a statement
-    with the right varmap; the ``execute`` form resolves its binds by key and
-    needs no scope for *that*, so none was computed -- and 217 of the corpus's
-    264 statements are that form.  The walk's seed range is a different
-    question from bind resolution, and it went unasked.
+    window only for the forwarded call, and 217 of the corpus's 264
+    statements were the ``execute`` form.  The walk's seed range is a
+    different question from bind resolution, and it went unasked.  (Bind
+    resolution turned out to need its own pairing for ``execute`` as well:
+    see ``sql.bound_values``.)
 
     **A statement that binds nothing is not a failure.**
     ``copyArchive.py::main`` runs one ``querySQLS(sql.format(table), {})``
