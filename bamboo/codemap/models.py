@@ -534,8 +534,15 @@ def branch_excludes(branch: Branch, value: str, truncated_to: Optional[int] = No
     """
     if branch.tier != 2 or not branch.value_frames:
         return False
+    return not fitting_frames(branch, value, truncated_to)
+
+
+def fitting_frames(branch: Branch, value: str, truncated_to: Optional[int] = None) -> list[str]:
+    """The frames of a tier-2 *branch* that *value* fits, read as :func:`branch_excludes` reads them."""
+    if branch.tier != 2:
+        return []
     cut = truncated_to is not None and len(value) == truncated_to
-    return all(not _fits(frame.split(_HOLE), value, cut) for frame in branch.value_frames)
+    return [frame for frame in branch.value_frames if _fits(frame.split(_HOLE), value, cut)]
 
 
 def _fits(literals: list[str], value: str, cut: bool) -> bool:
@@ -2813,6 +2820,19 @@ class FollowUp(BaseModel):
         ),
     )
     question: str = Field(default="", description="What to ask next, in one sentence.")
+    assembled_as: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The frames the observed value fits, of the arms that assemble it "
+            "at run time -- set only where nothing in the map selects, guards, "
+            "updates or checks rows by it.  Then the rest of this block has "
+            "nothing to say: no reader to name, and the triggers and the places "
+            "rows are made answer how a row is picked up by a value nothing "
+            "picks it up by.  Decided by the observation, not the subject: "
+            "``Could not add files to DDM: {}`` is a text an arm assembles, "
+            "and the map does not say whether a field holds messages."
+        ),
+    )
     reader_gaps: dict[str, list[str]] = Field(
         default_factory=dict,
         description=(

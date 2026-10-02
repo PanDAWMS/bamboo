@@ -4485,3 +4485,86 @@ def test_which_row_a_loop_is_on_is_printed_apart_from_why_the_arm_ran():
 
     assert "limit = 8" in why and "job" not in why
     assert "job = an element of self.jobs" in rows
+
+
+_DIAG = "JobSpec.ddmErrorDiag"
+_ADDER_FRAME = "Could not add files to DDM: {}"
+
+
+def _diag_fragment(**subject) -> MapFragment:
+    return MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(name=_DIAG, **subject)],
+        junctions=[
+            _junction(
+                "adder.py::register_files",
+                Branch(outcome="runtime(err_msg + x)", tier=2, value_frames=[_ADDER_FRAME]),
+                subject=_DIAG,
+                triggers=("polled",),
+            ),
+            _junction(
+                "setupper.py::run",
+                Branch(outcome="runtime(err_str)", tier=2, value_frames=["setupper.run failed with {}"]),
+                subject=_DIAG,
+            ),
+            _junction(
+                "free.py::f",
+                Branch(outcome="runtime(newDiag)", tier=2),
+                subject=_DIAG,
+            ),
+        ],
+    )
+
+
+def _follow_up_text(strategy) -> str:
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_follow_up
+
+    command = click.Command("x", callback=lambda: _report_follow_up(strategy, False))
+    return click.testing.CliRunner().invoke(command).output
+
+
+async def test_a_text_an_arm_assembles_and_nothing_acts_by_is_answered_in_one_line():
+    """The ``ddmErrorDiag`` answer was mostly a block about how rows are picked up.
+
+    Nothing selects, guards or updates rows by the observed text, and an arm
+    assembles it: there is no reader to name, and triggers and the places rows
+    are made answer a question nothing in the map asks of this value.
+    """
+    observed = "Could not add files to DDM: DataIdentifierNotFound"
+    strategy = await strategy_mod.derive(
+        await _map(_diag_fragment()), Symptom(subject=_DIAG, observed=observed)
+    )
+    output = _follow_up_text(strategy)
+
+    assert [c.owner for c in strategy.candidates] == ["adder.py::register_files", "free.py::f"]
+    assert strategy.follow_up.assembled_as == [_ADDER_FRAME]
+    assert "→ nothing in the map selects, guards or updates rows by" in output
+    assert "a re-evaluating trigger reaches" not in output
+    assert "any query selects on this value" not in output
+
+
+async def test_a_text_something_selects_by_keeps_the_whole_block():
+    """The observation decides, not the field: a selected value is answered as one."""
+    observed = "Could not add files to DDM: DataIdentifierNotFound"
+    strategy = await strategy_mod.derive(
+        await _map(_diag_fragment(selected=[observed], selected_by={observed: ["reader.py::r"]})),
+        Symptom(subject=_DIAG, observed=observed),
+    )
+
+    assert strategy.follow_up.assembled_as == []
+    assert "any query selects on this value yes" in _follow_up_text(strategy)
+
+
+async def test_a_text_no_arm_assembles_keeps_the_whole_block():
+    """Kept only by an arm with no frames: the map cannot say the text is one an arm builds."""
+    strategy = await strategy_mod.derive(
+        await _map(_diag_fragment()), Symptom(subject=_DIAG, observed="something else entirely")
+    )
+
+    assert [c.owner for c in strategy.candidates] == ["free.py::f"]
+    assert strategy.follow_up.assembled_as == []
+    assert "any query selects on this value no" in _follow_up_text(strategy)

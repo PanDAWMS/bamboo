@@ -127,6 +127,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     Symptom,
     branch_excludes,
+    fitting_frames,
 )
 
 logger = logging.getLogger(__name__)
@@ -665,6 +666,7 @@ def _follow_up(
     excluding: Sequence[ReadSiteNode] = (),
     refusing: Sequence[ReadSiteNode] = (),
     consulting: Sequence[ReadSiteNode] = (),
+    assembled: Sequence[str] = (),
 ) -> FollowUp:
     """Whether anything will move the value on, and what to ask if not.
 
@@ -708,6 +710,14 @@ def _follow_up(
     question where nothing selects the value, because there "ask who wrote the
     step before it" is the answer to a row that a ``NOT IN`` picks up every
     cycle, or that a reassign leaves alone every cycle.
+
+    **A text an arm assembles, and nothing acts by it: one sentence.**
+    *assembled* is the frames of the producing arms the value fits.  Where
+    nothing selects, guards, updates or checks rows by the value, the triggers
+    and the places rows are made answer how a row is picked up by a value
+    nothing picks it up by, and a ``ddmErrorDiag`` answer was mostly that.
+    The observation decides it, not the subject: the same field holding a
+    value no arm assembles keeps the whole block.
     """
     selected = observed in selected_values
     returned = [_statement_reading(site) for site in excluding]
@@ -859,6 +869,14 @@ def _follow_up(
             )
         if refused:
             question += f"; {len(refused)} statement(s) leave such rows out (listed above)"
+    acted_on = selected or updated_by or guarded or returned or refused or consulting
+    assembled_as = sorted(set(assembled)) if assembled and not acted_on else []
+    if assembled_as:
+        question = (
+            f"nothing in the map selects, guards or updates rows by {observed!r}, and it "
+            f"fits the text {_frames_phrase(assembled_as)} that the writers above assemble "
+            "at run time -- ask about the row by its other fields"
+        )
     if reader_acts == READS_ONLY_FOR_A_CALLER:
         # Appended rather than replacing the sentence: everything it says is
         # still true, and this only stops the named reader being read as the
@@ -892,7 +910,13 @@ def _follow_up(
         self_repairing=repairing,
         carried_from=carried_from,
         question=question,
+        assembled_as=assembled_as,
     )
+
+
+def _frames_phrase(frames: list[str]) -> str:
+    shown = ", ".join(repr(frame) for frame in frames[:3])
+    return shown + (f" and {len(frames) - 3} more" if len(frames) > 3 else "")
 
 
 def _tag_pattern(template: str, tags: list[str]) -> Optional[str]:
@@ -1265,6 +1289,12 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             excluding=excluding_here,
             refusing=refusing_here,
             consulting=consulting_here,
+            assembled=[
+                frame
+                for junction in producers
+                for branch in _reaching(junction, symptom.observed, subject.truncated_to)
+                for frame in fitting_frames(branch, symptom.observed, subject.truncated_to)
+            ],
         ),
         # Map edges first, so that when both suppliers name one field the fold
         # in ``evaluate`` keeps the deterministic one.  Not folded here: doing

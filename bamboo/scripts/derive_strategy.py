@@ -227,6 +227,15 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
     if follow is None:
         return
     click.echo("\nwill anything move it on")
+    if follow.assembled_as:
+        # Nothing acts on rows by this value and an arm assembles it: the
+        # lines below would name no reader and answer how a row is picked up
+        # by a value nothing picks it up by.  See ``FollowUp.assembled_as``.
+        for line in click.wrap_text(
+            follow.question, width=_WIDTH, initial_indent="  → ", subsequent_indent="    "
+        ).splitlines():
+            click.echo(line)
+        return
     selects = "yes" if follow.selected else "no"
     repair = "yes" if follow.self_repairing else "no"
     # "anything acts on this value" was wider than the thing computed.  What
