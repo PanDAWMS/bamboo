@@ -502,9 +502,16 @@ def _parameter_names(func: ast.AST) -> set[str]:
 
 
 def _rebinds(func: ast.AST, name: str) -> bool:
-    """Whether *func*'s own body binds *name* anywhere -- so a parameter's value may not be the one handed in."""
+    """Whether *func*'s own body binds *name* anywhere -- so a parameter's value may not be the one handed in.
+
+    A :class:`pathcond.Binding` outside a nested scope, or a ``del``.  Read
+    off the names' store context before, which counted a comprehension's own
+    variable and a bare annotation and missed ``except ... as``.
+    """
+    if any(not binding.nested for binding in pathcond.bindings(func, name)):
+        return True
     return any(
-        isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
+        isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del)
         for node in own_nodes(func)
     )
 

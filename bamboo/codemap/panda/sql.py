@@ -49,9 +49,13 @@ from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional
 
 from bamboo.codemap.panda import sqltext
 from bamboo.codemap.panda.pathcond import (
+    BIND_ANNOTATED,
+    BIND_ASSIGN,
+    BIND_FOR,
     UNDECIDED,
     ancestors,
     attach_parents,
+    bindings,
     can_reach,
     decided,
     enclosing_function,
@@ -3108,17 +3112,14 @@ def _renews(func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str) -> list[a
     ``varMap = {}`` and every other assignment to the name, and a loop over
     maps -- ``for varMap in varMapList:`` hands the body a different one each
     time round.  A subscript assignment is not one: it changes the map it
-    finds.
+    finds, and neither is ``+=``, which adds to it.
     """
     found: list[ast.stmt] = []
-    for node in ast.walk(func):
-        targets = [node.target] if isinstance(node, (ast.For, ast.AsyncFor)) else targets_of(node)
-        if any(
-            isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store) and name.id == varmap
-            for target in targets
-            for name in ast.walk(target)
+    for binding in bindings(func, varmap):
+        if binding.kind in (BIND_ASSIGN, BIND_ANNOTATED, BIND_FOR) and all(
+            binding.site is not one for one in found
         ):
-            found.append(node)  # type: ignore[arg-type]
+            found.append(binding.site)  # type: ignore[arg-type]
     return found
 
 

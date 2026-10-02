@@ -144,21 +144,22 @@ class _Index:
     read, so each pass is made once.  The entries are tuples and every caller
     gets its own list, so a reader that edits what it was given edits only that.
 
-    Three passes rather than one, because the three questions do not walk the
+    Separate passes rather than one, because the questions do not walk the
     same nodes: :func:`single_definition` and :func:`assigned_expressions`
     count a nested function's writes and :func:`attribute_expressions` does not.
     """
 
-    __slots__ = ("scope", "_definitions", "_assigned", "_attributes")
+    __slots__ = ("scope", "_definitions", "_assigned", "_attributes", "_bindings")
 
     def __init__(self, scope: ast.AST) -> None:
         self.scope = scope
         self._definitions: Optional[dict[str, tuple[ast.expr, ...]]] = None
         self._assigned: Optional[dict[str, tuple[ast.expr, ...]]] = None
         self._attributes: Optional[dict[str, tuple[ast.expr, ...]]] = None
+        self._bindings: Optional[dict[str, tuple[Binding, ...]]] = None
 
     def definitions(self) -> dict[str, tuple[ast.expr, ...]]:
-        """name -> the values an ``=`` writes to it, a tuple's element included."""
+        """name -> the values an ``=`` writes to it, an unpacked element included."""
         if self._definitions is None:
             found: dict[str, list[ast.expr]] = {}
             for node in ast.walk(self.scope):
@@ -166,12 +167,8 @@ class _Index:
                 if value is None:
                     continue
                 for target in targets_of(node):
-                    if isinstance(target, ast.Name):
-                        found.setdefault(target.id, []).append(value)
-                    elif isinstance(target, ast.Tuple):
-                        for element in target.elts:
-                            if isinstance(element, ast.Name):
-                                found.setdefault(element.id, []).append(value)
+                    for name, _slot, _unpacked in names_bound_by(target):
+                        found.setdefault(name, []).append(value)
             self._definitions = {name: tuple(values) for name, values in found.items()}
         return self._definitions
 
@@ -209,6 +206,124 @@ class _Index:
                             found.setdefault(bound, []).append(node.value)
             self._attributes = {field: tuple(values) for field, values in found.items()}
         return self._attributes
+
+    def bindings(self) -> dict[str, tuple[Binding, ...]]:
+        """name -> every :class:`Binding` of it in the scope, in ``ast.walk`` order."""
+        if self._bindings is None:
+            inner: set[int] = set()
+            for node in ast.walk(self.scope):
+                if node is not self.scope and isinstance(node, _SCOPES):
+                    inner.update(id(held) for held in ast.walk(node) if held is not node)
+            found: dict[str, list[Binding]] = {}
+            for node in ast.walk(self.scope):
+                for binding in _bindings_at(node, id(node) in inner):
+                    found.setdefault(binding.name, []).append(binding)
+            self._bindings = {name: tuple(held) for name, held in found.items()}
+        return self._bindings
+
+
+#: The nodes that open a scope of their own: a name bound inside one is not
+#: the enclosing function's.
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+#: How a :class:`Binding` gives its name a value.
+BIND_ASSIGN = "="
+BIND_ANNOTATED = "annotated"
+BIND_AUGMENTED = "augmented"
+BIND_FOR = "for"
+BIND_WITH = "with"
+BIND_WALRUS = "walrus"
+BIND_EXCEPT = "except"
+
+
+class Binding(NamedTuple):
+    """One place a scope gives a plain name a value.
+
+    *site* is the statement that does it -- the ``for`` or ``with``, the
+    handler for ``except ... as`` -- or the ``:=`` expression.  *value* is what
+    the site writes as a whole: the right-hand side, the context expression of
+    a ``with``, the walrus's value; ``None`` for a loop target or a caught
+    exception, whose value no expression here spells.  An unpacked name gets
+    the whole right-hand side and its *slot* in a one-level unpacking --
+    ``None`` in a nested one or beside a ``*rest``, where the position is not
+    the name's to say.  *nested* is whether the site sits in a function,
+    lambda or class inside the scope, which binds a name of its own.
+
+    The one reading of the syntax.  The walk asked six questions of it, each
+    with its own traversal, and they disagreed: a nested tuple, a ``*rest``
+    and a ``for (i, (x, j)) in`` target were bindings to the audit and not to
+    the walk.  ``tests/test_codemap_bindings.py`` holds every reader to it.
+    """
+
+    name: str
+    site: ast.AST
+    kind: str
+    value: Optional[ast.expr]
+    slot: Optional[int]
+    unpacked: bool
+    nested: bool
+
+
+def names_bound_by(target: ast.AST) -> list[tuple[str, Optional[int], bool]]:
+    """``(name, slot, unpacked)`` for every plain name an assignment target binds.
+
+    How a target unpacks, for every reader that takes one apart: a name, a
+    tuple or list of targets to any depth, a ``*rest``.  The slot is the
+    name's position in a one-level unpacking, ``None`` where a ``*rest`` or a
+    nested unpacking leaves it unsaid.  Attribute and subscript targets bind
+    no name.
+    """
+    if isinstance(target, ast.Name):
+        return [(target.id, None, False)]
+    if isinstance(target, ast.Starred):
+        return [(name, None, True) for name, _slot, _unpacked in names_bound_by(target.value)]
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return []
+    starred = any(isinstance(element, ast.Starred) for element in target.elts)
+    found: list[tuple[str, Optional[int], bool]] = []
+    for slot, element in enumerate(target.elts):
+        if isinstance(element, ast.Name):
+            found.append((element.id, None if starred else slot, True))
+        else:
+            found.extend((name, None, True) for name, _slot, _unpacked in names_bound_by(element))
+    return found
+
+
+def _bindings_at(node: ast.AST, nested: bool) -> list[Binding]:
+    """The :class:`Binding` s *node* itself makes."""
+    found: list[Binding] = []
+
+    def add(target: ast.AST, kind: str, value: Optional[ast.expr], site: ast.AST = node) -> None:
+        for name, slot, unpacked in names_bound_by(target):
+            found.append(Binding(name, site, kind, value, slot, unpacked, nested))
+
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            add(target, BIND_ASSIGN, node.value)
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        add(node.target, BIND_ANNOTATED, node.value)
+    elif isinstance(node, ast.AugAssign):
+        add(node.target, BIND_AUGMENTED, node.value)
+    elif isinstance(node, (ast.For, ast.AsyncFor)):
+        add(node.target, BIND_FOR, None)
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            if item.optional_vars is not None:
+                add(item.optional_vars, BIND_WITH, item.context_expr)
+    elif isinstance(node, ast.NamedExpr):
+        add(node.target, BIND_WALRUS, node.value)
+    elif isinstance(node, ast.ExceptHandler) and node.name:
+        found.append(Binding(node.name, node, BIND_EXCEPT, None, None, False, nested))
+    return found
+
+
+def bindings(scope: ast.AST, name: str) -> list[Binding]:
+    """Every :class:`Binding` of *name* in *scope*, nested scopes' included, in ``ast.walk`` order.
+
+    Read once per scope and kept on it, as :class:`_Index` keeps its other
+    answers: the walk asks this of every name it explains.
+    """
+    return list(_index(scope).bindings().get(name, ()))
 
 
 def _index(scope: ast.AST) -> _Index:
@@ -739,48 +854,29 @@ def _names_in(expression: ast.AST) -> set[str]:
 def _rebinds(func: ast.AST) -> dict[str, list[ast.AST]]:
     """``{name: every node in *func* that gives it a new value}``, found once per function.
 
-    Plain and annotated assignments, ``+=``, loop and ``with`` targets, the
-    walrus, ``except ... as``, and the two ways a container changes in place --
-    ``x[k] = v`` and ``x.add(v)`` -- because a test on ``x`` read before any
-    of those described a different ``x``.  Wide on purpose: the one reader of
-    this, :func:`parted`, reads a contradiction away for it, and that only
-    makes two sites look more able to meet.  A nested function's names are
-    its own.
+    Every :class:`Binding` outside a nested scope, and the two ways a
+    container changes in place -- ``x[k] = v`` and ``x.add(v)`` -- because a
+    test on ``x`` read before any of those described a different ``x``.  Wide
+    on purpose: the one reader of this, :func:`parted`, reads a contradiction
+    away for it, and that only makes two sites look more able to meet.
     """
     held = getattr(func, "_rebinds", None)
     if held is not None:
         return held
     found: dict[str, list[ast.AST]] = {}
-
-    def note(target: ast.AST, node: ast.AST) -> None:
-        if isinstance(target, ast.Name):
-            found.setdefault(target.id, []).append(node)
-        elif isinstance(target, (ast.Tuple, ast.List)):
-            for element in target.elts:
-                note(element, node)
-        elif isinstance(target, ast.Starred):
-            note(target.value, node)
-        elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
-            found.setdefault(target.value.id, []).append(node)
-
+    for name, sites in _index(func).bindings().items():
+        own = [binding.site for binding in sites if not binding.nested]
+        if own:
+            found[name] = own
     for node in ast.walk(func):
         if node is func or enclosing_function(node) is not func:
             continue
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            for target in targets_of(node):
-                note(target, node)
-        elif isinstance(node, ast.AugAssign):
-            note(node.target, node)
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            note(node.target, node)
-        elif isinstance(node, ast.NamedExpr):
-            note(node.target, node)
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if item.optional_vars is not None:
-                    note(item.optional_vars, node)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            found.setdefault(node.name, []).append(node)
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for held_target in ast.walk(target):
+                    if isinstance(held_target, ast.Subscript) and isinstance(held_target.value, ast.Name):
+                        found.setdefault(held_target.value.id, []).append(node)
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)

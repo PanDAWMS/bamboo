@@ -77,6 +77,7 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     handed_in,
     literal_values,
+    names_bound_by,
     path_condition,
     site_of,
     surviving_writes,
@@ -1547,11 +1548,7 @@ def _leaves(handler: ast.ExceptHandler) -> bool:
 
 
 def _assigned_names(node: ast.Assign) -> set[str]:
-    found: set[str] = set()
-    for target in node.targets:
-        parts = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
-        found |= {part.id for part in parts if isinstance(part, ast.Name)}
-    return found
+    return {name for target in node.targets for name, _slot, _unpacked in names_bound_by(target)}
 
 
 def _rows_of(
@@ -2323,18 +2320,18 @@ def _bound_by(node: ast.AST) -> set[str]:
     targets: list[ast.expr]
     if isinstance(node, ast.Assign):
         targets = list(node.targets)
-    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+    elif isinstance(node, ast.AugAssign) or (isinstance(node, ast.AnnAssign) and node.value is not None):
         targets = [node.target]
     else:
         return set()
     found: set[str] = set()
     for target in targets:
-        parts = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
-        for part in parts:
-            if isinstance(part, ast.Name):
-                found.add(part.id)
-            elif isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name):
-                found.add(part.value.id)
+        found.update(name for name, _slot, _unpacked in names_bound_by(target))
+        found.update(
+            part.value.id
+            for part in ast.walk(target)
+            if isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name)
+        )
     return found
 
 

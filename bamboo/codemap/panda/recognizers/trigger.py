@@ -74,6 +74,7 @@ from bamboo.codemap.panda.attribution import (
 )
 from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
+    names_bound_by,
     targets_of,
     written_value,
 )
@@ -182,12 +183,15 @@ def _pool_bindings(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
     for node in ast.walk(func):
         if isinstance(node, ast.With):
             for item in node.items:
-                if isinstance(item.optional_vars, ast.Name) and _rooted_at_pool(
-                    item.context_expr
-                ):
-                    bound.add(item.optional_vars.id)
+                if item.optional_vars is not None and _rooted_at_pool(item.context_expr):
+                    bound.update(name for name, _slot, unpacked in names_bound_by(item.optional_vars) if not unpacked)
         elif (borrowed := written_value(node)) is not None and _rooted_at_pool(borrowed):
-            bound.update(t.id for t in targets_of(node) if isinstance(t, ast.Name))
+            bound.update(
+                name
+                for target in targets_of(node)
+                for name, _slot, unpacked in names_bound_by(target)
+                if not unpacked
+            )
     return frozenset(bound)
 
 

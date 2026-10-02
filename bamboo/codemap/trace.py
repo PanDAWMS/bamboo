@@ -1118,6 +1118,10 @@ def _message_sites(
                 opaque.append(target)
             else:
                 plain.append(value)
+        elif isinstance(target, ast.Starred):
+            # ``*rest`` takes however many elements are left, which no
+            # element of the value spells.
+            slot(target.value, None)
         elif isinstance(target, (ast.Tuple, ast.List)):
             # A slot of a literal tuple is that element; a slot of a call is
             # what the call returns, which is the call's to say.
@@ -1168,15 +1172,10 @@ def _loop_bindings(func: ast.AST, name: str) -> list[ast.For | ast.AsyncFor]:
     through one: a command is read out of a map that a ``for`` took out of the
     list the knight handed over.
     """
-    found = []
-    for node in ast.walk(func):
-        if not isinstance(node, (ast.For, ast.AsyncFor)):
-            continue
-        targets = [node.target]
-        if isinstance(node.target, (ast.Tuple, ast.List)):
-            targets = list(node.target.elts)
-        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
-            found.append(node)
+    found: list[ast.For | ast.AsyncFor] = []
+    for binding in pathcond.bindings(func, name):
+        if binding.kind == pathcond.BIND_FOR and all(binding.site is not one for one in found):
+            found.append(binding.site)  # type: ignore[arg-type]
     return found
 
 
@@ -1197,20 +1196,13 @@ def _tuple_bindings(func: ast.AST, name: str) -> list[tuple[ast.Assign, Optional
     means anything.  38 of 218 binding steps over the 41-case sample are this
     shape.  A ``*rest`` in the target makes the position of everything after it
     depend on the length of the value, so the slot is left unsaid there rather
-    than guessed.
+    than guessed, and so is a slot inside a nested unpacking.
     """
-    found: list[tuple[ast.Assign, Optional[int]]] = []
-    for node in ast.walk(func):
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not isinstance(target, (ast.Tuple, ast.List)):
-                continue
-            starred = any(isinstance(e, ast.Starred) for e in target.elts)
-            for slot, element in enumerate(target.elts):
-                if isinstance(element, ast.Name) and element.id == name:
-                    found.append((node, None if starred else slot))
-    return found
+    return [
+        (binding.site, binding.slot)  # type: ignore[misc]
+        for binding in pathcond.bindings(func, name)
+        if binding.kind == pathcond.BIND_ASSIGN and binding.unpacked
+    ]
 
 
 def _imported_names(tree: ast.Module) -> frozenset[str]:
@@ -1243,31 +1235,22 @@ def _with_bindings(func: ast.AST, name: str) -> list[ast.expr]:
     Reaching definitions do not cover the form, and it is how every
     ``TaskBuffer`` method reaches the database -- ``with self.proxyPool.get()
     as proxy`` -- so without it the walk said a function does not bind a name
-    it plainly binds.  Read here rather than in ``pathcond``: that module is
-    shared with the build, and widening it would move the map.
+    it plainly binds.
     """
     found: list[ast.expr] = []
-    for node in ast.walk(func):
-        if not isinstance(node, (ast.With, ast.AsyncWith)):
-            continue
-        for item in node.items:
-            held = item.optional_vars
-            targets = [held]
-            if isinstance(held, (ast.Tuple, ast.List)):
-                targets = list(held.elts)
-            if any(isinstance(t, ast.Name) and t.id == name for t in targets):
-                found.append(item.context_expr)
+    for binding in pathcond.bindings(func, name):
+        if binding.kind == pathcond.BIND_WITH and binding.value is not None:
+            if all(binding.value is not one for one in found):
+                found.append(binding.value)
     return found
 
 
 def _walrus_bindings(func: ast.AST, name: str) -> list[ast.expr]:
     """The values an assignment expression ``(<name> := ...)`` binds."""
     return [
-        node.value
-        for node in ast.walk(func)
-        if isinstance(node, ast.NamedExpr)
-        and isinstance(node.target, ast.Name)
-        and node.target.id == name
+        binding.value
+        for binding in pathcond.bindings(func, name)
+        if binding.kind == pathcond.BIND_WALRUS and binding.value is not None
     ]
 
 
@@ -1370,9 +1353,9 @@ def _module_bindings(tree: ast.Module, name: str) -> list[ast.expr]:
 def _caught_as(func: ast.AST, name: str) -> list[ast.ExceptHandler]:
     """Handlers that bind *name* as the exception they caught."""
     return [
-        node
-        for node in ast.walk(func)
-        if isinstance(node, ast.ExceptHandler) and node.name == name
+        binding.site  # type: ignore[misc]
+        for binding in pathcond.bindings(func, name)
+        if binding.kind == pathcond.BIND_EXCEPT
     ]
 
 
