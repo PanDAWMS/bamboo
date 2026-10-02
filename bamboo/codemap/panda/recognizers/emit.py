@@ -314,6 +314,13 @@ def attach(
                     for branch in junction.branches:
                         if not _about(branch, named, names_value, reports):
                             continue
+                        # Read as written, not as the function runs: the
+                        # branch's conditions are where its value is decided,
+                        # not where it is written.  ``prepareTasksToBeFinished_JEDI``
+                        # decides the status under one ``not toSkip`` and logs
+                        # the unlock that replaces the write under the ``else``
+                        # of a later one; read as run, the two meet, and the
+                        # line saying the write did not happen went to the branch.
                         if exclusive(branch.path_condition, where):
                             continue
                         if any(e.template == template for e in branch.emits):

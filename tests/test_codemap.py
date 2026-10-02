@@ -14699,6 +14699,32 @@ def test_a_call_inside_a_test_is_not_a_new_value_after_it():
     assert pathcond.parted(first, second, exits=False)
 
 
+def test_a_new_value_in_an_arm_the_pass_does_not_enter_leaves_two_tests_contradicting():
+    """``prepareTasksToBeFinished_JEDI``: ``toSkip = True`` sits in the ``else`` of the ``if`` above the first test.
+
+    A pass that decided ``new`` under the first ``not toSkip`` never ran that
+    ``else``, so the second ``not toSkip`` still holds and the unlock below it
+    does not run with ``new``.  Counted by line alone, the new value read the
+    contradiction away and the unlock's log line went to the branch.
+    """
+    func = _func(
+        "def f(status):\n"
+        "    toSkip = False\n"
+        "    if status in ('running', 'ready'):\n"
+        "        if not toSkip:\n"
+        "            new = 'defined'\n"
+        "    else:\n"
+        "        toSkip = True\n"
+        "    if not toSkip:\n"
+        "        write = 1\n"
+        "    else:\n"
+        "        unlock = 1\n"
+    )
+    assigned = {n.targets[0].id: n for n in ast.walk(func) if isinstance(n, ast.Assign)}
+
+    assert pathcond.parted(assigned["new"], assigned["unlock"], exits=False)
+
+
 def test_a_call_carrying_its_own_statement_has_no_fragment_to_place():
     """"No fragment reaches this call" and "there is no fragment" are
     different answers.  Thirty pairs in the corpus write the statement into

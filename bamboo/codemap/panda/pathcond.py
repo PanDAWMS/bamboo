@@ -736,55 +736,57 @@ def _names_in(expression: ast.AST) -> set[str]:
     return {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
 
 
-def _rebinds(func: ast.AST) -> dict[str, list[int]]:
-    """``{name: every line in *func* that gives it a new value}``, found once per function.
+def _rebinds(func: ast.AST) -> dict[str, list[ast.AST]]:
+    """``{name: every node in *func* that gives it a new value}``, found once per function.
 
     Plain and annotated assignments, ``+=``, loop and ``with`` targets, the
     walrus, ``except ... as``, and the two ways a container changes in place --
     ``x[k] = v`` and ``x.add(v)`` -- because a test on ``x`` read before any
     of those described a different ``x``.  Wide on purpose: the one reader of
-    this drops a condition for it, and dropping one only makes two sites look
-    more able to meet.
+    this, :func:`parted`, reads a contradiction away for it, and that only
+    makes two sites look more able to meet.  A nested function's names are
+    its own.
     """
     held = getattr(func, "_rebinds", None)
     if held is not None:
         return held
-    found: dict[str, list[int]] = {}
+    found: dict[str, list[ast.AST]] = {}
 
-    def note(target: ast.AST, line: int) -> None:
+    def note(target: ast.AST, node: ast.AST) -> None:
         if isinstance(target, ast.Name):
-            found.setdefault(target.id, []).append(line)
+            found.setdefault(target.id, []).append(node)
         elif isinstance(target, (ast.Tuple, ast.List)):
             for element in target.elts:
-                note(element, line)
+                note(element, node)
         elif isinstance(target, ast.Starred):
-            note(target.value, line)
+            note(target.value, node)
         elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
-            found.setdefault(target.value.id, []).append(line)
+            found.setdefault(target.value.id, []).append(node)
 
     for node in ast.walk(func):
-        line = getattr(node, "lineno", 0)
+        if node is func or enclosing_function(node) is not func:
+            continue
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             for target in targets_of(node):
-                note(target, line)
+                note(target, node)
         elif isinstance(node, ast.AugAssign):
-            note(node.target, line)
+            note(node.target, node)
         elif isinstance(node, (ast.For, ast.AsyncFor)):
-            note(node.target, line)
+            note(node.target, node)
         elif isinstance(node, ast.NamedExpr):
-            note(node.target, line)
+            note(node.target, node)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if item.optional_vars is not None:
-                    note(item.optional_vars, line)
+                    note(item.optional_vars, node)
         elif isinstance(node, ast.ExceptHandler) and node.name:
-            found.setdefault(node.name, []).append(line)
+            found.setdefault(node.name, []).append(node)
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
         ):
-            found.setdefault(node.func.value.id, []).append(line)
+            found.setdefault(node.func.value.id, []).append(node)
     try:
         func._rebinds = found  # type: ignore[attr-defined]
     except AttributeError:
@@ -860,14 +862,47 @@ def _tested_by(node: ast.AST, exits: bool) -> list[tuple[str, Optional[ast.stmt]
     return found
 
 
-def _given_between(func: ast.AST, earlier: ast.stmt, later: ast.stmt) -> bool:
-    """Whether a name *earlier*'s test reads is given a new value before *later* tests it."""
-    rebinds = _rebinds(func)
+def _apart(one: ast.AST, other: ast.AST) -> bool:
+    """Whether an ``if`` holds *one* in one arm and *other* in the other -- one pass runs one of them."""
+    previous = one
+    for ancestor in ancestors(one):
+        if isinstance(
+            ancestor,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module),
+        ):
+            break
+        if isinstance(ancestor, ast.If):
+            if previous in ancestor.body:
+                arm = ancestor.orelse
+            elif previous in ancestor.orelse:
+                arm = ancestor.body
+            else:
+                arm = []
+            if any(_within(other, statement) for statement in arm):
+                return True
+        previous = ancestor
+    return False
+
+
+def _given_between(
+    func: ast.AST, earlier: ast.stmt, later: ast.stmt, ends: tuple[ast.AST, ...] = ()
+) -> bool:
+    """Whether a name *earlier*'s test reads is given a new value on the way to *later*'s test.
+
+    On the way: below the end of *earlier*'s test and above *later*, and in no
+    arm a pass through either test, or through either of *ends*, cannot enter.
+    ``prepareTasksToBeFinished_JEDI`` tests ``not toSkip`` at 4044, sets
+    ``toSkip = True`` at 4092 in the ``else`` of the ``if`` whose body holds
+    4044, and tests ``not toSkip`` again at 4095: a pass that tested 4044 never
+    ran 4092.
+    """
     start = getattr(earlier.test, "end_lineno", None) or earlier.lineno  # type: ignore[attr-defined]
+    rebinds = _rebinds(func)
     return any(
-        start < line < later.lineno
+        start < site.lineno < later.lineno  # type: ignore[attr-defined]
+        and not any(_apart(site, on) for on in (earlier, later, *ends))
         for name in _names_in(earlier.test)  # type: ignore[attr-defined]
-        for line in rebinds.get(name, ())
+        for site in rebinds.get(name, ())
     )
 
 
@@ -916,7 +951,7 @@ def parted(one: ast.AST, other: ast.AST, exits: bool = True) -> bool:
             if statement is None or other_statement is None or statement is other_statement:
                 return True
             earlier, later = sorted((statement, other_statement), key=lambda held: held.lineno)
-            if func is None or not _given_between(func, earlier, later):
+            if func is None or not _given_between(func, earlier, later, (one, other)):
                 return True
     return False
 
