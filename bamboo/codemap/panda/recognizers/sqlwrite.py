@@ -51,7 +51,7 @@ import ast
 import dataclasses
 import re
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Iterable, NamedTuple, Optional
 
 from bamboo.codemap.calls import Calls, Target, Types
 from bamboo.codemap.models import (
@@ -1576,27 +1576,34 @@ def _assigned_names(node: ast.Assign) -> set[str]:
     return {name for target in node.targets for name, _slot, _unpacked in names_bound_by(target)}
 
 
-def _rows_of(
+def _rows_written(
     func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
-) -> set[str]:
-    """The names this statement's rows land in, within the stretch it owns.
+) -> list[ast.Assign]:
+    """The assignments this statement's rows land in, within the stretch it owns.
 
     The call line first, for the forwarded form that returns them; otherwise
     the first ``fetch*`` under it.  Reading only the call would leave most of
     the corpus with no rows to test an exit against -- see :data:`_FETCH`.
     """
-    names: set[str] = set()
-    fetched: set[str] = set()
+    named: list[ast.Assign] = []
+    fetched: list[ast.Assign] = []
     for node in ast.walk(func):
-        if not isinstance(node, ast.Assign):
+        if not isinstance(node, ast.Assign) or not _assigned_names(node):
             continue
         if node.lineno == line:
-            names |= _assigned_names(node)
+            named.append(node)
         elif line < node.lineno <= last and isinstance(node.value, ast.Call):
             callee = node.value.func
             if isinstance(callee, ast.Attribute) and callee.attr in _FETCH:
-                fetched |= _assigned_names(node)
-    return names or fetched
+                fetched.append(node)
+    return named or fetched
+
+
+def _rows_of(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
+) -> set[str]:
+    """The names :func:`_rows_written` binds."""
+    return {name for node in _rows_written(func, line, last) for name in _assigned_names(node)}
 
 
 def _flag_parameters(func: ast.AST) -> set[str]:
@@ -2357,55 +2364,138 @@ def _bound_by(node: ast.AST) -> set[str]:
     return found
 
 
-def _mentions(expression: ast.AST, held: set[str]) -> bool:
-    return any(isinstance(n, ast.Name) and n.id in held for n in ast.walk(expression))
+def _keys_filed_under(target: ast.AST) -> list[ast.AST]:
+    """The keys of ``d[k] = v`` and ``d[k][j] = v`` -- a dict rooted at a name."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [key for element in target.elts for key in _keys_filed_under(element)]
+    keys: list[ast.AST] = []
+    while isinstance(target, ast.Subscript):
+        keys.append(target.slice)
+        target = target.value
+    return keys if isinstance(target, ast.Name) else []
 
 
-def _carried_into(func: ast.AST, seed: set[str]) -> set[str]:
-    """The names *seed*'s rows reach, by assignment, loop target or carrier.
+class _Carry:
+    """Which writes in one function hold the rows some of its statements wrote.
 
-    Deliberately generous, because of what it decides: not *where* the rows go
-    but only whether the function's ``return`` is one of the places.  The
-    flagship's closure picks up ``varMap`` along the way and the answer --
-    ``retTaskList`` is returned -- is right anyway.  A name it should not have
-    taken costs a statement that resolves to nothing, not a wrong lead: the
-    caller still has to do something the map holds a junction for.
+    The writes followed are the ones that move rows on: an assignment
+    (:func:`_bound_by`, so ``d[k] = row`` fills ``d``), a loop target, and a
+    :data:`_CARRIERS` call on a name.  A write holds the rows when what it
+    takes from -- the value, the loop's iterable, the call's arguments, and a
+    key it files under -- reads a name one of whose writes holding them
+    reaches it.  Which writes reach is ``pathcond.surviving_writes`` as the
+    function runs: the walk's rule.  Every other binding of a name
+    (``with ... as``, ``except ... as``, ``del``) overwrites and holds nothing;
+    ``d[k] = v``, ``x += v`` and ``n.append(v)`` add and overwrite nothing.
+
+    **It replaced a set of names.**  Any write anywhere in the function that
+    mentioned a held name added its targets, whatever the order, which made
+    the ``return`` generous and the caller's leads wrong.  Of ce1's 295
+    crossings, 25 named somewhere these rows never go -- 8 through a name
+    overwritten before the use, 8 through a link written before the rows
+    arrived (``AtlasAnalJobBroker.doBrokerage``'s ``setErrDiag`` at 496, from
+    ``failureCounts`` read at 388), 9 through rows only ever used to choose or
+    log, reaching the ``return`` through a loop name used again further down.
+    A caller was asked whether the arriving write still held at the use with
+    every seed name's writes at once, so ``ret_val`` rebound by the next call
+    dropped the rows the first had put in ``analy_sites_class_dict``; carried
+    from the arriving write, each name keeps its own.
+
+    The key is new: ``retMap[jediTaskID] = set()`` is how
+    ``throttleJobsInPausedTasks_JEDI`` hands its tasks back, and the caller
+    loops over ``.items()``.  The names never saw it -- 6 crossings over 3
+    statements.
+
+    Not followed, here or before: rows put into an object by a method and the
+    object into an element of what is returned --
+    ``_get_datasets_with_unprocessed_inputs`` packs ``tmp_res`` into
+    ``dataset_spec`` and adds it to an ``input_chunk`` of the list it returns.
+    The names reached that ``return`` only because ``tmp_res`` was used again;
+    following every method call would carry rows into ``tmp_log``.
     """
-    held = set(seed)
-    growing = True
-    while growing:
-        growing = False
+
+    def __init__(self, func: ast.AST, start: Iterable[ast.AST]):
+        self._writes: dict[str, dict[int, ast.AST]] = {}
+        self._adds: dict[str, dict[int, ast.AST]] = {}
+        self._takes: list[tuple[ast.AST, list[ast.AST]]] = []
+        self._read(func)
+        self._holding = {id(node) for node in start}
+        self._grow()
+
+    def _write(self, name: str, node: ast.AST, adds: bool) -> None:
+        self._writes.setdefault(name, {})[id(node)] = node
+        if adds:
+            self._adds.setdefault(name, {})[id(node)] = node
+
+    def _read(self, func: ast.AST) -> None:
+        # A comprehension's target is its own scope's, not the function's.
+        inner = {
+            id(name)
+            for node in ast.walk(func)
+            if isinstance(node, ast.comprehension)
+            for name in ast.walk(node.target)
+        }
         for node in ast.walk(func):
-            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
-                if node.value is None or not _mentions(node.value, held):
-                    continue
-                fresh = _bound_by(node) - held
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                if id(node) not in inner:
+                    statement = site_of(node)
+                    self._write(node.id, statement, isinstance(statement, ast.AugAssign))
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                self._write(node.name, node, False)
+            elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    for name in containers_changed(target):
+                        self._write(name, node, True)
+                if node.value is not None and _bound_by(node):
+                    keys = [key for target in targets for key in _keys_filed_under(target)]
+                    self._takes.append((node, [node.value, *keys]))
             elif isinstance(node, (ast.For, ast.AsyncFor)):
-                if not _mentions(node.iter, held):
+                self._takes.append((node, [node.iter]))
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _CARRIERS
+                and isinstance(node.func.value, ast.Name)
+            ):
+                statement = site_of(node)
+                self._write(node.func.value.id, statement, True)
+                self._takes.append((statement, list(node.args)))
+
+    def _holds(self, name: str, statement: ast.AST) -> bool:
+        writes = self._writes.get(name)
+        if not writes or not any(key in self._holding for key in writes):
+            return False
+        reached = surviving_writes(
+            list(writes.values()),
+            statement,
+            list(self._adds.get(name, {}).values()),
+            as_run=True,
+        )
+        return any(id(write) in self._holding for write in reached)
+
+    def reaches(self, expression: ast.AST, at: ast.AST) -> bool:
+        """Whether a name *expression* reads holds the rows where *at* runs."""
+        statement = at if isinstance(at, (ast.stmt, ast.ExceptHandler)) else site_of(at)
+        names = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
+        return any(self._holds(name, statement) for name in names)
+
+    def _grow(self) -> None:
+        growing = True
+        while growing:
+            growing = False
+            for statement, sources in self._takes:
+                if id(statement) in self._holding:
                     continue
-                target = node.target
-                parts = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
-                fresh = {p.id for p in parts if isinstance(p, ast.Name)} - held
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if (
-                    node.func.attr not in _CARRIERS
-                    or not isinstance(node.func.value, ast.Name)
-                    or not any(_mentions(a, held) for a in node.args)
-                ):
-                    continue
-                fresh = {node.func.value.id} - held
-            else:
-                continue
-            if fresh:
-                held |= fresh
-                growing = True
-    return held
+                if any(self.reaches(source, statement) for source in sources):
+                    self._holding.add(id(statement))
+                    growing = True
 
 
-def _hands_rows_back(func: ast.AST, held: set[str]) -> bool:
-    """Whether a ``return`` in *func* returns something built from *held*."""
+def _hands_rows_back(func: ast.AST, carry: _Carry) -> bool:
+    """Whether a ``return`` in *func* returns something *carry* holds there."""
     return any(
-        isinstance(node, ast.Return) and node.value is not None and _mentions(node.value, held)
+        isinstance(node, ast.Return) and node.value is not None and carry.reaches(node.value, node)
         for node in ast.walk(func)
     )
 
@@ -2449,42 +2539,27 @@ def _consumers_of(
 def _reached_by(
     caller: ast.AST,
     arrived: ast.stmt,
-    seed: set[str],
-    held: set[str],
     by_func: dict[str, set[str]],
     by_class: dict[str, set[str]],
 ) -> set[str]:
-    """The junctions *held* reaches in *caller*, by the two rules already used.
+    """The junctions the rows that *arrived* reach in *caller*, by the two rules already used.
 
     The same pair :func:`attach_crossings` applies inside a region -- a call
     the map owns a junction for, and a class built here and started as a
-    thread -- with two things added that the region form does not need.  There
+    thread -- with one thing added that the region form does not need.  There
     the stretch is the statement's own and everything in it is about these
-    rows.  Here it is somebody else's whole function, so the call has to
-    actually *take* one of the names the rows arrived in, **and** the line
-    they arrived on has to still be what that name holds there.
+    rows.  Here it is somebody else's whole function, so the call has to take
+    something that holds these rows where it runs -- carried from the line
+    they arrived on, see :class:`_Carry`.
 
-    The second is not caution.  ``datasetManager.py::main`` runs seven queries
-    into the same ``res`` and hands each to a different thread class, so
-    without it one statement's rows resolve to all seven constructions -- the
-    reuse P1-54 met on the exits, met again a function further out.
-    ``pathcond.surviving_writes`` is the same answer here as it was there: at
-    the construction on line 906 the ``res`` in scope is the one from line
-    896, and the six others were overwritten or had not run.  Read as the
-    function runs, as the walk reads it.
+    That is not caution.  ``datasetManager.py::main`` runs seven queries into
+    the same ``res`` and hands each to a different thread class, so carried by
+    name one statement's rows resolve to all seven constructions -- the reuse
+    P1-54 met on the exits, met again a function further out.  At the
+    construction on line 906 the ``res`` in scope is the one from line 896,
+    and the six others were overwritten or had not run.
     """
-    writes = [
-        node
-        for node in ast.walk(caller)
-        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
-        and _bound_by(node) & seed
-    ]
-
-    def theirs(use: ast.AST) -> bool:
-        """Whether the rows that reached *use* are the ones that arrived here."""
-        site = use if isinstance(use, ast.stmt) else site_of(use)
-        return arrived in surviving_writes(writes, site, as_run=True)
-
+    carry = _Carry(caller, [arrived])
     reached: set[str] = set()
     built: dict[str, ast.AST] = {}
     for node in ast.walk(caller):
@@ -2492,7 +2567,7 @@ def _reached_by(
             continue
         callee = node.value.func
         made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
-        if made in by_class and any(_mentions(a, held) for a in node.value.args) and theirs(node):
+        if made in by_class and any(carry.reaches(a, node) for a in node.value.args):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     built[target.id] = made
@@ -2513,7 +2588,7 @@ def _reached_by(
             called = callee.id
         else:
             continue
-        if any(_mentions(a, held) for a in node.args) and theirs(node):
+        if any(carry.reaches(a, node) for a in node.args):
             reached |= by_func.get(called, set())
     return reached
 
@@ -2550,11 +2625,11 @@ def attach_crossings(
     statements and does not include ``getTasksToExecCommand_JEDI@4591`` at
     all: that statement owns 4573-4603, works its rows through 4600-4621, and
     the function returns on 4647, the rows having travelled ``resList`` ->
-    ``retTaskIDs`` -> ``retTaskList`` on the way.  Followed by name instead --
-    see :func:`_carried_into` -- 106 statements hand their rows back.
+    ``retTaskIDs`` -> ``retTaskList`` on the way.  Followed as the function
+    runs instead -- see :class:`_Carry` -- 240 statements hand their rows back.
 
-    **A crossing is only stored where all three of these hold**, and 76 of
-    those 106 fail the last one and keep an empty ``crosses_to``:
+    **A crossing is only stored where all three of these hold**, and 174 of
+    those 240 fail the last one and keep an empty ``crosses_to``:
 
     1. the rows reach a ``return``;
     2. the owner has a call site that is not the proxy layer -- see
@@ -2718,11 +2793,8 @@ def _handed_back(
     first, last = site.region
     handled = site.rows_handled
     through = max(last, handled[1] if len(handled) >= 2 else last)
-    rows = _rows_of(func, site.anchor.line_start, through)
-    if not rows:
-        return set(), False
-    held = _carried_into(func, rows)
-    if not _hands_rows_back(func, held):
+    rows = _rows_written(func, site.anchor.line_start, through)
+    if not rows or not _hands_rows_back(func, _Carry(func, rows)):
         return set(), False
     reached: set[str] = set()
     for _rel, call, caller in _consumers_of(wanted, calls, site.anchor.file, func):
@@ -2731,16 +2803,8 @@ def _handed_back(
             # Returned on again, or thrown away.  The first is the proxy shape
             # under another name and the second has no rows to follow.
             continue
-        seed = _bound_by(statement)
-        if seed:
-            reached |= _reached_by(
-                caller,
-                statement,
-                seed,
-                _carried_into(caller, seed),
-                by_func,
-                by_class,
-            )
+        if _bound_by(statement):
+            reached |= _reached_by(caller, statement, by_func, by_class)
     return reached, True
 
 

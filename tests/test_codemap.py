@@ -9128,12 +9128,7 @@ def test_a_caller_that_does_nothing_the_map_answers_for_leaves_it_empty():
 
 
 def test_rows_that_never_reach_a_return_do_not_cross_to_the_caller():
-    """The function returns, and not these rows.
-
-    The closure that follows them is generous on purpose -- it decides only
-    whether the ``return`` is one of the places they reach -- but a name it
-    never touches is still an answer of no.
-    """
+    """The function returns, and not these rows: a name they never reach is an answer of no."""
     source = (
         "class TaskModule:\n"
         "    def getTasks(self):\n"
@@ -9163,10 +9158,10 @@ def test_rows_that_never_reach_a_return_do_not_cross_to_the_caller():
 def test_the_caller_reusing_the_name_gets_only_its_own_rows():
     """``datasetManager.py::main`` runs seven queries into the same ``res``.
 
-    Each is handed to a different thread class, so without the arriving
-    assignment having to still be live one statement's rows resolve to all
-    seven.  This is the reuse P1-54 met on the exits, met again a function
-    further out, and ``pathcond.surviving_writes`` is the same answer.
+    Each is handed to a different thread class, so carried by name one
+    statement's rows resolve to all seven.  This is the reuse P1-54 met on the
+    exits, met again a function further out; carried from the line the rows
+    arrived on, the second ``tasks`` overwrites the first.
     """
     caller = (
         "class Manager:\n"
@@ -9184,6 +9179,130 @@ def test_the_caller_reusing_the_name_gets_only_its_own_rows():
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == ["c.py::retryTask"]
+
+
+def test_a_status_name_the_next_call_reuses_does_not_take_the_rows_with_it():
+    """``ret_val, tasks = ...`` then ``ret_val, other = ...``: ``tasks`` still holds the rows.
+
+    ``AtlasAnalJobBroker.doBrokerage`` reuses ``ret_val`` for every call it
+    checks.  Asked whether the arriving write still held with every name's
+    writes at once, the second write replaced the first, and the rows that
+    arrived in ``analy_sites_class_dict`` crossed nowhere.
+    """
+    caller = (
+        "class Manager:\n"
+        "    def start(self):\n"
+        "        ret_val, tasks = self.taskBufferIF.getTasks()\n"
+        "        ret_val, other = self.taskBufferIF.getOtherTasks()\n"
+        "        self.retryTask(tasks)\n"
+    )
+    nodes, _census = _crossed(
+        ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")]
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["c.py::retryTask"]
+
+
+def test_a_link_written_before_the_rows_arrived_is_not_a_lead():
+    """``w = x`` above ``x = tasks``: ``w`` holds what ``x`` held then, not the rows.
+
+    Carried by name, ``x`` taking the rows on a later line made every name
+    ever built from ``x`` hold them too.  ``AtlasAnalJobBroker.doBrokerage``
+    was handed ``setErrDiag`` at 496 that way, from ``failureCounts`` read at
+    388, by a chain that runs up the function.
+    """
+    caller = (
+        "class Manager:\n"
+        "    def start(self):\n"
+        "        x = self.make()\n"
+        "        w = x\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        x = tasks\n"
+        "        self.setErrDiag(w)\n"
+        "        self.retryTask(x)\n"
+    )
+    nodes, _census = _crossed(
+        ROWS_HANDED_BACK,
+        ["c.py::retryTask", "c.py::setErrDiag"],
+        others=[(caller, "c.py")],
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["c.py::retryTask"]
+
+
+def test_rows_handed_back_as_a_dicts_keys_cross_to_what_the_caller_does():
+    """``retMap[jediTaskID] = set()`` and the caller loops over ``.items()``.
+
+    ``throttleJobsInPausedTasks_JEDI`` hands its tasks back so, and the
+    caller kills each task's jobs.  Following only what is filed, never what
+    it is filed under, said these rows reach no ``return``.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def getTasks(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        retMap = {}\n"
+        "        for (taskID,) in res:\n"
+        "            retMap[taskID] = set()\n"
+        "        return retMap\n"
+    )
+    caller = (
+        "class Commando:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        for taskID, ids in tasks.items():\n"
+        "            self.retryTask(taskID)\n"
+    )
+    nodes, census = _crossed(source, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["c.py::retryTask"]
+    assert (census.handing_back, census.resolved) == (1, 1)
+
+
+def test_rows_used_only_to_choose_are_not_handed_back():
+    """The rows pick which candidates are kept; the candidates are what is returned.
+
+    ``insertFilesForDataset_JEDI`` and ``copyArchive.py::main`` read lists
+    only to test membership in, and carried by name the rows reached the
+    ``return`` through a loop name used again for the candidates.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def getTasks(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        seen = set()\n"
+        "        for (taskID,) in res:\n"
+        "            seen.add(taskID)\n"
+        "        kept = []\n"
+        "        for taskID in self.candidates:\n"
+        "            if taskID in seen:\n"
+        "                kept.append(taskID)\n"
+        "        return kept\n"
+    )
+    caller = (
+        "class Commando:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        self.retryTask(tasks)\n"
+    )
+    nodes, census = _crossed(source, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+    assert (census.handing_back, census.resolved) == (0, 0)
 
 
 def _site_with(**fields):
