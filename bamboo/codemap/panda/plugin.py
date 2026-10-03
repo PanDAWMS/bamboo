@@ -644,6 +644,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         from one tree beside nodes from another.
         """
         shas = {module.rel_path: module.blob_sha for module in self._modules}
+        declared = logfile.declared_files(self._modules)
+        inherited = logfile.inherited_files(self._modules, declared)
         nodes: list[FunctionPrintsNode] = []
         for found in trace.function_prints(self._roots, list(shas)):
             if found.blob_sha != shas[found.file]:
@@ -661,6 +663,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     function=found.func.name,
                     count=len(found.statements),
                     statements=found.statements,
+                    log_files=logfile.files_of(found.file, declared, inherited),
                     anchor=Anchor(
                         package=found.file.split("/", 1)[0],
                         file=found.file,

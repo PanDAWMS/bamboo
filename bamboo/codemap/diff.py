@@ -168,6 +168,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "function",
         "count",
         "statements",
+        "log_files",
     ),
 }
 

@@ -13055,6 +13055,48 @@ def test_the_function_prints_kind_is_on_every_list_that_has_to_know_about_it():
     assert lookup._MODELS[FunctionPrintsNode] is NodeType.FUNCTION_PRINTS
 
 
+def test_a_functions_prints_name_the_files_its_module_writes_to(tmp_path):
+    """``archiveJob`` writes ``start status=...`` into the proxy log, not into its callers'.
+
+    The proxy modules declare no logger and the class that mixes them in
+    does, so that is where their rows land.  The junction's
+    ``observable_log_files`` names the callers' files instead -- where a line
+    saying the value was settled appears -- and was all a reader had.
+    """
+    from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
+
+    sources = {
+        "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py": (
+            "class JobComplexModule:\n"
+            "    def archiveJob(self, job):\n"
+            "        tmp_log.debug(f'start status={job.jobStatus}')\n"
+        ),
+        "pandaserver/taskbuffer/OraDBProxy.py": (
+            '_logger = PandaLogger().getLogger("DBProxy")\n'
+            "class DBProxy(job_complex_module.JobComplexModule):\n"
+            "    def connect(self):\n"
+            "        _logger.info('connected')\n"
+        ),
+        "pandaserver/daemons/scripts/quiet.py": "def main():\n    tmp_log.info('nothing declared here')\n",
+    }
+    for rel, text in sources.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    plugin = PandaCodeMapPlugin()
+    plugin.prepare(tmp_path)
+
+    found = {node.owner: node.log_files for node in plugin._function_prints()}
+
+    assert found == {
+        "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::JobComplexModule.archiveJob": [
+            "panda-DBProxy.log"
+        ],
+        "pandaserver/taskbuffer/OraDBProxy.py::DBProxy.connect": ["panda-DBProxy.log"],
+        "pandaserver/daemons/scripts/quiet.py::main": [],
+    }
+
+
 def _prints(owner: str, *lines: int):
     from bamboo.codemap.models import FunctionPrintsNode, PrintRow, PrintStatement
 

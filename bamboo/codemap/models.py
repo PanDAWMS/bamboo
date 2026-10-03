@@ -3328,6 +3328,19 @@ class FunctionPrintsNode(BaseNode):
     ``owner`` spells the nesting: ``file::Class.method``,
     ``file::function``, ``file::outer.inner``.  The bare name collides for
     seventeen of these functions -- ``datasetManager.py`` has seven named ``run``.
+
+    ``log_files`` is where the rows land, so a reader knows which log to lay
+    them over.  It is the function's module's own: the file its logger
+    declares, or for a module that declares none, the files of the classes
+    that mix it in.  ``JobComplexModule.archiveJob`` writes ``start
+    status=...`` into ``panda-DBProxy.log`` or ``panda-JediDBProxy.log``, and
+    the only files a reader had been given for it were its junction's
+    ``observable_log_files`` -- its callers', the right answer to where a line
+    saying the value was settled appears and the wrong one here.  The same
+    ``logfile.files_of`` gives a junction its ``log_files`` and an emit its
+    file, so the three cannot disagree within a build.  A call through a
+    logger the caller passed in lands in the caller's file instead, and that
+    is not said: 365 of the corpus's 5,732 calls, in 95 functions.
     """
 
     node_type: NodeType = NodeType.FUNCTION_PRINTS
@@ -3344,6 +3357,14 @@ class FunctionPrintsNode(BaseNode):
     function: str = Field(..., description="The function's own name.")
     count: int = Field(..., description="How many logging calls the function makes; one statement each.")
     statements: list[PrintStatement] = Field(default_factory=list)
+    log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The files the function's module writes to: the one its logger "
+            "declares, or the ones of the classes that mix it in.  Empty for a "
+            "module neither gives a file."
+        ),
+    )
     anchor: Optional[Anchor] = None
 
     @staticmethod
