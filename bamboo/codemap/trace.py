@@ -2497,6 +2497,7 @@ class _Walk:
         caught: list,
         at: Optional[ast.AST] = None,
         rereads: Sequence[ast.AST] = (),
+        cut: Sequence[ast.AST] = (),
     ) -> tuple[list, list, list]:
         """Drop the writes a later one overwrote before the read.
 
@@ -2510,8 +2511,11 @@ class _Walk:
         Execution order has no such edge.
 
         The two compose rather than replace one another.  Measured over the
-        corpus's exits, the span is the narrower answer 34 times and the
-        cancelling rule is narrower 657 times, so neither contains the other.
+        corpus's exits with the rule ``pathcond.surviving_writes`` used before
+        it followed the function's structure, the span was the narrower answer
+        34 times and the order 657 times, so neither contains the other.  *cut*
+        is what the span left out: those writes still ran, so they still
+        overwrite what was there before them, and are never an answer.
 
         The starting frame only, and the same reason as :meth:`_within`: a
         deeper frame is another function, where this line number belongs to
@@ -2521,9 +2525,9 @@ class _Walk:
         line the walk started from.  Cancelling against the starting line at
         every depth answered "which writes reach line 1019" for a name read on
         line 1007, and ``memVal = int(memVal)`` then cancelled the very writes
-        it reads.  The statement itself is never its own answer, because it
-        reads before it writes; inside a loop its previous iteration's value
-        still can be, and is kept -- as an answer, never as a canceller.
+        it reads.  The statement itself is not its own answer, because it reads
+        before it writes -- unless a loop brings its last pass's value round
+        to it with nothing overwriting that on the way.
         """
         if not self.narrows(frame):
             return bindings, loops, caught
@@ -2532,23 +2536,25 @@ class _Walk:
             target = _statement_at(frame.func, self.reading_at[2])
         if target is None:
             return bindings, loops, caught
-        sites: dict[int, ast.AST] = {}
-        for node in (*bindings, *loops, *caught):
-            sites[id(node)] = (
-                node
-                if isinstance(node, (ast.stmt, ast.ExceptHandler))
-                else pathcond.site_of(node)
-            )
-        others = [site for site in sites.values() if site is not target]
+
+        def site(node: ast.AST) -> ast.AST:
+            if isinstance(node, (ast.stmt, ast.ExceptHandler)):
+                return node
+            return pathcond.site_of(node)
+
+        sites = {id(node): site(node) for node in (*bindings, *loops, *caught)}
         # ``as_run``: a test on a name the function has since rebound says
-        # nothing about the rebound value, and a ``try``'s write is skipped by
-        # the exception its handler swallows -- see ``pathcond.surviving_writes``.
+        # nothing about the rebound value -- see ``pathcond.parted``.
         alive = {
-            id(site)
-            for site in pathcond.surviving_writes(others, target, rereads, as_run=True)
+            id(one)
+            for one in pathcond.surviving_writes(
+                list(sites.values()),
+                target,
+                rereads,
+                as_run=True,
+                killers=[site(node) for node in cut],
+            )
         }
-        if pathcond.loops_over(target):
-            alive.add(id(target))
 
         def lives(node: ast.AST) -> bool:
             return id(sites[id(node)]) in alive
@@ -2591,9 +2597,17 @@ class _Walk:
             bindings.extend(mutated)
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
+        every = (*bindings, *loops, *caught)
         bindings, loops, caught = self._within(frame, bindings, loops, caught, mutated)
+        inside = {id(node) for node in (*bindings, *loops, *caught)}
         bindings, loops, caught = self._reaching(
-            frame, bindings, loops, caught, at, [pathcond.site_of(node) for node in mutated]
+            frame,
+            bindings,
+            loops,
+            caught,
+            at,
+            [pathcond.site_of(node) for node in mutated],
+            [node for node in every if id(node) not in inside],
         )
         held = bool(bindings or loops or caught)
         # Asked before, from another statement: only what this one reaches and

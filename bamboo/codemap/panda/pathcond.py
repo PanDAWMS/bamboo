@@ -19,6 +19,8 @@ from __future__ import annotations
 import ast
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap.panda.reaching import reaching
+
 
 def functions_with_owner(
     node: ast.AST, owner: Optional[str] = None
@@ -822,28 +824,6 @@ def loops_over(node: ast.AST) -> set[int]:
     return found
 
 
-def handlers_over(node: ast.AST) -> set[int]:
-    """The header line of every ``except`` handler whose *body* holds *node*.
-
-    :func:`loops_over`'s counterpart for the other construct a path condition
-    cannot see.  :func:`reachable_when` renders ``ast.If`` tests and nothing
-    else, so an assignment in a handler reads as one that always ran -- but a
-    handler runs only when something below the ``try`` raised, which is a
-    condition no ``if`` in the function states.
-    """
-    found: set[int] = set()
-    previous = node
-    for ancestor in ancestors(node):
-        if isinstance(
-            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
-        ):
-            break
-        if isinstance(ancestor, ast.ExceptHandler) and previous in ancestor.body:
-            found.add(ancestor.lineno)
-        previous = ancestor
-    return found
-
-
 def not_below(site: ast.AST, target: ast.AST) -> bool:
     """Whether *site* could have run before *target* on one pass.
 
@@ -1112,128 +1092,6 @@ def _within(node: ast.AST, container: ast.AST) -> bool:
     return node is container or any(ancestor is container for ancestor in ancestors(node))
 
 
-def _skipped_by_a_raise(other: ast.AST, target: ast.AST, live: Sequence[ast.AST]) -> bool:
-    """Whether an exception can carry control past *other*'s write and on to *target*.
-
-    A write in a ``try`` body runs unless something above it in the body
-    raised, and that is the path this asks about: a handler that neither
-    leaves nor writes the name again sends control on with the value from
-    before the ``try``.  ``TaskRefiner.runImpl`` sets ``dataset_did = None``,
-    tries ``rucioAPI.get_did_str()``, passes on any exception and then tests
-    ``if dataset_did is not None`` -- the ``None`` is what that test sees
-    whenever Rucio failed, and reading the ``try``'s write as having replaced
-    it dropped exactly that answer.
-
-    A handler holding another of the *live* writes is taken to write the name,
-    which is the case ``except: limit = 8`` below a ``try: limit = parse()``
-    is: there the ``try``'s write does replace the one above it on every path
-    that reaches the read.
-    """
-    previous = other
-    for ancestor in ancestors(other):
-        if isinstance(
-            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
-        ):
-            break
-        if (
-            isinstance(ancestor, ast.Try)
-            and previous in ancestor.body
-            and not _within(target, ancestor)
-        ):
-            for handler in ancestor.handlers:
-                if _jumps(handler.body):
-                    continue
-                if any(site is not other and _within(site, handler) for site in live):
-                    continue
-                return True
-        previous = ancestor
-    return False
-
-
-def _cancels(
-    site: ast.AST,
-    other: ast.AST,
-    target: ast.AST,
-    rereads: Sequence[ast.AST] = (),
-    live: Optional[Sequence[ast.AST]] = None,
-) -> bool:
-    """Whether *other* overwrites *site* before *target* reads it.
-
-    Three things have to hold.  *other* sits between them, so it runs after the
-    write it cancels; it is held by no loop *target* is outside of, or it would
-    be an iteration's write rather than one on the way; and every condition it
-    is under is one *target* is under too, so a path that reaches the read
-    passed through it.
-
-    The conditions are compared as the strings :func:`reachable_when` renders,
-    which is why the third test is a subset rather than an implication.  Two
-    conditions that mean the same thing and are written differently do not
-    match, and the rule then keeps a binding it could have cancelled -- short
-    of the truth in the direction that leaves the reader more to look at
-    rather than less.  That holds for a condition the renderer spells
-    differently; it does **not** hold for one it cannot see at all, which is
-    why the ``except`` test below is a separate rule rather than a refinement.
-    A condition that goes uncounted makes the rendered set *smaller*, the
-    subset test easier to pass, and the cancelling too eager.
-
-    An ``except`` body is such a condition.  It runs only when something
-    raised, so a write in one cannot be assumed to have replaced the write
-    above it::
-
-        try:    nRanges = int(nRanges)     # 64
-        except: nRanges = 8                # 66
-
-    and the map said the request always asks for eight.  Measured over the
-    corpus's read sites, 199 firings across 28 (name, write, killer) triples
-    are of this shape -- ``objectstores`` read as always empty,
-    ``retryJob``'s ``attemptNr`` as always ``-999``, and
-    ``assigned_harvester_id`` as always unset.
-
-    The killed write's own handlers are subtracted as well as the target's,
-    and that is not a loosening: a write inside the handler is live only on a
-    path where the handler ran, and on that path the later write in the same
-    handler ran too.  ``getTasksToRefine_JEDI`` rebuilds ``varMap`` three
-    times inside one ``except``, and without this the rule would hand a
-    reader all three.  Subtracting only the target's would give up 51
-    firings over 3 triples that are right.
-
-    An ``ast.AugAssign`` cancels nothing, because it reads the value it
-    replaces: ``timeOutVal *= 60`` needs whatever line 423 or 425 put there,
-    so both are still answers to the read below it.  Treating it as an
-    overwrite cost five of the corpus's thirty-seven narrowings a *wrong*
-    answer rather than a short one -- ``copyArchive.py``'s holding limit read
-    as sixty minutes instead of the configured value or forty-eight hours, and
-    two SQL strings assembled with ``+=`` read as their last clause with the
-    ``SELECT`` dropped.  The reverse stays: a later *plain* assignment does
-    cancel an ``AugAssign``, since it needs nothing of what was there.
-
-    The rule stops at ``AugAssign`` rather than at "reads the name it binds".
-    ``x = f(x)`` reads it too and is still the whole answer once it has run;
-    the difference is that :func:`assigned_expressions` returns the right-hand
-    side alone, which reconstructs ``f(x)`` and not ``x * 60``.
-
-    *rereads* are the other writes of that kind -- ``keyList.add(tmpKey)``,
-    which the caller knows is a mutation and this function cannot tell from a
-    statement.  A set after ``add`` still holds everything it held before, so
-    ``copyArchive.py``'s ``if tmpKey not in keyList`` read the ``set()`` and
-    the first loop's keys as well as the second's, and cancelling them left
-    the test explained by its own loop alone.
-    """
-    if isinstance(other, ast.AugAssign) or any(other is one for one in rereads):
-        return False
-    # *live* is given where the caller reads the function as it runs -- see
-    # :func:`_skipped_by_a_raise`.
-    if live is not None and _skipped_by_a_raise(other, target, live):
-        return False
-    if not site.lineno < other.lineno <= getattr(target, "lineno", 0):
-        return False
-    if loops_over(other) - loops_over(target):
-        return False
-    if handlers_over(other) - handlers_over(target) - handlers_over(site):
-        return False
-    return set(reachable_when(other)) <= set(reachable_when(target))
-
-
 def reaching_definitions(
     func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, target: ast.AST
 ) -> list[ast.expr]:
@@ -1245,21 +1103,7 @@ def reaching_definitions(
     ``timeLimit`` twenty-six times in 1353 lines; the statement on line 381
     reads the one on line 360 and no other, because lines 397 onwards had not
     run yet and 298, 321 and 341 were overwritten by 360 on the way.
-
-    Two steps, and the second is what the first cannot do.  :func:`can_reach`
-    drops the writes that are positioned below the read or on a path that
-    excludes it -- five of the twenty-six survive that for line 381.  It does
-    not drop a write that *did* run and was then replaced, because reaching
-    the read is not the question there.  :func:`_cancels` is.
-
-    Measured on the corpus by walking every read statement: of 62 (statement,
-    bind name) pairs where the name has more than one assignment, 34 narrow
-    and none is emptied.  An emptied name would mean the rule had cancelled
-    the write the read actually saw, so nothing coming back is a signal that
-    it is wrong rather than an answer -- but only that one.  It cannot see a
-    narrowing that kept the *wrong* line, which is what ``AugAssign`` was
-    doing to five of these pairs until the rule stopped treating it as an
-    overwrite; that needs the lines themselves compared.
+    :func:`surviving_writes` is that answer.
 
     Returns the expressions in source order -- ``assigned_expressions`` walks
     breadth-first, so a nested default comes back after the statement below
@@ -1280,6 +1124,8 @@ def surviving_writes(
     target: ast.AST,
     rereads: Sequence[ast.AST] = (),
     as_run: bool = False,
+    *,
+    killers: Sequence[ast.AST] = (),
 ) -> list[ast.AST]:
     """Of *sites*, the writes that can still be what *target* reads.
 
@@ -1290,24 +1136,18 @@ def surviving_writes(
     within one of those shapes would keep a tuple-bound ``res`` alive against
     the assignment that replaced it.
 
-    *rereads* are writes that keep what was there -- see :func:`_cancels`.
+    Two steps.  :func:`~bamboo.codemap.panda.reaching.reaching` follows the
+    function the way it runs and keeps the writes that some path brings to
+    the read with nothing overwriting them on the way; *rereads* add to what
+    is there and overwrite nothing, *killers* overwrite and are never an
+    answer.  The flow takes every branch both ways, so :func:`can_reach` then
+    drops the writes whose conditions contradict the read's.
 
-    *as_run* reads the function the way it runs rather than the way it is
-    written, in the two places those differ: a test describes its name as it
-    was when the test ran (:func:`parted`), and an exception can carry control
-    past a ``try``'s write (:func:`_skipped_by_a_raise`).  The walk and the
-    build both ask for it.
+    *as_run* reads a test as describing its name as it was when the test ran
+    (:func:`parted`).  The walk and the build both ask for it.
     """
-    live = [site for site in sites if can_reach(site, target, as_run)]
-    return [
-        site
-        for site in live
-        if not any(
-            _cancels(site, other, target, rereads, live if as_run else None)
-            for other in live
-            if other is not site
-        )
-    ]
+    reached = reaching(target, sites, killers, rereads)
+    return [site for site in reached if site is target or can_reach(site, target, as_run)]
 
 
 def literal_values(

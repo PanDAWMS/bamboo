@@ -62,7 +62,6 @@ from bamboo.codemap.panda.pathcond import (
     loops_over,
     parted,
     path_condition,
-    reachable_when,
     ruled_out_by,
     surviving_writes,
     targets_of,
@@ -3153,7 +3152,16 @@ def _live_at(
     bind above it on the way to the run, and a later bind of the same key
     cancels an earlier one.  Two arms that each rebuild the map are both still
     live after the ``if``, which is what a window opening at the nearest
-    rebuild could not say.
+    rebuild could not say.  So is the loop's way round: ``copyArchive.main``
+    starts its loop body with ``var_map = {}`` and binds ``:site`` further
+    down, and the bind from the last pass does not reach the first run of the
+    next.
+
+    Read as the function runs (``as_run``), as the walk reads it.  Read as
+    written, a test on a name reassigned since describes a different value,
+    and ``prepareTasksToBeFinished_JEDI`` -- under ``if not toSkip:``, then
+    in the ``else`` of a second ``if not toSkip:`` after ``toSkip = True`` --
+    had its unlock's own ``:status`` bind ruled unable to reach the unlock.
 
     A run inside ``for varMap in varMapList:`` gets its map from the list, so
     its binds are the ones live where a map was appended to that list --
@@ -3163,7 +3171,11 @@ def _live_at(
     renewals = _renews(func, varmap)
     sites = list({id(site): site for site in [*writes, *renewals]}.values())
     rereads = [write for write in writes if _rereads(write, varmap)]
-    live = _surviving(sites, at, rereads)
+
+    def surviving(run: ast.AST) -> set[int]:
+        return {id(site) for site in surviving_writes(sites, run, rereads, as_run=True)}
+
+    live = surviving(at)
     for loop in renewals:
         if (
             isinstance(loop, (ast.For, ast.AsyncFor))
@@ -3172,7 +3184,7 @@ def _live_at(
             and any(ancestor is loop for ancestor in ancestors(at))
         ):
             for append in _appended(func, loop.iter.id, varmap):
-                live |= _surviving(sites, append, rereads)
+                live |= surviving(append)
     return live
 
 
@@ -3181,7 +3193,7 @@ def _rereads(write: ast.AST, varmap: str) -> bool:
 
     ``varMap[":diag"] = JobSpec.truncateStringAttr("supErrorDiag",
     varMap[":diag"])`` keeps the text above it, shortened, so it cancels
-    nothing -- the ``AugAssign`` reading of :func:`pathcond._cancels`.  Read as
+    nothing -- as ``x += y`` does in :mod:`~bamboo.codemap.panda.reaching`.  Read as
     a replacement it took ``updateJobStatus``'s diagnostic template with it.
     """
     targets = targets_of(write)
@@ -3198,49 +3210,6 @@ def _rereads(write: ast.AST, varmap: str) -> bool:
         and node.slice.value == key.value
         for node in ast.walk(write.value)  # type: ignore[attr-defined]
     )
-
-
-def _surviving(sites: list[ast.AST], at: ast.AST, rereads: list[ast.AST]) -> set[int]:
-    """The ``id`` of each of *sites* still live at *at*, the loop's way round included.
-
-    :func:`pathcond.surviving_writes` lets a write below *at* reach it on the
-    next iteration of a loop holding both, and cancels by position, so it does
-    not see the write that sits between them on that way round.  For a map
-    that write is nearly always there: ``copyArchive.main`` starts its loop
-    body with ``var_map = {}``, runs one statement, and binds ``:site`` again
-    further down for the next -- read as reaching the first, it gave the
-    site check the job query's binds.  A site above *at* in the loop that
-    carries the write round, and under no condition *at* is not under,
-    cancels it.  Kept here rather than in ``pathcond``: the walk reads locals
-    through the same rule, and changing what it keeps is a round of its own.
-
-    Read as the function runs (``as_run``), as the walk reads it.  Read as
-    written, a test on a name reassigned since describes a different value,
-    and ``prepareTasksToBeFinished_JEDI`` -- under ``if not toSkip:``, then
-    in the ``else`` of a second ``if not toSkip:`` after ``toSkip = True`` --
-    had its unlock's own ``:status`` bind ruled unable to reach the unlock,
-    and the top of the loop's bind, three map rebuilds above, kept instead.
-    """
-    kept = surviving_writes(sites, at, rereads, as_run=True)
-    line = getattr(at, "lineno", 0)
-    if any(site.lineno > line for site in kept):
-        around = loops_over(at)
-        held = set(reachable_when(at))
-        before = [
-            site
-            for site in sites
-            if site.lineno < line
-            and not any(site is one for one in rereads)
-            and not (loops_over(site) - around)
-            and set(reachable_when(site)) <= held
-        ]
-        kept = [
-            site
-            for site in kept
-            if site.lineno <= line
-            or not any(loops_over(site) & around & loops_over(other) for other in before)
-        ]
-    return {id(site) for site in kept}
 
 
 def inline_binds(call: ast.Call, key: Optional[str] = None) -> list[Bind]:
