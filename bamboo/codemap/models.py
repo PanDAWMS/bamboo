@@ -1738,6 +1738,16 @@ class MapFragment(BaseModel):
     loop_cuts: list["LoopCutNode"] = Field(default_factory=list)
     log_sites: list[LogSiteNode] = Field(default_factory=list)
     read_sites: list["ReadSiteNode"] = Field(default_factory=list)
+    function_prints: list["FunctionPrintsNode"] = Field(default_factory=list)
+    print_calls: dict[str, list[int]] = Field(
+        default_factory=dict,
+        description=(
+            "``owner`` -> the line of every logging call the function makes "
+            "itself, read off the syntax tree alone.  The other reading of what "
+            "``FunctionPrintsNode.statements`` holds, carried so that "
+            "``prints-are-counted`` can fail on a call the skeleton left out."
+        ),
+    )
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
@@ -1820,6 +1830,7 @@ MAP_NODE_GROUPS: tuple[str, ...] = (
     "loop_cuts",
     "log_sites",
     "read_sites",
+    "function_prints",
 )
 
 
@@ -3195,9 +3206,10 @@ class SkeletonLine(BaseModel):
     does land in a hole, the pattern with it filled in is narrower than the
     pattern without, so both are rendered and the row carries each.
 
-    Nothing here is written into the map.  Like the rest of the walk it is a
+    Not written into the map as it stands.  Like the rest of the walk it is a
     reading of the tree the map was built from, and is refused outright when
-    that is not the tree at hand.
+    that is not the tree at hand.  The print rows' fields that no question
+    changes are stored, once per function -- see :class:`FunctionPrintsNode`.
     """
 
     kind: str = Field(description=f"{SKELETON_BRANCH} | {SKELETON_PRINT} | {SKELETON_ARM}")
@@ -3257,6 +3269,86 @@ class SkeletonLine(BaseModel):
     because: str = Field(
         default="", description="Why that hole is the one the value fills."
     )
+
+
+class PrintRow(BaseModel):
+    """One way a logging call can print: a :class:`SkeletonLine` print row less the question.
+
+    The fields are the skeleton's, read the same way and meaning the same
+    thing.  What is left out is what an asking changes -- the arms a row was
+    printed alongside, and the observed value in its hole.
+    """
+
+    text: str = Field(description="The message as the source spells it, or as a binding wrote it.")
+    pattern: str = Field(default="", description="As :attr:`SkeletonLine.pattern`.")
+    refused: str = Field(default="", description="As :attr:`SkeletonLine.refused`.")
+    keyed: bool = Field(default=False, description="As :attr:`SkeletonLine.keyed`.")
+    holes: list[SkeletonHole] = Field(
+        default_factory=list, description="As :attr:`SkeletonLine.holes`."
+    )
+    prefix: str = Field(default="", description="As :attr:`SkeletonLine.prefix`.")
+
+
+class PrintStatement(BaseModel):
+    """One logging call and every way it can print, in the order the skeleton gives them."""
+
+    line: int = Field(description="The statement's first line, where the skeleton puts its rows.")
+    level: str = Field(description="The logger method called: debug, info, warning, error, critical.")
+    rows: list[PrintRow] = Field(
+        default_factory=list,
+        description=(
+            "One per way the call can print, at least one: a message that "
+            "cannot be written out still has a row, with the reason."
+        ),
+    )
+
+
+class FunctionPrintsNode(BaseNode):
+    """Every line one function can print, for every function in the corpus that prints.
+
+    The querier lays these rows over a log region to say which code ran, and
+    until this existed it got them by walking: ``trace.walk`` for each
+    candidate function, keeping the skeleton's print rows and throwing the
+    rest away.  In the querier's case A that was 210 of 293 seconds.  The rows
+    themselves cost the build 8.7 seconds for all 1093 functions, and 27 of
+    them sampled came out the same as the walk's field for field: nothing in
+    a print row but the arms and the observed value depends on what was asked.
+
+    **One node per function, every function that prints.**  ``LogSiteNode``
+    stops at the owners the map names because no reader had asked for more;
+    this one has a reader, and the functions it reads come from tracebacks,
+    callers and movers as much as from the map.  Per function rather than per
+    call because a function is what the reader asks for, all of it at once.
+
+    ``count`` is what lets a reader trust an absence: a line that should be
+    there and is not means the code did not pass it, which is only true when
+    no call is missing.  The build checks it against the calls themselves
+    (``prints-are-counted``).
+
+    ``owner`` spells the nesting: ``file::Class.method``,
+    ``file::function``, ``file::outer.inner``.  The bare name collides for
+    seventeen of these functions -- ``datasetManager.py`` has seven named ``run``.
+    """
+
+    node_type: NodeType = NodeType.FUNCTION_PRINTS
+    map_id: str
+    derived_from: str
+    owner: str = Field(..., description="``file::qualified.name``, the nesting spelled out.")
+    cls: str = Field(
+        default="",
+        description=(
+            "``file::Class`` for a method, as :attr:`TraceStep.cls` spells it; "
+            "empty for a function no class holds directly."
+        ),
+    )
+    function: str = Field(..., description="The function's own name.")
+    count: int = Field(..., description="How many logging calls the function makes; one statement each.")
+    statements: list[PrintStatement] = Field(default_factory=list)
+    anchor: Optional[Anchor] = None
+
+    @staticmethod
+    def make_name(map_id: str, owner: str) -> str:
+        return f"{map_id}:{owner}"
 
 
 class TraceStep(BaseModel):

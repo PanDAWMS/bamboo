@@ -1559,6 +1559,55 @@ class Flow:
     ]
 
 
+def test_every_function_that_prints_has_its_rows_with_nothing_asked(tmp_path):
+    """What the build stores: the skeleton's print rows, field for field the
+    walk's, less what an asking adds -- for every function that prints, each
+    under the name that tells it from another of its name."""
+    roots = _tree(
+        tmp_path,
+        daemon='''\
+class Closer:
+    def run(self, spec):
+        logger.info(f"closing {spec.name} now")
+        if spec.done:
+            msg = "the dataset is already closed"
+        else:
+            msg = "the dataset is closing now"
+        logger.debug(msg)
+        spec.status = "closed"
+
+
+class Freezer:
+    def run(self, spec):
+        def warn(text):
+            logger.warning(f"freezer says {text}")
+        warn("cold")
+        logger.error("the dataset is frozen")
+''',
+    )
+
+    found = {one.owner: one for one in trace_mod.function_prints(roots, [f"{PACKAGE}/daemon"])}
+
+    closer = f"{PACKAGE}/daemon::Closer.run"
+    assert sorted(found) == [closer, f"{PACKAGE}/daemon::Freezer.run", f"{PACKAGE}/daemon::Freezer.run.warn"]
+    assert found[closer].cls == f"{PACKAGE}/daemon::Closer"
+    assert found[f"{PACKAGE}/daemon::Freezer.run.warn"].cls == ""
+    assert [(s.line, s.level, len(s.rows)) for s in found[closer].statements] == [
+        (3, "info", 1),
+        (8, "debug", 2),
+    ]
+    assert [s.line for s in found[f"{PACKAGE}/daemon::Freezer.run"].statements] == [17]
+    walked = _printed(roots, file="daemon", owner="run", lines=[9], observed="closed")
+    assert [
+        (row.line, row.text, row.pattern, row.refused, row.keyed, row.holes, row.prefix)
+        for row in walked
+    ] == [
+        (s.line, row.text, row.pattern, row.refused, row.keyed, row.holes, row.prefix)
+        for s in found[closer].statements
+        for row in s.rows
+    ]
+
+
 def test_a_call_whose_value_is_used_is_not_a_print(tmp_path):
     """``raise socket.error("empty packet")`` is a method named ``error``, and
     the level is read off the name: it put two rows in a skeleton that no log

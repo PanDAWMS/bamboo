@@ -43,7 +43,8 @@ The downward closure of the same corpus reaches 1566 functions at one hop and
 90% of the tree at two, so the difference is the whole point of asking only
 for what a condition names.
 
-Nothing here is written into the map.
+Nothing here is written into the map but what :func:`function_prints` reads,
+the print rows no question changes, which the build stores.
 """
 
 from __future__ import annotations
@@ -54,9 +55,10 @@ import itertools
 import logging
 import re
 import string
+import sys
 from collections import deque
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional, Sequence
+from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.calls import Types as _Types
@@ -80,6 +82,8 @@ from bamboo.codemap.models import (
     TRACE_UNBOUND,
     TRACE_WRITE,
     Handover,
+    PrintRow,
+    PrintStatement,
     SkeletonHole,
     SkeletonLine,
     TraceStep,
@@ -94,7 +98,11 @@ from bamboo.codemap.panda import pathcond
 # with ``+``, ``%`` or ``.format``, or into an attribute, is written out here
 # and is still one hole there.  Two readings of one thing; the build's is the
 # narrower, and stored ``Branch.messages`` still come from it.
-from bamboo.codemap.panda.recognizers.emit import logging_arguments
+from bamboo.codemap.panda.recognizers.emit import (
+    logging_arguments,
+    own_logging_arguments,
+)
+from bamboo.codemap.panda.recognizers.selection import log_level
 from bamboo.codemap.reading import containing_function
 
 logger = logging.getLogger(__name__)
@@ -3865,3 +3873,84 @@ def walk_from_line(
         reaching=True,
     )
 
+
+class FunctionPrints(NamedTuple):
+    """What :func:`function_prints` hands back for one function."""
+
+    file: str
+    #: ``file::qualified.name`` -- see :func:`pathcond.qualified_name`.
+    owner: str
+    #: ``file::Class`` for a method, as ``TraceStep.cls`` spells it, else ``""``.
+    cls: str
+    func: ast.FunctionDef | ast.AsyncFunctionDef
+    #: The hash of the text the rows were read from.
+    blob_sha: str
+    statements: list[PrintStatement]
+
+
+def function_prints(roots: dict[str, Path], files: Sequence[str]) -> Iterator[FunctionPrints]:
+    """Every function in *files* that makes a logging call, with the rows each call prints.
+
+    The skeleton's print rows with nothing asked: no arm, so no row is placed
+    beside one, and no observed value, so none is filled in.  What is left
+    depends on the function alone, which is why the build can store it -- see
+    :class:`~bamboo.codemap.models.FunctionPrintsNode`.
+
+    One walk for every file, with the budget lifted: a budget bounds what one
+    question may cost, and here nothing is asked.  The logger's prefix is the
+    one reading that leaves the function, and a file budget spent half way
+    through would empty the later prefixes without saying so.
+
+    A function's own calls only.  ``logging_arguments`` walks into a nested
+    ``def``, whose lines are that function's: the skeleton already leaves them
+    out, and they come back under the nested function's own owner.  A call
+    the skeleton gives no row has no statement here, so the count falls short
+    of the calls and both the build's check and a reader's own count say so.
+    """
+    state = _Walk(
+        roots, _nothing, DEFAULT_BUDGET._replace(files=sys.maxsize, functions=sys.maxsize)
+    )
+    for file in files:
+        parsed = state.module(file)
+        if parsed is None:
+            continue
+        source, tree = parsed
+        imports = _imported_names(tree)
+        for func, _cls in pathcond.functions_with_owner(tree):
+            levels: dict[int, str] = {}
+            for argument in own_logging_arguments(func):
+                statement = _enclosing_statement(argument)
+                if statement is not None:
+                    levels.setdefault(statement.lineno, log_level(argument) or "")
+            if not levels:
+                continue
+            owner = f"{file}::{pathcond.qualified_name(func)}"
+            # The line keeps two functions of one name apart in the walk's
+            # memo, which is keyed on the owner.
+            frame = _Frame(file, f"{owner}@{func.lineno}", func, (), imports)
+            rows: dict[int, list[PrintRow]] = {}
+            for row in state.skeleton(frame):
+                if row.kind != SKELETON_PRINT:
+                    continue
+                rows.setdefault(row.line, []).append(
+                    PrintRow(
+                        text=row.text,
+                        pattern=row.pattern,
+                        refused=row.refused,
+                        keyed=row.keyed,
+                        holes=row.holes,
+                        prefix=row.prefix,
+                    )
+                )
+            cls = pathcond.class_of(tree, func)
+            yield FunctionPrints(
+                file=file,
+                owner=owner,
+                cls=f"{file}::{cls.name}" if cls is not None else "",
+                func=func,  # type: ignore[arg-type]
+                blob_sha=git_blob_sha(source),
+                statements=[
+                    PrintStatement(line=line, level=levels.get(line, ""), rows=held)
+                    for line, held in sorted(rows.items())
+                ],
+            )

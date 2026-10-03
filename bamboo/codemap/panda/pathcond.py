@@ -37,6 +37,21 @@ def functions_with_owner(
             yield from functions_with_owner(child, owner)
 
 
+def qualified_name(func: ast.AST) -> str:
+    """``Class.method``, ``function`` or ``outer.inner``: *func*'s name with what encloses it.
+
+    Read off ``parent`` links, so the tree must have them.  The bare name is
+    no identity -- ``datasetManager.py`` defines seven methods named ``run``,
+    one in each class its ``main`` declares -- and spelling every enclosing
+    ``def`` and ``class`` is what tells them apart.
+    """
+    names = [getattr(func, "name", "")]
+    for ancestor in ancestors(func):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(ancestor.name)
+    return ".".join(reversed(names))
+
+
 def attach_parents(tree: ast.AST) -> None:
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):

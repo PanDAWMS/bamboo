@@ -483,6 +483,21 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
                 click.echo(f"      {module:<56} {count} owner(s)")
             if len(by_module) > top:
                 click.echo(f"      … {len(by_module) - top} more module(s)")
+    # Every line every function can print, which a reader lays over a log
+    # region.  A call refused outright still has its row, with the reason, and
+    # is counted apart: it is a line the region can show and the map cannot
+    # match.
+    prints = fragment.function_prints
+    if prints:
+        calls = [statement for node in prints for statement in node.statements]
+        several = sum(1 for statement in calls if len(statement.rows) > 1)
+        refused = sum(1 for statement in calls if not any(row.pattern for row in statement.rows))
+        prefixed = sum(1 for statement in calls if any(row.prefix for row in statement.rows))
+        click.echo(
+            f"  function prints: {len(calls)} logging call(s) over {len(prints)} function(s), "
+            f"{several} printing more than one way, {refused} refused outright, "
+            f"{prefixed} with the logger's prefix"
+        )
     # The other side of the same statements: where the query that would carry a
     # row onwards actually is.  Reported beside the log sites because the two
     # answer one question between them -- which log to read, and where in the

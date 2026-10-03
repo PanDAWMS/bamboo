@@ -42,6 +42,7 @@ from bamboo.codemap.models import (
     Branch,
     EntityNode,
     FilterStageNode,
+    FunctionPrintsNode,
     JunctionNode,
     LogSiteNode,
     LoopCutNode,
@@ -71,6 +72,7 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
     ReadSiteNode: NodeType.READ_SITE,
     BoundaryNode: NodeType.BOUNDARY,
     ValueEnumNode: NodeType.VALUE_ENUM,
+    FunctionPrintsNode: NodeType.FUNCTION_PRINTS,
 }
 
 
@@ -659,6 +661,20 @@ class CodeMap:
         pair = f"{subject}={value}"
         sites = [site for site in await self._find(ReadSiteNode) if pair in site.consults]
         return sorted(sites, key=lambda s: (s.owner, s.anchor.line_start))
+
+    async def function_prints(self, owners: list[str]) -> dict[str, FunctionPrintsNode]:
+        """What each of *owners* prints, keyed on the owner; one not here prints nothing.
+
+        *owners* are spelled as the node spells them, ``file::Class.method``
+        -- see :attr:`FunctionPrintsNode.owner`.  Asked one owner at a time
+        rather than read whole and filtered: a reader asks for a handful of
+        functions per hop, and the whole is over a thousand nodes of rows.
+        """
+        found: dict[str, FunctionPrintsNode] = {}
+        for owner in dict.fromkeys(owners):
+            for node in await self._find(FunctionPrintsNode, owner=owner):
+                found[node.owner] = node
+        return found
 
     async def log_sites(self, owners: list[str]) -> dict[str, LogSiteNode]:
         """The log rows for *owners* that settle nothing themselves.

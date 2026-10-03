@@ -1210,6 +1210,10 @@ def map_identities_are_distinct(fragment: MapFragment) -> GateResult:
         # one ``(subject, value)`` pair, and keying per pair would put several
         # nodes on one statement.
         "read_sites",
+        # Keyed on the nesting spelled out, because the bare name is shared by
+        # seventeen of them; a function defined twice under one name would
+        # still meet here.
+        "function_prints",
     ):
         nodes = getattr(fragment, kind)
         checked += len(nodes)
@@ -1233,6 +1237,50 @@ def map_identities_are_distinct(fragment: MapFragment) -> GateResult:
         finding="two nodes share one merge key, so storing the map keeps only one",
         failures=sorted(failures),
         note="The build counts what it made; the store keeps one per signature. Nothing else compares them.",
+    )
+
+
+def prints_are_counted(fragment: MapFragment) -> GateResult:
+    """(i) Every logging call a function makes has its rows among the function's prints.
+
+    A reader trusts an absence only when no call is missing: a line that
+    should be in a region and is not means the code did not pass it.  Two
+    readings, compared line for line -- the skeleton's rows as
+    ``FunctionPrintsNode`` stores them, and the calls themselves off the
+    syntax tree (``MapFragment.print_calls``).  The census that led to the
+    node found both ways they part: fifteen lines inside ``case`` blocks the
+    skeleton left out, and two ``raise socket.error(...)`` it read as prints.
+    """
+    stored = {node.owner: sorted(s.line for s in node.statements) for node in fragment.function_prints}
+    failures: list[str] = []
+    owners = sorted(set(stored) | set(fragment.print_calls))
+    for owner in owners:
+        rows = stored.get(owner, [])
+        calls = fragment.print_calls.get(owner, [])
+        if rows != calls:
+            missing = sorted(set(calls) - set(rows))
+            extra = sorted(set(rows) - set(calls))
+            failures.append(
+                f"{owner}: "
+                + "; ".join(
+                    part
+                    for part in (
+                        f"no rows for the call(s) on {missing}" if missing else "",
+                        f"rows on {extra} where it makes no call" if extra else "",
+                    )
+                    if part
+                )
+                or f"{owner}: more than one call on a line, {calls}"
+            )
+    return GateResult(
+        gate="prints-are-counted",
+        passed=not failures,
+        checked=len(owners),
+        unit="functions",
+        question="does every logging call a function makes have its rows?",
+        finding="a function's prints leave out a call, or hold one it does not make",
+        failures=failures,
+        note="A line missing from a function's prints reads as one the code cannot print.",
     )
 
 
@@ -2244,6 +2292,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
     if fragment.annotation_readings:
         results.append(container_annotations_agree(fragment))
         results.append(annotations_are_read(fragment))
+    if fragment.function_prints or fragment.print_calls:
+        results.append(prints_are_counted(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

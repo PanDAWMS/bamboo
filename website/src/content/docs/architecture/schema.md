@@ -63,7 +63,7 @@ what keep them apart.
 |---|---|---|
 | Where it comes from | LLM extraction from incidents, human-validated | Machine-derived from source by `build-map` |
 | If you lose it | Irreplaceable | Rebuild it in a minute |
-| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss`, `LogSite`, `ReadSite` |
+| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss`, `LogSite`, `ReadSite`, `FunctionPrints` |
 
 That separation is not tidiness: `clear_all()` drops everything in the database, so
 rebuilding a Code Map would take the incident graph with it. `clear_map(map_id)` exists
@@ -97,11 +97,11 @@ materialised when the backward walk needs variable-length paths, and not before.
 
 ## Extended catalogue
 
-The model defines a larger set of node and relationship types — **28 node types** and
+The model defines a larger set of node and relationship types — **29 node types** and
 **23 relationship types** in total — available for future extraction strategies beyond the core
 incident-analysis pipeline.
 
-### Node types (28)
+### Node types (29)
 
 ```
 - Symptom: Symptom messages and failures
@@ -134,6 +134,7 @@ Code Map types (machine-derived from source, separate namespace):
 - Gloss: A reading of one function, with the exact text that reading was given
 - LogSite: Where one function's diagnostics land, for a function that decides nothing
 - ReadSite: One statement that asks the database for rows by a value
+- FunctionPrints: Every line one function can print, for every function in the corpus that prints
 ```
 
 ### Relationship types (23)

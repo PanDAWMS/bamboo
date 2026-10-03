@@ -23,13 +23,15 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from bamboo.codemap import reading
+from bamboo.codemap import reading, trace
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
 from bamboo.codemap.models import (
+    Anchor,
     AnnotationAudit,
     CallStop,
+    FunctionPrintsNode,
     JunctionNode,
     MapFragment,
     SourceModule,
@@ -43,7 +45,7 @@ from bamboo.codemap.panda.attribution import (
     class_bases,
     spec_annotation_forms,
 )
-from bamboo.codemap.panda.pathcond import functions_with_owner
+from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner, qualified_name
 from bamboo.codemap.panda.recognizers import outbound
 from bamboo.codemap.panda.recognizers import (
     alias,
@@ -60,6 +62,26 @@ from bamboo.codemap.panda.recognizers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _print_calls(modules: list[SourceModule]) -> dict[str, list[int]]:
+    """``owner -> the line of each logging call the function makes itself``, off the syntax tree.
+
+    The other reading of ``FunctionPrintsNode.statements``: no skeleton, no
+    message, only the calls -- each the value of a statement of its own, so
+    the statement's line.  Spelled with the owner the node carries.
+    """
+    lines: dict[str, list[int]] = {}
+    for module in modules:
+        attach_parents(module.tree)
+        for func, _cls in functions_with_owner(module.tree):
+            calls = emit.own_logging_arguments(func)
+            if calls:
+                lines[f"{module.rel_path}::{qualified_name(func)}"] = sorted(
+                    argument.parent.parent.lineno  # type: ignore[attr-defined]
+                    for argument in calls
+                )
+    return lines
 
 
 def _merge_uplinks(*sources: dict) -> dict:
@@ -595,6 +617,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # nobody's business at build time.
         self._glossed = reading.attach(fragment, self._modules)
 
+        # What every function prints, as the skeleton reads it with nothing
+        # asked: the rows the querier walked each function for.  Counted a
+        # second way off the syntax tree, so that a call the skeleton leaves
+        # out fails ``prints-are-counted`` instead of reading as a line the
+        # code cannot print.
+        fragment.function_prints.extend(self._function_prints())
+        fragment.print_calls = _print_calls(self._modules)
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
@@ -604,6 +634,43 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             len(fragment.junctions),
         )
         return fragment
+
+    def _function_prints(self) -> list[FunctionPrintsNode]:
+        """One node per function that prints, read by :func:`trace.function_prints`.
+
+        The walk reads each file again, from the same root, and a file whose
+        text differs from the build's reading of it means the corpus moved
+        under the build: the build is void, and saying so beats storing rows
+        from one tree beside nodes from another.
+        """
+        shas = {module.rel_path: module.blob_sha for module in self._modules}
+        nodes: list[FunctionPrintsNode] = []
+        for found in trace.function_prints(self._roots, list(shas)):
+            if found.blob_sha != shas[found.file]:
+                raise RuntimeError(
+                    f"{found.file} changed while the map was being built; "
+                    "build again from a tree nothing writes to"
+                )
+            nodes.append(
+                FunctionPrintsNode(
+                    name=FunctionPrintsNode.make_name(self.map_id, found.owner),
+                    map_id=self.map_id,
+                    derived_from=self._version,
+                    owner=found.owner,
+                    cls=found.cls,
+                    function=found.func.name,
+                    count=len(found.statements),
+                    statements=found.statements,
+                    anchor=Anchor(
+                        package=found.file.split("/", 1)[0],
+                        file=found.file,
+                        line_start=found.func.lineno,
+                        line_end=found.func.end_lineno,
+                        blob_sha=found.blob_sha,
+                    ),
+                )
+            )
+        return nodes
 
     @property
     def emits(self) -> int:

@@ -73,6 +73,7 @@ class NodeType(str, Enum):
     GLOSS = "Gloss"
     LOG_SITE = "LogSite"
     READ_SITE = "ReadSite"
+    FUNCTION_PRINTS = "FunctionPrints"
 
 
 #: The labels that make up the Code Map namespace.
@@ -97,6 +98,7 @@ CODE_MAP_NODE_TYPES: frozenset["NodeType"] = frozenset(
         NodeType.GLOSS,
         NodeType.LOG_SITE,
         NodeType.READ_SITE,
+        NodeType.FUNCTION_PRINTS,
     }
 )
 

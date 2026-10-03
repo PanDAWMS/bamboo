@@ -12925,6 +12925,90 @@ def test_the_new_node_kind_is_on_every_list_that_has_to_know_about_it():
     assert NodeType.LOOP_CUT.value in diff.CONTENT_FIELDS
 
 
+def test_the_function_prints_kind_is_on_every_list_that_has_to_know_about_it():
+    from bamboo.codemap import lookup
+    from bamboo.codemap.models import MAP_NODE_GROUPS, FunctionPrintsNode
+    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+
+    assert NodeType.FUNCTION_PRINTS in CODE_MAP_NODE_TYPES
+    assert NodeType.FUNCTION_PRINTS.value in diff.CONTENT_FIELDS
+    assert "function_prints" in MAP_NODE_GROUPS
+    assert lookup._MODELS[FunctionPrintsNode] is NodeType.FUNCTION_PRINTS
+
+
+def _prints(owner: str, *lines: int):
+    from bamboo.codemap.models import FunctionPrintsNode, PrintRow, PrintStatement
+
+    return FunctionPrintsNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=FunctionPrintsNode.make_name(MAP_ID, owner),
+        owner=owner,
+        function=owner.rsplit(".", 1)[-1],
+        count=len(lines),
+        statements=[
+            PrintStatement(line=line, level="debug", rows=[PrintRow(text="'done'", pattern="done")])
+            for line in lines
+        ],
+    )
+
+
+def test_a_call_the_prints_leave_out_fails_the_count():
+    """A reader trusts an absence only when no call is missing, so the stored
+    rows are held line for line against the calls read off the tree."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        function_prints=[_prints("x.py::A.run", 3, 5), _prints("x.py::B.run", 7)],
+        print_calls={"x.py::A.run": [3, 9], "x.py::B.run": [7], "x.py::C.run": [2]},
+    )
+
+    result = gates.prints_are_counted(fragment)
+
+    assert not result.passed
+    assert result.failures == [
+        "x.py::A.run: no rows for the call(s) on [9]; rows on [5] where it makes no call",
+        "x.py::C.run: no rows for the call(s) on [2]",
+    ]
+
+
+def test_prints_that_hold_every_call_pass_the_count():
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        function_prints=[_prints("x.py::A.run", 3, 5)],
+        print_calls={"x.py::A.run": [3, 5]},
+    )
+
+    assert gates.prints_are_counted(fragment).passed
+
+
+def test_the_calls_are_counted_off_the_tree_under_the_owner_the_node_carries():
+    """Each function its own calls: a nested ``def`` prints under its own
+    name, and ``raise socket.error(...)`` is not a print at all."""
+    from bamboo.codemap.panda.plugin import _print_calls
+
+    source = (
+        "class Bridge:\n"
+        "    def recv(self, spec):\n"
+        "        if spec.master:\n"
+        "            raise socket.error('empty packet')\n"
+        "        logger.error('the child closed the socket')\n"
+        "        def later():\n"
+        "            logger.info('later')\n"
+        "        match spec.kind:\n"
+        "            case 1:\n"
+        "                logger.debug('one')\n"
+    )
+
+    calls = _print_calls([_module(source, "pandaserver/taskbuffer/ConBridge.py")])
+
+    assert calls == {
+        "pandaserver/taskbuffer/ConBridge.py::Bridge.recv": [5, 10],
+        "pandaserver/taskbuffer/ConBridge.py::Bridge.recv.later": [7],
+    }
+
+
 # ---------------------------------------------------------------------------
 # The uplink a knight uses: construct a worker, dispatch it, and the work runs
 # in another class.  Not a call, so no name resolution reaches it.

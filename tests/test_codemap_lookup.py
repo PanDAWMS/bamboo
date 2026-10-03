@@ -107,6 +107,51 @@ async def test_a_junction_survives_the_round_trip_unchanged():
     assert read_back.model_dump() == original.model_dump()
 
 
+async def test_a_functions_prints_come_back_by_owner_as_they_went_in():
+    """Rows are nested twice over -- statements, then the ways each prints --
+    and go in as JSON; asked by owner, one the map has no node for is absent."""
+    from bamboo.codemap.models import (
+        FunctionPrintsNode,
+        PrintRow,
+        PrintStatement,
+        SkeletonHole,
+    )
+
+    owner = "pandaserver/daemons/scripts/datasetManager.py::main.CloserThr.run"
+    original = FunctionPrintsNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=FunctionPrintsNode.make_name(MAP_ID, owner),
+        owner=owner,
+        function="run",
+        count=1,
+        statements=[
+            PrintStatement(
+                line=210,
+                level="debug",
+                rows=[
+                    PrintRow(
+                        text="f'closing {name}'",
+                        pattern=r"closing\ .*",
+                        holes=[SkeletonHole(expression="name", prints="text")],
+                        prefix=r"<\ .*?\ >\ ",
+                    ),
+                    PrintRow(text="msg", refused="the message is handed in"),
+                ],
+            )
+        ],
+        anchor=Anchor(package="pandaserver", file=owner.split("::")[0], line_start=193),
+    )
+    code_map = await _stored(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, function_prints=[original])
+    )
+
+    found = await code_map.function_prints([owner, "pandaserver/x.py::Other.run"])
+
+    assert list(found) == [owner]
+    assert found[owner].model_dump() == original.model_dump()
+
+
 async def test_the_writers_of_a_subject_are_all_of_them():
     """The fan-out is the system's, not the map's -- so nothing is ranked away."""
     fragment = MapFragment(

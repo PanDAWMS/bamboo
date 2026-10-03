@@ -161,6 +161,14 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "log_level",
         "log_files",
     ),
+    # ``statements`` holds each call's line: a line added above the function
+    # moves every one of them, which between two builds of one tree is nothing.
+    NodeType.FUNCTION_PRINTS.value: (
+        "cls",
+        "function",
+        "count",
+        "statements",
+    ),
 }
 
 _IDENTITY = "identity: the node's signature or part of it, so equal on both sides"
@@ -212,6 +220,7 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
         "loop_line": _POSITION,
         "anchor": _POSITION,
     },
+    NodeType.FUNCTION_PRINTS.value: {"owner": _IDENTITY, "anchor": _POSITION},
 }
 
 #: What a branch says, compared between two branches of one outcome.  ``tags``
@@ -255,6 +264,7 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "call_stops": "the calls the build could not place -- see CallStop",
     "calls_considered": _REPORT,
     "row_key_sources": _REPORT,
+    "print_calls": "the second reading prints-are-counted checks the stored rows against",
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,
     "spec_annotation_forms": _REPORT,
