@@ -766,6 +766,32 @@ class Daemon:
     assert not any("nested-def" in entry for entry in held[0].unseen)
 
 
+def test_a_write_in_a_nested_class_does_not_replace_the_functions_own(tmp_path):
+    """``add_main.main`` sets ``taskBuffer = tbuf`` and a thread class inside it
+    sets ``taskBuffer = self.taskBuffer`` in its own ``run()``.
+
+    That is the nested function's variable.  Taken for an overwrite, it left
+    ``main``'s read answered by the thread's line and nothing else.
+    """
+    roots = _tree(
+        tmp_path,
+        adder='''\
+class Adder:
+    def main(self, tbuf, row):
+        taskBuffer = tbuf
+        class Thread:
+            def run(self):
+                taskBuffer = self.taskBuffer
+                taskBuffer.go()
+        row.status = taskBuffer
+''',
+    )
+
+    ours, _note = _walk(roots, file="adder", owner="main", lines=[8], reading_at=8)
+
+    assert [s.line for s in ours if s.kind == models.TRACE_BINDING and s.name == "taskBuffer"] == [3]
+
+
 # ---------------------------------------------------------------------------
 # The line production prints for this arm
 # ---------------------------------------------------------------------------
