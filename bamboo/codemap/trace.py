@@ -609,6 +609,11 @@ def _blocks_of(statement: ast.stmt) -> list[tuple[str, list[ast.stmt]]]:
     order is what lets the reader see that without being told it.
 
     ``elif`` comes back as ``else:`` wrapping an ``if``, which is what it is.
+    A ``match`` comes back as its subject, a block holding nothing of its own,
+    and then each ``case`` as a block beside it -- the cases are siblings the
+    way an ``if`` and its ``else`` are.  While this returned nothing for one,
+    the fifteen lines ``workflow_core.py`` prints inside a ``case`` were in no
+    skeleton at all.
     """
     if isinstance(statement, ast.If):
         blocks = [(f"if {_clip(_text(statement.test))}:", statement.body)]
@@ -639,6 +644,12 @@ def _blocks_of(statement: ast.stmt) -> list[tuple[str, list[ast.stmt]]]:
     if isinstance(statement, (ast.With, ast.AsyncWith)):
         held = ", ".join(_clip(_text(item.context_expr)) for item in statement.items)
         return [(f"with {held}:", statement.body)]
+    if isinstance(statement, ast.Match):
+        blocks = [(f"match {_clip(_text(statement.subject))}:", [])]
+        for case in statement.cases:
+            guard = f" if {_clip(_text(case.guard))}" if case.guard else ""
+            blocks.append((f"case {_clip(_text(case.pattern))}{guard}:", case.body))
+        return blocks
     return []
 
 

@@ -1522,6 +1522,44 @@ class Proxy:
     ]
 
 
+def test_a_line_printed_in_a_case_is_in_the_skeleton(tmp_path):
+    """``workflow_core.py`` prints fifteen lines inside ``case`` blocks, and
+    none of them was in any skeleton -- a reader laying one over a log reads
+    such a line as one the function cannot print."""
+    roots = _tree(
+        tmp_path,
+        flow='''\
+class Flow:
+    def check(self, spec, result):
+        match result.status:
+            case Status.done:
+                spec.status = "checked"
+            case Status.partial if spec.loud:
+                logger.info(f"partial for {spec.name}")
+            case _:
+                logger.warning("unexpected status; skipped")
+                return
+''',
+    )
+
+    rows = _skeleton(roots, file="flow", owner="check", lines=[5])
+
+    shape = [
+        (row.kind, row.text if row.kind == models.SKELETON_BRANCH else row.line, row.depth)
+        for row in rows
+    ]
+    assert shape == [
+        (models.SKELETON_BRANCH, "match result.status:", 0),
+        (models.SKELETON_BRANCH, "case Status.done:", 0),
+        (models.SKELETON_ARM, 5, 1),
+        (models.SKELETON_BRANCH, "case Status.partial if spec.loud:", 0),
+        (models.SKELETON_PRINT, 7, 1),
+        (models.SKELETON_BRANCH, "case _:", 0),
+        (models.SKELETON_PRINT, 9, 1),
+    ]
+
+
+
 # ---------------------------------------------------------------------------
 # What a site has to be able to reach
 # ---------------------------------------------------------------------------
