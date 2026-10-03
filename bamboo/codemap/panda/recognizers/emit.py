@@ -106,12 +106,21 @@ def logging_arguments(func: ast.AST) -> list[ast.expr]:
     an expression it cannot render at least leaves a refusal.  Sixty-five calls
     in this corpus go that way, and a reader lays the skeleton over a grep of
     the log region: a line present there and absent here reads as certainty.
+
+    A call is a print only as a statement of its own, its value thrown away.
+    The level is read off the method's name, and ``raise socket.error("empty
+    packet")`` is a method named ``error`` whose value is the exception: read
+    as a print, it put two rows in ``ConBridge.bridge_recv``'s skeleton that
+    no log can hold.  Those two are the only calls in the corpus the rule
+    removes.
     """
     found: list[ast.expr] = []
     for node in ast.walk(func):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
         if not node.args:
+            continue
+        if not isinstance(getattr(node, "parent", None), ast.Expr):
             continue
         argument = node.args[0]
         # ``log_level`` reads the level off the call *enclosing* a node, so it

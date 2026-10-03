@@ -1559,6 +1559,26 @@ class Flow:
     ]
 
 
+def test_a_call_whose_value_is_used_is_not_a_print(tmp_path):
+    """``raise socket.error("empty packet")`` is a method named ``error``, and
+    the level is read off the name: it put two rows in a skeleton that no log
+    can hold."""
+    roots = _tree(
+        tmp_path,
+        bridge='''\
+class Bridge:
+    def recv(self, spec):
+        if spec.master:
+            raise socket.error("empty packet")
+        logger.error("the child closed the socket on us")
+        spec.status = "closed"
+''',
+    )
+
+    rows = _printed(roots, file="bridge", owner="recv", lines=[6])
+
+    assert [row.line for row in rows] == [5]
+
 
 # ---------------------------------------------------------------------------
 # What a site has to be able to reach
