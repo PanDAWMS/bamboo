@@ -1178,6 +1178,62 @@ def _message_sites(
     return plain, appended, opaque
 
 
+def _still_written(
+    plain: list[ast.expr],
+    appended: list[ast.expr],
+    opaque: list[ast.AST],
+    at: ast.AST,
+    spelled: str,
+) -> tuple[list[ast.expr], list[ast.expr], list[ast.AST]]:
+    """Of :func:`_message_sites`' bindings, the ones that can still be what *at* prints.
+
+    Lying above the call was not enough.  A binding the function overwrites
+    on every way to the call, or leaves the function after, is not a way the
+    line is written: ``AtlasDDMClient.getAvailableFiles`` sets
+    ``error_message`` in its ``try`` and again in the handler just before
+    printing it, and ``TaskCommando.runImpl``'s ``tmpMsg``, written further
+    down the loop, was offered to the line that prints ``executing ...`` --
+    four lines said to print ``set task_status=ready``, where one does.  The
+    build's printed statements carried 978 rows that no run can print, on 305
+    statements.
+
+    So it is the walk's own reading (:func:`pathcond.surviving_writes`): what
+    ``+=`` adds keeps what was there, and ``except ... as`` binds on entering
+    the handler, as Python does.  A binding inside the call's own statement
+    (``log(msg := ...)``) is kept: the flow asks what reaches a statement's
+    entry, and that one is written on the way through.
+    """
+    def written_at(node: ast.AST, kind: str) -> ast.AST:
+        handler = getattr(node, "parent", None)
+        if (
+            kind == "opaque"
+            and isinstance(handler, ast.ExceptHandler)
+            and handler.name == spelled
+            and handler.body
+            and handler.body[0] is node
+        ):
+            return handler
+        return pathcond.site_of(node)
+
+    pairs = [
+        (node, written_at(node, kind), kind)
+        for kind, nodes in (("plain", plain), ("appended", appended), ("opaque", opaque))
+        for node in nodes
+    ]
+    kept = pathcond.surviving_writes(
+        [site for _node, site, _kind in pairs],
+        at,
+        rereads=[site for _node, site, kind in pairs if kind == "appended"],
+        as_run=True,
+    )
+    alive = {id(site) for site in kept} | {id(pathcond.site_of(at))}
+
+    def still(kind: str) -> list:
+        return [node for node, site, one in pairs if one == kind and id(site) in alive]
+
+    return still("plain"), still("appended"), still("opaque")
+
+
 def _clip(text: str, width: int = 72) -> str:
     """*text* on one line, cut to *width* with an ellipsis when it is longer."""
     flat = " ".join(text.split())
@@ -2012,7 +2068,8 @@ class _Walk:
         """The ways a name, an attribute or an item printed here was written.
 
         What this function writes into it before the call: every outright
-        binding that can reach it, each a way of its own, and what ``+=`` adds
+        binding that can still be what it prints (:func:`_still_written`),
+        each a way of its own, and what ``+=`` adds
         after as a hole at the end.  What ``+=`` adds is a way of its own too,
         where it has literal text -- the line then *contains* it, wherever the
         first binding left off.  ``err_str += traceback.format_exc()`` has
@@ -2034,10 +2091,7 @@ class _Walk:
         held = self._sites.get((id(frame.func), spelled))
         if held is None:
             held = self._sites[(id(frame.func), spelled)] = _message_sites(frame.func, spelled)
-        plain, appended, opaque = held
-        plain = [value for value in plain if pathcond.can_reach(value, at, current=True)]
-        appended = [value for value in appended if pathcond.can_reach(value, at, current=True)]
-        opaque = [site for site in opaque if pathcond.can_reach(site, at, current=True)]
+        plain, appended, opaque = _still_written(*held, at, spelled)
         if not plain and not opaque:
             if not isinstance(expr, ast.Name):
                 return [], [REFUSED_SET_ELSEWHERE]

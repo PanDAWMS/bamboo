@@ -1856,6 +1856,80 @@ def f(items, log):
     assert any("starting the first pass" in one for one in printed), printed
 
 
+def test_a_message_written_further_down_the_loop_is_not_what_the_top_prints(tmp_path):
+    """``TaskCommando.runImpl``: ``tmpMsg = f"executing ..."`` is printed on the next line.
+
+    The ``set task_status=`` written below it comes round the loop, but the
+    binding at the top replaces it on every pass before the call.  Read as a
+    way of the top line, it had four lines printing the status where one does.
+    """
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(items, log):
+    for item in items:
+        message = f"executing {item}"
+        log.info(message)
+        spec.status = "ready"
+        message = f"set task_status={spec.status}"
+        log.info(message)
+""",
+    )
+
+    top = _rows_at(roots, 5, arm=6)
+    bottom = _rows_at(roots, 8, arm=6)
+
+    assert [row.pattern for row in top] == [r"executing\ "]
+    assert [row.pattern for row in bottom] == [r"set\ task_status="]
+
+
+def test_a_message_overwritten_in_the_handler_is_not_what_the_handler_prints(tmp_path):
+    """``AtlasDDMClient.getAvailableFiles``: the ``try`` sets the message and returns.
+
+    The call that logs it can raise into the handler, so the ``try``'s binding
+    does reach the handler -- and the handler writes its own before printing.
+    """
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(spec, log):
+    spec.status = "ready"
+    try:
+        error_message = "dataset spec carries no dataset name"
+        log.error(error_message)
+        return 1
+    except Exception as e:
+        error_message = f"failed with {e}"
+        log.error(error_message)
+""",
+    )
+
+    (row,) = _rows_at(roots, 10)
+
+    assert row.pattern == r"failed\ with\ "
+
+
+def test_what_plus_equals_adds_is_printed_until_the_message_is_replaced(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(spec, log):
+    spec.status = "ready"
+    message = "head"
+    message += " for the tail"
+    log.info(message)
+    message = "replaced outright"
+    log.info(message)
+""",
+    )
+
+    kept = [row.pattern for row in _rows_at(roots, 6)]
+    replaced = [row.pattern for row in _rows_at(roots, 8)]
+
+    assert r"head" in kept and any("for\\ the\\ tail" in one for one in kept), kept
+    assert replaced == [r"replaced\ outright"]
+
+
 def test_a_message_the_walk_cannot_resolve_is_refused_rather_than_dropped(tmp_path):
     """A bare name bound only by an unpacking resolves to nothing, and the call
     used to leave no row at all -- where the same call holding an expression
