@@ -1542,15 +1542,16 @@ class _Walk:
             # rather than a failure: a name that comes from somewhere else is
             # exactly what a boundary is for.
             return None
-        try:
-            source = (root / relative).read_text(errors="replace")
-            tree = ast.parse(source, filename=str(root / relative))
-        except (OSError, SyntaxError, ValueError) as exc:
-            logger.debug("trace: %s unreadable (%s)", file, exc)
+        # The process's one tree for the file, never a parse of the walk's
+        # own: the caller index and the declared-type reading hold that tree's
+        # nodes -- see ``calls.parsed``.  What this walk has read is still its
+        # own, and that is what the file budget counts.
+        held = calls_mod.parsed(root / relative)
+        if held is None:
+            logger.debug("trace: %s unreadable", file)
             return None
-        pathcond.attach_parents(tree)
-        self.parsed[file] = (source, tree)
-        return self.parsed[file]
+        self.parsed[file] = held
+        return held
 
     def frame(
         self,

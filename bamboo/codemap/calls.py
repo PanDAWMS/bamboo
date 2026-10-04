@@ -23,8 +23,8 @@ This module is the one place a call is read, three ways:
 What a method changes on its object is read by :meth:`Calls.writes`, so that
 ``self.result.set_fatal()`` is a write of ``status_code`` like an assignment.
 
-Its parse cache is its own and spends none of the walk's budget, like the
-declared-type reading it is built on.
+It spends none of the walk's budget, like the declared-type reading it is
+built on, and reads the same trees -- :func:`parsed`.
 """
 
 from __future__ import annotations
@@ -56,10 +56,40 @@ UNPLACED_OPEN = "and possibly a class this reading cannot name"
 #: once per arm, per statement and per printed line, and the corpus index
 #: behind :meth:`Calls.callers` would otherwise be rebuilt for each.  Keyed by
 #: the file's stat, so a tree edited under a reading is read afresh.
-_PARSED: dict[tuple[str, int, int], Optional[ast.Module]] = {}
+_PARSED: dict[tuple[str, int, int], Optional[tuple[str, ast.Module]]] = {}
 #: ``callers`` index and answers, per set of roots.
 _INDEXES: dict[tuple, dict[str, list["CallSite"]]] = {}
 _CALLERS: dict[tuple, list["CallSite"]] = {}
+
+
+def parsed(path: Path) -> Optional[tuple[str, ast.Module]]:
+    """``(source, tree)`` for *path*, parents attached; ``None`` where it will not read or parse.
+
+    **One tree per file.**  The index behind :meth:`Calls.callers` holds the
+    nodes of whatever parse of a file existed when it was built, and a method
+    is found by the identity of its node; the walk used to parse each file
+    again for itself.  An index built before the walk reached
+    ``JediTaskBuffer.py`` held the other parse's methods, ``self.proxyPool``
+    could not be typed in them, and the DBProxy methods lost their callers --
+    by which walks had run before in the process: 9 of 144 sampled print
+    walks.  So every reading takes its tree from here, and the walk's
+    re-parsing of each file went with it.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if key not in _PARSED:
+        try:
+            source = path.read_text(errors="replace")
+            tree = ast.parse(source, filename=str(path))
+        except (OSError, SyntaxError, ValueError):
+            _PARSED[key] = None
+        else:
+            pathcond.attach_parents(tree)
+            _PARSED[key] = (source, tree)
+    return _PARSED[key]
 
 
 def _roots_key(roots: dict[str, Path]) -> tuple:
@@ -574,10 +604,11 @@ class Types:
     walked straight through the other.  What the object *is* does not depend
     on what someone called it.
 
-    Its own parse cache, apart from the walk's: reading a base class or the
-    interface's own module to learn a type is not a step on the path, so it
-    does not spend the walk's file budget.  The frame's own module is taken
-    from the walk, because ``pathcond.class_of`` finds a method by identity.
+    Its own record of what it read, apart from the walk's: reading a base
+    class or the interface's own module to learn a type is not a step on the
+    path, so it does not spend the walk's file budget.  The trees are the
+    same ones -- :func:`parsed` -- because ``pathcond.class_of`` finds a
+    method by identity.
     """
 
     #: How deep a declaration is followed through fields, locals and calls.
@@ -617,25 +648,8 @@ class Types:
         if file not in self.parsed:
             package, _, relative = file.partition("/")
             root = self.roots.get(package)
-            tree = None
-            if root is not None and relative:
-                path = root / relative
-                try:
-                    stat = path.stat()
-                except OSError:
-                    stat = None
-                key = (str(path), stat.st_mtime_ns, stat.st_size) if stat else None
-                if key is not None and key in _PARSED:
-                    tree = _PARSED[key]
-                elif key is not None:
-                    try:
-                        tree = ast.parse(path.read_text(errors="replace"))
-                    except (OSError, SyntaxError, ValueError):
-                        tree = None
-                    if tree is not None:
-                        pathcond.attach_parents(tree)
-                    _PARSED[key] = tree
-            self.parsed[file] = tree
+            held = parsed(root / relative) if root is not None and relative else None
+            self.parsed[file] = held[1] if held is not None else None
         return self.parsed[file]
 
     def file_of(self, node: ast.AST) -> Optional[str]:

@@ -23,6 +23,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from bamboo.codemap import calls as calls_mod
 from bamboo.codemap import reading, trace
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
@@ -971,12 +972,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 if _is_test_module(rel_path):
                     skipped_tests += 1
                     continue
-                try:
-                    source = path.read_text(errors="replace")
-                    tree = ast.parse(source, filename=str(path))
-                except SyntaxError:
+                # The process's one tree for the file, so the build and the
+                # walks it makes hold the same nodes -- see ``calls.parsed``.
+                held = calls_mod.parsed(path)
+                if held is None:
                     logger.debug("skipping unparseable module: %s", path)
                     continue
+                source, tree = held
                 modules.append(
                     SourceModule(
                         package=pkg,

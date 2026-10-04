@@ -2487,10 +2487,10 @@ def attach_mover_gaps(strategy: Strategy, roots: dict) -> None:
 def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[str]:
     """``["@2391 sql_where_clause, sorting_sql -- <why>"]`` for one function, or none."""
     from bamboo.codemap import gates
-    from bamboo.codemap.calls import Calls, Types
+    from bamboo.codemap.calls import Calls, Types, parsed
     from bamboo.codemap.gitsource import blob_sha
     from bamboo.codemap.panda import sql
-    from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner
+    from bamboo.codemap.panda.pathcond import functions_with_owner
     from bamboo.codemap.panda.recognizers import sqlwrite
 
     file, sha = follow.mover_files.get(owner, (owner.partition("::")[0], ""))
@@ -2498,14 +2498,12 @@ def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[str]:
     root = roots.get(package)
     if root is None or not relative:
         return ["not read: the file is outside the tree the answer was given"]
-    try:
-        source = (root / relative).read_text(errors="replace")
-        tree = ast.parse(source)
-    except (OSError, SyntaxError, ValueError):
+    held = parsed(root / relative)
+    if held is None:
         return ["not read: the file could not be read from this tree"]
+    source, tree = held
     if sha and blob_sha(source) != sha:
         return ["not read: this tree is not the one that was mapped"]
-    attach_parents(tree)
     name = owner.rpartition("::")[2]
     # Read through the calls the build read through, or a statement the build
     # followed into a callee reads here as one that stopped.

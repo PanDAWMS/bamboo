@@ -2809,6 +2809,49 @@ def test_a_print_line_from_another_tree_is_refused(tmp_path):
     assert "not the one that was mapped" in walked.note
 
 
+def test_a_caller_is_placed_whichever_reading_parsed_its_file_first(tmp_path):
+    """One tree per file.  The caller index is built the first time a walk
+    asks for callers, from whatever parse of each file exists then; the walk
+    parsed ``front.py`` again for itself on the way, and ``self.front``'s
+    class was then looked up by the identity of ``run`` in the walk's tree,
+    where that ``run`` is not.  ``self.front.put(7)`` was placed nowhere, and
+    the corpus's DBProxy methods lost their ``JediTaskBuffer`` callers by
+    which walks had run before them in the process."""
+    roots = _tree(
+        tmp_path,
+        **{
+            "store.py": '''\
+class Store:
+    def save(self, value):
+        log.info(f"saved {value}")
+''',
+            "front.py": '''\
+from pandajedi.store import Store
+
+
+class Front:
+    store: Store
+
+    def put(self, v):
+        self.store.save(v)
+
+
+class Outer:
+    front: Front
+
+    def run(self):
+        self.front.put(7)
+''',
+        },
+    )
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/store.py", line=3, classify=provenance.classify)
+
+    said = [(step.kind, step.name, step.value, step.detail) for step in walked.steps]
+    assert (TRACE_HANDOVER, "value", "v", "passed to save here") in said
+    assert (TRACE_HANDOVER, "v", "7", "passed to put here") in said
+
+
 # ---------------------------------------------------------------------------
 # Across a function's edge: calls, parameters, methods that change an object
 # ---------------------------------------------------------------------------
