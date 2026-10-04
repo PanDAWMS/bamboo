@@ -13307,7 +13307,9 @@ def test_a_mixins_logger_comes_down_its_constructors_and_from_the_module_that_re
 def test_each_call_is_read_by_the_logger_it_is_made_on(tmp_path):
     """One module, two loggers, two files; ``setup_logger`` opens a file as
     ``getLogger`` does; the standard library's ``logging.getLogger`` opens none,
-    and a call whose logger leads nowhere keeps its module's files, said so."""
+    a call whose logger leads nowhere keeps its module's files, said so; and one
+    followed to the standard library's logger has no file, even in a module
+    whose own function opens one."""
     found = _landed(
         tmp_path,
         {
@@ -13328,12 +13330,25 @@ def test_each_call_is_read_by_the_logger_it_is_made_on(tmp_path):
                         tmp_log.info("got")
                 """,
             "pandaserver/daemons/master.py": """\
+                from pandaserver.daemons.utils import DaemonMaster
                 def get_logger():
                     my_logger = logging.getLogger("PanDA-Daemon-Master")
                     return my_logger
                 def main():
                     main_log = get_logger()
                     main_log.info("start")
+                    master = DaemonMaster(logger=main_log)
+                """,
+            "pandaserver/daemons/utils.py": """\
+                def daemon_loop():
+                    base_logger = logger_utils.setup_logger("daemons")
+                    tmp_log = logger_utils.make_logger(base_logger, "worker")
+                    tmp_log.info("daemon worker start")
+                class DaemonMaster:
+                    def __init__(self, logger):
+                        self.logger = logger
+                    def run(self):
+                        self.logger.info("master run")
                 """,
         },
     )
@@ -13346,7 +13361,10 @@ def test_each_call_is_read_by_the_logger_it_is_made_on(tmp_path):
     assert found["pandajedi/jedimsgprocessor/panda_to_jedi_msg_processor.py::PandaToJediMsgProcPlugin.process"] == [
         (5, ["panda-panda_to_jedi_msg_processor.log"], "logger")
     ]
-    assert found["pandaserver/daemons/master.py::main"] == [(6, [], "module")]
+    assert found["pandaserver/daemons/master.py::main"] == [(7, [], "logger")]
+    # The module's file is ``daemon_loop``'s logger's, and the master's lines are not in it.
+    assert found["pandaserver/daemons/utils.py::daemon_loop"] == [(4, ["panda-daemons.log"], "logger")]
+    assert found["pandaserver/daemons/utils.py::DaemonMaster.run"] == [(9, [], "logger")]
 
 
 def _prints(owner: str, *lines: int):

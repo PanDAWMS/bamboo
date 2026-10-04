@@ -245,10 +245,11 @@ class _Way(NamedTuple):
 
 
 class _Trail:
-    """The files the paths reached, and whether any path stopped short of a file."""
+    """The files the paths reached, whether any path reached a logger, and whether any stopped short of one."""
 
     def __init__(self) -> None:
         self.files: set[str] = set()
+        self.reached = False
         self.open = False
 
 
@@ -312,7 +313,10 @@ class LoggerFiles:
         receiver = call.func.value if isinstance(call.func, ast.Attribute) else call.func
         self._value(trail, file, func, receiver, pathcond.site_of(call), _Way(frozenset()))
         own = files_of(file, self.declared, self.inherited)
-        if trail.files and not trail.open:
+        if trail.reached and not trail.open:
+            # Possibly no file at all: the daemon master's logger is the
+            # standard library's, writing to stdout, and the module's file
+            # standing in for it named one these lines are never in.
             return Landing(sorted(trail.files), LOG_FILES_FOLLOWED)
         if trail.files:
             return Landing(sorted(trail.files | set(own)), LOG_FILES_PARTLY)
@@ -350,9 +354,14 @@ class LoggerFiles:
         opened = _opened_name(call, file)
         if opened:
             trail.files.add(_FILENAME.format(opened))
+            trail.reached = True
             return
         called = call.func
         name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+        if name in _OPENERS and isinstance(called, ast.Attribute) and getattr(called.value, "id", "") == "logging":
+            # A logger, and none of PandaLogger's files.
+            trail.reached = True
+            return
         if name in _WRAPPERS and call.args:
             self._value(trail, file, func, call.args[0], at, way)
             return
