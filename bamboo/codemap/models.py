@@ -3289,6 +3289,18 @@ class PrintRow(BaseModel):
     prefix: str = Field(default="", description="As :attr:`SkeletonLine.prefix`.")
 
 
+#: How a print statement's ``log_files`` was found -- see
+#: :func:`~bamboo.codemap.panda.recognizers.logfile.statement_files`.
+#: ``logger``: the logger the call is made on was followed, on every path, to
+#: the files it opens, so a line absent from all of them was not printed.
+#: ``partly``: some paths were followed and some were not, and the module's own
+#: files stand in for the rest -- the list can name a file the line never
+#: reaches.  ``module``: nothing was followed, and the list is the module's.
+LOG_FILES_FOLLOWED = "logger"
+LOG_FILES_PARTLY = "partly"
+LOG_FILES_OF_MODULE = "module"
+
+
 class PrintStatement(BaseModel):
     """One logging call and every way it can print, in the order the skeleton gives them."""
 
@@ -3299,6 +3311,21 @@ class PrintStatement(BaseModel):
         description=(
             "One per way the call can print, at least one: a message that "
             "cannot be written out still has a row, with the reason."
+        ),
+    )
+    log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The files this call's lines land in: those of the logger it is "
+            "made on, followed to where that logger was opened.  A logger the "
+            "caller handed in lands in the caller's file."
+        ),
+    )
+    log_files_basis: str = Field(
+        default="",
+        description=(
+            f"How ``log_files`` was found: {LOG_FILES_FOLLOWED!r}, "
+            f"{LOG_FILES_PARTLY!r} or {LOG_FILES_OF_MODULE!r}."
         ),
     )
 
@@ -3330,17 +3357,26 @@ class FunctionPrintsNode(BaseNode):
     seventeen of these functions -- ``datasetManager.py`` has seven named ``run``.
 
     ``log_files`` is where the rows land, so a reader knows which log to lay
-    them over.  It is the function's module's own: the file its logger
-    declares, or for a module that declares none, the files of the classes
-    that mix it in.  ``JobComplexModule.archiveJob`` writes ``start
-    status=...`` into ``panda-DBProxy.log`` or ``panda-JediDBProxy.log``, and
-    the only files a reader had been given for it were its junction's
+    them over.  ``JobComplexModule.archiveJob`` writes ``start status=...``
+    into ``panda-DBProxy.log`` or ``panda-JediDBProxy.log``, and the only
+    files a reader had been given for it were its junction's
     ``observable_log_files`` -- its callers', the right answer to where a line
-    saying the value was settled appears and the wrong one here.  The same
-    ``logfile.files_of`` gives a junction its ``log_files`` and an emit its
-    file, so the three cannot disagree within a build.  A call through a
-    logger the caller passed in lands in the caller's file instead, and that
-    is not said: 365 of the corpus's 5,732 calls, in 95 functions.
+    saying the value was settled appears and the wrong one here.
+
+    **Per statement, because the logger is.**  Each statement carries the files
+    of the logger it is called on, and the function's list is their union.
+    The module's own file was the first answer, and for 4,735 of the 5,159
+    calls in modules that have one it is still the answer.  It is not for the
+    rest.  ``TypicalWatchDogBase.pre_action`` prints all 30 of its lines
+    through the ``tmpLog`` that ``WatchDog`` hands it, so they land in
+    ``panda-WatchDog.log`` and in none of the three files its module's
+    subclasses declare.  ``AtlasProdJobBroker.doBrokerage`` also writes into
+    ``panda-AtlasProdTaskBroker.log`` whenever the task broker passes its own
+    logger as ``glLog``.  One function can do both: ``pilot_api.acquire_jobs``
+    prints 12 lines through ``_logger`` and 2 through ``pilot_logger``, and
+    those two loggers are different files.  A wrong file is worse than none,
+    because nothing found reads as "not printed".  So each statement also says
+    how its files were found (``log_files_basis``).
     """
 
     node_type: NodeType = NodeType.FUNCTION_PRINTS
@@ -3360,9 +3396,8 @@ class FunctionPrintsNode(BaseNode):
     log_files: list[str] = Field(
         default_factory=list,
         description=(
-            "The files the function's module writes to: the one its logger "
-            "declares, or the ones of the classes that mix it in.  Empty for a "
-            "module neither gives a file."
+            "Every file one of the function's statements lands in: the union "
+            "of the statements' ``log_files``."
         ),
     )
     anchor: Optional[Anchor] = None

@@ -28,6 +28,7 @@ from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
 from bamboo.codemap.models import (
+    LOG_FILES_OF_MODULE,
     Anchor,
     AnnotationAudit,
     CallStop,
@@ -82,6 +83,31 @@ def _print_calls(modules: list[SourceModule]) -> dict[str, list[int]]:
                     for argument in calls
                 )
     return lines
+
+
+def _print_landings(
+    modules: list[SourceModule],
+    reader: Optional[logfile.LoggerFiles],
+) -> dict[tuple[str, int], logfile.Landing]:
+    """``(owner, statement line) -> where that logging call's lines land``.
+
+    Over the build's own trees, the same calls :func:`_print_calls` reads, so
+    that the call graph finds a caller in a tree it has parsed.  Empty without
+    a call graph: every statement then takes its module's files.
+    """
+    found: dict[tuple[str, int], logfile.Landing] = {}
+    if reader is None:
+        return found
+    for module in modules:
+        attach_parents(module.tree)
+        for func, _cls in functions_with_owner(module.tree):
+            owner = f"{module.rel_path}::{qualified_name(func)}"
+            for argument in emit.own_logging_arguments(func):
+                call = argument.parent  # type: ignore[attr-defined]
+                key = (owner, call.parent.lineno)
+                if key not in found:
+                    found[key] = reader.of_call(module.rel_path, func, call)
+    return found
 
 
 def _merge_uplinks(*sources: dict) -> dict:
@@ -646,6 +672,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         shas = {module.rel_path: module.blob_sha for module in self._modules}
         declared = logfile.declared_files(self._modules)
         inherited = logfile.inherited_files(self._modules, declared)
+        calls = getattr(self, "_calls", None)
+        landings = _print_landings(
+            self._modules, logfile.LoggerFiles(calls, declared, inherited) if calls is not None else None
+        )
         nodes: list[FunctionPrintsNode] = []
         for found in trace.function_prints(self._roots, list(shas)):
             if found.blob_sha != shas[found.file]:
@@ -653,6 +683,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     f"{found.file} changed while the map was being built; "
                     "build again from a tree nothing writes to"
                 )
+            own = logfile.files_of(found.file, declared, inherited)
+            for statement in found.statements:
+                landing = landings.get((found.owner, statement.line))
+                statement.log_files = landing.files if landing else list(own)
+                statement.log_files_basis = landing.basis if landing else LOG_FILES_OF_MODULE
             nodes.append(
                 FunctionPrintsNode(
                     name=FunctionPrintsNode.make_name(self.map_id, found.owner),
@@ -663,7 +698,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     function=found.func.name,
                     count=len(found.statements),
                     statements=found.statements,
-                    log_files=logfile.files_of(found.file, declared, inherited),
+                    log_files=sorted({file for statement in found.statements for file in statement.log_files}),
                     anchor=Anchor(
                         package=found.file.split("/", 1)[0],
                         file=found.file,

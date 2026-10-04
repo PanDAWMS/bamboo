@@ -13106,6 +13106,249 @@ def test_a_functions_prints_name_the_files_its_module_writes_to(tmp_path):
     }
 
 
+def _landed(tmp_path, sources: dict[str, str]) -> dict[str, list[tuple[int, list[str], str]]]:
+    """``owner -> [(line, log_files, basis)]`` for each printing function, read with the corpus's calls."""
+    import textwrap
+
+    from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    for rel, text in sources.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(text))
+    plugin = PandaCodeMapPlugin()
+    plugin.prepare(tmp_path)
+    plugin._calls = sqlwrite.corpus_calls(plugin._modules, plugin._roots)
+    return {
+        node.owner: [(s.line, s.log_files, s.log_files_basis) for s in node.statements]
+        for node in plugin._function_prints()
+    }
+
+
+def test_a_logger_handed_in_lands_in_the_file_of_the_caller_that_opened_it(tmp_path):
+    """``pre_action`` prints through the ``tmpLog`` ``WatchDog`` hands it, so into
+    ``panda-WatchDog.log`` -- not into its own module's file.  The call is on a
+    plugin chosen at run time, which the call graph places nowhere, so it is
+    found by the method's name."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandajedi/jediorder/WatchDog.py": """\
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                class WatchDog:
+                    def start(self, impl):
+                        tmpLog = MsgWrapper(logger)
+                        impl.pre_action(tmpLog, "atlas")
+                """,
+            "pandajedi/jedidog/TypicalWatchDogBase.py": """\
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                class TypicalWatchDogBase:
+                    def pre_action(self, tmpLog, vo):
+                        tmpLog.info(f"rescue for vo={vo}")
+                """,
+        },
+    )
+
+    assert found["pandajedi/jedidog/TypicalWatchDogBase.py::TypicalWatchDogBase.pre_action"] == [
+        (4, ["panda-WatchDog.log"], "logger")
+    ]
+
+
+def test_a_helper_handed_its_own_modules_logger_stays_in_that_file(tmp_path):
+    """Most loggers handed in are the module's own, given to a helper beside it."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandaserver/api/v1/file_server_api.py": """\
+                _logger = PandaLogger().getLogger("api_file_server")
+                def _get_content_length(req, tmp_logger):
+                    tmp_logger.debug("length")
+                def upload(req):
+                    tmp_logger = LogWrapper(_logger, "upload")
+                    _get_content_length(req, tmp_logger)
+                """,
+        },
+    )
+
+    assert found["pandaserver/api/v1/file_server_api.py::_get_content_length"] == [
+        (3, ["panda-api_file_server.log"], "logger")
+    ]
+
+
+def test_a_logger_a_caller_may_pass_adds_that_callers_file_to_the_functions_own(tmp_path):
+    """``doBrokerage`` opens its own logger unless it is given ``glLog``, and the
+    task broker gives it one: its lines are in either file.  A caller that
+    passes nothing leaves the default ``None``, which prints nothing anywhere."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandajedi/jedibrokerage/AtlasProdJobBroker.py": """\
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                class AtlasProdJobBroker:
+                    def doBrokerage(self, taskSpec, glLog=None):
+                        if glLog is None:
+                            tmpLog = MsgWrapper(logger)
+                        else:
+                            tmpLog = glLog
+                        tmpLog.debug("start")
+                """,
+            "pandajedi/jedibrokerage/AtlasProdTaskBroker.py": """\
+                from pandajedi.jedibrokerage.AtlasProdJobBroker import AtlasProdJobBroker
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                class AtlasProdTaskBroker:
+                    def doBrokerage(self, taskSpec):
+                        tmpLog = MsgWrapper(logger)
+                        jobBroker = AtlasProdJobBroker()
+                        jobBroker.doBrokerage(taskSpec, tmpLog)
+                        jobBroker.doBrokerage(taskSpec)
+                """,
+        },
+    )
+
+    assert found["pandajedi/jedibrokerage/AtlasProdJobBroker.py::AtlasProdJobBroker.doBrokerage"] == [
+        (8, ["panda-AtlasProdJobBroker.log", "panda-AtlasProdTaskBroker.log"], "logger")
+    ]
+
+
+def test_a_parameter_keeps_what_the_caller_passed_unless_every_path_rebinds_it(tmp_path):
+    """``if tmpLog is None: tmpLog = ...`` binds the parameter on one branch, so
+    the caller's logger still reaches the call; a binding on every path
+    replaces it."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandaserver/taskbuffer/InputChunk.py": """\
+                _logger = PandaLogger().getLogger("InputChunk")
+                class InputChunk:
+                    def getSubChunk(self, tmpLog=None):
+                        if tmpLog is None:
+                            tmpLog = LogWrapper(_logger, "sub")
+                        tmpLog.debug("sub chunk")
+                    def own(self, tmpLog):
+                        tmpLog = LogWrapper(_logger, "own")
+                        tmpLog.debug("own chunk")
+                """,
+            "pandajedi/jediorder/JobSplitter.py": """\
+                from pandaserver.taskbuffer.InputChunk import InputChunk
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                class JobSplitter:
+                    def doSplit(self):
+                        tmpLog = MsgWrapper(logger)
+                        chunk = InputChunk()
+                        chunk.getSubChunk(tmpLog)
+                        chunk.own(tmpLog)
+                """,
+        },
+    )
+
+    assert found["pandaserver/taskbuffer/InputChunk.py::InputChunk.getSubChunk"] == [
+        (6, ["panda-InputChunk.log", "panda-JobSplitter.log"], "logger")
+    ]
+    assert found["pandaserver/taskbuffer/InputChunk.py::InputChunk.own"] == [
+        (9, ["panda-InputChunk.log"], "logger")
+    ]
+
+
+def test_a_mixins_logger_comes_down_its_constructors_and_from_the_module_that_rebinds_it(tmp_path):
+    """The proxy mixins print through ``self._log_stream``, which ``OraDBProxy.DBProxy``
+    hands up through ``super().__init__`` -- and ``JediDBProxy`` rebinds
+    ``OraDBProxy._logger`` to its own, so in a JEDI process the same lines land in
+    ``panda-JediDBProxy.log``.  A sibling mixin's constructor is not this object's."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandaserver/taskbuffer/db_proxy_mods/base_module.py": """\
+                class BaseModule:
+                    def __init__(self, log_stream):
+                        self._log_stream = log_stream
+                    def create_tagged_logger(self, comment):
+                        tmp_log = LogWrapper(self._log_stream, comment)
+                        return tmp_log
+                """,
+            "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py": """\
+                from pandaserver.taskbuffer.db_proxy_mods.base_module import BaseModule
+                class JobComplexModule(BaseModule):
+                    def __init__(self, log_stream):
+                        super().__init__(log_stream)
+                    def archiveJob(self, job):
+                        tmp_log = self.create_tagged_logger(" /* DBProxy.archiveJob */")
+                        tmp_log.debug(f"start status={job.jobStatus}")
+                """,
+            "pandaserver/taskbuffer/db_proxy_mods/other_module.py": """\
+                from pandaserver.taskbuffer.db_proxy_mods.base_module import BaseModule
+                _other = PandaLogger().getLogger("Other")
+                class OtherModule(BaseModule):
+                    def __init__(self):
+                        super().__init__(_other)
+                """,
+            "pandaserver/taskbuffer/OraDBProxy.py": """\
+                from pandaserver.taskbuffer.db_proxy_mods.job_complex_module import JobComplexModule
+                _logger = PandaLogger().getLogger("DBProxy")
+                class DBProxy(JobComplexModule):
+                    def __init__(self):
+                        super().__init__(_logger)
+                """,
+            "pandajedi/jedicore/JediDBProxy.py": """\
+                from pandaserver.taskbuffer import OraDBProxy
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                OraDBProxy._logger = logger
+                class DBProxy(OraDBProxy.DBProxy):
+                    pass
+                """,
+        },
+    )
+
+    assert found["pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::JobComplexModule.archiveJob"] == [
+        (7, ["panda-DBProxy.log", "panda-JediDBProxy.log"], "logger")
+    ]
+
+
+def test_each_call_is_read_by_the_logger_it_is_made_on(tmp_path):
+    """One module, two loggers, two files; ``setup_logger`` opens a file as
+    ``getLogger`` does; the standard library's ``logging.getLogger`` opens none,
+    and a call whose logger leads nowhere keeps its module's files, said so."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandaserver/api/v1/pilot_api.py": """\
+                _logger = PandaLogger().getLogger("api_pilot")
+                pilot_logger = PandaLogger().getLogger("PilotRequests")
+                def acquire_jobs(req):
+                    tmp_logger = LogWrapper(_logger, "acquire_jobs")
+                    tmp_logger.debug("start")
+                    pilot_logger.info("acquired")
+                    unknown_log.info("from somewhere")
+                """,
+            "pandajedi/jedimsgprocessor/panda_to_jedi_msg_processor.py": """\
+                base_logger = logger_utils.setup_logger(__name__.split(".")[-1])
+                class PandaToJediMsgProcPlugin:
+                    def process(self, msg):
+                        tmp_log = logger_utils.make_logger(base_logger, token="x", method_name="process")
+                        tmp_log.info("got")
+                """,
+            "pandaserver/daemons/master.py": """\
+                def get_logger():
+                    my_logger = logging.getLogger("PanDA-Daemon-Master")
+                    return my_logger
+                def main():
+                    main_log = get_logger()
+                    main_log.info("start")
+                """,
+        },
+    )
+
+    assert found["pandaserver/api/v1/pilot_api.py::acquire_jobs"] == [
+        (5, ["panda-api_pilot.log"], "logger"),
+        (6, ["panda-PilotRequests.log"], "logger"),
+        (7, ["panda-api_pilot.log"], "module"),
+    ]
+    assert found["pandajedi/jedimsgprocessor/panda_to_jedi_msg_processor.py::PandaToJediMsgProcPlugin.process"] == [
+        (5, ["panda-panda_to_jedi_msg_processor.log"], "logger")
+    ]
+    assert found["pandaserver/daemons/master.py::main"] == [(6, [], "module")]
+
+
 def _prints(owner: str, *lines: int):
     from bamboo.codemap.models import FunctionPrintsNode, PrintRow, PrintStatement
 
