@@ -2717,7 +2717,7 @@ def written_back(
     the statement keeps for a schema name, a value or an ``IN`` list cannot,
     and is read past.
     """
-    runs = [run for run in executions(func) if any(one is call for one in run.run_at)]
+    runs = [run for run in _executions_held(func) if any(one is call for one in run.run_at)]
     if not runs:
         return None
     keys = {
@@ -2731,6 +2731,25 @@ def written_back(
     if any(stop.reason == FRAGMENT_NOT_RENDERED for run in runs for stop in run.unresolved):
         return None
     return ()
+
+
+def _executions_held(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
+    """:func:`executions` for :func:`written_back`, kept on the function.
+
+    A reader asks about every call of a function in turn, and reading the
+    function's statements is the whole cost: ``archiveJob``'s 27 calls took
+    5.0 seconds read again for each.  Kept per reading context, as
+    :func:`_imported_lists` is -- the calls the statements are read across --
+    and not kept under :func:`at_call`, which reads one run's values.
+    """
+    if _AT_CALL is not None:
+        return executions(func)
+    held = getattr(func, "_written_back_runs", None)
+    if held is not None and held[0] == id(_CALLS):
+        return held[1]
+    runs = executions(func)
+    func._written_back_runs = (id(_CALLS), runs)  # type: ignore[attr-defined]
+    return runs
 
 
 def written_back_at(path: Path, line: int) -> Optional[tuple[str, ...]]:

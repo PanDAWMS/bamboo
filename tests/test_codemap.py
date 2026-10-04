@@ -1989,6 +1989,29 @@ def test_written_back_is_found_from_a_file_and_the_line_of_the_call(tmp_path):
     assert sql.written_back_at(module, 2) is None
 
 
+def test_a_function_is_read_once_for_all_the_calls_asked_about(monkeypatch):
+    """``archiveJob``'s 27 calls read its statements 27 times: 5.0 seconds, where once is enough."""
+    func = _func(
+        "def f(self):\n"
+        "    sql = 'UPDATE ATLAS_PANDA.T SET a=:a WHERE b=:b '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+        "    sqlI = 'INSERT INTO ATLAS_PANDA.T (a) VALUES (:a) RETURNING row_ID INTO :newRowID '\n"
+        "    self.cur.execute(sqlI + comment, varMap)\n"
+    )
+    first, second = [
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "execute"
+    ]
+    reads = []
+    real = sql.executions
+    monkeypatch.setattr(sql, "executions", lambda one: reads.append(one) or real(one))
+
+    assert sql.written_back(func, first) == ()
+    assert sql.written_back(func, second) == (":newRowID",)
+    assert reads == [func]
+
+
 def test_a_column_the_statement_interpolates_is_its_own_reason():
     """``WHERE {}=:{}`` -- ``queryDatasetWithMap`` builds the column from a key.
 
