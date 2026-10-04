@@ -100,7 +100,7 @@ def _is_message_plugin(module: SourceModule) -> bool:
         if not isinstance(node, ast.ClassDef):
             continue
         for base in node.bases:
-            name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+            name = base_name(base)
             if _MESSAGE_BASE in (name or ""):
                 return True
     return False
@@ -1112,7 +1112,7 @@ def subclass_edges(
             if not isinstance(node, ast.ClassDef):
                 continue
             for base in node.bases:
-                name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", None)
+                name = base_name(base)
                 if name:
                     edges.setdefault(name, []).append((node, module.rel_path))
     return edges
@@ -1529,14 +1529,7 @@ def _fanouts_in(
                 if not places or len(places) != 1 or (name, default) in seen:
                     continue
                 seen.add((name, default))
-                base = next(
-                    (
-                        b.id if isinstance(b, ast.Name) else getattr(b, "attr", "")
-                        for b in places[0].bases
-                        if isinstance(b, (ast.Name, ast.Attribute))
-                    ),
-                    "",
-                )
+                base = next((base_name(b) or "" for b in places[0].bases if base_name(b)), "")
                 yield DispatchFanout(
                     at=node.lineno,
                     selector=_rendered(node.value),

@@ -825,7 +825,7 @@ class Types:
         seen = {(file, cls.name)}
         while queue and len(order) < self.LINEAGE:
             where, base = queue.pop(0)
-            found = self.class_named(where, base)
+            found = self.class_named(where, pathcond.unsubscripted(base))
             if found is None or (found[0], found[1].name) in seen:
                 continue
             seen.add((found[0], found[1].name))

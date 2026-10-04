@@ -6338,12 +6338,21 @@ def test_a_subscripted_base_class_is_still_a_base_class():
         "\n"
         "class Plain(JediKnight, FactoryBase):\n    pass\n"
     )
-    bases = attribution.class_bases([_module(source, "pandajedi/jediorder/WatchDog.py")])
+    module = _module(source, "pandajedi/jediorder/WatchDog.py")
+    bases = attribution.class_bases([module])
 
     assert bases["WatchDog"] == ["JediKnight", "FactoryBase"]
     # The unsubscripted form is what the corpus writes today, and it must read
     # exactly as it did -- this rule is a widening, not a replacement.
     assert bases["Plain"] == ["JediKnight", "FactoryBase"]
+    # Every other reader of a base clause reads it the same way: the subclass
+    # edges a mixin's log file and a dispatched worker are found by, and the
+    # same-module lineage the walk reads a field through.  ``calls.Types.lineage``
+    # is held in test_codemap_calls.
+    edges = trigger.subclass_edges([module])
+    assert sorted(node.name for node, _where in edges["FactoryBase"]) == ["Plain", "WatchDog"]
+    factory = ast.parse("class FactoryBase:\n    pass\nclass WatchDog(FactoryBase[WatchDogBase]):\n    pass\n")
+    assert [held.name for held in pathcond.bases_in(factory, factory.body[1])] == ["FactoryBase"]
 
 
 def test_a_type_argument_is_not_mistaken_for_a_base_class():

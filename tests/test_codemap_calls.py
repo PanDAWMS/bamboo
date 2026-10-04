@@ -57,6 +57,35 @@ def test_a_method_on_self_lands_in_the_class_or_a_base(tmp_path):
     assert (target.file, target.func.name, target.cls.name) == ("pkg/base.py", "helper", "Base")
 
 
+def test_a_base_with_type_arguments_is_still_the_base_a_method_lands_in(tmp_path):
+    """Eight JEDI factories are ``FactoryBase[...]``, and ``self.getImpl`` there is ``FactoryBase``'s.
+
+    A subscript has no name, and the lineage dropped it: the class read as
+    deriving from nothing, its inherited calls landed nowhere, and its
+    ``FactoryBase.__init__(self, ...)`` call reached no constructor.
+    """
+    roots = _tree(
+        tmp_path,
+        base=(
+            "class FactoryBase(Generic[T]):\n"
+            "    def __init__(self, vos, logger):\n        self.logger = logger\n"
+            "    def getImpl(self, vo):\n        return None\n"
+        ),
+        m=(
+            "from pkg.base import FactoryBase\n\n"
+            "class JobBroker(FactoryBase[JobBrokerBase]):\n"
+            "    def run(self):\n        return self.getImpl('atlas')\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    (target,) = _placed(calls, "m", "run", "self.getImpl").targets
+    cls = next(n for n in calls.types.tree("pkg/m.py").body if isinstance(n, ast.ClassDef))
+
+    assert (target.file, target.func.name) == ("pkg/base.py", "getImpl")
+    assert [held.name for _where, held in calls.types.lineage("pkg/m.py", cls)] == ["JobBroker", "FactoryBase"]
+
+
 def test_a_closure_calling_self_reads_the_enclosing_methods_class(tmp_path):
     """``getJobs`` builds its WHERE in a closure that calls ``self.construct_where_clause``."""
     roots = _tree(

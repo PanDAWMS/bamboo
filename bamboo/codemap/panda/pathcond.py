@@ -496,7 +496,22 @@ def bases_in(tree: ast.AST, cls: ast.ClassDef) -> list[ast.ClassDef]:
     return order
 
 
+def unsubscripted(base: ast.expr) -> ast.expr:
+    """A base clause without its type arguments: ``FactoryBase[WatchDogBase]`` -> ``FactoryBase``.
+
+    Eight of JEDI's factories derive from ``FactoryBase[...]``, and a reader
+    that looks for a name and finds a subscript drops the base without a
+    word -- the class reads as deriving from one thing fewer.  The argument
+    is not a base (see :func:`~bamboo.codemap.panda.attribution.base_name`),
+    so only the subscripted value is kept.
+    """
+    while isinstance(base, ast.Subscript):
+        base = base.value
+    return base
+
+
 def _base_name(base: ast.expr) -> Optional[str]:
+    base = unsubscripted(base)
     if isinstance(base, ast.Name):
         return base.id
     if isinstance(base, ast.Attribute):
