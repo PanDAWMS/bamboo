@@ -13387,9 +13387,29 @@ def test_each_call_is_read_by_the_logger_it_is_made_on(tmp_path):
                     def run(self):
                         self.logger.info("master run")
                 """,
+            "pandaserver/workflow/snakeparser/parser.py": """\
+                class Parser:
+                    def __init__(self, workflow_file, logger=None):
+                        if logger:
+                            self._logger = logger
+                        else:
+                            self._logger = logging.getLogger(__name__)
+                        self._logger.debug("create workflow")
+                """,
+            "pandaserver/taskbuffer/workflow_processor.py": """\
+                from pandaserver.workflow.snakeparser.parser import Parser
+                _logger = PandaLogger().getLogger("workflow_processor")
+                def process(workflow_file):
+                    parser = Parser(workflow_file, logger=_logger)
+                """,
         },
     )
 
+    # Handed a logger, or opening the standard library's: the line is in the
+    # file only when the caller handed one, so its absence there proves nothing.
+    assert found["pandaserver/workflow/snakeparser/parser.py::Parser.__init__"] == [
+        (7, ["panda-workflow_processor.log"], "partly")
+    ]
     assert found["pandaserver/api/v1/pilot_api.py::acquire_jobs"] == [
         (5, ["panda-api_pilot.log"], "logger"),
         (6, ["panda-PilotRequests.log"], "logger"),

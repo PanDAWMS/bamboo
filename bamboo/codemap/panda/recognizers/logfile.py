@@ -245,11 +245,16 @@ class _Way(NamedTuple):
 
 
 class _Trail:
-    """The files the paths reached, whether any path reached a logger, and whether any stopped short of one."""
+    """The files the paths reached, whether any path reached a logger, and whether any stopped short of one.
+
+    *standard* is a path that reached the standard library's logger, which
+    prints wherever its handlers say and into none of PandaLogger's files.
+    """
 
     def __init__(self) -> None:
         self.files: set[str] = set()
         self.reached = False
+        self.standard = False
         self.open = False
 
 
@@ -313,6 +318,12 @@ class LoggerFiles:
         receiver = call.func.value if isinstance(call.func, ast.Attribute) else call.func
         self._value(trail, file, func, receiver, pathcond.site_of(call), _Way(frozenset()))
         own = files_of(file, self.declared, self.inherited)
+        if trail.standard and trail.files:
+            # Some paths print into a file and some do not: the snakemake
+            # parser uses the logger it is handed, and its own standard
+            # library one when it is handed none.  A line absent from the
+            # file may have gone the other way, so absence proves nothing.
+            return Landing(sorted(trail.files | set(own)), LOG_FILES_PARTLY)
         if trail.reached and not trail.open:
             # Possibly no file at all: the daemon master's logger is the
             # standard library's, writing to stdout, and the module's file
@@ -361,6 +372,7 @@ class LoggerFiles:
         if name in _OPENERS and isinstance(called, ast.Attribute) and getattr(called.value, "id", "") == "logging":
             # A logger, and none of PandaLogger's files.
             trail.reached = True
+            trail.standard = True
             return
         if name in _WRAPPERS and call.args:
             self._value(trail, file, func, call.args[0], at, way)
