@@ -13250,6 +13250,43 @@ def test_a_parameter_keeps_what_the_caller_passed_unless_every_path_rebinds_it(t
     ]
 
 
+def test_a_factory_prints_into_the_file_of_every_subclass_that_constructs_it(tmp_path):
+    """``FactoryBase.initializeMods`` prints through the logger each JEDI factory
+    hands ``FactoryBase.__init__`` -- and the factories derive from
+    ``FactoryBase[...]``.  With the subscripted base unread, one placed caller
+    stood for all of them, and the lines read as landing in that one file."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandajedi/jedicore/FactoryBase.py": """\
+                class FactoryBase(Generic[T]):
+                    def __init__(self, vos, logger):
+                        self.logger = MsgWrapper(logger)
+                    def initializeMods(self):
+                        self.logger.error("wrong config definition")
+                """,
+            "pandajedi/jediorder/JobBroker.py": """\
+                from pandajedi.jedicore.FactoryBase import FactoryBase
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                class JobBroker(FactoryBase[JobBrokerBase]):
+                    def __init__(self, vos):
+                        FactoryBase.__init__(self, vos, logger)
+                """,
+            "pandajedi/jediorder/TaskSetupper.py": """\
+                from pandajedi.jedicore.FactoryBase import FactoryBase
+                logger = PandaLogger().getLogger(__name__.split(".")[-1])
+                class TaskSetupper(FactoryBase[TaskSetupperBase]):
+                    def __init__(self, vos):
+                        super().__init__(vos, logger)
+                """,
+        },
+    )
+
+    assert found["pandajedi/jedicore/FactoryBase.py::FactoryBase.initializeMods"] == [
+        (5, ["panda-JobBroker.log", "panda-TaskSetupper.log"], "logger")
+    ]
+
+
 def test_a_mixins_logger_comes_down_its_constructors_and_from_the_module_that_rebinds_it(tmp_path):
     """The proxy mixins print through ``self._log_stream``, which ``OraDBProxy.DBProxy``
     hands up through ``super().__init__`` -- and ``JediDBProxy`` rebinds
