@@ -1902,6 +1902,93 @@ def test_a_schema_interpolated_into_the_where_is_not_something_it_stopped_on():
     assert [run.unresolved for run in sql.executions(func)] == [()]
 
 
+def _the_execute(func):
+    return next(
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "execute"
+    )
+
+
+def test_a_statement_returning_into_a_bind_writes_that_key_back():
+    """``RETURNING row_ID INTO :newRowID`` -- the one key the cursor writes.
+
+    A reader that cannot see inside ``execute`` takes the map as rewritten
+    whole; the statement says which key is, spelt as the map spells it.
+    """
+    func = _func(
+        "def f(self):\n"
+        "    sql = 'INSERT INTO ATLAS_PANDA.jobParamsTable (PandaID) VALUES (:PandaID) '\n"
+        "    sql += 'RETURNING row_ID INTO :newRowID '\n"
+        "    varMap[':newRowID'] = self.cur.var(varNUMBER)\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+
+    assert sql.written_back(func, _the_execute(func)) == (":newRowID",)
+
+
+def test_a_statement_with_no_returning_writes_nothing_back_past_its_schema_hole():
+    """``kickExhaustedTasks_JEDI``'s ``UPDATE``: the arm's ``:newStatus`` is what was sent.
+
+    The schema is a hole in every statement the reassembly reads, and a hole
+    there cannot hold a clause; read as "cannot say", it would leave nearly
+    every map in the corpus rewritten.
+    """
+    func = _func(
+        "def f(self, flag):\n"
+        "    sql = f'UPDATE {schema}.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID '\n"
+        "    if flag:\n"
+        "        varMap[':newStatus'] = 'exhausted'\n"
+        "    else:\n"
+        "        varMap[':newStatus'] = 'finishing'\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+
+    assert sql.written_back(func, _the_execute(func)) == ()
+
+
+def test_a_statement_missing_a_piece_cannot_say_what_it_writes_back():
+    """``sqlP += sql_where_clause``: the piece nobody can read could hold the clause."""
+    func = _func(
+        "def f(self):\n"
+        "    sqlP = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab '\n"
+        "    sqlP += sql_where_clause\n"
+        "    self.cur.execute(sqlP + comment, getValMap)\n"
+    )
+
+    assert sql.written_back(func, _the_execute(func)) is None
+
+
+def test_a_call_running_either_of_two_statements_writes_back_what_either_returns():
+    """One arm inserts and returns the new id, the other updates in place: the key may be written."""
+    func = _func(
+        "def f(self, new):\n"
+        "    if new:\n"
+        "        sql = 'INSERT INTO ATLAS_PANDA.T (a) VALUES (:a) RETURNING PandaID INTO :newPandaID '\n"
+        "    else:\n"
+        "        sql = 'UPDATE ATLAS_PANDA.T SET a=:a WHERE PandaID=:PandaID '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+
+    assert sql.written_back(func, _the_execute(func)) == (":newPandaID",)
+
+
+def test_written_back_is_found_from_a_file_and_the_line_of_the_call(tmp_path):
+    """The reader holds a file and a line, not a tree."""
+    module = tmp_path / "m.py"
+    module.write_text(
+        "def f(self):\n"
+        "    sql = 'INSERT INTO ATLAS_PANDA.T (a) VALUES (:a) RETURNING row_ID INTO :newRowID '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+        "    return varMap[':newRowID']\n"
+    )
+
+    assert sql.written_back_at(module, 3) == (":newRowID",)
+    assert sql.written_back_at(module, 2) is None
+
+
 def test_a_column_the_statement_interpolates_is_its_own_reason():
     """``WHERE {}=:{}`` -- ``queryDatasetWithMap`` builds the column from a key.
 
