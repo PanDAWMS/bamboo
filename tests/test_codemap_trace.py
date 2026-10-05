@@ -3506,6 +3506,140 @@ def test_every_object_the_walk_came_in_on_has_its_construction_followed(tmp_path
     assert _built_handovers(walked) == [("start", "extra()"), ("start", "fetch()")]
 
 
+def test_another_object_whose_construction_is_not_found_is_said_and_not_followed(tmp_path):
+    """The spare box comes from ``make_box()``: any of the other nine could be
+    it, so none is followed for it, and the step says why."""
+    knight = "    def start(self):\n        box = Box(fetch())\n        Worker(box, make_box())\n"
+    worker = (
+        "    def run(self, log):\n"
+        "        got = self.box.take()\n"
+        "        more = self.backup()\n"
+        '        log.info(f"took {got} {more}")\n'
+        "\n"
+        "    def backup(self):\n"
+        "        spare = self.spare.take()\n"
+        "        return spare\n"
+    )
+    roots = _tree(tmp_path, **{"m.py": _boxes(knight, worker)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=20, classify=provenance.classify)
+
+    (stopped,) = [s for s in walked.steps if s.name == "items" and s.kind == TRACE_UNBOUND]
+    assert stopped.detail == (
+        "a parameter; followed to the 1 of 10 call(s) placed at __init__: "
+        "the ones that built the object the walk came in on; "
+        f"another object came in later on self.spare at {PACKAGE}/m.py:23, "
+        "whose construction is not found, so 9 more call(s) are not followed"
+    )
+    assert _built_handovers(walked) == [("start", "fetch()")]
+
+
+def _filled(knight: str, elsewhere: str, box: str = "") -> str:
+    """A ``Box`` its knight fills for a worker through ``add``; *elsewhere* fills other boxes."""
+    return f"""\
+class Box:
+    def __init__(self, items):
+        self.items = items
+
+    def add(self, item):
+        self.items.append(item)
+
+    def take(self):
+        return self.items
+{box}
+
+class Worker:
+    box: Box
+
+    def __init__(self, box):
+        self.box = box
+
+    def run(self, log):
+        got = self.box.take()
+        log.info(f"took {{got}}")
+
+
+class Knight:
+{knight}
+
+{elsewhere}"""
+
+
+_JUNK = "def other():\n    junk = Box([])\n    junk.add(spill())\n"
+
+
+def _added(walked):
+    return sorted(
+        (s.owner.rsplit("::", 1)[-1], s.value)
+        for s in walked.steps
+        if s.kind == TRACE_HANDOVER and s.name in ("self.items", "item")
+    )
+
+
+def test_a_setter_called_on_another_object_is_not_walked(tmp_path):
+    """``ListWithLock.append`` is called on a broker's ``inputListWorld`` and on
+    ``JobGeneratorThread``'s ``brokerageLockIDs``; neither is the list a
+    ``TaskRefinerThread`` reads, and following them took the walk into
+    ``JobGeneratorThread.runImpl``."""
+    knight = "    def start(self):\n        box = Box([])\n        box.add(fetch())\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _filled(knight, _JUNK)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=20, classify=provenance.classify)
+
+    assert _added(walked) == [("start", "box.add(fetch())"), ("start", "fetch()")]
+    (handed,) = [s for s in walked.steps if s.kind == TRACE_HANDOVER and s.name == "self.items"]
+    assert handed.detail == "calls add here, which sets items; 1 call(s) of add on other objects not walked"
+    (stopped,) = [s for s in walked.steps if s.name == "item" and s.kind == TRACE_UNBOUND]
+    assert stopped.detail == (
+        "a parameter; followed to the 1 of 2 call(s) placed at add: "
+        "the ones made on the object the walk came in on"
+    )
+
+
+def test_a_setter_called_on_self_is_kept(tmp_path):
+    """``InputChunk.__init__`` calls ``self.addMasterDS(...)``: the object is
+    the one being built, whichever that is."""
+    box = "\n    def refill(self):\n        self.add(more())\n"
+    knight = "    def start(self):\n        box = Box([])\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _filled(knight, _JUNK, box)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=23, classify=provenance.classify)
+
+    assert _added(walked) == [("refill", "more()"), ("refill", "self.add(more())")]
+
+
+def test_a_setter_never_called_on_the_object_says_so(tmp_path):
+    """Every ``add`` is on another box: nothing is walked, and both the
+    parameter and what ``add`` assigns say why."""
+    knight = "    def start(self):\n        box = Box([])\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _filled(knight, _JUNK)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=20, classify=provenance.classify)
+
+    assert _added(walked) == []
+    (stopped,) = [s for s in walked.steps if s.name == "item" and s.kind == TRACE_UNBOUND]
+    assert stopped.detail == "a parameter; none of the 1 call(s) placed at add is made on the object the walk came in on"
+    (filled,) = [s for s in walked.steps if s.kind == TRACE_BINDING and s.owner.endswith("::add")]
+    assert filled.detail.endswith("; none of the 1 call(s) of add is made on the object the walk came in on")
+
+
+def test_where_an_object_was_built_does_not_depend_on_the_walks_budget(tmp_path):
+    """A silent-scan walk out of files had made ``JobGeneratorThread``'s
+    ``brokerageLockIDs`` an object of unknown construction; a print walk
+    found ``JobGenerator.py:410``."""
+    knight = "    def start(self):\n        box = Box(fetch())\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _boxes(knight)})
+    file = f"{PACKAGE}/m.py"
+    walk = trace_mod._Walk(roots, provenance.classify, trace_mod.Budget(files=0))
+    tree = walk.types.tree(file)
+    run = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run")
+
+    made = walk._made_at(file, run, ast.parse("self.box", mode="eval").body)
+
+    assert made == {(file, 24, 14)}
+    assert walk.note == ""
+
+
 def test_a_call_to_another_systems_interface_is_gone_into_on_this_side(tmp_path):
     """``SiteMapper.getSite`` is CRIC's answer, and it is also PanDA code that
     resolves ``nucleus:X`` to one of its sites first."""
