@@ -1068,6 +1068,80 @@ def _keyed_reads(expression: ast.AST) -> list[str]:
     return found
 
 
+#: How many callers out an ``__init__`` parameter's object is looked for, and
+#: how many calls one of them may have before it is not.  Two reaches the
+#: knight that builds a worker's list: the worker's ``__init__`` and the knight.
+_BUILT_HOPS = 2
+_BUILT_CALLERS = 16
+
+
+class _Narrowed:
+    """An ``__init__`` parameter answered by the calls that built the objects the walk came in on."""
+
+    __slots__ = ("init", "target", "name", "depth", "stopped", "every", "followed")
+
+    def __init__(self, init, target, name, depth, stopped, every, followed) -> None:
+        self.init = init
+        self.target = target
+        self.name = name
+        self.depth = depth
+        self.stopped = stopped
+        self.every = every
+        self.followed = followed
+
+
+def _site_key(site) -> tuple[str, int, int]:
+    return (site.file, site.call.lineno, site.call.col_offset)
+
+
+def _built_detail(init: "_Frame", followed: int, every: int) -> str:
+    return (
+        f"a parameter; followed to the {followed} of {every} call(s) placed at "
+        f"{getattr(init.func, 'name', '')}: the ones that built the object the walk came in on"
+    )
+
+
+def _parameters(func: ast.AST) -> set[str]:
+    args = func.args  # type: ignore[attr-defined]
+    names = {one.arg for one in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+    return names | {one.arg for one in (args.vararg, args.kwarg) if one is not None}
+
+
+def _plain_bindings(func: ast.AST, name: str) -> Optional[list[ast.expr]]:
+    """What ``name = ...`` gives *name* in *func*; ``None`` where anything else binds it."""
+    values: list[ast.expr] = []
+
+    def names(target: ast.AST) -> bool:
+        return any(isinstance(node, ast.Name) and node.id == name for node in ast.walk(target))
+
+    for node in calls_mod.own_nodes(func):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    values.append(node.value)
+                elif names(target):
+                    return None
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name and node.value is not None:
+                values.append(node.value)
+        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension, ast.NamedExpr)):
+            if names(node.target):
+                return None
+        elif isinstance(node, ast.withitem):
+            if node.optional_vars is not None and names(node.optional_vars):
+                return None
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                return None
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                return None
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any((alias.asname or alias.name.split(".")[0]) == name for alias in node.names):
+                return None
+    return values
+
+
 def _self_fills(method: ast.AST, field: str) -> list[ast.expr]:
     """What *method* puts into ``self.<field>``: ``append``, ``add`` and the like, and ``[k] =``."""
     found: list[ast.expr] = []
@@ -1559,6 +1633,13 @@ class _Walk:
         self.crossing = False
         self.crossed = 0
         self.crossing_note = ""
+        #: ``{(file, line of an __init__): [frames that asked a field it assigns]}``
+        #: -- the methods an ``__init__``'s parameters are a question about the
+        #: object of.  See :meth:`_built_on`.
+        self.asked_of: dict[tuple[str, int], list[_Frame]] = {}
+        #: ``{(file, owner): [the narrowed questions]}`` of each frame that asked
+        #: one: another call into it can bring another object.  See :meth:`_built_too`.
+        self.watched: dict[tuple[str, str], list[_Narrowed]] = {}
         #: ``_message_sites`` per (function, spelling): a function with a
         #: hundred logging calls asks for the same local a hundred times.
         self._sites: dict[tuple[int, str], tuple] = {}
@@ -3082,6 +3163,8 @@ class _Walk:
             held = self.passed.setdefault((callee.file, callee.owner), [])
             if not any(one is call for _caller, one, _bound in held):
                 held.append((frame, call, calls_mod.bind(call, target)))
+                for question in self.watched.get((callee.file, callee.owner), ()):
+                    self.beyond.append(lambda question=question: self._built_too(question))
             self.entered.add((callee.file, callee.owner))
             entered.append(callee.owner)
             # Once per function and way of taking its value: a second call of
@@ -3240,6 +3323,13 @@ class _Walk:
         sites = self._callers_beside(frame, spanned)
         if not sites:
             return False
+        every = sites
+        if getattr(frame.func, "name", "") == "__init__" and not spanned:
+            built = self._built_on(frame)
+            if built is not None:
+                kept = [site for site in sites if _site_key(site) in built]
+                if kept and len(kept) < len(sites) and len(kept) <= _MAX_CALLERS:
+                    sites = kept
         if len(sites) > _MAX_CALLERS:
             # A function built or called from everywhere -- ``SiteMapper`` is
             # constructed by every daemon -- has no one caller to answer with,
@@ -3254,6 +3344,16 @@ class _Walk:
             f"{getattr(frame.func, 'name', '')}"
             + (f" besides the handover through {', '.join(sorted(spanned))}" if spanned else "")
         )
+        if len(sites) < len(every):
+            stopped.detail = _built_detail(frame, len(sites), len(every))
+            question = _Narrowed(frame, target, name, depth, stopped, every, {_site_key(site) for site in sites})
+            for asker in self.asked_of.get((frame.file, getattr(frame.func, "lineno", 0)), []):
+                self.watched.setdefault((asker.file, asker.owner), []).append(question)
+        self._follow_callers(target, name, depth, sites)
+        return True
+
+    def _follow_callers(self, target: "calls_mod.Target", name: str, depth: int, sites: list) -> None:
+        """A step for each of *sites* saying what it hands *name*, and the names that reads asked in its caller."""
         for site in sites:
             caller = self.frame(
                 site.file, f"{site.file}::{site.func.name}", line=site.func.lineno  # type: ignore[attr-defined]
@@ -3267,11 +3367,206 @@ class _Walk:
                 caller, call, target, name, calls_mod.bind(call, target), depth
             )
             if not self.record(step):
-                return True
+                return
             if step.reads:
                 self.entered.add((caller.file, caller.owner))
                 self.want(caller, step.reads, depth + 1, statement)
-        return True
+
+    def _built_too(self, question: "_Narrowed") -> None:
+        """Another call came into a frame that asked *question*: follow what built its object as well.
+
+        The walk keeps one frame per function, so ``ListWithLock.get`` entered
+        from ``TaskRefinerThread`` at line 129 and later, in the same walk,
+        from ``JobGeneratorThread`` at line 592 asks for ``self.dataList``
+        once -- and the answer was settled on the first object alone.  What is
+        followed stays followed; the builders of the new object are added, or,
+        where they are not found or would pass :data:`_MAX_CALLERS`, said on
+        the step and not walked.  Without this, a walk that read
+        ``JobGeneratorThread``'s list kept only the first object's builder.
+        """
+        built = self._built_on(question.init)
+        stopped = question.stopped
+        if built is None:
+            rest = len(question.every) - len(question.followed)
+            if "not found" not in stopped.detail:
+                stopped.detail += f"; another object came in whose construction is not found, so {rest} more are not followed"
+            return
+        extra = [
+            site for site in question.every
+            if _site_key(site) not in question.followed and _site_key(site) in built
+        ]
+        if not extra:
+            return
+        if len(question.followed) + len(extra) > _MAX_CALLERS:
+            if "too many" not in stopped.detail:
+                stopped.detail += f"; other objects came in, built at {len(extra)} more, too many to follow"
+            return
+        question.followed |= {_site_key(site) for site in extra}
+        stopped.detail = _built_detail(question.init, len(question.followed), len(question.every))
+        self._follow_callers(question.target, question.name, question.depth, extra)
+
+    def _built_on(self, init: _Frame) -> Optional[set[tuple[str, int, int]]]:
+        """The calls that built the objects the walk came in on, when an ``__init__`` parameter is asked.
+
+        A parameter of ``__init__`` is chosen where the object is built, and
+        every class built in more than one place gave the walk every one of
+        them: ``ListWithLock`` is built by twelve knights and message
+        processors, and the ``dataList`` a ``TaskRefinerThread`` reads through
+        ``self.taskList.get(nTasks)`` is the one ``TaskRefiner.start`` built at
+        line 72 -- the other eleven are other workers' lists, and twelve was
+        too many to follow at all.  The walk came into ``get`` on
+        ``self.taskList``, so that object's construction is found the way the
+        walk finds anything: backwards, through what was assigned to it
+        (:meth:`_constructions`).
+
+        Only for a constructor.  An object is built once, so its builder is a
+        fact about that object; a setter is called on it any number of times,
+        through any name it is handed on under, which is a different question.
+
+        ``None`` -- every call, as before -- unless each frame that asked was
+        entered by calls on objects whose constructions are all found.  A field
+        assigned from outside its class (``gen_thr.inputList = None``) is not
+        seen here, as it is not by :meth:`_assigned_field`.
+
+        Measured on the corpus walks: 254 of 6,647 change, each first at the
+        narrowed step (``ListWithLock``'s ``dataList`` 208, ``SiteMapper``'s
+        ``taskBuffer`` 46); the six answers keep their conclusions, and
+        relocationFlag's 12 "too many" becomes the three places
+        ``JobGeneratorThread``'s list is built.
+        """
+        askers = self.asked_of.get((init.file, getattr(init.func, "lineno", 0)))
+        if not askers:
+            return None
+        target = (init.file, getattr(init.func, "lineno", 0))
+        found: set[tuple[str, int, int]] = set()
+        for asker in askers:
+            objects = self._entered_on(asker, 0)
+            if objects is None:
+                return None
+            for file, func, expression in objects:
+                made = self._constructions(file, func, expression, target, _BUILT_HOPS, set())
+                if made is None:
+                    return None
+                found |= made
+        return found or None
+
+    def _entered_on(self, frame: _Frame, depth: int) -> Optional[list[tuple[str, ast.AST, ast.expr]]]:
+        """``(file, function, object)`` for each call that brought the walk into *frame*.
+
+        A call on ``self`` is the caller's own object, so the calls that brought
+        the walk into the caller answer it, up to four deep.  ``None`` where a
+        call is not made on an object, or *frame* was not entered by a call.
+        """
+        held = self.passed.get((frame.file, frame.owner))
+        if not held:
+            return None
+        objects: list[tuple[str, ast.AST, ast.expr]] = []
+        for caller, call, _bound in held:
+            if not isinstance(call.func, ast.Attribute):
+                return None
+            receiver = call.func.value
+            if isinstance(receiver, ast.Name) and receiver.id == "self":
+                if depth >= 4:
+                    return None
+                more = self._entered_on(caller, depth + 1)
+                if more is None:
+                    return None
+                objects.extend(more)
+            else:
+                objects.append((caller.file, caller.func, receiver))
+        return objects
+
+    def _constructions(
+        self,
+        file: str,
+        func: ast.AST,
+        expression: ast.expr,
+        target: tuple[str, int],
+        hops: int,
+        seen: set,
+    ) -> Optional[set[tuple[str, int, int]]]:
+        """The calls placed at the ``__init__`` *target* that built what *expression* holds in *func*.
+
+        ``self.<field>`` is what the class assigns to it, in any of its methods;
+        a local is what ``=`` gives it; a parameter is what each caller hands
+        it, *hops* callers out.  A constant builds nothing --
+        ``JobGeneratorThread(None, ...)`` in a test script.  ``None`` as soon as
+        one way is not known: a field a base class elsewhere assigns, a name
+        bound by a loop or an import, a value that is any other call.
+        """
+        if isinstance(expression, ast.Constant):
+            return set()
+        key = (file, getattr(func, "lineno", 0), ast.dump(expression), hops)
+        if key in seen:
+            return set()
+        seen.add(key)
+        values: list[tuple[ast.AST, Optional[ast.expr]]] = []
+        if (
+            isinstance(expression, ast.Attribute)
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id == "self"
+        ):
+            parsed = self.module(file)
+            if parsed is None:
+                return None
+            tree = parsed[1]
+            cls = pathcond.class_of(tree, func)
+            if cls is None:
+                return None
+            for where, holder in self.types.lineage(file, cls)[1:]:
+                if where != file and any(
+                    pathcond.attribute_expressions(method, expression.attr)
+                    for method in pathcond.methods_of(holder)
+                ):
+                    return None
+            for holder in [cls, *pathcond.bases_in(tree, cls)]:
+                for method in pathcond.methods_of(holder):
+                    if _self_fills(method, expression.attr):
+                        return None
+                    values.extend((method, value) for value in pathcond.attribute_expressions(method, expression.attr))
+        elif isinstance(expression, ast.Name):
+            bound = _plain_bindings(func, expression.id)
+            if bound is None:
+                return None
+            values = [(func, value) for value in bound]
+            if expression.id in _parameters(func):
+                values.append((func, None))
+        else:
+            return None
+        if not values:
+            return None
+        found: set[tuple[str, int, int]] = set()
+        for holder, value in values:
+            if value is None:
+                # The parameter itself, as each caller of *holder* hands it.
+                if hops <= 0:
+                    return None
+                owned = self.types.method_class(file, holder)
+                called = calls_mod.Target(file, holder, owned[1] if owned else None)
+                sites = self.calls.callers(called)
+                if not sites or len(sites) > _BUILT_CALLERS:
+                    return None
+                for site in sites:
+                    argument = calls_mod.bind(site.call, called).get(expression.id)
+                    if argument is None:
+                        return None
+                    more = self._constructions(site.file, site.func, argument, target, hops - 1, seen)
+                    if more is None:
+                        return None
+                    found |= more
+            elif isinstance(value, ast.Call):
+                placed = self.calls.callees(file, holder, value)
+                if not any((one.file, getattr(one.func, "lineno", 0)) == target for one in placed.targets):
+                    return None
+                found.add((file, value.lineno, value.col_offset))
+            elif isinstance(value, ast.Name):
+                more = self._constructions(file, holder, value, target, hops, seen)
+                if more is None:
+                    return None
+                found |= more
+            elif not isinstance(value, ast.Constant):
+                return None
+        return found
 
     def _module_binding(
         self, frame: _Frame, name: str, expression: ast.expr, depth: int
@@ -3431,6 +3726,10 @@ class _Walk:
                     other = other or self._sibling(frame, method)
                     if other is None:
                         break
+                    if method.name == "__init__":
+                        held = self.asked_of.setdefault((other.file, getattr(other.func, "lineno", 0)), [])
+                        if not any(one is frame for one in held):
+                            held.append(frame)
                     self._binding(other, name, expression, depth)
                     answered = True
                 if other is not None and method.name != "__init__":

@@ -3393,6 +3393,119 @@ def test_a_parameter_placed_at_many_calls_is_said_and_not_walked(tmp_path):
     assert not [s for s in walked.steps if s.kind == "handover"]
 
 
+_RUN = '''\
+    def run(self, log):
+        got = self.box.take()
+        log.info(f"took {got}")
+'''
+
+
+def _boxes(knight: str, worker: str = _RUN, others: int = 9) -> str:
+    """A ``Box`` built by a knight for its worker, and by *others* functions for nobody here."""
+    built = "\n".join(f"def other{i}():\n    return Box([{i}])\n" for i in range(others))
+    return f"""\
+class Box:
+    def __init__(self, items):
+        self.items = items
+
+    def take(self):
+        return self.items
+
+
+class Worker:
+    box: Box
+    spare: Box
+
+    def __init__(self, box, spare=None):
+        self.box = box
+        self.spare = spare
+
+{worker}
+
+class Knight:
+{knight}
+
+
+{built}"""
+
+
+def _built_handovers(walked):
+    return sorted(
+        (s.owner.rsplit("::", 1)[-1], s.value)
+        for s in walked.steps
+        if s.kind == TRACE_HANDOVER and s.name == "items"
+    )
+
+
+def test_a_constructor_parameter_is_answered_by_what_built_the_object_the_walk_came_in_on(tmp_path):
+    """``ListWithLock`` is built by twelve knights, and the list a worker reads
+    through ``self.taskList.get(n)`` is the one its own knight built: the other
+    eleven are other workers' lists, and twelve was too many to follow at all."""
+    knight = "    def start(self):\n        fetched = fetch()\n        box = Box(fetched)\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _boxes(knight)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=19, classify=provenance.classify)
+
+    (stopped,) = [s for s in walked.steps if s.name == "items" and s.kind == TRACE_UNBOUND]
+    assert stopped.detail == (
+        "a parameter; followed to the 1 of 10 call(s) placed at __init__: "
+        "the ones that built the object the walk came in on"
+    )
+    assert _built_handovers(walked) == [("start", "fetched")]
+
+
+def test_a_construction_handed_a_constant_builds_nothing_the_walk_came_in_on(tmp_path):
+    """``JobGeneratorThread(None, ...)`` in a test script hands its worker no
+    list, so it is not a way the knight's list could have been built."""
+    knight = (
+        "    def start(self):\n        box = Box(fetch())\n        Worker(box)\n\n"
+        "    def check(self):\n        Worker(None)\n"
+    )
+    roots = _tree(tmp_path, **{"m.py": _boxes(knight)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=19, classify=provenance.classify)
+
+    assert _built_handovers(walked) == [("start", "fetch()")]
+
+
+def test_an_object_whose_construction_is_not_found_keeps_every_call(tmp_path):
+    """A box from ``make_box()`` could be any of them: nothing is narrowed."""
+    knight = "    def start(self):\n        box = make_box()\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _boxes(knight)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=19, classify=provenance.classify)
+
+    (stopped,) = [s for s in walked.steps if s.name == "items" and s.kind == TRACE_UNBOUND]
+    assert stopped.detail == "a parameter; 9 calls are placed at __init__, too many to follow"
+    assert _built_handovers(walked) == []
+
+
+def test_every_object_the_walk_came_in_on_has_its_construction_followed(tmp_path):
+    """One frame per function: ``Box.take`` entered on ``self.box`` and, later in
+    the walk, from ``backup`` on ``self.spare`` asks for ``self.items`` once --
+    settled on the first box before the second came in -- and both boxes'
+    builders answer it."""
+    knight = (
+        "    def start(self):\n        box = Box(fetch())\n        spare = Box(extra())\n"
+        "        Worker(box, spare)\n"
+    )
+    worker = (
+        "    def run(self, log):\n"
+        "        got = self.box.take()\n"
+        "        more = self.backup()\n"
+        '        log.info(f"took {got} {more}")\n'
+        "\n"
+        "    def backup(self):\n"
+        "        spare = self.spare.take()\n"
+        "        return spare\n"
+    )
+    roots = _tree(tmp_path, **{"m.py": _boxes(knight, worker)})
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=20, classify=provenance.classify)
+
+    assert _built_handovers(walked) == [("start", "extra()"), ("start", "fetch()")]
+
+
 def test_a_call_to_another_systems_interface_is_gone_into_on_this_side(tmp_path):
     """``SiteMapper.getSite`` is CRIC's answer, and it is also PanDA code that
     resolves ``nucleus:X`` to one of its sites first."""
