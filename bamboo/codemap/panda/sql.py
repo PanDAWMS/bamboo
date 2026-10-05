@@ -2743,6 +2743,20 @@ def written_back(
     return ()
 
 
+def reading_context() -> tuple:
+    """What a reading of a function can be kept against.
+
+    The calls the statements are read across (:func:`across_calls`), as
+    :func:`_executions_held` keeps its runs, and under :func:`at_call` the
+    function read and the constants handed to it: every call handing the
+    same constants is read the same way, and the reader reads each one.
+    """
+    if _AT_CALL is None:
+        return (id(_CALLS),)
+    func, values = _AT_CALL
+    return (id(_CALLS), id(func), tuple(sorted((name, repr(value)) for name, value in values.items())))
+
+
 def _executions_held(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     """:func:`executions` for :func:`written_back`, kept on the function.
 

@@ -528,6 +528,80 @@ def test_only_an_exclusion_every_row_meets_is_a_refusal():
         [("JEDI_Tasks", "status", (":a", ":b"), ())],
         [("JEDI_Datasets", "status", (":a",), ())],
     ]
+
+
+def _decided(sql: str) -> set[tuple[str, bool, tuple[str, ...], bool]]:
+    with sqltext.with_schema(_SCHEMA):
+        return {(t.column, t.excluding, t.binds + t.literals, t.decided) for t in sqltext.terms(sql).terms}
+
+
+def test_a_term_decides_its_column_where_every_branch_of_its_or_rules_the_row_out():
+    """``copyArchive``'s ``main`` asks ``jobStatus`` in both branches of an ``OR``; ``getJobs`` asks ``processingType`` in one.
+
+    The first rules out every row with another status; the second rules out
+    no row at all, since one passes on the other branch's column.  Testing
+    the column in every branch is not enough: ``status<>:a OR status<>:b``
+    returns the rows holding ``a`` on its second branch, and ``status='a' OR
+    status IS NOT NULL`` every row with a status.
+    """
+    assert _decided(
+        "SELECT jediTaskID FROM JEDI_Tasks WHERE (vo=:v AND status=:a) OR (prodSourceLabel=:p AND status=:b)"
+    ) == {
+        ("vo", False, (":v",), False),
+        ("prodSourceLabel", False, (":p",), False),
+        ("status", False, (":a",), True),
+        ("status", False, (":b",), True),
+    }
+    assert _decided("SELECT jediTaskID FROM JEDI_Tasks WHERE status=:s AND (vo=:v OR prodSourceLabel=:p)") == {
+        ("status", False, (":s",), True),
+        ("vo", False, (":v",), False),
+        ("prodSourceLabel", False, (":p",), False),
+    }
+    assert _decided("SELECT jediTaskID FROM JEDI_Tasks WHERE status<>:a OR status<>:b") == {
+        ("status", True, (":a",), False),
+        ("status", True, (":b",), False),
+    }
+    assert _decided("SELECT jediTaskID FROM JEDI_Tasks WHERE status='a' OR status IS NOT NULL") == {
+        ("status", False, ("a",), False),
+    }
+
+
+def test_an_or_every_branch_of_which_leaves_the_value_out_is_a_refusal():
+    """``relocationFlag IS NULL OR relocationFlag<>:r`` was the one ``OR`` read as refusing; it is one of a kind.
+
+    A null holds no value, and a branch asking only for other quoted values
+    holds none of this one, so either branch rules the row out as the
+    ``<>`` does -- with or without other terms beside it.
+    """
+    assert _refused(
+        "SELECT jediTaskID FROM JEDI_Tasks WHERE (status IS NULL OR (status<>:a AND vo=:v)) "
+        "AND (prodSourceLabel IN ('x','y') OR prodSourceLabel<>'c')"
+    ) == [[("JEDI_Tasks", "status", (":a",), ()), ("JEDI_Tasks", "prodSourceLabel", (), ("c",))]]
+
+
+def test_a_subject_every_row_holds_one_value_of_is_restricted():
+    """``selects`` names ``vo`` here; ``restricts`` does not, as a row with another ``vo`` returns on ``oldStatus``.
+
+    Each branch of the ``UNION`` asks ``status`` outright, for a value each,
+    so every row holds one of the two.  The second statement asks it for a
+    value the caller hands, and a row holding that one is no row the map
+    could name.
+    """
+    side = _read_side(
+        "class TaskModule:\n"
+        "    def pick(self, given):\n"
+        "        sql = ('SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:st AND (vo=:vo OR oldStatus=:o) '\n"
+        "               'UNION SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status IN (:a) AND vo=:vo')\n"
+        "        self.cur.execute(sql, {':st': 'ready', ':vo': 'atlas', ':o': 'done', ':a': 'running'})\n"
+        "        sqlG = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status IN (:a,:b) AND vo=:vo'\n"
+        "        self.cur.execute(sqlG, {':a': 'running', ':b': given, ':vo': 'atlas'})\n" + _TEACH
+    )
+
+    first, second = (s for (owner, _line), s in sorted(side.statements.items()) if owner == "x.py::pick")
+    assert ("JediTaskSpec.vo", "atlas") in first.selects
+    assert first.restricts == {("JediTaskSpec.status", "ready"), ("JediTaskSpec.status", "running")}
+    assert second.restricts == {("JediTaskSpec.vo", "atlas")}
+    assert "JediTaskSpec.status" in second.keys
     assert _refused(
         "SELECT jediTaskID FROM JEDI_Tasks WHERE vo=:vo AND NOT EXISTS "
         "(SELECT 1 FROM JEDI_Datasets d WHERE d.jediTaskID=JEDI_Tasks.jediTaskID AND d.status<>:s)"

@@ -1001,6 +1001,11 @@ class Term(NamedTuple):
     #: Compared with something whose value the statement does not say -- a
     #: hole, or a subquery.
     undecided: bool
+    #: Whether every row the term's clause lets through fails what the term
+    #: rules out (:func:`_decides`).  ``processingType=:pt OR prodSourceLabel
+    #: IN (...)`` names both columns and rules out neither: a row passes on
+    #: the other one.
+    decided: bool
 
 
 class Reading(NamedTuple):
@@ -1026,6 +1031,7 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
     conditions.cache_clear()
     conjoined.cache_clear()
     refusals.cache_clear()
+    outright.cache_clear()
     try:
         yield
     finally:
@@ -1034,6 +1040,7 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
         conditions.cache_clear()
         conjoined.cache_clear()
         refusals.cache_clear()
+        outright.cache_clear()
 
 
 _CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
@@ -1435,18 +1442,96 @@ def _term(column: exp.Column, scope, root, verb: str, kind: str) -> Optional[Ter
         spelled = column.sql(dialect="oracle")
         among = f" ({', '.join(owners)})" if owners else ""
         return f"{spelled}{among} -- {why}"
+    excluding = excluding != bool(negations % 2)
     return Term(
         table=owners[0],
         column=column.name,
         verb=verb,
         scope=kind,
-        excluding=excluding != bool(negations % 2),
+        excluding=excluding,
         binds=binds,
         literals=tuple(
             value.this for value in values if isinstance(value, exp.Literal) and value.is_string
         ),
         undecided=undecided,
+        decided=_decides(column, holder, scope, root, excluding, undecided, values),
     )
+
+
+def _decides(
+    column: exp.Column, holder: exp.Expression, scope, root, excluding: bool, undecided: bool, values: list
+) -> bool:
+    """Whether every row *holder* lets through fails what *column*'s term rules out.
+
+    For a term asking for values, that is a row holding none of the values
+    the clause asks this column for; for one excluding them, a row holding
+    them.  Read on the conjunct of *holder* the term is in: one branch of an
+    ``AND`` deciding is enough, an ``OR`` needs every branch to.
+    ``(modificationTime<:t AND jobStatus=:a) OR (stateChangeTime<:t AND
+    jobStatus=:b)`` decides ``jobStatus`` -- no row with another status
+    passes either branch -- and ``processingType=:pt OR prodSourceLabel IN
+    (...)`` decides neither column.  A test of the column in every branch is
+    not enough: ``status<>:a OR status<>:b`` passes the rows holding ``a``
+    on its second branch.
+
+    Asking needs every value said: ``status=:{}`` asks for something the
+    statement does not name, so a row holding none of the named values can
+    still be the one asked for.
+    """
+    if not excluding and undecided:
+        return False
+    top = holder.this if isinstance(holder, exp.Where) else holder
+    conjunct = next(
+        (one for one in _conjuncts(top) if any(node is column for node in one.find_all(exp.Column))), None
+    )
+    if conjunct is None:
+        return False
+    owner = _owner(column, scope, root)[0]
+    ruled = {value.sql() for value in values}
+    quoted = all(isinstance(value, exp.Literal) and value.is_string for value in values)
+
+    def same(other: Optional[exp.Expression]) -> bool:
+        if not isinstance(other, exp.Column) or other.name.lower() != column.name.lower():
+            return False
+        return other is column or _owner(other, scope, root) == (owner, "")
+
+    def rules_out(node: exp.Expression) -> bool:
+        negated = False
+        while isinstance(node, (exp.Paren, exp.Not)):
+            negated ^= isinstance(node, exp.Not)
+            node = node.this
+        if isinstance(node, (exp.And, exp.Or)):
+            if negated:
+                return False  # ``NOT (a OR b)`` -- read only as the term it is
+            sides = (rules_out(node.this), rules_out(node.expression))
+            return any(sides) if isinstance(node, exp.And) else all(sides)
+        if isinstance(node, exp.Is) and isinstance(node.expression, exp.Null):
+            # ``col IS NULL`` holds no value at all, which is every value excluded.
+            return excluding and not negated and same(node.this)
+        if not isinstance(node, (exp.EQ, exp.NEQ, exp.In)):
+            return False
+        sides = [node.this] if isinstance(node, exp.In) else [node.this, node.expression]
+        tested = next((side for side in sides if same(side)), None)
+        compared = _compared(tested) if tested is not None else None
+        if compared is None:
+            return False
+        excludes, said, open_ = compared
+        excludes ^= negated
+        if not excluding:
+            return not excludes and not open_ and bool(said)
+        if excludes:
+            # ``NOT IN (SELECT ...)`` names no value to find in another
+            # branch: only its own test passes them over.
+            return tested is column if undecided else ruled <= {value.sql() for value in said}
+        # ``col IN ('a','b')`` holds no row with ``'c'``.
+        return (
+            quoted
+            and not open_
+            and all(isinstance(value, exp.Literal) and value.is_string for value in said)
+            and not ruled & {value.sql() for value in said}
+        )
+
+    return rules_out(conjunct)
 
 
 class Branch(NamedTuple):
@@ -1952,54 +2037,16 @@ def _disjuncts(node: exp.Expression) -> list[exp.Expression]:
     return [node]
 
 
-def _null_safe(conjunct: exp.Expression) -> Optional[exp.Column]:
-    """The column of ``(col IS NULL OR col<>:v)``, or ``None`` for any other ``OR``.
-
-    The one disjunction that still leaves a value out of every row: a row
-    holding ``v`` is not null and fails the other branch.  Five statements in
-    the corpus spell "not this value" that way, ``lockJobsForReassign``'s
-    ``relocationFlag`` among them, for the rows that never had one.
-    """
-    def spelled(column: exp.Column) -> tuple[str, str]:
-        return (column.table or "").lower(), column.name.lower()
-
-    branches = _disjuncts(conjunct)
-    nulls = [b for b in branches if isinstance(b, exp.Is) and isinstance(b.expression, exp.Null)]
-    rest = [b for b in branches if not any(b is n for n in nulls)]
-    if not nulls or len(rest) != 1 or not all(isinstance(n.this, exp.Column) for n in nulls):
-        return None
-    columns = list(rest[0].find_all(exp.Column))
-    if len(columns) != 1 or {spelled(n.this) for n in nulls} != {spelled(columns[0])}:
-        return None
-    return columns[0]
-
-
 def _outright(where: exp.Where, scope, root, verb: str, kind: str) -> tuple[Term, ...]:
-    """The exclusions *where* makes of every row: its own terms outside any ``OR``.
-
-    And inside one where it is ``col IS NULL OR`` the exclusion -- see
-    :func:`_null_safe`.
-    """
+    """The terms of *where* every row it lets through meets -- :attr:`Term.decided`."""
     found: list[Term] = []
     own = {id(column) for column in _own_columns(scope)}
     for conjunct in _conjuncts(where.this):
-        guarded = _null_safe(conjunct) if isinstance(conjunct, (exp.Or, exp.Paren)) else None
-        if guarded is not None and id(guarded) in own:
-            term = _term(guarded, scope, root, verb, kind)
-            if isinstance(term, Term) and term.excluding:
-                found.append(term)
-            continue
         for column in conjunct.find_all(exp.Column):
             if id(column) not in own:
                 continue
-            walk, inside = column.parent, False
-            while walk is not None and walk is not conjunct.parent:
-                inside = inside or isinstance(walk, (exp.And, exp.Or))
-                walk = walk.parent
-            if inside:
-                continue
             term = _term(column, scope, root, verb, kind)
-            if isinstance(term, Term) and term.excluding:
+            if isinstance(term, Term) and term.decided:
                 found.append(term)
     return tuple(found)
 
@@ -2012,15 +2059,24 @@ def refusals(sql: str) -> tuple[tuple[Term, ...], ...]:
     value to pass over.  ``getFailureCountsForTask_JEDI`` names
     ``relocationFlag<>:relThrottled`` inside one branch of an ``OR``, and its
     other branches return throttled jobs all the same; a reader told it leaves
-    them out would stop looking at a query that picks them up.
+    them out would stop looking at a query that picks them up.  The excluding
+    half of :func:`outright`.
+    """
+    return tuple(tuple(term for term in way if term.excluding) for way in outright(sql))
 
-    So a term counts only where every row has to meet it: a conjunct of the
-    ``WHERE`` outside any ``OR``, of the statement or of the derived table or
-    ``WITH`` clause the rows come from.  A ``UNION`` returns rows from any of
-    its branches, and each branch is a tuple of its own -- the caller names
-    the values and keeps the ones every branch passes over, since which
-    subject a table's column is, is not this module's to say.  ``()`` for a
-    statement that does not parse.
+
+@functools.lru_cache(maxsize=None)
+def outright(sql: str) -> tuple[tuple[Term, ...], ...]:
+    """The terms every row *sql* returns meets, one tuple per way a row comes back.
+
+    A term counts only where every row has to meet it (:attr:`Term.decided`):
+    a conjunct of the ``WHERE``, or an ``OR`` every branch of which rules out
+    what the term does, of the statement or of the derived table or ``WITH``
+    clause the rows come from.  A ``UNION`` returns rows from any of its
+    branches, and each branch is a tuple of its own -- the caller names the
+    values and decides how the branches combine, since which subject a
+    table's column is, is not this module's to say.  ``()`` for a statement
+    that does not parse.
     """
     read = parsed(sql)
     if read.tree is None:

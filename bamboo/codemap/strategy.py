@@ -500,6 +500,7 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         keys=list(site.keys),
         excludes=list(site.excludes),
         refuses=list(site.refuses),
+        restricts=list(site.restricts),
         consults=list(site.consults),
         tables=list(site.tables),
         order_by=list(site.order_by),

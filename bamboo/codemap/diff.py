@@ -83,6 +83,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "selects",
         "excludes",
         "refuses",
+        "restricts",
         "consults",
         "keys",
         "order_by",

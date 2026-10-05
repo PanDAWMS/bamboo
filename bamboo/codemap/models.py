@@ -1171,11 +1171,26 @@ class TermPlace(BaseModel):
             "The term the entry enters the statement in -- one of the terms the "
             "``WHERE`` ``AND``\\ s together -- spelled as ``conditions`` spells it: "
             "``processingType=:processingType1 OR prodSourceLabel IN (...)`` for a "
-            "pair one branch of an ``OR`` with another column holds, so that a pair "
-            "one build *requires* can be told from one it only *allows*; "
+            "pair one branch of an ``OR`` with another column holds; "
             "``status=:status`` for a pair ``conditions`` leaves to ``selects``.  "
             "Empty where the ``WHERE`` does not read term by term: not known, which "
             "is not the same as outside an ``OR``."
+        ),
+    )
+    decides: Optional[bool] = Field(
+        default=None,
+        description=(
+            "For a ``selects`` or ``excludes`` pair, whether ``term`` rules out every "
+            "row the pair's field does -- for ``selects`` a row holding none of the "
+            "subject's values, for ``excludes`` a row holding the value.  ``AND`` "
+            "decides where one side does, ``OR`` where every branch does: "
+            "``(modificationTime<:t AND jobStatus=:a) OR (stateChangeTime<:t AND "
+            "jobStatus=:b)`` decides ``jobStatus``, ``processingType=:pt OR "
+            "prodSourceLabel IN (...)`` decides neither column, and ``relocationFlag "
+            "IS NULL OR relocationFlag<>:r`` decides ``relocationFlag``.  ``False`` "
+            "is a pair the builds through this place only *allow*.  Read off the "
+            "statement whatever ``term`` could be spelled as.  ``None`` for "
+            "``conditions`` and ``order_by``, which are not pairs."
         ),
     )
     tests: list[TermGuard] = Field(
@@ -1281,7 +1296,25 @@ class ReadSiteNode(BaseNode):
             "with a value every run settles.  ``excludes`` says what a term "
             "names; ``relocationFlag<>:relThrottled`` in one branch of an "
             "``OR`` is there and not here, since the other branches return "
-            "those rows."
+            "those rows.  An ``OR`` every branch of which rules the value out "
+            "counts: ``relocationFlag IS NULL OR relocationFlag<>:r``."
+        ),
+    )
+    restricts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The ``selects`` counterpart of ``refuses``, sorted: per subject, "
+            "every row this statement returns holds one of the values listed "
+            "for it here -- in every branch of a ``UNION``, every way the text "
+            "is assembled and every run at the call, the subject is asked for "
+            "outright, by a conjunct or by an ``OR`` every branch of which asks "
+            "it (:attr:`TermPlace.decides`), and its values are all of theirs.  "
+            "A row holding none of them is not returned.  ``selects`` says "
+            "what a term names: ``processingType=:pt OR prodSourceLabel IN "
+            "(...)`` is there and not here, since a row passes on either "
+            "column.  A subject one of whose asking terms has a bind nothing "
+            "fills is left out -- the row may hold the value no one named -- "
+            "and is in ``keys``."
         ),
     )
     consults: list[str] = Field(
@@ -3771,6 +3804,13 @@ class StatementReading(BaseModel):
     refuses: list[str] = Field(
         default_factory=list,
         description="``subject=value`` no row the statement returns holds -- :attr:`ReadSiteNode.refuses`.",
+    )
+    restricts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``subject=value``, per subject the values every row the statement "
+            "returns holds one of -- :attr:`ReadSiteNode.restricts`."
+        ),
     )
     consults: list[str] = Field(
         default_factory=list,

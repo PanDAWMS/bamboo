@@ -1245,3 +1245,49 @@ def test_a_pair_is_placed_in_its_own_term_not_in_the_fragment_that_appends_it(tm
     (added,) = [one for one in statement.added_under if one.field == "selects"]
     assert added.term.endswith(".jobStatus=activated")
     assert [place.term.split("@")[0] for place in added.places] == ["jobStatus=:status"]
+
+
+def test_a_place_says_whether_its_term_decides_the_pair(tmp_path):
+    """``getJobs`` appends ``processingType OR prodSourceLabel`` under one ``if``; ``lockJobsForReassign`` a null-safe ``<>`` under another.
+
+    The first term only allows its pairs -- a row passes on either column --
+    and the second leaves the value out of every row of the builds it is in.
+    The spelling cannot tell them apart: both are an ``OR``.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def pick(self, flag, only):\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE computingSite=:site '\n"
+        "        if flag:\n"
+        "            sql += 'AND (processingType=:pt OR prodSourceLabel=:psl) '\n"
+        "        if only:\n"
+        "            sql += 'AND (relocationFlag IS NULL OR relocationFlag<>:r) '\n"
+        "        self.cur.execute(sql, {':site': 'X', ':pt': 'pmerge', ':psl': 'user', ':r': 'two'})\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    decides = {
+        (one.field, one.term.split(".")[-1]): [place.decides for place in one.places]
+        for one in statement.added_under
+        if one.field != "conditions"
+    }
+    assert decides == {
+        ("selects", "processingType=pmerge"): [False],
+        ("selects", "prodSourceLabel=user"): [False],
+        ("excludes", "relocationFlag=two"): [True],
+    }
+    assert [pair for pair in statement.restricts if pair[0].endswith(".computingSite")] == [
+        (next(s for s, _v in statement.selects if s.endswith(".computingSite")), "X")
+    ]

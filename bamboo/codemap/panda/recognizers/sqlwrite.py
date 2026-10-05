@@ -1042,6 +1042,11 @@ class ReadStatement(NamedTuple):
     #: is built -- the part of ``excludes`` that holds of every row.  Known
     #: once every run of the statement is, so it arrives by ``_replace``.
     refuses: frozenset[tuple[str, str]] = frozenset()
+    #: ``{(subject, value)}`` such that every row this statement returns holds
+    #: one of the subject's values here, however it is built -- the part of
+    #: ``selects`` that holds of every row.  Arrives by ``_replace`` as
+    #: ``refuses`` does.
+    restricts: frozenset[tuple[str, str]] = frozenset()
     #: Every term the fields hold on some builds only -- see
     #: :attr:`ReadSiteNode.added_under`.  Known once every run is, so it
     #: arrives by ``_replace`` too.
@@ -1294,7 +1299,24 @@ def _run_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
     text are two, because what each fills the binds with is not the same.  A
     run with no name for its text, or whose name holds no such variant and
     nothing optional, is one build, itself, with no fragments.
+
+    Kept on *func* per reading context (:func:`sql.reading_context`): every
+    field read off the builds asks for them -- ``refuses`` and ``restricts``,
+    ``conditions``, ``added_under`` -- at every call site handing constants
+    as well, and reading them again was most of the read side's time.
     """
+    key = (sql.reading_context(), run.variable, run.head, run.sql, id(run.call))
+    held = getattr(func, "_run_builds_held", None)
+    if held is None or held[0] != key[0][0]:
+        held = (key[0][0], {})
+        func._run_builds_held = held  # type: ignore[union-attr]
+    if key not in held[1]:
+        held[1][key] = _read_builds(func, run)
+    return held[1][key]
+
+
+def _read_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[list[_Build]]:
+    """:func:`_run_builds`, read."""
     if not run.variable:
         return [_Build(run.sql, run.sql, [])]
     variants = sql.variant_spans(func, run.variable)
@@ -1501,7 +1523,7 @@ def _guard_read(name: str, hop: int, hops: tuple[_Hop, ...], file_of) -> GuardRe
         func, current = hops[at].func, handed.id
 
 
-def _place(leaf: _Leaf, term: str, file_of) -> TermPlace:
+def _place(leaf: _Leaf, term: str, file_of, decides: Optional[bool] = None) -> TermPlace:
     """Where *leaf* is appended, in which *term*, and every test along its way to the ``execute``."""
     tests: list[TermGuard] = []
     for hop, node, below in reversed(_stretches(leaf)):
@@ -1518,7 +1540,10 @@ def _place(leaf: _Leaf, term: str, file_of) -> TermPlace:
                 )
             )
     return TermPlace(
-        fragment=f"{file_of(leaf.hops[-1].func)}:{getattr(leaf.node, 'lineno', 0)}", term=term, tests=tests
+        fragment=f"{file_of(leaf.hops[-1].func)}:{getattr(leaf.node, 'lineno', 0)}",
+        term=term,
+        decides=decides,
+        tests=tests,
     )
 
 
@@ -1595,36 +1620,27 @@ def _names(piece: str, binds: Iterable[str], words: Iterable[str]) -> bool:
 
 
 
-def _refused_terms(
+def _outright_terms(
     func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
 ) -> tuple[tuple["sqltext.Term", ...], ...]:
-    """The exclusions every row of *run* meets, however the paths to it went.
+    """The terms every row of *run* meets, one tuple per way a row comes back in each of its builds.
 
-    The terms are *run*'s own -- they name the tables the run reads -- and
-    one is kept only where the text with the optional fragments cut out makes
-    it too.  Both, because a fragment appending ``OR ...`` would take rows
-    back that the shorter text leaves out.
+    Read on every build (:func:`_every_run_texts`) and not on the run's text
+    alone: a fragment appending ``OR ...`` takes rows back that the shorter
+    text leaves out, and a term a fragment appends is met only where the
+    fragment is.  The caller combines the ways -- a value refused is refused
+    in every one, a subject restricted is restricted in every one, to any of
+    their values.
     """
-    whole = sqltext.refusals(run.sql)
-    # Before the fragments are asked for: they are the expensive half, and
-    # most statements leave nothing out of every row to begin with.
+    whole = sqltext.outright(run.sql)
+    # Before the builds are asked for: they are the expensive half, and a
+    # text nothing decides has no build that does.
     if not any(whole):
         return whole
     floors = _every_run_texts(func, run)
     if floors is None:
         return ()
-    if floors == [run.sql]:
-        return whole
-
-    def key(term):
-        return (term.column.lower(), term.binds, term.literals)
-
-    everywhere: Optional[set] = None
-    for floor in floors:
-        found = sqltext.refusals(floor)
-        keys = set.intersection(*({key(t) for t in one} for one in found)) if found else set()
-        everywhere = keys if everywhere is None else everywhere & keys
-    return tuple(tuple(t for t in one if key(t) in (everywhere or set())) for one in whole)
+    return tuple(way for floor in floors for way in sqltext.outright(floor))
 
 
 def _render_condition(condition: "sqltext.Condition", seeds: dict[str, list[int]]) -> str:
@@ -1775,11 +1791,22 @@ def _conjoined(terms: list[str]) -> str:
     return _shown([f"({term})" if _or_outside_parentheses(term) else term for term in terms], " AND ")
 
 
+def _restricted_both(one: dict[str, set[str]], other: dict[str, set[str]]) -> dict[str, set[str]]:
+    """What two ways a row comes back both restrict: the subjects both do, to any value either asks."""
+    return {subject: one[subject] | other[subject] for subject in one.keys() & other.keys()}
+
+
+def _restricted_pairs(restricted: dict[str, set[str]]) -> set[tuple[str, str]]:
+    return {(subject, value) for subject, values_of in restricted.items() for value in values_of}
+
+
 def _narrowed(
     kept: "ReadStatement",
     reading: _CallReading,
     refuses: set[tuple[str, str]],
     refuses_here: set[tuple[str, str]],
+    restricts: set[tuple[str, str]],
+    restricts_here: set[tuple[str, str]],
     conditions: list[str],
 ) -> list[str]:
     """What one call's reading of a statement says that the statement's own does not, field by field."""
@@ -1791,6 +1818,7 @@ def _narrowed(
         ("exclude", reading.excludes, kept.excludes),
         ("consult", reading.consults, kept.consults),
         ("refuse", refuses_here, set(refuses)),
+        ("restrict", restricts_here, set(restricts)),
     ):
         for label, held in ((f"does not {verb}", general - here), (f"also {verb}s", here - general)):
             if held:
@@ -2173,6 +2201,8 @@ def read_side(
     # kept for runs that file nothing too, since a run that refuses nothing
     # is the run that returns the row.
     refused: dict[tuple[str, int], set[tuple[str, str]]] = {}
+    # And what every run so far restricts, the same way.
+    restricted: dict[tuple[str, int], dict[str, set[str]]] = {}
 
     def record(
         subject: str,
@@ -2263,8 +2293,11 @@ def read_side(
                 into.add((subject, "{}"))
         return reading
 
-    def run_refuses(func, run, file: str) -> Optional[set[tuple[str, str]]]:
+    def run_refuses(func, run, file: str, ways) -> Optional[set[tuple[str, str]]]:
         """What no row of *run* holds, however it was built; ``None`` where nothing is read.
+
+        *ways* is :func:`_outright_terms` of *run*, read once for this and
+        :func:`run_restricts`: reading the builds is the expensive half.
 
         Narrower than ``excludes``, which files every value a term names: here
         only what every row of every branch is without, and only a value the
@@ -2275,10 +2308,10 @@ def read_side(
         """
         refuses_here: Optional[set[tuple[str, str]]] = None
         lists = {one.bind for one in sql.in_lists(func).values()}
-        for alternative in _refused_terms(func, run):
+        for alternative in ways:
             passed_over: set[tuple[str, str]] = set()
             for term in alternative:
-                if term.verb != "read" or term.scope != sqltext.ROW:
+                if not term.excluding or term.verb != "read" or term.scope != sqltext.ROW:
                     continue
                 subject = _term_subject(attributor, term)
                 for key in term.binds:
@@ -2292,6 +2325,37 @@ def read_side(
                 passed_over.update((subject, value) for value in term.literals)
             refuses_here = passed_over if refuses_here is None else refuses_here & passed_over
         return refuses_here
+
+    def run_restricts(func, run, file: str, ways) -> Optional[dict[str, set[str]]]:
+        """``{subject: values}`` every row of *run* holds one of, however it was built; ``None`` where nothing is read.
+
+        The ``selects`` counterpart of :func:`run_refuses`: a subject counts
+        where every way a row comes back, in every build, asks it for values
+        outright (:attr:`sqltext.Term.decided`), and its values are all of
+        theirs -- a row holding none of them comes back from no way.  Read as
+        ``selects`` reads them, so they are some of its pairs.  A subject one
+        of whose deciding terms has a bind nothing here fills is dropped from
+        that way: the row may hold the value no one could name.
+        """
+        restricts_here: Optional[dict[str, set[str]]] = None
+        for alternative in ways:
+            asked: dict[str, set[str]] = {}
+            unnamed: set[str] = set()
+            for term in alternative:
+                if term.excluding or term.verb != "read" or term.scope != sqltext.ROW:
+                    continue
+                subject = _term_subject(attributor, term)
+                values_of = set(term.literals)
+                for key in term.binds:
+                    filled = bound(func, run, key, file)
+                    if not filled:
+                        unnamed.add(subject)
+                    values_of.update(filled)
+                asked.setdefault(subject, set()).update(values_of)
+            for subject in unnamed:
+                asked.pop(subject, None)
+            restricts_here = asked if restricts_here is None else _restricted_both(restricts_here, asked)
+        return restricts_here
 
     def stated_list(func, run, key: str, file: str) -> Optional[list[str]]:
         """The members of the ``IN`` list bound to *key*, where every run holds all of them.
@@ -2356,6 +2420,7 @@ def read_side(
             per_line: dict[int, _CallReading] = {}
             variants: dict[int, list] = {}
             refuses_at: dict[int, set[tuple[str, str]]] = {}
+            restricts_at: dict[int, dict[str, set[str]]] = {}
             with sql.at_call(func, handed):
                 for run in sql.executions(func):
                     line = run.call.lineno
@@ -2363,8 +2428,11 @@ def read_side(
                     per_line.setdefault(line, _CallReading(set())).add(one)
                     if all(run.sql != other.sql for other in variants.setdefault(line, [])):
                         variants[line].append(run)
-                    here = run_refuses(func, run, file) or set()
+                    ways = _outright_terms(func, run)
+                    here = run_refuses(func, run, file, ways) or set()
                     refuses_at[line] = refuses_at[line] & here if line in refuses_at else here
+                    asked = run_restricts(func, run, file, ways) or {}
+                    restricts_at[line] = _restricted_both(restricts_at[line], asked) if line in restricts_at else asked
                 conditions_at = {line: _folded_conditions(func, line, runs) for line, runs in variants.items()}
             said = ", ".join(f"{name}={value!r}" for name, value in sorted(handed.items()))
             route = " <- ".join(reversed(via))
@@ -2379,6 +2447,8 @@ def read_side(
                         per_line[line],
                         refused.get((owner, line), set()),
                         refuses_at[line],
+                        _restricted_pairs(restricted.get((owner, line), {})),
+                        _restricted_pairs(restricts_at[line]),
                         conditions_at[line],
                     )
                     if not said_here:
@@ -2526,15 +2596,17 @@ def read_side(
                     here.update(pair for pair, _binds, _words in pairs(run, term, along))
             return here
 
-        def carried(run, piece: str, along: Optional[dict[int, list[ast.AST]]]) -> dict[tuple[str, str], list[str]]:
-            """``{(field, term): [the term it enters in]}`` for what a fragment reading *piece* appends."""
-            found: dict[tuple[str, str], list[str]] = {}
+        def carried(
+            run, piece: str, along: Optional[dict[int, list[ast.AST]]]
+        ) -> dict[tuple[str, str], list[tuple[str, Optional[bool]]]]:
+            """``{(field, term): [(the term it enters in, whether that decides it)]}`` for what a fragment reading *piece* appends."""
+            found: dict[tuple[str, str], list[tuple[str, Optional[bool]]]] = {}
             for order in orders[id(run)]:
                 if _squeezed(f"ORDER BY {order}") in _squeezed(piece):
-                    found.setdefault(("order_by", order), []).append(order)
+                    found.setdefault(("order_by", order), []).append((order, None))
             for text, binds in own_conditions[id(run)]:
                 if _names(piece, binds, () if binds else _words(text)):
-                    found.setdefault(("conditions", text), []).append(spelled[("conditions", text)])
+                    found.setdefault(("conditions", text), []).append((spelled[("conditions", text)], None))
             for term in row_terms[id(run)]:
                 for pair, binds, words in pairs(run, term, along):
                     if not _names(piece, binds, words):
@@ -2550,7 +2622,7 @@ def read_side(
                         ),
                         "",
                     )
-                    found.setdefault(pair, []).append(within)
+                    found.setdefault(pair, []).append((within, term.decided))
             return found
 
         read = [
@@ -2575,9 +2647,12 @@ def read_side(
             for leaf in build.leaves:
                 piece = build.variant[leaf.start : leaf.end]
                 for key, terms in carried(run, piece, _along([*kept_nodes, *_trail(leaf)])).items():
-                    for term in terms if key in places else ():
-                        place = _place(leaf, term, file_of)
-                        places[key].setdefault((place.fragment, place.term), place)
+                    for term, decides in terms if key in places else ():
+                        place = _place(leaf, term, file_of, decides)
+                        held = places[key].setdefault((place.fragment, place.term), place)
+                        # Two terms of one place naming the pair: either one ruling it out is enough.
+                        if decides and not held.decides:
+                            held.decides = True
 
         def named(key: tuple[str, str]) -> bool:
             """Whether a fragment appends *key*'s term with its values read across every branch."""
@@ -2878,13 +2953,16 @@ def read_side(
                             statements.setdefault((at.owner, at.line), at).keys.add(subject)
                     for value in term.literals:
                         record(subject, value, owner, term.verb, at)
-                refuses_here = run_refuses(func, run, module.rel_path)
+                ways = _outright_terms(func, run)
+                refuses_here = run_refuses(func, run, module.rel_path, ways)
                 site = (owner, run.call.lineno)
                 refused[site] = (
                     (refuses_here or set()) & refused[site]
                     if site in refused
                     else (refuses_here or set())
                 )
+                asked = run_restricts(func, run, module.rel_path, ways) or {}
+                restricted[site] = _restricted_both(restricted[site], asked) if site in restricted else asked
                 if not reading.parsed and read_tables:
                     # Not read some other way, and not dropped either: a
                     # statement whose text does not parse still reads these
@@ -2919,7 +2997,10 @@ def read_side(
             place_exits(func, owner)
             place_call_sites(func, owner, module.rel_path, executions)
     for site, at in statements.items():
-        statements[site] = at._replace(refuses=frozenset(refused.get(site, ())))
+        statements[site] = at._replace(
+            refuses=frozenset(refused.get(site, ())),
+            restricts=frozenset(_restricted_pairs(restricted.get(site, {}))),
+        )
     return ReadSide(
         values=found,
         entities=rows,
@@ -2957,6 +3038,7 @@ def read_site_nodes(
                 selects=sorted(f"{subject}={value}" for subject, value in at.selects),
                 excludes=sorted(f"{subject}={value}" for subject, value in at.excludes),
                 refuses=sorted(f"{subject}={value}" for subject, value in at.refuses),
+                restricts=sorted(f"{subject}={value}" for subject, value in at.restricts),
                 consults=sorted(f"{subject}={value}" for subject, value in at.consults),
                 keys=sorted(at.keys),
                 order_by=sorted(at.order_by),
