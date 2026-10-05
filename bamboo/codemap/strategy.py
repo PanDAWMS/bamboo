@@ -506,6 +506,9 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         limits=list(site.limits),
         call_sites=list(site.call_sites),
         conditions=list(site.conditions),
+        # ``None`` stays ``None``: an older map did not compute it, and an
+        # empty list would say every term is in every build.
+        added_under=None if site.added_under is None else list(site.added_under),
         unresolved=list(site.unresolved),
         bind_window=list(site.bind_window),
         region=list(site.region),

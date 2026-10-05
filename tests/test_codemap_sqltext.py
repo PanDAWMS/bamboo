@@ -548,11 +548,24 @@ def test_a_value_left_out_of_rows_that_may_be_null_is_still_a_refusal():
 
 
 def test_a_variant_is_recognised_in_the_statement_its_holes_were_filled_into():
-    """``sql % tableName`` in a loop: the variant says ``FROM %s``, the run names the table."""
+    """``(sql + comment) % tableName`` in a loop: the variant says ``FROM %s``, the run names the table and ends in the comment."""
     variant = "SELECT PandaID FROM %s WHERE jobStatus NOT IN (:a,:b)  AND rownum <= 1"
-    assert sqlwrite._spelled_by(variant, "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a,:b) AND rownum <= 1")
-    assert sqlwrite._spelled_by("SELECT a FROM {}.JEDI_Tasks WHERE b=:b", "SELECT a FROM ATLAS_PANDA.JEDI_Tasks WHERE b=:b")
-    assert not sqlwrite._spelled_by(variant, "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a)")
+    run = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a,:b) AND rownum <= 1"
+    assert sqlwrite._filled(variant, run) == (["ATLAS_PANDA.jobsActive4"], "")
+    assert sqlwrite._filled(variant, run + " /* DBProxy.main */") == (["ATLAS_PANDA.jobsActive4"], " /* DBProxy.main */")
+    assert sqlwrite._filled("SELECT a FROM {}.JEDI_Tasks WHERE b=:b", "SELECT a FROM ATLAS_PANDA.JEDI_Tasks WHERE b=:b") == (["ATLAS_PANDA"], "")
+    assert sqlwrite._filled(variant, "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a)") is None
+
+
+def test_a_cut_takes_the_fragment_out_of_the_run_and_keeps_what_the_call_fills():
+    """The build is what the database is sent less the cut: the table filled in, the comment kept."""
+    variant = "SELECT PandaID FROM %s WHERE a=:a AND b=:b "
+    run = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE a=:a AND b=:b  /* c */"
+    cut = variant.index("AND b=:b")
+    assert " ".join(sqlwrite._cut_text(variant, [(cut, cut + len("AND b=:b "))], run).split()) == (
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE a=:a /* c */"
+    )
+    assert sqlwrite._cut_text(variant, [], run) == run
 
 
 def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():

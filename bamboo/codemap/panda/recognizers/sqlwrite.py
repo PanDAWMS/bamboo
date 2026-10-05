@@ -55,17 +55,21 @@ from typing import Iterable, NamedTuple, Optional
 
 from bamboo.codemap.calls import Calls, Target, Types
 from bamboo.codemap.models import (
+    AddedTerm,
     Anchor,
     Branch,
     CoverageStat,
     DiagnosticTemplate,
     EntityNode,
+    GuardRead,
     JunctionNode,
     ReadingStop,
     ReadSiteNode,
     RowKeySource,
     SourceModule,
     SubjectNode,
+    TermGuard,
+    TermPlace,
     pooled_frames,
 )
 from bamboo.codemap.panda import sql, sqltext, values
@@ -74,6 +78,7 @@ from bamboo.codemap.panda.pathcond import (
     UNDECIDED,
     ancestors,
     attach_parents,
+    compatible,
     containers_changed,
     enclosing_function,
     functions_with_owner,
@@ -1037,6 +1042,10 @@ class ReadStatement(NamedTuple):
     #: is built -- the part of ``excludes`` that holds of every row.  Known
     #: once every run of the statement is, so it arrives by ``_replace``.
     refuses: frozenset[tuple[str, str]] = frozenset()
+    #: Every term the fields hold on some builds only -- see
+    #: :attr:`ReadSiteNode.added_under`.  Known once every run is, so it
+    #: arrives by ``_replace`` too.
+    added_under: tuple[AddedTerm, ...] = ()
 
 
 def _decided_chain(node: ast.If) -> bool:
@@ -1090,14 +1099,221 @@ def _on_some_paths(fragment: ast.stmt, call: ast.Call) -> bool:
 _VARIANT_HOLE = re.compile(r"\{[^{}]*\}|%(?:\([^)]*\))?[sdr]")
 
 
-def _spelled_by(variant: str, statement: str) -> bool:
-    """Whether *statement* is *variant* with its holes filled in.
+def _filled(variant: str, statement: str) -> Optional[tuple[list[str], str]]:
+    """How *statement* spells *variant*: what fills each of its holes, and what the call adds after it.
 
-    A table loop the reassembly writes out, ``FROM {}`` turned into ``FROM
-    ATLAS_PANDA.jobsActive4``, is the same variant and no longer the same text.
+    ``execute((sql + comment) % table, ...)`` runs ``sql``'s variant with
+    ``FROM {}`` turned into ``FROM ATLAS_PANDA.jobsActive4`` and the comment
+    after it.  ``None`` where *statement* does not start with *variant* so filled.
     """
     pieces = [re.escape(" ".join(piece.split())) for piece in _VARIANT_HOLE.split(variant)]
-    return re.fullmatch(r"\s*(.*?)\s*".join(pieces), " ".join(statement.split())) is not None
+    match = re.fullmatch(r"\s*(.*?)\s*".join(pieces) + r"(.*)", " ".join(statement.split()))
+    if match is None:
+        return None
+    *fillings, after = match.groups()
+    return fillings, after
+
+
+def _cut_text(variant: str, cuts: list[tuple[int, int]], statement: str) -> Optional[str]:
+    """*statement*, run from *variant*, with the stretches *cuts* of the variant taken out.
+
+    What the database is sent, less what some paths do not append: a hole
+    the cut leaves is filled as the run fills it, and what the call adds
+    after the variant stays.  ``None`` where the run does not spell the
+    variant.
+    """
+    if not cuts:
+        return statement
+    filled = _filled(variant, statement)
+    if filled is None:
+        return None
+    fillings, after = filled
+    edits = [(start, end, " ") for start, end in cuts]
+    for hole, filling in zip(_VARIANT_HOLE.finditer(variant), fillings, strict=True):
+        if not any(start <= hole.start() and hole.end() <= end for start, end in cuts):
+            edits.append((hole.start(), hole.end(), filling))
+    text = variant
+    for start, end, replacement in sorted(edits, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return f"{text} {after}"
+
+
+class _Hop(NamedTuple):
+    """A function a statement's text passes through: used there at *at*, handed in by *call* from the next."""
+
+    func: ast.FunctionDef | ast.AsyncFunctionDef
+    at: ast.AST
+    call: Optional[ast.Call] = None
+
+
+class _Leaf(NamedTuple):
+    """A fragment of an assembled statement: where it lies in the text, what appends it, and the hops above it."""
+
+    start: int
+    end: int
+    node: ast.stmt
+    hops: tuple[_Hop, ...]
+    #: Whether every run of its variant appends it: not cut out, here or in
+    #: any name it was appended through.
+    kept: bool = True
+
+
+class _Build(NamedTuple):
+    """One variant a run's statement can be, and what every run of that variant holds."""
+
+    #: The text of the run's name, as the reassembly reads it: what
+    #: :attr:`leaves` index.
+    variant: str
+    #: The run's own text with what some paths append cut out.
+    text: str
+    #: Its fragments; empty where the variant was not read fragment by fragment.
+    leaves: list[_Leaf]
+
+
+def _named_text(node: ast.AST) -> Optional[str]:
+    """The name whose text *node* appends or assigns -- ``sql += where``, ``sql = where`` -- if it does."""
+    if isinstance(node, (ast.AugAssign, ast.Assign)) and isinstance(node.value, ast.Name):
+        return node.value.id
+    return None
+
+
+def _binding_calls(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[tuple[ast.Call, int]]:
+    """``(call, slot)`` for each call *func* binds *name* from -- ``where, var_map = build_where_clause()`` is slot 0."""
+    found: list[tuple[ast.Call, int]] = []
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
+            continue
+        if enclosing_function(node) is not func:
+            continue
+        for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+            if isinstance(target, ast.Name) and target.id == name:
+                found.append((node.value, -1))
+            for slot, one in enumerate(getattr(target, "elts", [])):
+                if isinstance(one, ast.Name) and one.id == name:
+                    found.append((node.value, slot))
+    return found
+
+
+def _handed_paths(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[tuple[Optional[ast.Call], tuple[_Hop, ...], ast.FunctionDef | ast.AsyncFunctionDef, ast.Name]]:
+    """``(call, through, callee, value)`` for each name a call binding *name* in *func* hands back.
+
+    :func:`sql.returned`, with the functions it passes through kept: ``return
+    self.getCriteriaByAge(...)`` in ``getSortingCriteria`` is where the
+    statement's ``ORDER BY`` is chosen -- under ``if random_number <=
+    sloppy_ratio:`` -- and a path that skipped the forwarding function lost the
+    test.  Only names: a literal returned is not a fragment anyone builds.
+    """
+    found: list = []
+
+    def through(call: ast.Call, slot: int, at_func, at_call: ast.Call, passed: tuple[_Hop, ...], hops: int) -> None:
+        placed = sql.placed(at_func, at_call)
+        if placed is None or hops >= sql.RETURN_HOPS:
+            return
+        for target in placed.targets:
+            for value in sql._returns(target.func):
+                if isinstance(value, ast.Call):
+                    through(call, slot, target.func, value, (*passed, _Hop(target.func, value, value)), hops + 1)
+                    continue
+                if slot >= 0:
+                    if not (isinstance(value, ast.Tuple) and len(value.elts) > slot):
+                        continue
+                    value = value.elts[slot]
+                if isinstance(value, ast.Name):
+                    found.append((call, passed, target.func, value))
+
+    for call, slot in _binding_calls(func, name):
+        through(call, slot, func, call, (), 0)
+    return found
+
+
+#: How many names deep a statement's text is cut -- a local built from
+#: another, or a callee's return, each one more.
+_CUT_DEPTH = 6
+
+
+def _cut_name(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    text: str,
+    at: ast.AST,
+    hops: tuple[_Hop, ...] = (),
+    depth: int = 0,
+) -> Optional[tuple[list[tuple[int, int]], list[_Leaf]]]:
+    """*text* -- one statement *name* holds in *func*, used at *at* -- read fragment by fragment.
+
+    ``(cuts, leaves)``: the stretches of *text* some paths do not append, and
+    its fragments, both by position in *text*; ``None`` where no way *func*
+    builds *name* is *text* verbatim, which positions need.
+    A fragment appended on some of the paths to *at* only is cut
+    (:func:`_on_some_paths`).  A fragment that is itself a name's text is cut
+    the same way, in that name's terms: ``sql += constituent_filter`` appends
+    a local that is ``""`` unless ``skip_constituent_ids``, and ``sqlP +=
+    sql_where_clause`` appends what ``construct_where_clause`` returns, six of
+    whose terms are each appended under an ``if`` there.  Read as one piece,
+    every one of them was in every run of ``getJobs``.
+    """
+    if depth > _CUT_DEPTH:
+        return None
+    here = (*hops, _Hop(func, at))
+    for variant, spans in sql.variant_spans(func, name):
+        if variant != text:
+            continue
+        cuts: list[tuple[int, int]] = []
+        leaves: list[_Leaf] = []
+        for span in spans:
+            piece = variant[span.start : span.end]
+            inner = _named_text(span.node)
+            held = _cut_name(func, inner, piece, span.node, here, depth + 1) if inner else None
+            if held is None:
+                held = ([], [_Leaf(0, len(piece), span.node, here)])
+            optional = _on_some_paths(span.node, at)
+            leaves.extend(
+                leaf._replace(start=leaf.start + span.start, end=leaf.end + span.start, kept=leaf.kept and not optional)
+                for leaf in held[1]
+            )
+            cuts.extend(
+                [(span.start, span.end)]
+                if optional
+                else [(start + span.start, end + span.start) for start, end in held[0]]
+            )
+        return sorted(cuts), sorted(leaves, key=lambda leaf: leaf.start)
+    for call, passed, callee, value in _handed_paths(func, name):
+        found = _cut_name(callee, value.id, text, value, (*hops, _Hop(func, at, call), *passed), depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _run_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[list[_Build]]:
+    """Each variant that could have built *run*, read fragment by fragment; ``None`` where none can be told.
+
+    The variants are the ones the run was built from (:attr:`sql.Execution.head`):
+    one build each, so two branches of an ``if``/``else`` that append the same
+    text are two, because what each fills the binds with is not the same.  A
+    run with no name for its text, or whose name holds no such variant and
+    nothing optional, is one build, itself, with no fragments.
+    """
+    if not run.variable:
+        return [_Build(run.sql, run.sql, [])]
+    variants = sql.variant_spans(func, run.variable)
+    matching = [one for one in variants if one[0] == run.head]
+    if not matching:
+        if any(_on_some_paths(span.node, run.call) for _text, spans in variants for span in spans):
+            return None
+        return [_Build(run.sql, run.sql, [])]
+    builds: list[_Build] = []
+    for text, _spans in matching:
+        found = _cut_name(func, run.variable, text, run.call)
+        if found is None:
+            builds.append(_Build(text, run.sql, []))
+            continue
+        cut = _cut_text(text, found[0], run.sql)
+        if cut is None:
+            return None
+        builds.append(_Build(text, cut, found[1]))
+    return builds
 
 
 def _every_run_texts(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[list[str]]:
@@ -1106,34 +1322,277 @@ def _every_run_texts(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Exec
     ``[run.sql]`` itself where nothing is; one text per variant that could
     have built the run where more than one could; ``None`` where a fragment
     is optional and no variant is the run's -- a run whose text was rewritten
-    past recognising.
+    past recognising.  What a name appended to the statement holds is cut
+    too, through as many names as built it (:func:`_cut_name`).
     """
-    if not run.variable:
+    builds = _run_builds(func, run)
+    if builds is None:
+        return None
+    if len(builds) == 1 and builds[0].text == run.sql:
         return [run.sql]
-    spelled = " ".join(run.sql.split())
-    variants = sql.variant_spans(func, run.variable)
-    matching = [one for one in variants if " ".join(one[0].split()) == spelled] or [
-        one for one in variants if _spelled_by(one[0], run.sql)
-    ]
-    if not matching:
-        if any(_on_some_paths(span.node, run.call) for _text, spans in variants for span in spans):
-            return None
-        return [run.sql]
-    texts: list[str] = []
-    for text, spans in matching:
-        cut = sorted(
-            (span for span in spans if _on_some_paths(span.node, run.call)),
-            key=lambda span: span.start,
-            reverse=True,
-        )
-        for span in cut:
-            text = text[: span.start] + " " + text[span.end :]
-        texts.append(text)
-    if len(matching) == 1 and not any(
-        _on_some_paths(span.node, run.call) for span in matching[0][1]
-    ):
-        return [run.sql]
-    return texts
+    return [build.text for build in builds]
+
+
+def _parameters(func: ast.AST) -> list[str]:
+    args = func.args  # type: ignore[attr-defined]
+    return [one.arg for one in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
+
+
+def _nested_in(func: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    node = getattr(func, "parent", None)
+    while node is not None and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        node = getattr(node, "parent", None)
+    return node
+
+
+def _statement_of(node: ast.AST) -> ast.AST:
+    """*node*, or the statement holding it -- a ``return``'s value is its ``return``."""
+    if isinstance(node, ast.stmt):
+        return node
+    return next((one for one in ancestors(node) if isinstance(one, ast.stmt)), node)
+
+
+def _guards_between(node: ast.AST, below: ast.AST) -> list[tuple[str, str, int, Optional[ast.expr]]]:
+    """``(kind, test, line, expression)`` for each ``if``, loop and handler above *node* and not above *below*, outermost first.
+
+    *below* a function: every one above *node* in it.  An ``else`` -- and a
+    later branch of an ``elif`` chain, through the ``else`` it hangs from --
+    is the test not holding.
+    """
+    around = {id(one) for one in ancestors(below)} | {id(below)}
+    found: list[tuple[str, str, int, Optional[ast.expr]]] = []
+    previous: ast.AST = node
+    for ancestor in ancestors(node):
+        if id(ancestor) in around:
+            break
+        if isinstance(ancestor, ast.If):
+            if any(previous is one for one in ancestor.body):
+                found.append(("if", ast.unparse(ancestor.test), ancestor.lineno, ancestor.test))
+            elif any(previous is one for one in ancestor.orelse):
+                found.append(("else", f"not ({ast.unparse(ancestor.test)})", ancestor.lineno, ancestor.test))
+        elif isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)):
+            found.append(("loop", f"a loop at {ancestor.lineno} runs", ancestor.lineno, None))
+        elif isinstance(ancestor, ast.ExceptHandler):
+            found.append(("except", f"an except at {ancestor.lineno} runs", ancestor.lineno, None))
+        previous = ancestor
+    found.reverse()
+    return found
+
+
+def _stretches(leaf: _Leaf) -> list[tuple[int, ast.AST, ast.AST]]:
+    """``(hop, from, to)`` -- where along the text's way from *leaf* to the ``execute`` a test can choose it.
+
+    In the fragment's own function, between it and where the text is used;
+    in a function the text was returned from, above that ``return``; in the
+    function a call handed it to, between the call and where the text is used.
+    """
+    hops = leaf.hops
+    last = len(hops) - 1
+    found: list[tuple[int, ast.AST, ast.AST]] = [(last, leaf.node, hops[last].at)]
+    for index in range(last - 1, -1, -1):
+        hop, inner = hops[index], hops[index + 1]
+        if hop.call is not None:
+            found.append((index + 1, _statement_of(inner.at), inner.func))
+            found.append((index, hop.call, hop.at))
+        else:
+            found.append((index, inner.at, hop.at))
+    return found
+
+
+def _locals_bound(func: ast.AST, name: str) -> list[str]:
+    """``<expression>@<line>`` for each plain assignment of *name* in *func*."""
+    found: list[str] = []
+    for node in ast.walk(func):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and enclosing_function(node) is func:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(one, ast.Name) and one.id == name
+                for target in targets
+                for one in ([target] if isinstance(target, ast.Name) else getattr(target, "elts", []))
+            ):
+                found.append(f"{_clip(ast.unparse(node.value))}@{node.lineno}")
+    return found[:4]
+
+
+def _clip(text: str, width: int = 120) -> str:
+    return text if len(text) <= width else text[: width - 3] + "..."
+
+
+def _rebound_at(func: ast.AST, name: str) -> list[int]:
+    """Lines where *func* itself -- not a function nested in it -- binds *name* again."""
+    lines: list[int] = []
+    for node in ast.walk(func):
+        if node is func or enclosing_function(node) is not func:
+            continue
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor, ast.NamedExpr)):
+            targets = [node.target]
+        elif isinstance(node, ast.withitem):
+            targets = [node.optional_vars] if node.optional_vars is not None else []
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                lines.append(node.lineno)
+            continue
+        else:
+            continue
+        if any(isinstance(one, ast.Name) and one.id == name for target in targets for one in ast.walk(target)):
+            lines.append(getattr(node, "lineno", 0) or getattr(getattr(node, "context_expr", None), "lineno", 0))
+    return sorted(set(lines))
+
+
+def _guard_read(name: str, hop: int, hops: tuple[_Hop, ...], file_of) -> GuardRead:
+    """Where *name*, read by a test in ``hops[hop]``'s function, gets its value: out to the read site's parameter.
+
+    Only unchanged: where a function on the way binds the name again, the
+    value at the test is not the argument, and ``at_site`` stays empty with
+    ``via`` saying where.
+    """
+    func = hops[hop].func
+    site = hops[0].func
+    read = GuardRead(name=name)
+    current, at, changed = name, hop, False
+
+    def rebound(where: ast.AST, one: str) -> bool:
+        lines = _rebound_at(where, one)
+        if lines:
+            read.via.append(
+                f"{getattr(where, 'name', '?')}.{one} is reassigned at "
+                + ", ".join(f"{file_of(where)}:{line}" for line in lines)
+            )
+        return bool(lines)
+
+    while True:
+        if current not in _parameters(func):
+            outer = _nested_in(func)
+            if outer is not None and not _rebound_at(func, current) and current in _parameters(outer):
+                read.via.append(f"{func.name}: {current} is {outer.name}'s")
+                func = outer
+                continue
+            read.bound = _locals_bound(func, current)
+            return read
+        if not read.parameter:
+            read.parameter = f"{func.name}.{current}"
+        changed = rebound(func, current) or changed
+        if func is site:
+            if not changed:
+                read.at_site = f"{site.name}.{current}"
+            return read
+        # The call into *func*: the nearest hop above whose function is another.
+        while at > 0 and hops[at - 1].func is func:
+            at -= 1
+        if at == 0 or hops[at - 1].call is None:
+            read.via.append(f"{func.name}.{current}: no call into it on the way")
+            return read
+        call = hops[at - 1].call
+        handed = next((one.value for one in call.keywords if one.arg == current), None)
+        if handed is None:
+            names = _parameters(func)
+            position = names.index(current) - (1 if names and names[0] in ("self", "cls") else 0)
+            if 0 <= position < len(call.args):
+                handed = call.args[position]
+        if handed is None:
+            read.via.append(f"{func.name}.{current}: not passed at {call.lineno}, so its default")
+            return read
+        read.via.append(f"{func.name}.{current} <- {_clip(ast.unparse(handed))}@{call.lineno}")
+        if not isinstance(handed, ast.Name):
+            return read
+        at -= 1
+        func, current = hops[at].func, handed.id
+
+
+def _place(leaf: _Leaf, term: str, file_of) -> TermPlace:
+    """Where *leaf* is appended, in which *term*, and every test along its way to the ``execute``."""
+    tests: list[TermGuard] = []
+    for hop, node, below in reversed(_stretches(leaf)):
+        func = leaf.hops[hop].func
+        for kind, test, line, expression in _guards_between(node, below):
+            names = sorted({one.id for one in ast.walk(expression) if isinstance(one, ast.Name)}) if expression is not None else []
+            tests.append(
+                TermGuard(
+                    kind=kind,
+                    test=test,
+                    at=f"{file_of(func)}:{line}",
+                    function=func.name,
+                    reads=[_guard_read(name, hop, leaf.hops, file_of) for name in names],
+                )
+            )
+    return TermPlace(
+        fragment=f"{file_of(leaf.hops[-1].func)}:{getattr(leaf.node, 'lineno', 0)}", term=term, tests=tests
+    )
+
+
+def _condition_seeds(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution, line: int, found
+) -> dict[str, list[int]]:
+    """Where each bind *found* conditions name is filled for *run* -- the ``@<line>`` :func:`_render_condition` writes."""
+    window = run.window
+    if window is None and run.varmap:
+        window = sql.binding_window(func, run.varmap, line)
+    seeds: dict[str, list[int]] = {}
+    for condition in found:
+        for key in condition.binds:
+            if key in seeds:
+                continue
+            at_lines = sorted(
+                {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window, at=run.run_at)}
+            )
+            if at_lines:
+                seeds[key] = at_lines
+    return seeds
+
+
+def _trail(leaf: _Leaf) -> list[ast.AST]:
+    """Where a fragment's text is on its way to the ``execute``: appended, then each use and call above that."""
+    found: list[ast.AST] = [leaf.node]
+    for hop in leaf.hops:
+        found.append(hop.at)
+        if hop.call is not None:
+            found.append(hop.call)
+    return found
+
+
+def _along(nodes: Iterable[ast.AST]) -> dict[int, list[ast.AST]]:
+    """*nodes* by the function each is in -- what :func:`_meets` compares a node with."""
+    found: dict[int, list[ast.AST]] = {}
+    for node in nodes:
+        found.setdefault(id(enclosing_function(node)), []).append(node)
+    return found
+
+
+def _meets(node: ast.AST, along: dict[int, list[ast.AST]]) -> bool:
+    """Whether one run can pass *node* and every node of *along* in its function.
+
+    :func:`pathcond.compatible` read as the function runs, the question the
+    reassembly asks of a fragment and the call it might reach: the two arms
+    of one ``if`` never meet, and neither do two ``if``\\ s testing the same
+    thing with no name of the test given a new value between them --
+    ``getJobStatisticsForExtIF`` picks its statement under one ``if
+    source_type == "analysis"`` and fills its binds under another.  Only in
+    one function: a test in ``getJobs`` says nothing about one in
+    ``construct_where_clause``.
+    """
+    return all(compatible(node, one, current=True) for one in along.get(id(enclosing_function(node)), ()))
+
+
+def _squeezed(text: str) -> str:
+    return re.sub(r"\s+", "", text).lower()
+
+
+def _words(text: str) -> list[str]:
+    """The names, quoted values and numbers *text* is spelled with."""
+    return re.findall(r"'[^']*'|[A-Za-z_][\w$#]*|\d+(?:\.\d+)?", text)
+
+
+def _names(piece: str, binds: Iterable[str], words: Iterable[str]) -> bool:
+    """Whether a fragment's text names a term: every one of its binds, else every one of its words."""
+    binds = [bind for bind in binds if bind]
+    if binds:
+        return all(re.search(re.escape(bind) + r"(?!\w)", piece) for bind in binds)
+    words = [word for word in words if word]
+    return bool(words) and all(re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", piece, re.I) for word in words)
+
+
 
 
 def _refused_terms(
@@ -1758,7 +2217,11 @@ def read_side(
         statements.setdefault((at.owner, at.line), at).consults.add((subject, value))
 
     def bound(func, run, key: str, file: str) -> list[str]:
-        values_of: list[str] = []
+        return [value for value, _site in bound_sites(func, run, key, file)]
+
+    def bound_sites(func, run, key: str, file: str) -> list[tuple[str, ast.stmt]]:
+        """The values *key* is filled with for *run*, each with the statement putting it there."""
+        found: list[tuple[str, ast.stmt]] = []
         binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
         if not run.varmap:
             binds = binds + sql.inline_binds(run.call, key)
@@ -1770,8 +2233,8 @@ def read_side(
             at_file = file
             if where is not func and calls is not None:
                 at_file = calls.types.file_of(where) or file
-            values_of.extend(one.value for one in settle(bind.value, where, at_file))
-        return values_of
+            found.extend((one.value, bind.site) for one in settle(bind.value, where, at_file))
+        return found
 
     def reading_of(func, run, file: str) -> _CallReading:
         """What one run reads and asks by -- what a call site can narrow."""
@@ -1953,6 +2416,209 @@ def read_side(
             if kept is None:
                 continue
             kept.conditions.extend(_folded_conditions(func, line, variants))
+
+    def place_added_under(
+        func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, file: str, executions: list
+    ) -> None:
+        """Say, per statement, which terms of its fields some builds of it do not hold, and what adds each.
+
+        A build is one variant of the statement with what some paths append
+        cut out (:func:`_run_builds`), through every name its text passed
+        through.  A term every build holds is not said; one some build lacks
+        is, with each fragment that carries it and the tests above that
+        fragment (:func:`_place`).  ``selects`` and ``excludes`` are compared
+        pair by pair, so that a pair one build asks in an ``IN`` list and
+        another in a plain ``=`` is in both.
+
+        **Each variant is read on its own, the values in its binds too.**
+        ``construct_where_clause``'s branches reuse their bind names --
+        ``:prodSourceLabel2`` is ``panda`` under ``prod_source_label ==
+        "user"`` and ``test`` under ``"managed"`` -- and a varmap is read by
+        key, not by path.  Read across variants, every branch asked for every
+        label, so ``panda`` was in every build and read as required, and a
+        term was placed at every fragment naming its binds.  So a value counts
+        in a variant only where the statement putting it into the bind can run
+        with what the variant appends (:func:`_meets`), and a term is looked
+        for among that variant's own fragments, where a bind is in one place.
+        """
+        runs: dict[int, list] = {}
+        for run in executions:
+            held = runs.setdefault(run.call.lineno, [])
+            if all(run.sql != other.sql for other in held):
+                held.append(run)
+        for line, variants in runs.items():
+            kept = statements.get((owner, line))
+            if kept is not None:
+                statements[(owner, line)] = kept._replace(added_under=terms_added(func, file, line, variants, kept))
+
+    def terms_added(
+        func: ast.FunctionDef | ast.AsyncFunctionDef, file: str, line: int, variants: list, kept: ReadStatement
+    ) -> tuple[AddedTerm, ...]:
+        """:func:`place_added_under` for the statement *variants* run at *line*."""
+
+        def file_of(one: ast.AST) -> str:
+            return (calls.types.file_of(one) if calls is not None else None) or file
+
+        def identity(term) -> tuple:
+            return (term.table.lower(), term.column.lower(), term.excluding, term.binds, term.literals)
+
+        def plain(condition) -> str:
+            return _SEEDED.sub(r"\1", _render_condition(condition, {}))
+
+        filled: dict[tuple[int, str], list[tuple[str, ast.stmt]]] = {}
+        row_terms: dict[int, list] = {}
+        orders: dict[int, list[str]] = {}
+        # ``(plain, binds)`` per run, and each plain spelling as ``conditions`` seeds it.
+        own_conditions: dict[int, list[tuple[str, tuple[str, ...]]]] = {}
+        spelled: dict[tuple[str, str], str] = {}
+        # ``(spelling, plain, binds)`` of each term the run's ``WHERE`` ``AND``\ s
+        # together -- what a pair enters the statement in (:func:`sqltext.conjoined`).
+        conjuncts: dict[int, list[tuple[str, str, tuple[str, ...]]]] = {}
+        for run in variants:
+            try:
+                whole = sqltext.terms(run.sql).terms
+            except Exception:  # noqa: BLE001 -- a text sqlglot will not scope is read as nothing
+                whole = ()
+            row_terms[id(run)] = [term for term in whole if term.verb == "read" and term.scope == sqltext.ROW]
+            orders[id(run)] = sqltext.ordering(run.sql)[0]
+            found = sqltext.conditions(run.sql)
+            seeds = _condition_seeds(func, run, line, found)
+            own_conditions[id(run)] = [(plain(one), tuple(dict.fromkeys(one.binds))) for one in found]
+            for one in found:
+                spelled.setdefault(("conditions", plain(one)), _render_condition(one, seeds))
+            joined = sqltext.conjoined(run.sql)
+            seeds = _condition_seeds(func, run, line, joined)
+            conjuncts[id(run)] = [
+                (_render_condition(one, seeds), plain(one), tuple(dict.fromkeys(one.binds))) for one in joined
+            ]
+
+        def values(run, key: str, along: Optional[dict[int, list[ast.AST]]]) -> list[str]:
+            """What *key* is filled with in a run passing *along*; every value where *along* is ``None``."""
+            if (id(run), key) not in filled:
+                filled[(id(run), key)] = bound_sites(func, run, key, file)
+            return [value for value, site in filled[(id(run), key)] if along is None or _meets(site, along)]
+
+        def pairs(run, term, along) -> list[tuple[tuple[str, str], tuple[str, ...], tuple[str, ...]]]:
+            """``(pair, binds, words)``: what *term* asks for in a run passing *along*, and what in the text carries it."""
+            subject = _term_subject(attributor, term)
+            field = "excludes" if term.excluding else "selects"
+            found = [((field, f"{subject}={value}"), (), (term.column, f"'{value}'")) for value in term.literals]
+            unsaid = term.undecided
+            for key in term.binds:
+                values_of = values(run, key, along)
+                unsaid = unsaid or not values_of
+                found.extend(((field, f"{subject}={value}"), (key,), ()) for value in values_of)
+            if term.excluding and unsaid:
+                found.append(((field, f"{subject}={{}}"), term.binds, (term.column,)))
+            return found
+
+        def holds(run, build: _Build) -> Optional[set[tuple[str, str]]]:
+            """Every ``(field, term)`` each run of *build* has; ``None`` where its text will not read."""
+            along = _along(node for leaf in build.leaves if leaf.kept for node in _trail(leaf))
+            try:
+                present = {identity(term) for term in sqltext.terms(build.text).terms}
+                here = {("conditions", plain(one)) for one in sqltext.conditions(build.text)}
+                here |= {("order_by", order) for order in sqltext.ordering(build.text)[0]}
+            except Exception:  # noqa: BLE001 -- a build whose text cannot be read decides nothing
+                return None
+            for term in row_terms[id(run)]:
+                if identity(term) in present:
+                    here.update(pair for pair, _binds, _words in pairs(run, term, along))
+            return here
+
+        def carried(run, piece: str, along: Optional[dict[int, list[ast.AST]]]) -> dict[tuple[str, str], list[str]]:
+            """``{(field, term): [the term it enters in]}`` for what a fragment reading *piece* appends."""
+            found: dict[tuple[str, str], list[str]] = {}
+            for order in orders[id(run)]:
+                if _squeezed(f"ORDER BY {order}") in _squeezed(piece):
+                    found.setdefault(("order_by", order), []).append(order)
+            for text, binds in own_conditions[id(run)]:
+                if _names(piece, binds, () if binds else _words(text)):
+                    found.setdefault(("conditions", text), []).append(spelled[("conditions", text)])
+            for term in row_terms[id(run)]:
+                for pair, binds, words in pairs(run, term, along):
+                    if not _names(piece, binds, words):
+                        continue
+                    # The term of this run's ``WHERE`` that holds it -- an ``OR``
+                    # with another column whole -- and nothing where none does:
+                    # the fragment's own text can hold other terms' ``OR``\ s.
+                    within = next(
+                        (
+                            spelling
+                            for spelling, text, holding in conjuncts[id(run)]
+                            if (set(binds) <= set(holding) if binds else _names(text, (), words))
+                        ),
+                        "",
+                    )
+                    found.setdefault(pair, []).append(within)
+            return found
+
+        read = [
+            (run, build, holds(run, build))
+            for run in variants
+            for build in _run_builds(func, run) or [_Build(run.sql, run.sql, [])]
+        ]
+        readable = [held for _run, _build, held in read if held is not None]
+        if not readable:
+            return ()
+        every = set.intersection(*readable)
+        fields = (
+            [("selects", f"{subject}={value}") for subject, value in kept.selects]
+            + [("excludes", f"{subject}={value}") for subject, value in kept.excludes]
+            + list(spelled)
+            + [("order_by", order) for order in kept.order_by]
+        )
+        missing = sorted(set(fields) - every)
+        places: dict[tuple[str, str], dict[tuple[str, str], TermPlace]] = {key: {} for key in missing}
+        for run, build, _held in read:
+            kept_nodes = [node for leaf in build.leaves if leaf.kept for node in _trail(leaf)]
+            for leaf in build.leaves:
+                piece = build.variant[leaf.start : leaf.end]
+                for key, terms in carried(run, piece, _along([*kept_nodes, *_trail(leaf)])).items():
+                    for term in terms if key in places else ():
+                        place = _place(leaf, term, file_of)
+                        places[key].setdefault((place.fragment, place.term), place)
+
+        def named(key: tuple[str, str]) -> bool:
+            """Whether a fragment appends *key*'s term with its values read across every branch."""
+            return any(
+                key in carried(run, build.variant[leaf.start : leaf.end], None)
+                for run, build, _held in read
+                for leaf in build.leaves
+            )
+
+        added: list[AddedTerm] = []
+        for key in missing:
+            field, said = key
+            term = spelled.get(key, said)
+            chosen = [place for place in places[key].values() if place.tests]
+            if chosen:
+                added.append(AddedTerm(field=field, term=term, places=chosen))
+            elif places[key]:
+                added.append(
+                    AddedTerm(
+                        field=field,
+                        term=term,
+                        unplaced=(
+                            "no test chooses it: the map reads several statements at this call, at "
+                            + ", ".join(sorted({fragment for fragment, _term in places[key]}))
+                        ),
+                    )
+                )
+            elif named(key):
+                added.append(
+                    AddedTerm(
+                        field=field,
+                        term=term,
+                        unplaced=(
+                            "no build holds it: every statement putting the value into its bind "
+                            "is on a branch the fragment naming the bind is not"
+                        ),
+                    )
+                )
+            else:
+                added.append(AddedTerm(field=field, term=term, unplaced="the fragment appending it was not found"))
+        return tuple(added)
 
     def place_regions(
         func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
@@ -2247,6 +2913,7 @@ def read_side(
                             f"{'<' if strict else '<='} {value}" for value in values_of or [bound_to]
                         )
             place_conditions(func, owner, executions)
+            place_added_under(func, owner, module.rel_path, executions)
             # Regions first: the exits are read inside the stretch it settles.
             place_regions(func, owner, executions)
             place_exits(func, owner)
@@ -2303,6 +2970,7 @@ def read_site_nodes(
                 # true answer rather than a gap.
                 bind_window=list(at.window) if at.window else [],
                 conditions=sorted(at.conditions),
+                added_under=list(at.added_under),
                 unresolved=list(at.unresolved),
                 region=list(at.region) if at.region else [],
                 exits=list(at.exits),

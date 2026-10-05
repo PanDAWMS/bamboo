@@ -1067,3 +1067,181 @@ def test_the_build_lists_every_call_to_its_own_functions_it_cannot_place(tmp_pat
         (11, "spec.helper", calls_mod.UNPLACED_RECEIVER)
     ]
     assert stops[0].owner == f"{PACKAGE}/m.py::run"
+
+
+def test_a_term_a_callee_or_a_local_appends_on_some_paths_is_not_required(tmp_path):
+    """``getJobs`` appends what ``construct_where_clause`` returns, through a closure.
+
+    Its ``minRamCount`` term is appended under ``if mem not in [0, "0"]:`` in
+    the callee, and ``_read_unprocessed_inputs`` appends a local that holds
+    its constituent filter only ``if skip_constituent_ids:``.  Read as one
+    piece each, every run of the statement required them.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def construct_where_clause(self, mem):\n"
+        "        clause = 'WHERE jobStatus=:st '\n"
+        "        if mem:\n"
+        "            clause += 'AND minRamCount<=:mem '\n"
+        "        clause += 'AND maxCpuCount>:cpu '\n"
+        "        return clause, {}\n"
+        "\n"
+        "    def getJobs(self, mem, skip):\n"
+        "        def build_where_clause():\n"
+        "            where, values = self.construct_where_clause(mem)\n"
+        "            return where, values\n"
+        "\n"
+        "        sql_where_clause, var_map = build_where_clause()\n"
+        "        extra = ''\n"
+        "        if skip:\n"
+        "            extra = 'AND jediTaskID NOT IN (:skip) '\n"
+        "        sqlP = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 '\n"
+        "        sqlP += sql_where_clause\n"
+        "        sqlP += extra\n"
+        "        self.cur.execute(sqlP, {':st': 'activated', ':cpu': 1})\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    assert statement.conditions == ["maxCpuCount>:cpu"]
+
+
+def test_a_bind_reused_across_branches_is_read_per_branch(tmp_path):
+    """``construct_where_clause``'s branches reuse ``:prodSourceLabel1..N`` with other values.
+
+    Read by key, every branch asked for every label: ``managed`` -- asked
+    under one branch only -- was in every build and read as required, and the
+    ``IN`` list was placed at the fragment that puts the same binds inside an
+    ``OR`` with ``processingType``.  ``test`` is asked by both branches and is
+    required.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def getJobs(self, label):\n"
+        "        var_map = {':site': 'X'}\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE computingSite=:site '\n"
+        "        if label == 'managed':\n"
+        "            sql += 'AND prodSourceLabel IN (:l1,:l2) '\n"
+        "            var_map[':l1'] = 'managed'\n"
+        "            var_map[':l2'] = 'test'\n"
+        "        else:\n"
+        "            sql += 'AND (processingType=:pt OR prodSourceLabel IN (:l1,:l2)) '\n"
+        "            var_map[':pt'] = 'gangarobot'\n"
+        "            var_map[':l1'] = 'prod_test'\n"
+        "            var_map[':l2'] = 'test'\n"
+        "        self.cur.execute(sql, var_map)\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    added = {(one.field, one.term.split("=")[-1] if one.field == "selects" else one.term): one for one in statement.added_under}
+    assert ("selects", "test") not in added
+    for label, line in (("managed", 6), ("prod_test", 10), ("gangarobot", 10)):
+        (place,) = added[("selects", label)].places
+        assert place.fragment.endswith(f"db.py:{line}")
+    # The IN list it is asked in, not the OR the other branch puts the same binds in.
+    assert [place.term.split(" (")[0] for place in added[("selects", "managed")].places] == ["prodSourceLabel IN"]
+    assert [place.term.split("=")[0] for place in added[("selects", "gangarobot")].places] == ["processingType"]
+    (in_list,) = [one for key, one in added.items() if key[0] == "conditions" and key[1].startswith("prodSourceLabel")]
+    assert [place.fragment.rsplit(":", 1)[1] for place in in_list.places] == ["6"]
+
+
+def test_a_bind_filled_under_a_second_if_testing_the_same_thing_is_read_with_its_branch(tmp_path):
+    """``getJobStatisticsForExtIF`` picks its statement under one ``if source_type == "analysis"`` and fills the binds under another.
+
+    Two ``if`` statements, one decision: nothing between them gives
+    ``source_type`` a new value.  ``managed`` is the production branch's
+    label and was placed at the analysis statement, which names the same
+    bind.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def stats(self, source_type):\n"
+        "        if source_type == 'analysis':\n"
+        "            sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE prodSourceLabel IN (:l1,:l2) '\n"
+        "        else:\n"
+        "            sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE prodSourceLabel IN (:l1) AND jobExecutionID=1 '\n"
+        "        var_map = {}\n"
+        "        if source_type == 'analysis':\n"
+        "            var_map[':l1'] = 'user'\n"
+        "            var_map[':l2'] = 'panda'\n"
+        "        else:\n"
+        "            var_map[':l1'] = 'managed'\n"
+        "        self.cur.execute(sql, var_map)\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    placed = {
+        one.term.split("=")[-1]: sorted(place.fragment.rsplit(":", 1)[1] for place in one.places)
+        for one in statement.added_under
+        if one.field == "selects"
+    }
+    assert placed == {"user": ["4"], "panda": ["4"], "managed": ["6"]}
+
+
+def test_a_pair_is_placed_in_its_own_term_not_in_the_fragment_that_appends_it(tmp_path):
+    """``_read_unprocessed_inputs`` appends ``status=:status`` and an ``OR`` on attempts in one fragment.
+
+    The pair's term is ``status=:status``.  Spelled as the fragment, the pair
+    read as asked inside an ``OR`` -- another term's -- and so as allowed,
+    not required.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Files:\n"
+        "    def unprocessed(self, flag):\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE computingSite=:site '\n"
+        "        if flag:\n"
+        "            sql += 'AND jobStatus=:status AND (maxAttempt IS NULL OR attemptNr<maxAttempt) '\n"
+        "        self.cur.execute(sql, {':site': 'X', ':status': 'activated'})\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    (added,) = [one for one in statement.added_under if one.field == "selects"]
+    assert added.term.endswith(".jobStatus=activated")
+    assert [place.term.split("@")[0] for place in added.places] == ["jobStatus=:status"]

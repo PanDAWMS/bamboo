@@ -1098,6 +1098,117 @@ class LogSiteNode(BaseNode):
         return sorted(set(self.log_files) | set(self.caller_log_files))
 
 
+class GuardRead(BaseModel):
+    """A name a guard reads, and where a caller's value for it comes from."""
+
+    name: str
+    parameter: str = Field(
+        default="",
+        description=(
+            "``<function>.<parameter>`` where *name* is a parameter of the function "
+            "the guard is in, or of the function it is nested in; empty for a local."
+        ),
+    )
+    at_site: str = Field(
+        default="",
+        description=(
+            "``<function>.<parameter>`` of the read site's own function the value "
+            "arrives through unchanged -- what a call site's constants or a printed "
+            "run settle -- or empty where it does not: another expression is "
+            "handed on the way, or a function on the way reassigns the name "
+            "(``via`` says which)."
+        ),
+    )
+    via: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The hops from the guard's function out: ``construct_where_clause."
+            "prod_source_label <- prodSourceLabel@2329``, ``build_where_clause: "
+            "prodSourceLabel is getJobs's``; the last says why it stops where it "
+            "stops short of the read site."
+        ),
+    )
+    bound: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For a local, what assigns it: ``random.randrange(100)@839`` -- a value "
+            "computed at run time, said rather than settled."
+        ),
+    )
+
+
+class TermGuard(BaseModel):
+    """One test a term's fragment is appended under."""
+
+    kind: str = Field(
+        ...,
+        description=(
+            "``if`` -- the test holds; ``else`` -- it does not (an ``else``, or an "
+            "earlier branch of the ``elif`` chain a branch hangs from); ``loop`` / "
+            "``except`` -- the loop body or the handler runs."
+        ),
+    )
+    test: str = Field(
+        ...,
+        description=(
+            "As the source writes it; ``not (<test>)`` for an ``else`` or a later "
+            "``elif`` -- each earlier branch of a chain is its own entry; ``a loop "
+            "at <line> runs`` / ``an except at <line> runs`` for those."
+        ),
+    )
+    at: str = Field(..., description="``<file>:<line>`` of the ``if``, loop or handler.")
+    function: str
+    reads: list[GuardRead] = Field(default_factory=list)
+
+
+class TermPlace(BaseModel):
+    """One way a term gets into a statement: the fragment appending it and every test above it."""
+
+    fragment: str = Field(..., description="``<file>:<line>`` of the statement that appends the text.")
+    term: str = Field(
+        default="",
+        description=(
+            "The term the entry enters the statement in -- one of the terms the "
+            "``WHERE`` ``AND``\\ s together -- spelled as ``conditions`` spells it: "
+            "``processingType=:processingType1 OR prodSourceLabel IN (...)`` for a "
+            "pair one branch of an ``OR`` with another column holds, so that a pair "
+            "one build *requires* can be told from one it only *allows*; "
+            "``status=:status`` for a pair ``conditions`` leaves to ``selects``.  "
+            "Empty where the ``WHERE`` does not read term by term: not known, which "
+            "is not the same as outside an ``OR``."
+        ),
+    )
+    tests: list[TermGuard] = Field(
+        default_factory=list,
+        description=(
+            "Outermost first, all of them holding: the ones between where the "
+            "statement's text is used and the ``execute`` first, then each function "
+            "the text passed through, out to in, ending in the fragment's own.  A "
+            "guard above the ``execute`` holds for every build and is not here."
+        ),
+    )
+
+
+class AddedTerm(BaseModel):
+    """A term a statement's fields hold on some builds of it only."""
+
+    field: str = Field(..., description="``selects``, ``excludes``, ``conditions`` or ``order_by``.")
+    term: str = Field(..., description="As that field spells it.")
+    places: list[TermPlace] = Field(default_factory=list)
+    unplaced: str = Field(
+        default="",
+        description=(
+            "Why no place is given, when none is: the term is said rather than "
+            "dropped.  ``no test chooses it`` -- the call runs statements whose "
+            "difference no test above a fragment makes, such as a text passed "
+            "through ``re.sub``; ``no build holds it`` -- every statement putting "
+            "the value into its bind is on a branch the fragment naming the bind "
+            "is not, so the pair is in the field and in no build the map can see; "
+            "``the fragment appending it was not found``."
+        ),
+    )
+
+
 class ReadSiteNode(BaseNode):
     """One statement that asks the database for rows by a value.
 
@@ -1257,6 +1368,31 @@ class ReadSiteNode(BaseNode):
             "Join terms are left out.  ``c1.jediTaskID=d.jediTaskID`` says how "
             "two tables meet, not why a row was passed over, and the 182 of "
             "them would bury the terms that do."
+        ),
+    )
+    added_under: Optional[list[AddedTerm]] = Field(
+        default=None,
+        description=(
+            "Every term ``selects``, ``excludes``, ``conditions`` and ``order_by`` "
+            "hold on some builds of the statement only, with the tests that add it; "
+            "a term not here is in every build.\n\n"
+            "``getJobs``' ``WHERE`` is ``construct_where_clause``'s return, and six of "
+            "its terms are each appended under an ``if`` there -- ``mem not in [0, "
+            "'0']`` for ``minRamCount``.  Read as one piece, every run required them, "
+            "and a reader ruled a job out for failing a term its build never "
+            "asked.  Those leave ``conditions`` and are here, each with its test, "
+            "and each name the test reads that arrives as a parameter followed out "
+            "to ``getJobs``' own, so that a call's constants or a printed run can "
+            "settle it.  ``selects`` and ``excludes`` keep every pair any build asks "
+            "by; this says which of them some builds do not.\n\n"
+            "Each build is read on its own, the values in its binds too: a value "
+            "counts only where the statement filling the bind can be on one run "
+            "with the build's fragments.  ``construct_where_clause``'s branches "
+            "reuse ``:prodSourceLabel1..N`` with other labels, and read by key every "
+            "branch asked for every label.\n\n"
+            "``None`` -- an older build -- is not computed, and not \"every term in "
+            "every build\": a consumer that read the two alike would rule rows out "
+            "against terms nobody checked."
         ),
     )
     unresolved: list[str] = Field(
@@ -3653,6 +3789,14 @@ class StatementReading(BaseModel):
             "The ``ORDER BY`` clauses it can be built with -- "
             ":attr:`ReadSiteNode.order_by`.  With ``limits``, why a row that "
             "passes the ``WHERE`` can still not come back."
+        ),
+    )
+    added_under: Optional[list[AddedTerm]] = Field(
+        default=None,
+        description=(
+            "The terms some builds of the statement do not hold, with the tests "
+            "that add them -- :attr:`ReadSiteNode.added_under`.  ``None`` where the "
+            "map did not compute it, which is not the same answer as ``[]``."
         ),
     )
     limits: list[str] = Field(

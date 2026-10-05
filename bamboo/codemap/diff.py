@@ -91,6 +91,10 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "tables",
         "bind_window",
         "conditions",
+        # Which terms some builds lack, and the tests that add them: a term
+        # leaving ``conditions`` arrives here, and unlisted the move would
+        # read as the term vanishing.
+        "added_under",
         # What the statement was read only in part on.  Listed for the same
         # reason ``conditions`` is: a term moving out of ``conditions`` and
         # into here is a statement the map stopped being able to read, and

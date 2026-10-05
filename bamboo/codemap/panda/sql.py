@@ -1530,6 +1530,15 @@ class Execution(NamedTuple):
     second's.  See :attr:`run_at`.
     """
 
+    head: str = ""
+    """The text of :attr:`variable` this run was built from, before the call adds to it.
+
+    One of the name's variants, verbatim.  ``execute((sql + comment) % table,
+    ...)`` runs it with the comment after it and ``FROM {}`` filled in, so
+    :attr:`sql` is no variant's text, and a reader asking which fragments
+    built the run would otherwise have to guess by comparing spellings.
+    """
+
     @property
     def run_at(self) -> tuple[ast.Call, ...]:
         """The calls to read this run's binds at -- :attr:`calls`, or its own."""
@@ -2534,6 +2543,7 @@ def executions(
                         call=node,
                         window=window,
                         unresolved=tuple(stops) + _hole_stops(text, node.lineno),
+                        head=combination[0],
                     )
                 )
         if skipped is not None and len(found) == produced:

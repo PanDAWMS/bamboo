@@ -1024,6 +1024,7 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
     before, _SCHEMA = _SCHEMA, columns
     terms.cache_clear()
     conditions.cache_clear()
+    conjoined.cache_clear()
     refusals.cache_clear()
     try:
         yield
@@ -1031,6 +1032,7 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
         _SCHEMA = before
         terms.cache_clear()
         conditions.cache_clear()
+        conjoined.cache_clear()
         refusals.cache_clear()
 
 
@@ -1726,7 +1728,7 @@ def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: l
     return tree if agreed else None
 
 
-def _prune(node, in_or: bool):
+def _prune(node, in_or: bool, held: bool = False):
     """Drop what is not an answer, and drop a disjunction that lost a branch.
 
     An ``OR`` with one branch gone is satisfied by that branch whatever the
@@ -1734,13 +1736,14 @@ def _prune(node, in_or: bool):
     does not make -- the direction that gets a row ruled out for failing a
     test it never faced.  A term ``selects`` already carries is dropped only
     outside a disjunction: inside one it is not the same fact, since
-    ``selects`` says the statement asks by the value outright.
+    ``selects`` says the statement asks by the value outright.  *held* keeps
+    it outside one too (:func:`conjoined`).
     """
     if node[0] == "term":
         _term, _text, kind = node
-        return node if kind == _KEEP or (kind == _HELD and in_or) else None
+        return node if kind == _KEEP or (kind == _HELD and (in_or or held)) else None
     kind, body = node
-    children = [_prune(child, in_or or kind == "or") for child in body]
+    children = [_prune(child, in_or or kind == "or", held) for child in body]
     if kind == "or":
         return (kind, children) if all(children) else None
     kept = [child for child in children if child]
@@ -1857,6 +1860,24 @@ def conditions(sql: str) -> tuple[Condition, ...]:
     The caller decides what to do with :attr:`Branch.binds`, which is empty
     for exactly those.
     """
+    return _required(sql, held=False)
+
+
+@functools.lru_cache(maxsize=None)
+def conjoined(sql: str) -> tuple[Condition, ...]:
+    """Every term the rows' ``WHERE``\\ s ``AND`` together, read as :func:`conditions` reads them, with a column compared with one bind kept.
+
+    Where a value enters the statement.  ``conditions`` leaves
+    ``status=:status`` out, since ``selects`` has it, and a reader asking
+    which term a pair of ``selects`` is asked in was handed the fragment the
+    term was appended in instead -- ``status=:status AND (maxAttempt IS NULL
+    OR attemptNr<maxAttempt)``, whose ``OR`` is another term's.
+    """
+    return _required(sql, held=True)
+
+
+def _required(sql: str, held: bool) -> tuple[Condition, ...]:
+    """:func:`conditions`, and with *held* :func:`conjoined`."""
     read = parsed(sql)
     if read.tree is None:
         return ()
@@ -1890,7 +1911,7 @@ def conditions(sql: str) -> tuple[Condition, ...]:
         scope = root if isinstance(node, (exp.Update, exp.Delete)) else scope_of.get(id(node))
         if where is not None and scope is not None:
             clause = _where_tree(where, scope, root, read, sql, tokens)
-            kept = _prune(clause, False) if clause is not None else None
+            kept = _prune(clause, False, held) if clause is not None else None
             if kept is not None:
                 found.extend(_as_condition(child) for child in (kept[1] if kept[0] == "and" else [kept]))
         sources = [node.args.get("from_")] + list(node.args.get("joins") or [])
