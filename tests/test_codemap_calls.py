@@ -1682,7 +1682,7 @@ def test_a_call_placed_open_at_another_definition_may_miss_this_one(tmp_path):
     buffer = _method(calls, "m", "Buffer", "getTask")
 
     assert calls.missed(other) == [
-        "getTask: 1 call(s) by its name placed elsewhere, "
+        "getTask: 1 call(s) by its name placed elsewhere -- "
         f"{calls_mod.UNPLACED_OPEN} (self.taskBufferIF 1)"
     ]
     assert [ast.unparse(site.call.func) for site in calls.callers(buffer)] == ["self.taskBufferIF.getTask"]

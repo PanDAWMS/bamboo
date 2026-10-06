@@ -55,8 +55,10 @@ UNPLACED_NAME = "the name is bound to something that is not a function here"
 UNPLACED_NO_INIT = "the class it builds has no __init__ in the corpus"
 #: Beside targets, not instead of them: the receiver is one of these classes
 #: or another one some way of building it does not show -- or it is one of
-#: them that supplies the method only by forwarding the call elsewhere.
-UNPLACED_OPEN = "and possibly a class this reading cannot name"
+#: them that supplies the method only by forwarding the call elsewhere.  Said
+#: on its own like the others -- :attr:`TraceStep.open` holds nothing else --
+#: and not as a clause that reads only after the targets are named.
+UNPLACED_OPEN = "the call may also land somewhere this reading cannot name"
 #: What a class says of a name it supplies only by forwarding, the reason
 #: that says more first.
 _FORWARDING = (UNPLACED_FORWARDED, UNPLACED_GETATTRIBUTE)
@@ -628,7 +630,7 @@ class Calls:
         for reason, receivers in sorted(unplaced.items()):
             why.append(f"{name}: {sum(receivers.values())} call(s) by its name not placed -- {reason} ({_on(receivers)})")
         for reason, receivers in sorted(elsewhere.items()):
-            why.append(f"{name}: {sum(receivers.values())} call(s) by its name placed elsewhere, {reason} ({_on(receivers)})")
+            why.append(f"{name}: {sum(receivers.values())} call(s) by its name placed elsewhere -- {reason} ({_on(receivers)})")
         if not placed and not unplaced and not elsewhere:
             why.append(f"{name}: {_OUTSIDE}")
         return why
