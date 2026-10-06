@@ -759,9 +759,14 @@ def _conjunct_spans(tokens: list, lo: int, hi: int) -> list[tuple[int, int]]:
     readings line up term for term.
     """
     while hi - lo >= 2 and tokens[lo].token_type == _T.L_PAREN and _closing(tokens, lo, hi) == hi - 1:
-        if not _cuts(tokens, lo + 1, hi - 1, _T.AND):
+        if not _cuts(tokens, lo + 1, hi - 1, _T.AND) or _cuts(tokens, lo + 1, hi - 1, _T.OR):
             break
         lo, hi = lo + 1, hi - 1
+    # ``AND`` binds tighter: ``(A) OR (B) AND c AND d`` is one term, an ``OR``
+    # whose second branch is ``B AND c AND d`` -- ``get_workers_to_synchronize``
+    # spells its time limits that way.
+    if _cuts(tokens, lo, hi, _T.OR):
+        return [(lo, hi)]
     cuts = _cuts(tokens, lo, hi, _T.AND)
     if not cuts:
         return [(lo, hi)]
@@ -1766,6 +1771,18 @@ def _respelled(fragment: str, sql: str) -> str:
     return re.sub(rf"{_HOLE_NAME}(\d+)( ?)", back, fragment)
 
 
+def _where_span(where: exp.Where, tokens: list) -> Optional[tuple[int, int]]:
+    """The tokens of *where*'s clause: from the last ``WHERE`` before its first term to what ends it."""
+    placed = [node.meta["start"] for node in where.this.find_all(exp.Identifier, exp.Literal) if "start" in node.meta]
+    if not placed:
+        return None
+    first = min(placed)
+    opened = [index for index, token in enumerate(tokens) if token.token_type == _T.WHERE and token.start < first]
+    if not opened:
+        return None
+    return _clause(tokens, opened[-1])
+
+
 def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: list):
     """*where*'s clause as a tree of ``("term", text, kind)``, or ``None``.
 
@@ -1780,13 +1797,10 @@ def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: l
         for node in where.this.find_all(exp.Identifier, exp.Literal)
         if "start" in node.meta
     ]
-    if not placed:
+    span = _where_span(where, tokens)
+    if span is None:
         return None
-    first = min(start for start, _node in placed)
-    opened = [index for index, token in enumerate(tokens) if token.token_type == _T.WHERE and token.start < first]
-    if not opened:
-        return None
-    lo, hi = _clause(tokens, opened[-1])
+    lo, hi = span
     if hi <= lo or any(not tokens[lo].start <= start <= tokens[hi - 1].end for start, _node in placed):
         return None
     joins = _connectives(where)
@@ -2267,3 +2281,165 @@ def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
             if value is not None:
                 limits.append((value, isinstance(comparison, (exp.LT, exp.GT))))
     return orders, limits
+
+
+class OrderItem(NamedTuple):
+    """One item of an ``ORDER BY`` list."""
+
+    #: The expression sorted on, as the list spells it, direction off.
+    expression: str
+    #: The columns it names, as spelled -- ``gshare`` of a ``CASE WHEN
+    #: gshare=:leave0 THEN 0 ... END``; none where it is ``blanked``.
+    columns: tuple[str, ...]
+    descending: bool
+    #: Built at run time, and spelled ``{}`` where the map reads the source:
+    #: ``getJobs``' share ranking is ``(CASE {} ELSE {} END)``.  Any item a
+    #: run prints in its place is that item.
+    blanked: bool
+
+
+_DIRECTION = re.compile(r"^(?P<expression>.*?)(?:\s+(?P<direction>ASC|DESC))?(?:\s+NULLS\s+(?:FIRST|LAST))?$", re.I | re.S)
+
+
+def _spelled_columns(columns: Iterator[exp.Column] | list[exp.Column]) -> tuple[str, ...]:
+    """*columns* as spelled -- ``tab.jobStatus`` -- once each, in the order the text has them."""
+    placed = sorted(columns, key=lambda column: column.this.meta.get("start", 0) if isinstance(column.this, exp.Identifier) else 0)
+    return tuple(dict.fromkeys(".".join(part for part in (column.table, column.name) if part) for column in placed))
+
+
+def order_items(order: str) -> tuple[OrderItem, ...]:
+    """*order* -- an ``ORDER BY`` list as :attr:`ReadSiteNode.order_by` or :func:`ordering` spells it -- item by item.
+
+    The same reading for the map's spelling and for the text a run printed,
+    so the two compare item for item: the map's ``(CASE {} ELSE {} END),
+    currentpriority desc, pandaid asc`` and a ``getJobs`` debug line's
+    ``ORDER BY (CASE WHEN gshare=:leave0 THEN 0 ... END), currentpriority
+    desc, pandaid asc`` are three items each, the first blanked in the map.
+    Split at its own commas -- not inside parentheses or a ``CASE``.
+    """
+    tokens = _tokens(order)
+    if not tokens:
+        return ()
+    bounds = [-1, *_cuts(tokens, 0, len(tokens), _T.COMMA), len(tokens)]
+    items: list[OrderItem] = []
+    for a, b in zip(bounds, bounds[1:], strict=False):
+        text = " ".join(_spelled(order, tokens, a + 1, b).split())
+        match = _DIRECTION.match(text)
+        expression = match.group("expression") if match else text
+        blanked = "{}" in expression
+        columns: tuple[str, ...] = ()
+        if not blanked:
+            try:
+                tree = sqlglot.parse_one(expression, read="oracle")
+            except SqlglotError:
+                tree = None
+            if tree is not None:
+                columns = _spelled_columns(tree.find_all(exp.Column))
+        items.append(
+            OrderItem(
+                expression=expression,
+                columns=columns,
+                descending=bool(match and (match.group("direction") or "").upper() == "DESC"),
+                blanked=blanked,
+            )
+        )
+    return tuple(items)
+
+
+class PrintedTerm(NamedTuple):
+    """One conjunct of a ``WHERE`` a run printed."""
+
+    #: As the statement spells it.
+    text: str
+    #: The columns of the query it filters that it names, as spelled
+    #: (``tab.jobStatus``); a subquery's own are not among them.
+    columns: tuple[str, ...]
+    #: Every bind it names, ``:name``, in order -- a subquery's too, since
+    #: the printed map fills them all.
+    binds: tuple[str, ...]
+
+
+class PrintedQuery(NamedTuple):
+    """One query whose rows a printed statement returns."""
+
+    #: The tables its ``FROM`` and joins read, schema off; a derived table or
+    #: ``WITH`` clause is not one -- it is a query of its own.
+    tables: tuple[str, ...]
+    #: Its ``WHERE``'s conjuncts.  Empty where it has none, or where the
+    #: clause could not be cut term for term (``failure`` says which).
+    where: tuple[PrintedTerm, ...]
+    #: Its ``ORDER BY`` list, item by item (:func:`order_items`).
+    order: tuple[OrderItem, ...]
+
+
+class Printed(NamedTuple):
+    """What a statement a run printed asks, read as the map reads statements."""
+
+    #: The query whose rows come back first, then each it takes rows from:
+    #: ``getJobs``' ``SELECT * FROM (SELECT ... FROM jobsActive4 tab WHERE
+    #: ... ORDER BY ...) WHERE ROWNUM<=:njobs`` is the outer query, which
+    #: reads no table and keeps the first rows, then the inner one, which
+    #: reads ``jobsActive4`` and filters it.
+    queries: tuple[PrintedQuery, ...]
+    #: ``(bind or number, strict)``, as :func:`ordering` reads them.
+    limits: tuple[tuple[str, bool], ...]
+    #: Why the text was not read, or a part of it was not; ``""`` where it was.
+    failure: str
+
+
+def printed(sql: str) -> Printed:
+    """Read *sql*, a statement a run printed, as the map reads the statements it stores.
+
+    For a reader holding a log line rather than a tree: the debug record
+    ``getJobs`` writes before its ``execute`` is the statement that ran,
+    with the ``ORDER BY`` the run chose and the share ranking it built.  The
+    bind map printed after it is the run's, not the statement's, and is
+    the caller's to read; a ``/* comment */`` between them is read past.
+
+    This is the entry kept stable for such a reader.  It is made of the
+    readings the map uses -- the queries rows come back from
+    (:func:`ordering`), each ``WHERE`` cut at its own ``AND``\\ s as the map
+    cuts one (:func:`_conjunct_spans`), each ``ORDER BY`` item by item
+    (:func:`order_items`) -- and those may change under it.
+    """
+    read = parsed(sql)
+    if read.tree is None:
+        return Printed((), (), f"{read.near} -- {NOT_PARSED}" if read.near else NOT_PARSED)
+    tokens = _tokens(read.text)
+    queries: list[PrintedQuery] = []
+    failures: list[str] = []
+    for query in _rows_from(read.tree, {}, set()):
+        if not isinstance(query, (exp.Select, exp.Update, exp.Delete)):
+            continue
+        sources = [query.args.get("from_"), *(query.args.get("joins") or [])] if isinstance(query, exp.Select) else [query]
+        tables = tuple(
+            dict.fromkeys(
+                _table_name(source.this)
+                for source in sources
+                if source is not None and isinstance(source.this, exp.Table)
+            )
+        )
+        where: list[PrintedTerm] = []
+        clause = query.args.get("where")
+        if clause is not None:
+            span = _where_span(clause, tokens)
+            spans = _conjunct_spans(tokens, *span) if span is not None else []
+            terms = list(_conjuncts(clause.this))
+            if len(spans) != len(terms):
+                failures.append(f"{len(spans)} conjunct(s) spelled, {len(terms)} read, in a WHERE of {', '.join(tables) or 'a derived table'}")
+            else:
+                for (a, b), term in zip(spans, terms, strict=True):
+                    text = " ".join(_respelled(read.text[tokens[a].start : tokens[b - 1].end + 1], sql).split())
+                    own = [column for column in term.find_all(exp.Column) if column.find_ancestor(exp.Select, exp.Update, exp.Delete) is query]
+                    where.append(
+                        PrintedTerm(
+                            text=text,
+                            columns=_spelled_columns(own),
+                            # A quoted value -- ``'12:30'`` -- holds no bind.
+                            binds=tuple(dict.fromkeys(_BIND_KEY.findall(_QUOTED.sub("''", text)))),
+                        )
+                    )
+        order = query.args.get("order")
+        items = order_items(_order_text(query, order, read, sql, tokens)) if isinstance(order, exp.Order) else ()
+        queries.append(PrintedQuery(tables=tables, where=tuple(where), order=items))
+    return Printed(tuple(queries), tuple(ordering(sql)[1]), "; ".join(failures))

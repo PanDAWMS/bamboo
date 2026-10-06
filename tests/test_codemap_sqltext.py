@@ -885,3 +885,85 @@ def test_every_test_of_a_written_column_is_its_precondition():
         "AND (ramCount IS NOT NULL AND ramCount>:ramCount)"
     )
     assert preconditions == {"ramCount": "ramCount IS NOT NULL AND ramCount>:ramCount"}
+
+
+_PRINTED_GETJOBS = (
+    "SELECT * FROM (SELECT /*+ INDEX_RS_ASC(tab (PRODSOURCELABEL COMPUTINGSITE JOBSTATUS) ) */ PandaID,currentPriority "
+    "FROM ATLAS_PANDA.jobsActive4 tab WHERE computingSite=:computingSite AND jobStatus=:oldJobStatus "
+    "AND (processingType=:processingType1 OR prodSourceLabel IN (:p1,:p2)) "
+    "AND NOT EXISTS (SELECT 1 FROM ATLAS_PANDA.JEDI_Tasks t WHERE t.jediTaskID=tab.jediTaskID AND t.status=:ts) "
+    "\n          ORDER BY (CASE WHEN gshare=:leave0 THEN 0 WHEN gshare=:leave1 THEN 1 ELSE 2 END), currentpriority desc, pandaid asc)"
+    "\n          WHERE ROWNUM <= :njobs\n /* DBProxy.getJobs */"
+)
+
+
+def test_a_printed_statement_is_read_query_by_query():
+    """``getJobs`` prints the statement it runs: a share ranking built at run time, around the query that filters.
+
+    The outer query reads no table and keeps the first rows; the inner one
+    reads ``jobsActive4`` and is where the row is asked for, term by term as
+    the map cuts a ``WHERE``.  A subquery's columns are its own, its binds
+    the printed map's all the same.  The comment the call adds is read past.
+    """
+    read = sqltext.printed(_PRINTED_GETJOBS)
+
+    assert read.failure == ""
+    assert read.limits == ((":njobs", False),)
+    outer, inner = read.queries
+    assert outer.tables == () and [term.text for term in outer.where] == ["ROWNUM <= :njobs"]
+    assert inner.tables == ("jobsActive4",)
+    assert inner.where == (
+        sqltext.PrintedTerm("computingSite=:computingSite", ("computingSite",), (":computingSite",)),
+        sqltext.PrintedTerm("jobStatus=:oldJobStatus", ("jobStatus",), (":oldJobStatus",)),
+        sqltext.PrintedTerm(
+            "(processingType=:processingType1 OR prodSourceLabel IN (:p1,:p2))",
+            ("processingType", "prodSourceLabel"),
+            (":processingType1", ":p1", ":p2"),
+        ),
+        sqltext.PrintedTerm(
+            "NOT EXISTS (SELECT 1 FROM ATLAS_PANDA.JEDI_Tasks t WHERE t.jediTaskID=tab.jediTaskID AND t.status=:ts)",
+            (),
+            (":ts",),
+        ),
+    )
+    assert [(item.columns, item.descending) for item in inner.order] == [
+        (("gshare",), False),
+        (("currentpriority",), True),
+        (("pandaid",), False),
+    ]
+
+
+def test_an_order_list_is_read_item_by_item_with_what_the_map_blanks_said():
+    """The map spells ``getJobs``' ranking ``(CASE {} ELSE {} END)``: built at run time, it is not in the source.
+
+    Read the same way, the map's list and the printed one are three items
+    each, and only the first is blanked -- whatever a run prints there is it.
+    """
+    (printed,) = [query.order for query in sqltext.printed(_PRINTED_GETJOBS).queries if query.order]
+    mapped = sqltext.order_items("(CASE {} ELSE {} END), currentpriority desc, pandaid asc")
+
+    assert [item.blanked for item in mapped] == [True, False, False]
+    assert mapped[0].columns == ()
+    assert [(one.expression, one.descending) for one in mapped[1:]] == [
+        (one.expression, one.descending) for one in printed[1:]
+    ]
+    assert not printed[0].blanked
+
+
+def test_a_where_whose_or_binds_looser_than_its_and_is_one_conjunct():
+    """``get_workers_to_synchronize`` writes ``(A) OR (B) AND lastupdate > ... AND (...)``.
+
+    ``AND`` binds tighter, so that is one term -- an ``OR`` whose second
+    branch carries the time limits -- and cutting the text at its ``AND``\\ s
+    gave four, which the tree does not have.
+    """
+    read = sqltext.printed(
+        "SELECT harvesterID FROM ATLAS_PANDA.harvester_workers "
+        "WHERE (status IN ('submitted') AND pilotStatus='running') "
+        "OR (status IN ('idle') AND pilotEndTime < :d) AND lastupdate > :x AND (sync > :r OR sync IS NULL)"
+    )
+
+    assert read.failure == ""
+    ((only,),) = [query.where for query in read.queries]
+    assert only.text.startswith("(status IN ('submitted')") and only.text.endswith("sync IS NULL)")
+    assert only.binds == (":d", ":x", ":r")
