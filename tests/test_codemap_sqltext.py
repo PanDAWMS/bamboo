@@ -1062,3 +1062,21 @@ def test_a_logged_statement_and_its_map_are_cut_apart_without_losing_a_time():
         {":a": 1},
     )
     assert sqltext.cut("nothing printed after it") is None
+
+
+def test_a_value_printed_as_its_angle_repr_is_kept_as_text_and_voids_nothing():
+    """``<...>`` is how ``repr`` spells a value with no literal: that value's text, not the end of the map."""
+    message = (
+        "SELECT 1 FROM dual WHERE a=:a AND b=:b"
+        "{':a': <cx_Oracle.Var of type DB_TYPE_NUMBER with value None>, ':b': 'x<y>z', "
+        "':f': <function f.<locals>.g at 0x10>, ':q': 'it\\'s <'}"
+    )
+    text, binds = sqltext.cut(message)
+    assert text == "SELECT 1 FROM dual WHERE a=:a AND b=:b"
+    assert binds == {
+        ":a": "<cx_Oracle.Var of type DB_TYPE_NUMBER with value None>",
+        ":b": "x<y>z",
+        ":f": "<function f.<locals>.g at 0x10>",
+        ":q": "it's <",
+    }
+    assert sqltext.cut("SELECT 1 FROM dual{':a': <unclosed}") is None

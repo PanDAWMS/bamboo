@@ -2817,10 +2817,50 @@ def _printed_value(node: ast.expr) -> object:
     return ast.unparse(node)
 
 
+def _quoted_reprs(text: str) -> str:
+    """*text* with each ``<...>`` outside a string literal written as a string of itself.
+
+    ``repr``'s convention for a value no expression spells -- a
+    ``cx_Oracle.Var``, a function, a lock -- is ``<...some description...>``,
+    which no parser reads.  Outside quotes a ``<`` opens one, a printed
+    container holding no comparison, and its ``>`` is found by depth, as
+    ``<function f.<locals>.g at 0x1>`` nests.  An unclosed one is left as it
+    is, and the map with it.
+    """
+    out: list[str] = []
+    at = 0
+    quote = ""
+    while at < len(text):
+        char = text[at]
+        if quote:
+            out.append(text[at : at + 2] if char == "\\" else char)
+            if char == quote:
+                quote = ""
+            at += 2 if char == "\\" else 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "<":
+            depth = 0
+            for end in range(at, len(text)):
+                depth += {"<": 1, ">": -1}.get(text[end], 0)
+                if depth == 0:
+                    out.append(repr(text[at : end + 1]))
+                    at = end + 1
+                    break
+            else:
+                out.append(text[at:])
+                break
+            continue
+        out.append(char)
+        at += 1
+    return "".join(out)
+
+
 def _printed_map(text: str) -> Optional[dict[object, object]]:
     """*text*, all of it, as the bind map ``str(varMap)`` printed; ``None`` where it is not one."""
     try:
-        tree = ast.parse(text.strip(), mode="eval")
+        tree = ast.parse(_quoted_reprs(text.strip()), mode="eval")
     except SyntaxError:
         return None
     if not isinstance(tree.body, ast.Dict) or any(key is None for key in tree.body.keys):
@@ -2837,8 +2877,9 @@ def cut(message: str, lead: str = "", gap: str = "") -> Optional[tuple[str, dict
     at the first *lead*, and the map at the first ``{`` after it, behind
     *gap*, from which the rest of the line reads as a dict: a value
     ``str()`` spells as ``datetime.datetime(2026, 10, 4, 18, 38, 7)`` is
-    read as that time, and one with no literal spelling is kept as its
-    text, so one value never voids the map.  ``None`` where no ``{`` does.
+    read as that time, and one with no literal spelling -- ``Decimal('1.5')``,
+    or ``repr``'s ``<...>`` -- is kept as its text, so one value never voids
+    the map.  ``None`` where no ``{`` does.
     """
     start = message.find(lead) if lead else 0
     if start < 0:

@@ -1597,7 +1597,9 @@ class ReadSiteNode(BaseNode):
             "every way the statement is run from the corpus.  ``False`` can be "
             "said of a complete list, a call by the same name to another "
             "function counting against it; ``True`` is never said of an "
-            "incomplete one."
+            "incomplete one.  The corpus is the one the map reads: a test "
+            "module is not read, so a call from one neither makes a route "
+            "nor counts against the list."
         ),
     )
     callers_stop: list[str] = Field(
