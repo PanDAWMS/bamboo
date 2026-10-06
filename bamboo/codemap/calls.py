@@ -41,6 +41,12 @@ UNPLACED_OUTSIDE = "outside the corpus"
 UNPLACED_RECEIVER = "the receiver's class is not declared"
 UNPLACED_FORWARDED = "the receiver forwards every call through __getattr__"
 UNPLACED_NO_METHOD = "the declared class has no such method"
+#: ``self.conn.close()`` on ``WrappedOracleConn``: the class defines no
+#: ``close``, and its ``__getattribute__`` hands the name to the connection it
+#: wraps -- as a type checker reads it, the name may be supplied there.  A
+#: method the class does define is still placed: ``JobSpec``'s
+#: ``__getattribute__`` filters values and supplies no name of its own.
+UNPLACED_GETATTRIBUTE = "the declared class has no such method, and __getattribute__ may supply one"
 UNPLACED_DYNAMIC = "the callee is chosen at run time"
 UNPLACED_NAME = "the name is bound to something that is not a function here"
 #: ``Interaction.JEDITemporaryError(...)``, ``DataCarouselRequestSpec()``: the
@@ -48,8 +54,12 @@ UNPLACED_NAME = "the name is bound to something that is not a function here"
 #: one runs is ``object``'s, ``Exception``'s or a base's outside the corpus.
 UNPLACED_NO_INIT = "the class it builds has no __init__ in the corpus"
 #: Beside targets, not instead of them: the receiver is one of these classes
-#: or another one some way of building it does not show.
+#: or another one some way of building it does not show -- or it is one of
+#: them that supplies the method only by forwarding the call elsewhere.
 UNPLACED_OPEN = "and possibly a class this reading cannot name"
+#: What a class says of a name it supplies only by forwarding, the reason
+#: that says more first.
+_FORWARDING = (UNPLACED_FORWARDED, UNPLACED_GETATTRIBUTE)
 
 
 #: Parsed modules shared by every reading of the same files.  A walk is made
@@ -285,26 +295,29 @@ class Calls:
         named = self.types.class_named(file, receiver)
         if named is not None:
             return self._method_of(named, called.attr)
-        declared = self.types.of_expression(file, func, receiver)
-        if declared is None:
-            # Nothing declares it -- or it is declared ``Any`` -- so read what
-            # it was built from.  Every class it can be is a target; where some
-            # way of building it cannot be read, that is said beside them.
-            classes, opened = self.types.candidates(file, func, receiver)
-            targets: list[Target] = []
-            for where, name in sorted(classes):
-                cls = self.types.class_def(where, name)
-                if cls is not None:
-                    targets.extend(self._method_of((where, cls), called.attr).targets)
-            if targets:
-                return Placed(tuple(targets), UNPLACED_OPEN if opened else "")
-            root = receiver
-            while isinstance(root, ast.Attribute):
-                root = root.value
-            if isinstance(root, ast.Name) and self.types.imported_from_outside(file, root.id):
-                return Placed((), UNPLACED_OUTSIDE)
-            return Placed((), UNPLACED_RECEIVER)
-        return self._method_of(declared, called.attr)
+        declared = self.types.declared(file, func, receiver)
+        if declared is not None:
+            # ``self.conn: WrappedOracleConn | WrappedPostgresConn`` -- each
+            # class it is declared as, as for the values below.
+            return self._method_of_any(sorted(declared, key=_class_key), called.attr)
+        # Nothing declares it -- or it is declared ``Any`` -- so read what it
+        # was built from.  Every class it can be is a target; where some way
+        # of building it cannot be read, that is said beside them.
+        classes, opened = self.types.candidates(file, func, receiver)
+        built = [
+            (where, cls)
+            for where, name in sorted(classes)
+            if (cls := self.types.class_def(where, name)) is not None
+        ]
+        placed = self._method_of_any(built, called.attr, opened)
+        if placed.targets or placed.unplaced in _FORWARDING:
+            return placed
+        root = receiver
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name) and self.types.imported_from_outside(file, root.id):
+            return Placed((), UNPLACED_OUTSIDE)
+        return Placed((), UNPLACED_RECEIVER)
 
     def _declared_in(self, file: str, cls: ast.ClassDef, name: str) -> Optional[Target]:
         for node in cls.body:
@@ -314,13 +327,42 @@ class Calls:
 
     def _method_of(self, declared: tuple[str, ast.ClassDef], name: str) -> Placed:
         file, cls = declared
-        for where, holder in self.types.lineage(file, cls):
+        lineage = self.types.lineage(file, cls)
+        for where, holder in lineage:
             found = self._declared_in(where, holder, name)
             if found is not None:
                 return Placed((found,))
-        for where, holder in self.types.lineage(file, cls):
-            if self._declared_in(where, holder, "__getattr__") is not None:
-                return Placed((), UNPLACED_FORWARDED)
+        for hook, reason in (("__getattr__", UNPLACED_FORWARDED), ("__getattribute__", UNPLACED_GETATTRIBUTE)):
+            if any(self._declared_in(where, holder, hook) is not None for where, holder in lineage):
+                return Placed((), reason)
+        return Placed((), UNPLACED_NO_METHOD)
+
+    def _method_of_any(
+        self, classes: list[tuple[str, ast.ClassDef]], name: str, opened: bool = False
+    ) -> Placed:
+        """Where a call of *name* lands on an object that is one of *classes*.
+
+        At the method of each class that has one.  A class that supplies the
+        name only by forwarding it -- ``JediTaskBufferInterface``'s
+        ``__getattr__``, ``WrappedOracleConn``'s ``__getattribute__`` -- adds
+        no definition: what runs is somewhere this reading does not follow, so
+        the placement is open beside the definitions found.  Where no class
+        has the method, the reason is the forwarding one if any class
+        forwards, else that none has it.  *opened* is the caller's own reason
+        to say so: some way the object is built cannot be read.
+        """
+        targets: list[Target] = []
+        forwarded: set[str] = set()
+        for one in classes:
+            placed = self._method_of(one, name)
+            targets.extend(target for target in placed.targets if target not in targets)
+            if not placed.targets and placed.unplaced in _FORWARDING:
+                forwarded.add(placed.unplaced)
+        if targets:
+            return Placed(tuple(targets), UNPLACED_OPEN if opened or forwarded else "")
+        for reason in _FORWARDING:
+            if reason in forwarded:
+                return Placed((), reason)
         return Placed((), UNPLACED_NO_METHOD)
 
     def _named(self, file: str, func: ast.AST, name: str) -> Placed:
@@ -556,8 +598,11 @@ class Calls:
         call to it, so the list is said to stop there -- by reason, and by the
         receiver the call is made on -- though the call may be to another
         function of that name: this can call a complete list incomplete, never
-        the other way round.  A function no call in the corpus names is
-        reached from outside it: an endpoint, a thread's ``run``.
+        the other way round.  So is a call placed at other definitions and
+        open beside them: ``self.taskBufferIF.getTaskWithID_JEDI(...)`` lands
+        at ``JediTaskBuffer``'s, or wherever the interface forwards it.  A
+        function no call in the corpus names is reached from outside it: an
+        endpoint, a thread's ``run``.
         """
         name = target.func.name  # type: ignore[attr-defined]
         if name == "__init__" and target.cls is not None:
@@ -567,19 +612,24 @@ class Calls:
         if len(placed) > self.CONSTANT_CALLERS:
             why.append(f"{name}: {len(placed)} callers, more than {self.CONSTANT_CALLERS} are read one by one")
         unplaced: dict[str, dict[str, int]] = {}
+        elsewhere: dict[str, dict[str, int]] = {}
         for site in self._index().get(name, []):
             if site.func is target.func:
                 continue
             landed = self.callees(site.file, site.func, site.call)
             if landed.targets:
-                continue
+                if not landed.unplaced or any(one.func is target.func for one in landed.targets):
+                    continue
+                held = elsewhere.setdefault(landed.unplaced, {})
+            else:
+                held = unplaced.setdefault(landed.unplaced or "not placed", {})
             receiver = ast.unparse(site.call.func.value) if isinstance(site.call.func, ast.Attribute) else "(a bare name)"
-            reason = unplaced.setdefault(landed.unplaced or "not placed", {})
-            reason[receiver] = reason.get(receiver, 0) + 1
+            held[receiver] = held.get(receiver, 0) + 1
         for reason, receivers in sorted(unplaced.items()):
-            on = ", ".join(f"{receiver} {count}" for receiver, count in sorted(receivers.items(), key=lambda one: (-one[1], one[0])))
-            why.append(f"{name}: {sum(receivers.values())} call(s) by its name not placed -- {reason} ({on})")
-        if not placed and not unplaced:
+            why.append(f"{name}: {sum(receivers.values())} call(s) by its name not placed -- {reason} ({_on(receivers)})")
+        for reason, receivers in sorted(elsewhere.items()):
+            why.append(f"{name}: {sum(receivers.values())} call(s) by its name placed elsewhere, {reason} ({_on(receivers)})")
+        if not placed and not unplaced and not elsewhere:
             why.append(f"{name}: {_OUTSIDE}")
         return why
 
@@ -618,6 +668,13 @@ class Calls:
                     for inner in self._method_of((target.file, target.cls), node.func.attr).targets:
                         found.extend(self.writes(inner, depth + 1))
         return found
+
+
+def _on(receivers: dict[str, int]) -> str:
+    """``self.taskBufferIF 19, tbIF 2`` -- the receivers calls were made on, most first."""
+    return ", ".join(
+        f"{receiver} {count}" for receiver, count in sorted(receivers.items(), key=lambda one: (-one[1], one[0]))
+    )
 
 
 #: The methods that put a value into a container.  The removals take one out
@@ -685,6 +742,52 @@ _YIELDING = frozenset(
     {"Iterator", "Generator", "ContextManager", "AbstractContextManager", "Iterable"}
 )
 
+#: The classes a declaration states -- one, or each member of a union.
+Classes = frozenset[tuple[str, ast.ClassDef]]
+
+
+def _one(classes: Optional[Classes]) -> Optional[tuple[str, ast.ClassDef]]:
+    """The class of a declaration that states exactly one."""
+    if classes is None or len(classes) != 1:
+        return None
+    return next(iter(classes))
+
+
+def _class_key(one: tuple[str, ast.ClassDef]) -> tuple[str, str, int]:
+    return one[0], one[1].name, one[1].lineno
+
+
+def _union_members(annotation: ast.expr) -> Optional[list[ast.expr]]:
+    """The members of ``A | B``, ``Union[A, B]`` or ``Optional[A]``; ``None`` for anything else."""
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return [annotation.left, annotation.right]
+    if isinstance(annotation, ast.Subscript):
+        wrapper = annotation.value
+        name = wrapper.attr if isinstance(wrapper, ast.Attribute) else getattr(wrapper, "id", "")
+        if name == "Optional":
+            return [annotation.slice]
+        if name == "Union":
+            inner = annotation.slice
+            return list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+    return None
+
+
+def _module_statements(body: list[ast.stmt]):
+    """Every statement run at module level: the module's own, and those under its ``if``, ``try`` and ``with``."""
+    for node in body:
+        yield node
+        if isinstance(node, ast.If):
+            yield from _module_statements(node.body)
+            yield from _module_statements(node.orelse)
+        elif isinstance(node, ast.Try):
+            yield from _module_statements(node.body)
+            for handler in node.handlers:
+                yield from _module_statements(handler.body)
+            yield from _module_statements(node.orelse)
+            yield from _module_statements(node.finalbody)
+        elif isinstance(node, ast.With):
+            yield from _module_statements(node.body)
+
 
 class Types:
     """What class the code *declares* a receiver to be.
@@ -722,9 +825,10 @@ class Types:
         self.walked = walked
         self.parsed: dict[str, Optional[ast.Module]] = {}
         self._imports: dict[str, dict[str, tuple[str, str]]] = {}
+        self._bound: dict[str, dict[str, list[ast.expr]]] = {}
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
-        # (file, id(func), name, depth) -> (func, class): see ``of_expression``.
-        self._names: dict[tuple, tuple[ast.AST, Optional[tuple[str, ast.ClassDef]]]] = {}
+        # (file, id(func), name, depth) -> (func, classes): see ``declared``.
+        self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
 
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
@@ -864,7 +968,16 @@ class Types:
     # -- classes -----------------------------------------------------------
 
     def class_named(self, file: str, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
-        """The class *expression* names in *file*: declared there, or imported."""
+        """The class *expression* names in *file*: declared there, imported, or bound to a name there.
+
+        A name the module neither declares nor imports is read from what the
+        module binds it to -- ``_Proxied: Any = JediTaskBuffer``, so that
+        ``class JediTaskBufferInterface(_Proxied)`` has its base.  The value
+        is what the name is, whatever the annotation says: ``Any`` says
+        nothing.  A binding to no class of the corpus -- ``_Proxied =
+        object`` in the other branch -- is passed over; two bindings to two
+        corpus classes name neither.
+        """
         if depth > self.DEPTH:
             return None
         tree = self.tree(file)
@@ -876,7 +989,7 @@ class Types:
                     return file, node
             held = self.imports(file).get(expression.id)
             if held is None:
-                return None
+                return self._aliased(file, expression.id, depth)
             module, attribute = held
             if not attribute:
                 return None
@@ -898,32 +1011,59 @@ class Types:
             return self.class_named(target, ast.Name(id=expression.attr, ctx=ast.Load()), depth + 1)
         return None
 
+    def _aliased(self, file: str, name: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
+        """The corpus class every module-level binding of *name* in *file* that names one names."""
+        found = {
+            named
+            for value in self._module_bound(file).get(name, [])
+            if (named := self.class_named(file, value, depth + 1)) is not None
+        }
+        return found.pop() if len(found) == 1 else None
+
+    def _module_bound(self, file: str) -> dict[str, list[ast.expr]]:
+        """``{name: [value]}`` for each ``name = value`` / ``name: T = value`` run at module level, the value a name or ``a.b``."""
+        if file not in self._bound:
+            found: dict[str, list[ast.expr]] = {}
+            tree = self.tree(file)
+            for node in _module_statements(tree.body) if tree is not None else ():
+                if isinstance(node, ast.Assign):
+                    names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                    names = [node.target.id]
+                else:
+                    continue
+                if isinstance(node.value, (ast.Name, ast.Attribute)):
+                    for one in names:
+                        found.setdefault(one, []).append(node.value)
+            self._bound[file] = found
+        return self._bound[file]
+
     def annotated(self, file: str, annotation: Optional[ast.expr]) -> Optional[tuple[str, ast.ClassDef]]:
-        """The class an annotation states, through quotes and ``Optional``/``| None``."""
+        """The class an annotation states, where it states exactly one -- :meth:`annotated_all`."""
+        return _one(self.annotated_all(file, annotation))
+
+    def annotated_all(self, file: str, annotation: Optional[ast.expr]) -> Optional[Classes]:
+        """Every corpus class an annotation states, through quotes, ``Optional`` and unions.
+
+        ``WrappedOracleConn | WrappedPostgresConn`` is both; ``Foo | None`` and
+        ``Foo | str`` are ``Foo`` -- a member naming no class of the corpus
+        says nothing this reading can follow.  ``None`` where it states none.
+        """
         if annotation is None:
             return None
         annotation = _unquoted(annotation)
-        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-            sides = [
-                side for side in (annotation.left, annotation.right)
-                if not (isinstance(side, ast.Constant) and side.value is None)
-            ]
-            found = {self.annotated(file, side) for side in sides} - {None}
-            return found.pop() if len(found) == 1 else None
+        members = _union_members(annotation)
+        if members is not None:
+            found: set[tuple[str, ast.ClassDef]] = set()
+            for member in members:
+                if isinstance(member, ast.Constant) and member.value is None:
+                    continue
+                found |= self.annotated_all(file, member) or frozenset()
+            return frozenset(found) or None
         if isinstance(annotation, ast.Subscript):
-            wrapper = annotation.value
-            name = wrapper.attr if isinstance(wrapper, ast.Attribute) else getattr(wrapper, "id", "")
-            if name == "Optional":
-                return self.annotated(file, annotation.slice)
-            if name == "Union" and isinstance(annotation.slice, ast.Tuple):
-                sides = [
-                    side for side in annotation.slice.elts
-                    if not (isinstance(side, ast.Constant) and side.value is None)
-                ]
-                found = {self.annotated(file, side) for side in sides} - {None}
-                return found.pop() if len(found) == 1 else None
             return None
-        return self.class_named(file, annotation)
+        named = self.class_named(file, annotation)
+        return frozenset({named}) if named is not None else None
 
     def lineage(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
         """*cls* and its bases, nearest first, followed across files through imports."""
@@ -949,8 +1089,8 @@ class Types:
 
     # -- declarations ------------------------------------------------------
 
-    def of_field(self, file: str, cls: ast.ClassDef, field: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
-        """``self.<field>``'s class: its annotation in the class or a base, else what it is assigned."""
+    def of_field(self, file: str, cls: ast.ClassDef, field: str, depth: int) -> Optional[Classes]:
+        """``self.<field>``'s classes: its annotation in the class or a base, else what every assignment says."""
         lineage = self.lineage(file, cls)
         for where, holder in lineage:
             for node in holder.body:
@@ -959,7 +1099,7 @@ class Types:
                     and isinstance(node.target, ast.Name)
                     and node.target.id == field
                 ):
-                    return self.annotated(where, node.annotation)
+                    return self.annotated_all(where, node.annotation)
             for method in pathcond.methods_of(holder):
                 for node in ast.walk(method):
                     if (
@@ -969,25 +1109,23 @@ class Types:
                         and node.target.value.id == "self"
                         and node.target.attr == field
                     ):
-                        return self.annotated(where, node.annotation)
+                        return self.annotated_all(where, node.annotation)
         if depth >= self.DEPTH:
             return None
-        found: set[tuple[str, str]] = set()
-        held: dict[tuple[str, str], tuple[str, ast.ClassDef]] = {}
+        found: set[Classes] = set()
         for where, holder in lineage:
             for method in pathcond.methods_of(holder):
                 for expression in pathcond.attribute_expressions(method, field):
                     if isinstance(expression, ast.Constant) and expression.value is None:
                         continue
-                    one = self.of_expression(where, method, expression, depth + 1)
+                    one = self.declared(where, method, expression, depth + 1)
                     if one is None:
                         return None
-                    found.add((one[0], one[1].name))
-                    held[(one[0], one[1].name)] = one
-        return held[found.pop()] if len(found) == 1 else None
+                    found.add(one)
+        return found.pop() if len(found) == 1 else None
 
-    def _with_held(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
-        """The class ``with <call> as <name>`` binds, from what the call is declared to yield.
+    def _with_held(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[Classes]:
+        """The classes ``with <call> as <name>`` binds, from what the call is declared to yield.
 
         Every ``TaskBuffer`` method reaches the database through ``with
         self.proxyPool.get() as proxy``, and ``get`` is declared ``->
@@ -1003,7 +1141,7 @@ class Types:
                     continue
                 context = item.context_expr
                 if not (isinstance(context, ast.Call) and isinstance(context.func, ast.Attribute)):
-                    return self.of_expression(file, func, context, depth + 1)
+                    return self.declared(file, func, context, depth + 1)
                 receiver = context.func.value
                 if isinstance(receiver, ast.Name) and receiver.id == "self":
                     owner = self.method_class(file, func)
@@ -1023,8 +1161,8 @@ class Types:
                         inner = returned.slice
                         if isinstance(inner, ast.Tuple) and inner.elts:
                             inner = inner.elts[0]
-                        return self.annotated(where, inner)
-                return self.annotated(where, returned)
+                        return self.annotated_all(where, inner)
+                return self.annotated_all(where, returned)
         return None
 
     def _annotation_of(
@@ -1094,8 +1232,8 @@ class Types:
                 return target, node
         return None
 
-    def _outside_instance(self, file: str, name: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
-        """The class of a name this function does not bind: a module's own instance.
+    def _outside_instance(self, file: str, name: str, depth: int) -> Optional[Classes]:
+        """The classes of a name this function does not bind: a module's own instance.
 
         ``taskBuffer = TaskBuffer()`` at the foot of ``TaskBuffer.py`` and
         ``rucioAPI = RucioAPI()`` at the foot of ``ddm.py`` are what every
@@ -1114,7 +1252,7 @@ class Types:
                 and isinstance(node.target, ast.Name)
                 and node.target.id == name
             ):
-                declared = self.annotated(file, node.annotation)
+                declared = self.annotated_all(file, node.annotation)
                 if declared is not None:
                     return declared
         values = [
@@ -1124,7 +1262,7 @@ class Types:
             and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
         ]
         if values:
-            found = {self.of_expression(file, tree, value, depth + 1) for value in values}
+            found = {self.declared(file, tree, value, depth + 1) for value in values}
             return found.pop() if len(found) == 1 else None
         held = self.imports(file).get(name)
         if held is None or not held[1]:
@@ -1134,24 +1272,24 @@ class Types:
             return None
         return self._outside_instance(target, held[1], depth + 1)
 
-    def _of_name(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[tuple[str, ast.ClassDef]]:
-        """:meth:`of_expression` for a bare name, read in *func*."""
+    def _of_name(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[Classes]:
+        """:meth:`declared` for a bare name, read in *func*."""
         args = getattr(func, "args", None)
         for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
             if argument.arg == name:
-                return self.annotated(file, argument.annotation)
+                return self.annotated_all(file, argument.annotation)
         for node in ast.walk(func):
             if (
                 isinstance(node, ast.AnnAssign)
                 and isinstance(node.target, ast.Name)
                 and node.target.id == name
             ):
-                return self.annotated(file, node.annotation)
+                return self.annotated_all(file, node.annotation)
         # Every assignment, less the ``None`` a name is cleared with:
         # ``siteMapper = SiteMapper(taskBuffer)`` and, at the end of the
         # daemon, ``siteMapper = None``.  The evidence for a local is all in
         # this function, so it is read rather than asked for; the answer
-        # is a class only where every assignment says the same one.
+        # is classes only where every assignment says the same ones.
         bound = [
             value
             for value in self.assigned(func).get(name, [])
@@ -1160,13 +1298,29 @@ class Types:
         held = self._with_held(file, func, name, depth)
         if not bound and held is None and not isinstance(func, ast.Module):
             return self._outside_instance(file, name, depth)
-        found = {self.of_expression(file, func, value, depth + 1) for value in bound}
+        found = {self.declared(file, func, value, depth + 1) for value in bound}
         if held is not None:
             found.add(held)
         return found.pop() if len(found) == 1 else None
 
     def of_expression(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
-        """The class *expression*, read in *func* of *file*, is declared to be."""
+        """The class *expression*, read in *func* of *file*, is declared to be, where it is declared one.
+
+        The walk's typer asks this, and so does the owner of a method whose
+        return annotation is read: a call on an object declared as two
+        classes returns what either method does, and that is not read.
+        """
+        return _one(self.declared(file, func, expression, depth))
+
+    def declared(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[Classes]:
+        """The classes *expression*, read in *func* of *file*, is declared to be.
+
+        One, or each member of a union.  A union is read wherever a single
+        class is -- a field's, a parameter's or a local's annotation, a
+        module's instance, what a ``with`` yields, a container's element, a
+        return annotation -- and where every assignment of a name or field
+        must say the same, it must say the same classes.
+        """
         if depth > self.DEPTH:
             return None
         tree = self.tree(file)
@@ -1200,19 +1354,19 @@ class Types:
                 where, annotation = container
                 element = _element_annotation(annotation)
                 if element is not None:
-                    return self.annotated(where, element)
+                    return self.annotated_all(where, element)
             return None
         if isinstance(expression, ast.Call):
             called = expression.func
             constructed = self.class_named(file, called) if isinstance(called, (ast.Name, ast.Attribute)) else None
             if constructed is not None:
-                return constructed
+                return frozenset({constructed})
             if isinstance(called, ast.Name):
                 # ``get_task_utils_module(self)``, declared ``-> TaskUtilsModule``.
                 function = self._function_named(file, called.id)
                 if function is not None:
                     where, definition = function
-                    return self.annotated(where, definition.returns)
+                    return self.annotated_all(where, definition.returns)
                 return None
             if isinstance(called, ast.Attribute):
                 receiver = called.value
@@ -1226,7 +1380,7 @@ class Types:
                 if found is None:
                     return None
                 where, method = found
-                return self.annotated(where, method.returns)
+                return self.annotated_all(where, method.returns)
         return None
 
     # -- what a value can be, where nothing declares it --------------------
@@ -1244,9 +1398,9 @@ class Types:
         declaration, that is ``{AdderAtlasPlugin}`` and *open* -- there is
         another way, and this reading cannot say which class it is.
         """
-        declared = self.of_expression(file, func, expression, 0)
+        declared = self.declared(file, func, expression, 0)
         if declared is not None:
-            return frozenset({(declared[0], declared[1].name)}), False
+            return frozenset((where, cls.name) for where, cls in declared), False
         return self._values(file, func, expression, depth, instances=True, seen=frozenset())
 
     def class_def(self, file: str, name: str) -> Optional[ast.ClassDef]:
@@ -1340,7 +1494,7 @@ class Types:
                     continue
                 typed = self.of_field(where, cls, expression.attr, depth + 1)
                 if typed is not None and instances:
-                    found.add((typed[0], typed[1].name))
+                    found.update((one, held.name) for one, held in typed)
                     continue
                 for place, holder in self.lineage(where, cls):
                     for method in pathcond.methods_of(holder):

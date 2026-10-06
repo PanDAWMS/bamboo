@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from bamboo.codemap import calls as calls_mod
 from bamboo.codemap import models
 from bamboo.codemap import trace as trace_mod
 from bamboo.codemap.models import (
@@ -2994,6 +2995,60 @@ def f(a):
 
     assert [(s.kind, s.name, s.line) for s in own][:2] == [("write", "", 6), ("binding", "b", 5)]
     assert walked.steps[1].detail == f"returns from {PACKAGE}/m::helper"
+
+
+_OPEN_ENTRY = '''\
+from typing import Any
+
+
+class Interface:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.remote, name)
+
+
+class Buffer:
+    def getTask(self, x):
+        return x + 1
+
+    def plain(self, x):
+        return x - 1
+
+
+class Feeder:
+    def __init__(self, source: "Interface | Buffer", buffer: Buffer):
+        self.source = source
+        self.buffer = buffer
+
+    def run(self, a):
+        v = {first}
+        w = {second}
+        u = self.buffer.plain(a)
+        spec.status = v + w + u
+'''
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("self.source.getTask(a)", "self.buffer.getTask(a)"),
+        ("self.buffer.getTask(a)", "self.source.getTask(a)"),
+    ],
+)
+def test_a_function_some_call_entered_open_says_so_on_every_return_whichever_call_came_first(tmp_path, first, second):
+    """``self.source.getTask`` lands at ``Buffer.getTask`` or wherever the interface forwards it.
+
+    Its returns are recorded once, by whichever call enters first -- here a
+    call placed closed as often as not -- and they say the value may come
+    from elsewhere either way.
+    """
+    roots = _tree(tmp_path, m=_OPEN_ENTRY.format(first=first, second=second))
+
+    walked = _walked_in(roots, "m", "run", [26])
+    returned = {(s.name, s.line, s.open) for s in walked.steps if s.kind == models.TRACE_RETURN}
+    entering = next(s for s in walked.steps if s.kind == TRACE_BINDING and s.value == "self.source.getTask(a)")
+
+    assert returned == {("getTask()", 11, calls_mod.UNPLACED_OPEN), ("plain()", 14, "")}
+    assert entering.detail == f"returns from {PACKAGE}/m::getTask; {calls_mod.UNPLACED_OPEN}"
 
 
 def test_a_guard_that_asks_a_method_names_the_calls_that_changed_its_answer(tmp_path):

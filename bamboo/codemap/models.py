@@ -3946,6 +3946,18 @@ class TraceStep(BaseModel):
             "ran is told by what printed beside it."
         ),
     )
+    open: str = Field(
+        default="",
+        description=(
+            "On a ``return`` step: why some call that entered this function was "
+            "placed open -- here, and possibly somewhere this reading cannot "
+            "name, such as wherever ``JediTaskBufferInterface`` forwards a "
+            "call -- so the value may instead come from a function the walk "
+            "did not enter.  Said of the function, not of one call: every "
+            "return step of it carries it, whichever call the walk came in by.  "
+            "Empty where every call that entered it was placed closed."
+        ),
+    )
 
 
 class StatementExit(BaseModel):

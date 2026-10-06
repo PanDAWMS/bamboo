@@ -1472,3 +1472,241 @@ def test_an_order_a_loop_builds_says_its_column_and_an_order_a_format_hands_says
     files = next(one for (owner, _line), one in side.statements.items() if owner.endswith("::files"))
     chosen = {one.term: [test.test for place in one.places for test in place.tests] for one in files.added_under if one.field == "order_by"}
     assert chosen == {"fileID": ["not (mode == 'lumi')"], "lumiBlockNr,lfn": ["mode == 'lumi'"]}
+
+
+# ---------------------------------------------------------------------------
+# A class named through a module-level name, and an object declared as several
+# ---------------------------------------------------------------------------
+
+
+def _method(calls, file, cls_name, name):
+    found = calls.types.class_named(f"{PACKAGE}/{file}.py", ast.Name(id=cls_name, ctx=ast.Load()))
+    assert found is not None
+    where, cls = found
+    func = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    return calls_mod.Target(where, func, cls)
+
+
+def _where(placed):
+    return [(target.cls.name, target.func.name) for target in placed.targets]
+
+
+_BUFFER = '''\
+class JediTaskBuffer:
+    def getTask(self, x):
+        return x
+'''
+
+_INTERFACE = '''\
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pkg.tb import JediTaskBuffer
+
+    _Proxied: Any = JediTaskBuffer
+else:
+    _Proxied = object
+
+
+class Interface(_Proxied):
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.remote, name)
+
+    def own(self):
+        return 1
+'''
+
+
+def test_a_base_bound_to_a_class_at_module_level_is_that_class_whatever_its_annotation(tmp_path):
+    """``_Proxied: Any = JediTaskBuffer`` under ``TYPE_CHECKING``: the value, not ``Any``, and not ``object``."""
+    roots = _tree(
+        tmp_path,
+        tb=_BUFFER,
+        iface=_INTERFACE,
+        m='''\
+from pkg.iface import Interface
+
+def f(tb: Interface):
+    tb.getTask(1)
+    tb.own()
+    tb.nowhere()
+''',
+    )
+    calls = _calls(roots)
+
+    assert _where(_placed(calls, "m", "f", "tb.getTask")) == [("JediTaskBuffer", "getTask")]
+    assert _placed(calls, "m", "f", "tb.getTask").unplaced == ""
+    assert _where(_placed(calls, "m", "f", "tb.own")) == [("Interface", "own")]
+    assert _placed(calls, "m", "f", "tb.nowhere").unplaced == calls_mod.UNPLACED_FORWARDED
+
+
+def test_a_name_bound_to_two_corpus_classes_names_neither(tmp_path):
+    roots = _tree(
+        tmp_path,
+        tb=_BUFFER,
+        other="class Other:\n    def getTask(self, x):\n        return x\n",
+        m='''\
+import sys
+
+from pkg.other import Other
+from pkg.tb import JediTaskBuffer
+
+if sys.version_info > (3,):
+    Chosen = JediTaskBuffer
+else:
+    Chosen = Other
+
+
+class C(Chosen):
+    pass
+
+
+def f(c: C):
+    c.getTask(1)
+''',
+    )
+    calls = _calls(roots)
+
+    assert _placed(calls, "m", "f", "c.getTask").unplaced == calls_mod.UNPLACED_NO_METHOD
+
+
+_CONNECTIONS = '''\
+class Oracle:
+    def __getattribute__(self, name):
+        return object.__getattribute__(self, name)
+
+    def cursor(self):
+        return 1
+
+
+class Postgres:
+    def __getattribute__(self, name):
+        return object.__getattribute__(self, name)
+
+    def begin(self):
+        pass
+
+    def cursor(self):
+        return 2
+
+
+class Base:
+    conn: "Oracle | Postgres"
+
+    def run(self):
+        self.conn.begin()
+        self.conn.cursor()
+        self.conn.close()
+
+
+def one(conn: Oracle):
+    conn.cursor()
+    conn.close()
+'''
+
+
+def test_an_object_declared_as_several_classes_lands_in_each_that_has_the_method(tmp_path):
+    """``self.conn: WrappedOracleConn | WrappedPostgresConn``: a class that may only forward the name opens the placement."""
+    roots = _tree(tmp_path, m=_CONNECTIONS)
+    calls = _calls(roots)
+
+    begin = _placed(calls, "m", "run", "self.conn.begin")
+    cursor = _placed(calls, "m", "run", "self.conn.cursor")
+    close = _placed(calls, "m", "run", "self.conn.close")
+
+    assert (_where(begin), begin.unplaced) == ([("Postgres", "begin")], calls_mod.UNPLACED_OPEN)
+    assert (_where(cursor), cursor.unplaced) == ([("Oracle", "cursor"), ("Postgres", "cursor")], "")
+    assert (_where(close), close.unplaced) == ([], calls_mod.UNPLACED_GETATTRIBUTE)
+
+
+def test_a_name_getattribute_may_supply_is_said_so_and_a_method_the_class_defines_is_still_placed(tmp_path):
+    roots = _tree(tmp_path, m=_CONNECTIONS)
+    calls = _calls(roots)
+
+    assert _where(_placed(calls, "m", "one", "conn.cursor")) == [("Oracle", "cursor")]
+    assert _placed(calls, "m", "one", "conn.cursor").unplaced == ""
+    assert _placed(calls, "m", "one", "conn.close").unplaced == calls_mod.UNPLACED_GETATTRIBUTE
+
+
+_FEEDER = '''\
+from typing import Any
+
+
+class Interface:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.remote, name)
+
+
+class Buffer:
+    def getTask(self, x):
+        return x + 1
+
+
+class Other:
+    def getTask(self, x):
+        return x
+
+
+class Feeder:
+    def __init__(self, taskbufferIF: "Interface | Buffer"):
+        self.taskBufferIF = taskbufferIF
+
+    def run(self, a):
+        self.taskBufferIF.getTask(a)
+        self.taskBufferIF.elsewhere(a)
+'''
+
+
+def test_a_union_is_read_through_the_field_its_parameter_is_assigned_to(tmp_path):
+    """The declaration is two classes wherever a single one would be read; a single-class answer is still none."""
+    roots = _tree(tmp_path, m=_FEEDER)
+    calls = _calls(roots)
+
+    got = _placed(calls, "m", "run", "self.taskBufferIF.getTask")
+    forwarded = _placed(calls, "m", "run", "self.taskBufferIF.elsewhere")
+    run = _function(calls, "m", "run")
+    receiver = _call_in(run, "self.taskBufferIF.getTask").func.value
+
+    assert (_where(got), got.unplaced) == ([("Buffer", "getTask")], calls_mod.UNPLACED_OPEN)
+    assert (_where(forwarded), forwarded.unplaced) == ([], calls_mod.UNPLACED_FORWARDED)
+    assert sorted(cls.name for _file, cls in calls.types.declared("pkg/m.py", run, receiver)) == ["Buffer", "Interface"]
+    assert calls.types.of_expression("pkg/m.py", run, receiver) is None
+
+
+def test_a_call_placed_open_at_another_definition_may_miss_this_one(tmp_path):
+    """``Other.getTask`` is not where ``self.taskBufferIF.getTask`` lands -- unless it is where the interface forwards it."""
+    roots = _tree(tmp_path, m=_FEEDER)
+    calls = _calls(roots)
+
+    other = _method(calls, "m", "Other", "getTask")
+    buffer = _method(calls, "m", "Buffer", "getTask")
+
+    assert calls.missed(other) == [
+        "getTask: 1 call(s) by its name placed elsewhere, "
+        f"{calls_mod.UNPLACED_OPEN} (self.taskBufferIF 1)"
+    ]
+    assert [ast.unparse(site.call.func) for site in calls.callers(buffer)] == ["self.taskBufferIF.getTask"]
+    assert calls.missed(buffer) == []
+
+
+def test_a_value_built_as_a_class_that_only_forwards_opens_the_placement(tmp_path):
+    """Read from the values as from a union: ``Interface()`` adds no definition, and says the call may go elsewhere."""
+    roots = _tree(
+        tmp_path,
+        m=_FEEDER + '''
+
+def f(flag, a):
+    if flag:
+        tb = Interface()
+    else:
+        tb = Buffer()
+    tb.getTask(a)
+    tb.elsewhere(a)
+''',
+    )
+    calls = _calls(roots)
+
+    got = _placed(calls, "m", "f", "tb.getTask")
+
+    assert (_where(got), got.unplaced) == ([("Buffer", "getTask")], calls_mod.UNPLACED_OPEN)
+    assert _placed(calls, "m", "f", "tb.elsewhere").unplaced == calls_mod.UNPLACED_FORWARDED

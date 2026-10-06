@@ -1674,6 +1674,9 @@ class _Walk:
         self.entered: set[tuple[str, str]] = set()
         #: ``(file, owner, projection)`` already gone into for its returns.
         self.returned: set[tuple] = set()
+        #: ``{(file, owner): reason}`` for each function some call placed open
+        #: entered -- :attr:`TraceStep.open` of its return steps.
+        self.entered_open: dict[tuple[str, str], str] = {}
 
     # -- source ------------------------------------------------------------
 
@@ -3174,7 +3177,10 @@ class _Walk:
         its parameters answered by the call that brought the walk in.
 
         Where the call cannot be placed the step says why, so a walk that ends
-        here says what would carry it further.
+        here says what would carry it further.  Where it is placed open -- at
+        these functions and possibly somewhere this reading cannot name -- each
+        is entered all the same, and every return step of it says so
+        (:attr:`TraceStep.open`): the value may come from somewhere else.
         """
         call = expression
         path: tuple = slot if isinstance(slot, tuple) else ((slot,) if slot is not None else ())
@@ -3202,6 +3208,8 @@ class _Walk:
             callee = self._callee_frame(target)
             if callee is None:
                 continue
+            if placed.unplaced:
+                self._entered_open(callee, placed.unplaced)
             # One entry per call, however many ways the walk arrived at it: the
             # ten statements under one ``if`` each enter the test's
             # ``JediTaskSpec.statusToIncexec()``, and a parameter read there was
@@ -3247,6 +3255,7 @@ class _Walk:
                         terminal=terminal,
                         detail=detail,
                         depth=depth,
+                        open=self.entered_open.get((callee.file, callee.owner), ""),
                     )
                 ):
                     return
@@ -3260,7 +3269,23 @@ class _Walk:
                         self.want(callee, [f"{value.id}[{pending[0]!r}]"], depth + 1, statement)
                     self._ask_keyed(callee, value, depth + 1, statement)
         if entered and step is not None and not step.terminal:
-            step.detail = f"returns from {', '.join(entered)}"
+            step.detail = f"returns from {', '.join(entered)}" + (f"; {placed.unplaced}" if placed.unplaced else "")
+
+    def _entered_open(self, callee: _Frame, reason: str) -> None:
+        """Say on each return step of *callee* that some call that entered it was placed open.
+
+        Of the function, whichever call the walk came in by: its returns are
+        recorded once, by the first call to enter it, and that may be a call
+        placed closed -- so the steps already recorded are marked as well,
+        and the marks do not depend on the order the walk took.
+        """
+        key = (callee.file, callee.owner)
+        if key in self.entered_open:
+            return
+        self.entered_open[key] = reason
+        for one in self.steps:
+            if one.kind == TRACE_RETURN and (one.file, one.owner) == key:
+                one.open = reason
 
     def _callee_frame(self, target: calls_mod.Target) -> Optional[_Frame]:
         """This walk's own frame for a function a call was placed at."""
