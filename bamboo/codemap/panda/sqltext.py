@@ -2301,6 +2301,16 @@ class OrderItem(NamedTuple):
 _DIRECTION = re.compile(r"^(?P<expression>.*?)(?:\s+(?P<direction>ASC|DESC))?(?:\s+NULLS\s+(?:FIRST|LAST))?$", re.I | re.S)
 
 
+def _spelled_table(table: exp.Table) -> str:
+    """*table* as the statement names it: catalog and schema kept, alias off, a hole ``{}``."""
+    parts = [table.args.get(key) for key in ("catalog", "db", "this")]
+    return ".".join(
+        "{}" if part.name.startswith(_HOLE_NAME) else part.sql(dialect="oracle")
+        for part in parts
+        if isinstance(part, exp.Identifier)
+    )
+
+
 def _spelled_columns(columns: Iterator[exp.Column] | list[exp.Column]) -> tuple[str, ...]:
     """*columns* as spelled -- ``tab.jobStatus`` -- once each, in the order the text has them."""
     placed = sorted(columns, key=lambda column: column.this.meta.get("start", 0) if isinstance(column.this, exp.Identifier) else 0)
@@ -2365,6 +2375,11 @@ class PrintedQuery(NamedTuple):
     #: The tables its ``FROM`` and joins read, schema off; a derived table or
     #: ``WITH`` clause is not one -- it is a query of its own.
     tables: tuple[str, ...]
+    #: The same tables, in the same order, as the statement spells them:
+    #: schema kept, alias off -- ``ATLAS_PANDA.jobsActive4``, what a query
+    #: run by hand against the database has to name.  A part the map reads
+    #: as a hole is ``{}``.
+    spelled: tuple[str, ...]
     #: Its ``WHERE``'s conjuncts.  Empty where it has none, or where the
     #: clause could not be cut term for term (``failure`` says which).
     where: tuple[PrintedTerm, ...]
@@ -2412,13 +2427,14 @@ def printed(sql: str) -> Printed:
         if not isinstance(query, (exp.Select, exp.Update, exp.Delete)):
             continue
         sources = [query.args.get("from_"), *(query.args.get("joins") or [])] if isinstance(query, exp.Select) else [query]
-        tables = tuple(
+        named = list(
             dict.fromkeys(
-                _table_name(source.this)
+                (_table_name(source.this), _spelled_table(source.this))
                 for source in sources
                 if source is not None and isinstance(source.this, exp.Table)
             )
         )
+        tables = tuple(name for name, _spelled in named)
         where: list[PrintedTerm] = []
         clause = query.args.get("where")
         if clause is not None:
@@ -2441,5 +2457,47 @@ def printed(sql: str) -> Printed:
                     )
         order = query.args.get("order")
         items = order_items(_order_text(query, order, read, sql, tokens)) if isinstance(order, exp.Order) else ()
-        queries.append(PrintedQuery(tables=tables, where=tuple(where), order=items))
+        queries.append(PrintedQuery(tables=tables, spelled=tuple(spelled for _name, spelled in named), where=tuple(where), order=items))
     return Printed(tuple(queries), tuple(ordering(sql)[1]), "; ".join(failures))
+
+
+#: A quoted value, or a bind -- found together so that a bind is never looked
+#: for inside a value: ``TO_DATE(:t, 'HH24:MI:SS')`` has one bind, not three.
+_BIND_OR_QUOTED = re.compile(r"'(?:[^']|'')*'|:\w+")
+
+
+def _literal(value: object) -> Optional[str]:
+    """*value* as the SQL literal it stands for; ``None`` for a value with no one spelling."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    return None
+
+
+def filled(text: str, values: dict[str, object]) -> str:
+    """*text* -- a statement or a :class:`PrintedTerm`'s text -- with the binds *values* gives written in.
+
+    *values* is keyed as a printed bind map keys it, ``:name`` (or ``name``),
+    and holds Python values: a string is quoted, its quotes doubled, a
+    number written as it is, ``None`` as ``NULL``.  What is not given, and a
+    value with no one SQL spelling (a ``datetime``, a ``bool``), stays a
+    bind, to be filled by whoever runs the result.  Nothing inside quotes is
+    touched.
+    """
+
+    def put(match: re.Match) -> str:
+        spelled = match.group(0)
+        if spelled.startswith("'"):
+            return spelled
+        key = spelled if spelled in values else spelled[1:]
+        if key not in values:
+            return spelled
+        literal = _literal(values[key])
+        return spelled if literal is None else literal
+
+    return _BIND_OR_QUOTED.sub(put, text)

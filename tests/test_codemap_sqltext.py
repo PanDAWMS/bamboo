@@ -912,6 +912,7 @@ def test_a_printed_statement_is_read_query_by_query():
     outer, inner = read.queries
     assert outer.tables == () and [term.text for term in outer.where] == ["ROWNUM <= :njobs"]
     assert inner.tables == ("jobsActive4",)
+    assert inner.spelled == ("ATLAS_PANDA.jobsActive4",)
     assert inner.where == (
         sqltext.PrintedTerm("computingSite=:computingSite", ("computingSite",), (":computingSite",)),
         sqltext.PrintedTerm("jobStatus=:oldJobStatus", ("jobStatus",), (":oldJobStatus",)),
@@ -967,3 +968,17 @@ def test_a_where_whose_or_binds_looser_than_its_and_is_one_conjunct():
     ((only,),) = [query.where for query in read.queries]
     assert only.text.startswith("(status IN ('submitted')") and only.text.endswith("sync IS NULL)")
     assert only.binds == (":d", ":x", ":r")
+
+
+def test_a_printed_term_is_filled_with_its_values_and_nothing_inside_quotes():
+    """A query drawn from a printed record is run by hand, with the run's values in it.
+
+    A bind looked for inside a quoted value is not one: ``HH24:MI:SS`` holds
+    no ``:MI``.  A value with no one SQL spelling stays a bind.
+    """
+    text = "x=:x AND d > TO_DATE(:t,'YYYY-MM-DD HH24:MI:SS') AND n IN (:a,:b) AND s=:s AND f=:f"
+    values = {":x": 1, ":a": "it's", ":b": None, "s": "done", ":f": True}
+
+    assert sqltext.filled(text, values) == (
+        "x=1 AND d > TO_DATE(:t,'YYYY-MM-DD HH24:MI:SS') AND n IN ('it''s',NULL) AND s='done' AND f=:f"
+    )
