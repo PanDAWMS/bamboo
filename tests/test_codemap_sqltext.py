@@ -982,3 +982,83 @@ def test_a_printed_term_is_filled_with_its_values_and_nothing_inside_quotes():
     assert sqltext.filled(text, values) == (
         "x=1 AND d > TO_DATE(:t,'YYYY-MM-DD HH24:MI:SS') AND n IN ('it''s',NULL) AND s='done' AND f=:f"
     )
+
+
+def _shape(twin) -> object:
+    """A twin as nested tuples: ``(node, items...)`` or ``(kind, table.column, op, ((side kind, side text), ...))``."""
+    if twin.node != "test":
+        return (twin.node, *(_shape(one) for one in twin.items))
+    test = twin.test
+    return (test.kind, f"{test.table}.{test.column}", test.op, tuple((side.kind, side.text) for side in test.sides))
+
+
+def test_a_condition_is_a_tree_of_branches_and_terms_read_off_its_own_clause():
+    """``copyArchive``'s ``(modificationTime<:t AND jobStatus=:a) OR (...)`` and a null-safe time limit.
+
+    An entry is an ``any`` of its branches and each an ``all`` of its terms,
+    with the column the term tests named by table, never by alias, and put on
+    the left where the statement writes ``:p < currentPriority``.
+    """
+    sql = (
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab WHERE "
+        "(tab.modificationTime<:t AND tab.jobStatus=:a) OR (tab.stateChangeTime<:t AND tab.jobStatus=:b) "
+        "AND (tab.lockedTime IS NULL OR tab.lockedTime<:lock) AND :p < tab.currentPriority "
+        "AND tab.creationTime>CURRENT_DATE-3 AND tab.cloud NOT IN (:c1,:c2)"
+    )
+    entries = sqltext.conditions(sql)
+    twins = sqltext.condition_twins(sql)
+    assert len(twins) == len(entries)
+    shapes = [_shape(twin) for twin in twins]
+    assert ("any", ("all", ("compare", "jobsActive4.modificationTime", "<", (("bind", ":t"),)), ("equal", "jobsActive4.jobStatus", "=", (("bind", ":a"),))),
+            ("all", ("compare", "jobsActive4.stateChangeTime", "<", (("bind", ":t"),)), ("equal", "jobsActive4.jobStatus", "=", (("bind", ":b"),)),
+             # An ``OR`` inside a branch nests, its terms as they are.
+             ("any", ("null", "jobsActive4.lockedTime", "", ()), ("compare", "jobsActive4.lockedTime", "<", (("bind", ":lock"),))),
+             ("compare", "jobsActive4.currentPriority", ">", (("bind", ":p"),)),
+             ("compare", "jobsActive4.creationTime", ">", (("clock", "CURRENT_DATE - 3"),)),
+             ("unequal", "jobsActive4.cloud", "NOT IN", (("bind", ":c1"), ("bind", ":c2"))))) in shapes
+    clock = next(
+        side for twin in twins for one in [twin] for side in _sides(one) if side.kind == "clock"
+    )
+    assert (clock.clock, clock.offset_seconds) == ("CURRENT_DATE", -259200.0)
+
+
+def _sides(twin):
+    if twin.node == "test":
+        yield from twin.test.sides
+    for one in twin.items:
+        yield from _sides(one)
+
+
+def test_what_two_branches_of_a_union_require_between_them_folds_into_one_tree():
+    """``A AND B UNION A AND C`` requires ``A``, and ``B`` or ``C``: the second entry is an ``any`` of each branch's rest."""
+    sql = (
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE modificationTime<:t AND creationTime<:c "
+        "UNION SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE modificationTime<:t AND stateChangeTime<:s"
+    )
+    twins = sqltext.condition_twins(sql)
+    assert len(twins) == len(sqltext.conditions(sql)) == 2
+    folded = _shape(twins[1])
+    assert folded[0] == "any" and len(folded) == 3
+    assert [branch[0] for branch in folded[1:]] == ["all", "all"]
+
+
+def test_a_logged_statement_and_its_map_are_cut_apart_without_losing_a_time():
+    """``str(varMap)`` prints a time as ``datetime.datetime(...)``: read as that time, and said to be left unfilled."""
+    import datetime
+
+    message = (
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE modificationTime<:timeLimit AND jobStatus=:s "
+        "/* DBProxy.x */{':timeLimit': datetime.datetime(2026, 10, 4, 18, 38, 7), ':s': 'activated', "
+        "':d': Decimal('1.5')}"
+    )
+    text, binds = sqltext.cut(message)
+    assert text.endswith("/* DBProxy.x */")
+    assert binds[":timeLimit"] == datetime.datetime(2026, 10, 4, 18, 38, 7)
+    assert binds[":d"] == "Decimal('1.5')"
+    assert "'activated'" in sqltext.filled(text, binds)
+    assert sqltext.unfilled(text, binds) == (":timeLimit",)
+    assert sqltext.cut("Trying 1/5 sql:SELECT 1 FROM dual WHERE a=:a var:{':a': 1}", "sql:", " var:") == (
+        "SELECT 1 FROM dual WHERE a=:a",
+        {":a": 1},
+    )
+    assert sqltext.cut("nothing printed after it") is None

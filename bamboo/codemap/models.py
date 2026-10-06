@@ -1224,6 +1224,231 @@ class AddedTerm(BaseModel):
     )
 
 
+class ConditionValue(BaseModel):
+    """One value a term compares its column with, as far as the map settles it.
+
+    A time is a *base* -- the clock -- plus an offset: ``modificationTime
+    <:timeLimit`` with ``timeLimit = naive_utcnow() - timedelta(days=7)`` at
+    the line that reaches the bind is the base ``naive_utcnow`` and
+    ``-604800``.  Where the source does not settle the value here, ``needs``
+    names the parameters the offset waits for -- a call's record fills them --
+    or ``said`` gives the expression, as :attr:`GuardRead.bound` does.
+    """
+
+    kind: str = Field(
+        ...,
+        description=(
+            "``bind`` -- the value a bind is filled with; ``constant`` -- one the "
+            "statement writes; ``column`` -- another column of the row; ``clock`` "
+            "-- the database's own clock, ``CURRENT_DATE-3``; ``other``."
+        ),
+    )
+    text: str = Field(..., description="This side as the statement spells it: ``:timeLimit``, ``CURRENT_DATE-3``.")
+    base: str = Field(
+        default="",
+        description=(
+            "What the offset is added to: a clock -- the database's "
+            "(``CURRENT_DATE``, ``SYSDATE``, ``CURRENT_TIMESTAMP``, "
+            "``SYSTIMESTAMP``) or Python's, named by what the call resolves to "
+            "through the module's imports (``naive_utcnow``, ``datetime.utcnow``, "
+            "``datetime.now``, ``datetime.now(utc)``) -- or "
+            "``<function>.<parameter>``, a value the call hands in.  Empty for a "
+            "plain constant.  A call reading any other clock is ``said``.  Clocks "
+            "are named, not equated: PanDA's Oracle session runs in UTC "
+            "(``WrappedCursor.initialize``), ``SYSDATE`` in the database host's "
+            "zone, ``datetime.now`` in the server's."
+        ),
+    )
+    offset_seconds: Optional[float] = Field(
+        default=None,
+        description=(
+            "Added to ``base``: seconds for a time, the amount itself for a "
+            "number handed in as a parameter.  ``None`` where it is not settled."
+        ),
+    )
+    constant: str = Field(
+        default="",
+        description="A settled value with no base, spelled as ``selects`` spells values: ``800``, ``activated``, ``None``.",
+    )
+    scale_seconds: Optional[float] = Field(
+        default=None,
+        description=(
+            "Seconds per unit of a bind amount the statement adds to a database "
+            "clock: ``CURRENT_DATE-:days`` is ``-86400`` times the bind's value."
+        ),
+    )
+    subject: str = Field(default="", description="A ``column`` side's subject, spelled as ``ConditionNode.subject``.")
+    needs: list[str] = Field(
+        default_factory=list,
+        description="``<function>.<parameter>`` for each value the offset waits for: ``lockJobOutputReport.time_limit``.",
+    )
+    said: str = Field(
+        default="",
+        description=(
+            "``<expression>@<line>`` where the source does not settle the value: "
+            "a configuration lookup, several writes reaching the bind, a bind "
+            "nothing in the map fills."
+        ),
+    )
+
+
+class ConditionNode(BaseModel):
+    """One node of a condition read as a tree: :attr:`ReadSiteNode.condition_trees`."""
+
+    node: str = Field(
+        ...,
+        description=(
+            "``any`` -- holds where one of ``items`` does; ``all`` -- where every "
+            "one does; or a term: ``compare`` (``< <= > >=``), ``equal`` (``=``, "
+            "``IN``), ``unequal`` (``<>``, ``NOT IN``), ``null``, ``not_null``, "
+            "``other`` -- what does not read as one column tested against values "
+            "(an expression on the left, a ``NOT EXISTS``), kept so that the "
+            "entry is never read as decided without it."
+        ),
+    )
+    items: list["ConditionNode"] = Field(default_factory=list)
+    text: str = Field(default="", description="A term as the statement writes it.")
+    subject: str = Field(
+        default="",
+        description=(
+            "The column the term tests, as ``selects`` spells subjects: "
+            "``JobSpec.modificationTime``, or ``jobs_StatusLog.modificationTime`` "
+            "for a table no spec holds -- the alias never: a joined row is not "
+            "the job's."
+        ),
+    )
+    op: str = Field(
+        default="",
+        description=(
+            "``<``, ``<=``, ``>``, ``>=`` with the column on the left (turned "
+            "round where the statement writes ``:t > col``), ``=``/``IN``, "
+            "``<>``/``NOT IN``."
+        ),
+    )
+    values: list[ConditionValue] = Field(
+        default_factory=list,
+        description=(
+            "What the column is compared with: each value a run can use, so a "
+            "bind filled differently on two paths is two, and an ``IN`` list "
+            "one per member and value."
+        ),
+    )
+    settled: bool = Field(
+        default=False,
+        description="Every bind of the term is filled with a value the map settles, and nothing in it is ``other``.",
+    )
+
+
+class ConditionReading(BaseModel):
+    """One ``conditions`` entry, or ``added_under`` conditions term, and its tree."""
+
+    entry: str = Field(..., description="The entry exactly as ``conditions`` or ``added_under`` spells it.")
+    tree: ConditionNode
+
+
+class PrintedBy(BaseModel):
+    """A logging call that prints this statement's text and the bind map it runs with.
+
+    ``getJobs`` logs ``sqlP + comment + str(getValMap)`` the line before it
+    executes ``sqlP + comment`` with ``getValMap``: the record is the
+    statement that ran, then its binds.  Said only where that holds -- the
+    print's text is the executed text (or it less the trailing comment), its
+    map is the executed map, and neither is rebound between the two -- so a
+    reader never takes another statement's print for this one's.
+    """
+
+    line: int = Field(..., description="The logging statement's line: :attr:`PrintStatement.line` of the function's prints.")
+    where: str = Field(..., description="``before`` or ``after`` the ``execute``.")
+    text: str = Field(
+        ...,
+        description="``whole`` -- the executed text; ``without comment`` -- it less the trailing ``/* ... */`` comment.",
+    )
+    lead: str = Field(
+        default="",
+        description=(
+            "What the message writes just before the statement: ``running sql: ``.  "
+            "The statement starts at its first occurrence -- :func:`sqltext.cut`."
+        ),
+    )
+    gap: str = Field(default="", description="What the message writes between the statement and the map: ``\" \"``, ``\" var:\"``.")
+
+
+class OrderHole(BaseModel):
+    """A blanked item of an ``ORDER BY`` -- one the source builds at run time -- and what builds it.
+
+    ``getJobs`` sorts by ``(CASE {} ELSE {} END)``: ``getCriteriaForGlobalShares``
+    joins one ``WHEN gshare=:leave{i} THEN {i}`` per share, in the order
+    ``get_sorted_leaves()`` returns them.  Which column the ranking is over
+    is in the source; the ranking itself is not.
+    """
+
+    order: str = Field(..., description="The ``order_by`` entry, as that field spells it.")
+    item: int = Field(..., description="The blanked item's place in the list, from 0 -- :func:`sqltext.order_items`.")
+    subjects: list[str] = Field(
+        default_factory=list,
+        description="The columns the item ranks by, as ``selects`` spells subjects: ``JobSpec.gshare``.",
+    )
+    templates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What fills the hole, once per member, with its own holes blanked: "
+            "``WHEN gshare=:leave{} THEN {}``, and ``... THEN 0`` for the share "
+            "the source puts first."
+        ),
+    )
+    computed_at: str = Field(
+        default="",
+        description=(
+            "Where the members, and so the ranking, come from at run time: the "
+            "loop building them and what it walks -- ``entity_module.py:874 "
+            "for leave in sorted_leaves (sorted_leaves = self.get_sorted_leaves()@867)``."
+        ),
+    )
+
+
+class CallReading(BaseModel):
+    """What one statement reads when one route of calls runs it: :attr:`ReadSiteNode.call_readings`.
+
+    A route is the call into the statement's function and, outward, each
+    call that hands it its caller's own parameter unchanged, ending where the
+    values are written down.  Read the way the statement's own fields are
+    read, with what the route fixes: the constants that decide which
+    fragments and binds run, the values it hands the parameters -- a list,
+    a time limit -- and a callee's default where the route's call does not
+    pass the argument.  A parameter of the route's outermost function is not
+    fixed: its callers are not asked, and the value stays ``needs``.
+    """
+
+    chain: list[str] = Field(..., description="``file:line`` of each call of the route, the call into the statement's function first.")
+    constants: dict[str, str] = Field(
+        default_factory=dict,
+        description="The constants the route hands the parameters the function tests, as Python spells them -- what names the call.",
+    )
+    not_run: bool = Field(default=False, description="The route's constants rule the statement out: it never runs on this route.")
+    as_statement: bool = Field(
+        default=False,
+        description=(
+            "The route's fields, read in full, are the statement's own -- each "
+            "field below compared, none copied.  Every route reading as the "
+            "statement does carries no fields of its own."
+        ),
+    )
+    tables: list[str] = Field(default_factory=list)
+    selects: list[str] = Field(default_factory=list)
+    excludes: list[str] = Field(default_factory=list)
+    consults: list[str] = Field(default_factory=list)
+    refuses: list[str] = Field(default_factory=list)
+    restricts: list[str] = Field(default_factory=list)
+    condition_trees: list[ConditionReading] = Field(
+        default_factory=list,
+        description="The conditions every build of the route requires, as trees with the route's values in them.",
+    )
+
+
+#: :class:`CallReading`'s fields that say which route, not what it reads.
+CALL_READING_ROUTE = frozenset({"chain", "constants", "not_run", "as_statement"})
+
+
 class ReadSiteNode(BaseNode):
     """One statement that asks the database for rows by a value.
 
@@ -1350,14 +1575,38 @@ class ReadSiteNode(BaseNode):
             "a bind's value where the map settles it."
         ),
     )
-    call_sites: list[str] = Field(
+    call_readings: list[CallReading] = Field(
         default_factory=list,
         description=(
-            "``<call> <- <call> (flag=True): reads a, b[; selects ...]`` for "
-            "each call site whose constants narrow what the statement reads: "
-            "the statement's own tables and selects are every run any call can "
-            "make.  Only calls that differ are listed; ``not run`` where the "
-            "call's constants rule the statement out."
+            "What the statement reads on each route of calls into its function "
+            "(:class:`CallReading`), every route the map places, each complete "
+            "in the statement's own forms or marked as reading as the statement "
+            "does.  The statement's own fields are every run any call can make; "
+            "``copyArchive`` hands ``lockJobsForReassign`` four status lists at "
+            "four calls, and only a route's record says which call asks for "
+            "which, and which of them refuse ``relocationFlag=2``.  Whether the "
+            "routes are every way in is ``callers_complete``."
+        ),
+    )
+    callers_complete: bool = Field(
+        default=False,
+        description=(
+            "Every call spelled with the name of the statement's function, and "
+            "of each forwarder a route passes through, is placed, and none has "
+            "more callers than are read one by one -- so ``call_readings`` is "
+            "every way the statement is run from the corpus.  ``False`` can be "
+            "said of a complete list, a call by the same name to another "
+            "function counting against it; ``True`` is never said of an "
+            "incomplete one."
+        ),
+    )
+    callers_stop: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the list of routes may stop short, when it may: the function, "
+            "how many calls by its name are not placed and why, by receiver "
+            "(``self.taskBufferIF 3``), or that no call in the corpus names it "
+            "-- an endpoint, reached from outside."
         ),
     )
     tables: list[str] = Field(
@@ -1401,6 +1650,45 @@ class ReadSiteNode(BaseNode):
             "Join terms are left out.  ``c1.jediTaskID=d.jediTaskID`` says how "
             "two tables meet, not why a row was passed over, and the 182 of "
             "them would bury the terms that do."
+        ),
+    )
+    order_holes: list[OrderHole] = Field(
+        default_factory=list,
+        description=(
+            "Each blanked ``order_by`` item the source builds at run time, with "
+            "the column it ranks by and where the ranking is computed.  A reader "
+            "comparing a row with the rows sorted ahead of it groups by these "
+            "subjects; without them ``getJobs``' share ranking read as an order "
+            "by priority alone."
+        ),
+    )
+    printed_by: list[PrintedBy] = Field(
+        default_factory=list,
+        description=(
+            "The logging calls in the statement's own function that print its "
+            "text and then the map it is executed with -- where to find the "
+            "statement that ran, and its binds, in a log.  50 read statements "
+            "of the corpus print ``<sql> + comment + str(<map>)``; most print "
+            "nothing of their SQL, and this is empty for them."
+        ),
+    )
+    condition_trees: list[ConditionReading] = Field(
+        default_factory=list,
+        description=(
+            "Each ``conditions`` entry, and each ``conditions`` term of "
+            "``added_under``, as a tree a row can be evaluated against: an "
+            "``any`` of its branches, each an ``all`` of its terms, each term "
+            "saying which subject it tests and against what.  The entries are "
+            "text a reader would otherwise parse; ``tabT.modificationTime<"
+            ":timeLimit@4143`` and ``lockedTime IS NULL OR lockedTime<"
+            ":timeLimit@1822`` were out of reach of a pattern that took "
+            "``col<:bind@line``, and so was the time the bind holds.\n\n"
+            "A bind's value is read through the writes that reach it: "
+            "``copyArchive.py::main`` writes ``timeLimit`` twenty-six times, and "
+            "the statement at 381 reads the one at 375.  A parameter's value is "
+            "the call's, named in ``needs`` and filled in that call's record; "
+            "its default is never taken as fixed, since a caller may pass "
+            "another."
         ),
     )
     added_under: Optional[list[AddedTerm]] = Field(
@@ -3831,6 +4119,18 @@ class StatementReading(BaseModel):
             "passes the ``WHERE`` can still not come back."
         ),
     )
+    condition_trees: list[ConditionReading] = Field(
+        default_factory=list,
+        description="Each conditions entry as a tree -- :attr:`ReadSiteNode.condition_trees`.",
+    )
+    printed_by: list[PrintedBy] = Field(
+        default_factory=list,
+        description="The prints of the statement's text and map -- :attr:`ReadSiteNode.printed_by`.",
+    )
+    order_holes: list[OrderHole] = Field(
+        default_factory=list,
+        description="Each blanked order item and what builds it -- :attr:`ReadSiteNode.order_holes`.",
+    )
     added_under: Optional[list[AddedTerm]] = Field(
         default=None,
         description=(
@@ -3843,13 +4143,12 @@ class StatementReading(BaseModel):
         default_factory=list,
         description="How many rows come back at most -- :attr:`ReadSiteNode.limits`.",
     )
-    call_sites: list[str] = Field(
+    call_readings: list[CallReading] = Field(
         default_factory=list,
-        description=(
-            "What each call site whose constants narrow the statement reads "
-            "there -- :attr:`ReadSiteNode.call_sites`."
-        ),
+        description="What the statement reads on each route of calls -- :attr:`ReadSiteNode.call_readings`.",
     )
+    callers_complete: bool = Field(default=False, description=":attr:`ReadSiteNode.callers_complete`.")
+    callers_stop: list[str] = Field(default_factory=list, description=":attr:`ReadSiteNode.callers_stop`.")
     conditions: list[str] = Field(
         default_factory=list,
         description=(

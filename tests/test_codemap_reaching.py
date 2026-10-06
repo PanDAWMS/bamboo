@@ -537,3 +537,28 @@ def test_the_same_writes_asked_from_two_reads_answer_each():
 
     assert pathcond.surviving_writes([one, two], read, as_run=True) == [one]
     assert pathcond.surviving_writes([one, two], last, as_run=True) == [two]
+
+
+def test_a_parameter_list_is_written_on_entry():
+    """``if days is None: days = 3`` leaves the call's value beside the default the body writes.
+
+    The parameter list is handed in as a write that holds when the function
+    starts; with no other write on some path, the call's value is what the
+    read sees there, and an unconditional rebinding ends it.
+    """
+    source = (
+        "def f(days, limit):\n"
+        "    if days is None:\n"
+        "        days = 3\n"
+        "    use(days)\n"
+        "    limit = 5\n"
+        "    use(limit)\n"
+    )
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    default, reread = func.body[0].body[0], func.body[1]
+    rebound, read = func.body[2], func.body[3]
+
+    assert reaching(reread, [func.args, default]) == [func.args, default]
+    assert reaching(read, [func.args, rebound]) == [rebound]

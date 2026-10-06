@@ -88,6 +88,44 @@ _REASONS_SHOWN = 3
 _VERDICT_ORDER = (SEEN, UNSETTLED, UNASKABLE, ELIMINATED)
 
 
+def _routes_said(entry) -> list[str]:
+    """``<call> <- <call> (flag=True): selects a; refuses b`` for each route reading otherwise than *entry*."""
+    said: list[str] = []
+    own = {
+        "tables": sorted(entry.tables),
+        "selects": sorted(entry.selects),
+        "excludes": sorted(entry.excludes),
+        "consults": sorted(entry.consults),
+        "refuses": sorted(entry.refuses),
+        "restricts": sorted(entry.restricts),
+        "condition_trees": sorted(one.entry for one in entry.condition_trees if one.entry in entry.conditions),
+    }
+    for reading in entry.call_readings:
+        constants = ", ".join(f"{name}={value}" for name, value in sorted(reading.constants.items()))
+        route = " <- ".join(reversed(reading.chain)) + (f" ({constants})" if constants else "")
+        if reading.not_run:
+            said.append(f"{route}: not run")
+            continue
+        if reading.as_statement:
+            continue
+        parts: list[str] = []
+        for field, mine in own.items():
+            theirs = sorted(one.entry for one in reading.condition_trees) if field == "condition_trees" else getattr(reading, field)
+            label = "requires" if field == "condition_trees" else field
+            if theirs != mine:
+                parts.append(f"{label} {', '.join(theirs) or 'nothing'}")
+        said.append(f"{route}: " + "; ".join(parts))
+    return said
+
+
+def _routes_extent(entry) -> str:
+    """``3 route(s), 2 reading as the statement -- every route``, or where the list stops; empty where none is known."""
+    if not entry.call_readings and not entry.callers_stop:
+        return ""
+    alike = sum(1 for reading in entry.call_readings if reading.as_statement)
+    extent = "every route" if entry.callers_complete else "the list may stop at " + "; ".join(entry.callers_stop)
+    return f"{len(entry.call_readings)} route(s), {alike} reading as the statement -- {extent}"
+
 def _report_header(strategy: Strategy, evidence_path: Optional[Path], ev) -> None:
     symptom = strategy.symptom
     scope = f" · task {symptom.task_id}" if symptom.task_id else ""
@@ -321,13 +359,22 @@ def _report_follow_up(strategy: Strategy, full: bool) -> None:
                     ("by key", entry.keys),
                     ("excluding", entry.excludes),
                     ("reads", entry.tables),
-                    ("ordered by", entry.order_by),
                     ("limit", entry.limits),
                 ):
                     if said:
                         click.echo(f"                                       {label}  {', '.join(said)}")
-                for narrowed in entry.call_sites:
+                # One line an order: the statement is built with one of them,
+                # and joined by ", " two orders read as one order by more keys.
+                for order in entry.order_by:
+                    click.echo(f"                                       ordered by  {order}")
+                # Each route that reads otherwise than the statement, by
+                # what it reads differently; the map stores whole readings
+                # and this is only the print.
+                for narrowed in _routes_said(entry):
                     click.echo(f"                                       when called from {narrowed}")
+                extent = _routes_extent(entry)
+                if extent:
+                    click.echo(f"                                       routes  {extent}")
                 # What else the row had to be.  The question this answers is
                 # "it held the value and did not come back", and until the
                 # conditions were recorded the map's answer stopped one line

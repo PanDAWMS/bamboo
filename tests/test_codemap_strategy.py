@@ -629,7 +629,8 @@ async def test_the_answer_carries_what_the_map_holds_on_a_statement_and_its_writ
         tables=["jobsActive4"],
         order_by=["PandaID"],
         limits=["<= :rlimit"],
-        call_sites=["x.py:7 (onlyActive=True): reads jobsActive4"],
+        call_readings=[models.CallReading(chain=["x.py:7"], constants={"onlyActive": "True"}, tables=["jobsActive4"])],
+        callers_complete=True,
     )
     writer = _junction(
         "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::activateJob",
@@ -662,7 +663,8 @@ async def test_the_answer_carries_what_the_map_holds_on_a_statement_and_its_writ
     assert statement.tables == ["jobsActive4"]
     assert statement.order_by == ["PandaID"]
     assert statement.limits == ["<= :rlimit"]
-    assert statement.call_sites == ["x.py:7 (onlyActive=True): reads jobsActive4"]
+    assert [(one.chain, one.tables) for one in statement.call_readings] == [(["x.py:7"], ["jobsActive4"])]
+    assert statement.callers_complete
     (candidate,) = strategy.candidates
     assert candidate.called_from == ["pandaserver/taskbuffer/TaskBuffer.py:928"]
 
@@ -689,7 +691,11 @@ def test_a_statement_prints_each_field_it_has_and_none_it_lacks():
                     keys=["JobSpec.jediTaskID"],
                     excludes=["JobSpec.jobStatus=holding", "JobSpec.jobStatus=running"],
                     tables=["jobsActive4", "jobsDefined4"],
-                    call_sites=["y.py:9 (onlyActive=True): reads jobsActive4"],
+                    call_readings=[
+                        models.CallReading(chain=["y.py:9"], constants={"onlyActive": "True"}, tables=["jobsActive4"]),
+                        models.CallReading(chain=["y.py:11"], as_statement=True),
+                    ],
+                    callers_complete=True,
                 )
             ],
         ),
@@ -701,7 +707,9 @@ def test_a_statement_prints_each_field_it_has_and_none_it_lacks():
     assert "by key  JobSpec.jediTaskID" in output
     assert "excluding  JobSpec.jobStatus=holding, JobSpec.jobStatus=running" in output
     assert "reads  jobsActive4, jobsDefined4" in output
-    assert "when called from y.py:9 (onlyActive=True): reads jobsActive4" in output
+    assert "when called from y.py:9 (onlyActive=True): tables jobsActive4; excludes nothing" in output
+    assert "routes  2 route(s), 1 reading as the statement -- every route" in output
+    assert "y.py:11" not in output
     assert "ordered by" not in output
     assert "limit" not in output
 
@@ -4610,3 +4618,34 @@ def test_the_calls_a_walk_did_not_enter_are_listed_once_by_reason():
     assert f"     1  {undeclared}" in output
     assert "a.py:3  taskSpec.useScout()" in output
     assert "a.py:9  json.loads(text)" in output
+
+
+def test_each_order_a_statement_can_be_built_with_prints_on_its_own_line():
+    """Joined by ", ", ``pandaid asc`` and ``(CASE {} ELSE {} END), ...`` read as one order by four keys."""
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_follow_up
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject="JobSpec.jobStatus", observed="activated"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        follow_up=models.FollowUp(
+            selected=True,
+            selected_by=["x.py::getJobs"],
+            reader_statements=[
+                models.StatementReading(
+                    owner="x.py::getJobs",
+                    file="x.py",
+                    line=2391,
+                    order_by=["(CASE {} ELSE {} END), currentpriority desc, pandaid asc", "pandaid asc"],
+                )
+            ],
+        ),
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_follow_up(strategy, False))
+    output = runner.invoke(command).output
+    assert "ordered by  (CASE {} ELSE {} END), currentpriority desc, pandaid asc\n" in output
+    assert "ordered by  pandaid asc\n" in output

@@ -110,7 +110,10 @@ def reaching(
     Where a site writes is decided by what it is: a ``for`` at the top of
     each pass, a ``with`` or a handler on entering its body, a ``while`` or
     ``if`` holding ``:=`` at its test, a ``match`` on entering a case, any
-    other statement once it has run.
+    other statement once it has run -- and the function's parameter list
+    (its ``args``) on entry, where the call hands the parameters their
+    values.  So a parameter rebound on some paths only comes back beside
+    the rebinding: ``if days is None: days = 3`` leaves both.
 
     The scope is the one *target* is in.  A write inside a nested function is
     to another variable and reaches nothing here.  If no write is in this
@@ -309,7 +312,8 @@ class _Flow:
         self.entry: dict[int, int] = {}
         self._catchers: list[_Handlers | _Finally] = []
         self._loops: list[_Loop] = []
-        self._block(scope.body, 0)  # type: ignore[attr-defined]
+        # A parameter list among the writes holds at entry: the call wrote it.
+        self._block(scope.body, bits.get(id(getattr(scope, "args", None)), 0))  # type: ignore[attr-defined]
 
     # -- plumbing -------------------------------------------------------------
     def _gen(self, state: Optional[int], node: ast.AST) -> Optional[int]:

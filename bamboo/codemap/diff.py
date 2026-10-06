@@ -88,7 +88,10 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "keys",
         "order_by",
         "limits",
-        "call_sites",
+        # What each route of calls reads, and whether the routes are all of them.
+        "call_readings",
+        "callers_complete",
+        "callers_stop",
         "tables",
         "bind_window",
         "conditions",
@@ -96,6 +99,11 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         # leaving ``conditions`` arrives here, and unlisted the move would
         # read as the term vanishing.
         "added_under",
+        # Each conditions entry as a tree: a bind's value moving under an
+        # entry whose text stays the same is a change only this shows.
+        "condition_trees",
+        "printed_by",
+        "order_holes",
         # What the statement was read only in part on.  Listed for the same
         # reason ``conditions`` is: a term moving out of ``conditions`` and
         # into here is a statement the map stopped being able to read, and

@@ -51,18 +51,26 @@ import ast
 import dataclasses
 import re
 from pathlib import Path
-from typing import Iterable, NamedTuple, Optional
+from typing import Callable, Iterable, NamedTuple, Optional
 
-from bamboo.codemap.calls import Calls, Target, Types
+from bamboo.codemap.calls import FILLERS, Calls, Route, Target, Types, bind
+from bamboo.codemap.calls import said as passed_by
 from bamboo.codemap.models import (
+    CALL_READING_ROUTE,
     AddedTerm,
     Anchor,
     Branch,
+    CallReading,
+    ConditionNode,
+    ConditionReading,
+    ConditionValue,
     CoverageStat,
     DiagnosticTemplate,
     EntityNode,
     GuardRead,
     JunctionNode,
+    OrderHole,
+    PrintedBy,
     ReadingStop,
     ReadSiteNode,
     RowKeySource,
@@ -86,9 +94,11 @@ from bamboo.codemap.panda.pathcond import (
     literal_values,
     names_bound_by,
     path_condition,
+    reaching_definitions,
     site_of,
     surviving_writes,
     targets_of,
+    written_value,
 )
 
 # The block a decision records about itself reads the same way whichever slice
@@ -241,9 +251,12 @@ def _subject_of(
 
 def _term_subject(attributor: SpecAttributor, term: "sqltext.Term") -> str:
     """The subject a statement's term is about, named as a write to that column would be."""
-    qualifier, attribute, _kind = _subject_of(
-        attributor, attributor.class_for_table(term.table), term.table, term.column
-    )
+    return _column_subject(attributor, term.table, term.column)
+
+
+def _column_subject(attributor: SpecAttributor, table: str, column: str) -> str:
+    """The subject *table*'s *column* is, named as a write to that column would be."""
+    qualifier, attribute, _kind = _subject_of(attributor, attributor.class_for_table(table), table, column)
     return SubjectNode.make_name(qualifier, attribute)
 
 
@@ -1035,9 +1048,12 @@ class ReadStatement(NamedTuple):
     #: statement is offered the expression to open next rather than a
     #: ``conditions`` list that is silently short.
     unresolved: tuple[str, ...] = ()
-    #: ``"<call> <- <call> (flag=True): reads a, b"`` for each call site whose
-    #: constants narrow what the statement reads -- see ``place_call_sites``.
-    call_sites: tuple[str, ...] = ()
+    #: What the statement reads on each route of calls -- see ``place_routes``.
+    call_readings: tuple[CallReading, ...] = ()
+    #: Whether the routes are every way the statement is run from the corpus,
+    #: and where the list may stop short -- :attr:`ReadSiteNode.callers_complete`.
+    callers_complete: bool = False
+    callers_stop: tuple[str, ...] = ()
     #: ``{(subject, value)}`` no row this statement returns holds, however it
     #: is built -- the part of ``excludes`` that holds of every row.  Known
     #: once every run of the statement is, so it arrives by ``_replace``.
@@ -1051,6 +1067,13 @@ class ReadStatement(NamedTuple):
     #: :attr:`ReadSiteNode.added_under`.  Known once every run is, so it
     #: arrives by ``_replace`` too.
     added_under: tuple[AddedTerm, ...] = ()
+    #: Each ``conditions`` entry and ``added_under`` conditions term as a
+    #: tree -- :attr:`ReadSiteNode.condition_trees`.  Arrives by ``_replace``.
+    condition_trees: tuple[ConditionReading, ...] = ()
+    #: The prints of this statement's text and map -- :attr:`ReadSiteNode.printed_by`.
+    printed_by: tuple[PrintedBy, ...] = ()
+    #: Each blanked order item and what builds it -- :attr:`ReadSiteNode.order_holes`.
+    order_holes: tuple[OrderHole, ...] = ()
 
 
 def _decided_chain(node: ast.If) -> bool:
@@ -1674,6 +1697,19 @@ def _folded_conditions(
 ) -> list[str]:
     """What every one of a statement's *variants* requires, and what they require between them.
 
+    :func:`_folded` without the trees.
+    """
+    return [entry for entry, _tree in _folded(func, line, variants)]
+
+
+def _folded(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    line: int,
+    variants: list,
+    tree_of: Optional[Callable[[sql.Execution, "sqltext.Twin"], ConditionNode]] = None,
+) -> list[tuple[str, Optional[ConditionNode]]]:
+    """What every one of a statement's *variants* requires, and what they require between them.
+
     The variants are folded as what they are, a disjunction: ``(A and B) or
     (A and C)`` is ``A``, required outright, and ``B or C`` as one condition.
     A variant that requires nothing beyond the common part makes that
@@ -1688,8 +1724,13 @@ def _folded_conditions(
     even where it travels with the value a reader asks by -- saying less is
     the direction this field can afford.  A run whose variant cannot be told
     is read as it is.
+
+    Each entry comes with its tree where *tree_of* reads one off a run's
+    :func:`sqltext.condition_twins` -- the values of the same entry in two
+    runs merged, and the disjunction folded here an ``any`` of the ``all``
+    of each variant's remainder.
     """
-    rendered: list[list[str]] = []
+    rendered: list[list[tuple[str, Optional[ConditionNode]]]] = []
     for run in variants:
         window = run.window
         if window is None and run.varmap:
@@ -1699,9 +1740,13 @@ def _folded_conditions(
             # Only what the run itself requires: a cut inside a term leaves
             # one the statement never has -- ``computingSite IN ( )`` once the
             # loop filling the list is cut out.
-            found = [condition for condition in sqltext.conditions(text) if condition in whole]
+            found = [
+                (condition, twin)
+                for condition, twin in zip(sqltext.conditions(text), sqltext.condition_twins(text))
+                if condition in whole
+            ]
             seeds: dict[str, list[int]] = {}
-            for condition in found:
+            for condition, _twin in found:
                 for key in condition.binds:
                     if key in seeds:
                         continue
@@ -1713,26 +1758,277 @@ def _folded_conditions(
                     )
                     if at_lines:
                         seeds[key] = at_lines
-            rendered.append([_render_condition(c, seeds) for c in found])
-    common = set.intersection(*(set(one) for one in rendered))
-    folded = sorted(common)
-    remainders: list[tuple[str, ...]] = []
+            rendered.append(
+                [(_render_condition(c, seeds), tree_of(run, twin) if tree_of is not None else None) for c, twin in found]
+            )
+    trees: dict[str, Optional[ConditionNode]] = {}
     for one in rendered:
+        for entry, tree in one:
+            trees[entry] = _merged_tree(trees.get(entry), tree)
+    entries = [[entry for entry, _tree in one] for one in rendered]
+    common = set.intersection(*(set(one) for one in entries))
+    folded = [(entry, trees[entry]) for entry in sorted(common)]
+    remainders: list[tuple[str, ...]] = []
+    for one in entries:
         shape = tuple(entry for entry in one if entry not in common)
         if shape not in remainders:
             remainders.append(shape)
     if len(remainders) == 1:
-        folded.extend(remainders[0])
+        folded.extend((entry, trees[entry]) for entry in remainders[0])
     elif all(remainders):
+        tree = None
+        if tree_of is not None:
+            tree = ConditionNode(
+                node="any",
+                items=[ConditionNode(node="all", items=[trees[entry] for entry in shape]) for shape in remainders],
+            )
         folded.append(
-            " OR ".join(f"({' AND '.join(shape)})" if len(shape) > 1 else shape[0] for shape in remainders)
+            (" OR ".join(f"({' AND '.join(shape)})" if len(shape) > 1 else shape[0] for shape in remainders), tree)
         )
     return folded
+
+
+def _merged_tree(one: Optional[ConditionNode], other: Optional[ConditionNode]) -> Optional[ConditionNode]:
+    """One entry's tree as two runs read it: the values either reads, settled where both are."""
+    if one is None or other is None:
+        return one if other is None else other
+    if (one.node, one.text, len(one.items)) != (other.node, other.text, len(other.items)):
+        return one
+    return one.model_copy(
+        update={
+            "items": [_merged_tree(a, b) for a, b in zip(one.items, other.items)],
+            "values": one.values + [value for value in other.values if value not in one.values],
+            "settled": one.settled and other.settled,
+        }
+    )
 
 
 #: ``:key@412,415`` -- where a condition's bind is filled, which two readings
 #: of one statement may place differently without reading it differently.
 _SEEDED = re.compile(r"(:\w+)@[\d,]+")
+
+
+#: The logger methods a print of a statement is made with.
+_PRINTS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
+
+
+def _message_parts(node: ast.expr) -> list[tuple[str, object]]:
+    """A message as it is assembled: ``("text", str)`` and ``("expr", node)`` in order.
+
+    ``sqlP + comment + str(getValMap)`` is three expressions, ``f"running
+    sql: {sqlGD} {varMap}"`` text, an expression, text and an expression.
+    ``str(x)`` and an f-string's ``{x}`` both print *x*, so both are *x*.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _message_parts(node.left) + _message_parts(node.right)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[tuple[str, object]] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(("text", value.value))
+            elif isinstance(value, ast.FormattedValue) and value.format_spec is None:
+                parts.extend(_message_parts(value.value))
+            else:
+                parts.append(("expr", value))
+        return parts
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [("text", node.value)]
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "str"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        return [("expr", node.args[0])]
+    return [("expr", node)]
+
+
+def _comment_name(func: ast.AST, part: tuple[str, object], at: ast.AST) -> bool:
+    """Whether *part* is a name holding only a ``/* ... */`` comment where *at* reads it."""
+    if part[0] != "expr" or not isinstance(part[1], ast.Name):
+        return False
+    written = reaching_definitions(func, part[1].id, at)
+    return bool(written) and all(
+        isinstance(one, ast.Constant) and isinstance(one.value, str) and one.value.strip().startswith("/*")
+        for one in written
+    )
+
+
+def _changed_between(func: ast.AST, names: set[str], low: int, high: int) -> bool:
+    """Whether a statement strictly between lines *low* and *high* rebinds or changes one of *names*."""
+    for node in ast.walk(func):
+        line = getattr(node, "lineno", 0)
+        if not low < line < high or enclosing_function(node) is not func:
+            continue
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in FILLERS + (
+            "pop", "popitem", "clear", "remove", "discard"
+        ):
+            targets = [node.func.value]
+        for target in targets:
+            for one in ast.walk(target):
+                base = one
+                while isinstance(base, (ast.Subscript, ast.Attribute)):
+                    base = base.value
+                if isinstance(base, ast.Name) and base.id in names:
+                    return True
+    return False
+
+
+def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> list[PrintedBy]:
+    """The logging calls in *func* that print *run*'s statement text and then the map it is executed with.
+
+    Only where the record can be cut without guessing: the print writes the
+    executed text -- the execute's own pieces, or those less a trailing name
+    holding a ``/* ... */`` comment -- then text, then the executed map as
+    its last piece, and nothing between the print and the ``execute``
+    rebinds or changes either.  A print of another statement or another
+    map is not this statement's, however alike it reads.
+    """
+    if not run.call.args or not run.varmap:
+        return []
+    executed = _message_parts(run.call.args[0])
+    if any(kind != "expr" for kind, _value in executed):
+        return []
+    spelled = [ast.unparse(value) for _kind, value in executed]
+    execute = _statement_of(run.call)
+    whole = len(spelled)
+    shorter = whole - 1 if whole > 1 and _comment_name(func, executed[-1], execute) else None
+    found: list[PrintedBy] = []
+    for node in ast.walk(func):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _PRINTS
+            and len(node.args) == 1
+            and enclosing_function(node) is func
+        ):
+            continue
+        parts = _message_parts(node.args[0])
+        if not parts or parts[-1][0] != "expr" or not (
+            isinstance(parts[-1][1], ast.Name) and parts[-1][1].id == run.varmap
+        ):
+            continue
+        said = [ast.unparse(value) if kind == "expr" else None for kind, value in parts[:-1]]
+        for length, text in ((whole, "whole"), (shorter, "without comment")):
+            if not length:
+                continue
+            starts = [
+                at
+                for at in range(len(said) - length + 1)
+                if said[at : at + length] == spelled[:length]
+                and all(kind == "text" for kind, _value in parts[at + length : -1])
+            ]
+            if not starts:
+                continue
+            at = starts[-1]
+            lead = ""
+            for kind, value in reversed(parts[:at]):
+                if kind != "text":
+                    break
+                lead = str(value) + lead
+            printed = _statement_of(node)
+            low, high = sorted((printed.lineno, execute.lineno))
+            names = {one.id for _kind, value in executed for one in ast.walk(value) if isinstance(one, ast.Name)}
+            if _changed_between(func, names | {run.varmap}, low, high):
+                break
+            found.append(
+                PrintedBy(
+                    line=printed.lineno,
+                    where="before" if printed.lineno < execute.lineno else "after",
+                    text=text,
+                    lead=lead,
+                    gap="".join(str(value) for _kind, value in parts[at + length : -1]),
+                )
+            )
+            break
+    return sorted(found, key=lambda one: one.line)
+
+
+def _joined_members(name: ast.Name, func: ast.AST, at: ast.AST) -> Optional[tuple[list[str], list[ast.AST]]]:
+    """The templates a ``"<sep>".join(members)`` written into *name* repeats, and the loops appending them.
+
+    ``leave_bindings = " ".join(tmp_list)``, ``tmp_list`` appended one
+    ``WHEN gshare=:leave{i} THEN {i}`` per share in a ``for`` -- the text is
+    as long as the loop runs, and only its template is in the source.
+    """
+    for value in reaching_definitions(func, name.id, at):
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "join"
+            and isinstance(value.func.value, ast.Constant)
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Name)
+        ):
+            continue
+        members = value.args[0].id
+        templates: list[str] = []
+        loops: list[ast.AST] = []
+        for node in ast.walk(func):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == members
+                and len(node.args) == 1
+                and enclosing_function(node) is func
+            ):
+                continue
+            text = values.rendered_text(node.args[0])
+            if text and text not in templates:
+                templates.append(text)
+            loop = next((one for one in ancestors(node) if isinstance(one, (ast.For, ast.AsyncFor))), None)
+            if loop is not None and loop not in loops:
+                loops.append(loop)
+        if templates:
+            return templates, loops
+    return None
+
+
+def _loop_said(loop: ast.AST, func: ast.AST, file: str) -> str:
+    """``file:line for x in xs (xs = f()@line)``: a loop, and what it walks where that is a name."""
+    said = f"{file}:{loop.lineno} for {ast.unparse(loop.target)} in {ast.unparse(loop.iter)}"
+    if isinstance(loop.iter, ast.Name):
+        written = [f"{ast.unparse(one)}@{site_of(one).lineno}" for one in reaching_definitions(func, loop.iter.id, loop)]
+        if written:
+            said += f" ({loop.iter.id} = {', '.join(written)})"
+    return said
+
+
+def _number(amount: float) -> str:
+    """``800`` for 800.0, ``0.5`` for 0.5: a number as Python spells the value the source wrote."""
+    return str(int(amount)) if float(amount).is_integer() else repr(amount)
+
+
+def _bind_amount(side: "sqltext.Side", value: "values.Stated") -> ConditionValue:
+    """A bind the statement compares a column with, filled with *value*."""
+    if value.said:
+        return ConditionValue(kind="bind", text=side.text, said=value.said)
+    if value.constant:
+        return ConditionValue(kind="bind", text=side.text, constant=value.constant)
+    if value.base:
+        return ConditionValue(kind="bind", text=side.text, base=value.base, offset_seconds=value.offset, needs=list(value.needs))
+    if value.offset is None:
+        return ConditionValue(kind="bind", text=side.text, needs=list(value.needs))
+    return ConditionValue(kind="bind", text=side.text, constant=_number(value.offset))
+
+
+def _clock_amount(side: "sqltext.Side", value: "values.Stated") -> ConditionValue:
+    """A database clock plus a bind amount -- ``CURRENT_DATE-:days`` -- with the bind filled with *value*."""
+    held = ConditionValue(kind="clock", text=side.text, base=side.clock, scale_seconds=side.scale_seconds)
+    if value.said or value.constant or value.duration:
+        return held.model_copy(update={"said": value.said or f"{side.binds[0]} holds {value.constant or 'a duration'}"})
+    if value.base or value.offset is None:
+        needs = list(value.needs) + ([value.base] if value.base and not values.is_clock(value.base) else [])
+        return held.model_copy(update={"needs": needs} if needs else {"said": f"{side.binds[0]} holds a clock"})
+    return held.model_copy(update={"offset_seconds": (side.scale_seconds or 0.0) * value.offset})
 
 
 @dataclasses.dataclass
@@ -1751,44 +2047,87 @@ class _CallReading:
         self.consults |= other.consults
 
 
-def _shown(held: list[str], joined: str = ", ") -> str:
-    more = f" and {len(held) - 6} more" if len(held) > 6 else ""
-    return joined.join(held[:6]) + more
+def _on_route(via: tuple[str, ...], chain: tuple[str, ...], into: frozenset[str]) -> bool:
+    """Whether a value handed through the calls *via* reaches the statement along the route *chain*.
 
-
-def _or_outside_parentheses(term: str) -> bool:
-    """Whether *term* has an ``OR`` of its own, outside its parentheses and quotes."""
-    depth, quoted = 0, False
-    for at, char in enumerate(term):
-        if char == "'":
-            quoted = not quoted
-        elif quoted:
-            continue
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-        elif (
-            depth == 0
-            and term[at : at + 2].upper() == "OR"
-            and (at == 0 or not (term[at - 1].isalnum() or term[at - 1] in "_:."))
-            and not (term[at + 2 : at + 3].isalnum() or term[at + 2 : at + 3] == "_")
-        ):
-            return True
-    return False
-
-
-def _conjoined(terms: list[str]) -> str:
-    """*terms* joined by ``AND``, a term with an ``OR`` of its own in parentheses.
-
-    ``modificationTime<:t AND relocationFlag IS NULL OR relocationFlag<>:f``
-    reads, by SQL's precedence, as ``(A AND B) OR C`` -- the opposite of the
-    list it was made from, whose entries are each one condition.  One term
-    alone is left as it is: there is nothing for it to bind with.
+    *into* is every call into the statement's function.  A value handed
+    through none of them -- written in the function, or in a callee whose
+    calls never leave it -- is on every route; one handed through one of them
+    is on the routes starting there, as far as both go: ``copyArchive``'s
+    status list at line 774 is that call's, not the one at 727.
     """
-    if len(terms) < 2:
-        return _shown(terms, " AND ")
-    return _shown([f"({term})" if _or_outside_parentheses(term) else term for term in terms], " AND ")
+    at = next((index for index, call in enumerate(via) if call in into), None)
+    if at is None:
+        return True
+    rest = via[at:]
+    shared = min(len(rest), len(chain))
+    return rest[:shared] == chain[:shared]
+
+
+#: A parameter a route fixes no constant for.
+_UNSET = object()
+
+
+def _route_constant(name: str, target: Target, sites: tuple, calls: Calls) -> object:
+    """The constant the route *sites* hands *target*'s parameter *name*, or :data:`_UNSET`.
+
+    Followed out through each forwarder that hands the parameter on
+    unchanged; a call that does not pass it hands the default it states.  A
+    value the route's outermost caller takes as its own parameter is not
+    fixed: that caller's callers are not asked.
+    """
+    site = sites[0]
+    handed = bind(site.call, target).get(name)
+    if isinstance(handed, ast.Constant):
+        return handed.value
+    if (
+        isinstance(handed, ast.Name)
+        and name in passed_by(site.call, target)
+        and len(sites) > 1
+        and handed.id in _parameters(site.func)
+    ):
+        owned = calls.types.method_class(site.file, site.func)
+        return _route_constant(handed.id, Target(site.file, site.func, owned[1] if owned else None), sites[1:], calls)
+    return _UNSET
+
+
+def _route_handed(target: Target, sites: tuple, calls: Calls) -> dict[str, "values.Stated"]:
+    """What the route *sites* hands each of *target*'s parameters, read as an amount in the caller (:func:`values.stated`).
+
+    A parameter the call does not pass holds the default the function
+    states; one passed is read where the caller writes it, through the
+    caller's own parameters as the rest of the route hands them.  A
+    parameter the call hands with ``*args`` is left out: its value is the
+    function's own parameter, ``needs``.
+    """
+    site = sites[0]
+    passed = passed_by(site.call, target)
+    outer: Optional[dict[str, values.Stated]] = None
+    found: dict[str, values.Stated] = {}
+    for name, expression in bind(site.call, target).items():
+        if expression is None:
+            continue
+        if name not in passed:
+            found[name] = values.stated(expression, target.func, expression)
+            continue
+        if outer is None:
+            outer = {}
+            if len(sites) > 1:
+                owned = calls.types.method_class(site.file, site.func)
+                outer = _route_handed(Target(site.file, site.func, owned[1] if owned else None), sites[1:], calls)
+        found[name] = values.stated(expression, site.func, _statement_of(site.call), handed=outer)
+    return found
+
+
+def _reads_alike(route: CallReading, statement: Optional[CallReading]) -> bool:
+    """Whether a route reads what the statement does: every field :class:`CallReading` has, the route's own aside."""
+    if statement is None:
+        return False
+    return all(
+        getattr(route, name) == getattr(statement, name)
+        for name in CallReading.model_fields
+        if name not in CALL_READING_ROUTE
+    )
 
 
 def _restricted_both(one: dict[str, set[str]], other: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -1798,42 +2137,6 @@ def _restricted_both(one: dict[str, set[str]], other: dict[str, set[str]]) -> di
 
 def _restricted_pairs(restricted: dict[str, set[str]]) -> set[tuple[str, str]]:
     return {(subject, value) for subject, values_of in restricted.items() for value in values_of}
-
-
-def _narrowed(
-    kept: "ReadStatement",
-    reading: _CallReading,
-    refuses: set[tuple[str, str]],
-    refuses_here: set[tuple[str, str]],
-    restricts: set[tuple[str, str]],
-    restricts_here: set[tuple[str, str]],
-    conditions: list[str],
-) -> list[str]:
-    """What one call's reading of a statement says that the statement's own does not, field by field."""
-    said: list[str] = []
-    if reading.tables != kept.tables:
-        said.append("reads " + (", ".join(sorted(reading.tables)) or "no table"))
-    for verb, here, general in (
-        ("select", reading.selects, kept.selects),
-        ("exclude", reading.excludes, kept.excludes),
-        ("consult", reading.consults, kept.consults),
-        ("refuse", refuses_here, set(refuses)),
-        ("restrict", restricts_here, set(restricts)),
-    ):
-        for label, held in ((f"does not {verb}", general - here), (f"also {verb}s", here - general)):
-            if held:
-                said.append(f"{label} " + _shown([f"{subject}={value}" for subject, value in sorted(held)]))
-    # Compared without where the binds are filled: the same condition is the
-    # same requirement wherever the walk would start.
-    general_conditions = {_SEEDED.sub(r"\1", one) for one in kept.conditions}
-    here_conditions = {_SEEDED.sub(r"\1", one) for one in conditions}
-    for label, held in (
-        ("does not require", [one for one in kept.conditions if _SEEDED.sub(r"\1", one) not in here_conditions]),
-        ("also requires", [one for one in conditions if _SEEDED.sub(r"\1", one) not in general_conditions]),
-    ):
-        if held:
-            said.append(f"{label} " + _conjoined(held))
-    return said
 
 
 READ_SLICE_NAME = "sql-read"
@@ -2197,6 +2500,10 @@ def read_side(
     joins: dict[str, set[frozenset[str]]] = {}
 
     statements: dict[tuple[str, int], ReadStatement] = {}
+    # The route of calls the read side is reading a function as, while it
+    # reads one (``place_routes``): its chain, and what it hands the
+    # function's parameters.
+    routing: dict[str, object] = {"chain": None, "into": frozenset(), "func": None, "handed": None}
     # What every run of a statement so far passes over, by (owner, line) --
     # kept for runs that file nothing too, since a run that refuses nothing
     # is the run that returns the row.
@@ -2249,21 +2556,97 @@ def read_side(
     def bound(func, run, key: str, file: str) -> list[str]:
         return [value for value, _site in bound_sites(func, run, key, file)]
 
+    # What each run's bind is filled with, every route's values with the
+    # calls they came through: a route only keeps some of them, and reading
+    # them again for each of a function's routes is the cost of reading
+    # routes at all.  The run is kept beside its values so that its ``id``
+    # is not another run's while this read lasts.
+    settled: dict[tuple[int, str, str], tuple[object, list[tuple[str, ast.stmt, tuple[str, ...]]]]] = {}
+
     def bound_sites(func, run, key: str, file: str) -> list[tuple[str, ast.stmt]]:
-        """The values *key* is filled with for *run*, each with the statement putting it there."""
-        found: list[tuple[str, ast.stmt]] = []
+        """The values *key* is filled with for *run*, each with the statement putting it there -- on the route being read, if one is."""
+        held = settled.get((id(run), key, file))
+        if held is None or held[0] is not run:
+            found: list[tuple[str, ast.stmt, tuple[str, ...]]] = []
+            binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
+            if not run.varmap:
+                binds = binds + sql.inline_binds(run.call, key)
+            for bind in binds:
+                # Read where the value is written: one a call handed the varmap
+                # sits in the callee, an imported ``IN`` list at the top of
+                # another module, and their names are theirs.
+                where = enclosing_function(bind.value) or _module_of(bind.value) or func
+                at_file = file
+                if where is not func and calls is not None:
+                    at_file = calls.types.file_of(where) or file
+                found.extend((one.value, bind.site, one.via) for one in settle(bind.value, where, at_file))
+            held = settled[(id(run), key, file)] = (run, found)
+        chain = routing["chain"]
+        return [
+            (value, site)
+            for value, site, via in held[1]
+            if chain is None or _on_route(via, chain, routing["into"])
+        ]
+
+    def tree_of(func, run, file: str, twin: "sqltext.Twin") -> ConditionNode:
+        """*twin* with each value its terms compare with read off *run*: :attr:`ReadSiteNode.condition_trees`."""
+        if twin.node != "test":
+            return ConditionNode(node=twin.node, items=[tree_of(func, run, file, one) for one in twin.items])
+        test = twin.test
+        if test is None or test.kind == "other":
+            return ConditionNode(node="other", text=test.text if test is not None else "")
+        found: list[ConditionValue] = []
+        settled = True
+        for side in test.sides:
+            for value in side_values(func, run, file, side, test.kind == "compare"):
+                settled = settled and not (value.needs or value.said or value.kind == "other")
+                if value not in found:
+                    found.append(value)
+        return ConditionNode(
+            node=test.kind,
+            text=test.text,
+            subject=_column_subject(attributor, test.table, test.column),
+            op=test.op,
+            values=found,
+            settled=settled,
+        )
+
+    def side_values(func, run, file: str, side: "sqltext.Side", amount: bool) -> list[ConditionValue]:
+        """What one side of a term holds on *run*: one value per way a run fills it.
+
+        *amount*: a ``<``/``>`` comparison, whose bind is read as an amount
+        (:func:`values.stated`, through the writes reaching it); an ``=`` or
+        ``IN`` reads its bind's values as ``selects`` does.
+        """
+        if side.kind == "constant":
+            return [ConditionValue(kind="constant", text=side.text, constant=side.constant)]
+        if side.kind == "column":
+            return [ConditionValue(kind="column", text=side.text, subject=_column_subject(attributor, side.table, side.column))]
+        if side.kind == "other":
+            return [ConditionValue(kind="other", text=side.text, said=side.text)]
+        if side.kind == "clock" and not side.binds:
+            return [ConditionValue(kind="clock", text=side.text, base=side.clock, offset_seconds=side.offset_seconds)]
+        key = side.binds[0]
+        if side.kind == "bind" and not amount:
+            settled_values = bound(func, run, key, file)
+            if not settled_values:
+                return [ConditionValue(kind="bind", text=side.text, said=f"nothing in the map settles {key}")]
+            return [ConditionValue(kind="bind", text=side.text, constant=value) for value in settled_values]
         binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
         if not run.varmap:
             binds = binds + sql.inline_binds(run.call, key)
+        if not binds:
+            return [ConditionValue(kind=side.kind, text=side.text, base=side.clock, scale_seconds=side.scale_seconds,
+                                   said=f"nothing in the map fills {key}")]
+        found: list[ConditionValue] = []
         for bind in binds:
-            # Read where the value is written: one a call handed the varmap
-            # sits in the callee, an imported ``IN`` list at the top of
-            # another module, and their names are theirs.
-            where = enclosing_function(bind.value) or _module_of(bind.value) or func
-            at_file = file
-            if where is not func and calls is not None:
-                at_file = calls.types.file_of(where) or file
-            found.extend((one.value, bind.site) for one in settle(bind.value, where, at_file))
+            where = enclosing_function(bind.value) or func
+            handed = routing["handed"] if where is routing["func"] else None
+            value = values.stated(bind.value, where, bind.site, handed=handed)
+            if side.kind == "clock":
+                found.append(_clock_amount(side, value))
+            else:
+                found.append(_bind_amount(side, value))
         return found
 
     def reading_of(func, run, file: str) -> _CallReading:
@@ -2393,76 +2776,170 @@ def read_side(
             return None
         return [one.value for one in handed]
 
-    def place_call_sites(func, owner: str, file: str, executions: list) -> None:
-        """Say, per call site that narrows a statement, what it reads there.
+    def place_routes(func, owner: str, file: str, executions: list) -> None:
+        """Say, per statement, what it reads on each route of calls into *func* -- :class:`CallReading`.
 
-        The statement's own reading is every run any call can make.  A call
-        handing a flag parameter a constant runs fewer: ``TaskCommando.py:143``
-        calls ``getPandaIDsWithTask_JEDI(jediTaskID, True)``, and under
-        ``onlyActive`` the loop reads two tables, not four.  Asked only for a
-        parameter the function tests and never rebinds, and recorded only
-        where the call's reading differs from the statement's.
-
-        Every field a flag can change is compared, not only the tables and
-        ``selects``: ``copyArchive`` hands ``lockJobsForReassign``
-        ``onlyReassignable=True`` at two of its four calls, and only there
-        does the statement refuse ``relocationFlag=2`` -- which the
-        statement's own reading, over every call, cannot say.
+        The statement's own reading is every run any call can make.  A route
+        runs fewer: ``TaskCommando.py:143`` calls ``getPandaIDsWithTask_JEDI
+        (jediTaskID, True)``, and under ``onlyActive`` the loop reads two
+        tables, not four; ``copyArchive`` hands ``lockJobsForReassign`` a
+        status list of its own at each of four calls.  Each route is read as
+        the statement is -- the same functions, with the route's constants
+        deciding what runs (:func:`sql.at_call`) and its values in the binds
+        -- and compared with the statement's reading read the same way,
+        field by field off :class:`CallReading`: equal, it says so and
+        carries nothing; otherwise it carries every field.
         """
-        if calls is None or not any((owner, run.call.lineno) in statements for run in executions):
-            return
-        tested = _flag_parameters(func)
-        if not tested:
+        lines = sorted({run.call.lineno for run in executions if (owner, run.call.lineno) in statements})
+        if calls is None or not lines:
             return
         owned = calls.types.method_class(file, func)
         target = Target(file, func, owned[1] if owned else None)
-        for via, handed in calls.handed_constants(target, tested):
-            per_line: dict[int, _CallReading] = {}
-            variants: dict[int, list] = {}
-            refuses_at: dict[int, set[tuple[str, str]]] = {}
-            restricts_at: dict[int, dict[str, set[str]]] = {}
-            with sql.at_call(func, handed):
-                for run in sql.executions(func):
-                    line = run.call.lineno
-                    one = reading_of(func, run, file)
-                    per_line.setdefault(line, _CallReading(set())).add(one)
-                    if all(run.sql != other.sql for other in variants.setdefault(line, [])):
-                        variants[line].append(run)
-                    ways = _outright_terms(func, run)
-                    here = run_refuses(func, run, file, ways) or set()
-                    refuses_at[line] = refuses_at[line] & here if line in refuses_at else here
-                    asked = run_restricts(func, run, file, ways) or {}
-                    restricts_at[line] = _restricted_both(restricts_at[line], asked) if line in restricts_at else asked
-                conditions_at = {line: _folded_conditions(func, line, runs) for line, runs in variants.items()}
-            said = ", ".join(f"{name}={value!r}" for name, value in sorted(handed.items()))
-            route = " <- ".join(reversed(via))
-            for (own, line), kept in list(statements.items()):
-                if own != owner:
-                    continue
-                if line not in per_line:
-                    entry = f"{route} ({said}): not run"
+        found, stops = calls.routes(target)
+        into = frozenset(f"{site.file}:{site.call.lineno}" for site in calls.callers(target))
+        tested = _flag_parameters(func)
+        own = route_reading(func, file)
+        records: dict[int, list[CallReading]] = {line: [] for line in lines}
+        for route in found:
+            constants = {
+                name: value for name in sorted(tested) if (value := _route_constant(name, target, route.sites, calls)) is not _UNSET
+            }
+            routing.update(chain=route.chain, into=into, func=func, handed=_route_handed(target, route.sites, calls))
+            try:
+                if constants:
+                    with sql.at_call(func, constants):
+                        here = route_reading(func, file)
                 else:
-                    said_here = _narrowed(
-                        kept,
-                        per_line[line],
-                        refused.get((owner, line), set()),
-                        refuses_at[line],
-                        _restricted_pairs(restricted.get((owner, line), {})),
-                        _restricted_pairs(restricts_at[line]),
-                        conditions_at[line],
-                    )
-                    if not said_here:
-                        continue
-                    entry = f"{route} ({said}): " + "; ".join(said_here)
-                statements[(owner, line)] = kept._replace(call_sites=(*kept.call_sites, entry))
+                    here = route_reading(func, file)
+            finally:
+                routing.update(chain=None, into=frozenset(), func=None, handed=None)
+            named = {name: repr(value) for name, value in constants.items()}
+            for line in lines:
+                if line not in here:
+                    records[line].append(CallReading(chain=list(route.chain), constants=named, not_run=True))
+                    continue
+                read = here[line].model_copy(update={"chain": list(route.chain), "constants": named})
+                if _reads_alike(read, own.get(line)):
+                    read = CallReading(chain=list(route.chain), constants=named, as_statement=True)
+                records[line].append(read)
+        for line in lines:
+            kept = statements[(owner, line)]
+            statements[(owner, line)] = kept._replace(
+                call_readings=tuple(records[line]), callers_complete=not stops, callers_stop=tuple(stops)
+            )
+
+    def route_reading(func, file: str) -> dict[int, CallReading]:
+        """What each statement of *func* reads, per line, as the read side is reading it now -- a route's or every run's."""
+        per_line: dict[int, _CallReading] = {}
+        variants: dict[int, list] = {}
+        refuses_at: dict[int, set[tuple[str, str]]] = {}
+        restricts_at: dict[int, dict[str, set[str]]] = {}
+        for run in sql.executions(func):
+            line = run.call.lineno
+            per_line.setdefault(line, _CallReading(set())).add(reading_of(func, run, file))
+            if all(run.sql != other.sql for other in variants.setdefault(line, [])):
+                variants[line].append(run)
+            ways = _outright_terms(func, run)
+            here = run_refuses(func, run, file, ways) or set()
+            refuses_at[line] = refuses_at[line] & here if line in refuses_at else here
+            asked = run_restricts(func, run, file, ways) or {}
+            restricts_at[line] = _restricted_both(restricts_at[line], asked) if line in restricts_at else asked
+        readings: dict[int, CallReading] = {}
+        for line, one in per_line.items():
+            folded = _folded(func, line, variants[line], lambda run, twin: tree_of(func, run, file, twin))
+            readings[line] = CallReading(
+                chain=[],
+                tables=sorted(one.tables),
+                selects=sorted(f"{subject}={value}" for subject, value in one.selects),
+                excludes=sorted(f"{subject}={value}" for subject, value in one.excludes),
+                consults=sorted(f"{subject}={value}" for subject, value in one.consults),
+                refuses=sorted(f"{subject}={value}" for subject, value in refuses_at[line]),
+                restricts=sorted(f"{subject}={value}" for subject, value in _restricted_pairs(restricts_at[line])),
+                condition_trees=sorted(
+                    (ConditionReading(entry=entry, tree=tree) for entry, tree in folded if tree is not None),
+                    key=lambda reading: reading.entry,
+                ),
+            )
+        return readings
 
     def touch(table: str, owner: str, verb: str) -> None:
         use = rows.setdefault(table.lower(), EntityUse(set(), set(), set(), set(), set()))
         use.tables.add(table)
         getattr(use, f"{verb}_by").add(owner)
 
+    def place_orders(func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, file: str, executions: list) -> None:
+        """Say, per statement, what builds each blanked item of its ``ORDER BY`` -- :class:`OrderHole`.
+
+        The fragment writing the order is found as ``added_under`` finds it,
+        by the text it appends; the item's hole is the f-string's value at
+        that place, and a value joined from members a loop appends is read
+        as its template and the loop.  The template, written in once, says
+        which columns the item ranks by; the members' order is the loop's,
+        computed at run time.
+        """
+
+        def file_of(one: ast.AST) -> str:
+            return (calls.types.file_of(one) if calls is not None else None) or file
+
+        for run in executions:
+            kept = statements.get((owner, run.call.lineno))
+            if kept is None or not any("{}" in order for order in kept.order_by):
+                continue
+            found = list(kept.order_holes)
+            for build in _run_builds(func, run) or []:
+                for leaf in build.leaves:
+                    piece = _squeezed(build.variant[leaf.start : leaf.end])
+                    value = written_value(leaf.node)
+                    if not isinstance(value, ast.JoinedStr):
+                        continue
+                    rendered = _squeezed(values.rendered_text(value) or "")
+                    holes = [one.value for one in value.values if isinstance(one, ast.FormattedValue)]
+                    where = leaf.hops[-1].func
+                    for order in kept.order_by:
+                        spelled = _squeezed(f"ORDER BY {order}")
+                        if "{}" not in order or spelled not in piece or spelled not in rendered:
+                            continue
+                        at = rendered.count("{}", 0, rendered.find(spelled))
+                        for index, item in enumerate(sqltext.order_items(order)):
+                            count = item.expression.count("{}")
+                            hole = holes[at] if item.blanked and at < len(holes) else None
+                            at += count
+                            if not isinstance(hole, ast.Name):
+                                continue
+                            joined = _joined_members(hole, where, leaf.node)
+                            if joined is None:
+                                continue
+                            templates, loops = joined
+                            # The columns the template adds to the order, written in once.
+                            filled = item.expression.replace("{}", templates[-1], 1)
+                            before = set(sqltext.order_owners(run.sql))
+                            owners = sqltext.order_owners(run.sql.replace(item.expression, filled, 1))
+                            subjects = sorted(
+                                {_column_subject(attributor, table, column) for table, column in owners if (table, column) not in before}
+                            )
+                            hole_read = OrderHole(
+                                order=order,
+                                item=index,
+                                subjects=subjects,
+                                templates=templates,
+                                computed_at="; ".join(_loop_said(loop, where, file_of(where)) for loop in loops),
+                            )
+                            if hole_read not in found:
+                                found.append(hole_read)
+            statements[(owner, run.call.lineno)] = kept._replace(order_holes=tuple(found))
+
+    def place_prints(func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list) -> None:
+        """Say, per statement, which logging calls print its text and the map it runs with: :func:`_printed_by`."""
+        for run in executions:
+            kept = statements.get((owner, run.call.lineno))
+            if kept is None:
+                continue
+            found = [one for one in _printed_by(func, run) if one not in kept.printed_by]
+            if found:
+                statements[(owner, run.call.lineno)] = kept._replace(printed_by=(*kept.printed_by, *found))
+
     def place_conditions(
-        func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
+        func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, file: str, executions: list
     ) -> None:
         """Say what each of *func*'s statements requires of a row besides the value.
 
@@ -2485,7 +2962,14 @@ def read_side(
             kept = statements.get((owner, line))
             if kept is None:
                 continue
-            kept.conditions.extend(_folded_conditions(func, line, variants))
+            folded = _folded(func, line, variants, lambda run, twin: tree_of(func, run, file, twin))
+            kept.conditions.extend(entry for entry, _tree in folded)
+            statements[(owner, line)] = kept._replace(
+                condition_trees=(
+                    *kept.condition_trees,
+                    *(ConditionReading(entry=entry, tree=tree) for entry, tree in folded if tree is not None),
+                )
+            )
 
     def place_added_under(
         func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, file: str, executions: list
@@ -2519,12 +3003,17 @@ def read_side(
         for line, variants in runs.items():
             kept = statements.get((owner, line))
             if kept is not None:
-                statements[(owner, line)] = kept._replace(added_under=terms_added(func, file, line, variants, kept))
+                added, read_trees = terms_added(func, file, line, variants, kept)
+                held = {one.entry for one in kept.condition_trees}
+                statements[(owner, line)] = kept._replace(
+                    added_under=added,
+                    condition_trees=(*kept.condition_trees, *(one for one in read_trees if one.entry not in held)),
+                )
 
     def terms_added(
         func: ast.FunctionDef | ast.AsyncFunctionDef, file: str, line: int, variants: list, kept: ReadStatement
-    ) -> tuple[AddedTerm, ...]:
-        """:func:`place_added_under` for the statement *variants* run at *line*."""
+    ) -> tuple[tuple[AddedTerm, ...], tuple[ConditionReading, ...]]:
+        """:func:`place_added_under` for the statement *variants* run at *line*, and each added conditions term's tree."""
 
         def file_of(one: ast.AST) -> str:
             return (calls.types.file_of(one) if calls is not None else None) or file
@@ -2541,6 +3030,8 @@ def read_side(
         # ``(plain, binds)`` per run, and each plain spelling as ``conditions`` seeds it.
         own_conditions: dict[int, list[tuple[str, tuple[str, ...]]]] = {}
         spelled: dict[tuple[str, str], str] = {}
+        # Each conditions term's tree, the runs holding it merged.
+        trees: dict[tuple[str, str], Optional[ConditionNode]] = {}
         # ``(spelling, plain, binds)`` of each term the run's ``WHERE`` ``AND``\ s
         # together -- what a pair enters the statement in (:func:`sqltext.conjoined`).
         conjuncts: dict[int, list[tuple[str, str, tuple[str, ...]]]] = {}
@@ -2554,8 +3045,10 @@ def read_side(
             found = sqltext.conditions(run.sql)
             seeds = _condition_seeds(func, run, line, found)
             own_conditions[id(run)] = [(plain(one), tuple(dict.fromkeys(one.binds))) for one in found]
-            for one in found:
+            for one, twin in zip(found, sqltext.condition_twins(run.sql)):
                 spelled.setdefault(("conditions", plain(one)), _render_condition(one, seeds))
+                key = ("conditions", plain(one))
+                trees[key] = _merged_tree(trees.get(key), tree_of(func, run, file, twin))
             joined = sqltext.conjoined(run.sql)
             seeds = _condition_seeds(func, run, line, joined)
             conjuncts[id(run)] = [
@@ -2632,7 +3125,7 @@ def read_side(
         ]
         readable = [held for _run, _build, held in read if held is not None]
         if not readable:
-            return ()
+            return (), ()
         every = set.intersection(*readable)
         fields = (
             [("selects", f"{subject}={value}") for subject, value in kept.selects]
@@ -2653,6 +3146,40 @@ def read_side(
                         # Two terms of one place naming the pair: either one ruling it out is enough.
                         if decides and not held.decides:
                             held.decides = True
+
+        def argued(text: str, term: str) -> list[TermPlace]:
+            """Where a value the ``execute`` formats into the statement is written as *text*, with the tests that choose it.
+
+            ``sql_read_files.format(order_by_policy, ...)``: the order is no
+            fragment of the statement, it is ``order_by_policy``, and each
+            of its writes under an ``if`` -- ``"lumiBlockNr,lfn"``,
+            ``"boundaryID"`` -- is a build of its own.
+            """
+            found: dict[tuple[str, str], TermPlace] = {}
+            for run in variants:
+                if not run.call.args:
+                    continue
+                execute = _statement_of(run.call)
+                for node in ast.walk(run.call.args[0]):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+                        handed = [*node.args, *(one.value for one in node.keywords)]
+                    elif isinstance(node, ast.JoinedStr):
+                        handed = [one.value for one in node.values if isinstance(one, ast.FormattedValue)]
+                    else:
+                        continue
+                    for name in handed:
+                        if not isinstance(name, ast.Name):
+                            continue
+                        for value in reaching_definitions(func, name.id, execute):
+                            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                                continue
+                            if _squeezed(value.value) != _squeezed(text):
+                                continue
+                            leaf = _Leaf(0, 0, site_of(value), (_Hop(func, run.call),))
+                            place = _place(leaf, term, file_of)
+                            if place.tests:
+                                found.setdefault((place.fragment, place.term), place)
+            return list(found.values())
 
         def named(key: tuple[str, str]) -> bool:
             """Whether a fragment appends *key*'s term with its values read across every branch."""
@@ -2691,9 +3218,16 @@ def read_side(
                         ),
                     )
                 )
+            elif field in ("order_by", "conditions") and (handed := argued(said, term)):
+                added.append(AddedTerm(field=field, term=term, places=handed))
             else:
                 added.append(AddedTerm(field=field, term=term, unplaced="the fragment appending it was not found"))
-        return tuple(added)
+        read_trees = tuple(
+            ConditionReading(entry=spelled[key], tree=trees[key])
+            for key in missing
+            if key[0] == "conditions" and trees.get(key) is not None
+        )
+        return tuple(added), read_trees
 
     def place_regions(
         func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
@@ -2990,12 +3524,14 @@ def read_side(
                         kept.limits.update(
                             f"{'<' if strict else '<='} {value}" for value in values_of or [bound_to]
                         )
-            place_conditions(func, owner, executions)
+            place_conditions(func, owner, module.rel_path, executions)
+            place_prints(func, owner, executions)
+            place_orders(func, owner, module.rel_path, executions)
             place_added_under(func, owner, module.rel_path, executions)
             # Regions first: the exits are read inside the stretch it settles.
             place_regions(func, owner, executions)
             place_exits(func, owner)
-            place_call_sites(func, owner, module.rel_path, executions)
+            place_routes(func, owner, module.rel_path, executions)
     for site, at in statements.items():
         statements[site] = at._replace(
             refuses=frozenset(refused.get(site, ())),
@@ -3043,7 +3579,9 @@ def read_site_nodes(
                 keys=sorted(at.keys),
                 order_by=sorted(at.order_by),
                 limits=sorted(at.limits),
-                call_sites=list(at.call_sites),
+                call_readings=list(at.call_readings),
+                callers_complete=at.callers_complete,
+                callers_stop=list(at.callers_stop),
                 tables=sorted(at.tables),
                 # Empty only where the call names no varmap to read -- one
                 # statement in the corpus, ``querySQLS(sql.format(t), {})``,
@@ -3053,6 +3591,9 @@ def read_site_nodes(
                 bind_window=list(at.window) if at.window else [],
                 conditions=sorted(at.conditions),
                 added_under=list(at.added_under),
+                condition_trees=sorted(at.condition_trees, key=lambda one: one.entry),
+                printed_by=list(at.printed_by),
+                order_holes=list(at.order_holes),
                 unresolved=list(at.unresolved),
                 region=list(at.region) if at.region else [],
                 exits=list(at.exits),

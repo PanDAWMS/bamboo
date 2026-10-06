@@ -505,8 +505,13 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         tables=list(site.tables),
         order_by=list(site.order_by),
         limits=list(site.limits),
-        call_sites=list(site.call_sites),
+        call_readings=list(site.call_readings),
+        callers_complete=site.callers_complete,
+        callers_stop=list(site.callers_stop),
         conditions=list(site.conditions),
+        condition_trees=list(site.condition_trees),
+        printed_by=list(site.printed_by),
+        order_holes=list(site.order_holes),
         # ``None`` stays ``None``: an older map did not compute it, and an
         # empty list would say every term is in every build.
         added_under=None if site.added_under is None else list(site.added_under),

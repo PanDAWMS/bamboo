@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.pathcond import single_definition
+from bamboo.codemap.panda.reaching import reaching
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
@@ -843,3 +844,275 @@ def handed(resolve, calls: Optional["Calls"]):
         return settle(expression, func, file, 0, frozenset())
 
     return settled
+
+
+# -- what a value is, read as an amount ------------------------------------
+
+#: The clocks a call can read, by what it resolves to through the module's
+#: imports: ``datetime.now()`` under ``from datetime import datetime`` and
+#: ``datetime.datetime.now()`` under ``import datetime`` are one clock.
+#: ``naive_utcnow`` is PanDA's own (``pandacommon``).  ``datetime.now`` is the
+#: server's local time; ``datetime.now(utc)`` is UTC.
+CLOCKS = {
+    "datetime.datetime.utcnow": "datetime.utcnow",
+    "datetime.datetime.now": "datetime.now",
+}
+_UTC = "datetime.timezone.utc"
+#: Seconds in each unit ``datetime.timedelta`` takes, by keyword.
+TIMEDELTA_UNITS = {
+    "weeks": 604800.0,
+    "days": 86400.0,
+    "hours": 3600.0,
+    "minutes": 60.0,
+    "seconds": 1.0,
+    "milliseconds": 0.001,
+    "microseconds": 0.000001,
+}
+#: ``timedelta``'s positional order.
+_TIMEDELTA_POSITIONS = ("days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks")
+
+
+def _module_of(node: ast.AST) -> Optional[ast.Module]:
+    while node is not None and not isinstance(node, ast.Module):
+        node = getattr(node, "parent", None)
+    return node
+
+
+def _resolved(expression: ast.expr) -> str:
+    """*expression*, a dotted name, as what the module's imports make of it: ``datetime.datetime.now``."""
+    dotted = ast.unparse(expression)
+    head, _, rest = dotted.partition(".")
+    module = _module_of(expression)
+    for node in ast.walk(module) if module is not None else ():
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if (alias.asname or alias.name.split(".")[0]) == head:
+                    origin = alias.name if alias.asname else head
+                    return f"{origin}.{rest}" if rest else origin
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                if (alias.asname or alias.name) == head:
+                    return f"{node.module}.{alias.name}" + (f".{rest}" if rest else "")
+    return dotted
+
+
+def clock_of(call: ast.Call) -> str:
+    """The clock *call* reads -- ``naive_utcnow``, ``datetime.utcnow``, ``datetime.now``, ``datetime.now(utc)`` -- or ``""``."""
+    if call.keywords or not isinstance(call.func, (ast.Name, ast.Attribute)):
+        return ""
+    resolved = _resolved(call.func)
+    if resolved == "naive_utcnow" or resolved.endswith(".naive_utcnow"):
+        return "naive_utcnow" if not call.args else ""
+    name = CLOCKS.get(resolved, "")
+    if not name or not call.args:
+        return name
+    if name == "datetime.now" and len(call.args) == 1 and _resolved(call.args[0]) == _UTC:
+        return "datetime.now(utc)"
+    return ""
+
+
+class Stated(NamedTuple):
+    """A value as an amount the source states: a base, plus an offset.
+
+    ``naive_utcnow() - datetime.timedelta(days=7)`` is the clock less 604800
+    seconds; ``800`` is a number and no base; ``priority``, a parameter, is a
+    base the call fills.  What the source does not settle is *said* -- the
+    expression and its line -- or, where only a parameter is missing, the
+    parameters it *needs*: ``timedelta(minutes=time_limit)`` is an offset the
+    call settles and this function cannot.
+    """
+
+    #: The clock (:func:`clock_of`: ``naive_utcnow``, ``datetime.now``, ...), ``<function>.<parameter>``, or empty.
+    base: str = ""
+    #: Added to *base*: seconds for a time or a duration, the number itself
+    #: where there is no base.  ``None`` where it is not settled here.
+    offset: Optional[float] = 0.0
+    #: A value that is no number, spelled as ``selects`` spells values: ``pending``, ``None``.
+    constant: str = ""
+    #: The parameters an unsettled offset waits for.
+    needs: tuple[str, ...] = ()
+    #: ``<expression>@<line>`` where the value is not settled.
+    said: str = ""
+    #: A ``timedelta`` -- an amount of time with no clock under it.
+    duration: bool = False
+    #: The value is a number (or a duration): an offset alone, no base and no constant.
+    numeric: bool = False
+
+
+def _said(node: ast.AST, why: str = "") -> Stated:
+    text = ast.unparse(node)
+    if len(text) > 120:
+        text = text[:117] + "..."
+    return Stated(offset=None, said=f"{text}@{getattr(node, 'lineno', 0)}" + (f" ({why})" if why else ""))
+
+
+#: Every name :func:`clock_of` gives.
+_CLOCK_NAMES = frozenset({"naive_utcnow", "datetime.utcnow", "datetime.now", "datetime.now(utc)"})
+
+
+def is_clock(base: str) -> bool:
+    """Whether *base* is a clock rather than a parameter."""
+    return base in _CLOCK_NAMES
+
+
+_clock = is_clock
+
+
+def _needed(value: Stated) -> tuple[str, ...]:
+    """The parameters *value* waits for: its own, and its base where that is a parameter."""
+    parameter = (value.base,) if value.base and not _clock(value.base) else ()
+    return tuple(dict.fromkeys(value.needs + parameter))
+
+
+def _sum(left: Stated, right: Stated, sign: float, node: ast.AST) -> Stated:
+    """``left + right`` or ``left - right``."""
+    if left.said or right.said or left.constant or right.constant:
+        return _said(node)
+    if (left.base and right.base) or (right.base and sign < 0):
+        # ``now - then`` is a duration the source does not state.
+        return _said(node)
+    base = left.base or right.base
+    other = right if left.base else left
+    if base and _clock(base) and not other.duration:
+        return _said(node)  # a clock plus a plain number is not Python
+    if not base and left.duration != right.duration:
+        return _said(node)
+    offset = None if left.offset is None or right.offset is None else left.offset + sign * right.offset
+    return Stated(
+        base=base,
+        offset=offset,
+        needs=tuple(dict.fromkeys(left.needs + right.needs)),
+        duration=not base and left.duration,
+        numeric=not base,
+    )
+
+
+def _scaled(left: Stated, right: Stated, op: ast.operator, node: ast.AST) -> Stated:
+    """``left * right`` or ``left / right``: numbers, or a duration and a number."""
+    if left.said or right.said or left.constant or right.constant:
+        return _said(node)
+    if (left.base and _clock(left.base)) or (right.base and _clock(right.base)):
+        return _said(node)
+    if left.duration and right.duration:
+        return _said(node)
+    if isinstance(op, (ast.Div, ast.FloorDiv)) and right.duration:
+        return _said(node)
+    duration = left.duration or right.duration
+    if left.base or right.base or left.offset is None or right.offset is None:
+        # ``60 * timeout``: an amount waiting for its parameter.
+        return Stated(offset=None, needs=tuple(dict.fromkeys(_needed(left) + _needed(right))), duration=duration, numeric=True)
+    if isinstance(op, ast.Mult):
+        return Stated(offset=left.offset * right.offset, duration=duration, numeric=True)
+    if not right.offset:
+        return _said(node)
+    quotient = left.offset / right.offset
+    return Stated(offset=quotient if isinstance(op, ast.Div) else float(quotient // 1), duration=duration, numeric=True)
+
+
+def _timedelta(call: ast.Call, func, at: ast.AST, depth: int, handed) -> Stated:
+    """``datetime.timedelta(...)`` as seconds, or the parameters its amounts wait for."""
+    amounts = [*zip(_TIMEDELTA_POSITIONS, call.args), *((one.arg, one.value) for one in call.keywords)]
+    total, needs = 0.0, ()
+    for unit, amount in amounts:
+        if unit not in TIMEDELTA_UNITS:
+            return _said(call)
+        value = stated(amount, func, at, depth + 1, handed)
+        if value.said or value.constant or value.duration or (value.base and _clock(value.base)):
+            return _said(call)
+        if value.base or value.offset is None:
+            needs += _needed(value)
+        else:
+            total += value.offset * TIMEDELTA_UNITS[unit]
+    if needs:
+        return Stated(offset=None, needs=tuple(dict.fromkeys(needs)), duration=True, numeric=True)
+    return Stated(offset=total, duration=True, numeric=True)
+
+
+def _parameters(func: ast.AST) -> set[str]:
+    args = getattr(func, "args", None)
+    if args is None:
+        return set()
+    return {one.arg for one in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+
+
+def _named(name: ast.Name, func, at: ast.AST, depth: int, handed) -> Stated:
+    """What *name* holds where *at* reads it: the writes reaching it, the call's value among them."""
+    own = [one for one in pathcond.bindings(func, name.id) if not one.nested] if func is not None else []
+    sites = [one.site for one in own]
+    parameter = func is not None and name.id in _parameters(func)
+    target = pathcond.site_of(at)
+    entry = [func.args] if parameter else []
+    reached = reaching(target, [*entry, *sites]) if (sites or entry) else []
+    alive = {id(site) for site in reached}
+    found: list[Stated] = []
+    if parameter and id(func.args) in alive:
+        found.append((handed or {}).get(name.id) or Stated(base=f"{func.name}.{name.id}"))
+    for one in own:
+        if id(one.site) not in alive or not pathcond.can_reach(one.site, target):
+            continue
+        if one.kind not in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED) or one.unpacked or one.value is None:
+            return _said(name, f"{name.id} is bound by {one.kind} at {getattr(one.site, 'lineno', 0)}")
+        found.append(stated(one.value, func, one.site, depth + 1, handed))
+    if not found:
+        return _said(name, f"no write of {name.id} reaches it")
+    if len(set(found)) > 1:
+        lines = sorted({getattr(one.site, "lineno", 0) for one in own if id(one.site) in alive})
+        lead = "the call's value and " if parameter and id(func.args) in alive else ""
+        return _said(name, f"{lead}writes at {', '.join(map(str, lines))} reach it")
+    return found[0]
+
+
+def stated(
+    expression: ast.expr,
+    func,
+    at: Optional[ast.AST] = None,
+    depth: int = 0,
+    handed: Optional[dict[str, Stated]] = None,
+) -> Stated:
+    """*expression*, read where *at* evaluates it in *func*, as a :class:`Stated` amount.
+
+    The clock, a ``timedelta`` of constants, a number, and ``+``/``-``/``*``/
+    ``/`` of those settle; a plain name is followed through the writes that
+    reach the read (:func:`~bamboo.codemap.panda.reaching.reaching`, the call's
+    own value counting as one for a parameter), so ``copyArchive``'s
+    twenty-six ``timeLimit`` writes give the one line 375 reads.  Anything
+    else -- an attribute, a subscript, a call that is not the clock -- is said.
+
+    *handed* is what one call hands *func*'s parameters, read in the caller:
+    a parameter whose call value reaches the read is that value instead of
+    a base of its own, so ``timedelta(minutes=time_limit)`` under a call
+    handing ``30`` is ``-1800`` seconds.
+    """
+    at = expression if at is None else at
+    if depth > 8:
+        return _said(expression, "too deep")
+    if isinstance(expression, ast.Constant):
+        value = expression.value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return Stated(offset=float(value), numeric=True)
+        return Stated(offset=None, constant=value if isinstance(value, str) else repr(value))
+    if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, (ast.USub, ast.UAdd)):
+        inner = stated(expression.operand, func, at, depth + 1, handed)
+        if not inner.numeric or inner.base:
+            return _said(expression)
+        if isinstance(expression.op, ast.UAdd) or inner.offset is None:
+            return inner
+        return inner._replace(offset=-inner.offset)
+    if isinstance(expression, ast.Call):
+        clock = clock_of(expression)
+        if clock:
+            return Stated(base=clock)
+        if ast.unparse(expression.func).split(".")[-1] == "timedelta":
+            return _timedelta(expression, func, at, depth, handed)
+        return _said(expression)
+    if isinstance(expression, ast.BinOp):
+        left = stated(expression.left, func, at, depth + 1, handed)
+        right = stated(expression.right, func, at, depth + 1, handed)
+        if isinstance(expression.op, (ast.Add, ast.Sub)):
+            return _sum(left, right, 1.0 if isinstance(expression.op, ast.Add) else -1.0, expression)
+        if isinstance(expression.op, (ast.Mult, ast.Div, ast.FloorDiv)):
+            return _scaled(left, right, expression.op, expression)
+        return _said(expression)
+    if isinstance(expression, ast.Name):
+        return _named(expression, func, at, depth, handed)
+    return _said(expression)

@@ -115,6 +115,21 @@ class Placed(NamedTuple):
     unplaced: str = ""
 
 
+#: How :meth:`Calls.missed` says a function is called from nowhere in the corpus.
+_OUTSIDE = "no call in the corpus names it -- reached from outside"
+
+
+class Route(NamedTuple):
+    """One way calls reach a function: the call into it first, out to where the values are written -- :meth:`Calls.routes`."""
+
+    sites: tuple["CallSite", ...]
+
+    @property
+    def chain(self) -> tuple[str, ...]:
+        """``file:line`` of each call, the call into the function first."""
+        return tuple(f"{site.file}:{site.call.lineno}" for site in self.sites)
+
+
 class CallSite(NamedTuple):
     """One call, in the function that makes it."""
 
@@ -489,6 +504,84 @@ class Calls:
             if not outer and values:
                 found.append(((at,), values))
         return found
+
+    #: How many calls out a route goes, the call into the function counted.
+    ROUTE_HOPS = 4
+
+    def routes(self, target: Target, depth: int = 0) -> tuple[list["Route"], list[str]]:
+        """Every route of calls into *target*, and why the list may miss some (:meth:`missed`).
+
+        A route starts at a call placed at *target* and goes on outward while
+        the caller hands *target* one of its own parameters unchanged -- a
+        forwarder, ``TaskBuffer.lockJobsForReassign`` handing on what
+        ``copyArchive`` gave it -- so that the outermost call of a route is
+        where the values are written down, or where the caller's own callers
+        are unknown.  Up to :data:`ROUTE_HOPS` calls; a function with more
+        callers than :data:`CONSTANT_CALLERS` has no routes listed, and says so.
+        """
+        sites = self.callers(target)
+        stops = self.missed(target)
+        if len(sites) > self.CONSTANT_CALLERS:
+            return [], stops
+        found: list[Route] = []
+        for site in sites:
+            handed = bind(site.call, target)
+            filled = said(site.call, target)
+            forwards = any(
+                isinstance(value, ast.Name)
+                and name in filled
+                and value.id in _parameter_names(site.func)
+                and not _rebinds(site.func, value.id)
+                for name, value in handed.items()
+            )
+            if forwards and depth + 1 < self.ROUTE_HOPS:
+                owned = self.types.method_class(site.file, site.func)
+                outer, more = self.routes(Target(site.file, site.func, owned[1] if owned else None), depth + 1)
+                if not outer:
+                    # The forwarder is the route's outermost function: what
+                    # it hands on is its parameters' values, unfixed, and no
+                    # caller of it is missing from a list it has none in.
+                    more = [one for one in more if not one.endswith(_OUTSIDE)]
+                stops.extend(one for one in more if one not in stops)
+                if outer:
+                    found.extend(Route((site, *route.sites)) for route in outer)
+                    continue
+            found.append(Route((site,)))
+        return found, stops
+
+    def missed(self, target: Target) -> list[str]:
+        """Why the calls placed at *target* may not be every call reaching it; empty where they are.
+
+        A call spelled with *target*'s name that is placed nowhere may be a
+        call to it, so the list is said to stop there -- by reason, and by the
+        receiver the call is made on -- though the call may be to another
+        function of that name: this can call a complete list incomplete, never
+        the other way round.  A function no call in the corpus names is
+        reached from outside it: an endpoint, a thread's ``run``.
+        """
+        name = target.func.name  # type: ignore[attr-defined]
+        if name == "__init__" and target.cls is not None:
+            name = target.cls.name
+        placed = self.callers(target)
+        why: list[str] = []
+        if len(placed) > self.CONSTANT_CALLERS:
+            why.append(f"{name}: {len(placed)} callers, more than {self.CONSTANT_CALLERS} are read one by one")
+        unplaced: dict[str, dict[str, int]] = {}
+        for site in self._index().get(name, []):
+            if site.func is target.func:
+                continue
+            landed = self.callees(site.file, site.func, site.call)
+            if landed.targets:
+                continue
+            receiver = ast.unparse(site.call.func.value) if isinstance(site.call.func, ast.Attribute) else "(a bare name)"
+            reason = unplaced.setdefault(landed.unplaced or "not placed", {})
+            reason[receiver] = reason.get(receiver, 0) + 1
+        for reason, receivers in sorted(unplaced.items()):
+            on = ", ".join(f"{receiver} {count}" for receiver, count in sorted(receivers.items(), key=lambda one: (-one[1], one[0])))
+            why.append(f"{name}: {sum(receivers.values())} call(s) by its name not placed -- {reason} ({on})")
+        if not placed and not unplaced:
+            why.append(f"{name}: {_OUTSIDE}")
+        return why
 
     # -- what a method changes on its object --------------------------------
 

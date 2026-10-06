@@ -562,16 +562,82 @@ def test_a_call_handing_a_flag_says_what_the_statement_refuses_and_requires_ther
     # refused nor required.
     assert statement.refuses == frozenset()
     assert statement.conditions == []
-    unreassignable, reassignable = statement.call_sites
-    assert unreassignable == "pkg/main.py:4 (onlyReassignable=False): does not exclude jobsDefined4.relocationFlag=2"
-    assert reassignable == (
-        "pkg/main.py:5 (onlyReassignable=True): also refuses jobsDefined4.relocationFlag=2; "
-        "also requires relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2"
+    assert statement.callers_complete and statement.callers_stop == ()
+    unreassignable, reassignable = statement.call_readings
+    assert (unreassignable.chain, unreassignable.constants) == (["pkg/main.py:4"], {"onlyReassignable": "False"})
+    assert (unreassignable.selects, unreassignable.excludes, unreassignable.refuses, unreassignable.condition_trees) == (
+        ["jobsDefined4.jobStatus=defined"], [], [], []
     )
+    assert (reassignable.chain, reassignable.constants) == (["pkg/main.py:5"], {"onlyReassignable": "True"})
+    assert (reassignable.selects, reassignable.refuses, reassignable.restricts) == (
+        ["jobsDefined4.jobStatus=activated"], ["jobsDefined4.relocationFlag=2"], ["jobsDefined4.jobStatus=activated"]
+    )
+    assert [one.entry for one in reassignable.condition_trees] == [
+        "relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2"
+    ]
 
 
-def test_a_call_requiring_several_conditions_keeps_an_or_among_them_in_parentheses(tmp_path):
-    """``A AND B OR C`` is ``(A AND B) OR C`` to SQL: the ``OR`` term is one condition and says so."""
+def test_a_route_reading_as_the_statement_says_so_and_one_settling_more_does_not(tmp_path):
+    """Each route is read in full and compared with the statement, field by field off the model.
+
+    The two calls of ``scan`` hand the same flag and nothing else, and read
+    as the statement does.  The two of ``lock`` hand time limits of their own:
+    the statement waits for the parameter, each route settles it, and so
+    neither reads as the statement -- though no constant differs.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import CALL_READING_ROUTE, CallReading, SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "def scan(cur, active):\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s'\n"
+        "    varMap = {':s': 'running'}\n"
+        "    cur.execute(sql, varMap)\n"
+        "\n"
+        "def lock(cur, minutes):\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s AND modificationTime<:t'\n"
+        "    varMap = {':s': 'running', ':t': naive_utcnow() - datetime.timedelta(minutes=minutes)}\n"
+        "    cur.execute(sql, varMap)\n"
+    )
+    main = (
+        "from pkg.db import lock, scan\n\n"
+        "def run(cur):\n    scan(cur, True)\n    scan(cur, True)\n    lock(cur, 30)\n    lock(cur, 60)\n"
+    )
+    roots = _tree(tmp_path, db=db, main=main)
+    modules = [
+        SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/{name}.py", tree=ast.parse(text), source=text, blob_sha=blob_sha(text))
+        for name, text in (("db", db), ("main", main))
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    scanned = next(one for (owner, _line), one in side.statements.items() if owner.endswith("::scan"))
+    locked = next(one for (owner, _line), one in side.statements.items() if owner.endswith("::lock"))
+    assert [one.as_statement for one in scanned.call_readings] == [True, True]
+    # A record reading as the statement carries nothing; expanded, it is the statement.
+    assert all(one.selects == [] for one in scanned.call_readings)
+    assert sorted(f"{s}={v}" for s, v in scanned.selects) == ["jobsActive4.jobStatus=running"]
+    assert [one.as_statement for one in locked.call_readings] == [False, False]
+    offsets = [
+        one.condition_trees[0].tree.items[0].items[0].values[0].offset_seconds for one in locked.call_readings
+    ]
+    assert offsets == [-1800.0, -3600.0]
+    (statement_tree,) = locked.condition_trees
+    assert statement_tree.tree.items[0].items[0].values[0].needs == ["lock.minutes"]
+    # The comparison is every field of the model but the route's own: one
+    # added later is compared without anyone listing it.
+    compared = {name for name in CallReading.model_fields if name not in CALL_READING_ROUTE}
+    assert compared == {"tables", "selects", "excludes", "consults", "refuses", "restricts", "condition_trees"}
+    assert CALL_READING_ROUTE == {"chain", "constants", "not_run", "as_statement"}
+
+
+def test_a_call_requiring_several_conditions_reads_each_as_a_tree_of_its_own(tmp_path):
+    """``A AND B OR C`` is ``(A AND B) OR C`` to SQL: the ``OR`` term is one condition, its own tree."""
     from bamboo.codemap.gitsource import blob_sha
     from bamboo.codemap.models import SourceModule
     from bamboo.codemap.panda import attribution, sql
@@ -599,13 +665,11 @@ def test_a_call_requiring_several_conditions_keeps_an_or_among_them_in_parenthes
         side = sqlwrite.read_side(modules, attributor, calls)
 
     (statement,) = side.statements.values()
-    _, reassignable = statement.call_sites
-    assert reassignable.endswith(
-        "also requires modificationTime<:timeLimit@2 AND (relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2)"
-    )
-    assert not sqlwrite._or_outside_parentheses("(a OR b) AND c")
-    assert not sqlwrite._or_outside_parentheses("label='OR' AND :ORDER=1")
-    assert sqlwrite._or_outside_parentheses("a IS NULL or a<:b")
+    _, reassignable = statement.call_readings
+    assert [(one.entry, one.tree.items[0].items[0].node if len(one.tree.items) == 1 else "any") for one in reassignable.condition_trees] == [
+        ("modificationTime<:timeLimit@2", "compare"),
+        ("relocationFlag IS NULL OR relocationFlag<>:relocationFlag@2", "any"),
+    ]
 
 
 def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):
@@ -1291,3 +1355,120 @@ def test_a_place_says_whether_its_term_decides_the_pair(tmp_path):
     assert [pair for pair in statement.restricts if pair[0].endswith(".computingSite")] == [
         (next(s for s, _v in statement.selects if s.endswith(".computingSite")), "X")
     ]
+
+
+def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp_path):
+    """The time a bind holds, read through the write that reaches it, and the logging calls a record can be cut by.
+
+    ``timeLimit`` is written twice and the bind reads the second; the locked
+    time waits for the caller's ``time_limit``.  Of the three prints, two
+    hold the executed text and map -- one whole, one less its comment and
+    after the ``execute`` -- and the third prints another map.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def pick(self, time_limit, other):\n"
+        "        comment = ' /* DBProxy.pick */'\n"
+        "        varMap = {}\n"
+        "        varMap[':st'] = 'activated'\n"
+        "        timeLimit = naive_utcnow() - datetime.timedelta(hours=1)\n"
+        "        timeLimit = naive_utcnow() - datetime.timedelta(days=7)\n"
+        "        varMap[':t'] = timeLimit\n"
+        "        varMap[':l'] = naive_utcnow() - datetime.timedelta(minutes=time_limit)\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:st AND modificationTime<:t '\n"
+        "        sql += 'AND (lockedTime IS NULL OR lockedTime<:l)'\n"
+        "        self.log.debug(sql + comment + str(varMap))\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+        "        self.log.debug(f'running sql: {sql} {varMap}')\n"
+        "        self.log.debug(sql + str(other))\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    trees = {one.entry.split("@")[0]: one.tree for one in statement.condition_trees}
+    assert set(trees) == {"modificationTime<:t", "lockedTime IS NULL OR lockedTime<:l"}
+    (limit,) = trees["modificationTime<:t"].items[0].items
+    (value,) = limit.values
+    assert (limit.node, limit.op, value.base, value.offset_seconds) == ("compare", "<", "naive_utcnow", -604800.0)
+    locked = trees["lockedTime IS NULL OR lockedTime<:l"]
+    assert [branch.items[0].node for branch in locked.items] == ["null", "compare"]
+    (waits,) = locked.items[1].items[0].values
+    assert (waits.base, waits.offset_seconds, waits.needs) == ("naive_utcnow", None, ["pick.time_limit"])
+    assert [(one.line, one.where, one.text, one.lead, one.gap) for one in statement.printed_by] == [
+        (12, "before", "whole", "", ""),
+        (14, "after", "without comment", "running sql: ", " "),
+    ]
+
+
+def test_an_order_a_loop_builds_says_its_column_and_an_order_a_format_hands_says_its_test(tmp_path):
+    """``getJobs``' share ranking and ``_read_unprocessed_inputs``' ``ORDER BY {0}``.
+
+    The ranking is blanked in the map -- its members are a loop's -- and the
+    template the loop appends says it ranks by ``gshare``.  The other order
+    is a value the ``execute`` formats in, written under an ``if``: that
+    write is where the order is chosen.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def criteria(self, n):\n"
+        "        var_map = {}\n"
+        "        tmp_list = []\n"
+        "        leaves = self.sorted_leaves()\n"
+        "        i = 0\n"
+        "        for leave in leaves:\n"
+        "            var_map[f':leave{i}'] = leave\n"
+        "            tmp_list.append('WHEN gshare=:leave{0} THEN {0}'.format(i))\n"
+        "            i += 1\n"
+        "        bindings = ' '.join(tmp_list)\n"
+        "        ret_sql = f' ORDER BY (CASE {bindings} ELSE {len(leaves)} END), currentpriority desc'\n"
+        "        return ret_sql, var_map\n"
+        "\n"
+        "    def pick(self, sorting):\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s '\n"
+        "        varMap = {':s': 'activated'}\n"
+        "        if sorting:\n"
+        "            order, more = self.criteria(5)\n"
+        "            sql += order\n"
+        "            varMap.update(more)\n"
+        "        self.cur.execute(sql, varMap)\n"
+        "\n"
+        "    def files(self, mode):\n"
+        "        sql = 'SELECT fileID FROM ATLAS_PANDA.filesTable4 WHERE status=:s ORDER BY {0}'\n"
+        "        if mode == 'lumi':\n"
+        "            order_by_policy = 'lumiBlockNr,lfn'\n"
+        "        else:\n"
+        "            order_by_policy = 'fileID'\n"
+        "        self.cur.execute(sql.format(order_by_policy), {':s': 'ready'})\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    picked = next(one for (owner, _line), one in side.statements.items() if owner.endswith("::pick"))
+    (hole,) = picked.order_holes
+    assert (hole.order, hole.item, hole.subjects) == ("(CASE {} ELSE {} END), currentpriority desc", 0, ["jobsActive4.gshare"])
+    assert hole.templates == ["WHEN gshare=:leave{} THEN {}"]
+    assert hole.computed_at == "pkg/db.py:7 for leave in leaves (leaves = self.sorted_leaves()@5)"
+    files = next(one for (owner, _line), one in side.statements.items() if owner.endswith("::files"))
+    chosen = {one.term: [test.test for place in one.places for test in place.tests] for one in files.added_under if one.field == "order_by"}
+    assert chosen == {"fileID": ["not (mode == 'lumi')"], "lumiBlockNr,lfn": ["mode == 'lumi'"]}
