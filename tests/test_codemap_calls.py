@@ -1710,3 +1710,45 @@ def f(flag, a):
 
     assert (_where(got), got.unplaced) == ([("Buffer", "getTask")], calls_mod.UNPLACED_OPEN)
     assert _placed(calls, "m", "f", "tb.elsewhere").unplaced == calls_mod.UNPLACED_FORWARDED
+
+
+def test_what_a_call_placed_open_hands_back_is_not_known_where_a_statement_reads_it(tmp_path):
+    """A partial answer would read as all of it: the readers of :func:`sql.returned` take empty for "not known"."""
+    from bamboo.codemap.panda import sql
+
+    roots = _tree(
+        tmp_path,
+        m='''\
+from typing import Any
+
+
+class Interface:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.remote, name)
+
+
+class Buffer:
+    def where(self):
+        return " AND x=1", {}
+
+
+class Holder:
+    def __init__(self, source: "Interface | Buffer", buffer: Buffer):
+        self.source = source
+        self.buffer = buffer
+
+    def run(self):
+        opened, _ = self.source.where()
+        closed, _ = self.buffer.where()
+''',
+    )
+    calls = _calls(roots)
+    run = _function(calls, "m", "run")
+
+    with sql.across_calls(calls):
+        opened = sql.returned(run, "opened")
+        closed = sql.returned(run, "closed")
+
+    assert _placed(calls, "m", "run", "self.source.where").unplaced == calls_mod.UNPLACED_OPEN
+    assert opened == []
+    assert [(callee.name, ast.unparse(value)) for callee, value in closed] == [("where", "' AND x=1'")]

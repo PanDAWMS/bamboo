@@ -369,7 +369,9 @@ def returned(
     ``a, b = f()`` binds ``b`` to the second element of each tuple ``f``
     returns; a return that is not a tuple of that length says nothing about it
     and is passed over.  Empty outside :func:`across_calls`, and for a call the
-    corpus's calls do not place.
+    corpus's calls do not place -- or place open, where what comes back may be
+    another function's: an empty answer is the one every reader here takes
+    for "not known", and a partial one would read as all of it.
     """
     if _CALLS is None:
         return []
@@ -398,8 +400,11 @@ def _called(
     file = _CALLS.types.file_of(func)
     if file is None:
         return []
+    placed = _CALLS.callees(file, func, call)
+    if placed.unplaced:
+        return []
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
-    for callee in _CALLS.callees(file, func, call).targets:
+    for callee in placed.targets:
         for value in _returns(callee.func):
             found.extend(_at_slot(callee.func, value, slot, hops + 1))  # type: ignore[arg-type]
     return found
