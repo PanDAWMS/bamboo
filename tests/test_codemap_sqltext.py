@@ -1080,3 +1080,23 @@ def test_a_value_printed_as_its_angle_repr_is_kept_as_text_and_voids_nothing():
         ":q": "it's <",
     }
     assert sqltext.cut("SELECT 1 FROM dual{':a': <unclosed}") is None
+
+
+def test_every_where_of_a_statement_is_read_each_to_the_end_of_its_own_clause():
+    """``checkJobStatus`` asks ``jobsArchived4`` by ``:timeLimit`` after its ``UNION``; the first clause alone missed it."""
+    union = (
+        "SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:pandaID "
+        "UNION SELECT jobStatus FROM ATLAS_PANDA.jobsArchived4 WHERE PandaID=:pandaID AND modificationTime>:timeLimit "
+    )
+    derived = (
+        "SELECT * FROM (SELECT PandaID FROM t WHERE a=:a UNION SELECT PandaID FROM u WHERE b=:b) "
+        "WHERE rownum<:nRows ORDER BY PandaID"
+    )
+    minus = "SELECT x FROM t WHERE f=:f MINUS SELECT x FROM e WHERE status IN (:esSent,:esRunning)"
+    nested = "SELECT x FROM t WHERE a IN (SELECT y FROM u WHERE b=:b) AND c=:c GROUP BY x"
+
+    assert sqltext.where_clauses(union) == [" PandaID=:pandaID ", " PandaID=:pandaID AND modificationTime>:timeLimit "]
+    assert sqltext.where_clauses(derived) == [" a=:a ", " b=:b", " rownum<:nRows "]
+    assert sqltext.where_clauses(minus) == [" f=:f ", " status IN (:esSent,:esRunning)"]
+    assert sqltext.where_clauses(nested) == [" a IN (SELECT y FROM u WHERE b=:b) AND c=:c ", " b=:b"]
+    assert sqltext.where_clauses("SELECT 1 FROM dual") == []

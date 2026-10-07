@@ -922,23 +922,42 @@ _QUOTED = re.compile(r"'([^']*)'")
 #: Where the ``WHERE`` clause ends.  Everything after is about the rows that
 #: did come back, not about which ones do.
 _CLAUSE_END = re.compile(
-    r"\b(?:GROUP\s+BY|ORDER\s+BY|HAVING|FOR\s+UPDATE|UNION|FETCH\s+FIRST)\b", re.IGNORECASE
+    r"\b(?:GROUP\s+BY|ORDER\s+BY|HAVING|FOR\s+UPDATE|UNION|MINUS|INTERSECT|FETCH\s+FIRST)\b", re.IGNORECASE
 )
 
 
-def where_clause(sql: str) -> str:
-    """The text between ``WHERE`` and whatever ends the clause, or ``""``.
+def where_clauses(sql: str) -> list[str]:
+    """The text of each ``WHERE``'s clause: from it to whatever ends the clause, in the order written.
 
-    Asked by the readers of holes -- whether the placeholders a statement
-    filters on are readable at all.  What the clause requires of a row is
-    read off the tree, by :func:`conditions`.
+    Asked by the readers of holes and keys -- whether the placeholders a
+    statement filters on are readable, and which keys it is asked by.  Every
+    ``WHERE``, not the first: ``checkJobStatus`` asks ``jobsArchived4`` by
+    ``:timeLimit`` in the branch after its ``UNION``, ``copyArchive`` limits
+    rows with ``rownum<:nRows`` in the ``WHERE`` around a derived table, and a
+    ``MINUS`` branch has keys of its own.  A clause ends at a set operator, an
+    ``ORDER BY`` or the like at its own depth, or at the parenthesis closing
+    the subquery it is in; a subquery inside it is part of it, and is read
+    again as a clause of its own.  What the clause requires of a row is read
+    off the tree, by :func:`conditions`.
     """
-    opened = _WHERE.search(sql)
-    if opened is None:
-        return ""
-    rest = sql[opened.end() :]
-    closed = _CLAUSE_END.search(rest)
-    return rest[: closed.start()] if closed else rest
+    found: list[str] = []
+    for opened in _WHERE.finditer(sql):
+        rest = sql[opened.end() :]
+        depth = 0
+        end = len(rest)
+        for index, char in enumerate(rest):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    end = index
+                    break
+                depth -= 1
+            elif depth == 0 and _CLAUSE_END.match(rest, index):
+                end = index
+                break
+        found.append(rest[:end])
+    return found
 
 
 #: A hole the reassembly left where the source interpolates -- ``{}``,

@@ -226,6 +226,46 @@ def _terminal_of(
     return None
 
 
+def database_call(
+    expression: ast.expr,
+    resolve: Optional[Resolver] = None,
+    typed: Optional[Typer] = None,
+) -> Optional[ast.Call]:
+    """The call :func:`classify` names as the one that went to the database, as a node; ``None`` if it names none.
+
+    Read in :func:`classify`'s order, so the call is the one its answer
+    names: ``self.taskBufferIF.getPandaIDsWithTask_JEDI(jediTaskID, True)``
+    itself, or the call a name was bound from -- ``taskSpec`` in
+    ``taskSpec.getNumFilesPerJob()`` came out of ``getTaskWithID_JEDI(...)``,
+    one hop, as :func:`_rooted_in` follows it.  What it hands the method is
+    what the method's statements are read with.
+    """
+    queue: list[tuple[ast.AST, Optional[ast.Call]]] = [(expression, None)]
+    while queue:
+        node, around = queue.pop(0)
+        found = _terminal_of(node, resolve, typed)
+        if found is not None:
+            if found[0] != STOP_UPSTREAM:
+                return None
+            method = found[1]
+            if around is not None and isinstance(around.func, ast.Attribute) and around.func.attr == method:
+                return around
+            if isinstance(node, ast.Attribute) and resolve is not None:
+                base, _ = _base(node)
+                bound = resolve(base.id) if isinstance(base, ast.Name) and base.id != "self" else None
+                if isinstance(bound, ast.Call) and isinstance(bound.func, ast.Attribute) and bound.func.attr == method:
+                    return bound
+            return None
+        if isinstance(node, ast.Call) and not _hands_its_arguments_on(node):
+            queue.append((node.func, node))
+            continue
+        queue.extend(
+            (child, node if isinstance(node, ast.Call) and child is node.func else None)
+            for child in ast.iter_child_nodes(node)
+        )
+    return None
+
+
 def _hands_its_arguments_on(call: ast.Call) -> bool:
     """Whether a call's value is made of its arguments, so they say where it came from.
 

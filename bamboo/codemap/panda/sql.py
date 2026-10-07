@@ -158,13 +158,18 @@ def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
       mapping key, which :func:`key_column_census` counts from the other end.
 
     The term is kept whole, ``AND``/``OR`` to ``AND``/``OR``, so the consumer
-    is told which column it is about.
+    is told which column it is about.  Every ``WHERE`` of the statement is
+    read -- each branch of a ``UNION``, the clause around a derived table
+    (:func:`sqltext.where_clauses`) -- and a term read in two clauses, a
+    subquery's inside its outer clause and on its own, is one stop.
     """
-    clause = _SCHEMA_HOLE.sub("", sqltext.where_clause(sql))
-    if not _HOLE.search(clause):
-        return ()
     found: set[Stop] = set()
-    for term in _CLAUSE_JOIN.split(clause):
+    terms = [
+        term
+        for clause in sqltext.where_clauses(sql)
+        for term in _CLAUSE_JOIN.split(_SCHEMA_HOLE.sub("", clause))
+    ]
+    for term in terms:
         if not _HOLE.search(term):
             continue
         text = _balanced(" ".join(term.split()))
@@ -1190,7 +1195,7 @@ def _fold_filled(
             ]
             assembled = text + assembled
             continue
-        spans.append(Span(node, len(assembled), len(assembled) + len(text)))
+        spans.extend(_part_spans(node, text, len(assembled)))
         assembled += text
     return assembled, spans
 
@@ -1218,7 +1223,11 @@ def _accumulated(
     Written out pass by pass, that test is answered by what is assembled so
     far, and a test on the table by :func:`_test_value`.  One neither can
     decide keeps its fragment, as an optional fragment is kept everywhere
-    else.
+    else -- and as one: it stays its own part, at the ``+=`` under the test,
+    so the readers of what some paths append see the test above it.  Pasted
+    into the pass's text, ``AND modificationTime>(CURRENT_DATE-30)`` under
+    ``if tableName.startswith(panda_config.schemaPANDAARCH):`` read as a
+    condition of every branch of ``getPandaIDsWithTask_JEDI``.
     """
     per_part, choices = _table_choices(func, parts)
     for (_line, _operator, _text, node), (expressions, holes) in zip(parts, per_part, strict=True):
@@ -1252,13 +1261,15 @@ def _accumulated(
                 return parts
             assembled = _fold(parts[: body[0]])
             text = ""
+            undecided: list[tuple[int, int, ast.stmt]] = []
             for value in choices[variable]:
                 for index in body:
                     _at, _op, fragment, held = parts[index]
-                    if _guarded(held, loop, {variable: value, name: assembled + text}) is False:
+                    decided = _guarded(held, loop, {variable: value, name: assembled + text})
+                    if decided is False:
                         continue
                     fragment_expressions, fragment_holes = per_part[index]
-                    text += _fill(
+                    filled = _fill(
                         fragment,
                         {
                             hole: value
@@ -1266,10 +1277,51 @@ def _accumulated(
                             if ast.unparse(fragment_expressions[hole]) == variable
                         },
                     )
+                    if decided is None:
+                        undecided.append((len(text), len(text) + len(filled), held))
+                    text += filled
+            if undecided:
+                _undecided_passes(loop)[text] = undecided
             return _accumulated(
                 func, parts[: body[0]] + [(loop.lineno, "+=", text, loop)] + parts[body[-1] + 1 :], name
             )
     return parts
+
+
+def _undecided_passes(loop: ast.AST) -> dict[str, list[tuple[int, int, ast.stmt]]]:
+    """Where, in each text :func:`_accumulated` wrote *loop* out to, a fragment under a test it could not decide landed.
+
+    ``{text: [(start, end, the fragment's statement), ...]}``, kept on the
+    loop node: one text per reading of the loop (a call's constants can drop
+    passes), and the loop is one part of the statement whichever.  The part
+    stays one -- two parts at one node read as alternatives
+    (:func:`_compatible_sets`) -- and its spans say where each such fragment
+    is (:func:`_part_spans`).
+    """
+    held = loop.__dict__.setdefault("undecided_passes", {})
+    return held  # type: ignore[no-any-return]
+
+
+def _part_spans(node: ast.stmt, text: str, at: int) -> list[Span]:
+    """The spans of a part appended at *at*: one, or a written-out loop's, split where an undecided fragment landed.
+
+    The fragment's span is the fragment's statement, under its ``if``, so
+    what some paths append (``sqlwrite._on_some_paths``) is read off it as
+    off any optional fragment.
+    """
+    ranges = node.__dict__.get("undecided_passes", {}).get(text) if isinstance(node, (ast.For, ast.AsyncFor)) else None
+    if not ranges:
+        return [Span(node, at, at + len(text))]
+    spans: list[Span] = []
+    done = 0
+    for start, end, held in ranges:
+        if start > done:
+            spans.append(Span(node, at + done, at + start))
+        spans.append(Span(held, at + start, at + end))
+        done = end
+    if done < len(text):
+        spans.append(Span(node, at + done, at + len(text)))
+    return spans
 
 
 def _guarded(node: ast.AST, loop: ast.For, bound: dict[str, str]) -> Optional[bool]:

@@ -3910,3 +3910,71 @@ def test_a_handover_from_a_call_placed_open_says_the_call_may_land_elsewhere(tmp
 
     (handed,) = [s for s in walked.steps if s.kind == "handover" and s.name == "x"]
     assert (handed.value, handed.line, handed.open) == ("7", 19, calls_mod.UNPLACED_OPEN)
+
+
+def test_a_value_the_database_supplies_is_read_at_the_call_that_asked_for_it(tmp_path):
+    """``getPandaIDsWithTask_JEDI(jediTaskID, True)`` reads the two tables ``onlyActive`` leaves, through the buffer's forwarder.
+
+    A call the map places has routes into the proxy method, read with what
+    each hands; a call it cannot place has none, and reads as every run.
+    """
+    roots = _server(
+        tmp_path,
+        **{
+            "taskbuffer/OraDBProxy.py": '''\
+from pandaserver.config import panda_config
+
+
+class DBProxy:
+    def getPandaIDsWithTask_JEDI(self, jediTaskID, onlyActive):
+        tables = [f"{panda_config.schemaPANDA}.jobsDefined4", f"{panda_config.schemaPANDA}.jobsActive4"]
+        if not onlyActive:
+            tables += [f"{panda_config.schemaPANDA}.jobsArchived4"]
+        sqlP = ""
+        for tableName in tables:
+            if sqlP != "":
+                sqlP += "UNION ALL "
+            sqlP += f"SELECT PandaID FROM {tableName} WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        self.cur.execute(sqlP, varMap)
+        return self.cur.fetchall()
+''',
+            "taskbuffer/Buffer.py": '''\
+from pandaserver.taskbuffer.OraDBProxy import DBProxy
+
+
+class Buffer:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+
+    def getPandaIDsWithTask_JEDI(self, jediTaskID, onlyActive):
+        return self.proxy.getPandaIDsWithTask_JEDI(jediTaskID, onlyActive)
+''',
+            "daemons/commando.py": '''\
+from pandaserver.taskbuffer.Buffer import Buffer
+
+
+class Commando:
+    def __init__(self, taskBufferIF: Buffer):
+        self.taskBufferIF = taskBufferIF
+
+    def run(self, jediTaskID, log):
+        active = self.taskBufferIF.getPandaIDsWithTask_JEDI(jediTaskID, True)
+        every = self.taskBufferIF.getPandaIDsWithTask_JEDI(jediTaskID, False)
+        unknown = self.taskBuffer.getPandaIDsWithTask_JEDI(jediTaskID, True)
+        log.info(f"{active} {every} {unknown}")
+''',
+        },
+    )
+
+    walked = trace_mod.walk_from_print(
+        roots, file="pandaserver/daemons/commando.py", line=12, classify=provenance.classify
+    )
+
+    said = {s.name: s.detail for s in walked.steps if s.terminal == models.STOP_UPSTREAM}
+    assert said == {
+        "active": "getPandaIDsWithTask_JEDI -- reads jobsDefined4, jobsActive4 by :jediTaskID",
+        "every": "getPandaIDsWithTask_JEDI -- reads jobsDefined4, jobsActive4, jobsArchived4 by :jediTaskID",
+        "unknown": "getPandaIDsWithTask_JEDI -- reads jobsDefined4, jobsActive4, jobsArchived4 by :jediTaskID",
+    }

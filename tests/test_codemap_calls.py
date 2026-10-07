@@ -1958,3 +1958,98 @@ def test_a_name_shared_with_every_container_names_five_receivers_and_counts_the_
     (why,) = calls.missed(_method(calls, "m", "Mine", "update"))
 
     assert why.endswith("(d0 1, d1 1, d2 1, d3 1, d4 1, … 3 more)")
+
+
+# -- X5: a statement read at a call ---------------------------------------------
+
+
+def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_not_required(tmp_path):
+    """``getPandaIDsWithTask_JEDI``: ``modificationTime>(CURRENT_DATE-30)`` is appended under a test of the table name.
+
+    No pass can say whether ``{}.jobsArchived`` starts with the archive schema,
+    so every pass keeps the fragment -- the statement's text is unchanged --
+    but it is kept as appended under that ``if``, not as what every branch requires.
+    """
+    from bamboo.codemap.panda import sql
+
+    db = (
+        "from pandaserver.config import panda_config\n"
+        "\n"
+        "\n"
+        "def get_ids(cur, jediTaskID, onlyActive):\n"
+        "    tables = [\n"
+        "        f\"{panda_config.schemaPANDA}.jobsDefined4\",\n"
+        "        f\"{panda_config.schemaPANDA}.jobsActive4\",\n"
+        "    ]\n"
+        "    if not onlyActive:\n"
+        "        tables += [f\"{panda_config.schemaPANDA}.jobsArchived4\", f\"{panda_config.schemaPANDAARCH}.jobsArchived\"]\n"
+        "    sqlP = \"\"\n"
+        "    for tableName in tables:\n"
+        "        if sqlP != \"\":\n"
+        "            sqlP += \"UNION ALL \"\n"
+        "        sqlP += f\"SELECT PandaID FROM {tableName} WHERE jediTaskID=:jediTaskID \"\n"
+        "        if tableName.startswith(panda_config.schemaPANDAARCH):\n"
+        "            sqlP += \"AND modificationTime>(CURRENT_DATE-30) \"\n"
+        "    varMap = {}\n"
+        "    varMap[\":jediTaskID\"] = jediTaskID\n"
+        "    cur.execute(sqlP, varMap)\n"
+    )
+    main = "from pkg.db import get_ids\n\ndef run(cur):\n    get_ids(cur, 1, True)\n    get_ids(cur, 2, False)\n"
+    side = _read_side(tmp_path, db=db, main=main)
+
+    (got,) = side.statements.values()
+    (run,) = sql.executions(_function(_calls(_tree(tmp_path, db=db, main=main)), "db", "get_ids"))
+    assert run.sql.count("AND modificationTime>(CURRENT_DATE-30)") == 4
+    assert got.conditions == []
+    (added,) = [one for one in got.added_under if one.field == "conditions"]
+    assert added.term == "modificationTime>(CURRENT_DATE-30)"
+    assert [test.test for test in added.places[0].tests] == [
+        "a loop at 12 runs", "tableName.startswith(panda_config.schemaPANDAARCH)"
+    ]
+    assert all(route.condition_trees == [] for route in got.call_readings)
+
+
+def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path):
+    """Renamed and passed by position, it is the caller's; bound again on the route, it is no one's; a literal or a default is the forwarder's."""
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    roots = _tree(
+        tmp_path,
+        db="def lock(flag, other=False, more=None):\n    if flag or other or more:\n        return 1\n",
+        tb=(
+            "from pkg.db import lock\n"
+            "\n"
+            "def renamed(f):\n    return lock(f)\n"
+            "\n"
+            "def rebound(flag, sim):\n    if sim:\n        flag = True\n    return lock(flag, sim)\n"
+            "\n"
+            "def maybe(flag, sim):\n    if sim:\n        flag = True\n    return lock(flag, sim)\n"
+            "\n"
+            "def fixed(flag):\n    return lock(True, flag)\n"
+            "\n"
+            "def spread(**kwargs):\n    return lock(False, **kwargs)\n"
+        ),
+        main=(
+            "from pkg.tb import fixed, maybe, rebound, renamed, spread\n"
+            "\n"
+            "def run():\n    renamed(False)\n    rebound(False, [1])\n    fixed(False)\n    spread(other=True)\n    maybe(False, None)\n"
+        ),
+    )
+    calls = _calls(roots)
+    target = calls_mod.Target("pkg/db.py", _function(calls, "db", "lock"), None)
+    routes, _stops = calls.routes(target)
+
+    def constants(owner):
+        (route,) = [one for one in routes if one.sites[0].func.name == owner]
+        found = {name: sqlwrite._route_constant(name, target, route.sites, calls) for name in ("flag", "other", "more")}
+        return {name: value for name, value in found.items() if value is not sqlwrite._UNSET}
+
+    assert constants("renamed") == {"flag": False, "other": False, "more": None}
+    # ``sim`` is handed on as it came, so the route goes on out to ``run``; ``flag``
+    # is bound again first, and what ``run`` hands it is not what ``lock`` gets.
+    assert constants("rebound") == {"more": None}
+    # The same binding under a test the route's own constant rules out is not on the route.
+    assert constants("maybe") == {"flag": False, "other": None, "more": None}
+    # ``other`` is handed on as it came: the outer call's.
+    assert constants("fixed") == {"flag": True, "other": False, "more": None}
+    assert constants("spread") == {"flag": False}

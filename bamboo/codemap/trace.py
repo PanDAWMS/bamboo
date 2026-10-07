@@ -1655,7 +1655,7 @@ class _Walk:
         #: ``_message_sites`` per (function, spelling): a function with a
         #: hundred logging calls asks for the same local a hundred times.
         self._sites: dict[tuple[int, str], tuple] = {}
-        self._asked: dict[str, str] = {}
+        self._asked: dict[tuple[str, str], str] = {}
         self._prefixes: dict[tuple[str, str, str], str] = {}
         #: The role the name being explained was asked in -- see
         #: ``TraceStep.role`` -- and the role each queued asking carries.
@@ -1770,38 +1770,88 @@ class _Walk:
                 f"the walk's {what} budget ran out; what follows is part of the answer"
             )
 
-    def database_asked(self, method: str) -> str:
+    def database_asked(self, method: str, frame: Optional[_Frame] = None, call: Optional[ast.Call] = None) -> str:
         """``reads jobsDefined4, jobsActive4 by :jediTaskID`` for the proxy's *method*, or ``""``.
 
         The step that stops at "a value the database supplies" named the
         method and nothing else: which table the value came from, and by what
         key, were one proxy method away and unsaid.  Read from the statements
         the method runs, the way the build reads them.
+
+        Read at *call*, the call in *frame* that went to the database, where a
+        route of calls into the method passes through it (:meth:`Calls.routes`):
+        with the constants each such route hands the parameters the method
+        tests, as the build reads a route (``sqlwrite._route_constant``), so
+        ``getPandaIDsWithTask_JEDI(jediTaskID, True)`` reads the two tables
+        ``onlyActive`` leaves, not four.  The tables and keys of every route
+        through the call together.  Where no route passes through it -- the
+        call is not placed -- every run the method can make, as before.
         """
-        if method in self._asked:
-            return self._asked[method]
         from bamboo.codemap.panda import sql as sql_mod
         from bamboo.codemap.panda import sqltext
         from bamboo.codemap.panda.provenance import DATABASE_PROXY
 
+        at = f"{frame.file}:{call.lineno}" if frame is not None and call is not None else ""
+        if (method, at) in self._asked:
+            return self._asked[(method, at)]
         said = ""
         cls = self.types.class_def(*DATABASE_PROXY)
         found = self.types.method(DATABASE_PROXY[0], cls, method) if cls is not None else None
         if found is not None:
-            _where, func = found
+            where, func = found
+            readings = [None]
+            if at:
+                from bamboo.codemap.panda.recognizers import sqlwrite
+
+                owned = self.types.method_class(where, func)
+                target = calls_mod.Target(where, func, owned[1] if owned else None)
+                through = [route for route in self.calls.routes(target)[0] if at in route.chain]
+                if through:
+                    flags = sorted(sqlwrite._flag_parameters(func))
+                    readings = [
+                        {
+                            name: value
+                            for name in flags
+                            if (value := sqlwrite._route_constant(name, target, route.sites, self.calls))
+                            is not sqlwrite._UNSET
+                        }
+                        for route in through
+                    ]
             tables: list[str] = []
             keys: list[str] = []
-            for run in sql_mod.executions(func):
-                for table in sqltext.tables_named(run.sql):
-                    _add(tables, table)
-                for key in re.findall(r":(\w+)", sqltext.where_clause(run.sql)):
-                    _add(keys, f":{key}")
+            for constants in readings:
+                if constants:
+                    with sql_mod.at_call(func, constants):
+                        runs = list(sql_mod.executions(func))
+                else:
+                    runs = list(sql_mod.executions(func))
+                for run in runs:
+                    for table in sqltext.tables_named(run.sql):
+                        _add(tables, table)
+                    for clause in sqltext.where_clauses(run.sql):
+                        for key in re.findall(r":(\w+)", clause):
+                            _add(keys, f":{key}")
             if tables:
                 said = f"reads {', '.join(tables[:6])}" + (
                     f" by {', '.join(keys[:6])}" if keys else ""
                 )
-        self._asked[method] = said
+        self._asked[(method, at)] = said
         return said
+
+    def _classified(
+        self, frame: _Frame, expression: ast.expr, resolve=None, typed=None
+    ) -> tuple[str, str]:
+        """``(terminal, detail)`` for *expression* in *frame*; a value the database supplies says what it is read from at the call."""
+        resolve = resolve if resolve is not None else self.resolver(frame)
+        typed = typed if typed is not None else self.typer(frame)
+        terminal, detail = self.classify(expression, resolve, typed)
+        if terminal == STOP_UPSTREAM and detail and " " not in detail:
+            from bamboo.codemap.panda.provenance import database_call
+
+            asked = self.database_asked(detail, frame, database_call(expression, resolve, typed))
+            if asked:
+                detail = f"{detail} -- {asked}"
+        return terminal, detail
 
     def record(self, step: TraceStep) -> bool:
         if self._role and not step.role:
@@ -1903,7 +1953,7 @@ class _Walk:
 
     def terminal_of(self, frame: _Frame, expression: ast.expr) -> tuple[str, str]:
         """(terminal, detail) for *expression* read in *frame*, the walk's way."""
-        return self.classify(expression, self.resolver(frame), self.typer(frame))
+        return self._classified(frame, expression)
 
     def scope_key(self, frame: _Frame) -> str:
         """What a name asked in *frame* is unique within.
@@ -2862,7 +2912,7 @@ class _Walk:
         site = pathcond.site_of(expression)
         resolve = self.resolver(frame)
         typed = self.typer(frame)
-        terminal, detail = self.classify(expression, resolve, typed)
+        terminal, detail = self._classified(frame, expression, resolve, typed)
         unseen = _unseen(site)
         inner = _nested_scope(frame.func, site)
         if inner is not None:
