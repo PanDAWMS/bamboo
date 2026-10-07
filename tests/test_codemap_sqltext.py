@@ -1114,7 +1114,29 @@ def test_a_term_with_a_hole_ends_with_its_own_clause():
 
     assert [stop.source for stop in sql._hole_stops(ranges, 7)] == ["rownum<={}"]
     assert [stop.source for stop in sql._hole_stops(grouped, 7)] == ["cloud IN ({})"]
-    assert sqltext.in_own_clause(" attemptNr>:minAttemptNr ORDER BY x ) WHERE rownum<={}") == " attemptNr>:minAttemptNr "
-    assert sqltext.in_own_clause(" b=:b ) WHERE rownum<={}") == " b=:b ) "
-    assert sqltext.in_own_clause(" x IN (SELECT y FROM u WHERE z IN ({}))") == " x IN (SELECT y FROM u WHERE z IN ({}))"
-    assert sqltext.in_own_clause(" cloud IN ({}))") == " cloud IN ({}))"
+    assert sqltext.own_clause_terms(" attemptNr>:minAttemptNr ORDER BY x ) WHERE rownum<={}") == [" attemptNr>:minAttemptNr "]
+    assert sqltext.own_clause_terms(" b=:b ) WHERE rownum<={}") == [" b=:b "]
+    assert sqltext.own_clause_terms(" x IN (SELECT y FROM u WHERE z IN ({}))") == [" x IN (SELECT y FROM u WHERE z IN ({}))"]
+    assert sqltext.own_clause_terms(" cloud IN ({}))") == [" cloud IN ({})"]
+
+
+def test_a_term_ends_at_the_subquery_it_closes_and_a_condition_interpolated_whole_is_its_own_hole():
+    """``do_preassign``: ``dl.rse IN ({}) ) {} {} {}`` is the subquery's term, then three outer conditions.
+
+    ``updateDataset``'s ``AND {withCriteria}`` names no column: the whole condition is the hole.
+    """
+    preassign = (
+        "SELECT t.jediTaskID FROM {}.JEDI_Tasks t WHERE t.status IN ('ready','running') "
+        "AND EXISTS ( SELECT * FROM {}.JEDI_Dataset_Locality dl WHERE dl.jediTaskID=t.jediTaskID "
+        "AND dl.rse IN ({}) ) {} {} {} AND EXISTS ( SELECT d.datasetID FROM {}.JEDI_Datasets d "
+        "WHERE t.jediTaskID=d.jediTaskID ) ORDER BY t.currentPriority DESC "
+    )
+    criteria = "UPDATE ATLAS_PANDA.Datasets SET status=:status WHERE vuid=:vuid AND {}"
+
+    assert [(stop.source, stop.reason) for stop in sql._hole_stops(preassign, 7)] == [
+        ("dl.rse IN ({})", sql.BINDS_ARE_A_HOLE),
+        ("{} {} {}", sql.CONDITION_IS_A_HOLE),
+    ]
+    assert [(stop.source, stop.reason) for stop in sql._hole_stops(criteria, 7)] == [("{}", sql.CONDITION_IS_A_HOLE)]
+    # A column named through a hole is still the column's.
+    assert [stop.reason for stop in sql._hole_stops("SELECT x FROM t WHERE {}=:{}", 7)] == [sql.COLUMN_IS_A_HOLE]

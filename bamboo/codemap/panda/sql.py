@@ -137,6 +137,11 @@ BINDS_ARE_A_HOLE = "the WHERE names its bind variables through an interpolation"
 #: reader has no column to go looking for, let alone a value.
 COLUMN_IS_A_HOLE = "the WHERE names its column through an interpolation"
 
+#: ``AND {withCriteria}`` -- ``updateDataset`` appends whatever condition its
+#: caller wrote; ``do_preassign`` three of its own, built apart.  Neither a
+#: column nor a value: the condition itself is not in the text.
+CONDITION_IS_A_HOLE = "the WHERE takes whole conditions through an interpolation"
+
 #: Where the binds go, as opposed to where the schema does.  ``{}.JEDI_Tasks``
 #: is a hole too and is not a gap: reassembly blanks the schema on purpose.
 _HOLE = re.compile(r"\{\d*\}")
@@ -146,7 +151,7 @@ def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
     """One :class:`Stop` per ``WHERE`` term the reassembly left a hole in.
 
     Read off the assembled text rather than off a fragment, because that is
-    where it is decidable, and the three holes a ``WHERE`` can carry are three
+    where it is decidable, and the four holes a ``WHERE`` can carry are four
     different answers:
 
     * **The schema**, ``{}.JEDI_Datasets`` -- blanked on purpose, and not a
@@ -156,31 +161,35 @@ def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
       and the values are at whichever call site supplied the list.
     * **The column**, ``{}=:{}`` -- the statement names its column from a
       mapping key, which :func:`key_column_census` counts from the other end.
+    * **The condition**, a term that is nothing but holes -- ``AND {}`` --
+      where the code interpolates a whole condition, column and value alike.
 
     The term is kept whole, ``AND``/``OR`` to ``AND``/``OR``, so the consumer
     is told which column it is about.  Every ``WHERE`` of the statement is
     read -- each branch of a ``UNION``, the clause around a derived table
     (:func:`sqltext.where_clauses`) -- and a term read in two clauses, a
     subquery's inside its outer clause and on its own, is one stop.  A term
-    ends with its own clause (:func:`sqltext.in_own_clause`).
+    ends with its own clause, and at the parenthesis closing the subquery it
+    sits in (:func:`sqltext.own_clause_terms`).
     """
     found: set[Stop] = set()
     terms = [
-        sqltext.in_own_clause(term)
+        piece
         for clause in sqltext.where_clauses(sql)
         for term in _CLAUSE_JOIN.split(_SCHEMA_HOLE.sub("", clause))
+        for piece in sqltext.own_clause_terms(term)
     ]
     for term in terms:
         if not _HOLE.search(term):
             continue
         text = _balanced(" ".join(term.split()))
-        found.add(
-            Stop(
-                line,
-                text,
-                COLUMN_IS_A_HOLE if _HOLE.match(text) else BINDS_ARE_A_HOLE,
-            )
-        )
+        if not _HOLE.sub("", text).strip(" ()"):
+            reason = CONDITION_IS_A_HOLE
+        elif _HOLE.match(text):
+            reason = COLUMN_IS_A_HOLE
+        else:
+            reason = BINDS_ARE_A_HOLE
+        found.add(Stop(line, text, reason))
     return tuple(sorted(found))
 
 

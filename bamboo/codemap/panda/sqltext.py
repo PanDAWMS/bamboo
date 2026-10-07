@@ -960,27 +960,40 @@ def where_clauses(sql: str) -> list[str]:
     return found
 
 
-def in_own_clause(term: str) -> str:
-    """*term* up to the end of the clause it is a term of.
+def own_clause_terms(term: str) -> list[str]:
+    """The terms *term* holds of the clause it is in, each ending where it does.
 
     A ``WHERE`` split into terms at any depth runs its subquery's last term
     on past the subquery: ``getEventRanges`` read ``attemptNr>:minAttemptNr
     ORDER BY jediTaskID,PandaID,fileID ) WHERE rownum<={}`` as one term, and
-    named the derived table's ``rownum`` hole as ``attemptNr``'s.  The term
-    ends where :func:`where_clauses` ends a clause, or at the next ``WHERE``,
-    at its own depth or above; what follows is another clause, read as its
-    own.  A parenthesis the split left unmatched is not an end: ``cloud IN
-    ({}))`` closes a group, not a subquery.
+    named the derived table's ``rownum`` hole as ``attemptNr``'s.  What ends
+    a clause in :func:`where_clauses` ends the term, and so does the next
+    ``WHERE``; what follows is another clause, read as its own.
+
+    A parenthesis the term did not open ends the term too, and what follows
+    it is a term of the level it closes into: ``do_preassign``'s ``dl.rse IN
+    ({}) ) {} {} {}`` is the subquery's last term, then three conditions of
+    the outer ``WHERE`` interpolated whole.  Where the parenthesis closes a
+    group -- ``cloud IN ({}))`` -- nothing follows it.
     """
+    found: list[str] = []
+    start = 0
     depth = 0
     for index, char in enumerate(term):
         if char == "(":
             depth += 1
         elif char == ")":
-            depth -= 1
-        elif depth <= 0 and (_CLAUSE_END.match(term, index) or _WHERE.match(term, index)):
-            return term[:index]
-    return term
+            if depth:
+                depth -= 1
+                continue
+            found.append(term[start:index])
+            start = index + 1
+        elif depth == 0 and (_CLAUSE_END.match(term, index) or _WHERE.match(term, index)):
+            found.append(term[start:index])
+            start = len(term)
+            break
+    found.append(term[start:])
+    return [one for one in found if one.strip()]
 
 
 #: A hole the reassembly left where the source interpolates -- ``{}``,
