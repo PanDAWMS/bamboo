@@ -960,6 +960,29 @@ def where_clauses(sql: str) -> list[str]:
     return found
 
 
+def in_own_clause(term: str) -> str:
+    """*term* up to the end of the clause it is a term of.
+
+    A ``WHERE`` split into terms at any depth runs its subquery's last term
+    on past the subquery: ``getEventRanges`` read ``attemptNr>:minAttemptNr
+    ORDER BY jediTaskID,PandaID,fileID ) WHERE rownum<={}`` as one term, and
+    named the derived table's ``rownum`` hole as ``attemptNr``'s.  The term
+    ends where :func:`where_clauses` ends a clause, or at the next ``WHERE``,
+    at its own depth or above; what follows is another clause, read as its
+    own.  A parenthesis the split left unmatched is not an end: ``cloud IN
+    ({}))`` closes a group, not a subquery.
+    """
+    depth = 0
+    for index, char in enumerate(term):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth <= 0 and (_CLAUSE_END.match(term, index) or _WHERE.match(term, index)):
+            return term[:index]
+    return term
+
+
 #: A hole the reassembly left where the source interpolates -- ``{}``,
 #: ``{0}``.  Read as a name, which is what most of them are: the schema, a
 #: table, a column.

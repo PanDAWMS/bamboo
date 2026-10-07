@@ -11,7 +11,7 @@ import ast
 
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
-from bamboo.codemap.panda import attribution, sqltext
+from bamboo.codemap.panda import attribution, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress, sqlwrite
 
 _SCHEMA = {
@@ -1100,3 +1100,21 @@ def test_every_where_of_a_statement_is_read_each_to_the_end_of_its_own_clause():
     assert sqltext.where_clauses(minus) == [" f=:f ", " status IN (:esSent,:esRunning)"]
     assert sqltext.where_clauses(nested) == [" a IN (SELECT y FROM u WHERE b=:b) AND c=:c ", " b=:b"]
     assert sqltext.where_clauses("SELECT 1 FROM dual") == []
+
+
+def test_a_term_with_a_hole_ends_with_its_own_clause():
+    """``getEventRanges``: the derived table's ``rownum<={}`` is one hole, not also ``attemptNr``'s."""
+    ranges = (
+        "UPDATE {}.JEDI_Events tab SET PandaID=:pandaID WHERE (jediTaskID,PandaID) IN ("
+        "SELECT jediTaskID,PandaID FROM (SELECT jediTaskID,PandaID FROM {}.JEDI_Events tab "
+        "WHERE jediTaskID=:jediTaskID AND attemptNr>:minAttemptNr ORDER BY jediTaskID,PandaID "
+        ") WHERE rownum<={}) "
+    )
+    grouped = "SELECT x FROM t WHERE a=:a AND (cloud IS NULL OR cloud IN ({}))"
+
+    assert [stop.source for stop in sql._hole_stops(ranges, 7)] == ["rownum<={}"]
+    assert [stop.source for stop in sql._hole_stops(grouped, 7)] == ["cloud IN ({})"]
+    assert sqltext.in_own_clause(" attemptNr>:minAttemptNr ORDER BY x ) WHERE rownum<={}") == " attemptNr>:minAttemptNr "
+    assert sqltext.in_own_clause(" b=:b ) WHERE rownum<={}") == " b=:b ) "
+    assert sqltext.in_own_clause(" x IN (SELECT y FROM u WHERE z IN ({}))") == " x IN (SELECT y FROM u WHERE z IN ({}))"
+    assert sqltext.in_own_clause(" cloud IN ({}))") == " cloud IN ({}))"

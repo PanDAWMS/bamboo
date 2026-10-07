@@ -161,11 +161,12 @@ def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
     is told which column it is about.  Every ``WHERE`` of the statement is
     read -- each branch of a ``UNION``, the clause around a derived table
     (:func:`sqltext.where_clauses`) -- and a term read in two clauses, a
-    subquery's inside its outer clause and on its own, is one stop.
+    subquery's inside its outer clause and on its own, is one stop.  A term
+    ends with its own clause (:func:`sqltext.in_own_clause`).
     """
     found: set[Stop] = set()
     terms = [
-        term
+        sqltext.in_own_clause(term)
         for clause in sqltext.where_clauses(sql)
         for term in _CLAUSE_JOIN.split(_SCHEMA_HOLE.sub("", clause))
     ]
