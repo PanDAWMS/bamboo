@@ -707,6 +707,11 @@ def handed(resolve, calls: Optional["Calls"]):
             return listed(expression.left) or listed(expression.right)
         return False
 
+    #: Each function's bindings, by name, read in one walk: every caller of a
+    #: parameter is read, and walking a large caller once per name it binds
+    #: was most of the read side's time.
+    indexed: dict[int, tuple[ast.AST, dict[str, Optional[list[ast.expr]]]]] = {}
+
     def bindings(func: ast.AST, name: str) -> Optional[list[ast.expr]]:
         """What each binding of *name* in *func* writes; ``None`` if one writes what cannot be read here.
 
@@ -715,26 +720,43 @@ def handed(resolve, calls: Optional["Calls"]):
         not a value any statement asks by, and settling the one literal of
         two writes said it was.
         """
-        found: list[ast.expr] = []
+        held = indexed.get(id(func))
+        if held is None or held[0] is not func:
+            held = indexed[id(func)] = (func, written_by(func))
+        return held[1].get(name, [])
+
+    def written_by(func: ast.AST) -> dict[str, Optional[list[ast.expr]]]:
+        found: dict[str, Optional[list[ast.expr]]] = {}
+
+        def add(name: str, value: ast.expr) -> None:
+            values = found.setdefault(name, [])
+            if values is not None:
+                values.append(value)
+
+        def spoil(names) -> None:
+            for name in names:
+                found[name] = None
+
         for node in ast.walk(func):
             if node is func or not in_scope(node, func):
                 continue
             if isinstance(node, ast.Assign):
                 for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id == name:
-                        found.append(node.value)
-                    elif any(isinstance(one, ast.Name) and one.id == name for one in ast.walk(target)):
-                        return None
+                    if isinstance(target, ast.Name):
+                        add(target.id, node.value)
+                    else:
+                        spoil(one.id for one in ast.walk(target) if isinstance(one, ast.Name))
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-                if isinstance(node.target, ast.Name) and node.target.id == name and node.value is not None:
-                    found.append(node.value)
+                if isinstance(node.target, ast.Name) and node.value is not None:
+                    add(node.target.id, node.value)
             elif isinstance(node, ast.AugAssign):
-                if isinstance(node.target, ast.Name) and node.target.id == name:
+                if isinstance(node.target, ast.Name):
                     # ``statList += ["x"]`` adds members; ``text += "x"``
                     # makes a different string.
-                    if not isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
-                        return None
-                    found.append(node.value)
+                    if isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
+                        add(node.target.id, node.value)
+                    else:
+                        spoil([node.target.id])
             elif isinstance(node, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith, ast.ExceptHandler)):
                 targets = (
                     [node.target] if isinstance(node, (ast.For, ast.AsyncFor))
@@ -742,20 +764,13 @@ def handed(resolve, calls: Optional["Calls"]):
                     if isinstance(node, (ast.With, ast.AsyncWith))
                     else []
                 )
-                if isinstance(node, ast.ExceptHandler) and node.name == name:
-                    return None
-                if any(
-                    isinstance(one, ast.Name) and one.id == name
-                    for target in targets
-                    for one in ast.walk(target)
-                ):
-                    return None
-            elif isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
-                names = [alias.asname or alias.name for alias in node.names] if isinstance(
-                    node, (ast.Import, ast.ImportFrom)
-                ) else node.names
-                if name in names:
-                    return None
+                if isinstance(node, ast.ExceptHandler) and node.name:
+                    spoil([node.name])
+                spoil(one.id for target in targets for one in ast.walk(target) if isinstance(one, ast.Name))
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                spoil([alias.asname or alias.name for alias in node.names])
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                spoil(node.names)
         return found
 
     def settle(
