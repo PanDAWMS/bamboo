@@ -3836,3 +3836,77 @@ def test_a_call_handover_is_the_whole_answer_where_it_crosses_every_call(tmp_pat
     walked = _walked_in(roots, "proxy.py", "retryJob", [2], handovers=[_COPY_ARCHIVE])
 
     assert [s.kind for s in walked.steps if s.name == "recoverableEsMerge"] == ["handover"]
+
+
+# -- X5: a parameter's stop says why the calls placed may not be all --------------
+
+
+def _stop_on(walked, name):
+    (stopped,) = [s for s in walked.steps if s.name == name and s.kind == "unbound"]
+    return stopped
+
+
+def test_a_parameter_with_no_caller_says_whether_a_call_by_its_name_was_not_placed(tmp_path):
+    """"Chosen at the call site" alone hid that ``obj.g(1)`` may be the call; the stop names it."""
+    roots = _tree(tmp_path, **{"m.py": "def g(x):\n    spec.status = x\n\ndef c(obj):\n    obj.g(1)\n"})
+
+    stopped = _stop_on(_walked_in(roots, "m.py", "g", [2]), "x")
+
+    assert stopped.detail == (
+        "a parameter, so its value is chosen at the call site; "
+        "g: 1 call(s) by its name not placed -- the receiver's class is not declared (obj 1)"
+    )
+
+
+def test_a_parameter_of_a_function_nothing_calls_says_it_is_reached_from_outside(tmp_path):
+    roots = _tree(tmp_path, **{"m.py": "def g(x):\n    spec.status = x\n"})
+
+    stopped = _stop_on(_walked_in(roots, "m.py", "g", [2]), "x")
+
+    assert stopped.detail == (
+        "a parameter, so its value is chosen at the call site; g: no call in the corpus names it -- reached from outside"
+    )
+
+
+def test_a_parameter_followed_to_its_callers_says_when_more_calls_by_its_name_were_not_placed(tmp_path):
+    roots = _tree(tmp_path, **{"m.py": "def g(x):\n    spec.status = x\n\ndef c():\n    g(1)\n\ndef d(obj):\n    obj.g(2)\n"})
+
+    stopped = _stop_on(_walked_in(roots, "m.py", "g", [2]), "x")
+
+    assert stopped.detail == (
+        "a parameter; followed to the 1 call(s) placed at g; "
+        "g: 1 call(s) by its name not placed -- the receiver's class is not declared (obj 1)"
+    )
+
+
+_OPEN_CALLER = '''\
+from typing import Any
+
+
+class Interface:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.remote, name)
+
+
+class Buffer:
+    def put(self, x):
+        spec.status = x
+
+
+class Feeder:
+    def __init__(self, tb: "Interface | Buffer"):
+        self.tb = tb
+
+    def run(self):
+        self.tb.put(7)
+'''
+
+
+def test_a_handover_from_a_call_placed_open_says_the_call_may_land_elsewhere(tmp_path):
+    """``self.tb.put(7)`` lands at ``Buffer.put`` or wherever the interface forwards it: 7 may not be what ``x`` held."""
+    roots = _tree(tmp_path, **{"m.py": _OPEN_CALLER})
+
+    walked = _walked_in(roots, "m.py", "Buffer.put", [11])
+
+    (handed,) = [s for s in walked.steps if s.kind == "handover" and s.name == "x"]
+    assert (handed.value, handed.line, handed.open) == ("7", 19, calls_mod.UNPLACED_OPEN)

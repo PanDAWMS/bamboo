@@ -50,6 +50,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import re
+import time
 from pathlib import Path
 from typing import Callable, Iterable, NamedTuple, Optional
 
@@ -990,6 +991,10 @@ class ReadSide(NamedTuple):
     #: until now ``record`` was handed the owner and the position was dropped,
     #: which made three queries in ``copyArchive.main`` one answer.
     statements: dict[tuple[str, int], "ReadStatement"]
+    #: What the build watches now that every caller is read: the function with
+    #: the most routes into it, ``(owner, routes)``, and the seconds spent
+    #: settling bind values from their callers.  For the build's report.
+    watch: dict[str, object] = {}
 
 
 class ReadStatement(NamedTuple):
@@ -1237,7 +1242,9 @@ def _handed_paths(
 
     def through(call: ast.Call, slot: int, at_func, at_call: ast.Call, passed: tuple[_Hop, ...], hops: int) -> None:
         placed = sql.placed(at_func, at_call)
-        if placed is None or hops >= sql.RETURN_HOPS:
+        # As :func:`sql.returned`: a call placed open hands back what this
+        # reading cannot name as well, so no path is read through it.
+        if placed is None or placed.unplaced or hops >= sql.RETURN_HOPS:
             return
         for target in placed.targets:
             for value in sql._returns(target.func):
@@ -2119,6 +2126,54 @@ def _route_handed(target: Target, sites: tuple, calls: Calls) -> dict[str, "valu
     return found
 
 
+def _check_as_statement(
+    recorded: list[tuple[tuple[str, int], tuple[str, ...], CallReading]],
+    statements: dict[tuple[str, int], "ReadStatement"],
+) -> None:
+    """Stop the build where a route recorded as reading as the statement does not read what the statement's fields say.
+
+    A route marked ``as_statement`` carries no fields: a reader takes the
+    statement's.  The mark is decided against the statement read the route's
+    way (``route_reading``); the fields stored are filed another way, run by
+    run (``record``, ``refused``, ``restricted``, ``place_conditions``).  A
+    statement whose own fields name no value -- a call's value not known --
+    beside a route that reads one would lose the route's value without a
+    word.  So the two are compared on every field the mark stands for; the
+    statement's condition trees are its conditions' (``added_under``'s are
+    not a route's to say).
+    """
+    def pairs(found) -> list[str]:
+        return sorted(f"{subject}={value}" for subject, value in found)
+
+    def trees(readings, entries=None) -> dict[str, object]:
+        return {
+            one.entry: one.tree.model_dump() if one.tree is not None else None
+            for one in readings
+            if entries is None or one.entry in entries
+        }
+
+    wrong: list[str] = []
+    for site, chain, read in recorded:
+        at = statements.get(site)
+        if at is None:
+            continue
+        stored = {
+            "tables": sorted(at.tables), "selects": pairs(at.selects), "excludes": pairs(at.excludes),
+            "consults": pairs(at.consults), "refuses": pairs(at.refuses), "restricts": pairs(at.restricts),
+        }
+        moved = [name for name, value in stored.items() if sorted(getattr(read, name)) != value]
+        if trees(read.condition_trees) != trees(at.condition_trees, set(at.conditions)):
+            moved.append("condition_trees")
+        if moved:
+            wrong.append(f"{site[0]}@{site[1]} via {list(chain)}: {', '.join(moved)}")
+    if wrong:
+        raise RuntimeError(
+            f"{len(wrong)} route(s) recorded as reading as the statement read otherwise -- "
+            + "; ".join(wrong[:5])
+            + (f"; … {len(wrong) - 5} more" if len(wrong) > 5 else "")
+        )
+
+
 def _reads_alike(route: CallReading, statement: Optional[CallReading]) -> bool:
     """Whether a route reads what the statement does: every field :class:`CallReading` has, the route's own aside."""
     if statement is None:
@@ -2493,7 +2548,18 @@ def read_side(
     not among the values reported as written-but-unselected for this subject,
     so nothing is hidden by it.
     """
-    settle = values.handed(values.resolver(), calls)
+    handed = values.handed(values.resolver(), calls)
+    # Every caller of a parameter is read now, however many: how long that
+    # takes, and the function with the most routes, go to the build's report.
+    watch: dict[str, object] = {"settle_seconds": 0.0, "most_routes": ("", 0)}
+
+    def settle(expression, func, file):
+        started = time.perf_counter()
+        try:
+            return handed(expression, func, file)
+        finally:
+            watch["settle_seconds"] += time.perf_counter() - started  # type: ignore[operator]
+
     found: dict[str, dict[str, ValueUse]] = {}
     rows: dict[str, EntityUse] = {}
     unreadable: dict[str, int] = {}
@@ -2510,6 +2576,9 @@ def read_side(
     refused: dict[tuple[str, int], set[tuple[str, str]]] = {}
     # And what every run so far restricts, the same way.
     restricted: dict[tuple[str, int], dict[str, set[str]]] = {}
+    # Each route recorded as reading as the statement, with what it read:
+    # checked against the statement's own fields once they are final.
+    as_statement: list[tuple[tuple[str, int], tuple[str, ...], CallReading]] = []
 
     def record(
         subject: str,
@@ -2561,13 +2630,18 @@ def read_side(
     # them again for each of a function's routes is the cost of reading
     # routes at all.  The run is kept beside its values so that its ``id``
     # is not another run's while this read lasts.
-    settled: dict[tuple[int, str, str], tuple[object, list[tuple[str, ast.stmt, tuple[str, ...]]]]] = {}
+    settled: dict[tuple[int, str, str], tuple[object, list[tuple[str, ast.stmt, tuple[str, ...], bool]]]] = {}
 
     def bound_sites(func, run, key: str, file: str) -> list[tuple[str, ast.stmt]]:
-        """The values *key* is filled with for *run*, each with the statement putting it there -- on the route being read, if one is."""
+        """The values *key* is filled with for *run*, each with the statement putting it there -- on the route being read, if one is.
+
+        Read as every run any call makes, none where a call's value is not
+        known (:attr:`values.Handed.unknown`): the rest are not every value
+        the bind is filled with.  On a route, what the route's calls handed.
+        """
         held = settled.get((id(run), key, file))
         if held is None or held[0] is not run:
-            found: list[tuple[str, ast.stmt, tuple[str, ...]]] = []
+            found: list[tuple[str, ast.stmt, tuple[str, ...], bool]] = []
             binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
             if not run.varmap:
                 binds = binds + sql.inline_binds(run.call, key)
@@ -2579,13 +2653,19 @@ def read_side(
                 at_file = file
                 if where is not func and calls is not None:
                     at_file = calls.types.file_of(where) or file
-                found.extend((one.value, bind.site, one.via) for one in settle(bind.value, where, at_file))
+                found.extend(
+                    (one.value, bind.site, one.via, one.unknown) for one in settle(bind.value, where, at_file)
+                )
             held = settled[(id(run), key, file)] = (run, found)
         chain = routing["chain"]
+        if chain is None:
+            if any(unknown for _value, _site, _via, unknown in held[1]):
+                return []
+            return [(value, site) for value, site, _via, _unknown in held[1]]
         return [
             (value, site)
-            for value, site, via in held[1]
-            if chain is None or _on_route(via, chain, routing["into"])
+            for value, site, via, unknown in held[1]
+            if not unknown and _on_route(via, chain, routing["into"])
         ]
 
     def tree_of(func, run, file: str, twin: "sqltext.Twin") -> ConditionNode:
@@ -2772,7 +2852,7 @@ def read_side(
         if where is not func and calls is not None:
             at_file = calls.types.file_of(where) or file
         handed = settle(value, where, at_file)
-        if not handed or any(one.via for one in handed):
+        if not handed or any(one.via or one.unknown for one in handed):
             return None
         return [one.value for one in handed]
 
@@ -2796,6 +2876,8 @@ def read_side(
         owned = calls.types.method_class(file, func)
         target = Target(file, func, owned[1] if owned else None)
         found, stops = calls.routes(target)
+        if len(found) > watch["most_routes"][1]:  # type: ignore[index]
+            watch["most_routes"] = (owner, len(found))
         into = frozenset(f"{site.file}:{site.call.lineno}" for site in calls.callers(target))
         tested = _flag_parameters(func)
         own = route_reading(func, file)
@@ -2814,13 +2896,15 @@ def read_side(
             finally:
                 routing.update(chain=None, into=frozenset(), func=None, handed=None)
             named = {name: repr(value) for name, value in constants.items()}
+            opened = [f"{site.file}:{site.call.lineno} -- {why}" for site in route.sites if (why := calls.opened(site))]
             for line in lines:
                 if line not in here:
-                    records[line].append(CallReading(chain=list(route.chain), constants=named, not_run=True))
+                    records[line].append(CallReading(chain=list(route.chain), constants=named, not_run=True, open=opened))
                     continue
-                read = here[line].model_copy(update={"chain": list(route.chain), "constants": named})
+                read = here[line].model_copy(update={"chain": list(route.chain), "constants": named, "open": opened})
                 if _reads_alike(read, own.get(line)):
-                    read = CallReading(chain=list(route.chain), constants=named, as_statement=True)
+                    as_statement.append(((owner, line), tuple(route.chain), read))
+                    read = CallReading(chain=list(route.chain), constants=named, as_statement=True, open=opened)
                 records[line].append(read)
         for line in lines:
             kept = statements[(owner, line)]
@@ -3537,12 +3621,14 @@ def read_side(
             refuses=frozenset(refused.get(site, ())),
             restricts=frozenset(_restricted_pairs(restricted.get(site, {}))),
         )
+    _check_as_statement(as_statement, statements)
     return ReadSide(
         values=found,
         entities=rows,
         unreadable=unreadable,
         joins=joins,
         statements=statements,
+        watch=watch,
     )
 
 

@@ -1425,6 +1425,16 @@ class CallReading(BaseModel):
         description="The constants the route hands the parameters the function tests, as Python spells them -- what names the call.",
     )
     not_run: bool = Field(default=False, description="The route's constants rule the statement out: it never runs on this route.")
+    open: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file:line -- reason`` for each call of the route placed open, in "
+            "``chain``'s order: it lands where the route goes, or somewhere this "
+            "reading cannot name -- ``self.taskBufferIF.X(...)`` where the "
+            "interface forwards -- so the route may not run the statement.  "
+            "Empty where every call of the route is placed closed."
+        ),
+    )
     as_statement: bool = Field(
         default=False,
         description=(
@@ -1446,7 +1456,7 @@ class CallReading(BaseModel):
 
 
 #: :class:`CallReading`'s fields that say which route, not what it reads.
-CALL_READING_ROUTE = frozenset({"chain", "constants", "not_run", "as_statement"})
+CALL_READING_ROUTE = frozenset({"chain", "constants", "not_run", "as_statement", "open"})
 
 
 class ReadSiteNode(BaseNode):
@@ -1592,9 +1602,10 @@ class ReadSiteNode(BaseNode):
         default=False,
         description=(
             "Every call spelled with the name of the statement's function, and "
-            "of each forwarder a route passes through, is placed, and none has "
-            "more callers than are read one by one -- so ``call_readings`` is "
-            "every way the statement is run from the corpus.  ``False`` can be "
+            "of each forwarder a route passes through, is placed -- so "
+            "``call_readings`` is every way the statement is run from the "
+            "corpus.  A call placed open is in the list, its route marked "
+            "(:attr:`CallReading.open`).  ``False`` can be "
             "said of a complete list, a call by the same name to another "
             "function counting against it; ``True`` is never said of an "
             "incomplete one.  The corpus is the one the map reads: a test "
@@ -1607,8 +1618,10 @@ class ReadSiteNode(BaseNode):
         description=(
             "Where the list of routes may stop short, when it may: the function, "
             "how many calls by its name are not placed and why, by receiver "
-            "(``self.taskBufferIF 3``), or that no call in the corpus names it "
-            "-- an endpoint, reached from outside."
+            "(``self.taskBufferIF 3``, the first five receivers and the rest "
+            "counted), how many are placed elsewhere and open beside it, or "
+            "that no call in the corpus names it -- an endpoint, reached from "
+            "outside."
         ),
     )
     tables: list[str] = Field(
@@ -2212,6 +2225,15 @@ class MapFragment(BaseModel):
     coverage: list[CoverageStat] = Field(default_factory=list)
     reading_stops: list[ReadingStop] = Field(default_factory=list)
     call_stops: list[CallStop] = Field(default_factory=list)
+    open_calls: list[CallStop] = Field(
+        default_factory=list,
+        description=(
+            "The build's calls to its own functions placed open: at the "
+            "definitions they name, and possibly somewhere this reading cannot "
+            "name, the reason saying why.  Not stops -- the walk enters what "
+            "they name -- and counted from the same calls as :attr:`call_stops`."
+        ),
+    )
     calls_considered: int = Field(
         default=0,
         description=(
@@ -3955,6 +3977,10 @@ class TraceStep(BaseModel):
             "call -- so the value may instead come from a function the walk "
             "did not enter.  Said of the function, not of one call: every "
             "return step of it carries it, whichever call the walk came in by.  "
+            "On a ``handover`` step from a call into the function -- a "
+            "parameter's caller, or a call of the setter that sets the field -- "
+            "why that call was placed open: it may land elsewhere, and then it "
+            "is not the call that handed the value.  "
             "Empty where every call that entered it was placed closed."
         ),
     )

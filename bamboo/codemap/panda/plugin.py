@@ -472,6 +472,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             sqlwrite.read_site_nodes(side.statements, self.map_id, self._version)
         )
         self._unreadable_tables = side.unreadable
+        self.read_watch = side.watch
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:
             readers = selected.get(subject.name, {})
@@ -616,7 +617,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # are answered from.
         if self._calls is not None:
             _attach_called_from(fragment.junctions, self._calls)
-            fragment.calls_considered, fragment.call_stops = _call_stops(self._calls, self._modules)
+            fragment.calls_considered, fragment.call_stops, fragment.open_calls = _call_stops(self._calls, self._modules)
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the
@@ -1006,8 +1007,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 _LOG_CALLS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
 
 
-def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]]:
-    """``(considered, stops)``: the build's calls to its own functions, and those ``calls`` cannot place.
+def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop], list[CallStop]]:
+    """``(considered, stops, opened)``: the build's calls to its own functions, those ``calls`` cannot place, and those it places open.
+
+    A call placed open is not a stop -- the walk enters the definitions it
+    names -- but it may land somewhere else as well, and before it had a list
+    of its own the 452 of them that X4 placed open simply left the stops.
 
     Drawn from the calls whose name some function or class of the build's
     modules defines -- a call to ``json.loads`` names nothing the walk could
@@ -1023,6 +1028,7 @@ def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]
     }
     considered = 0
     stops: list[CallStop] = []
+    opened: list[CallStop] = []
     for name, sites in sorted(calls.every_call().items()):
         if name not in defined or name in _LOG_CALLS:
             continue
@@ -1031,9 +1037,9 @@ def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]
                 continue
             considered += 1
             placed = calls.callees(site.file, site.func, site.call)
-            if placed.targets:
+            if placed.targets and not placed.unplaced:
                 continue
-            stops.append(
+            (opened if placed.targets else stops).append(
                 CallStop(
                     reason=placed.unplaced,
                     file=site.file,
@@ -1043,7 +1049,8 @@ def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]
                 )
             )
     stops.sort(key=lambda stop: (stop.file, stop.line, stop.callee))
-    return considered, stops
+    opened.sort(key=lambda stop: (stop.file, stop.line, stop.callee))
+    return considered, stops, opened
 
 
 def _attach_called_from(junctions, calls) -> None:

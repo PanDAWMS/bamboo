@@ -84,7 +84,10 @@ def _outside_class(calls: Calls, file: str, func: ast.AST, receiver: ast.expr) -
                 if isinstance(called, ast.Name) and types.imported_from_outside(file, called.id):
                     annotation = called
                 else:
-                    for target in calls.callees(file, func, node.value).targets:
+                    # A call placed open may land somewhere returning another
+                    # class: its targets' annotation is not the receiver's.
+                    placed = calls.callees(file, func, node.value)
+                    for target in placed.targets if not placed.unplaced else ():
                         annotation = getattr(target.func, "returns", None)
                         if annotation is not None:
                             file = target.file
@@ -131,9 +134,7 @@ def extract(
             if not outside:
                 continue
             verbs = sorted({verb_of(name) for name in outside})
-            sites = sorted(
-                {f"{site.file}:{site.call.lineno}" for site in calls.callers(Target(file, method, cls))}
-            )
+            sites = sorted({calls.hop(site) for site in calls.callers(Target(file, method, cls))})
             interface = f"{file}::{class_name}.{method.name}"
             module = by_file.get(file)
             nodes.append(

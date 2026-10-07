@@ -276,6 +276,7 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "see ReadingStop, and the answer reads them again from the source"
     ),
     "call_stops": "the calls the build could not place -- see CallStop",
+    "open_calls": "the calls the build placed open -- see MapFragment.open_calls",
     "calls_considered": _REPORT,
     "row_key_sources": _REPORT,
     "print_calls": "the second reading prints-are-counted checks the stored rows against",

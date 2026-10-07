@@ -633,7 +633,7 @@ def test_a_route_reading_as_the_statement_says_so_and_one_settling_more_does_not
     # added later is compared without anyone listing it.
     compared = {name for name in CallReading.model_fields if name not in CALL_READING_ROUTE}
     assert compared == {"tables", "selects", "excludes", "consults", "refuses", "restricts", "condition_trees"}
-    assert CALL_READING_ROUTE == {"chain", "constants", "not_run", "as_statement"}
+    assert CALL_READING_ROUTE == {"chain", "constants", "not_run", "as_statement", "open"}
 
 
 def test_a_call_requiring_several_conditions_reads_each_as_a_tree_of_its_own(tmp_path):
@@ -1124,7 +1124,8 @@ def test_the_build_lists_every_call_to_its_own_functions_it_cannot_place(tmp_pat
         for name, text in texts.items()
     ]
 
-    considered, stops = plugin._call_stops(calls, modules)
+    considered, stops, opened = plugin._call_stops(calls, modules)
+    assert opened == []
 
     assert considered == 2  # ``helper()`` and ``spec.helper()``
     assert [(stop.line, stop.callee, stop.reason) for stop in stops] == [
@@ -1752,3 +1753,208 @@ class Holder:
     assert _placed(calls, "m", "run", "self.source.where").unplaced == calls_mod.UNPLACED_OPEN
     assert opened == []
     assert [(callee.name, ast.unparse(value)) for callee, value in closed] == [("where", "' AND x=1'")]
+
+
+# -- X5: a call placed open, said where callers are listed ----------------------
+
+
+def test_a_listing_of_callers_says_which_call_was_placed_open(tmp_path):
+    """``called_from`` lists ``self.taskBufferIF.getTask(...)`` at ``Buffer.getTask`` and says it may land elsewhere."""
+    roots = _tree(tmp_path, m=_FEEDER)
+    calls = _calls(roots)
+    buffer = _method(calls, "m", "Buffer", "getTask")
+    (site,) = calls.callers(buffer)
+
+    assert calls.opened(site) == calls_mod.UNPLACED_OPEN
+    assert calls.called_from(buffer) == [f"pkg/m.py:{site.call.lineno} (placed open -- {calls_mod.UNPLACED_OPEN})"]
+
+
+def test_the_build_lists_the_calls_it_places_open_apart_from_those_it_cannot_place(tmp_path):
+    """A call placed open is entered, so it is no stop; it is listed on its own with its reason."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import plugin
+
+    roots = _tree(tmp_path, m=_FEEDER)
+    calls = _calls(roots)
+    modules = [
+        SourceModule(
+            package=PACKAGE, rel_path="pkg/m.py", tree=calls.types.tree("pkg/m.py"), source=_FEEDER, blob_sha=blob_sha(_FEEDER)
+        )
+    ]
+
+    considered, stops, opened = plugin._call_stops(calls, modules)
+
+    assert [(one.callee, one.reason) for one in opened] == [("self.taskBufferIF.getTask", calls_mod.UNPLACED_OPEN)]
+    assert all(one.callee != "self.taskBufferIF.getTask" for one in stops)
+
+
+_OPEN_ROUTE_DB = (
+    "from typing import Any\n"
+    "\n"
+    "class Interface:\n"
+    "    def __getattr__(self, name: str) -> Any:\n"
+    "        return getattr(self.remote, name)\n"
+    "\n"
+    "class Buffer:\n"
+    "    def scan(self, cur, label):\n"
+    "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE prodSourceLabel=:l'\n"
+    "        varMap = {':l': label}\n"
+    "        cur.execute(sql, varMap)\n"
+)
+
+
+def _read_side(tmp_path, **texts):
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    roots = _tree(tmp_path, **texts)
+    modules = [
+        SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/{name}.py", tree=ast.parse(text), source=text, blob_sha=blob_sha(text))
+        for name, text in texts.items()
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+    with sql.across_calls(calls):
+        return sqlwrite.read_side(modules, attributor, calls)
+
+
+def test_a_route_through_a_call_placed_open_says_so(tmp_path):
+    """The route is read like any other, and its record names the call that may land elsewhere and why."""
+    main = (
+        "from pkg.db import Buffer, Interface\n"
+        "\n"
+        "class Feeder:\n"
+        "    def __init__(self, tb: 'Interface | Buffer'):\n"
+        "        self.tb = tb\n"
+        "\n"
+        "    def run(self, cur):\n"
+        "        self.tb.scan(cur, 'managed')\n"
+    )
+    side = _read_side(tmp_path, db=_OPEN_ROUTE_DB, main=main)
+
+    (scanned,) = [one for (owner, _line), one in side.statements.items() if owner.endswith("::scan")]
+    (route,) = scanned.call_readings
+    assert route.chain == ["pkg/main.py:8"]
+    assert route.open == [f"pkg/main.py:8 -- {calls_mod.UNPLACED_OPEN}"]
+    # In the list, so the list is not short of it.
+    assert scanned.callers_complete is True
+
+
+def test_a_statement_says_no_value_where_one_of_its_calls_hands_one_not_known(tmp_path):
+    """``getCache_JEDI``: one call hands ``main_key="AtlasSites"``, another an attribute.
+
+    The statement's own fields, every run any call makes, name no value -- the
+    union of the calls that settle is not every value.  Each route still reads
+    what its own call hands, and the route whose call hands the attribute reads
+    none; a route that read as the statement before now carries its own field.
+    """
+    db = (
+        "def get_cache(cur, main_key):\n"
+        "    sql = 'SELECT data FROM ATLAS_PANDA.JEDI_Cache WHERE main_key=:k'\n"
+        "    varMap = {':k': main_key}\n"
+        "    cur.execute(sql, varMap)\n"
+    )
+    main = (
+        "from pkg.db import get_cache\n"
+        "\n"
+        "class Watchdog:\n"
+        "    def __init__(self):\n"
+        "        self.key = 'Filler'\n"
+        "\n"
+        "    def sites(self, cur):\n"
+        "        get_cache(cur, 'AtlasSites')\n"
+        "\n"
+        "    def filler(self, cur):\n"
+        "        get_cache(cur, self.key)\n"
+    )
+    side = _read_side(tmp_path, db=db, main=main)
+
+    (cached,) = [one for (owner, _line), one in side.statements.items() if owner.endswith("::get_cache")]
+    assert cached.selects == set()
+    routes = {tuple(one.chain): one for one in cached.call_readings}
+    assert routes[("pkg/main.py:8",)].as_statement is False
+    assert routes[("pkg/main.py:8",)].selects == ["JEDI_Cache.main_key=AtlasSites"]
+    assert routes[("pkg/main.py:11",)].selects == []
+
+
+def test_a_value_settles_from_callers_only_where_every_call_is_known(tmp_path):
+    """Handed marks, not silence: a call by the name placed nowhere, a value passed through ``*``, a value not settled."""
+    from bamboo.codemap.panda import values
+
+    roots = _tree(
+        tmp_path,
+        db="def lock(statList):\n    return statList\n",
+        main=(
+            "from pkg.db import lock\n"
+            "\n"
+            "def run(more, rows):\n"
+            "    lock(['activated'])\n"
+            "    lock(*more)\n"
+            "    lock(rows[0])\n"
+            "    unknown.lock(['held'])\n"
+        ),
+    )
+    calls = _calls(roots)
+    func = _function(calls, "db", "lock")
+    settle = values.handed(values.resolver(), calls)
+
+    found = settle(ast.Name(id="statList"), func, "pkg/db.py")
+
+    assert [(one.value, one.via) for one in found if not one.unknown] == [("activated", ("pkg/main.py:4",))]
+    assert sorted(one.via for one in found if one.unknown) == [(), ("pkg/main.py:5",), ("pkg/main.py:6",)]
+    assert values.known(found) == []
+
+
+def test_a_route_read_as_the_statement_is_checked_against_the_statements_fields():
+    """The build stops where a route marked as the statement read otherwise -- every field the mark stands for."""
+    import pytest
+
+    from bamboo.codemap.models import CallReading
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    at = sqlwrite.ReadStatement(
+        owner="pkg/db.py::scan", package=PACKAGE, file="pkg/db.py", blob_sha="", line=4, window=None,
+        selects={("jobsActive4.jobStatus", "running")}, excludes=set(), consults=set(), keys=set(),
+        order_by=set(), limits=set(), tables={"jobsActive4"}, conditions=[], unresolved=(),
+    )
+    same = CallReading(chain=["pkg/main.py:4"], tables=["jobsActive4"], selects=["jobsActive4.jobStatus=running"])
+    other = same.model_copy(update={"selects": []})
+
+    sqlwrite._check_as_statement([(("pkg/db.py::scan", 4), ("pkg/main.py:4",), same)], {("pkg/db.py::scan", 4): at})
+    with pytest.raises(RuntimeError, match="1 route.*selects"):
+        sqlwrite._check_as_statement([(("pkg/db.py::scan", 4), ("pkg/main.py:4",), other)], {("pkg/db.py::scan", 4): at})
+
+
+def test_every_caller_is_read_however_many_there_are(tmp_path):
+    """No call count past which a function's routes or constants are not read; ``missed`` says only what is missing."""
+    callers = "".join(f"    lock({i})\n" for i in range(20))
+    roots = _tree(
+        tmp_path,
+        db="def lock(minutes):\n    return minutes\n",
+        main=f"from pkg.db import lock\n\ndef run():\n{callers}",
+    )
+    calls = _calls(roots)
+    target = calls_mod.Target("pkg/db.py", _function(calls, "db", "lock"), None)
+
+    routes, stops = calls.routes(target)
+
+    assert len(routes) == 20 and stops == []
+    assert len(calls.handed_constants(target, {"minutes"})) == 20
+    assert calls.missed(target) == []
+
+
+def test_a_name_shared_with_every_container_names_five_receivers_and_counts_the_rest(tmp_path):
+    """``update``'s 168 calls on ``varMap``, ``var_map``, ... would make one clause of seven hundred characters."""
+    body = "".join(f"    d{i}.update(x)\n" for i in range(8))
+    roots = _tree(
+        tmp_path,
+        m=f"class Mine:\n    def update(self, x):\n        return x\n\ndef run(x, {', '.join(f'd{i}' for i in range(8))}):\n{body}",
+    )
+    calls = _calls(roots)
+
+    (why,) = calls.missed(_method(calls, "m", "Mine", "update"))
+
+    assert why.endswith("(d0 1, d1 1, d2 1, d3 1, d4 1, … 3 more)")

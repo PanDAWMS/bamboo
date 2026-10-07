@@ -1037,6 +1037,13 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
             click.echo(f"    … {len(where) - top} more function(s)")
 
     _report_call_stops(fragment, top)
+    watch = getattr(plugin, "read_watch", None)
+    if watch:
+        owner, routes = watch.get("most_routes", ("", 0))
+        click.echo(
+            f"\nread side, every caller read: most routes into one function {routes} ({owner or 'none'}); "
+            f"settling bind values from callers took {watch.get('settle_seconds', 0.0):.1f} s"
+        )
 
     differences = gates.mover_differences(fragment)
     if differences:
@@ -1108,6 +1115,18 @@ def _report_call_stops(fragment: MapFragment, top: int) -> None:
         click.echo(f"  {count:>5}  {owner}")
     if len(where) > top:
         click.echo(f"    … {len(where) - top} more function(s)")
+    opened = fragment.open_calls
+    click.echo(
+        f"\nwhere calls were placed open: {len(opened)} of {fragment.calls_considered} "
+        f"calls to this corpus's functions"
+    )
+    click.echo("  (entered at the definitions they name, and possibly landing elsewhere too)")
+    for reason, count in Counter(stop.reason for stop in opened).most_common():
+        here = [stop for stop in opened if stop.reason == reason]
+        files = Counter(stop.file for stop in here).most_common(1)[0]
+        click.echo(f"  {count:>5}  {reason}   (most in {files[0]}, {files[1]})")
+        for callee, seen in Counter(stop.callee for stop in here).most_common(3):
+            click.echo(f"        {seen:>4}x  {callee}")
 
 
 if __name__ == "__main__":

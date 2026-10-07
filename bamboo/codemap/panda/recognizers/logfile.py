@@ -378,7 +378,9 @@ class LoggerFiles:
             self._value(trail, file, func, call.args[0], at, way)
             return
         placed = self.calls.callees(file, func, call) if func is not None and name not in _OPENERS else None
-        if placed is None or len(placed.targets) != 1:
+        # One definition, placed closed: a call placed open may return
+        # another function's file.
+        if placed is None or len(placed.targets) != 1 or placed.unplaced:
             trail.open = True
             return
         (target,) = placed.targets
@@ -551,7 +553,11 @@ class LoggerFiles:
         return found
 
     def _unplaced(self, target: Target) -> list[tuple[CallSite, ast.Call, bool]]:
-        """Calls by *target*'s name, on another object, that the call graph places nowhere."""
+        """Calls by *target*'s name, on another object, that the call graph places nowhere, or elsewhere and open.
+
+        As :meth:`Calls.missed` counts them: a call placed at other definitions
+        and open beside them may land here too.
+        """
         found: list[tuple[CallSite, ast.Call, bool]] = []
         for site in self.calls.every_call().get(getattr(target.func, "name", ""), []):
             called = site.call.func
@@ -559,7 +565,8 @@ class LoggerFiles:
                 continue
             if isinstance(called.value, ast.Name) and called.value.id in ("self", "cls"):
                 continue
-            if self.calls.callees(site.file, site.func, site.call).targets:
+            landed = self.calls.callees(site.file, site.func, site.call)
+            if landed.targets and (not landed.unplaced or any(one.func is target.func for one in landed.targets)):
                 continue
             found.append((site, site.call, False))
         return found

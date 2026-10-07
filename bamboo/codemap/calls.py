@@ -252,6 +252,7 @@ class Calls:
         self._placed: dict[int, Placed] = {}
         self._by_name: Optional[dict[str, list[CallSite]]] = None
         self._callers: dict[tuple[str, int], list[CallSite]] = {}
+        self._missed: dict[tuple[str, int], list[str]] = {}
 
     # -- where a call lands -------------------------------------------------
 
@@ -478,6 +479,23 @@ class Calls:
         _CALLERS[shared] = kept
         return kept
 
+    def opened(self, site: CallSite) -> str:
+        """Why *site*'s call may land beyond the definitions it is placed at; ``""`` where it is placed closed.
+
+        :meth:`callers` lists a call placed open beside the ones placed
+        closed -- ``self.taskBufferIF.getTaskWithID_JEDI(...)`` lands at
+        ``JediTaskBuffer``'s, or wherever the interface forwards it.  A reader
+        listing callers says so beside it; a reader taking one definition as
+        the call's does not take it.
+        """
+        placed = self.callees(site.file, site.func, site.call)
+        return placed.unplaced if placed.targets else ""
+
+    def hop(self, site: CallSite) -> str:
+        """``file:line`` of *site*, and why it may land elsewhere where it is placed open."""
+        why = self.opened(site)
+        return f"{site.file}:{site.call.lineno}" + (f" (placed open -- {why})" if why else "")
+
     #: How many chains ``called_from`` lists before it counts the rest.
     CALLED_FROM = 16
 
@@ -485,14 +503,15 @@ class Calls:
         """``file:line`` of each call placed at *target*, and one hop out where its caller is called.
 
         Sorted, capped at :data:`CALLED_FROM` with a closing ``… N more``.
+        A hop placed open says so after its ``file:line`` (:meth:`opened`).
         """
         chains: list[str] = []
         for site in self.callers(target):
-            at = f"{site.file}:{site.call.lineno}"
+            at = self.hop(site)
             owned = self.types.method_class(site.file, site.func)
             outer = self.callers(Target(site.file, site.func, owned[1] if owned else None))
             if outer:
-                chains.extend(f"{one.file}:{one.call.lineno} -> {at}" for one in outer)
+                chains.extend(f"{self.hop(one)} -> {at}" for one in outer)
             else:
                 chains.append(at)
         chains = sorted(set(chains))
@@ -500,10 +519,8 @@ class Calls:
             return [*chains[: self.CALLED_FROM], f"… {len(chains) - self.CALLED_FROM} more"]
         return chains
 
-    #: How many calls out a constant is looked for, and how many calls one
-    #: function may have before its callers are not read one by one.
+    #: How many calls out a constant is looked for.
     CONSTANT_HOPS = 3
-    CONSTANT_CALLERS = 16
 
     def handed_constants(
         self, target: Target, names: set[str], depth: int = 0
@@ -516,9 +533,10 @@ class Calls:
         callers, so ``JediTaskBuffer``'s forwarding method is read through to
         ``TaskCommando``.  A call handing none of *names* a constant is left
         out: it runs the function as the general reading already reads it.
+        Every call placed at *target* is read, however many there are.
         """
         sites = self.callers(target)
-        if not sites or len(sites) > self.CONSTANT_CALLERS:
+        if not sites:
             return []
         found: list[tuple[tuple[str, ...], dict[str, object]]] = []
         for site in sites:
@@ -560,13 +578,11 @@ class Calls:
         forwarder, ``TaskBuffer.lockJobsForReassign`` handing on what
         ``copyArchive`` gave it -- so that the outermost call of a route is
         where the values are written down, or where the caller's own callers
-        are unknown.  Up to :data:`ROUTE_HOPS` calls; a function with more
-        callers than :data:`CONSTANT_CALLERS` has no routes listed, and says so.
+        are unknown.  Up to :data:`ROUTE_HOPS` calls out, from every call
+        placed at *target*, however many there are.
         """
         sites = self.callers(target)
-        stops = self.missed(target)
-        if len(sites) > self.CONSTANT_CALLERS:
-            return [], stops
+        stops = list(self.missed(target))
         found: list[Route] = []
         for site in sites:
             handed = bind(site.call, target)
@@ -606,13 +622,14 @@ class Calls:
         function no call in the corpus names is reached from outside it: an
         endpoint, a thread's ``run``.
         """
+        key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
+        if key in self._missed:
+            return self._missed[key]
         name = target.func.name  # type: ignore[attr-defined]
         if name == "__init__" and target.cls is not None:
             name = target.cls.name
         placed = self.callers(target)
         why: list[str] = []
-        if len(placed) > self.CONSTANT_CALLERS:
-            why.append(f"{name}: {len(placed)} callers, more than {self.CONSTANT_CALLERS} are read one by one")
         unplaced: dict[str, dict[str, int]] = {}
         elsewhere: dict[str, dict[str, int]] = {}
         for site in self._index().get(name, []):
@@ -633,6 +650,7 @@ class Calls:
             why.append(f"{name}: {sum(receivers.values())} call(s) by its name placed elsewhere -- {reason} ({_on(receivers)})")
         if not placed and not unplaced and not elsewhere:
             why.append(f"{name}: {_OUTSIDE}")
+        self._missed[key] = why
         return why
 
     # -- what a method changes on its object --------------------------------
@@ -672,11 +690,21 @@ class Calls:
         return found
 
 
+#: How many receivers :func:`_on` names before it counts the rest.
+_RECEIVERS = 5
+
+
 def _on(receivers: dict[str, int]) -> str:
-    """``self.taskBufferIF 19, tbIF 2`` -- the receivers calls were made on, most first."""
-    return ", ".join(
-        f"{receiver} {count}" for receiver, count in sorted(receivers.items(), key=lambda one: (-one[1], one[0]))
-    )
+    """``self.taskBufferIF 19, tbIF 2`` -- the receivers calls were made on, most first, the first five.
+
+    A method named ``append`` or ``update`` shares its name with every
+    container's: the calls on ``varMap`` and ``tmp_list`` that may be calls to
+    it run to 168 receivers and eleven thousand characters, so past
+    :data:`_RECEIVERS` the rest are counted.
+    """
+    ranked = sorted(receivers.items(), key=lambda one: (-one[1], one[0]))
+    said = ", ".join(f"{receiver} {count}" for receiver, count in ranked[:_RECEIVERS])
+    return said + (f", … {len(ranked) - _RECEIVERS} more" if len(ranked) > _RECEIVERS else "")
 
 
 #: The methods that put a value into a container.  The removals take one out

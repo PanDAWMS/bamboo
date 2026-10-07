@@ -627,10 +627,6 @@ def resolver():
     return resolve
 
 
-#: How many calls one parameter is followed into.  Past it the parameter is
-#: left unsettled rather than settled by a sample of its callers.
-HANDED_CALLERS = 16
-
 #: How many functions out a value is followed.  ``lockJobsForReassign``'s
 #: status list is two: the ``DBProxy`` method's parameter is ``TaskBuffer``'s,
 #: which is the list ``copyArchive.main`` writes down.
@@ -638,12 +634,28 @@ HANDED_DEPTH = 4
 
 
 class Handed(NamedTuple):
-    """One value an expression can take, and the calls it came in through."""
+    """One value an expression can take, and the calls it came in through -- or a mark that one is not known."""
 
     value: str
     #: ``file:line`` of each call the value was handed through, the one into
     #: the function asked about first.  Empty where the function says it.
     via: tuple[str, ...] = ()
+    #: Not a value: a call into the function hands one this reading cannot
+    #: settle -- ``main_key=self.dc_main_key`` -- or passes it through ``*``,
+    #: or a call by the function's name is placed nowhere (:meth:`Calls.missed`).
+    #: The values beside it are some of the parameter's, not all.  A route
+    #: through a call that handed a value reads it; a statement's own fields,
+    #: every run any call makes, do not (:func:`known`).
+    unknown: bool = False
+
+
+def known(found: list[Handed]) -> list[Handed]:
+    """*found* as a statement's own fields read it: every value, or none where one is not known."""
+    return [] if any(one.unknown for one in found) else found
+
+
+def _any_value(found: list[Handed]) -> bool:
+    return any(not one.unknown for one in found)
 
 
 def handed(resolve, calls: Optional["Calls"]):
@@ -658,14 +670,21 @@ def handed(resolve, calls: Optional["Calls"]):
     * a local name, through each ``=`` or ``+=`` in the function that writes
       it -- and only where every one of them settles (see ``bindings``);
     * a parameter, through what each call :meth:`Calls.callers` places at the
-      function hands it (``calls.bind``), read in the caller the same way.
+      function hands it (``calls.bind``), read in the caller the same way --
+      every call, however many.
 
     Returns ``(expression, func, file) -> [Handed, ...]``.  Without *calls*
     only the function's own writes are read.
 
     A union, not a choice: a statement that three callers hand three lists
     asks, over its runs, for every value any of them names.  Which caller
-    asked for which is kept in ``via``.
+    asked for which is kept in ``via``.  A call whose value is not settled,
+    and a call by the name placed nowhere, are kept too, as marks
+    (:attr:`Handed.unknown`): the union of the rest is not every value, and
+    ``getCache_JEDI`` read ``main_key=AtlasSites`` alone while
+    ``AtlasQueueFillerWatchDog`` hands its own key from an attribute.  A
+    route keeps what its call handed; a statement's own fields take the
+    union only where no mark is beside it (:func:`known`).
     """
     from bamboo.codemap.calls import Target, bind
     from bamboo.codemap.calls import returns as calls_returns
@@ -756,7 +775,7 @@ def handed(resolve, calls: Optional["Calls"]):
             # ``cls.getInputTypes() + ["pp_input"]``: every member of both.
             left = settle(expression.left, func, file, depth, seen)
             right = settle(expression.right, func, file, depth, seen)
-            return left + right if left and right else []
+            return left + right if _any_value(left) and _any_value(right) else []
         if isinstance(expression, ast.Call):
             return returned(expression, func, file, depth, seen)
         if not isinstance(expression, ast.Name):
@@ -771,7 +790,7 @@ def handed(resolve, calls: Optional["Calls"]):
         found: list[Handed] = []
         for value in written:
             settled = settle(value, func, file, depth, seen)
-            if not settled:
+            if not _any_value(settled):
                 return []
             found.extend(settled)
         if expression.id not in parameters(func):
@@ -781,18 +800,21 @@ def handed(resolve, calls: Optional["Calls"]):
         owned = calls.types.method_class(file, func)
         target = Target(file, func, owned[1] if owned else None)
         sites = calls.callers(target)
-        if not sites or len(sites) > HANDED_CALLERS:
+        if not sites:
             return []
         passed_over = [] if written else never_reaching(expression, func, target)
+        if calls.missed(target):
+            found.append(Handed("", (), unknown=True))
         for site in sites:
             passed = bind(site.call, target).get(expression.id)
-            if passed is None:
-                continue
+            held = settle(passed, site.func, site.file, depth + 1, seen) if passed is not None else []
+            if not _any_value(held):
+                held = [Handed("", (), unknown=True)]
             at = f"{site.file}:{site.call.lineno}"
-            for one in settle(passed, site.func, site.file, depth + 1, seen):
+            for one in held:
                 via = (at, *one.via)
                 if not any(via[: len(route)] == route for route in passed_over):
-                    found.append(Handed(one.value, via))
+                    found.append(Handed(one.value, via, one.unknown))
         return found
 
     def never_reaching(expression: ast.Name, func: ast.AST, target: "Target") -> list[tuple[str, ...]]:
@@ -835,7 +857,7 @@ def handed(resolve, calls: Optional["Calls"]):
                 return []
             for value in calls_returns(target.func):
                 settled = settle(value, target.func, target.file, depth + 1, seen | {key})
-                if not settled:
+                if not _any_value(settled):
                     return []
                 found.extend(settled)
         return found

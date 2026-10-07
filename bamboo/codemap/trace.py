@@ -2261,7 +2261,9 @@ class _Walk:
         if depth > 1:
             return None
         placed = self.calls.callees(frame.file, frame.func, built)
-        if len(placed.targets) != 1:
+        # One definition, placed closed: placed open, the logger may be
+        # built by a function this reading cannot name.
+        if len(placed.targets) != 1 or placed.unplaced:
             return None
         (target,) = placed.targets
         bound = calls_mod.bind(built, target)
@@ -3151,6 +3153,7 @@ class _Walk:
                     ),
                     depth=depth,
                     printed=self._block_prints(caller, statement),
+                    open=self.calls.opened(site),
                 )
             ):
                 return False
@@ -3388,11 +3391,20 @@ class _Walk:
 
         *spanned* are the facade methods a map handover already crossed to
         answer this parameter; their calls are that handover's, not others.
+
+        Whatever the step says, it says too why the calls placed here may not
+        be every call -- :meth:`Calls.missed`, each after ``"; "`` -- so "a
+        parameter, so its value is chosen at the call site" with no caller
+        says whether the function is an endpoint or called where nothing
+        places the call, and "followed to the 3 call(s)" says when more calls
+        by the name were not placed.
         """
         cls = self.types.method_class(frame.file, frame.func)
         target = calls_mod.Target(frame.file, frame.func, cls[1] if cls else None)
+        missing = "".join(f"; {one}" for one in self.calls.missed(target))
         sites = self._callers_beside(frame, spanned)
         if not sites:
+            stopped.detail += missing
             return False
         every = sites
         made: Optional[set[tuple[str, int, int]]] = None
@@ -3419,7 +3431,7 @@ class _Walk:
             stopped.detail = (
                 f"a parameter; {len(sites)} calls are placed at "
                 f"{getattr(frame.func, 'name', '')}, too many to follow"
-            )
+            ) + missing
             return True
         elif left:
             stopped.detail = _built_detail(frame, len(sites), len(every))
@@ -3429,6 +3441,7 @@ class _Walk:
                 f"{getattr(frame.func, 'name', '')}"
                 + (f" besides the handover through {', '.join(sorted(spanned))}" if spanned else "")
             )
+        stopped.detail += missing
         if left:
             self._narrowed(
                 frame, made, stopped, left,
@@ -3452,6 +3465,7 @@ class _Walk:
             step, statement = self._handed_step(
                 caller, call, target, name, calls_mod.bind(call, target), depth
             )
+            step.open = self.calls.opened(site)
             if not self.record(step):
                 return
             if step.reads:
