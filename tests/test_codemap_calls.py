@@ -2187,3 +2187,31 @@ def test_a_function_whose_calls_by_name_all_land_outside_says_so_and_not_that_no
     assert calls.missed(_method(calls, "m", "Mapper", "unused")) == [
         "unused: no call in the corpus names it -- reached from outside"
     ]
+
+
+def test_a_list_with_one_element_unsettled_settles_to_no_value_not_to_the_rest(tmp_path):
+    """``[a, b]`` with ``b`` unknown is not ``{a}`` -- as a name with one unsettled write is not its other writes."""
+    from bamboo.codemap.panda import values
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def get(other, more):\n"
+            "    known = ['activated', 'throttled']\n"
+            "    partly = ['activated', other]\n"
+            "    spread = ['activated', *more]\n"
+            "    return known, partly, spread\n"
+        ),
+    )
+    calls = _calls(roots)
+    func = _function(calls, "db", "get")
+    settle = values.handed(values.resolver(), calls)
+    lists = {
+        node.targets[0].id: node.value
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.List)
+    }
+
+    assert sorted(one.value for one in settle(lists["known"], func, "pkg/db.py")) == ["activated", "throttled"]
+    assert settle(lists["partly"], func, "pkg/db.py") == []
+    assert settle(lists["spread"], func, "pkg/db.py") == []

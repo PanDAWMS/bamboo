@@ -666,7 +666,8 @@ def handed(resolve, calls: Optional["Calls"]):
     without stating it:
 
     * a list, tuple or set literal, element by element -- what an ``IN`` list
-      is bound from;
+      is bound from -- and only where every element settles: ``[a, b]`` with
+      ``b`` unknown is not ``{a}``;
     * a local name, through each ``=`` or ``+=`` in the function that writes
       it -- and only where every one of them settles (see ``bindings``);
     * a parameter, through what each call :meth:`Calls.callers` places at the
@@ -780,12 +781,15 @@ def handed(resolve, calls: Optional["Calls"]):
         if stated:
             return [Handed(value) for value in stated]
         if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
-            return [
-                one
-                for element in expression.elts
-                if not isinstance(element, ast.Starred)
-                for one in settle(element, func, file, depth, seen)
-            ]
+            # As for a name's writes below: one element unsettled -- or
+            # spread in with ``*`` -- and the rest are not every value.
+            found = []
+            for element in expression.elts:
+                settled = [] if isinstance(element, ast.Starred) else settle(element, func, file, depth, seen)
+                if not _any_value(settled):
+                    return []
+                found.extend(settled)
+            return found
         if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add) and listed(expression):
             # ``cls.getInputTypes() + ["pp_input"]``: every member of both.
             left = settle(expression.left, func, file, depth, seen)
