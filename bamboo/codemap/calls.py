@@ -63,6 +63,30 @@ UNPLACED_OPEN = "the call may also land somewhere this reading cannot name"
 #: that says more first.
 _FORWARDING = (UNPLACED_FORWARDED, UNPLACED_GETATTRIBUTE)
 
+#: Where :meth:`Types.candidates` says a value is an instance of a builtin
+#: type -- ``tmp_list = []``, ``seen = set()`` -- as ``(BUILTIN, "list")``.
+#: Not a file: no class of the corpus is defined there, so no method of one is
+#: a call's target.
+BUILTIN = "<builtins>"
+#: The builtin types a call of their name builds, and what each builds.
+_BUILTIN_TYPES = {
+    "list": "list",
+    "dict": "dict",
+    "set": "set",
+    "tuple": "tuple",
+    "frozenset": "frozenset",
+    "str": "str",
+    "bytes": "bytes",
+    "sorted": "list",
+}
+#: The standard library's container classes, by the module they are imported from.
+_LIBRARY_CONTAINERS = {
+    ("collections", "defaultdict"),
+    ("collections", "OrderedDict"),
+    ("collections", "deque"),
+    ("collections", "Counter"),
+}
+
 
 #: Parsed modules shared by every reading of the same files.  A walk is made
 #: once per arm, per statement and per printed line, and the corpus index
@@ -129,6 +153,8 @@ class Placed(NamedTuple):
 
 #: How :meth:`Calls.missed` says a function is called from nowhere in the corpus.
 _OUTSIDE = "no call in the corpus names it -- reached from outside"
+#: ... and that the calls naming it all land outside the corpus.
+_LANDS_OUTSIDE = "no call this reading places lands at it"
 
 
 class Route(NamedTuple):
@@ -307,10 +333,19 @@ class Calls:
         # was built from.  Every class it can be is a target; where some way
         # of building it cannot be read, that is said beside them.
         classes, opened = self.types.candidates(file, func, receiver)
+        builtin = {name for where, name in classes if where == BUILTIN}
+        if builtin and len(builtin) == len(classes) and not opened:
+            # ``tmp_list = []`` ... ``tmp_list.append(x)``: a builtin type's
+            # method, as on a literal above -- and no call to a corpus
+            # function of that name (:meth:`Calls.missed`).
+            return Placed((), UNPLACED_OUTSIDE)
+        # Beside a class of the corpus, a builtin is as open as it was before
+        # it was told apart: the call may land on either.
+        opened = opened or bool(builtin)
         built = [
             (where, cls)
             for where, name in sorted(classes)
-            if (cls := self.types.class_def(where, name)) is not None
+            if where != BUILTIN and (cls := self.types.class_def(where, name)) is not None
         ]
         placed = self._method_of_any(built, called.attr, opened)
         if placed.targets or placed.unplaced in _FORWARDING:
@@ -621,6 +656,13 @@ class Calls:
         at ``JediTaskBuffer``'s, or wherever the interface forwards it.  A
         function no call in the corpus names is reached from outside it: an
         endpoint, a thread's ``run``.
+
+        A call placed outside the corpus is not a call to *target* and is not
+        listed: ``tmp_list.append(x)`` on a list, ``os.kill(...)``,
+        ``json.dump(...)``.  Where every call by the name lands there, that is
+        what is said -- not that nothing names it, and not that it is reached
+        from outside: ``ListWithLock.__contains__`` is asked by ``in``, which
+        this reading does not read as a call.
         """
         key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
         if key in self._missed:
@@ -632,6 +674,7 @@ class Calls:
         why: list[str] = []
         unplaced: dict[str, dict[str, int]] = {}
         elsewhere: dict[str, dict[str, int]] = {}
+        outside: dict[str, int] = {}
         for site in self._index().get(name, []):
             if site.func is target.func:
                 continue
@@ -640,6 +683,8 @@ class Calls:
                 if not landed.unplaced or any(one.func is target.func for one in landed.targets):
                     continue
                 held = elsewhere.setdefault(landed.unplaced, {})
+            elif landed.unplaced == UNPLACED_OUTSIDE:
+                held = outside
             else:
                 held = unplaced.setdefault(landed.unplaced or "not placed", {})
             receiver = ast.unparse(site.call.func.value) if isinstance(site.call.func, ast.Attribute) else "(a bare name)"
@@ -649,7 +694,13 @@ class Calls:
         for reason, receivers in sorted(elsewhere.items()):
             why.append(f"{name}: {sum(receivers.values())} call(s) by its name placed elsewhere -- {reason} ({_on(receivers)})")
         if not placed and not unplaced and not elsewhere:
-            why.append(f"{name}: {_OUTSIDE}")
+            if outside:
+                why.append(
+                    f"{name}: {_LANDS_OUTSIDE} -- {sum(outside.values())} call(s) by its name land "
+                    f"{UNPLACED_OUTSIDE} ({_on(outside)})"
+                )
+            else:
+                why.append(f"{name}: {_OUTSIDE}")
         self._missed[key] = why
         return why
 
@@ -1467,6 +1518,8 @@ class Types:
 
         if isinstance(expression, ast.Constant) and expression.value is None:
             return frozenset(), False
+        if instances and (builtin := self._builtin_instance(file, func, expression)):
+            return frozenset({(BUILTIN, builtin)}), False
         if isinstance(expression, ast.Call):
             if instances:
                 # An instance of whatever class the callee is: ``Cls(...)``,
@@ -1519,6 +1572,12 @@ class Types:
             owners, owner_open = self.candidates(file, func, expression.value, depth + 1)
             opened = owner_open
             for where, name in owners:
+                if where == BUILTIN:
+                    # ``self.task_setupper_map = {}`` ... ``.get(key)``: what
+                    # a builtin's method returns, or its field holds, is not
+                    # read here.
+                    opened = True
+                    continue
                 cls = self.class_def(where, name)
                 if cls is None:
                     continue
@@ -1534,6 +1593,52 @@ class Types:
                             add(self._values(place, method, value, depth + 1, instances=instances, seen=seen))
             return frozenset(found), opened
         return frozenset(), True
+
+    def _builtin_instance(self, file: str, func: ast.AST, expression: ast.expr) -> str:
+        """The builtin type *expression* builds an instance of -- ``"list"`` for ``[]`` or ``sorted(x)`` -- or ``""``.
+
+        A literal, a comprehension, a string constant; a call of a builtin
+        type's name the module and the function leave unbound; a container
+        class of the standard library, imported.  ``tmp_list.append(x)`` on
+        such a value is a builtin's method, not a call to a corpus function
+        named ``append`` -- ``ListWithLock.append`` had a thousand calls by
+        its name that could not be told from it.
+        """
+        literal = (
+            ((ast.List, ast.ListComp), "list"),
+            ((ast.Dict, ast.DictComp), "dict"),
+            ((ast.Set, ast.SetComp), "set"),
+            ((ast.Tuple,), "tuple"),
+            ((ast.JoinedStr,), "str"),
+        )
+        for shapes, kind in literal:
+            if isinstance(expression, shapes):
+                return kind
+        if isinstance(expression, ast.Constant):
+            return type(expression.value).__name__
+        if not isinstance(expression, ast.Call):
+            return ""
+        called = expression.func
+        if isinstance(called, ast.Name):
+            held = self.imports(file).get(called.id)
+            if held is not None:
+                return held[1] if held in _LIBRARY_CONTAINERS else ""
+            if called.id not in _BUILTIN_TYPES or called.id in self.assigned(func):
+                return ""
+            tree = self.tree(file)
+            for node in tree.body if tree is not None else ():
+                defined = (
+                    [node.name] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    else [one.id for one in getattr(node, "targets", []) if isinstance(one, ast.Name)]
+                )
+                if called.id in defined:
+                    return ""
+            return _BUILTIN_TYPES[called.id]
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            held = self.imports(file).get(called.value.id)
+            if held is not None and not held[1] and (held[0], called.attr) in _LIBRARY_CONTAINERS:
+                return called.attr
+        return ""
 
     def _owner_of(self, file: str, func: ast.AST, called: ast.expr) -> Optional[tuple[str, ast.AST]]:
         """The function *called* names, for a call on ``self`` or a plain name."""

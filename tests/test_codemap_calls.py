@@ -2053,3 +2053,137 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
     # ``other`` is handed on as it came: the outer call's.
     assert constants("fixed") == {"flag": True, "other": False, "more": None}
     assert constants("spread") == {"flag": False}
+
+
+# -- X6: a builtin type's method is not a corpus function's -----------------------
+
+_LISTS = '''\
+import collections
+from collections import defaultdict
+
+
+class ListWithLock:
+    def append(self, x):
+        return x
+
+    def add(self, x):
+        return x
+
+
+def build(x, given):
+    items = []
+    items.append(x)
+    seen = set()
+    seen.add(x)
+    named = [one for one in given]
+    named.append(x)
+    grouped = defaultdict(list)
+    grouped.setdefault(x, [])
+    counted = collections.Counter()
+    counted.update(x)
+    given.append(x)
+
+
+def either(flag, x):
+    held = [] if flag else None
+    if flag:
+        held = ListWithLock()
+    else:
+        held = []
+    held.append(x)
+
+
+def shadowed(x):
+    set = ListWithLock
+    mine = set()
+    mine.add(x)
+'''
+
+
+def test_a_receiver_built_as_a_builtin_lands_outside_the_corpus(tmp_path):
+    """``items = []``, ``set()``, a comprehension, a library container: a builtin's method, not ``ListWithLock``'s."""
+    calls = _calls(_tree(tmp_path, m=_LISTS))
+
+    for text in ("items.append", "seen.add", "named.append", "grouped.setdefault", "counted.update"):
+        placed = _placed(calls, "m", "build", text)
+        assert (placed.targets, placed.unplaced) == ((), calls_mod.UNPLACED_OUTSIDE), text
+    given = _placed(calls, "m", "build", "given.append")
+    assert (given.targets, given.unplaced) == ((), calls_mod.UNPLACED_RECEIVER)
+
+
+def test_a_builtin_beside_a_corpus_class_leaves_the_call_open_as_before(tmp_path):
+    """``held`` is a list on one branch and a ``ListWithLock`` on the other: either may run the call."""
+    calls = _calls(_tree(tmp_path, m=_LISTS))
+
+    placed = _placed(calls, "m", "either", "held.append")
+
+    assert (_where(placed), placed.unplaced) == ([("ListWithLock", "append")], calls_mod.UNPLACED_OPEN)
+
+
+def test_a_builtin_name_the_function_rebinds_is_not_the_builtin(tmp_path):
+    """``set = ListWithLock``: ``set()`` builds what the name holds."""
+    calls = _calls(_tree(tmp_path, m=_LISTS))
+
+    placed = _placed(calls, "m", "shadowed", "mine.add")
+
+    assert _where(placed) == [("ListWithLock", "add")]
+
+
+def test_a_builtin_name_the_module_defines_is_not_the_builtin(tmp_path):
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m="class Box:\n    def add(self, x):\n        return x\n\n"
+            "def sorted(x):\n    return Box()\n\n"
+            "def run(x):\n    held = sorted(x)\n    held.add(x)\n",
+        )
+    )
+
+    placed = _placed(calls, "m", "run", "held.add")
+
+    assert placed.unplaced != calls_mod.UNPLACED_OUTSIDE
+
+
+def test_what_a_builtins_method_returns_is_not_read_so_the_call_stays_open(tmp_path):
+    """``self.task_setupper_map = {}`` ... ``.get(key)``: the dict's values are not read here, so a class beside them is not all."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m="class Setupper:\n    def initializeMods(self):\n        return 1\n\n"
+            "class Processor:\n    def __init__(self):\n        self.task_setupper_map = {}\n\n"
+            "    def run(self, key):\n        taskSetupper = self.task_setupper_map.get(key)\n"
+            "        if taskSetupper is None:\n            taskSetupper = Setupper()\n"
+            "        taskSetupper.initializeMods()\n",
+        )
+    )
+
+    placed = _placed(calls, "m", "run", "taskSetupper.initializeMods")
+
+    assert (_where(placed), placed.unplaced) == ([("Setupper", "initializeMods")], calls_mod.UNPLACED_OPEN)
+
+
+def test_a_call_landing_outside_the_corpus_is_not_counted_as_a_call_the_list_misses(tmp_path):
+    """``ListWithLock.append`` misses ``given.append`` -- its receiver's class is not known -- and not ``items.append``."""
+    calls = _calls(_tree(tmp_path, m=_LISTS))
+
+    (why,) = calls.missed(_method(calls, "m", "ListWithLock", "append"))
+
+    assert why.startswith("append: 1 call(s) by its name not placed -- the receiver's class is not declared (given 1)")
+
+
+def test_a_function_whose_calls_by_name_all_land_outside_says_so_and_not_that_nothing_names_it(tmp_path):
+    """``WorkQueueMapper.dump``: ``json.dump(...)`` names it and lands in ``json``; ``in`` asks ``__contains__`` unread."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m="import json\n\nclass Mapper:\n    def dump(self):\n        return 1\n\n    def unused(self):\n        return 2\n\n"
+            "def save(x, f):\n    json.dump(x, f)\n    json.dump(x, f)\n",
+        )
+    )
+
+    assert calls.missed(_method(calls, "m", "Mapper", "dump")) == [
+        "dump: no call this reading places lands at it -- 2 call(s) by its name land outside the corpus (json 2)"
+    ]
+    assert calls.missed(_method(calls, "m", "Mapper", "unused")) == [
+        "unused: no call in the corpus names it -- reached from outside"
+    ]
