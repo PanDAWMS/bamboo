@@ -2524,6 +2524,42 @@ class TaskBuffer:
         return SiteMapper(self)
 '''
 
+_PROXY_POOL = '''\
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from pandaserver.taskbuffer.OraDBProxy import DBProxy
+
+
+class DBProxyPool:
+    @contextmanager
+    def get(self) -> Iterator[DBProxy]:
+        yield DBProxy()
+'''
+
+
+def _forwarding_task_buffer(*methods: str) -> str:
+    """``TaskBuffer``, the declared facade, whose methods borrow a proxy and call its method of the same name.
+
+    Each of *methods* is ``name``, then its parameters as one string.
+    """
+    pairs = list(zip(methods[::2], methods[1::2], strict=True))
+    body = "".join(
+        f"""
+    def {name}(self, {parameters}):
+        with self.proxyPool.get() as proxy:
+            return proxy.{name}({parameters})
+"""
+        for name, parameters in pairs
+    )
+    return f"""from pandaserver.taskbuffer.DBProxyPool import DBProxyPool
+
+
+class TaskBuffer:
+    proxyPool: DBProxyPool
+{body}"""
+
+
 _PLUGIN_BASE = '''\
 from typing import TYPE_CHECKING
 
@@ -3300,6 +3336,8 @@ class DBProxy:
         self.cur.execute(sql, varMap)
         return self.cur.fetchall()
 ''',
+            "taskbuffer/DBProxyPool.py": _PROXY_POOL,
+            "taskbuffer/TaskBuffer.py": _forwarding_task_buffer("getPandaIDsWithTask_JEDI", "jediTaskID, onlyActive"),
             "daemons/commando.py": '''\
 def run(self, jediTaskID, log):
     pandaIDs = self.taskBufferIF.getPandaIDsWithTask_JEDI(jediTaskID, True)
@@ -4196,23 +4234,14 @@ class DBProxy:
         self.cur.execute(sqlP, varMap)
         return self.cur.fetchall()
 ''',
-            "taskbuffer/Buffer.py": '''\
-from pandaserver.taskbuffer.OraDBProxy import DBProxy
-
-
-class Buffer:
-    def __init__(self, proxy: DBProxy):
-        self.proxy = proxy
-
-    def getPandaIDsWithTask_JEDI(self, jediTaskID, onlyActive):
-        return self.proxy.getPandaIDsWithTask_JEDI(jediTaskID, onlyActive)
-''',
+            "taskbuffer/DBProxyPool.py": _PROXY_POOL,
+            "taskbuffer/TaskBuffer.py": _forwarding_task_buffer("getPandaIDsWithTask_JEDI", "jediTaskID, onlyActive"),
             "daemons/commando.py": '''\
-from pandaserver.taskbuffer.Buffer import Buffer
+from pandaserver.taskbuffer.TaskBuffer import TaskBuffer
 
 
 class Commando:
-    def __init__(self, taskBufferIF: Buffer):
+    def __init__(self, taskBufferIF: TaskBuffer):
         self.taskBufferIF = taskBufferIF
 
     def run(self, jediTaskID, log):
@@ -4233,4 +4262,95 @@ class Commando:
         "active": "getPandaIDsWithTask_JEDI -- reads jobsDefined4, jobsActive4 by :jediTaskID",
         "every": "getPandaIDsWithTask_JEDI -- reads jobsDefined4, jobsActive4, jobsArchived4 by :jediTaskID",
         "unknown": "getPandaIDsWithTask_JEDI -- reads jobsDefined4, jobsActive4, jobsArchived4 by :jediTaskID",
+    }
+
+
+def test_a_value_the_database_supplies_is_read_from_what_the_facade_calls(tmp_path):
+    """The facade's method says which proxy methods run, not its name.
+
+    ``querySQL`` calls ``querySQLS``, and the proxy's own ``querySQL`` --
+    another method, reading another table -- was what the same name read.
+    ``peekJobs`` calls ``peekJob`` once per job and the proxy has no
+    ``peekJobs`` at all, so the same name read nothing.  A name no facade has
+    says nothing, though the proxy has a method of it.
+    """
+    roots = _server(
+        tmp_path,
+        **{
+            "taskbuffer/OraDBProxy.py": '''\
+class DBProxy:
+    def querySQL(self, sql):
+        sql = "SELECT name FROM ATLAS_PANDA.wrongTable WHERE id=:id "
+        varMap = {}
+        varMap[":id"] = 1
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+
+    def querySQLS(self, sql, varMap):
+        sql = "SELECT name FROM ATLAS_PANDA.rightTable WHERE name=:name "
+        varMap = {}
+        varMap[":name"] = "x"
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+
+    def peekJob(self, pandaID):
+        sql = "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE PandaID=:PandaID "
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+
+    def lonely(self, pandaID):
+        sql = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID "
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+''',
+            "taskbuffer/DBProxyPool.py": _PROXY_POOL,
+            "taskbuffer/TaskBuffer.py": '''\
+from pandaserver.taskbuffer.DBProxyPool import DBProxyPool
+
+
+class TaskBuffer:
+    proxyPool: DBProxyPool
+
+    def querySQL(self, sql, varMap):
+        with self.proxyPool.get() as proxy:
+            ret = proxy.querySQLS(sql, varMap)[1]
+        return ret
+
+    def peekJobs(self, pandaIDs):
+        found = []
+        with self.proxyPool.get() as proxy:
+            for pandaID in pandaIDs:
+                found.append(proxy.peekJob(pandaID))
+        return found
+''',
+            "daemons/commando.py": '''\
+from pandaserver.taskbuffer.TaskBuffer import TaskBuffer
+
+
+class Commando:
+    def __init__(self, taskBufferIF: TaskBuffer):
+        self.taskBufferIF = taskBufferIF
+
+    def run(self, pandaIDs, log):
+        names = self.taskBufferIF.querySQL("SELECT", {})
+        jobs = self.taskBufferIF.peekJobs(pandaIDs)
+        alone = self.taskBufferIF.lonely(pandaIDs)
+        log.info(f"{names} {jobs} {alone}")
+''',
+        },
+    )
+
+    walked = trace_mod.walk_from_print(
+        roots, file="pandaserver/daemons/commando.py", line=12, classify=provenance.classify
+    )
+
+    said = {s.name: s.detail for s in walked.steps if s.terminal == models.STOP_UPSTREAM}
+    assert said == {
+        "names": "querySQL -- reads rightTable by :name",
+        "jobs": "peekJobs -- reads jobsDefined4 by :PandaID",
+        "alone": "lonely",
     }

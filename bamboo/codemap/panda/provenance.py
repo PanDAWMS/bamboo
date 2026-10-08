@@ -33,9 +33,13 @@ from __future__ import annotations
 
 import ast
 import builtins
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
+from bamboo.codemap.panda.pathcond import names_bound_by, targets_of, written_value
+
+if TYPE_CHECKING:
+    from bamboo.codemap.calls import Types
 
 #: The class a receiver is declared to be -> the system on the other side of it.
 #:
@@ -86,12 +90,24 @@ EXTERNAL_INTERFACES = {
 #: executed a few lines above, and the map has read that statement.
 DATABASE_INTERFACES = {"taskBufferIF", "taskBuffer", "cur"}
 
-#: Where a method the task buffer is asked for runs its statements: every
-#: ``TaskBuffer`` and ``JediTaskBuffer`` method forwards to the proxy's method
-#: of the same name, and the proxy is thirteen mixins of statements.  The
-#: walk reads the statement there to say which table and which key a value
-#: the database supplies was asked with.
-DATABASE_PROXY = ("pandaserver/taskbuffer/OraDBProxy.py", "DBProxy")
+#: The task buffer's facades -> the attribute each borrows a proxy from, and
+#: the proxy class whose methods run the statements.
+#:
+#: Each method of ``TaskBuffer`` and ``JediTaskBuffer`` borrows a connection
+#: from ``self.proxyPool`` and calls methods on it, so what a method asks the
+#: database is what it calls on the proxy (:func:`facade_calls`).  Mostly that
+#: is the proxy's method of the same name, handed the same arguments -- 224 of
+#: 265 ``TaskBuffer`` methods and 145 of 152 ``JediTaskBuffer`` ones -- but not
+#: always, so it is read from the method rather than assumed from its name:
+#: ``peekJobs`` calls ``peekJob`` once per job, ``querySQL`` calls
+#: ``querySQLS``, and ``getDatasetsWithJediTaskID_JEDI`` calls two.  The JEDI
+#: facade's pool hands out ``JediDBProxy``, a subclass that adds nothing a
+#: facade calls.
+FACADES = {
+    "pandaserver/taskbuffer/TaskBuffer.py::TaskBuffer": ("proxyPool", "pandaserver/taskbuffer/OraDBProxy.py::DBProxy"),
+    "pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer": ("proxyPool", "pandajedi/jedicore/JediDBProxy.py::DBProxy"),
+}
+_POOLS = frozenset(pool for pool, _proxy in FACADES.values())
 
 _CONFIG_CALL = "getConfigValue"
 _BUILTINS = frozenset(dir(builtins))
@@ -318,3 +334,89 @@ def classify(
             continue
         queue.extend(ast.iter_child_nodes(node))
     return "", ""
+
+
+class FacadeCall(NamedTuple):
+    """One call a facade method makes on the proxy it borrowed, and the proxy's method that runs it."""
+
+    file: str
+    method: ast.FunctionDef | ast.AsyncFunctionDef
+    call: ast.Call
+    proxy_file: str
+    proxy_method: ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def rooted_at_pool(node: ast.expr) -> bool:
+    """True for ``self.proxyPool.get()`` and friends, however deep: a pool :data:`FACADES` names."""
+    while isinstance(node, (ast.Call, ast.Attribute)):
+        if isinstance(node, ast.Call):
+            node = node.func
+        else:
+            if node.attr in _POOLS:
+                return True
+            node = node.value
+    return False
+
+
+def borrowed_proxies(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Names *func* binds to a borrowed proxy.
+
+    Both spellings are in the corpus: ``with self.proxyPool.get() as proxy``
+    (JediTaskBuffer) and ``proxy = self.proxyPool.getProxy()`` (TaskBuffer).
+    """
+    bound: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if item.optional_vars is not None and rooted_at_pool(item.context_expr):
+                    bound.update(name for name, _slot, unpacked in names_bound_by(item.optional_vars) if not unpacked)
+        elif (borrowed := written_value(node)) is not None and rooted_at_pool(borrowed):
+            bound.update(
+                name
+                for target in targets_of(node)
+                for name, _slot, unpacked in names_bound_by(target)
+                if not unpacked
+            )
+    return frozenset(bound)
+
+
+def facade_calls(types: Types, method: str) -> list[FacadeCall]:
+    """What the facades' *method* calls on the proxy, in the order it is written; ``[]`` where no facade has one.
+
+    Every facade's *method*, its own or inherited -- ``JediTaskBuffer``
+    inherits most of ``TaskBuffer`` -- because a stop is found by the name of
+    the receiver, which does not say which facade it is.  A call the proxy has
+    no method for is left out, and a method two facades share is listed once.
+    """
+    found: list[FacadeCall] = []
+    seen: set[int] = set()
+    for facade, (_pool, proxy) in FACADES.items():
+        file, name = facade.split("::")
+        cls = types.class_def(file, name)
+        held = types.method(file, cls, method) if cls is not None else None
+        if held is None:
+            continue
+        where, func = held
+        proxy_file, proxy_name = proxy.split("::")
+        proxy_cls = types.class_def(proxy_file, proxy_name)
+        if proxy_cls is None:
+            continue
+        borrowed = borrowed_proxies(func)
+        made = sorted(
+            (
+                node
+                for node in ast.walk(func)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in borrowed
+            ),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        for call in made:
+            runs = types.method(proxy_file, proxy_cls, call.func.attr)  # type: ignore[union-attr]
+            if runs is None or id(call) in seen:
+                continue
+            seen.add(id(call))
+            found.append(FacadeCall(where, func, call, runs[0], runs[1]))
+    return found

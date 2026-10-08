@@ -74,10 +74,10 @@ from bamboo.codemap.panda.attribution import (
 )
 from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
-    names_bound_by,
     targets_of,
     written_value,
 )
+from bamboo.codemap.panda.provenance import borrowed_proxies
 from bamboo.codemap.panda.recognizers.boundary import endpoint_decorator
 
 # The trigger vocabulary is imported rather than declared here.  It lives with
@@ -153,46 +153,6 @@ def _calls_by_name(module: SourceModule) -> dict[str, ast.Call]:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             calls.setdefault(node.func.attr, node)
     return calls
-
-
-#: How both facades reach the implementation.  ``TaskBuffer`` and
-#: ``JediTaskBuffer`` borrow a connection and call through it, so a name bound
-#: from here is the proxy, not a collaborator.
-_POOL = "proxyPool"
-
-
-def _rooted_at_pool(node: ast.expr) -> bool:
-    """True for ``self.proxyPool.get()`` and friends, however deep."""
-    while isinstance(node, (ast.Call, ast.Attribute)):
-        if isinstance(node, ast.Call):
-            node = node.func
-        else:
-            if node.attr == _POOL:
-                return True
-            node = node.value
-    return False
-
-
-def _pool_bindings(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
-    """Names *func* binds to a borrowed proxy.
-
-    Both spellings are in the corpus: ``with self.proxyPool.get() as proxy``
-    (JediTaskBuffer) and ``proxy = self.proxyPool.getProxy()`` (TaskBuffer).
-    """
-    bound: set[str] = set()
-    for node in ast.walk(func):
-        if isinstance(node, ast.With):
-            for item in node.items:
-                if item.optional_vars is not None and _rooted_at_pool(item.context_expr):
-                    bound.update(name for name, _slot, unpacked in names_bound_by(item.optional_vars) if not unpacked)
-        elif (borrowed := written_value(node)) is not None and _rooted_at_pool(borrowed):
-            bound.update(
-                name
-                for target in targets_of(node)
-                for name, _slot, unpacked in names_bound_by(target)
-                if not unpacked
-            )
-    return frozenset(bound)
 
 
 def forwarder_classes(modules: list[SourceModule]) -> dict[str, tuple[str, int]]:
@@ -399,7 +359,7 @@ def _outward_call_sites(
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 inner_names = enclosing + (child.name,)
-                inner_pooled = _pool_bindings(child)
+                inner_pooled = borrowed_proxies(child)
             else:
                 inner_names, inner_pooled = enclosing, pooled
             if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):

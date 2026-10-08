@@ -1847,34 +1847,45 @@ class _Walk:
         )
 
     def database_asked(self, method: str, frame: Optional[_Frame] = None, call: Optional[ast.Call] = None) -> str:
-        """``reads jobsDefined4, jobsActive4 by :jediTaskID`` for the proxy's *method*, or ``""``.
+        """``reads jobsDefined4, jobsActive4 by :jediTaskID`` for what the task buffer's *method* asks the proxy, or ``""``.
 
         The step that stops at "a value the database supplies" named the
         method and nothing else: which table the value came from, and by what
         key, were one proxy method away and unsaid.  Read from the statements
-        the method runs, the way the build reads them.
+        the proxy's methods run, the way the build reads them.
+
+        The proxy's methods are the ones the facade's *method* calls
+        (:func:`~bamboo.codemap.panda.provenance.facade_calls`), not the
+        proxy's method of the same name: ``peekJobs`` reads what ``peekJob``
+        reads, and ``querySQL`` what ``querySQLS`` does.  A name no facade
+        has says nothing.
 
         Read at *call*, the call in *frame* that went to the database, where a
-        route of calls into the method passes through it (:meth:`Calls.routes`):
-        with the constants each such route hands the parameters the method
-        tests, as the build reads a route (``sqlwrite._route_constant``), so
-        ``getPandaIDsWithTask_JEDI(jediTaskID, True)`` reads the two tables
-        ``onlyActive`` leaves, not four.  The tables and keys of every route
-        through the call together.  Where no route passes through it -- the
-        call is not placed -- every run the method can make, as before.
+        route of calls into a proxy method passes through it
+        (:meth:`Calls.routes`): with the constants each such route hands the
+        parameters the method tests, as the build reads a route
+        (``sqlwrite._route_constant``), so ``getPandaIDsWithTask_JEDI(jediTaskID,
+        True)`` reads the two tables ``onlyActive`` leaves, not four.  The
+        tables and keys of every route through the call together.  Where no
+        route passes through it -- the call is not placed, or the facade does
+        not hand the method its own parameters -- every run the method can
+        make, as before.
         """
         from bamboo.codemap.panda import sql as sql_mod
         from bamboo.codemap.panda import sqltext
-        from bamboo.codemap.panda.provenance import DATABASE_PROXY
+        from bamboo.codemap.panda.provenance import facade_calls
 
         at = f"{frame.file}:{call.lineno}" if frame is not None and call is not None else ""
         if (method, at) in self._asked:
             return self._asked[(method, at)]
-        said = ""
-        cls = self.types.class_def(*DATABASE_PROXY)
-        found = self.types.method(DATABASE_PROXY[0], cls, method) if cls is not None else None
-        if found is not None:
-            where, func = found
+        tables: list[str] = []
+        keys: list[str] = []
+        read: set[tuple[str, int]] = set()
+        for made in facade_calls(self.types, method):
+            where, func = made.proxy_file, made.proxy_method
+            if (where, func.lineno) in read:
+                continue
+            read.add((where, func.lineno))
             readings = [None]
             if at:
                 from bamboo.codemap.panda.recognizers import sqlwrite
@@ -1893,8 +1904,6 @@ class _Walk:
                         }
                         for route in through
                     ]
-            tables: list[str] = []
-            keys: list[str] = []
             for constants in readings:
                 if constants:
                     with sql_mod.at_call(func, constants):
@@ -1907,10 +1916,11 @@ class _Walk:
                     for clause in sqltext.where_clauses(run.sql):
                         for key in re.findall(r":(\w+)", clause):
                             _add(keys, f":{key}")
-            if tables:
-                said = f"reads {', '.join(tables[:6])}" + (
-                    f" by {', '.join(keys[:6])}" if keys else ""
-                )
+        said = ""
+        if tables:
+            said = f"reads {', '.join(tables[:6])}" + (
+                f" by {', '.join(keys[:6])}" if keys else ""
+            )
         self._asked[(method, at)] = said
         return said
 
