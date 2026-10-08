@@ -516,14 +516,17 @@ class LoggerFiles:
         A constructor's include the chain from a subclass's --
         ``super().__init__(...)``, ``Base.__init__(self, ...)`` -- made on
         the object being built, which is how the proxy mixins' logger
-        arrives.  With *instance* known, only the calls on a related class.
+        arrives, and the links of that chain the call graph does not place
+        (:meth:`_along_the_mro`).  With *instance* known, only the calls on a
+        related class.
         """
         key = (target.file, target.func.lineno, id(instance[1]) if instance else None)  # type: ignore[attr-defined]
         if key in self._callers:
             return self._callers[key]
         constructor = getattr(target.func, "name", "") == "__init__" and target.cls is not None
+        placed = self.calls.callers(target)
         found: list[tuple[CallSite, bool]] = []
-        for site in self.calls.callers(target):
+        for site in placed:
             chained = constructor and isinstance(site.call.func, ast.Attribute) and site.call.func.attr == "__init__"
             if constructor and instance is not None:
                 held = self.types.method_class(site.file, site.func) if chained else None
@@ -532,9 +535,41 @@ class LoggerFiles:
                 if not chained and not self._builds_related(site, instance):
                     continue
             found.append((site, chained))
-        if not found and not constructor:
+        if constructor:
+            found += self._along_the_mro(target, instance, {id(site.call) for site in placed})
+        elif not found:
             found = self._unplaced(target)
         self._callers[key] = found
+        return found
+
+    def _along_the_mro(
+        self, target: Target, instance: Optional[tuple[str, ast.ClassDef]], placed: set[int]
+    ) -> list[tuple[CallSite, bool]]:
+        """``super().__init__(...)`` in a subclass of *target*'s class that the call graph places at another base.
+
+        A class with several bases runs each base's constructor in turn, along
+        its MRO: ``OraDBProxy.DBProxy``'s ``super().__init__(_logger)``
+        reaches all thirteen mixins, each handing the logger on.  The call
+        graph places ``super()`` at the first base that has the method and no
+        further, so the other mixins' constructors have no caller there.  The
+        chain is read as the MRO runs it, the subclass's call standing for
+        each link.  ``Base.__init__(self, ...)`` names its base, and the call
+        graph places it there.
+        """
+        found: list[tuple[CallSite, bool]] = []
+        for site in self.calls.every_call().get("__init__", []):
+            call = site.call
+            if id(call) in placed or not isinstance(call.func, ast.Attribute):
+                continue
+            receiver = call.func.value
+            if not (isinstance(receiver, ast.Call) and getattr(receiver.func, "id", "") == "super"):
+                continue
+            held = self.types.method_class(site.file, site.func)
+            if held is None or not any(cls is target.cls for _where, cls in self.types.lineage(*held)[1:]):
+                continue
+            if instance is not None and not self._related(held, instance):
+                continue
+            found.append((site, True))
         return found
 
     def _unplaced(self, target: Target) -> list[tuple[CallSite, bool]]:

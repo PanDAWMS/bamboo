@@ -13451,6 +13451,52 @@ def test_a_mixins_logger_comes_down_its_constructors_and_from_the_module_that_re
     ]
 
 
+def test_a_mixins_logger_comes_down_the_chain_of_a_proxy_with_several_bases(tmp_path):
+    """``OraDBProxy.DBProxy`` derives from thirteen mixins, and its ``super().__init__``
+    runs each one's constructor in turn along its MRO -- the call graph places it at
+    the first mixin only.  The second mixin's logger still arrives from the proxy."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandaserver/taskbuffer/db_proxy_mods/base_module.py": """\
+                class BaseModule:
+                    def __init__(self, log_stream):
+                        self._log_stream = log_stream
+                    def create_tagged_logger(self, comment):
+                        tmp_log = LogWrapper(self._log_stream, comment)
+                        return tmp_log
+                """,
+            "pandaserver/taskbuffer/db_proxy_mods/entity_module.py": """\
+                from pandaserver.taskbuffer.db_proxy_mods.base_module import BaseModule
+                class EntityModule(BaseModule):
+                    def __init__(self, log_stream):
+                        super().__init__(log_stream)
+                """,
+            "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py": """\
+                from pandaserver.taskbuffer.db_proxy_mods.base_module import BaseModule
+                class JobComplexModule(BaseModule):
+                    def __init__(self, log_stream):
+                        super().__init__(log_stream)
+                    def archiveJob(self, job):
+                        tmp_log = self.create_tagged_logger(" /* DBProxy.archiveJob */")
+                        tmp_log.debug(f"start status={job.jobStatus}")
+                """,
+            "pandaserver/taskbuffer/OraDBProxy.py": """\
+                from pandaserver.taskbuffer.db_proxy_mods.entity_module import EntityModule
+                from pandaserver.taskbuffer.db_proxy_mods.job_complex_module import JobComplexModule
+                _logger = PandaLogger().getLogger("DBProxy")
+                class DBProxy(EntityModule, JobComplexModule):
+                    def __init__(self):
+                        super().__init__(_logger)
+                """,
+        },
+    )
+
+    assert found["pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::JobComplexModule.archiveJob"] == [
+        (7, ["panda-DBProxy.log"], "logger")
+    ]
+
+
 def test_each_call_is_read_by_the_logger_it_is_made_on(tmp_path):
     """One module, two loggers, two files; ``setup_logger`` opens a file as
     ``getLogger`` does; the standard library's ``logging.getLogger`` opens none,
