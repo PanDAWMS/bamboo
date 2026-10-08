@@ -96,6 +96,10 @@ _PARSED: dict[tuple[str, int, int], Optional[tuple[str, ast.Module]]] = {}
 #: ``callers`` index and answers, per set of roots.
 _INDEXES: dict[tuple, dict[str, list["CallSite"]]] = {}
 _CALLERS: dict[tuple, list["CallSite"]] = {}
+#: The other names each name is imported or bound as, and each class's
+#: subclasses, per set of roots -- :meth:`Calls.spellings`.
+_ALIASES: dict[tuple, dict[str, set[str]]] = {}
+_SUBCLASSES: dict[tuple, dict[tuple[str, int], list[tuple[str, ast.ClassDef]]]] = {}
 
 
 def parsed(path: Path) -> Optional[tuple[str, ast.Module]]:
@@ -525,7 +529,14 @@ class Calls:
         return found
 
     def callers(self, target: Target) -> list[CallSite]:
-        """The calls in the corpus that :meth:`callees` places at *target*."""
+        """The calls in the corpus that :meth:`callees` places at *target*.
+
+        Every call :meth:`callees` places at *target* is here -- the
+        consistency the tests and the census hold it to.  The candidates are
+        the calls spelled with any of :meth:`spellings`; the target's own
+        name comes first, so a list that was whole under that name alone
+        keeps its order.
+        """
         key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
         if key in self._callers:
             return self._callers[key]
@@ -533,11 +544,9 @@ class Calls:
         if shared in _CALLERS:
             self._callers[key] = _CALLERS[shared]
             return _CALLERS[shared]
-        name = target.func.name  # type: ignore[attr-defined]
-        if name == "__init__" and target.cls is not None:
-            name = target.cls.name
         kept = [
             site
+            for name in self.spellings(target)
             for site in self._index().get(name, [])
             if any(
                 (placed.file, placed.func.lineno) == key  # type: ignore[attr-defined]
@@ -555,6 +564,80 @@ class Calls:
     def filled(self, site: CallSite, target: Target) -> set[str]:
         """:func:`said` for *site*, as :meth:`handed`."""
         return said(site.call, target, self.callees(site.file, site.func, site.call).on_class)
+
+    def spellings(self, target: Target) -> list[str]:
+        """Every name a call that lands at *target* can be spelled with, its own name first.
+
+        A function's own name.  An ``__init__``'s class name; ``__init__``
+        itself, which is how ``super().__init__(...)`` and
+        ``Base.__init__(self, ...)`` spell the chain from a subclass's
+        constructor; and the name of each subclass that defines no
+        ``__init__`` of its own, whose construction runs this one.  Then every
+        other name any of those is imported or bound as in the corpus --
+        ``from pandaserver.api.v1.http_client import HttpClient as
+        HttpClientV1`` built twenty clients no list of ``HttpClient``'s callers
+        held.  A name matching more than the calls landing here costs only
+        their placing: :meth:`callees` keeps the ones that land.
+        """
+        name = target.func.name  # type: ignore[attr-defined]
+        if name == "__init__" and target.cls is not None:
+            seeds = [target.cls.name, *self._built_through(target)]
+        else:
+            seeds = [name]
+        aliases = self._aliases()
+        found = list(dict.fromkeys(seeds))
+        queue = list(found)
+        while queue:
+            for other in sorted(aliases.get(queue.pop(0), ())):
+                if other not in found:
+                    found.append(other)
+                    queue.append(other)
+        if name == "__init__" and target.cls is not None:
+            found.insert(1, "__init__")
+        return found
+
+    def _built_through(self, target: Target) -> list[str]:
+        """Names of *target*'s class's subclasses whose construction lands at *target*, an ``__init__``."""
+        assert target.cls is not None
+        held = self._subclasses().get((target.file, target.cls.lineno), [])
+        return sorted(
+            {
+                cls.name
+                for file, cls in held
+                if any(one.func is target.func for one in self._method_of((file, cls), "__init__").targets)
+            }
+        )
+
+    def _subclasses(self) -> dict[tuple[str, int], list[tuple[str, ast.ClassDef]]]:
+        """``{(file, line of a class): every corpus class with it among its bases}``."""
+        shared = _roots_key(self.types.roots)
+        if shared not in _SUBCLASSES:
+            found: dict[tuple[str, int], list[tuple[str, ast.ClassDef]]] = {}
+            for file in self.types.corpus_files():
+                tree = self.types.tree(file)
+                for node in ast.walk(tree) if tree is not None else ():
+                    if isinstance(node, ast.ClassDef):
+                        for where, base in self.types.lineage(file, node)[1:]:
+                            found.setdefault((where, base.lineno), []).append((file, node))
+            _SUBCLASSES[shared] = found
+        return _SUBCLASSES[shared]
+
+    def _aliases(self) -> dict[str, set[str]]:
+        """``{name: each other name it is imported as or bound to at module level}``, across the corpus."""
+        shared = _roots_key(self.types.roots)
+        if shared not in _ALIASES:
+            found: dict[str, set[str]] = {}
+            for file in self.types.corpus_files():
+                for local, (_module, attribute) in self.types.imports(file).items():
+                    if attribute and local != attribute:
+                        found.setdefault(attribute, set()).add(local)
+                for local, values in self.types._module_bound(file).items():
+                    for value in values:
+                        held = value.id if isinstance(value, ast.Name) else value.attr  # type: ignore[attr-defined]
+                        if held != local:
+                            found.setdefault(held, set()).add(local)
+            _ALIASES[shared] = found
+        return _ALIASES[shared]
 
     def opened(self, site: CallSite) -> str:
         """Why *site*'s call may land beyond the definitions it is placed at; ``""`` where it is placed closed.
@@ -705,6 +788,11 @@ class Calls:
         what is said -- not that nothing names it, and not that it is reached
         from outside: ``ListWithLock.__contains__`` is asked by ``in``, which
         this reading does not read as a call.
+
+        The calls looked at are those spelled with any of :meth:`spellings`.
+        One spelled ``__init__`` is a call to a constructor only in a subclass
+        of *target*'s class -- where the chain from a subclass runs --
+        and ``threading.Thread.__init__(self)`` in any other class is not.
         """
         key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
         if key in self._missed:
@@ -717,8 +805,11 @@ class Calls:
         unplaced: dict[str, dict[str, int]] = {}
         elsewhere: dict[str, dict[str, int]] = {}
         outside: dict[str, int] = {}
-        for site in self._index().get(name, []):
+        for site in (site for spelled in self.spellings(target) for site in self._index().get(spelled, [])):
             if site.func is target.func:
+                continue
+            called = site.call.func
+            if isinstance(called, ast.Attribute) and called.attr == "__init__" and not self._in_subclass(site, target):
                 continue
             landed = self.callees(site.file, site.func, site.call)
             if landed.targets:
@@ -745,6 +836,11 @@ class Calls:
                 why.append(f"{name}: {_OUTSIDE}")
         self._missed[key] = why
         return why
+
+    def _in_subclass(self, site: CallSite, target: Target) -> bool:
+        """Whether *site* is made in a method of a strict subclass of *target*'s class."""
+        held = self.types.method_class(site.file, site.func)
+        return held is not None and any(cls is target.cls for _where, cls in self.types.lineage(*held)[1:])
 
     # -- what a method changes on its object --------------------------------
 

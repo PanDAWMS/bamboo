@@ -221,6 +221,104 @@ class Child(Base):
     assert target.cls.name == "Base"
 
 
+_SPELLED = {
+    "m": '''\
+class Base:
+    def __init__(self, x):
+        self.x = x
+
+    def helper(self, y):
+        return y
+
+class Chained(Base):
+    def __init__(self, x):
+        super().__init__(x)
+
+class Named(Base):
+    def __init__(self, x):
+        Base.__init__(self, x)
+        Base.helper(self, 1)
+
+class Plain(Base):
+    pass
+
+def helper_function(z):
+    return z
+
+Rebound = Base
+''',
+    "u": '''\
+from pkg.m import Base as Aliased, Plain, Chained, Rebound, helper_function as hf
+
+def build(x):
+    Aliased(x)
+    Plain(x)
+    Chained(x)
+    Rebound(x)
+    hf(x)
+''',
+}
+
+
+def test_the_callers_of_a_constructor_are_every_spelling_that_lands_there(tmp_path):
+    """The chain from a subclass, a subclass with no ``__init__`` of its own, and every alias -- not ``Chained(x)``."""
+    calls = _calls(_tree(tmp_path, **_SPELLED))
+
+    sites = calls.callers(_method(calls, "m", "Base", "__init__"))
+
+    assert sorted(f"{site.file}:{ast.unparse(site.call.func)}" for site in sites) == [
+        "pkg/m.py:Base.__init__",
+        "pkg/m.py:super().__init__",
+        "pkg/u.py:Aliased",
+        "pkg/u.py:Plain",
+        "pkg/u.py:Rebound",
+    ]
+    assert calls.missed(_method(calls, "m", "Base", "__init__")) == []
+
+
+def test_every_call_placed_at_a_function_is_among_its_callers(tmp_path):
+    """The consistency the census holds the corpus to: ``callees`` and ``callers`` read the same calls."""
+    calls = _calls(_tree(tmp_path, **_SPELLED))
+
+    lacking = [
+        f"{site.file}:{site.call.lineno} {ast.unparse(site.call.func)} -> {target.owner}"
+        for sites in calls.every_call().values()
+        for site in sites
+        for target in calls.callees(site.file, site.func, site.call).targets
+        if not any(one.call is site.call for one in calls.callers(target))
+    ]
+
+    assert lacking == []
+    function = calls.callers(calls_mod.Target("pkg/m.py", _function(calls, "m", "helper_function"), None))
+    assert [ast.unparse(site.call.func) for site in function] == ["hf"]
+
+
+def test_an_unplaced_init_call_is_missed_by_a_constructor_only_in_its_subclasses(tmp_path):
+    """``other.__init__(self)`` in an unrelated class is not the chain to ``Base``; in a subclass it may be."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m='''\
+class Base:
+    def __init__(self, x):
+        self.x = x
+
+class Sub(Base):
+    def __init__(self, x, other):
+        other.__init__(self, x)
+
+class Elsewhere:
+    def __init__(self, other):
+        other.__init__(self)
+''',
+        )
+    )
+
+    assert calls.missed(_method(calls, "m", "Base", "__init__")) == [
+        "Base: 1 call(s) by its name not placed -- the receiver's class is not declared (other 1)"
+    ]
+
+
 def test_a_call_binds_positional_keyword_and_default_arguments(tmp_path):
     roots = _tree(
         tmp_path,

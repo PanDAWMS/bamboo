@@ -310,7 +310,7 @@ class LoggerFiles:
         self.declared = declared
         self.inherited = inherited
         self._rebound = self._rebindings()
-        self._callers: dict[tuple, list[tuple[CallSite, ast.Call, bool]]] = {}
+        self._callers: dict[tuple, list[tuple[CallSite, bool]]] = {}
 
     def of_call(self, file: str, func: ast.AST, call: ast.Call) -> Landing:
         """Where the lines of logging *call*, made in *func* of *file*, land."""
@@ -471,10 +471,8 @@ class LoggerFiles:
         if not sites:
             trail.open = True
             return
-        for site, call, same_object in sites:
-            # A call :meth:`_chained` shifted by hand is bound as it reads.
-            on_class = call is site.call and self.calls.callees(site.file, site.func, call).on_class
-            argument = bind(call, target, on_class).get(name)
+        for site, same_object in sites:
+            argument = self.calls.handed(site, target).get(name)
             if argument is None:
                 trail.open = True
                 continue
@@ -512,55 +510,40 @@ class LoggerFiles:
 
     def _callers_of(
         self, target: Target, instance: Optional[tuple[str, ast.ClassDef]]
-    ) -> list[tuple[CallSite, ast.Call, bool]]:
-        """``(site, call, same object)`` for each call that hands *target* its arguments."""
+    ) -> list[tuple[CallSite, bool]]:
+        """``(site, same object)`` for each call that hands *target* its arguments.
+
+        A constructor's include the chain from a subclass's --
+        ``super().__init__(...)``, ``Base.__init__(self, ...)`` -- made on
+        the object being built, which is how the proxy mixins' logger
+        arrives.  With *instance* known, only the calls on a related class.
+        """
         key = (target.file, target.func.lineno, id(instance[1]) if instance else None)  # type: ignore[attr-defined]
         if key in self._callers:
             return self._callers[key]
-        placed = [(site, site.call, False) for site in self.calls.callers(target)]
-        if getattr(target.func, "name", "") == "__init__" and target.cls is not None:
-            if instance is not None:
-                placed = [one for one in placed if self._builds_related(one[0], instance)]
-            found = placed + self._chained(target, instance)
-        else:
-            found = placed or self._unplaced(target)
+        constructor = getattr(target.func, "name", "") == "__init__" and target.cls is not None
+        found: list[tuple[CallSite, bool]] = []
+        for site in self.calls.callers(target):
+            chained = constructor and isinstance(site.call.func, ast.Attribute) and site.call.func.attr == "__init__"
+            if constructor and instance is not None:
+                held = self.types.method_class(site.file, site.func) if chained else None
+                if chained and (held is None or not self._related(held, instance)):
+                    continue
+                if not chained and not self._builds_related(site, instance):
+                    continue
+            found.append((site, chained))
+        if not found and not constructor:
+            found = self._unplaced(target)
         self._callers[key] = found
         return found
 
-    def _chained(
-        self, target: Target, instance: Optional[tuple[str, ast.ClassDef]]
-    ) -> list[tuple[CallSite, ast.Call, bool]]:
-        """``super().__init__(...)`` and ``Base.__init__(self, ...)`` calls that reach *target*.
-
-        The call graph places neither at the base's ``__init__``, and the
-        proxy mixins' logger arrives only that way.
-        """
-        found: list[tuple[CallSite, ast.Call, bool]] = []
-        for site in self.calls.every_call().get("__init__", []):
-            call = site.call
-            if not isinstance(call.func, ast.Attribute):
-                continue
-            held = self.types.method_class(site.file, site.func)
-            if held is None or not any(cls is target.cls for _where, cls in self.types.lineage(*held)[1:]):
-                continue
-            if instance is not None and not self._related(held, instance):
-                continue
-            receiver = call.func.value
-            if isinstance(receiver, ast.Call) and getattr(receiver.func, "id", "") == "super":
-                found.append((site, call, True))
-            elif isinstance(receiver, ast.Name) and receiver.id == target.cls.name and call.args:  # type: ignore[union-attr]
-                # The instance is passed by hand: bind the rest as a call through it.
-                shifted = ast.Call(func=call.func, args=call.args[1:], keywords=call.keywords)
-                found.append((site, ast.copy_location(shifted, call), True))
-        return found
-
-    def _unplaced(self, target: Target) -> list[tuple[CallSite, ast.Call, bool]]:
+    def _unplaced(self, target: Target) -> list[tuple[CallSite, bool]]:
         """Calls by *target*'s name, on another object, that the call graph places nowhere, or elsewhere and open.
 
         As :meth:`Calls.missed` counts them: a call placed at other definitions
         and open beside them may land here too.
         """
-        found: list[tuple[CallSite, ast.Call, bool]] = []
+        found: list[tuple[CallSite, bool]] = []
         for site in self.calls.every_call().get(getattr(target.func, "name", ""), []):
             called = site.call.func
             if not isinstance(called, ast.Attribute):
@@ -570,7 +553,7 @@ class LoggerFiles:
             landed = self.calls.callees(site.file, site.func, site.call)
             if landed.targets and (not landed.unplaced or any(one.func is target.func for one in landed.targets)):
                 continue
-            found.append((site, site.call, False))
+            found.append((site, False))
         return found
 
     def _builds_related(self, site: CallSite, instance: tuple[str, ast.ClassDef]) -> bool:
