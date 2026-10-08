@@ -1111,6 +1111,28 @@ def _element_annotation(annotation: ast.expr) -> Optional[ast.expr]:
     return None
 
 
+#: Containers a loop takes its target from, by the annotation's name -- :meth:`Types._iterated`.
+_MAPPINGS = frozenset({"dict", "Dict", "Mapping", "MutableMapping", "defaultdict", "OrderedDict"})
+_SEQUENCES = frozenset(
+    {"list", "List", "Sequence", "set", "Set", "frozenset", "FrozenSet", "Iterable", "Iterator", "Generator"}
+)
+
+
+def _slot_of(annotation: ast.expr, slot: Optional[int]) -> Optional[ast.expr]:
+    """Slot *slot* of a ``tuple[A, B]`` annotation; ``None`` for any other, or ``tuple[A, ...]``."""
+    annotation = _unquoted(annotation)
+    if (
+        slot is None
+        or not isinstance(annotation, ast.Subscript)
+        or getattr(annotation.value, "id", getattr(annotation.value, "attr", "")) not in ("tuple", "Tuple")
+        or not isinstance(annotation.slice, ast.Tuple)
+        or slot >= len(annotation.slice.elts)
+        or any(isinstance(one, ast.Constant) and one.value is Ellipsis for one in annotation.slice.elts)
+    ):
+        return None
+    return annotation.slice.elts[slot]
+
+
 #: What a context manager is declared to yield its element through.
 _YIELDING = frozenset(
     {"Iterator", "Generator", "ContextManager", "AbstractContextManager", "Iterable"}
@@ -1609,23 +1631,7 @@ class Types:
             and expression.value.id == "self"
         ):
             holder = self.method_class(file, func)
-            if holder is None:
-                return None
-            for where, cls in self.lineage(*holder):
-                for node in cls.body:
-                    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == expression.attr:
-                        return where, node.annotation
-                for method in pathcond.methods_of(cls):
-                    for node in ast.walk(method):
-                        if (
-                            isinstance(node, ast.AnnAssign)
-                            and isinstance(node.target, ast.Attribute)
-                            and isinstance(node.target.value, ast.Name)
-                            and node.target.value.id == "self"
-                            and node.target.attr == expression.attr
-                        ):
-                            return where, node.annotation
-            return None
+            return self._field_annotation(holder, expression.attr) if holder is not None else None
         if isinstance(expression, ast.Name):
             args = getattr(func, "args", None)
             for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
@@ -1644,6 +1650,24 @@ class Types:
                 texts = {ast.unparse(one[1]) for one in found if one is not None}
                 if len(texts) == 1 and all(one is not None for one in found):
                     return found[0]
+        return None
+
+    def _field_annotation(self, holder: tuple[str, ast.ClassDef], field: str) -> Optional[tuple[str, ast.expr]]:
+        """The annotation *holder*'s class or a base declares *field* with: in the class body or as ``self.<field>: T``."""
+        for where, cls in self.lineage(*holder):
+            for node in cls.body:
+                if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == field:
+                    return where, node.annotation
+            for method in pathcond.methods_of(cls):
+                for node in ast.walk(method):
+                    if (
+                        isinstance(node, ast.AnnAssign)
+                        and isinstance(node.target, ast.Attribute)
+                        and isinstance(node.target.value, ast.Name)
+                        and node.target.value.id == "self"
+                        and node.target.attr == field
+                    ):
+                        return where, node.annotation
         return None
 
     def _function_named(self, file: str, name: str) -> Optional[tuple[str, ast.AST]]:
@@ -1727,14 +1751,12 @@ class Types:
         # ``siteMapper = SiteMapper(taskBuffer)`` and, at the end of the
         # daemon, ``siteMapper = None``.  The evidence for a local is all in
         # this function, so it is read rather than asked for; the answer
-        # is classes only where every assignment says the same ones.
-        bound = [
-            value
-            for value in self.assigned(func).get(name, [])
-            if not (isinstance(value, ast.Constant) and value.value is None)
-        ]
+        # is classes only where every assignment says the same ones.  So
+        # are the bindings an assignment is not (:meth:`_other_bindings`).
+        bound = self._assigned_here(func, name)
+        others = self._other_bindings(file, func, name, depth)
         held = self._with_held(file, func, name, depth)
-        if not bound and held is None:
+        if not bound and held is None and not others:
             # A name a module's own body reads and does not bind is one it
             # imports: ``initializer.init()`` and ``taskBuffer.init(...)`` at
             # the top of ``panda.py``, a module's caller (:class:`CallSite`).
@@ -1742,9 +1764,174 @@ class Types:
                 return self._imported_instance(file, name, depth)
             return self._outside_instance(file, name, depth)
         found = {self.declared(file, func, value, depth + 1) for value in bound}
+        found.update(one for one in others if one is not None)
         if held is not None:
             found.add(held)
         return found.pop() if len(found) == 1 else None
+
+    def _assigned_here(self, func: ast.AST, name: str) -> list[ast.expr]:
+        """What *func*'s own assignments bind *name* to, less the ``None`` it is cleared with.
+
+        Not a function's, lambda's or class's nested in it: ``taskBuffer =
+        ...`` inside ``add_main.main``'s inner function binds that function's
+        own name.
+        """
+        nested = {id(one.value) for one in pathcond.bindings(func, name) if one.nested and one.value is not None}
+        return [
+            value
+            for value in self.assigned(func).get(name, [])
+            if not (isinstance(value, ast.Constant) and value.value is None) and id(value) not in nested
+        ]
+
+    def _other_bindings(self, file: str, func: ast.AST, name: str, depth: int) -> list[Optional[Classes]]:
+        """What each binding of *name* in *func* that is not an assignment makes it, by its declarations; ``None`` for one they do not say.
+
+        A loop's target is an element of what it iterates
+        (:meth:`_iterated`): ``for file_spec in job.Files``, ``Files:
+        list[FileSpec]``.  A name unpacked from a call is its slot of the
+        ``tuple[...]`` the callee returns; ``:=`` is an assignment;
+        ``except X as e`` is an ``X``.  Read by the declarations, as the
+        rest of this class reads -- not by which binding reaches the call.
+        A binding they do not type adds nothing and takes nothing away, as
+        before these were read: ``for tmpNucleusSpec in nucleusList.items()``
+        on an undeclared ``nucleusList`` beside a loop over ``dict[str,
+        NucleusSpec]``.  Saying "open" for it lost 65 placements whose
+        readings were right (X8: 33 closed, 32 builtin), where the 154 the
+        rule left closed held no wrong one (X7).  A ``with`` is
+        :meth:`_with_held`'s; a nested scope's binding is its own.
+
+        A parameter is not one of these, nor an import inside the function:
+        where the function also assigns the name, the assignments answer
+        alone.  ``add_main.main``'s ``taskBuffer = tbuf`` is a ``TaskBuffer``
+        by ``tbuf = TaskBuffer()`` further down, while the daemon may pass the
+        interface proxy (``daemons/utils.py``) -- which hands the call by its
+        name to a ``TaskBuffer`` in another process, so the method, the
+        arguments and the constants are the ones placed here and the process
+        is not.  18 placements rest on such a name (X8), 6 of them behind
+        that proxy.
+        """
+        found: list[Optional[Classes]] = []
+        for one in pathcond.bindings(func, name):
+            if one.nested:
+                continue
+            if one.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED, pathcond.BIND_AUGMENTED, pathcond.BIND_WITH):
+                if not one.unpacked or one.kind == pathcond.BIND_WITH:
+                    continue
+                found.append(self._unpacked(file, func, one.value, one.slot, depth))
+            elif one.kind == pathcond.BIND_WALRUS:
+                found.append(self.declared(file, func, one.value, depth + 1) if one.value is not None else None)
+            elif one.kind == pathcond.BIND_EXCEPT:
+                found.append(self._caught(file, one.site))
+            elif one.kind == pathcond.BIND_FOR:
+                loop = one.site
+                found.append(
+                    self._iterated(file, func, loop.iter, one.slot if one.unpacked else None, one.unpacked, depth)  # type: ignore[attr-defined]
+                )
+            else:
+                found.append(None)
+        return found
+
+    def _unpacked(
+        self, file: str, func: ast.AST, value: Optional[ast.expr], slot: Optional[int], depth: int
+    ) -> Optional[Classes]:
+        """The classes slot *slot* of *value* is declared as: a tuple literal's element, or a call's ``tuple[...]``."""
+        if value is None or slot is None:
+            return None
+        if isinstance(value, (ast.Tuple, ast.List)):
+            return self.declared(file, func, value.elts[slot], depth + 1) if slot < len(value.elts) else None
+        returned = self._returned(file, func, value, depth)
+        if returned is None:
+            return None
+        where, annotation = returned
+        element = _slot_of(annotation, slot)
+        return self.annotated_all(where, element) if element is not None else None
+
+    def _returned(self, file: str, func: ast.AST, value: ast.expr, depth: int) -> Optional[tuple[str, ast.expr]]:
+        """``(file, return annotation)`` of the function *value*, a call, lands in, read as :meth:`declared` reads it."""
+        if not isinstance(value, ast.Call):
+            return None
+        called = value.func
+        if isinstance(called, ast.Name):
+            function = self._function_named(file, called.id)
+            definition = function[1] if function is not None else None
+            where = function[0] if function is not None else file
+        elif isinstance(called, ast.Attribute):
+            receiver = called.value
+            if isinstance(receiver, ast.Name) and receiver.id == "self":
+                owner = self.method_class(file, func)
+            else:
+                owner = self.of_expression(file, func, receiver, depth + 1)
+            found = self.method(owner[0], owner[1], called.attr) if owner is not None else None
+            where, definition = found if found is not None else (file, None)
+        else:
+            return None
+        returns = getattr(definition, "returns", None)
+        return (where, returns) if returns is not None else None
+
+    def _caught(self, file: str, handler: ast.AST) -> Optional[Classes]:
+        """The corpus classes ``except X as e`` binds ``e`` to; ``None`` where one is not the corpus's."""
+        caught = getattr(handler, "type", None)
+        members = caught.elts if isinstance(caught, ast.Tuple) else [caught] if caught is not None else []
+        found = [self.class_named(file, one) for one in members]
+        if not found or any(one is None for one in found):
+            return None
+        return frozenset(found)  # type: ignore[arg-type]
+
+    def _iterated(
+        self, file: str, func: ast.AST, iterable: ast.expr, slot: Optional[int], unpacked: bool, depth: int
+    ) -> Optional[Classes]:
+        """The classes a loop's target is, from what it iterates; slot *slot* of each element where it is unpacked.
+
+        ``list(x)``, ``sorted(x)``, ``reversed(x)`` iterate what ``x`` does;
+        ``enumerate(x)``'s second slot is ``x``'s element.  ``d.items()``,
+        ``.values()`` and ``.keys()`` on a ``dict[K, V]`` are ``(K, V)``,
+        ``V`` and ``K``; a container is its element, a mapping its key.
+        """
+        if isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name) and len(iterable.args) == 1:
+            if iterable.func.id in ("list", "sorted", "reversed", "tuple", "set", "frozenset") and not unpacked:
+                return self._iterated(file, func, iterable.args[0], None, False, depth)
+            if iterable.func.id == "enumerate" and unpacked and slot == 1:
+                return self._iterated(file, func, iterable.args[0], None, False, depth)
+            return None
+        view = ""
+        source: ast.expr = iterable
+        if (
+            isinstance(iterable, ast.Call)
+            and isinstance(iterable.func, ast.Attribute)
+            and iterable.func.attr in ("items", "values", "keys")
+            and not iterable.args
+        ):
+            view, source = iterable.func.attr, iterable.func.value
+        declared = self._annotation_of(file, func, source)
+        if declared is None and isinstance(source, ast.Attribute):
+            # ``job.Files``, on a ``job`` declared a ``JobSpec``.
+            owner = self.of_expression(file, func, source.value, depth + 1)
+            declared = self._field_annotation(owner, source.attr) if owner is not None else None
+        if declared is None:
+            declared = self._returned(file, func, source, depth)
+        if declared is None:
+            return None
+        where, annotation = declared
+        annotation = _unquoted(annotation)
+        if not isinstance(annotation, ast.Subscript):
+            return None
+        wrapper = annotation.value
+        kind = wrapper.attr if isinstance(wrapper, ast.Attribute) else getattr(wrapper, "id", "")
+        inner = annotation.slice
+        if kind in _MAPPINGS:
+            if not (isinstance(inner, ast.Tuple) and len(inner.elts) == 2):
+                return None
+            key, value = inner.elts
+            if view == "items":
+                element = (key, value)[slot] if unpacked and slot in (0, 1) else None
+            else:
+                element = value if view == "values" else key
+                element = None if unpacked else element
+        elif kind in _SEQUENCES and not view:
+            element = inner if not unpacked else _slot_of(inner, slot)
+        else:
+            element = None
+        return self.annotated_all(where, element) if element is not None else None
 
     def of_expression(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
         """The class *expression*, read in *func* of *file*, is declared to be, where it is declared one.
@@ -1902,15 +2089,29 @@ class Types:
                 named = self.class_named(file, expression)
                 if named is not None:
                     return frozenset({(named[0], named[1].name)}), False
-            bound = [
-                value
-                for value in self.assigned(func).get(expression.id, [])
-                if not (isinstance(value, ast.Constant) and value.value is None)
-            ]
-            if not bound:
+            bound = self._assigned_here(func, expression.id)
+            # A loop's target, a name unpacked or caught: the classes their
+            # declarations say, as :meth:`declared` reads them; one they do
+            # not type adds nothing (:meth:`_other_bindings`).
+            others = self._other_bindings(file, func, expression.id, depth)
+            if not bound and not others:
                 return frozenset(), True
             for value in bound:
+                # What a binding is declared as, where it is: ``site_spec_tmp
+                # = self.siteSpecList[name]`` is a ``SiteSpec`` beside a loop
+                # over a ``dict[Any, Any]`` -- read as :meth:`_of_name` reads
+                # each binding, and from what it is built where nothing
+                # declares it.
+                typed = self.declared(file, func, value, depth + 1) if instances else None
+                if typed is not None:
+                    found.update((where, cls.name) for where, cls in typed)
+                    continue
                 add(self._values(file, func, value, depth + 1, instances=instances, seen=seen))
+            readable = [one for one in others if one is not None and instances]
+            if not bound and not readable:
+                return frozenset(), True
+            for one in readable:
+                found.update((where, cls.name) for where, cls in one)
             return frozenset(found), opened
         if (
             isinstance(expression, ast.Attribute)

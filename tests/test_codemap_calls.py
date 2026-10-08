@@ -356,6 +356,72 @@ class Proxy(First, Second):
     ]
 
 
+_BOUND_OTHERWISE = '''\
+class FileSpec:
+    def check(self):
+        pass
+
+class Site:
+    def check(self):
+        pass
+
+class Job:
+    Files: list[FileSpec]
+
+def pair() -> tuple[Job, Site]:
+    return Job(), Site()
+
+def run(job: Job, sites: dict[str, Site]):
+    for f in job.Files:
+        f.check()
+    for name, site in sites.items():
+        site.check()
+    j, s = pair()
+    s.check()
+
+def mixed(x):
+    spec = Site()
+    for spec in x:
+        pass
+    spec.check()
+
+def outer():
+    tb = Site()
+    def inner():
+        tb = FileSpec()
+        return tb
+    tb.check()
+
+class Mapper:
+    specs: dict[str, Site]
+
+    def load(self, raw: dict):
+        for name, spec in raw.items():
+            pass
+        spec = self.specs["x"]
+        spec.check()
+'''
+
+
+def test_a_name_a_loop_an_unpacking_or_a_nested_scope_binds_is_read_by_the_declarations(tmp_path):
+    """``for f in job.Files`` is a ``FileSpec``; a loop over an undeclared ``x`` says nothing of ``spec``; ``inner``'s ``tb`` is not ``outer``'s."""
+    calls = _calls(_tree(tmp_path, m=_BOUND_OTHERWISE))
+
+    def placed(owner, text):
+        func = _function(calls, "m", owner)
+        held = calls.callees("pkg/m.py", func, _call_in(func, text))
+        return _where(held), held.unplaced
+
+    assert placed("run", "f.check") == ([("FileSpec", "check")], "")
+    assert placed("run", "site.check") == ([("Site", "check")], "")
+    assert placed("run", "s.check") == ([("Site", "check")], "")
+    # A loop over an undeclared ``x`` adds nothing and takes nothing from what ``spec = Site()`` says.
+    assert placed("mixed", "spec.check") == ([("Site", "check")], "")
+    assert placed("outer", "tb.check") == ([("Site", "check")], "")
+    # ``spec`` is a ``Site`` where it is assigned; the loop over a bare ``dict`` says nothing.
+    assert placed("load", "spec.check") == ([("Site", "check")], "")
+
+
 def test_a_call_in_a_modules_own_body_is_a_caller_and_the_end_of_its_routes(tmp_path):
     """``g(1)`` at import and under ``__main__``: callers after the functions' calls, the end of every chain."""
     calls = _calls(
