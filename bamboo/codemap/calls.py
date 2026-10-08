@@ -812,13 +812,13 @@ class Calls:
         for site in (site for spelled in self.spellings(target) for site in self._index().get(spelled, [])):
             if site.func is target.func:
                 continue
+            landed = self.callees(site.file, site.func, site.call)
+            if landed.targets and (not landed.unplaced or any(one.func is target.func for one in landed.targets)):
+                continue
             called = site.call.func
             if isinstance(called, ast.Attribute) and called.attr == "__init__" and not self._in_subclass(site, target):
                 continue
-            landed = self.callees(site.file, site.func, site.call)
             if landed.targets:
-                if not landed.unplaced or any(one.func is target.func for one in landed.targets):
-                    continue
                 held = elsewhere.setdefault(landed.unplaced, {})
             elif landed.unplaced == UNPLACED_OUTSIDE:
                 held = outside
