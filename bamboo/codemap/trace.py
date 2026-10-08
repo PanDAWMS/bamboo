@@ -3711,7 +3711,13 @@ class _Walk:
             stopped.detail += f"; {len(where)} of them not walked, {why}: {', '.join(where)}"
 
     def _module_frame(self, file: str) -> Optional[_Frame]:
-        """The module's own body, to read a call in it: not entered, so it spends none of the functions budget."""
+        """The module's own body, to read a call in it: not entered, so it spends none of the functions budget.
+
+        Its file is parsed as any caller's is, and a file not read yet spends
+        one of the files budget: on the new pin, ``activateJob``'s walk ran out
+        of files beyond the function once module-scope callers were read, and
+        14 steps of ``killJob`` and ``archiveJob`` went (X8).
+        """
         parsed = self.module(file)
         if parsed is None:
             return None
