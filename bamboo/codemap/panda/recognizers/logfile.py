@@ -516,9 +516,9 @@ class LoggerFiles:
         A constructor's include the chain from a subclass's --
         ``super().__init__(...)``, ``Base.__init__(self, ...)`` -- made on
         the object being built, which is how the proxy mixins' logger
-        arrives, and the links of that chain the call graph does not place
-        (:meth:`_along_the_mro`).  With *instance* known, only the calls on a
-        related class.
+        arrives, and the subclass's call standing for every link of that
+        chain (:meth:`_along_the_mro`).  With *instance* known, only the calls
+        on a related class.
         """
         key = (target.file, target.func.lineno, id(instance[1]) if instance else None)  # type: ignore[attr-defined]
         if key in self._callers:
@@ -550,11 +550,12 @@ class LoggerFiles:
         A class with several bases runs each base's constructor in turn, along
         its MRO: ``OraDBProxy.DBProxy``'s ``super().__init__(_logger)``
         reaches all thirteen mixins, each handing the logger on.  The call
-        graph places ``super()`` at the first base that has the method and no
-        further, so the other mixins' constructors have no caller there.  The
-        chain is read as the MRO runs it, the subclass's call standing for
-        each link.  ``Base.__init__(self, ...)`` names its base, and the call
-        graph places it there.
+        graph places the subclass's ``super()`` at the first mixin and each
+        mixin's at the next (:meth:`Calls.callees`); read one link at a time,
+        the last mixins are further than a logger is followed (:data:`_HOPS`),
+        so the subclass's call stands for each link as well.
+        ``Base.__init__(self, ...)`` names its base, and the call graph places
+        it there.
         """
         found: list[tuple[CallSite, bool]] = []
         for site in self.calls.every_call().get("__init__", []):

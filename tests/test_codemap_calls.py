@@ -319,6 +319,43 @@ class Elsewhere:
     ]
 
 
+def test_super_lands_at_the_next_class_in_the_order_of_every_object_it_runs_on(tmp_path):
+    """A mixin's ``super().__init__`` reaches its base on its own and the next mixin on a class with both."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m='''\
+class Base:
+    def __init__(self, log):
+        self.log = log
+
+class First(Base):
+    def __init__(self, log):
+        super().__init__(log)
+
+class Second(Base):
+    def __init__(self, log):
+        super().__init__(log)
+
+class Proxy(First, Second):
+    def __init__(self):
+        super().__init__("logger")
+''',
+        )
+    )
+    first = _method(calls, "m", "First", "__init__")
+    chain = _call_in(first.func, "super().__init__")
+
+    assert _where(calls.callees("pkg/m.py", first.func, chain)) == [("Base", "__init__"), ("Second", "__init__")]
+    second = _method(calls, "m", "Second", "__init__")
+    assert [site.call for site in calls.callers(second)] == [chain]
+    assert calls.missed(second) == []
+    proxy = _method(calls, "m", "Proxy", "__init__")
+    assert _where(calls.callees("pkg/m.py", proxy.func, _call_in(proxy.func, "super().__init__"))) == [
+        ("First", "__init__")
+    ]
+
+
 def test_a_call_binds_positional_keyword_and_default_arguments(tmp_path):
     roots = _tree(
         tmp_path,

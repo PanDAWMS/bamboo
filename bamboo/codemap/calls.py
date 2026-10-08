@@ -349,12 +349,7 @@ class Calls:
             cls = self.types.method_class(file, func)
             if cls is None:
                 return Placed((), UNPLACED_RECEIVER)
-            lineage = self.types.lineage(*cls)[1:]
-            for where, holder in lineage:
-                found = self._declared_in(where, holder, called.attr)
-                if found is not None:
-                    return Placed((found,))
-            return Placed((), UNPLACED_NO_METHOD)
+            return self._after(cls, called.attr)
         module = self.types.module_named(file, receiver)
         if module is not None:
             return self._module_member(module, called.attr)
@@ -412,6 +407,29 @@ class Calls:
             if any(self._declared_in(where, holder, hook) is not None for where, holder in lineage):
                 return Placed((), reason)
         return Placed((), UNPLACED_NO_METHOD)
+
+    def _after(self, owned: tuple[str, ast.ClassDef], name: str) -> Placed:
+        """Where ``super().<name>(...)`` in a method of *owned* lands.
+
+        At the next class after *owned* in the method resolution order of
+        the object's class (:meth:`Types.mro`) that defines *name* -- for an
+        object of *owned* itself and of each of its subclasses in the corpus,
+        so a mixin's ``super().__init__(log_stream)`` lands at the base it
+        names and, on an ``OraDBProxy.DBProxy``, at the next mixin, whose
+        constructor no other call reaches.  *owned*'s own order first.
+        """
+        file, cls = owned
+        targets: list[Target] = []
+        for where, holder in [owned, *self.subclasses(file, cls)]:
+            order = self.types.mro(where, holder)
+            at = next((index for index, (_file, one) in enumerate(order) if one is cls), None)
+            for place, base in order[at + 1:] if at is not None else ():
+                found = self._declared_in(place, base, name)
+                if found is not None:
+                    if found not in targets:
+                        targets.append(found)
+                    break
+        return Placed(tuple(targets)) if targets else Placed((), UNPLACED_NO_METHOD)
 
     def _method_of_any(
         self, classes: list[tuple[str, ast.ClassDef]], name: str, opened: bool = False
@@ -1053,6 +1071,7 @@ class Types:
         # (file, id(func), name, depth) -> (func, classes): see ``declared``.
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
+        self._mro: dict[int, tuple[ast.ClassDef, list[tuple[str, ast.ClassDef]]]] = {}
 
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
         """``pathcond.assigned_expressions``, once per function."""
@@ -1302,6 +1321,65 @@ class Types:
             order.append(found)
             queue.extend((found[0], one) for one in found[1].bases)
         return order
+
+    def mro(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
+        """*cls* and its corpus bases in the order Python resolves a method on an object of *cls*.
+
+        :meth:`lineage` reads the bases breadth first, and in the corpus that
+        finds the same definition of every name a lookup asks.  ``super()``
+        needs the order itself: in a class with several bases it runs the
+        class after the caller's in the order of the object's class, so
+        ``OraDBProxy.DBProxy``'s thirteen mixins each hand the call on to the
+        next.  C3, as Python builds it; a base outside the corpus stands for
+        itself, its own bases unknown.  Where the bases admit no such order,
+        :meth:`lineage`.
+        """
+        held = self._mro.get(id(cls))
+        if held is not None and held[0] is cls:
+            return held[1]
+        # A class that reaches itself through its bases reads its lineage.
+        self._mro[id(cls)] = (cls, self.lineage(file, cls))
+        found = self._linearized(file, cls)
+        order = found if found is not None else self.lineage(file, cls)
+        self._mro[id(cls)] = (cls, order)
+        return order
+
+    def _linearized(self, file: str, cls: ast.ClassDef) -> Optional[list[tuple[str, ast.ClassDef]]]:
+        """C3 over *cls*'s bases, ``None`` where they admit no order."""
+        held: dict[object, tuple[str, ast.ClassDef]] = {}
+
+        def token(one: tuple[str, ast.ClassDef]) -> object:
+            held[id(one[1])] = one
+            return id(one[1])
+
+        direct: list[object] = []
+        sequences: list[list[object]] = []
+        for base in cls.bases:
+            found = self.class_named(file, pathcond.unsubscripted(base))
+            if found is None:
+                outside = f"<outside>{ast.unparse(base)}"
+                direct.append(outside)
+                sequences.append([outside])
+                continue
+            direct.append(token(found))
+            sequences.append([token(one) for one in self.mro(*found)])
+        sequences.append(list(direct))
+        merged: list[object] = [token((file, cls))]
+        while True:
+            sequences = [one for one in sequences if one]
+            if not sequences:
+                break
+            for sequence in sequences:
+                head = sequence[0]
+                if not any(head in other[1:] for other in sequences):
+                    break
+            else:
+                return None
+            merged.append(head)
+            for sequence in sequences:
+                if sequence[0] == head:
+                    del sequence[0]
+        return [held[one] for one in merged if one in held]
 
     def method(self, file: str, cls: ast.ClassDef, name: str):
         for where, holder in self.lineage(file, cls):

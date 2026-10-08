@@ -13497,6 +13497,45 @@ def test_a_mixins_logger_comes_down_the_chain_of_a_proxy_with_several_bases(tmp_
     ]
 
 
+def test_a_mixins_logger_does_not_spend_its_hops_on_the_mixins_before_it(tmp_path):
+    """The call graph places each mixin's ``super().__init__`` at the next mixin of the proxy;
+    read one link at a time, the fifth mixin's logger would be further than a logger is followed.
+    The proxy's own call stands for the chain."""
+    mixins = ["First", "Second", "Third", "Fourth", "Fifth"]
+    files = {
+        "pandaserver/taskbuffer/db_proxy_mods/base_module.py": """\
+            class BaseModule:
+                def __init__(self, log_stream):
+                    self._log_stream = log_stream
+                def create_tagged_logger(self, comment):
+                    tmp_log = LogWrapper(self._log_stream, comment)
+                    return tmp_log
+            """,
+        "pandaserver/taskbuffer/OraDBProxy.py": "".join(
+            f"from pandaserver.taskbuffer.db_proxy_mods.{name.lower()}_module import {name}Module\n" for name in mixins
+        )
+        + '_logger = PandaLogger().getLogger("DBProxy")\n'
+        + f"class DBProxy({', '.join(f'{name}Module' for name in mixins)}):\n"
+        + "    def __init__(self):\n"
+        + "        super().__init__(_logger)\n",
+    }
+    for name in mixins:
+        files[f"pandaserver/taskbuffer/db_proxy_mods/{name.lower()}_module.py"] = (
+            "from pandaserver.taskbuffer.db_proxy_mods.base_module import BaseModule\n"
+            f"class {name}Module(BaseModule):\n"
+            "    def __init__(self, log_stream):\n"
+            "        super().__init__(log_stream)\n"
+            "    def archiveJob(self, job):\n"
+            '        tmp_log = self.create_tagged_logger(" /* DBProxy.archiveJob */")\n'
+            '        tmp_log.debug(f"start status={job.jobStatus}")\n'
+        )
+    found = _landed(tmp_path, files)
+
+    assert found["pandaserver/taskbuffer/db_proxy_mods/fifth_module.py::FifthModule.archiveJob"] == [
+        (7, ["panda-DBProxy.log"], "logger")
+    ]
+
+
 def test_each_call_is_read_by_the_logger_it_is_made_on(tmp_path):
     """One module, two loggers, two files; ``setup_logger`` opens a file as
     ``getLogger`` does; the standard library's ``logging.getLogger`` opens none,
