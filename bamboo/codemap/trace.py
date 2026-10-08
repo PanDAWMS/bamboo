@@ -1766,8 +1766,7 @@ class _Walk:
             if func is None or "." in owner.rsplit("::", 1)[-1]:
                 return held
             return self.frame(file, _with_class(file, self.parsed[file][1], func), line=line, handovers=handovers)
-        limit = self.budget.functions + (self.budget.crossed_functions if self.crossing else 0)
-        if len(self.frames) >= limit:
+        if len(self.frames) >= self._functions_limit():
             self._exhausted("functions")
             return None
         self.frames[key] = None
@@ -1793,6 +1792,9 @@ class _Walk:
             file, owner, func, tuple(handovers), _imported_names(tree)
         )
         return self.frames[key]
+
+    def _functions_limit(self) -> int:
+        return self.budget.functions + (self.budget.crossed_functions if self.crossing else 0)
 
     # -- steps -------------------------------------------------------------
 
@@ -3564,18 +3566,18 @@ class _Walk:
         if left:
             self._narrowed(
                 frame, made, stopped, left,
-                lambda more: self._follow_callers(target, name, depth, more),
+                lambda more: self._follow_callers(target, name, depth, more, stopped),
                 _MAX_CALLERS - len(sites),
             )
         if unbuilt:
             self.by_class.setdefault((frame.file, getattr(frame.func, "lineno", 0)), []).append(
                 _ByClass(
                     asking, unbuilt,
-                    lambda more: self._follow_callers(target, name, depth, more),
+                    lambda more: self._follow_callers(target, name, depth, more, stopped),
                     _MAX_CALLERS - len(sites), stopped,
                 )
             )
-        self._follow_callers(target, name, depth, sites)
+        self._follow_callers(target, name, depth, sites, stopped)
         return True
 
     def _asking_classes(self, frame: _Frame) -> Optional[list[tuple[str, ast.ClassDef]]]:
@@ -3619,26 +3621,44 @@ class _Walk:
             for file, held in [one, *self.calls.subclasses(*one)]
         )
 
-    def _follow_callers(self, target: "calls_mod.Target", name: str, depth: int, sites: list) -> None:
-        """A step for each of *sites* saying what it hands *name*, and the names that reads asked in its caller."""
-        for site in sites:
-            caller = self.frame(
-                site.file, f"{site.file}::{site.func.name}", line=site.func.lineno  # type: ignore[attr-defined]
-            )
-            if caller is None:
-                continue
-            call = _same_node(caller.func, site.call)
+    def _follow_callers(
+        self, target: "calls_mod.Target", name: str, depth: int, sites: list, stopped: TraceStep
+    ) -> None:
+        """A step for each of *sites* saying what it hands *name*, and the names that reads asked in its caller.
+
+        A site the walk does not take is said on *stopped*, whose "followed to
+        the N call(s)" counted it: where the walk's budget ran out before the
+        caller's frame was made or its step recorded, or the caller could not
+        be read.
+        """
+        unwalked: dict[str, list[str]] = {}
+        for index, site in enumerate(sites):
+            owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
+            spent = (site.file, owner) not in self.frames and len(self.frames) >= self._functions_limit()
+            caller = self.frame(site.file, owner, line=site.func.lineno)  # type: ignore[attr-defined]
+            call = _same_node(caller.func, site.call) if caller is not None else None
             if not isinstance(call, ast.Call):
+                why = (
+                    "the walk's functions budget ran out" if caller is None and spent
+                    else "its function is not read" if caller is None
+                    else "the call is not found in the function the walk read"
+                )
+                unwalked.setdefault(why, []).append(f"{site.file}:{site.call.lineno}")
                 continue
             step, statement = self._handed_step(
                 caller, call, target, name, calls_mod.bind(call, target, self.calls.callees(caller.file, caller.func, call).on_class), depth
             )
             step.open = self.calls.opened(site)
             if not self.record(step):
-                return
+                unwalked.setdefault("the walk's steps budget ran out", []).extend(
+                    f"{one.file}:{one.call.lineno}" for one in sites[index:]
+                )
+                break
             if step.reads:
                 self.entered.add((caller.file, caller.owner))
                 self.want(caller, step.reads, depth + 1, statement)
+        for why, where in unwalked.items():
+            stopped.detail += f"; {len(where)} of them not walked, {why}: {', '.join(where)}"
 
     def _narrowed(
         self,

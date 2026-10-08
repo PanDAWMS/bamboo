@@ -3448,6 +3448,33 @@ def test_a_parameter_placed_at_many_calls_is_said_and_not_walked(tmp_path):
     assert not [s for s in walked.steps if s.kind == "handover"]
 
 
+@pytest.mark.parametrize(
+    ("budget", "said", "handed"),
+    [
+        (
+            trace_mod.Budget(functions=1, crossed_functions=1),
+            "2 of them not walked, the walk's functions budget ran out: pandajedi/m.py:8, pandajedi/m.py:11",
+            ["0"],
+        ),
+        (
+            trace_mod.Budget(steps=2, crossed_steps=2),
+            "1 of them not walked, the walk's steps budget ran out: pandajedi/m.py:11",
+            ["0", "1"],
+        ),
+    ],
+)
+def test_a_caller_the_walks_budget_leaves_unwalked_is_said_on_the_stop_that_counted_it(tmp_path, budget, said, handed):
+    """"Followed to the 3 call(s)" over one handover step said three were walked."""
+    callers = "\n".join(f"def c{i}():\n    return g({i})\n" for i in range(3))
+    roots = _tree(tmp_path, **{"m.py": f"def g(x):\n    spec.status = x\n\n{callers}"})
+
+    walked = _walked_in(roots, "m.py", "g", [2], budget=budget)
+
+    (stopped,) = [s for s in walked.steps if s.name == "x" and s.kind == "unbound"]
+    assert stopped.detail == f"a parameter; followed to the 3 call(s) placed at g; {said}"
+    assert [s.value for s in walked.steps if s.kind == "handover"] == handed
+
+
 _RUN = '''\
     def run(self, log):
         got = self.box.take()
