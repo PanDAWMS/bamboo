@@ -4274,13 +4274,41 @@ def test_a_value_the_database_supplies_is_read_from_what_the_facade_calls(tmp_pa
     ``peekJobs`` at all, so the same name read nothing.  A call the facade
     makes under an ``if`` is read where the caller's constants let it run --
     ``getFiles`` defaults to ``False``.  A name no facade has says nothing,
-    though the proxy has a method of it.
+    though the proxy has a method of it.  A proxy method whose statements are
+    handed to it is named beside the tables the others read, not dropped from
+    them; one whose statements the call's constants rule out is not, and
+    neither is one whose statement names no table.
     """
     roots = _server(
         tmp_path,
         **{
             "taskbuffer/OraDBProxy.py": '''\
 class DBProxy:
+    def checkBan(self, user):
+        sql = "SELECT status FROM ATLAS_PANDA.users WHERE name=:name "
+        varMap = {}
+        varMap[":name"] = user
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+
+    def fetchIDs(self, n):
+        sql = "SELECT ATLAS_PANDA.JOBS_SEQ.nextval FROM dual "
+        varMap = {}
+        varMap[":n"] = n
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+
+    def bulkInsert(self, sql, varMaps):
+        self.cur.executemany(sql, varMaps)
+
+    def markDone(self, taskID, force):
+        if force:
+            sql = "UPDATE ATLAS_PANDA.tasksTable SET status=:status WHERE taskID=:taskID "
+            varMap = {}
+            varMap[":taskID"] = taskID
+            varMap[":status"] = "done"
+            self.cur.execute(sql, varMap)
+
     def querySQL(self, sql):
         sql = "SELECT name FROM ATLAS_PANDA.wrongTable WHERE id=:id "
         varMap = {}
@@ -4349,6 +4377,24 @@ class TaskBuffer:
             if getFiles:
                 proxy.getFiles(taskID)
         return ret
+
+    def storeJobs(self, user, sql, varMaps):
+        with self.proxyPool.get() as proxy:
+            ret = proxy.checkBan(user)
+            proxy.fetchIDs(len(varMaps))
+            proxy.bulkInsert(sql, varMaps)
+        return ret
+
+    def insertOnly(self, sql, varMaps):
+        with self.proxyPool.get() as proxy:
+            ret = proxy.bulkInsert(sql, varMaps)
+        return ret
+
+    def finish(self, taskID):
+        with self.proxyPool.get() as proxy:
+            ret = proxy.getDatasets(taskID)
+            proxy.markDone(taskID, False)
+        return ret
 ''',
             "daemons/commando.py": '''\
 from pandaserver.taskbuffer.TaskBuffer import TaskBuffer
@@ -4364,13 +4410,16 @@ class Commando:
         alone = self.taskBufferIF.lonely(pandaIDs)
         plain = self.taskBufferIF.getDatasets(1)
         full = self.taskBufferIF.getDatasets(1, getFiles=True)
-        log.info(f"{names} {jobs} {alone} {plain} {full}")
+        stored = self.taskBufferIF.storeJobs("me", "INSERT", [])
+        inserted = self.taskBufferIF.insertOnly("INSERT", [])
+        finished = self.taskBufferIF.finish(1)
+        log.info(f"{names} {jobs} {alone} {plain} {full} {stored} {inserted} {finished}")
 ''',
         },
     )
 
     walked = trace_mod.walk_from_print(
-        roots, file="pandaserver/daemons/commando.py", line=14, classify=provenance.classify
+        roots, file="pandaserver/daemons/commando.py", line=17, classify=provenance.classify
     )
 
     said = {s.name: s.detail for s in walked.steps if s.terminal == models.STOP_UPSTREAM}
@@ -4380,4 +4429,7 @@ class Commando:
         "names": "querySQL -- reads rightTable by :name",
         "jobs": "peekJobs -- reads jobsDefined4 by :PandaID",
         "alone": "lonely",
+        "stored": "storeJobs -- reads users by :name; what bulkInsert runs is not read",
+        "inserted": "insertOnly",
+        "finished": "finish -- reads datasetsTable by :taskID",
     }

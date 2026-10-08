@@ -1873,6 +1873,18 @@ class _Walk:
         route passes through it -- the call is not placed, or the facade does
         not hand the method its own parameters -- every run the method can
         make, as before.
+
+        **A proxy method this reads no statement in is named, not dropped.**
+        ``storeJobs(bulk_job_insert=True)`` reached the proxy's
+        ``bulk_insert_new_jobs``, which runs the statements ``insertNewJob``
+        hands back and no reading here follows, and said "reads users,
+        JEDI_Events": the tables of the rest, said alone, read as everything
+        ``storeJobs`` asks.  Half a list of tables said as the list is the
+        statement :func:`~bamboo.codemap.panda.sql._elements` refuses to make.
+        A method whose statements the call's constants all rule out runs
+        nothing on that route and is not one of these; nor is one that runs a
+        statement naming no table, such as a sequence's ``nextval``.  Where no
+        call names a table there is nothing partial to say, and nothing is.
         """
         from bamboo.codemap.panda import sql as sql_mod
         from bamboo.codemap.panda import sqltext
@@ -1885,6 +1897,7 @@ class _Walk:
 
         tables: list[str] = []
         keys: list[str] = []
+        unread: list[str] = []
         read: set[tuple[str, int]] = set()
         for made in facade_calls(self.types, method):
             if at and self._ruled_out_at(made, at):
@@ -1909,23 +1922,29 @@ class _Walk:
                         }
                         for route in through
                     ]
+            ran = False
             for constants in readings:
                 if constants:
                     with sql_mod.at_call(func, constants):
                         runs = list(sql_mod.executions(func))
                 else:
                     runs = list(sql_mod.executions(func))
+                ran = ran or bool(runs)
                 for run in runs:
                     for table in sqltext.tables_named(run.sql):
                         _add(tables, table)
                     for clause in sqltext.where_clauses(run.sql):
                         for key in re.findall(r":(\w+)", clause):
                             _add(keys, f":{key}")
+            if not ran and (readings == [None] or not sql_mod.executions(func)):
+                _add(unread, func.name)
         said = ""
         if tables:
             said = f"reads {', '.join(tables[:6])}" + (
                 f" by {', '.join(keys[:6])}" if keys else ""
             )
+            if unread:
+                said += f"; what {', '.join(unread)} run{'s' if len(unread) == 1 else ''} is not read"
         self._asked[(method, at)] = said
         return said
 
