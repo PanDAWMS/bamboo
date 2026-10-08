@@ -1858,7 +1858,10 @@ class _Walk:
         (:func:`~bamboo.codemap.panda.provenance.facade_calls`), not the
         proxy's method of the same name: ``peekJobs`` reads what ``peekJob``
         reads, and ``querySQL`` what ``querySQLS`` does.  A name no facade
-        has says nothing.
+        has says nothing.  A call the facade makes under an ``if`` the call's
+        constants decide against is not read:
+        ``getDatasetsWithJediTaskID_JEDI`` reads the files only when it is
+        handed ``getFiles=True``, and its default is ``False``.
 
         Read at *call*, the call in *frame* that went to the database, where a
         route of calls into a proxy method passes through it
@@ -1878,18 +1881,20 @@ class _Walk:
         at = f"{frame.file}:{call.lineno}" if frame is not None and call is not None else ""
         if (method, at) in self._asked:
             return self._asked[(method, at)]
+        from bamboo.codemap.panda.recognizers import sqlwrite
+
         tables: list[str] = []
         keys: list[str] = []
         read: set[tuple[str, int]] = set()
         for made in facade_calls(self.types, method):
+            if at and self._ruled_out_at(made, at):
+                continue
             where, func = made.proxy_file, made.proxy_method
             if (where, func.lineno) in read:
                 continue
             read.add((where, func.lineno))
             readings = [None]
             if at:
-                from bamboo.codemap.panda.recognizers import sqlwrite
-
                 owned = self.types.method_class(where, func)
                 target = calls_mod.Target(where, func, owned[1] if owned else None)
                 through = [route for route in self.calls.routes(target)[0] if at in route.chain]
@@ -1923,6 +1928,30 @@ class _Walk:
             )
         self._asked[(method, at)] = said
         return said
+
+    def _ruled_out_at(self, made, at: str) -> bool:
+        """Whether every route through *at* into the facade's method hands it constants under which it never makes *made*'s call."""
+        from bamboo.codemap.panda.recognizers import sqlwrite
+
+        owned = self.types.method_class(made.file, made.method)
+        facade = calls_mod.Target(made.file, made.method, owned[1] if owned else None)
+        through = [route for route in self.calls.routes(facade)[0] if at in route.chain]
+        if not through:
+            return False
+        flags = sorted(sqlwrite._flag_parameters(made.method))
+        return all(
+            pathcond.ruled_out_by(
+                made.call,
+                made.method,
+                {
+                    name: value
+                    for name in flags
+                    if (value := sqlwrite._route_constant(name, facade, route.sites, self.calls))
+                    is not sqlwrite._UNSET
+                },
+            )
+            for route in through
+        )
 
     def _classified(
         self, frame: _Frame, expression: ast.expr, resolve=None, typed=None

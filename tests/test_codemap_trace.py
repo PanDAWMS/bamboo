@@ -4271,8 +4271,10 @@ def test_a_value_the_database_supplies_is_read_from_what_the_facade_calls(tmp_pa
     ``querySQL`` calls ``querySQLS``, and the proxy's own ``querySQL`` --
     another method, reading another table -- was what the same name read.
     ``peekJobs`` calls ``peekJob`` once per job and the proxy has no
-    ``peekJobs`` at all, so the same name read nothing.  A name no facade has
-    says nothing, though the proxy has a method of it.
+    ``peekJobs`` at all, so the same name read nothing.  A call the facade
+    makes under an ``if`` is read where the caller's constants let it run --
+    ``getFiles`` defaults to ``False``.  A name no facade has says nothing,
+    though the proxy has a method of it.
     """
     roots = _server(
         tmp_path,
@@ -4297,6 +4299,20 @@ class DBProxy:
         sql = "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 WHERE PandaID=:PandaID "
         varMap = {}
         varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+
+    def getDatasets(self, taskID):
+        sql = "SELECT datasetID FROM ATLAS_PANDA.datasetsTable WHERE taskID=:taskID "
+        varMap = {}
+        varMap[":taskID"] = taskID
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+
+    def getFiles(self, taskID):
+        sql = "SELECT fileID FROM ATLAS_PANDA.filesTable WHERE taskID=:taskID "
+        varMap = {}
+        varMap[":taskID"] = taskID
         self.cur.execute(sql, varMap)
         return self.cur.fetchall()
 
@@ -4326,6 +4342,13 @@ class TaskBuffer:
             for pandaID in pandaIDs:
                 found.append(proxy.peekJob(pandaID))
         return found
+
+    def getDatasets(self, taskID, getFiles=False):
+        with self.proxyPool.get() as proxy:
+            ret = proxy.getDatasets(taskID)
+            if getFiles:
+                proxy.getFiles(taskID)
+        return ret
 ''',
             "daemons/commando.py": '''\
 from pandaserver.taskbuffer.TaskBuffer import TaskBuffer
@@ -4339,17 +4362,21 @@ class Commando:
         names = self.taskBufferIF.querySQL("SELECT", {})
         jobs = self.taskBufferIF.peekJobs(pandaIDs)
         alone = self.taskBufferIF.lonely(pandaIDs)
-        log.info(f"{names} {jobs} {alone}")
+        plain = self.taskBufferIF.getDatasets(1)
+        full = self.taskBufferIF.getDatasets(1, getFiles=True)
+        log.info(f"{names} {jobs} {alone} {plain} {full}")
 ''',
         },
     )
 
     walked = trace_mod.walk_from_print(
-        roots, file="pandaserver/daemons/commando.py", line=12, classify=provenance.classify
+        roots, file="pandaserver/daemons/commando.py", line=14, classify=provenance.classify
     )
 
     said = {s.name: s.detail for s in walked.steps if s.terminal == models.STOP_UPSTREAM}
     assert said == {
+        "plain": "getDatasets -- reads datasetsTable by :taskID",
+        "full": "getDatasets -- reads datasetsTable, filesTable by :taskID",
         "names": "querySQL -- reads rightTable by :name",
         "jobs": "peekJobs -- reads jobsDefined4 by :PandaID",
         "alone": "lonely",
