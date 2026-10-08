@@ -3989,14 +3989,7 @@ class _Walk:
                     other = other or self._sibling(frame, method)
                     if other is None:
                         break
-                    # The calls placed at it, constructor or setter, are a
-                    # question about the object this frame came in on.
-                    key = (other.file, getattr(other.func, "lineno", 0))
-                    held = self.asked_of.setdefault(key, [])
-                    if not any(one is frame for one in held):
-                        held.append(frame)
-                        for narrowed in self.narrowings.get(key, ()):
-                            self._watch(narrowed, frame)
+                    self._asked_into(other, frame)
                     before = len(self.steps)
                     self._binding(other, name, expression, depth)
                     said = said or next((step for step in self.steps[before:] if step.owner == other.owner), None)
@@ -4016,7 +4009,7 @@ class _Walk:
                     continue
                 self.beyond.append(
                     lambda place=where, one=method: self._inherited_field(
-                        place, one, name, field, depth
+                        frame, place, one, name, field, depth
                     )
                 )
                 answered = True
@@ -4045,13 +4038,28 @@ class _Walk:
                         answered = True
         return answered
 
+    def _asked_into(self, other: _Frame, frame: _Frame) -> None:
+        """Record that *frame* asked into *other*, a method assigning a field of the object *frame* came in on.
+
+        The calls placed at *other*, constructor or setter, are a question
+        about that object (:meth:`_object_made`), and so is a narrowing
+        already made there that a later object may widen (:meth:`_watch`).
+        """
+        key = (other.file, getattr(other.func, "lineno", 0))
+        held = self.asked_of.setdefault(key, [])
+        if not any(one is frame for one in held):
+            held.append(frame)
+            for narrowed in self.narrowings.get(key, ()):
+                self._watch(narrowed, frame)
+
     def _inherited_field(
-        self, file: str, method: ast.AST, name: str, field: str, depth: int
+        self, frame: _Frame, file: str, method: ast.AST, name: str, field: str, depth: int
     ) -> None:
-        """``self.<field>`` as a base class in another file assigns it."""
+        """``self.<field>`` as a base class in another file assigns it, asked by *frame* as a sibling in the file is."""
         other = self.frame(file, f"{file}::{getattr(method, 'name', '')}", line=method.lineno)
         if other is None:
             return
+        self._asked_into(other, frame)
         self.entered.add((other.file, other.owner))
         for expression in pathcond.attribute_expressions(other.func, field):
             self._binding(other, name, expression, depth)

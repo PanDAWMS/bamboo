@@ -3509,6 +3509,53 @@ def test_a_constructor_parameter_is_answered_by_what_built_the_object_the_walk_c
     assert _built_handovers(walked) == [("start", "fetched")]
 
 
+def test_a_setter_a_base_in_another_file_declares_is_answered_by_the_calls_on_the_object(tmp_path):
+    """``self.items`` assigned by a base's setter one file over is asked about the object the walk came in on,
+    as a setter in the class's own file is: ``spare.put(...)`` is another box's."""
+    roots = _tree(
+        tmp_path,
+        **{
+            "base.py": "class Holder:\n    def put(self, items):\n        self.items = items\n",
+            "m.py": '''\
+from pandajedi.base import Holder
+
+
+class Box(Holder):
+    def take(self):
+        return self.items
+
+
+class Worker:
+    def __init__(self):
+        self.box = Box()
+
+    def run(self, log):
+        got = self.box.take()
+        log.info(f"took {got}")
+
+    def fill(self):
+        self.box.put(fetch())
+
+
+def other(i):
+    spare = Box()
+    spare.put([i])
+''',
+        },
+    )
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/m.py", line=15, classify=provenance.classify)
+
+    (stopped,) = [s for s in walked.steps if s.name == "items" and s.kind == TRACE_UNBOUND]
+    assert stopped.owner == f"{PACKAGE}/base.py::put"
+    assert stopped.detail == (
+        "a parameter; followed to the 1 of 2 call(s) placed at put: "
+        "the ones made on the object the walk came in on"
+    )
+    handed = [(s.owner.rsplit("::", 1)[-1], s.value) for s in walked.steps if s.kind == TRACE_HANDOVER and s.name == "items"]
+    assert handed == [("fill", "fetch()")]
+
+
 def test_a_construction_handed_a_constant_builds_nothing_the_walk_came_in_on(tmp_path):
     """``JobGeneratorThread(None, ...)`` in a test script hands its worker no
     list, so it is not a way the knight's list could have been built."""
