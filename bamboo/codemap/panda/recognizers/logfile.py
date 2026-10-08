@@ -476,8 +476,10 @@ class LoggerFiles:
             if argument is None:
                 trail.open = True
                 continue
+            # A call in a module's own body is read in the module's scope,
+            # as a module's names are (:meth:`_module_name`).
             self._value(
-                trail, site.file, site.func, argument, site.call,
+                trail, site.file, None if site.in_module else site.func, argument, None if site.in_module else site.call,
                 _Way(way.seen, way.hops + 1, way.instance if same_object else None),
             )
 

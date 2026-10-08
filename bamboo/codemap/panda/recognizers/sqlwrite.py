@@ -1385,7 +1385,10 @@ def _every_run_texts(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Exec
 
 
 def _parameters(func: ast.AST) -> list[str]:
-    args = func.args  # type: ignore[attr-defined]
+    """*func*'s parameter names; none for a module's own body (a call there, :class:`CallSite`)."""
+    args = getattr(func, "args", None)
+    if args is None:
+        return []
     return [one.arg for one in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
 
 

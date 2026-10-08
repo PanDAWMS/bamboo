@@ -1145,7 +1145,10 @@ def _built_detail(frame: "_Frame", followed: int, every: int) -> str:
 
 
 def _parameters(func: ast.AST) -> set[str]:
-    args = func.args  # type: ignore[attr-defined]
+    """*func*'s parameter names, ``*args`` and ``**kwargs`` included; none for a module's own body."""
+    args = getattr(func, "args", None)
+    if args is None:
+        return set()
     names = {one.arg for one in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
     return names | {one.arg for one in (args.vararg, args.kwarg) if one is not None}
 
@@ -1541,6 +1544,16 @@ def _module_bindings(tree: ast.Module, name: str) -> list[ast.expr]:
             if any(isinstance(e, ast.Name) and e.id == name for e in elements):
                 found.append(node.value)
     return found
+
+
+def _is_main_test(test: ast.expr) -> bool:
+    """Whether *test* is ``__name__ == "__main__"``, either way round."""
+    return (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and {ast.unparse(test.left), ast.unparse(test.comparators[0])} == {"__name__", "'__main__'"}
+    )
 
 
 def _caught_as(func: ast.AST, name: str) -> list[ast.ExceptHandler]:
@@ -3217,9 +3230,12 @@ class _Walk:
     def _mutations(self, method_frame: _Frame, field: str, depth: int, sites: list) -> bool:
         """A handover step for each call in *sites* of the method that sets *field*; ``False`` once out of steps."""
         for site in sites:
-            caller = self.frame(
-                site.file, f"{site.file}::{site.func.name}", line=site.func.lineno  # type: ignore[attr-defined]
-            )
+            if site.in_module:
+                caller = self._module_frame(site.file)
+            else:
+                caller = self.frame(
+                    site.file, f"{site.file}::{site.func.name}", line=site.func.lineno  # type: ignore[attr-defined]
+                )
             if caller is None:
                 continue
             call = _same_node(caller.func, site.call)
@@ -3227,27 +3243,30 @@ class _Walk:
                 continue
             statement = _enclosing_statement(call) or call
             guards = _guard_tests(statement)
-            if not self.record(
-                TraceStep(
-                    kind=TRACE_HANDOVER,
-                    name=f"self.{field}",
-                    owner=caller.owner,
-                    file=caller.file,
-                    line=call.lineno,
-                    value=_text(call),
-                    guards=pathcond.path_condition(statement),
-                    unseen=_unseen(statement),
-                    reads=[name for _test, names in guards for name in names],
-                    detail=(
-                        f"calls {getattr(method_frame.func, 'name', '')} here, "
-                        f"which sets {field}"
-                    ),
-                    depth=depth,
-                    printed=self._block_prints(caller, statement),
-                    open=self.calls.opened(site),
-                )
-            ):
+            step = TraceStep(
+                kind=TRACE_HANDOVER,
+                name=f"self.{field}",
+                owner=caller.owner,
+                file=caller.file,
+                line=call.lineno,
+                value=_text(call),
+                guards=pathcond.path_condition(statement),
+                unseen=_unseen(statement),
+                reads=[name for _test, names in guards for name in names],
+                detail=(
+                    f"calls {getattr(method_frame.func, 'name', '')} here, "
+                    f"which sets {field}"
+                ),
+                depth=depth,
+                printed=[] if site.in_module else self._block_prints(caller, statement),
+                open=self.calls.opened(site),
+            )
+            if site.in_module:
+                self._at_module(caller, step, statement, None)
+            if not self.record(step):
                 return False
+            if site.in_module:
+                continue
             self.entered.add((caller.file, caller.owner))
             for test, names in guards:
                 self.want(caller, names, depth + 1, test)
@@ -3630,12 +3649,20 @@ class _Walk:
         the N call(s)" counted it: where the walk's budget ran out before the
         caller's frame was made or its step recorded, or the caller could not
         be read.
+
+        A call in a module's own body is where the value is written: its step
+        says so, as a binding at module scope does (:meth:`_module_binding`),
+        and what the argument reads is not walked.
         """
         unwalked: dict[str, list[str]] = {}
         for index, site in enumerate(sites):
-            owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
-            spent = (site.file, owner) not in self.frames and len(self.frames) >= self._functions_limit()
-            caller = self.frame(site.file, owner, line=site.func.lineno)  # type: ignore[attr-defined]
+            if site.in_module:
+                spent = False
+                caller = self._module_frame(site.file)
+            else:
+                owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
+                spent = (site.file, owner) not in self.frames and len(self.frames) >= self._functions_limit()
+                caller = self.frame(site.file, owner, line=site.func.lineno)  # type: ignore[attr-defined]
             call = _same_node(caller.func, site.call) if caller is not None else None
             if not isinstance(call, ast.Call):
                 why = (
@@ -3645,20 +3672,49 @@ class _Walk:
                 )
                 unwalked.setdefault(why, []).append(f"{site.file}:{site.call.lineno}")
                 continue
-            step, statement = self._handed_step(
-                caller, call, target, name, calls_mod.bind(call, target, self.calls.callees(caller.file, caller.func, call).on_class), depth
-            )
+            bound = calls_mod.bind(call, target, self.calls.callees(caller.file, caller.func, call).on_class)
+            step, statement = self._handed_step(caller, call, target, name, bound, depth)
             step.open = self.calls.opened(site)
+            if site.in_module:
+                self._at_module(caller, step, statement, bound.get(name))
             if not self.record(step):
                 unwalked.setdefault("the walk's steps budget ran out", []).extend(
                     f"{one.file}:{one.call.lineno}" for one in sites[index:]
                 )
                 break
-            if step.reads:
+            if step.reads and not site.in_module:
                 self.entered.add((caller.file, caller.owner))
                 self.want(caller, step.reads, depth + 1, statement)
         for why, where in unwalked.items():
             stopped.detail += f"; {len(where)} of them not walked, {why}: {', '.join(where)}"
+
+    def _module_frame(self, file: str) -> Optional[_Frame]:
+        """The module's own body, to read a call in it: not entered, so it spends none of the functions budget."""
+        parsed = self.module(file)
+        if parsed is None:
+            return None
+        tree = parsed[1]
+        return _Frame(file, f"{file}::{MODULE_SCOPE}", tree, (), _imported_names(tree))
+
+    def _at_module(self, module: _Frame, step: TraceStep, statement: ast.AST, argument: Optional[ast.expr]) -> None:
+        """Mark *step*, made at a call in *module*'s own body, as written there and run at import or as a script.
+
+        What the argument reads is the module's, and the walk does not go on
+        into it -- as for a binding at module scope.  A value it can classify
+        says so, as that binding's does.
+        """
+        script = any(
+            isinstance(one, ast.If) and _is_main_test(one.test) for one in pathcond.ancestors(statement)
+        )
+        step.unseen.append(
+            f"{MODULE_SCOPE} at {step.line}: "
+            + ("run when the file is run as a script" if script else "run when the file is imported")
+            + ", not on the way here"
+        )
+        if step.reads and argument is not None:
+            step.terminal, detail = self.terminal_of(module, argument)
+            if detail:
+                step.detail += f" -- {detail}"
 
     def _narrowed(
         self,

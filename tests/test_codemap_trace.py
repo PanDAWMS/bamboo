@@ -4082,6 +4082,36 @@ def test_a_parameter_followed_to_its_callers_says_when_more_calls_by_its_name_we
     )
 
 
+def test_a_parameter_handed_in_a_modules_own_body_is_written_there_and_not_walked_on(tmp_path):
+    """``g(LIMIT)`` at import and ``g(5)`` under ``__main__`` are g's callers; the walk stops at what each hands."""
+    roots = _tree(
+        tmp_path,
+        **{"m.py": 'def g(x):\n    spec.status = x\n\nLIMIT = 3\ng(LIMIT)\n\nif __name__ == "__main__":\n    g(5)\n'},
+    )
+
+    walked = _walked_in(roots, "m.py", "g", [2])
+
+    assert _stop_on(walked, "x").detail == "a parameter; followed to the 2 call(s) placed at g"
+    handed = [s for s in walked.steps if s.kind == "handover" and s.name == "x"]
+    assert [(s.owner, s.line, s.value, s.unseen) for s in handed] == [
+        (f"{PACKAGE}/m.py::module-scope", 5, "LIMIT", ["module-scope at 5: run when the file is imported, not on the way here"]),
+        (f"{PACKAGE}/m.py::module-scope", 8, "5", ["module-scope at 8: run when the file is run as a script, not on the way here"]),
+    ]
+    assert not [s for s in walked.steps if s.name == "LIMIT"]
+
+
+def test_a_modules_own_body_has_no_parameters_for_a_reader_handed_a_call_made_there():
+    """A call in a module's body is a caller (:class:`calls.CallSite`), and the readers that ask its function's
+    parameters are handed the module: ``JobGeneratorThread(..., brokerageLockIDs, ...)`` in a JEDI test script
+    stopped the F case's walk where ``_constructions`` asked the module for its parameters."""
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    module = ast.parse("brokerageLockIDs = []\nrun(brokerageLockIDs)\n")
+
+    assert trace_mod._parameters(module) == set()
+    assert sqlwrite._parameters(module) == []
+
+
 _OPEN_CALLER = '''\
 from typing import Any
 

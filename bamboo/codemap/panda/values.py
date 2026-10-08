@@ -306,9 +306,9 @@ def _can_hold(site: ast.AST, at: ast.AST) -> bool:
 
 
 def _local(func, name: str) -> bool:
-    arguments = func.args
-    every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
-    every += [argument for argument in (arguments.vararg, arguments.kwarg) if argument]
+    arguments = getattr(func, "args", None)  # a module's own body has none
+    every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs] if arguments is not None else []
+    every += [argument for argument in (arguments.vararg, arguments.kwarg) if argument] if arguments is not None else []
     if any(argument.arg == name for argument in every):
         return False
     return not any(

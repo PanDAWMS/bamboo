@@ -30,6 +30,7 @@ built on, and reads the same trees -- :func:`parsed`.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -134,6 +135,23 @@ def parsed(path: Path) -> Optional[tuple[str, ast.Module]]:
     return _PARSED[key]
 
 
+# Test code is not the system's behaviour.  It writes the same attributes with
+# the same literals, so leaving it in files fixtures as junctions and doubles
+# the ambiguous attribution cases -- 88 of 376 modules, and 47% of the writes
+# whose spec class could not be settled came from them.  A junction pointing at
+# a test would send an investigation to code that never runs in production;
+# so would a caller: a JEDI test script's own body builds ``JobGeneratorThread``
+# and calls ``doGenerate``, and listed among a function's callers it pushed the
+# daemons' calls past the count a list names.
+_TEST_PATH = re.compile(r"(^|/)(tests?|jeditest)(/|$)", re.IGNORECASE)
+_TEST_FILE = re.compile(r"(^test_|_tests?$)", re.IGNORECASE)
+
+
+def is_test_module(rel_path: str) -> bool:
+    """True when *rel_path* is test code rather than system behaviour."""
+    return bool(_TEST_PATH.search(rel_path) or _TEST_FILE.search(Path(rel_path).stem))
+
+
 def _roots_key(roots: dict[str, Path]) -> tuple:
     return tuple(sorted((package, str(root)) for package, root in roots.items()))
 
@@ -163,6 +181,10 @@ class Placed(NamedTuple):
     on_class: bool = False
 
 
+#: The owner of a call in a module's own body -- the walk's spelling of the
+#: scope a module binds its names in (``trace.MODULE_SCOPE``).
+MODULE_SCOPE = "module-scope"
+
 #: How :meth:`Calls.missed` says a function is called from nowhere in the corpus.
 _OUTSIDE = "no call in the corpus names it -- reached from outside"
 #: ... and that the calls naming it all land outside the corpus.
@@ -185,15 +207,25 @@ class Route(NamedTuple):
 
 
 class CallSite(NamedTuple):
-    """One call, in the function that makes it."""
+    """One call, in the function that makes it -- or in the module's own body, *func* the module.
+
+    A call in the module's body runs when the file is imported, or under
+    ``if __name__ == "__main__":`` when it is run as a script: ``taskBuffer =
+    TaskBuffer()`` at the foot of ``TaskBuffer.py``.  It has no caller of its
+    own and no parameters, so what it hands a function is written there.
+    """
 
     file: str
     func: ast.AST
     call: ast.Call
 
     @property
+    def in_module(self) -> bool:
+        return isinstance(self.func, ast.Module)
+
+    @property
     def owner(self) -> str:
-        return f"{self.file}::{self.func.name}"  # type: ignore[attr-defined]
+        return f"{self.file}::{MODULE_SCOPE if self.in_module else self.func.name}"  # type: ignore[attr-defined]
 
 
 def own_nodes(scope: ast.AST):
@@ -523,6 +555,12 @@ class Calls:
 
         A name is how to *find* the calls worth placing, never how to place
         one: each is resolved by :meth:`callees` before it is kept.
+
+        The calls in each module's own body come after every function's
+        (:class:`CallSite`): ``extract_allowed_methods(...)`` at import,
+        ``main()`` under ``if __name__ == "__main__":``.  A class's body,
+        whose calls the corpus places at none of its functions, and a
+        lambda's, which runs when it is called, are not read.
         """
         if self._by_name is not None:
             return self._by_name
@@ -531,23 +569,26 @@ class Calls:
             self._by_name = shared
             return shared
         found: dict[str, list[CallSite]] = {}
-        for file in self.types.corpus_files():
-            tree = self.types.tree(file)
-            if tree is None:
-                continue
-            for func in ast.walk(tree):
-                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+
+        def add(file: str, scope: ast.AST) -> None:
+            for node in own_nodes(scope):
+                if not isinstance(node, ast.Call):
                     continue
-                for node in own_nodes(func):
-                    if not isinstance(node, ast.Call):
-                        continue
-                    called = node.func
-                    name = (
-                        called.attr if isinstance(called, ast.Attribute)
-                        else called.id if isinstance(called, ast.Name) else ""
-                    )
-                    if name:
-                        found.setdefault(name, []).append(CallSite(file, func, node))
+                called = node.func
+                name = (
+                    called.attr if isinstance(called, ast.Attribute)
+                    else called.id if isinstance(called, ast.Name) else ""
+                )
+                if name:
+                    found.setdefault(name, []).append(CallSite(file, scope, node))
+
+        trees = [(file, tree) for file in self.types.corpus_files() if (tree := self.types.tree(file)) is not None]
+        for file, tree in trees:
+            for func in ast.walk(tree):
+                if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    add(file, func)
+        for file, tree in trees:
+            add(file, tree)
         self._by_name = found
         _INDEXES[_roots_key(self.types.roots)] = found
         return found
@@ -692,10 +733,14 @@ class Calls:
 
         Sorted, capped at :data:`CALLED_FROM` with a closing ``… N more``.
         A hop placed open says so after its ``file:line`` (:meth:`opened`).
+        A call in a module's body is the end of its chain.
         """
         chains: list[str] = []
         for site in self.callers(target):
             at = self.hop(site)
+            if site.in_module:
+                chains.append(at)
+                continue
             owned = self.types.method_class(site.file, site.func)
             outer = self.callers(Target(site.file, site.func, owned[1] if owned else None))
             if outer:
@@ -1192,12 +1237,12 @@ class Types:
         return self._files.get(id(module))
 
     def corpus_files(self) -> list[str]:
-        """Every module of the corpus, as the map spells a file; tests left out."""
+        """Every module of the corpus, as the map spells a file; tests left out, by the build's rule (:func:`is_test_module`)."""
         found: list[str] = []
         for package, root in sorted(self.roots.items()):
             for path in sorted(root.rglob("*.py")):
                 file = f"{package}/{path.relative_to(root)}"
-                if "/test" not in file:
+                if not is_test_module(file):
                     found.append(file)
         return found
 
@@ -1653,6 +1698,10 @@ class Types:
         if values:
             found = {self.declared(file, tree, value, depth + 1) for value in values}
             return found.pop() if len(found) == 1 else None
+        return self._imported_instance(file, name, depth)
+
+    def _imported_instance(self, file: str, name: str, depth: int) -> Optional[Classes]:
+        """:meth:`_outside_instance` of the module *file* imports *name* from."""
         held = self.imports(file).get(name)
         if held is None or not held[1]:
             return None
@@ -1685,7 +1734,12 @@ class Types:
             if not (isinstance(value, ast.Constant) and value.value is None)
         ]
         held = self._with_held(file, func, name, depth)
-        if not bound and held is None and not isinstance(func, ast.Module):
+        if not bound and held is None:
+            # A name a module's own body reads and does not bind is one it
+            # imports: ``initializer.init()`` and ``taskBuffer.init(...)`` at
+            # the top of ``panda.py``, a module's caller (:class:`CallSite`).
+            if isinstance(func, ast.Module):
+                return self._imported_instance(file, name, depth)
             return self._outside_instance(file, name, depth)
         found = {self.declared(file, func, value, depth + 1) for value in bound}
         if held is not None:

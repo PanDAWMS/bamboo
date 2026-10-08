@@ -356,6 +356,74 @@ class Proxy(First, Second):
     ]
 
 
+def test_a_call_in_a_modules_own_body_is_a_caller_and_the_end_of_its_routes(tmp_path):
+    """``g(1)`` at import and under ``__main__``: callers after the functions' calls, the end of every chain."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m='''\
+def g(x):
+    return x
+
+def f():
+    g(2)
+
+g(1)
+
+if __name__ == "__main__":
+    g(x=3)
+''',
+        )
+    )
+    g = calls_mod.Target("pkg/m.py", _function(calls, "m", "g"), None)
+
+    sites = calls.callers(g)
+
+    assert [(site.in_module, site.owner, site.call.lineno) for site in sites] == [
+        (False, "pkg/m.py::f", 5),
+        (True, "pkg/m.py::module-scope", 7),
+        (True, "pkg/m.py::module-scope", 10),
+    ]
+    assert calls.missed(g) == []
+    assert calls.called_from(g) == ["pkg/m.py:10", "pkg/m.py:5", "pkg/m.py:7"]
+    assert [route.chain for route in calls.routes(g)[0]] == [("pkg/m.py:5",), ("pkg/m.py:7",), ("pkg/m.py:10",)]
+    assert calls.handed_constants(g, {"x"}) == [(("pkg/m.py:5",), {"x": 2}), (("pkg/m.py:7",), {"x": 1}), (("pkg/m.py:10",), {"x": 3})]
+    f = calls_mod.Target("pkg/m.py", _function(calls, "m", "f"), None)
+    assert calls.missed(f) == ["f: no call in the corpus names it -- reached from outside"]
+
+
+def test_a_test_scripts_calls_are_not_callers_by_the_rule_the_build_leaves_tests_out_with(tmp_path):
+    """``jeditest/`` and ``*_test.py`` are test code to the build, so their calls are no function's callers."""
+    roots = _tree(
+        tmp_path,
+        m="def g(x):\n    return x\n\ng(1)\n",
+        pcwl_test="from pkg.m import g\n\ng(2)\n",
+    )
+    (roots["pkg"] / "jeditest").mkdir()
+    (roots["pkg"] / "jeditest" / "run.py").write_text("from pkg.m import g\n\ng(3)\n")
+    calls = _calls(roots)
+
+    assert "pkg/jeditest/run.py" not in calls.types.corpus_files()
+    assert [site.file for site in calls.callers(calls_mod.Target("pkg/m.py", _function(calls, "m", "g"), None))] == [
+        "pkg/m.py"
+    ]
+
+
+def test_a_call_in_a_modules_own_body_on_an_imported_instance_is_placed_through_the_import(tmp_path):
+    """``taskBuffer.init(...)`` at the top of a server module, on the ``taskBuffer`` another module builds."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            tb="class TaskBuffer:\n    def init(self, dbhost):\n        self.dbhost = dbhost\n\ntaskBuffer = TaskBuffer()\n",
+            server="from pkg.tb import taskBuffer\n\ntaskBuffer.init(\"host\")\n",
+        )
+    )
+    init = _method(calls, "tb", "TaskBuffer", "init")
+
+    assert [(site.owner, site.call.lineno) for site in calls.callers(init)] == [("pkg/server.py::module-scope", 3)]
+    assert calls.missed(init) == []
+
+
 def test_a_constructor_no_call_names_is_not_said_reached_from_outside_where_its_class_is_held_as_a_value(tmp_path):
     """``cls = Plugin`` ... ``cls(job)`` builds one; a class only tested with ``isinstance`` is reached from outside."""
     calls = _calls(

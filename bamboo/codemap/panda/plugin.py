@@ -19,7 +19,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import logging
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -170,18 +169,9 @@ def _unique_subjects(subjects: list[SubjectNode]) -> list[SubjectNode]:
 
 PACKAGES = ("pandaserver", "pandajedi")
 
-# Test code is not the system's behaviour.  It writes the same attributes with
-# the same literals, so leaving it in files fixtures as junctions and doubles
-# the ambiguous attribution cases -- 88 of 376 modules, and 47% of the writes
-# whose spec class could not be settled came from them.  A junction pointing at
-# a test would send an investigation to code that never runs in production.
-_TEST_PATH = re.compile(r"(^|/)(tests?|jeditest)(/|$)", re.IGNORECASE)
-_TEST_FILE = re.compile(r"(^test_|_tests?$)", re.IGNORECASE)
-
-
-def _is_test_module(rel_path: str) -> bool:
-    """True when *rel_path* is test code rather than system behaviour."""
-    return bool(_TEST_PATH.search(rel_path) or _TEST_FILE.search(Path(rel_path).stem))
+# Test code is not the system's behaviour: :func:`calls.is_test_module`, the
+# one rule the build and the call index share.
+_is_test_module = calls_mod.is_test_module
 
 
 def _schema_stamp(root: Path, schema: dict[str, frozenset[str]]) -> str:
@@ -1017,7 +1007,8 @@ def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]
     Drawn from the calls whose name some function or class of the build's
     modules defines -- a call to ``json.loads`` names nothing the walk could
     enter, so it is not a stop.  Over the build's modules only, test code
-    left out by the build's own rule.
+    left out by the build's own rule, and over the calls in functions: one in
+    a module's own body is where a walk ends, not a call it goes into.
     """
     files = {module.rel_path for module in modules}
     defined = {
@@ -1033,7 +1024,7 @@ def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]
         if name not in defined or name in _LOG_CALLS:
             continue
         for site in sites:
-            if site.file not in files:
+            if site.file not in files or site.in_module:
                 continue
             considered += 1
             placed = calls.callees(site.file, site.func, site.call)
