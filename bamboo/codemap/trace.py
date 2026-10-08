@@ -154,6 +154,14 @@ class Budget(NamedTuple):
 
 DEFAULT_BUDGET = Budget()
 
+
+def _budgets(names: set[str]) -> str:
+    """``depth budget``, ``functions and depth budgets``: in :class:`Budget`'s order, so one set reads one way."""
+    order = [one for one in Budget._fields if one in names] + sorted(names - set(Budget._fields))
+    if len(order) == 1:
+        return f"{order[0]} budget"
+    return f"{', '.join(order[:-1])} and {order[-1]} budgets"
+
 #: What a step's terminal is, when the classifier is not supplied.  Injected
 #: rather than imported so that the walk stays about Python and the naming of
 #: interfaces stays with the map that has them.
@@ -1679,7 +1687,10 @@ class _Walk:
         self.explained: dict[tuple[str, str], set[tuple[int, int, str]]] = {}
         self._scopes: dict[tuple[str, str], str] = {}
         self._logged: dict[tuple[str, str], list[tuple[ast.expr, _Message]]] = {}
-        self.note = ""
+        #: The budgets that ran out in the function's own answer, and beyond
+        #: it -- every one, as :attr:`note` and :attr:`crossing_note` say them.
+        self.ran_out: set[str] = set()
+        self.ran_out_crossing: set[str] = set()
         self.queue: deque[tuple[_Frame, str, int, Optional[ast.AST]]] = deque()
         #: What waits until the function's own answer is done: going into a
         #: call, and the names asked in the functions reached that way.
@@ -1688,7 +1699,6 @@ class _Walk:
         #: allowance -- see ``Budget.crossed_steps``.
         self.crossing = False
         self.crossed = 0
-        self.crossing_note = ""
         #: ``{(file, line of a method): [frames that asked a field it assigns]}``
         #: -- the ``__init__`` and the setters whose calls are a question about
         #: the object those frames came in on.  See :meth:`_object_made`.
@@ -1812,17 +1822,29 @@ class _Walk:
     # -- steps -------------------------------------------------------------
 
     def _exhausted(self, what: str) -> None:
-        if self.crossing:
-            if not self.crossing_note:
-                self.crossing_note = (
-                    f"the walk's {what} budget beyond this function ran out; "
-                    "what the calls hand back is part of the answer"
-                )
-            return
-        if not self.note:
-            self.note = (
-                f"the walk's {what} budget ran out; what follows is part of the answer"
-            )
+        (self.ran_out_crossing if self.crossing else self.ran_out).add(what)
+
+    @property
+    def note(self) -> str:
+        """Which budgets the function's own answer ran out of, or ``""``.
+
+        Every one, not the first: ``setCloudToTasks_JEDI``'s walk ran out of
+        depth and then of steps beyond the function, and saying depth alone
+        hid the 37 steps the steps budget left out (X8).
+        """
+        if not self.ran_out:
+            return ""
+        return f"the walk's {_budgets(self.ran_out)} ran out; what follows is part of the answer"
+
+    @property
+    def crossing_note(self) -> str:
+        """:attr:`note` for what the walk spent beyond the function."""
+        if not self.ran_out_crossing:
+            return ""
+        return (
+            f"the walk's {_budgets(self.ran_out_crossing)} beyond this function ran out; "
+            "what the calls hand back is part of the answer"
+        )
 
     def database_asked(self, method: str, frame: Optional[_Frame] = None, call: Optional[ast.Call] = None) -> str:
         """``reads jobsDefined4, jobsActive4 by :jediTaskID`` for the proxy's *method*, or ``""``.

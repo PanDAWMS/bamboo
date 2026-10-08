@@ -303,6 +303,29 @@ def test_a_budget_that_runs_out_is_recorded_rather_than_hidden(tmp_path):
     assert "budget" in note
 
 
+def test_the_note_names_every_budget_that_ran_out_on_each_side(tmp_path):
+    """``setCloudToTasks_JEDI``'s walk ran out of depth beyond the function
+    and then of steps; a note naming the first hid the steps it left out."""
+    roots = _tree(tmp_path, feeder=KNIGHT)
+    walk = trace_mod._Walk(roots, provenance.classify, trace_mod.Budget())
+    walk._exhausted("depth")
+    assert walk.note == "the walk's depth budget ran out; what follows is part of the answer"
+    walk.crossing = True
+    walk._exhausted("steps")
+    walk._exhausted("depth")
+    walk._exhausted("steps")
+
+    assert walk.crossing_note == (
+        "the walk's steps and depth budgets beyond this function ran out; "
+        "what the calls hand back is part of the answer"
+    )
+    assert walk.note == "the walk's depth budget ran out; what follows is part of the answer"
+    # Budget's order, whatever order they ran out in.
+    walk._exhausted("files")
+    walk._exhausted("functions")
+    assert walk.crossing_note.startswith("the walk's files, functions, steps and depth budgets beyond")
+
+
 def test_an_imported_name_is_not_reported_as_unexplained(tmp_path):
     # ``JediTaskSpec`` and ``Interaction`` are named by half the conditions in
     # this corpus and the walk has nothing to say about either, so keeping
