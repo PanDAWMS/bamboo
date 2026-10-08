@@ -2290,6 +2290,40 @@ def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
     assert tables == ["jobsDefined4", "jobsActive4", "jobsArchived"]
 
 
+def test_a_table_list_built_by_append_is_read_as_the_tables_it_holds():
+    """The same list, one ``append`` per flag.
+
+    ``peekJob`` builds its job tables that way and fills ``SELECT %s FROM %s``
+    from the loop, so the one read every job lookup makes was over a table
+    named ``{}``.  An element that is not written out still refuses the list:
+    ``tables.append(archive)`` names no table, and neither does the statement.
+    """
+    source = (
+        "def f(self, fromDefined, fromActive, archive):\n"
+        "    sql1_0 = 'SELECT %s FROM %s '\n"
+        "    sql1_1 = 'WHERE PandaID=:PandaID'\n"
+        "    tables = []\n"
+        "    if fromDefined:\n"
+        "        tables.append('ATLAS_PANDA.jobsDefined4')\n"
+        "    if fromActive:\n"
+        "        tables.extend(['ATLAS_PANDA.jobsActive4'])\n"
+        "    for table in tables:\n"
+        "        sql = sql1_0 % (JobSpec.columnNames(), table) + sql1_1\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    unread = source.replace(
+        "tables.extend(['ATLAS_PANDA.jobsActive4'])", "tables.append(archive)"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT {} FROM ATLAS_PANDA.jobsDefined4 WHERE PandaID=:PandaID",
+        "SELECT {} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID",
+    ]
+    assert [run.sql for run in sql.executions(_func(unread))] == [
+        "SELECT {} FROM {} WHERE PandaID=:PandaID"
+    ]
+
+
 def test_an_interpolated_schema_is_still_left_blank():
     """The reason reassembly blanks interpolations in the first place.
 

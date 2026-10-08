@@ -1750,12 +1750,18 @@ def _elements(node: ast.expr) -> Optional[list[str]]:
 def _sequence_values(
     func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
 ) -> Optional[list[str]]:
-    """The strings local sequence *name* holds, across ``=``, ``+=`` and keys.
+    """The strings local sequence *name* holds, across ``=``, ``+=``, ``append``, ``extend`` and keys.
 
     ``None`` rather than a partial answer wherever the sequence is built some
-    other way -- an ``append``, or a sequence that is not a literal.  A missing
-    element is not a smaller answer here: it is a statement the map says the
-    code runs over a set of tables it does not.
+    other way -- an ``insert`` or a ``pop``, or an element that is not a literal.
+    A missing element is not a smaller answer here: it is a statement the map
+    says the code runs over a set of tables it does not.
+
+    ``tables.append(x)`` is ``tables += [x]`` spelled as a call, and refusing it
+    left ``peekJob`` -- which builds its list of job tables one ``append`` per
+    flag -- reading a table named ``{}``.  The element still has to be written
+    out: an ``append`` of a value read from somewhere else refuses the sequence
+    exactly as a ``+=`` of one does.
 
     Which is why the dict spelling needs both halves.  ``getDispatchDatasets
     PerUser`` writes one table in the literal and adds two more by subscript
@@ -1799,11 +1805,24 @@ def _sequence_values(
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            # ``update`` and ``setdefault`` add keys from somewhere this cannot
-            # see; ``pop`` and ``clear`` take them away again.  Read the same
-            # way as ``append`` on a list, and for the same reason.
-            and node.func.attr
-            in {"append", "extend", "insert", "update", "setdefault", "pop", "clear"}
+            and node.func.attr in {"append", "extend"}
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+        ):
+            added = (
+                ast.List(elts=list(node.args)) if node.func.attr == "append" else node.args[0]
+            ) if len(node.args) == 1 and not node.keywords else None
+            elements = _elements(added) if added is not None else None
+            if elements is None:
+                return None
+            found.extend(elements)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            # ``insert`` puts an element where this does not follow; ``update``
+            # and ``setdefault`` add keys from somewhere this cannot see; ``pop``
+            # and ``clear`` take them away again.
+            and node.func.attr in {"insert", "update", "setdefault", "pop", "clear"}
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id == name
         ):
