@@ -356,6 +356,40 @@ class Proxy(First, Second):
     ]
 
 
+def test_a_constructor_no_call_names_is_not_said_reached_from_outside_where_its_class_is_held_as_a_value(tmp_path):
+    """``cls = Plugin`` ... ``cls(job)`` builds one; a class only tested with ``isinstance`` is reached from outside."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m='''\
+class Plugin:
+    def __init__(self, job):
+        self.job = job
+
+class Tested:
+    def __init__(self, job):
+        self.job = job
+
+def make(job, cls=None):
+    if cls is None:
+        cls = Plugin
+    return cls(job)
+
+def check(x: Tested) -> bool:
+    return isinstance(x, Tested)
+''',
+        )
+    )
+
+    assert calls.missed(_method(calls, "m", "Plugin", "__init__")) == [
+        "Plugin: no call in the corpus names it; the class is read as a value at pkg/m.py:11, "
+        "and a call of that value may build one"
+    ]
+    assert calls.missed(_method(calls, "m", "Tested", "__init__")) == [
+        "Tested: no call in the corpus names it -- reached from outside"
+    ]
+
+
 def test_a_call_binds_positional_keyword_and_default_arguments(tmp_path):
     roots = _tree(
         tmp_path,

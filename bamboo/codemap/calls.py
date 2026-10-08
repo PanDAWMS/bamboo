@@ -100,6 +100,8 @@ _CALLERS: dict[tuple, list["CallSite"]] = {}
 #: subclasses, per set of roots -- :meth:`Calls.spellings`.
 _ALIASES: dict[tuple, dict[str, set[str]]] = {}
 _SUBCLASSES: dict[tuple, dict[tuple[str, int], list[tuple[str, ast.ClassDef]]]] = {}
+#: Where each class is read as a value, per set of roots -- :meth:`Calls.read_as_value`.
+_VALUES: dict[tuple, dict[tuple[str, int], list[str]]] = {}
 
 
 def parsed(path: Path) -> Optional[tuple[str, ast.Module]]:
@@ -165,6 +167,10 @@ class Placed(NamedTuple):
 _OUTSIDE = "no call in the corpus names it -- reached from outside"
 #: ... and that the calls naming it all land outside the corpus.
 _LANDS_OUTSIDE = "no call this reading places lands at it"
+#: ... and that its class is held as a value something may build from -- :meth:`Calls.read_as_value`.
+_READ_AS_VALUE = "no call in the corpus names it; the class is read as a value at {}, and a call of that value may build one"
+#: How many of those reads it names before it counts the rest.
+_READS = 5
 
 
 class Route(NamedTuple):
@@ -854,10 +860,53 @@ class Calls:
                     f"{name}: {_LANDS_OUTSIDE} -- {sum(outside.values())} call(s) by its name land "
                     f"{UNPLACED_OUTSIDE} ({_on(outside)})"
                 )
+            elif read := self.read_as_value(target):
+                shown = ", ".join(read[:_READS]) + (f", … {len(read) - _READS} more" if len(read) > _READS else "")
+                why.append(f"{name}: {_READ_AS_VALUE.format(shown)}")
             else:
                 why.append(f"{name}: {_OUTSIDE}")
         self._missed[key] = why
         return why
+
+    def read_as_value(self, target: Target) -> list[str]:
+        """``file:line`` of each place a class whose construction runs *target*, an ``__init__``, is read as a value.
+
+        ``self.adder_plugin_class = AdderAtlasPlugin`` holds the class, and
+        ``self.adder_plugin_class(job, ...)`` builds one: no call names
+        ``AdderAtlasPlugin``, and it is not reached from outside.  A read a
+        call of the value may build from -- bound, passed, returned, held in
+        a container -- and not one that cannot: a base list, ``isinstance``,
+        ``super()``'s argument, an ``except`` clause, a comparison, an
+        annotation.  Empty for any other function.
+        """
+        if target.cls is None or getattr(target.func, "name", "") != "__init__":
+            return []
+        held = self._subclasses().get((target.file, target.cls.lineno), [])
+        built = [(target.file, target.cls)] + [
+            (file, cls)
+            for file, cls in held
+            if any(one.func is target.func for one in self._method_of((file, cls), "__init__").targets)
+        ]
+        read = self._values_read()
+        return sorted({where for file, cls in built for where in read.get((file, cls.lineno), [])})
+
+    def _values_read(self) -> dict[tuple[str, int], list[str]]:
+        """``{(file, line of a class): file:line of each read of it as a value a call may build from}``."""
+        shared = _roots_key(self.types.roots)
+        if shared not in _VALUES:
+            found: dict[tuple[str, int], list[str]] = {}
+            for file in self.types.corpus_files():
+                tree = self.types.tree(file)
+                for node in ast.walk(tree) if tree is not None else ():
+                    if (
+                        isinstance(node, (ast.Name, ast.Attribute))
+                        and isinstance(node.ctx, ast.Load)
+                        and _may_build_from(node)
+                        and (named := self.types.class_named(file, node)) is not None
+                    ):
+                        found.setdefault((named[0], named[1].lineno), []).append(f"{file}:{node.lineno}")
+            _VALUES[shared] = found
+        return _VALUES[shared]
 
     def _in_subclass(self, site: CallSite, target: Target) -> bool:
         """Whether *site* is made in a method of a strict subclass of *target*'s class."""
@@ -952,6 +1001,45 @@ def _self_field(node: ast.AST) -> str:
     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
         return node.attr
     return ""
+
+
+#: Calls whose arguments are classes to test against, not to build.
+_CLASS_TESTS = frozenset({"isinstance", "issubclass", "super"})
+
+
+def _may_build_from(node: ast.expr) -> bool:
+    """Whether *node*, a name or attribute read, holds a value a later call may build from -- :meth:`Calls.read_as_value`.
+
+    Not a call's callee or an attribute's object -- those use it here -- and
+    not a place that only tests or declares a class: a base list, a class
+    statement's keywords, ``isinstance``/``issubclass``/``super``, an
+    ``except`` clause, a comparison, an annotation.
+    """
+    parent = getattr(node, "parent", None)
+    if isinstance(parent, ast.Call) and parent.func is node:
+        return False
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        return False
+    if isinstance(parent, ast.Compare):
+        return False
+    child: ast.AST = node
+    while parent is not None and not isinstance(parent, ast.stmt):
+        if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id in _CLASS_TESTS:
+            return False
+        if isinstance(parent, ast.ExceptHandler):
+            return False
+        if isinstance(parent, ast.arg) and child is parent.annotation:
+            return False
+        child, parent = parent, getattr(parent, "parent", None)
+    if isinstance(parent, ast.ClassDef) and child in (*parent.bases, *parent.keywords):
+        return False
+    if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and child is not None and child is parent.returns:
+        return False
+    if isinstance(parent, ast.AnnAssign) and child is parent.annotation:
+        return False
+    if isinstance(parent, ast.ExceptHandler):
+        return False
+    return True
 
 
 def _unquoted(annotation: ast.expr) -> ast.expr:
