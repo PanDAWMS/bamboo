@@ -3556,6 +3556,103 @@ def other(i):
     assert handed == [("fill", "fetch()")]
 
 
+def _plugins(deeper: bool = False) -> dict[str, str]:
+    """``AdderPluginBase`` and its plugins: a base one file over, three siblings chaining to its ``__init__``."""
+    dummy_reads = (
+        "    def execute(self):\n        got = self.fetch()\n        return got\n\n"
+        "    def fetch(self):\n        found = self.lookup()\n        return found\n\n"
+        "    def lookup(self):\n        return self.job\n"
+        if deeper
+        else "    def execute(self):\n        return self.job\n"
+    )
+    return {
+        "base.py": "class PluginBase:\n    def __init__(self, job, params):\n        self.job = job\n",
+        "atlas.py": (
+            "from pandajedi.base import PluginBase\n\n\nclass AtlasPlugin(PluginBase):\n"
+            "    def __init__(self, job, **params):\n        PluginBase.__init__(self, job, params)\n\n"
+            "    def execute(self):\n        return self.job\n"
+        ),
+        "dummy.py": (
+            "from pandajedi.base import PluginBase\n\n\nclass DummyPlugin(PluginBase):\n"
+            "    def __init__(self, job, **params):\n        super().__init__(job, params)\n\n" + dummy_reads
+        ),
+        "simple.py": (
+            "from pandajedi.base import PluginBase\n\n\nclass SimplePlugin(PluginBase):\n"
+            "    def __init__(self, job, **params):\n        super().__init__(job, params)\n"
+        ),
+        "runner.py": '''\
+from pandajedi.atlas import AtlasPlugin
+from pandajedi.dummy import DummyPlugin
+
+
+def one(log, plugin: AtlasPlugin):
+    x = plugin.execute()
+    log.info(f"{x}")
+
+
+def both(log, atlas: AtlasPlugin, dummy: DummyPlugin):
+    x = atlas.execute()
+    y = dummy.execute()
+    log.info(f"{x} {y}")
+''',
+    }
+
+
+def _job_steps(walked):
+    return [
+        (s.kind, s.owner.split("/", 1)[1], s.value, s.detail)
+        for s in walked.steps
+        if s.name == "job" and s.kind in (TRACE_HANDOVER, TRACE_UNBOUND)
+    ]
+
+
+def test_a_base_constructor_is_answered_by_the_chain_from_the_class_that_read_the_field(tmp_path):
+    """``AdderAtlasPlugin`` reads ``self.job``; ``AdderDummyPlugin``'s chain to the base builds another object."""
+    roots = _tree(tmp_path, **_plugins())
+
+    walked = trace_mod.walk_from_print(roots, file=f"{PACKAGE}/runner.py", line=7, classify=provenance.classify)
+
+    assert _job_steps(walked) == [
+        (
+            TRACE_UNBOUND, "base.py::__init__", "job",
+            "a parameter; followed to the 1 of 3 call(s) placed at __init__: the ones that can build "
+            "an object of AtlasPlugin, the class the walk read the field in",
+        ),
+        (TRACE_HANDOVER, "atlas.py::__init__", "job", "passed to __init__ here"),
+        (
+            TRACE_UNBOUND, "atlas.py::__init__", "job",
+            "a parameter, so its value is chosen at the call site; AtlasPlugin: no call in the corpus names it "
+            "-- reached from outside",
+        ),
+    ]
+
+
+def test_a_base_constructor_asked_from_two_classes_follows_each_ones_chain(tmp_path):
+    """Asked from both at once, the stop names both; asked from the second later, its chain is followed then."""
+    together = trace_mod.walk_from_print(
+        _tree(tmp_path / "together", **_plugins()), file=f"{PACKAGE}/runner.py", line=13, classify=provenance.classify
+    )
+    later = trace_mod.walk_from_print(
+        _tree(tmp_path / "later", **_plugins(deeper=True)), file=f"{PACKAGE}/runner.py", line=13,
+        classify=provenance.classify,
+    )
+
+    (stopped,) = [step for step in _job_steps(together) if step[1] == "base.py::__init__"]
+    assert stopped[3] == (
+        "a parameter; followed to the 2 of 3 call(s) placed at __init__: the ones that can build "
+        "an object of AtlasPlugin or DummyPlugin, the classes the walk read the field in"
+    )
+    (stopped,) = [step for step in _job_steps(later) if step[1] == "base.py::__init__"]
+    assert stopped[3] == (
+        "a parameter; followed to the 1 of 3 call(s) placed at __init__: the ones that can build "
+        "an object of AtlasPlugin, the class the walk read the field in; "
+        "asked again from DummyPlugin, and its 1 call(s) are followed too"
+    )
+    for walked in (together, later):
+        handed = {owner for kind, owner, _value, _detail in _job_steps(walked) if kind == TRACE_HANDOVER}
+        assert handed == {"atlas.py::__init__", "dummy.py::__init__"}
+
+
 def test_a_construction_handed_a_constant_builds_nothing_the_walk_came_in_on(tmp_path):
     """``JobGeneratorThread(None, ...)`` in a test script hands its worker no
     list, so it is not a way the knight's list could have been built."""

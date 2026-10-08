@@ -1096,6 +1096,31 @@ class _Narrowed:
         self.said: set[tuple[str, int]] = set()
 
 
+class _ByClass:
+    """Calls placed at an ``__init__`` left out because they cannot build an object of the classes that asked.
+
+    *classes* are the classes whose methods asked a field the ``__init__``
+    assigns; *left* the calls not followed.  When a method of another class
+    asks later, the left calls that can build its objects are walked by
+    *follow*, as many as *room* allows; *step* says so.  See
+    :meth:`_Walk._asked_into`.
+    """
+
+    __slots__ = ("classes", "left", "follow", "room", "step")
+
+    def __init__(self, classes, left, follow, room, step) -> None:
+        self.classes: list[tuple[str, ast.ClassDef]] = list(classes)
+        self.left: list = left
+        self.follow: Callable[[list], Any] = follow
+        self.room: int = room
+        self.step: "TraceStep" = step
+
+
+def _objects_of(classes: list[tuple[str, ast.ClassDef]]) -> str:
+    names = " or ".join(sorted({cls.name for _file, cls in classes}))
+    return f"an object of {names}, the class{'es' if ' or ' in names else ''} the walk read the field in"
+
+
 def _site_key(site) -> tuple[str, int, int]:
     return (site.file, site.call.lineno, site.call.col_offset)
 
@@ -1661,6 +1686,9 @@ class _Walk:
         #: ``{(file, line of a method): [what was narrowed]}``, for a frame
         #: that asks after the narrowing was done.
         self.narrowings: dict[tuple[str, int], list[_Narrowed]] = {}
+        #: ``{(file, line of an __init__): [calls left out by class]}``, for a
+        #: method of another class that asks later.  See :meth:`_asked_into`.
+        self.by_class: dict[tuple[str, int], list[_ByClass]] = {}
         #: :meth:`_made_at` per (file, function, expression).
         self._made: dict[tuple[str, int, str], Optional[set[tuple[str, int, int]]]] = {}
         #: ``_message_sites`` per (function, spelling): a function with a
@@ -3478,7 +3506,17 @@ class _Walk:
         every = sites
         made: Optional[set[tuple[str, int, int]]] = None
         left: list = []
+        asking: list[tuple[str, ast.ClassDef]] = []
+        unbuilt: list = []
         if not spanned and getattr(frame.func, "name", "") == "__init__":
+            # The object is one of the classes whose methods read the field,
+            # or of a subclass: the chain from a sibling's constructor builds
+            # another object.
+            classes = self._asking_classes(frame)
+            if classes is not None:
+                kept = [site for site in sites if self._may_build(site, classes)]
+                if len(kept) < len(sites):
+                    asking, unbuilt, sites = classes, [site for site in sites if site not in kept], kept
             made = self._object_made(frame)
             if made is not None:
                 kept = [site for site in sites if _site_key(site) in made]
@@ -3488,22 +3526,34 @@ class _Walk:
         elif not spanned and (frame.file, getattr(frame.func, "lineno", 0)) in self.asked_of:
             # A setter's parameter is chosen by the calls made on the object.
             sites, left, made = self._on_the_object(frame, sites)
+        called = getattr(frame.func, "name", "")
         if left and not sites:
             stopped.detail = (
                 f"a parameter; none of the {len(every)} call(s) placed at "
-                f"{getattr(frame.func, 'name', '')} is made on the object the walk came in on"
+                f"{called} is made on the object the walk came in on"
+            )
+        elif unbuilt and not sites:
+            stopped.detail = (
+                f"a parameter; none of the {len(every)} call(s) placed at {called} can build {_objects_of(asking)}"
             )
         elif len(sites) > _MAX_CALLERS:
             # A function built or called from everywhere -- ``SiteMapper`` is
             # constructed by every daemon -- has no one caller to answer with,
             # and the first eight would be as arbitrary as any.  Said, not walked.
             stopped.detail = (
-                f"a parameter; {len(sites)} calls are placed at "
-                f"{getattr(frame.func, 'name', '')}, too many to follow"
+                f"a parameter; {len(sites)} of the {len(every)} calls placed at {called} "
+                f"can build {_objects_of(asking)}, too many to follow"
+                if unbuilt
+                else f"a parameter; {len(sites)} calls are placed at {called}, too many to follow"
             ) + missing
             return True
         elif left:
             stopped.detail = _built_detail(frame, len(sites), len(every))
+        elif unbuilt:
+            stopped.detail = (
+                f"a parameter; followed to the {len(sites)} of {len(every)} call(s) placed at "
+                f"{called}: the ones that can build {_objects_of(asking)}"
+            )
         else:
             stopped.detail = (
                 f"a parameter; followed to the {len(sites)} call(s) placed at "
@@ -3517,8 +3567,57 @@ class _Walk:
                 lambda more: self._follow_callers(target, name, depth, more),
                 _MAX_CALLERS - len(sites),
             )
+        if unbuilt:
+            self.by_class.setdefault((frame.file, getattr(frame.func, "lineno", 0)), []).append(
+                _ByClass(
+                    asking, unbuilt,
+                    lambda more: self._follow_callers(target, name, depth, more),
+                    _MAX_CALLERS - len(sites), stopped,
+                )
+            )
         self._follow_callers(target, name, depth, sites)
         return True
+
+    def _asking_classes(self, frame: _Frame) -> Optional[list[tuple[str, ast.ClassDef]]]:
+        """The classes whose methods asked a field *frame* assigns; ``None`` unless every one of them is known."""
+        askers = self.asked_of.get((frame.file, getattr(frame.func, "lineno", 0)))
+        if not askers:
+            return None
+        found: list[tuple[str, ast.ClassDef]] = []
+        for asker in askers:
+            held = self.types.method_class(asker.file, asker.func)
+            if held is None:
+                return None
+            if not any(one[1] is held[1] for one in found):
+                found.append(held)
+        return found
+
+    def _may_build(self, site, classes: list[tuple[str, ast.ClassDef]]) -> bool:
+        """Whether *site*, a call placed at an ``__init__``, can be building an object of one of *classes*.
+
+        A construction builds the class it names, and that is one of
+        *classes* or a subclass of one.  A chain from a constructor --
+        ``super().__init__(...)``, ``Base.__init__(self, ...)`` -- runs on an
+        object whose class has both the class the chain is made in and one of
+        *classes* among its bases: ``AdderAtlasPlugin``'s chain to
+        ``AdderPluginBase`` builds no ``AdderDummyPlugin``.  A call whose
+        class is not known is kept.
+        """
+        called = site.call.func
+        if isinstance(called, ast.Attribute) and called.attr == "__init__":
+            held = self.types.method_class(site.file, site.func)
+            return held is None or any(self._one_object(held, one) for one in classes)
+        built = self.types.class_named(site.file, called)
+        return built is None or any(
+            any(cls is one[1] for _where, cls in self.types.lineage(*built)) for one in classes
+        )
+
+    def _one_object(self, one: tuple[str, ast.ClassDef], other: tuple[str, ast.ClassDef]) -> bool:
+        """Whether a corpus class has both *one* and *other* among its lineage, itself included."""
+        return any(
+            any(cls is other[1] for _where, cls in self.types.lineage(file, held))
+            for file, held in [one, *self.calls.subclasses(*one)]
+        )
 
     def _follow_callers(self, target: "calls_mod.Target", name: str, depth: int, sites: list) -> None:
         """A step for each of *sites* saying what it hands *name*, and the names that reads asked in its caller."""
@@ -4051,6 +4150,27 @@ class _Walk:
             held.append(frame)
             for narrowed in self.narrowings.get(key, ()):
                 self._watch(narrowed, frame)
+            for left in self.by_class.get(key, ()):
+                self._asked_later(left, frame)
+
+    def _asked_later(self, left: _ByClass, frame: _Frame) -> None:
+        """A method of another class asks into an ``__init__`` already answered: follow the left calls that build its objects."""
+        held = self.types.method_class(frame.file, frame.func)
+        if held is not None and any(one[1] is held[1] for one in left.classes):
+            return
+        extra = [site for site in left.left if held is None or self._may_build(site, [held])]
+        if held is not None:
+            left.classes.append(held)
+        if not extra:
+            return
+        asker = held[1].name if held is not None else frame.owner
+        if len(extra) > left.room:
+            left.step.detail += f"; asked again from {asker}, with {len(extra)} more call(s), too many to follow"
+            return
+        left.room -= len(extra)
+        left.left = [site for site in left.left if site not in extra]
+        left.step.detail += f"; asked again from {asker}, and its {len(extra)} call(s) are followed too"
+        self.beyond.append(lambda: left.follow(extra))
 
     def _inherited_field(
         self, frame: _Frame, file: str, method: ast.AST, name: str, field: str, depth: int

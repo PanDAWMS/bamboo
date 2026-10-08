@@ -608,6 +608,10 @@ class Calls:
             }
         )
 
+    def subclasses(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
+        """Every corpus class with *cls* among its bases."""
+        return list(self._subclasses().get((file, cls.lineno), []))
+
     def _subclasses(self) -> dict[tuple[str, int], list[tuple[str, ast.ClassDef]]]:
         """``{(file, line of a class): every corpus class with it among its bases}``."""
         shared = _roots_key(self.types.roots)
