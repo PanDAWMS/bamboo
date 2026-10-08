@@ -145,10 +145,16 @@ class Target(NamedTuple):
 
 
 class Placed(NamedTuple):
-    """Where a call lands: the definitions, or why none is named."""
+    """Where a call lands: the definitions, or why none is named.
+
+    *on_class*: the call reads its method off a class --
+    ``JobBrokerBase.__init__(self, ...)`` -- so a method that takes the
+    object is handed it as the call's first argument (:func:`bind`).
+    """
 
     targets: tuple[Target, ...] = ()
     unplaced: str = ""
+    on_class: bool = False
 
 
 #: How :meth:`Calls.missed` says a function is called from nowhere in the corpus.
@@ -205,18 +211,47 @@ def _is_static(func: ast.AST) -> bool:
     )
 
 
-def bind(call: ast.Call, target: Target) -> dict[str, Optional[ast.expr]]:
+def _is_classmethod(func: ast.AST) -> bool:
+    return any(
+        isinstance(decorator, ast.Name) and decorator.id == "classmethod"
+        for decorator in getattr(func, "decorator_list", [])
+    )
+
+
+def _positional(target: Target, on_class: bool) -> list[ast.arg]:
+    """The parameters a call to *target* fills by position.
+
+    Past ``self`` or ``cls`` where the call names the object it is made on.
+    A method read off its class (*on_class*, :class:`Placed`) is handed its
+    object by position like any other argument --
+    ``TaskRefinerBase.extractCommon(self, jediTaskID, ...)`` hands ``self``
+    to ``self``, not to ``jediTaskID`` -- while a classmethod is handed its
+    class either way.
+    """
+    args = target.func.args  # type: ignore[attr-defined]
+    positional = [*args.posonlyargs, *args.args]
+    if (
+        target.cls is not None
+        and not _is_static(target.func)
+        and positional
+        and not (on_class and not _is_classmethod(target.func))
+    ):
+        positional = positional[1:]
+    return positional
+
+
+def bind(call: ast.Call, target: Target, on_class: bool = False) -> dict[str, Optional[ast.expr]]:
     """``{parameter: the expression the call hands it}``; ``None`` where it is not said.
 
     Positional, keyword and default, in Python's order.  A ``*args`` or
     ``**kwargs`` at the call makes every parameter it could fill unknown
     rather than guessed; a parameter the call leaves to its default holds the
-    default.  ``self`` is left out of a method reached through an instance.
+    default.  ``self`` is left out of a method reached through an instance,
+    and bound to the first argument of one read off its class (*on_class*,
+    :func:`_positional`).
     """
     args = target.func.args  # type: ignore[attr-defined]
-    positional = [*args.posonlyargs, *args.args]
-    if target.cls is not None and not _is_static(target.func) and positional:
-        positional = positional[1:]
+    positional = _positional(target, on_class)
     defaults = dict(
         zip([p.arg for p in positional][len(positional) - len(args.defaults):], args.defaults, strict=True)
     )
@@ -242,16 +277,15 @@ def bind(call: ast.Call, target: Target) -> dict[str, Optional[ast.expr]]:
     return bound
 
 
-def said(call: ast.Call, target: Target) -> set[str]:
+def said(call: ast.Call, target: Target, on_class: bool = False) -> set[str]:
     """The parameters *call* fills itself, by position or by keyword -- not by default.
 
     ``self``/``cls`` is not among them: the call names the object it is made
-    on, which is a different thing from passing it.
+    on, which is a different thing from passing it -- unless the method is
+    read off its class (*on_class*), where the object is passed like the
+    rest.
     """
-    args = target.func.args  # type: ignore[attr-defined]
-    positional = [*args.posonlyargs, *args.args]
-    if target.cls is not None and not _is_static(target.func) and positional:
-        positional = positional[1:]
+    positional = _positional(target, on_class)
     filled = {
         parameter.arg
         for index, parameter in enumerate(positional)
@@ -323,7 +357,7 @@ class Calls:
         # ``JobBrokerBase.__init__(self, ...)``: a method read off its class.
         named = self.types.class_named(file, receiver)
         if named is not None:
-            return self._method_of(named, called.attr)
+            return self._method_of(named, called.attr)._replace(on_class=True)
         declared = self.types.declared(file, func, receiver)
         if declared is not None:
             # ``self.conn: WrappedOracleConn | WrappedPostgresConn`` -- each
@@ -514,6 +548,14 @@ class Calls:
         _CALLERS[shared] = kept
         return kept
 
+    def handed(self, site: CallSite, target: Target) -> dict[str, Optional[ast.expr]]:
+        """:func:`bind` for *site*, its method read off a class where :meth:`callees` placed it so."""
+        return bind(site.call, target, self.callees(site.file, site.func, site.call).on_class)
+
+    def filled(self, site: CallSite, target: Target) -> set[str]:
+        """:func:`said` for *site*, as :meth:`handed`."""
+        return said(site.call, target, self.callees(site.file, site.func, site.call).on_class)
+
     def opened(self, site: CallSite) -> str:
         """Why *site*'s call may land beyond the definitions it is placed at; ``""`` where it is placed closed.
 
@@ -575,7 +617,7 @@ class Calls:
             return []
         found: list[tuple[tuple[str, ...], dict[str, object]]] = []
         for site in sites:
-            bound = bind(site.call, target)
+            bound = self.handed(site, target)
             at = f"{site.file}:{site.call.lineno}"
             values: dict[str, object] = {}
             forwarded: dict[str, str] = {}
@@ -620,8 +662,8 @@ class Calls:
         stops = list(self.missed(target))
         found: list[Route] = []
         for site in sites:
-            handed = bind(site.call, target)
-            filled = said(site.call, target)
+            handed = self.handed(site, target)
+            filled = self.filled(site, target)
             forwards = any(
                 isinstance(value, ast.Name)
                 and name in filled

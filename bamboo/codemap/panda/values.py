@@ -687,7 +687,7 @@ def handed(resolve, calls: Optional["Calls"]):
     route keeps what its call handed; a statement's own fields take the
     union only where no mark is beside it (:func:`known`).
     """
-    from bamboo.codemap.calls import Target, bind
+    from bamboo.codemap.calls import Target
     from bamboo.codemap.calls import returns as calls_returns
 
     def parameters(func: ast.AST) -> set[str]:
@@ -825,7 +825,7 @@ def handed(resolve, calls: Optional["Calls"]):
         if calls.missed(target):
             found.append(Handed("", (), unknown=True))
         for site in sites:
-            passed = bind(site.call, target).get(expression.id)
+            passed = calls.handed(site, target).get(expression.id)
             held = settle(passed, site.func, site.file, depth + 1, seen) if passed is not None else []
             if not _any_value(held):
                 held = [Handed("", (), unknown=True)]

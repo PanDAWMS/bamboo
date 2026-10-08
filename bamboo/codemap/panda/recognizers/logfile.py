@@ -402,7 +402,7 @@ class LoggerFiles:
             way.seen | {key},
             way.hops,
             (way.instance or self.types.method_class(file, func)) if on_self else None,
-            _Return(target.func, bind(call, target), file, func, at, way),
+            _Return(target.func, bind(call, target, placed.on_class), file, func, at, way),
         )
         for value in returned:
             self._value(trail, target.file, target.func, value, value, inner)
@@ -472,7 +472,9 @@ class LoggerFiles:
             trail.open = True
             return
         for site, call, same_object in sites:
-            argument = bind(call, target).get(name)
+            # A call :meth:`_chained` shifted by hand is bound as it reads.
+            on_class = call is site.call and self.calls.callees(site.file, site.func, call).on_class
+            argument = bind(call, target, on_class).get(name)
             if argument is None:
                 trail.open = True
                 continue

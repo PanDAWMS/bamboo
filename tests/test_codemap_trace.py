@@ -3769,6 +3769,38 @@ def build():
     assert all("passed through * or **" not in s.detail for s in walked.steps)
 
 
+def test_a_method_read_off_its_class_and_one_called_through_super_hand_the_callers_own_object(tmp_path):
+    """``Base.extract(self, 42)`` passes 42 to ``task_id``, not ``self``; ``super().columns()``'s object is ``cls``."""
+    roots = _tree(
+        tmp_path,
+        **{"m.py": '''\
+class Base:
+    def extract(self, task_id):
+        spec.status = task_id
+
+    @classmethod
+    def columns(cls):
+        spec.names = cls.attributes
+
+class Refiner(Base):
+    def run(self):
+        Base.extract(self, 42)
+
+    @classmethod
+    def columns(cls):
+        return super().columns()
+'''},
+    )
+
+    extract = _walked_in(roots, "m.py", "Base.extract", [3])
+    columns = _walked_in(roots, "m.py", "Base.columns", [7])
+    handed = [(s.name, s.line, s.value, s.detail) for w in (extract, columns) for s in w.steps if s.kind == "handover"]
+
+    assert ("task_id", 11, "42", "passed to extract here") in handed
+    assert ("cls", 15, "cls", "the object columns is called on") in handed
+    assert all(value not in ("self", "super()") for _name, _line, value, _detail in handed)
+
+
 def test_every_walk_in_bamboo_says_whether_bindings_must_reach():
     """``reaching`` is a choice each caller makes; a call that leaves it out made it by default."""
     import ast as ast_mod

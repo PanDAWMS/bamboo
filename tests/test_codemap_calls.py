@@ -249,6 +249,47 @@ def f(proxy: Proxy, t):
     }
 
 
+def test_a_method_read_off_its_class_is_handed_its_object_as_the_first_argument(tmp_path):
+    """``Base.extract(self, 42)`` hands ``self`` to ``self`` and 42 to ``task_id``; a classmethod still takes its class."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+class Base:
+    def extract(self, task_id, label=None):
+        return task_id
+
+    @classmethod
+    def make(cls, task_id):
+        return task_id
+
+class Refiner(Base):
+    def run(self, obj: Base):
+        Base.extract(self, 42)
+        obj.extract(7)
+        Base.make(9)
+''',
+    )
+    calls = _calls(roots)
+    func = _function(calls, "m", "run")
+
+    def handed(text):
+        call = _call_in(func, text)
+        placed = calls.callees("pkg/m.py", func, call)
+        (target,) = placed.targets
+        bound = calls_mod.bind(call, target, placed.on_class)
+        return (
+            placed.on_class,
+            {name: ast.unparse(value) if value is not None else None for name, value in bound.items()},
+            calls_mod.said(call, target, placed.on_class),
+        )
+
+    assert handed("Base.extract") == (True, {"self": "self", "task_id": "42", "label": "None"}, {"self", "task_id"})
+    assert handed("obj.extract") == (False, {"task_id": "7", "label": "None"}, {"task_id"})
+    assert handed("Base.make") == (True, {"task_id": "9"}, {"task_id"})
+    site = calls_mod.CallSite("pkg/m.py", func, _call_in(func, "Base.extract"))
+    assert calls.handed(site, calls.callees(site.file, func, site.call).targets[0])["task_id"].value == 42
+
+
 def test_a_spread_argument_leaves_what_it_could_fill_unsaid(tmp_path):
     roots = _tree(
         tmp_path,

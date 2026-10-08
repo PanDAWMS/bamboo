@@ -1100,6 +1100,17 @@ def _site_key(site) -> tuple[str, int, int]:
     return (site.file, site.call.lineno, site.call.col_offset)
 
 
+def _is_super(expression: ast.AST) -> bool:
+    return isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name) and expression.func.id == "super"
+
+
+def _own_object(func: ast.AST) -> Optional[str]:
+    """The parameter a method's own object is in -- ``self`` -- or ``None`` where it takes none."""
+    args = getattr(func, "args", None)
+    positional = [*args.posonlyargs, *args.args] if args is not None else []
+    return positional[0].arg if positional else None
+
+
 def _built_detail(frame: "_Frame", followed: int, every: int) -> str:
     which = "that built" if getattr(frame.func, "name", "") == "__init__" else "made on"
     return (
@@ -2316,7 +2327,7 @@ class _Walk:
         if len(placed.targets) != 1 or placed.unplaced:
             return None
         (target,) = placed.targets
-        bound = calls_mod.bind(built, target)
+        bound = calls_mod.bind(built, target, placed.on_class)
         callee_env = {
             name: (_fold(value, env) if value is not None else None)
             for name, value in bound.items()
@@ -3269,7 +3280,7 @@ class _Walk:
             # handed over once for each of them.
             held = self.passed.setdefault((callee.file, callee.owner), [])
             if not any(one is call for _caller, one, _bound in held):
-                held.append((frame, call, calls_mod.bind(call, target)))
+                held.append((frame, call, calls_mod.bind(call, target, placed.on_class)))
                 for narrowed in self.watched.get((callee.file, callee.owner), ()):
                     self._came_later(narrowed, frame, call)
             self.entered.add((callee.file, callee.owner))
@@ -3378,23 +3389,31 @@ class _Walk:
         """The step saying what *call* hands the parameter *name*, and the statement to walk from.
 
         Four answers, and only the first is "passed here": an argument the
-        call writes; the default the signature holds, which the call leaves
-        alone and whose names are the callee's module's, not the caller's;
-        the object a method is called on, for ``self`` and ``cls``; and an
-        argument hidden in ``*``/``**``.
+        call writes -- ``self`` too, where the method is read off its class,
+        ``AdderPluginBase.__init__(self, job, ...)``; the default the
+        signature holds, which the call leaves alone and whose names are the
+        callee's module's, not the caller's; the object a method is called
+        on, for ``self`` and ``cls`` -- the caller's own for
+        ``super().__init__(...)``, not ``super()``; and an argument hidden in
+        ``*``/``**``.
         """
         callee = getattr(target.func, "name", "")
         statement = _enclosing_statement(call) or call
         argument = bound.get(name)
-        if argument is not None and name in calls_mod.said(call, target):
+        on_class = self.calls.callees(caller.file, caller.func, call).on_class
+        if argument is not None and name in calls_mod.said(call, target, on_class):
             value, reads, detail = _text(argument), _reads(argument), f"passed to {callee} here"
         elif argument is not None:
             # Evaluated where the ``def`` is, once: nothing on the path to
             # this call chose it, so there is nothing further to walk.
             value, reads, detail = _text(argument), [], f"left to the default {callee}'s signature gives it"
         elif name == calls_mod.receiver_parameter(target) and isinstance(call.func, ast.Attribute):
-            value = _text(call.func.value)
-            reads = _reads(call.func.value)
+            receiver = call.func.value
+            own = _own_object(caller.func)
+            if _is_super(receiver) and own is not None:
+                receiver = ast.Name(id=own, ctx=ast.Load())
+            value = _text(receiver)
+            reads = _reads(receiver)
             detail = f"the object {callee} is called on"
         else:
             value, reads, detail = name, [], "passed through * or ** here, so which argument it is is not said"
@@ -3513,7 +3532,7 @@ class _Walk:
             if not isinstance(call, ast.Call):
                 continue
             step, statement = self._handed_step(
-                caller, call, target, name, calls_mod.bind(call, target), depth
+                caller, call, target, name, calls_mod.bind(call, target, self.calls.callees(caller.file, caller.func, call).on_class), depth
             )
             step.open = self.calls.opened(site)
             if not self.record(step):
@@ -3785,7 +3804,7 @@ class _Walk:
                 if not sites or len(sites) > _BUILT_CALLERS:
                     return None
                 for site in sites:
-                    argument = calls_mod.bind(site.call, called).get(expression.id)
+                    argument = self.calls.handed(site, called).get(expression.id)
                     if argument is None:
                         return None
                     more = self._constructions(site.file, site.func, argument, hops - 1, seen)

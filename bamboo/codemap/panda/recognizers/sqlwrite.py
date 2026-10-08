@@ -54,8 +54,7 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, NamedTuple, Optional
 
-from bamboo.codemap.calls import FILLERS, Calls, Route, Target, Types, _rebinds, bind
-from bamboo.codemap.calls import said as passed_by
+from bamboo.codemap.calls import FILLERS, Calls, Route, Target, Types, _rebinds
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     AddedTerm,
@@ -2088,12 +2087,12 @@ def _route_constant(name: str, target: Target, sites: tuple, calls: Calls) -> ob
     passed -- on a route that gives it, not on one that leaves it ``None``.
     """
     site = sites[0]
-    handed = bind(site.call, target).get(name)
+    handed = calls.handed(site, target).get(name)
     if isinstance(handed, ast.Constant):
         return handed.value
     if (
         isinstance(handed, ast.Name)
-        and name in passed_by(site.call, target)
+        and name in calls.filled(site, target)
         and len(sites) > 1
         and handed.id in _parameters(site.func)
     ):
@@ -2146,10 +2145,10 @@ def _route_handed(target: Target, sites: tuple, calls: Calls) -> dict[str, "valu
     function's own parameter, ``needs``.
     """
     site = sites[0]
-    passed = passed_by(site.call, target)
+    passed = calls.filled(site, target)
     outer: Optional[dict[str, values.Stated]] = None
     found: dict[str, values.Stated] = {}
-    for name, expression in bind(site.call, target).items():
+    for name, expression in calls.handed(site, target).items():
         if expression is None:
             continue
         if name not in passed:
