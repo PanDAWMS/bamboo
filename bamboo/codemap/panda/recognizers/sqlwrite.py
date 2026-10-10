@@ -671,7 +671,7 @@ def _deciding_fragment(
     """
     if not run.variable:
         return run.call
-    for statement, spans in sql.variant_spans(func, run.variable):
+    for statement, spans in sql.variant_spans(func, run.variable, at=run.call, text=run.head or None):
         at = sqltext.supplied_at(statement, kind, column, supplied)
         if at is not None:
             return sql.fragment_holding(spans, at)
@@ -1291,7 +1291,7 @@ def _cut_name(
     if depth > _CUT_DEPTH:
         return None
     here = (*hops, _Hop(func, at))
-    for variant, spans in sql.variant_spans(func, name):
+    for variant, spans in sql.variant_spans(func, name, at=at, text=text):
         if variant != text:
             continue
         cuts: list[tuple[int, int]] = []
@@ -1334,7 +1334,7 @@ def _run_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
     ``conditions``, ``added_under`` -- at every call site handing constants
     as well, and reading them again was most of the read side's time.
     """
-    key = (sql.reading_context(), run.variable, run.head, run.sql, id(run.call))
+    key = (sql.reading_context(), run.variable, run.head, run.sql, id(run.call), run.pieces)
     held = getattr(func, "_run_builds_held", None)
     if held is None or held[0] != key[0][0]:
         held = (key[0][0], {})
@@ -1346,9 +1346,13 @@ def _run_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
 
 def _read_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[list[_Build]]:
     """:func:`_run_builds`, read."""
+    if run.pieces:
+        # Run (``sql.evaluated``): the statement is one the paths build as it stands -- every stretch of it is
+        # appended on every path that builds it, so nothing is cut -- and each stretch says the way it came.
+        return [_Build(run.sql, run.sql, _evaluated_leaves(func, run))]
     if not run.variable:
         return [_Build(run.sql, run.sql, [])]
-    variants = sql.variant_spans(func, run.variable)
+    variants = sql.variant_spans(func, run.variable, at=run.call)
     matching = [one for one in variants if one[0] == run.head]
     if not matching:
         if any(_on_some_paths(span.node, run.call) for _text, spans in variants for span in spans):
@@ -1365,6 +1369,33 @@ def _read_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Executio
             return None
         builds.append(_Build(text, cut, found[1]))
     return builds
+
+
+def _evaluated_leaves(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> list[_Leaf]:
+    """*run*'s stretches as fragments, from the way the evaluator says each came (:attr:`sql.Execution.pieces`).
+
+    The fragment is the statement that wrote the stretch -- a value handed to a
+    parameter, written by no statement here, is placed at the first statement
+    that put it into a name -- and the hops are the rest of the way, out to
+    the ``execute``: each statement that put it into a name, and a callee's
+    ``return`` with the call it came back from.  ``getJobs``'s ``WHERE`` terms
+    are appended in ``construct_where_clause``, a function the call runs: read
+    by name instead, the way stopped at ``sqlP += sql_where_clause`` and every
+    test above a term was said to be in ``getJobs``.
+    """
+    leaves: list[_Leaf] = []
+    for start, end, way in run.pieces:
+        nodes = [node for node in way if isinstance(node, ast.AST)]
+        if not nodes:
+            continue
+        hops = [_Hop(func, run.call)]
+        for node in reversed(nodes[1:]):
+            if isinstance(node, ast.Call):
+                hops[-1] = hops[-1]._replace(call=node)
+            elif node is not hops[-1].at:
+                hops.append(_Hop(enclosing_function(node) or func, node))
+        leaves.append(_Leaf(start, end, _statement_of(nodes[0]), tuple(hops)))
+    return leaves
 
 
 def _every_run_texts(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> Optional[list[str]]:
@@ -1669,7 +1700,13 @@ def _outright_terms(
     # text nothing decides has no build that does.
     if not any(whole):
         return whole
-    floors = _every_run_texts(func, run)
+    if run.pieces:
+        # Run: what every run asks is what every statement of the call asks, not
+        # every statement of the covering set (:func:`sql.every_statement`).
+        every = sql.every_statement(func, run.call.lineno)
+        floors = every if every is not None else [run.sql]
+    else:
+        floors = _every_run_texts(func, run)
     if floors is None:
         return ()
     return tuple(way for floor in floors for way in sqltext.outright(floor))
@@ -1740,19 +1777,36 @@ def _folded(
     of each variant's remainder.
     """
     rendered: list[list[tuple[str, Optional[ConditionNode]]]] = []
-    for run in variants:
+    # Run, the statements are the call's every statement where there are few
+    # enough (:func:`sql.every_statement`); past that only a covering set,
+    # whose statements are not every way a run can go, so no disjunction of
+    # theirs is said.
+    open_ended = False
+    # ``(run, its texts)``: a run's binds are read once, whichever of the
+    # call's statements is folded -- they are the call's, not the text's.
+    texts_of: list[tuple[sql.Execution, list[str]]] = []
+    if variants and variants[0].pieces:
+        every = sql.every_statement(func, line)
+        if every is None:
+            open_ended = True
+            texts_of = [(run, [run.sql]) for run in variants]
+        else:
+            texts_of = [(variants[0], every)]
+    else:
+        texts_of = [(run, _every_run_texts(func, run) or [run.sql]) for run in variants]
+    for run, texts in texts_of:
         window = run.window
         if window is None and run.varmap:
             window = sql.binding_window(func, run.varmap, line)
-        whole = set(sqltext.conditions(run.sql))
-        for text in _every_run_texts(func, run) or [run.sql]:
+        whole = None if run.pieces else set(sqltext.conditions(run.sql))
+        for text in texts:
             # Only what the run itself requires: a cut inside a term leaves
             # one the statement never has -- ``computingSite IN ( )`` once the
             # loop filling the list is cut out.
             found = [
                 (condition, twin)
                 for condition, twin in zip(sqltext.conditions(text), sqltext.condition_twins(text))
-                if condition in whole
+                if whole is None or condition in whole
             ]
             seeds: dict[str, list[int]] = {}
             for condition, _twin in found:
@@ -1782,9 +1836,13 @@ def _folded(
         shape = tuple(entry for entry in one if entry not in common)
         if shape not in remainders:
             remainders.append(shape)
+    # ``A or (A and B)`` is ``A``: a way that asks all another asks and more
+    # adds nothing to the disjunction.  ``lockJobsForReassign``'s 384
+    # statements each add their own optional terms to one of two time tests.
+    remainders = [one for one in remainders if not any(set(other) < set(one) for other in remainders)]
     if len(remainders) == 1:
         folded.extend((entry, trees[entry]) for entry in remainders[0])
-    elif all(remainders):
+    elif all(remainders) and not open_ended:
         tree = None
         if tree_of is not None:
             tree = ConditionNode(
@@ -2665,6 +2723,25 @@ def read_side(
     def bound(func, run, key: str, file: str) -> list[str]:
         return [value for value, _site in bound_sites(func, run, key, file)]
 
+    def file_run(func, run, at: ReadStatement, read_tables: set[str], file: str) -> None:
+        """Onto the record kept for *run*'s line: *at*'s stops, and the tables, orders and limits *run* reads.
+
+        Every run of the line, the ones whose predicates file no pair too: the
+        run of ``get_job_statistics_per_site_label_resource``'s loop over four
+        statements that has no ``WHERE`` still reads ``jobsDefined4``.
+        """
+        site = (at.owner, at.line)
+        kept = statements[site]
+        if kept is not at and at.unresolved:
+            kept = kept._replace(unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved))))
+            statements[site] = kept
+        kept.tables.update(read_tables)
+        orders, limits = sqltext.ordering(run.sql)
+        kept.order_by.update(orders)
+        for bound_to, strict in limits:
+            values_of = bound(func, run, bound_to, file) if bound_to.startswith(":") else [bound_to]
+            kept.limits.update(f"{'<' if strict else '<='} {value}" for value in values_of or [bound_to])
+
     # What each run's bind is filled with, every route's values with the
     # calls they came through: a route only keeps some of them, and reading
     # them again for each of a function's routes is the cost of reading
@@ -2999,17 +3076,54 @@ def read_side(
         that place, and a value joined from members a loop appends is read
         as its template and the loop.  The template, written in once, says
         which columns the item ranks by; the members' order is the loop's,
-        computed at run time.
+        computed at run time.  Run (:func:`sql.evaluated`), the evaluator's
+        hole there says both (:attr:`sql.Execution.holes`).
         """
 
         def file_of(one: ast.AST) -> str:
             return (calls.types.file_of(one) if calls is not None else None) or file
+
+        def said(run: sql.Execution, order: str, index: int, item, templates: list[str], loops: list, where) -> OrderHole:
+            # The columns the template adds to the order, written in once.
+            filled = item.expression.replace("{}", templates[-1], 1)
+            before = set(sqltext.order_owners(run.sql))
+            owners = sqltext.order_owners(run.sql.replace(item.expression, filled, 1))
+            subjects = sorted({_column_subject(attributor, table, column) for table, column in owners if (table, column) not in before})
+            return OrderHole(
+                order=order,
+                item=index,
+                subjects=subjects,
+                templates=templates,
+                computed_at="; ".join(_loop_said(loop, where, file_of(where)) for loop in loops),
+            )
 
         for run in executions:
             kept = statements.get((owner, run.call.lineno))
             if kept is None or not any("{}" in order for order in kept.order_by):
                 continue
             found = list(kept.order_holes)
+            if run.pieces:
+                # Run, the hole is the evaluator's: a loop of unknown length's part keeps the loop and what one
+                # pass appends (``sqleval.HoleAt.repeats``).  Its holes are the text's ``{}`` in order.
+                if len(run.holes) != run.sql.count("{}"):
+                    continue
+                squeezed = _squeezed(run.sql)
+                for order in kept.order_by:
+                    start = squeezed.find(_squeezed(f"ORDER BY {order}"))
+                    if "{}" not in order or start < 0:
+                        continue
+                    at = squeezed.count("{}", 0, start)
+                    for index, item in enumerate(sqltext.order_items(order)):
+                        hole = run.holes[at][1] if item.blanked and at < len(run.holes) else None
+                        at += item.expression.count("{}")
+                        if hole is None or not hole.repeats:
+                            continue
+                        where = enclosing_function(hole.stmt) or func
+                        hole_read = said(run, order, index, item, list(hole.repeats), [hole.stmt], where)
+                        if hole_read not in found:
+                            found.append(hole_read)
+                statements[(owner, run.call.lineno)] = kept._replace(order_holes=tuple(found))
+                continue
             for build in _run_builds(func, run) or []:
                 for leaf in build.leaves:
                     piece = _squeezed(build.variant[leaf.start : leaf.end])
@@ -3034,20 +3148,7 @@ def read_side(
                             if joined is None:
                                 continue
                             templates, loops = joined
-                            # The columns the template adds to the order, written in once.
-                            filled = item.expression.replace("{}", templates[-1], 1)
-                            before = set(sqltext.order_owners(run.sql))
-                            owners = sqltext.order_owners(run.sql.replace(item.expression, filled, 1))
-                            subjects = sorted(
-                                {_column_subject(attributor, table, column) for table, column in owners if (table, column) not in before}
-                            )
-                            hole_read = OrderHole(
-                                order=order,
-                                item=index,
-                                subjects=subjects,
-                                templates=templates,
-                                computed_at="; ".join(_loop_said(loop, where, file_of(where)) for loop in loops),
-                            )
+                            hole_read = said(run, order, index, item, templates, loops, where)
                             if hole_read not in found:
                                 found.append(hole_read)
             statements[(owner, run.call.lineno)] = kept._replace(order_holes=tuple(found))
@@ -3511,6 +3612,10 @@ def read_side(
             # call in this walk, and the two passes below want the same list:
             # calling it again for each of them tripled the build.
             executions = sql.executions(func)
+            # Runs that came before their line had a record, filed once every
+            # run is read: whether a run's tables count must not hang on the
+            # order the runs come in.
+            unfiled: list[tuple[sql.Execution, ReadStatement, set[str]]] = []
             for run in executions:
                 if (run.sql, run.window) in seen:
                     continue
@@ -3629,25 +3734,13 @@ def read_side(
                 # After the terms, and onto whichever record was kept: a join
                 # reads two tables in one statement, and the second one would
                 # otherwise land on the copy ``setdefault`` discarded.
-                kept = statements.get((owner, run.call.lineno))
-                if kept is not None and kept is not at and at.unresolved:
-                    kept = kept._replace(
-                        unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved)))
-                    )
-                    statements[(owner, run.call.lineno)] = kept
-                if kept is not None:
-                    kept.tables.update(read_tables)
-                    orders, limits = sqltext.ordering(run.sql)
-                    kept.order_by.update(orders)
-                    for bound_to, strict in limits:
-                        values_of = (
-                            bound(func, run, bound_to, module.rel_path)
-                            if bound_to.startswith(":")
-                            else [bound_to]
-                        )
-                        kept.limits.update(
-                            f"{'<' if strict else '<='} {value}" for value in values_of or [bound_to]
-                        )
+                if site in statements:
+                    file_run(func, run, at, read_tables, module.rel_path)
+                else:
+                    unfiled.append((run, at, read_tables))
+            for run, at, read_tables in unfiled:
+                if (at.owner, at.line) in statements:
+                    file_run(func, run, at, read_tables, module.rel_path)
             place_conditions(func, owner, module.rel_path, executions)
             place_prints(func, owner, executions)
             place_orders(func, owner, module.rel_path, executions)

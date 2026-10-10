@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 
+import pytest
+
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import attribution, sql, sqltext
@@ -686,29 +688,49 @@ def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():
     assert chosen.refuses == {(status, "done")}
 
 
-def test_conditions_drop_what_some_paths_append_and_invent_nothing_from_the_cut():
-    """``if not force_read:`` appends a test some runs never ask; a cut list leaves no ``IN ( )``."""
-    side = _read_side(
-        "class TaskModule:\n"
-        "    def feed(self, force_read):\n"
-        "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND oldStatus IS NULL '\n"
-        "        if not force_read:\n"
-        "            sql += 'AND lockedBy IS NULL '\n"
-        "        self.cur.execute(sql, {':vo': 'atlas'})\n"
-        "    def sites(self, sites):\n"
-        "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND oldStatus IS NULL AND site IN ('\n"
-        "        var_map = {':vo': 'atlas'}\n"
-        "        for idx, site in enumerate(sites):\n"
-        "            var_map[f':s_{idx}'] = site\n"
-        "            sql += f':s_{idx},'\n"
-        "        sql = sql[:-1] + ') '\n"
-        "        self.cur.execute(sql, var_map)\n" + _TEACH
-    )
+_FEED_AND_SITES = (
+    "class TaskModule:\n"
+    "    def feed(self, force_read):\n"
+    "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND oldStatus IS NULL '\n"
+    "        if not force_read:\n"
+    "            sql += 'AND lockedBy IS NULL '\n"
+    "        self.cur.execute(sql, {':vo': 'atlas'})\n"
+    "    def sites(self, sites):\n"
+    "        sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND oldStatus IS NULL AND site IN ('\n"
+    "        var_map = {':vo': 'atlas'}\n"
+    "        for idx, site in enumerate(sites):\n"
+    "            var_map[f':s_{idx}'] = site\n"
+    "            sql += f':s_{idx},'\n"
+    "        sql = sql[:-1] + ') '\n"
+    "        self.cur.execute(sql, var_map)\n" + _TEACH
+)
+
+
+def test_conditions_drop_what_some_paths_append():
+    """``if not force_read:`` appends a test some runs never ask."""
+    side = _read_side(_FEED_AND_SITES)
 
     (fed,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::feed"]
     assert fed.conditions == ["oldStatus IS NULL"]
+
+
+@pytest.mark.reassembly("python")
+def test_conditions_invent_nothing_from_a_cut_list():
+    """A cut list leaves no ``IN ( )``: the reassembly cuts the loop filling it, and says nothing of it."""
+    side = _read_side(_FEED_AND_SITES)
+
     (sited,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::sites"]
     assert sited.conditions == ["oldStatus IS NULL"]
+
+
+def test_conditions_read_a_list_a_loop_fills_as_one_requirement():
+    """Run, what the loop appends is one part however many sites there are -- ``IN ({})`` -- and every run asks it:
+    ``site`` is one of the list's.  Not a disjunction of lengths, and no ``IN ( )``."""
+    with sql.evaluated(True):
+        side = _read_side(_FEED_AND_SITES)
+
+    (sited,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::sites"]
+    assert sited.conditions == ["oldStatus IS NULL", "site IN ({})"]
 
 
 def test_a_stated_in_list_refuses_every_member_and_a_handed_one_none():
@@ -885,6 +907,7 @@ def test_every_test_of_a_written_column_is_its_precondition():
         "AND (ramCount IS NOT NULL AND ramCount>:ramCount)"
     )
     assert preconditions == {"ramCount": "ramCount IS NOT NULL AND ramCount>:ramCount"}
+
 
 
 _PRINTED_GETJOBS = (

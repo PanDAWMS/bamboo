@@ -1767,6 +1767,7 @@ def test_a_loop_that_runs_nothing_builds_one_statement_over_its_tables():
     ]
 
 
+@pytest.mark.reassembly("one_pass")
 def test_a_cut_off_the_end_of_a_statement_is_applied():
     """``sql = sql[:-4]`` drops the ``AND `` a loop leaves after its last term.
 
@@ -2211,6 +2212,7 @@ def test_an_index_used_twice_fills_both_of_its_holes():
     ]
 
 
+@pytest.mark.reassembly("python")
 def test_a_format_call_that_cannot_be_lined_up_leaves_the_hole_alone():
     """The four shapes where marker and argument stop corresponding.
 
@@ -2263,6 +2265,7 @@ def test_a_derived_field_holds_its_position_without_naming_anything():
     ]
 
 
+@pytest.mark.reassembly("representation")
 def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
     """A hole standing for a whole table is not the schema.
 
@@ -2290,6 +2293,7 @@ def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
     assert tables == ["jobsDefined4", "jobsActive4", "jobsArchived"]
 
 
+@pytest.mark.reassembly("python")
 def test_a_table_list_built_by_append_is_read_as_the_tables_it_holds():
     """The same list, one ``append`` per flag.
 
@@ -2324,6 +2328,7 @@ def test_a_table_list_built_by_append_is_read_as_the_tables_it_holds():
     ]
 
 
+@pytest.mark.reassembly("python")
 def test_an_interpolated_schema_is_still_left_blank():
     """The reason reassembly blanks interpolations in the first place.
 
@@ -2926,7 +2931,8 @@ def test_a_default_argument_names_the_table_the_function_writes():
     written in the signature -- by the same function, not by a caller that
     would have to be traced.  Until it was read, the one statement that creates
     a ``Datasets`` row named no table, and the map reported that kind of row as
-    changed here but never created here.
+    changed here but never created here.  The evaluator also reads the
+    statement of a caller that passes a table, with the table a hole.
     """
     source = (
         "def f(self, dataset, tablename='ATLAS_PANDA.Datasets'):\n"
@@ -2937,7 +2943,7 @@ def test_a_default_argument_names_the_table_the_function_writes():
 
     created = [table for run in sql.executions(_func(source)) for table in sqltext.creates(run.sql)]
 
-    assert created == ["Datasets"]
+    assert "Datasets" in created
 
 
 def test_an_argument_with_no_default_leaves_the_hole():
@@ -2956,6 +2962,7 @@ def test_an_argument_with_no_default_leaves_the_hole():
     ]
 
 
+@pytest.mark.reassembly("python")
 def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
     """Half a list of tables read as the list is a statement about tables the
     code never runs over, which is worse than the hole it replaces."""
@@ -3002,6 +3009,7 @@ def test_a_dict_keyed_by_table_name_is_a_list_of_tables():
     ]
 
 
+@pytest.mark.reassembly("python")
 def test_a_dict_of_tables_mutated_some_other_way_leaves_the_hole_alone():
     """``update`` and ``setdefault`` add keys from somewhere this cannot see,
     and ``pop`` and ``clear`` take them away again.
@@ -3049,6 +3057,7 @@ def test_a_dict_whose_keys_are_not_written_out_leaves_the_hole_alone():
         ], literal
 
 
+@pytest.mark.reassembly("python")
 def test_more_tables_than_the_cap_allows_are_not_split_at_all():
     """A silent cap reads exactly like full coverage.
 
@@ -14714,6 +14723,7 @@ def test_the_daemon_layer_speaks_through_the_task_buffer():
     assert "jobsActive4" in runs[0].sql
 
 
+@pytest.mark.reassembly("inline")
 def test_a_statement_written_into_the_call_is_read_for_the_forwarded_form():
     """22 of the 114 forwarded sites pass the statement as a literal rather
     than through a name.  ``execute`` still requires a name -- widening it
@@ -15453,6 +15463,7 @@ def test_an_arm_that_uses_the_tested_name_does_not_join_the_other_arm():
     ]
 
 
+@pytest.mark.reassembly("cover")
 def test_two_tests_of_a_name_given_a_new_value_between_them_can_both_hold():
     """``getTasksWithCriteria_JEDI``: the second ``for`` gives ``tmpVal`` its new value.
 
@@ -15563,6 +15574,7 @@ def test_a_statement_thrown_away_before_the_call_is_not_what_it_ran():
     assert second == ["SELECT b FROM ATLAS_PANDA.t2 "]
 
 
+@pytest.mark.reassembly("python")
 def test_a_statement_editing_itself_does_not_throw_itself_away():
     """``sql_to_get_ids = sql_to_get_ids[:-1] + ") "`` closes a bracket.
 
@@ -15605,6 +15617,7 @@ def test_a_rebinding_under_an_arm_the_call_is_not_in_throws_nothing_away():
     ]
 
 
+@pytest.mark.reassembly("one_pass")
 def test_a_rebinding_inside_a_loop_leaves_the_first_pass_alone():
     """The pass before it ran is a pass where the earlier statement stood."""
     source = (
@@ -15835,6 +15848,7 @@ def test_the_value_is_found_after_the_table_name_is_filled_in():
     assert _branches_of(source, "jobsDefined4.jobStatus") == {("holding", ())}
 
 
+@pytest.mark.reassembly("per_call")
 def test_the_reading_is_chosen_by_kind_so_an_upsert_keeps_its_two_reasons():
     """The ablation for choosing the reading rather than trying both.
 
@@ -16112,6 +16126,7 @@ def test_a_skip_written_as_a_prefix_test_is_read_too():
     assert columns == {"walltime"}
 
 
+@pytest.mark.reassembly("union")
 def test_a_skip_this_cannot_read_leaves_the_column_unnamed():
     """Missing a skip does not shorten the answer, it falsifies it."""
     source = _SCOUT_SOURCE.replace(
@@ -16236,7 +16251,9 @@ def _skips(source: str, name: str) -> list:
     [
         ("queryTasksToBePending_JEDI", sql.SKIP_HANDED_IN, "sql_query"),
         ("getSiteInfo", sql.SKIP_NO_VARMAP, "sql"),
-        ("inline", sql.SKIP_INLINE, "SELECT LAST_INSERT_ID()"),
+        pytest.param(
+            "inline", sql.SKIP_INLINE, "SELECT LAST_INSERT_ID()", marks=pytest.mark.reassembly("inline")
+        ),
         ("unbound", sql.SKIP_UNBOUND, "SQL_FROM_ELSEWHERE"),
         ("peekJob", sql.SKIP_UNREAD_NAME, "sql"),
     ],

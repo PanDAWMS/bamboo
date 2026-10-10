@@ -43,11 +43,12 @@ import contextlib
 import itertools
 import logging
 import math
+import os
 import re
 import string
 from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional
 
-from bamboo.codemap.panda import sqltext
+from bamboo.codemap.panda import sqleval, sqltext
 from bamboo.codemap.panda.pathcond import (
     BIND_ANNOTATED,
     BIND_ASSIGN,
@@ -341,6 +342,23 @@ def _with_lists(node: ast.expr, lists: dict[str, InList]) -> ast.expr:
 #: The corpus's calls, while a build reads statements through them.
 _CALLS: Optional["Calls"] = None
 
+#: Read statements by running the function (:mod:`sqleval`) instead of
+#: reassembling them -- for a whole process with ``BAMBOO_SQL_EVAL=1``, or for
+#: the length of a block (:func:`evaluated`).  The reassembly stays beside it,
+#: so the two can be compared on every field the map reads.
+_EVALUATED: bool = os.environ.get("BAMBOO_SQL_EVAL") == "1"
+
+
+@contextlib.contextmanager
+def evaluated(on: bool = True) -> Iterator[None]:
+    """Read statements, for the length of the block, by running the function (*on*) or by reassembling it."""
+    global _EVALUATED
+    previous, _EVALUATED = _EVALUATED, on
+    try:
+        yield
+    finally:
+        _EVALUATED = previous
+
 #: How many calls out a statement's text or binds are followed.  ``getJobs``
 #: is two: its ``WHERE`` is a closure's return, which is
 #: ``construct_where_clause``'s.
@@ -525,7 +543,7 @@ def _handed_texts(
     texts: list[str] = []
     for callee, value in returned(func, name):
         if isinstance(value, ast.Name):
-            found = variants(callee, value.id, seen | {f"{id(callee)}:{value.id}"})
+            found = _variants(callee, value.id, seen | {f"{id(callee)}:{value.id}"})
             found = found or _handed_texts(callee, value.id, seen | {f"{id(callee)}:{value.id}"})
         else:
             rendered = rendered_text(value)
@@ -572,7 +590,17 @@ def ruled_out(node: ast.AST) -> bool:
 
 
 def decided_here(test: ast.expr) -> object:
-    """What the call site being read (:func:`at_call`) makes of *test*: ``True``, ``False`` or ``UNDECIDED``."""
+    """What the call site being read (:func:`at_call`) makes of *test*: ``True``, ``False`` or ``UNDECIDED``.
+
+    Run (:func:`evaluated`), the way every path of the function took it under
+    that call's constants: a value the function settles itself decides it too.
+    """
+    if _EVALUATED:
+        func = enclosing_function(test)
+        if func is None:
+            return UNDECIDED
+        taken = _evaluation(func).decided(test)
+        return UNDECIDED if taken is None else taken
     if not _AT_CALL:
         return UNDECIDED
     func, values = _AT_CALL
@@ -670,7 +698,7 @@ def _parts(
                 # down under another name; ``sqlP += sql_where_clause`` text a
                 # call handed it.  Either way each statement the name can
                 # hold is one alternative, appended in this one place.
-                held = variants(func, node.value.id, seen) or _handed_texts(
+                held = _variants(func, node.value.id, seen) or _handed_texts(
                     func, node.value.id, seen
                 )
                 if held:
@@ -787,7 +815,7 @@ def _composed_texts(
         try:
             return [
                 re.sub(value.args[0].value, value.args[1].value, text)
-                for text in variants(func, value.args[2].id, seen)
+                for text in _variants(func, value.args[2].id, seen)
             ][:_MAX_BRANCH_VARIANTS]
         except re.error:
             return []
@@ -797,7 +825,7 @@ def _composed_texts(
     pieces: list[list[str]] = []
     for operand in operands:
         if isinstance(operand, ast.Name):
-            held = variants(func, operand.id, seen)
+            held = _variants(func, operand.id, seen)
             if len(held) > 1:
                 # Two names each built several ways are not crossed: which
                 # header goes with which tail is decided by the branches that
@@ -830,7 +858,7 @@ def _percent_texts(
     templates: list[str] = [""]
     for operand in head:
         if isinstance(operand, ast.Name):
-            held = variants(func, operand.id, seen)
+            held = _variants(func, operand.id, seen)
         else:
             rendered = rendered_text(operand)
             held = [rendered] if rendered is not None else []
@@ -861,7 +889,7 @@ def _through_name(func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.
     reads where it is written into the call.
     """
     head = _concatenated(expression)[0]
-    if not isinstance(head, ast.Name) or variants(func, head.id):
+    if not isinstance(head, ast.Name) or _variants(func, head.id):
         return expression
     bound = [
         node.value
@@ -1439,6 +1467,23 @@ def variants(
 ) -> list[str]:
     """Return every statement local *name* can hold.
 
+    Run (:func:`evaluated`), every text *name* holds at a call that runs it.
+    A name no call here runs is not followed by the run at all -- ``other(sqlJ)``
+    hands its statement away -- and the reassembly (:func:`_variants`) is
+    then the only reading there is: coverage still has to count it.
+    """
+    if _EVALUATED and not seen:
+        held = _evaluation(func).named_everywhere(name)
+        if held:
+            return held
+    return _variants(func, name, seen)
+
+
+def _variants(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, seen: frozenset[str] = frozenset()
+) -> list[str]:
+    """Return every statement local *name* can hold, reassembled.
+
     Two things make one name hold several statements, and both were learned by
     getting them wrong.
 
@@ -1489,9 +1534,33 @@ def _runs(parts: list[tuple[int, str, str, ast.stmt]]) -> list[list[tuple[int, s
 
 
 def variant_spans(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    at: Optional[ast.AST] = None,
+    text: Optional[str] = None,
 ) -> list[tuple[str, list[Span]]]:
     """:func:`variants`, with each statement's fragments and where they landed.
+
+    *at* is where the question is asked: a call that runs *name*, or a
+    statement copying it into the name a call runs (``sql = sqlIn``, which
+    sqlwrite cuts in ``sqlIn``'s own terms).  Run (:func:`evaluated`), the
+    answer is what *name* holds there -- the texts that reach it, each with the
+    statement that put each stretch into *name* -- and *text*, where given, is
+    the one statement asked about: ``updateSiteData`` copies ``sqlIn`` into
+    ``sql`` in two loops, and read by name the call in the first was handed the
+    copy in the second.  Without *at*, or reassembled, every variant of the
+    name in the function, as :func:`_variant_spans` reads them, *text* or not:
+    the reassembly's readers pick their own.
+    """
+    if _EVALUATED and at is not None:
+        return _evaluated_spans(func, name, at, text)
+    return _variant_spans(func, name)
+
+
+def _variant_spans(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[tuple[str, list[Span]]]:
+    """:func:`_variants`, with each statement's fragments and where they landed.
 
     **The variant is the unit, not the fragment and not the whole function.**
     A fragment is where a path condition lives, so it is tempting to read one
@@ -1604,6 +1673,23 @@ class Execution(NamedTuple):
     ...)`` runs it with the comment after it and ``FROM {}`` filled in, so
     :attr:`sql` is no variant's text, and a reader asking which fragments
     built the run would otherwise have to guess by comparing spellings.
+    """
+
+    pieces: tuple = ()
+    """Run (:func:`evaluated`), each stretch of :attr:`sql` with its way to the run: ``(start, end, way)``.
+
+    *way* is :func:`sqleval.way_of`: where the stretch was written, then each
+    statement that put it into a name, each callee ``return`` and each call it
+    came back from.  Empty for the reassembly, whose readers cut the statement
+    into fragments themselves (``sqlwrite._run_builds``).
+    """
+
+    holes: tuple = ()
+    """Run (:func:`evaluated`), each ``{}`` of :attr:`sql` in order: ``(offset, sqleval.HoleAt)``.
+
+    Where a loop of unknown length appended, the hole keeps the loop and what
+    one pass appends (:attr:`sqleval.HoleAt.repeats`): ``getJobs``' ``(CASE {}
+    ELSE {} END)``, filled with one ``WHEN gshare=:leave{} THEN {}`` per share.
     """
 
     @property
@@ -2476,6 +2562,8 @@ def executions(
     is a :class:`Skip` with the reason, so a consumer can tell "read in full"
     from "never read" -- see :data:`SKIP_REASONS`.
     """
+    if _EVALUATED:
+        return _evaluated_executions(func, skipped)
     # ``_compatible_sets`` reads the arms a fragment sits under off the ancestor
     # chain, and two of this function's callers -- ``boundary`` and ``trigger``
     # -- never attached one.  A tree without parents does not raise: every
@@ -2515,7 +2603,7 @@ def executions(
         if isinstance(operands[0], ast.Name):
             base = operands[0]
             head = []
-            for text, spans in variant_spans(func, base.id):
+            for text, spans in _variant_spans(func, base.id):
                 if not text:
                     continue
                 head.append(text)
@@ -2577,7 +2665,7 @@ def executions(
         for operand in operands[1:]:
             if isinstance(operand, ast.Name):
                 pieces.append(
-                    variants(func, operand.id) or _handed_texts(func, operand.id, frozenset()) or ["{}"]
+                    _variants(func, operand.id) or _handed_texts(func, operand.id, frozenset()) or ["{}"]
                 )
                 continue
             rendered = rendered_text(operand)
@@ -2707,7 +2795,7 @@ def _head_texts(
 ) -> tuple[str, ...]:
     """What the head of a statement can be read to hold, without pairing binds."""
     if isinstance(head, ast.Name):
-        return tuple(text for text in variants(func, head.id) if text)
+        return tuple(text for text in _variants(func, head.id) if text)
     rendered = rendered_text(head)
     return (rendered,) if rendered else ()
 
@@ -2838,9 +2926,14 @@ def reading_context() -> tuple:
     same constants is read the same way, and the reader reads each one.
     """
     if _AT_CALL is None:
-        return (id(_CALLS),)
+        return (id(_CALLS), _EVALUATED)
     func, values = _AT_CALL
-    return (id(_CALLS), id(func), tuple(sorted((name, repr(value)) for name, value in values.items())))
+    return (
+        id(_CALLS),
+        _EVALUATED,
+        id(func),
+        tuple(sorted((name, repr(value)) for name, value in values.items())),
+    )
 
 
 def _executions_held(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
@@ -2855,10 +2948,10 @@ def _executions_held(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execu
     if _AT_CALL is not None:
         return executions(func)
     held = getattr(func, "_written_back_runs", None)
-    if held is not None and held[0] == id(_CALLS):
+    if held is not None and held[0] == (id(_CALLS), _EVALUATED):
         return held[1]
     runs = executions(func)
-    func._written_back_runs = (id(_CALLS), runs)  # type: ignore[attr-defined]
+    func._written_back_runs = ((id(_CALLS), _EVALUATED), runs)  # type: ignore[attr-defined]
     return runs
 
 
@@ -3450,3 +3543,315 @@ def _copied_from(value: ast.expr) -> Optional[str]:
         if isinstance(value.args[0], ast.Name):
             return value.args[0].id
     return None
+
+
+# ---------------------------------------------------------------- read by running the function
+
+
+def _evaluation(func: ast.FunctionDef | ast.AsyncFunctionDef) -> "sqleval.Reading":
+    """*func* run on every path (:mod:`sqleval`), kept on it per reading context.
+
+    The context is what the run is given: the calls it follows into
+    (:func:`across_calls`, the map's own placing of each call) and, read as one
+    call site runs it (:func:`at_call`), that call's constants.  A build asks
+    about a function many times in one context -- 43,706 readings of 3,446
+    (function, constants) pairs -- and running it is the whole cost.
+    """
+    constants = dict(_AT_CALL[1]) if _AT_CALL is not None and _AT_CALL[0] is func else {}
+    key = (id(_CALLS), tuple(sorted((name, repr(value)) for name, value in constants.items())))
+    held = getattr(func, "_sqleval_held", None)
+    if held is None:
+        held = func._sqleval_held = {}  # type: ignore[union-attr]
+    if key not in held:
+        # Values are interned per run; one kept from an earlier run stays
+        # valid, but is never the same object as an equal one made later.
+        sqleval.clear_memo()
+        lists = in_lists(func)
+        conventions = {
+            "in_list_helper": IN_LIST_HELPER,
+            "globals": {name: sqleval.lit(one.bind, one.site) for name, one in lists.items()},
+            # ``execute(sqlU + comment)``: the tag the call appends is not the statement (:func:`_call_site_fill`).
+            "tracing_tag": True,
+        }
+        held[key] = sqleval.evaluate(func, constants, _placed_callees(), conventions)
+    return held[key]
+
+
+def _placed_callees():
+    """The calls a run follows: the map's own placing of each (:func:`across_calls`), every target, nothing open."""
+    calls = _CALLS
+    if calls is None:
+        return None
+
+    def resolve(func, call):
+        file = calls.types.file_of(func)
+        if file is None:
+            return None
+        placed = calls.callees(file, func, call)
+        if placed.unplaced or not placed.targets:
+            return None
+        return [target.func for target in placed.targets]
+
+    return resolve
+
+
+def _says_nothing(text: str) -> bool:
+    """A statement that is holes and nothing else: what a parameter handed in renders to."""
+    return not _HOLE.sub("", text).strip()
+
+
+def _statement_of(node: ast.AST) -> ast.AST:
+    while not isinstance(node, ast.stmt) and getattr(node, "parent", None) is not None:
+        node = node.parent  # type: ignore[attr-defined]
+    return node
+
+
+def _spans_of(drawn: "sqleval.Rendered", anchor: ast.AST) -> list[Span]:
+    """Each stretch of *drawn* with the statement that put it into its name.
+
+    A piece no assignment put there -- a parameter run as handed in, or a
+    route's constant -- is anchored at *anchor*, as a statement written into
+    its call is.
+    """
+    return [
+        Span(where if isinstance(where, ast.AST) else anchor, start, end)
+        for where, start, end in drawn.carried
+    ]
+
+
+def _evaluated_spans(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST, text: Optional[str]
+) -> list[tuple[str, list[Span]]]:
+    """:func:`variant_spans`, run: what *name* holds at *at*."""
+    reading = _evaluation(func)
+    if isinstance(at, ast.Call):
+        found = reading.named(at.lineno, name, text)
+        anchor = _statement_of(at)
+    else:
+        found = reading.copied(at.lineno, name, text)
+        anchor = at
+    found = [_fragments_out(one, func) for one in found]
+    return [(one.text, _spans_of(one, anchor)) for one in found if one.text]
+
+
+#: How many statements of one call :func:`every_statement` draws, at most.
+#: ``lockJobsForReassign`` runs 384, ``propagateResultToJEDI``'s file update
+#: 324; past them, ``getJobs`` runs 24,576 and ``getTasksWithCriteria_JEDI``
+#: 9,984.
+EVERY_CAP = 512
+
+
+def every_statement(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> Optional[list[str]]:
+    """Run (:func:`evaluated`), every statement the call at *line* runs, as :func:`executions` gives each text; ``None``
+    past :data:`EVERY_CAP` of them.
+
+    :func:`executions` hands a covering set -- every branch shows up, not
+    every combination of branches -- which is all a reader of what some run
+    asks needs.  A reader of what *every* run asks needs them all:
+    ``getJobs`` appends a dozen terms each under its own ``if``, and no
+    statement of its covering set appends none of them, so read as the ways a
+    run can go, the set required one of its combinations.
+    """
+    reading = _evaluation(func)
+    held = getattr(reading, "_every", None)
+    if held is None:
+        held = reading._every = {}  # type: ignore[attr-defined]
+    if line not in held:
+        held[line] = _every_statement(func, reading, line)
+    return held[line]
+
+
+def _every_statement(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, reading: "sqleval.Reading", line: int
+) -> Optional[list[str]]:
+    if line in reading.full_capped:
+        return None
+    full = reading.texts.get(line) or {}
+    if len(full) > EVERY_CAP:
+        return None
+    drawn = reading.cover(line)[0]
+    if not set(full) <= {one.text for one in drawn}:
+        values = list(reading.values.get(line, {}))
+        drawn = []
+        for text in full:
+            found = sqleval.rendered_as(values, text, limit=1)
+            if not found:
+                return None
+            drawn.append(found[0])
+    texts: list[str] = []
+    for one in drawn:
+        text = _fragments_out(one, func).text
+        if not _says_nothing(text) and text not in texts:
+            texts.append(text)
+    return texts
+
+
+def _unrendered(hole: "sqleval.HoleAt", func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """A hole that is a whole ``+=`` fragment with no text of its own (:data:`FRAGMENT_NOT_RENDERED`), appended
+    by *func* itself.
+
+    One a callee appends -- ``ret += attr`` in ``JobSpec.columnNames()`` -- is a piece of the value the call
+    returns, not a fragment of the statement, and stays ``{}``.
+    """
+    if not isinstance(hole.stmt, ast.AugAssign) or hole.source != ast.unparse(hole.stmt.value):
+        return False
+    own = getattr(func, "_own_augassigns", None)
+    if own is None:
+        own = func._own_augassigns = frozenset(  # type: ignore[union-attr]
+            id(node) for node in ast.walk(func) if isinstance(node, ast.AugAssign)
+        )
+    return id(hole.stmt) in own
+
+
+def _fragments_out(
+    drawn: "sqleval.Rendered", func: ast.FunctionDef | ast.AsyncFunctionDef
+) -> "sqleval.Rendered":
+    """*drawn* without the ``+=`` fragments *func* appends that have no text of its own, as the reassembly reads
+    them.
+
+    ``sqlP += sql_where_clause`` with nothing known of the name: the
+    reassembly leaves the fragment out of the statement and says so, once
+    (:func:`_fragment_stops`).  Kept in as ``{}`` it would be said a second
+    time, as a ``WHERE`` that takes whole conditions through an interpolation,
+    and a head and the statement it starts would disagree on every position
+    after it.
+    """
+    cut = sorted(at for at, hole in drawn.holes if _unrendered(hole, func))
+    if not cut:
+        return drawn
+    width = len("{}")
+
+    def moved(position: int) -> int:
+        return position - width * sum(1 for at in cut if at < position)
+
+    text = drawn.text
+    for at in reversed(cut):
+        text = text[:at] + text[at + width :]
+
+    def spans(found):
+        out = []
+        for where, start, end in found:
+            start, end = moved(start), moved(end)
+            if end > start:
+                out.append((where, start, end))
+        return tuple(out)
+
+    return drawn._replace(
+        text=text,
+        spans=spans(drawn.spans),
+        holes=tuple((moved(at), hole) for at, hole in drawn.holes if at not in cut),
+        carried=spans(drawn.carried),
+        pieces=tuple(
+            (moved(start), moved(end), way)
+            for start, end, way in drawn.pieces
+            if moved(end) > moved(start)
+        ),
+    )
+
+
+def _fragment_stops(
+    drawn: "sqleval.Rendered", func: ast.FunctionDef | ast.AsyncFunctionDef
+) -> tuple[Stop, ...]:
+    """A ``+=`` *func* appends whose right-hand side has no text of its own: :data:`FRAGMENT_NOT_RENDERED`, as the
+    reassembly says it."""
+    found = {
+        Stop(hole.stmt.lineno, hole.source, FRAGMENT_NOT_RENDERED)
+        for _at, hole in drawn.holes
+        if _unrendered(hole, func)
+    }
+    return tuple(sorted(found))
+
+
+def _evaluated_executions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, skipped: Optional[list["Skip"]]
+) -> list[Execution]:
+    """:func:`executions`, run: each covering statement of each call, with the text of the name it runs.
+
+    Which calls are executions, the binds they are paired with, the window of
+    the forwarded form and the reasons a call is not read are the reassembly's
+    own rules; only what a call runs is read by running the function.  A
+    statement written into the call is read as any other (the reassembly read
+    it only through a name).  Kept per reading context, as the run is.
+    """
+    attach_parents(func)
+    key = reading_context()
+    held = getattr(func, "_sqleval_runs", None)
+    if held is None:
+        held = func._sqleval_runs = {}  # type: ignore[union-attr]
+    if key not in held:
+        held[key] = _evaluated_executions_read(func)
+    found, skips = held[key]
+    if skipped is not None:
+        skipped.extend(skips)
+    return list(found)
+
+
+def _evaluated_executions_read(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[list[Execution], list["Skip"]]:
+    reading = _evaluation(func)
+    found: list[Execution] = []
+    skips: list[Skip] = []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        forwarded = node.func.attr in _FORWARDED
+        if not forwarded and node.func.attr not in {"execute", "executemany"}:
+            continue
+        if _AT_CALL and ruled_out(node):
+            continue
+        if not node.args:
+            continue
+        if len(node.args) < 2:
+            skip = _skip_without_binds(func, node)
+            if skip is not None:
+                skips.append(skip)
+            continue
+        statement, _fillers, _spelling = _call_site_fill(func, _through_name(func, node.args[0]))
+        operands = _concatenated(statement)
+        held = operands[0].id if isinstance(operands[0], ast.Name) else ""
+        line = node.lineno
+        if line not in reading.reached:
+            skips.append(Skip(line, SKIP_UNREACHED, held or _clipped(_unparsed(operands[0]))))
+            continue
+        if held:
+            drawn = reading.heads(line, held)
+        else:
+            drawn = [(one, []) for one in reading.cover(line)[0]]
+        drawn = [
+            (one, [_fragments_out(head, func) for head in heads])
+            for one, heads in drawn
+            if not _says_nothing(_fragments_out(one, func).text)
+        ]
+        if not drawn:
+            skip = _skip_without_text(func, node, operands[0], forwarded)
+            if skip is not None:
+                skips.append(skip)
+            continue
+        varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
+        window = binding_window(func, varmap, line) if forwarded and varmap is not None else None
+        for one, heads in drawn:
+            run = _fragments_out(one, func)
+            found.append(
+                Execution(
+                    sql=run.text,
+                    varmap=varmap,
+                    variable=held,
+                    call=node,
+                    window=window,
+                    unresolved=_fragment_stops(one, func) + _hole_stops(run.text, line),
+                    head=heads[0].text if heads else "",
+                    pieces=run.pieces,
+                    holes=run.holes,
+                )
+            )
+    together: dict[tuple, dict[ast.Call, None]] = {}
+    for run in found:
+        together.setdefault((run.variable, run.sql, run.varmap, run.window), {})[run.call] = None
+    return (
+        [
+            run._replace(calls=tuple(together[(run.variable, run.sql, run.varmap, run.window)]))
+            for run in found
+        ],
+        skips,
+    )

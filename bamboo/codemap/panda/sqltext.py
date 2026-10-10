@@ -645,8 +645,22 @@ def _statement(sql: str):
 
 
 def _spelled(sql: str, tokens: list, lo: int, hi: int) -> str:
-    """``tokens[lo:hi]`` as *sql* spells them."""
-    return sql[tokens[lo].start : tokens[hi - 1].end + 1].strip() if hi > lo else ""
+    """``tokens[lo:hi]`` as *sql* spells them, an ``IN`` list's repeated items once (:func:`_one_of_each`)."""
+    text = sql[tokens[lo].start : tokens[hi - 1].end + 1].strip() if hi > lo else ""
+    return _IN_LIST.sub(_listed_once, text) if "," in text else text
+
+
+_IN_LIST = re.compile(r"(\bIN\s*\()([^()]*)(\))", re.IGNORECASE)
+
+
+def _listed_once(match: re.Match) -> str:
+    items = match.group(2).split(",")
+    kept: dict[str, str] = {}
+    for item in items:
+        kept.setdefault(_NAMED_HOLE.sub("{}", item.strip()), item)
+    if len(kept) == len(items):
+        return match.group(0)
+    return match.group(1) + ",".join(kept.values()) + match.group(3)
 
 
 def _at_depth(tokens: list, start: int, kinds, stop: Optional[int] = None) -> Optional[int]:
@@ -1196,6 +1210,24 @@ def _holes_stand_for_what_is_missing(tree: exp.Expression) -> bool:
     )
 
 
+def _one_of_each(tree: exp.Expression) -> exp.Expression:
+    """*tree* with an ``IN`` list's repeated items said once: ``x IN (a, a)`` asks what ``x IN (a)`` does.
+
+    A list a loop of unknown length builds is run once and twice
+    (:mod:`sqleval`), ``site IN (:site_{})`` and ``site IN (:site_{},:site_{})``,
+    each hole a bind the loop names: one requirement, which two spellings made
+    a disjunction of the two lengths.
+    """
+    for node in tree.find_all(exp.In):
+        items = node.expressions
+        kept: dict[str, exp.Expression] = {}
+        for item in items:
+            kept.setdefault(_NAMED_HOLE.sub("{}", item.sql()), item)
+        if len(kept) < len(items):
+            node.set("expressions", list(kept.values()))
+    return tree
+
+
 @functools.lru_cache(maxsize=None)
 def parsed(sql: str) -> Parsed:
     """*sql* as a tree, its holes read as names.
@@ -1218,13 +1250,13 @@ def parsed(sql: str) -> Parsed:
 
     for _attempt in range(len(_NAMED_HOLE.findall(text)) + 1):
         try:
-            return Parsed(sqlglot.parse_one(text, read="oracle"), "", "", text)
+            return Parsed(_one_of_each(sqlglot.parse_one(text, read="oracle")), "", "", text)
         except ParseError as error:
             said = [one.get("description") or "" for one in error.errors]
             if said and all(_REQUIRED in one for one in said):
                 tree = sqlglot.parse_one(text, read="oracle", error_level=ErrorLevel.IGNORE)
                 if tree is not None and _holes_stand_for_what_is_missing(tree):
-                    return Parsed(tree, "", "", text)
+                    return Parsed(_one_of_each(tree), "", "", text)
                 return failed(said[0], " ".join(text.split()[-8:]))
             first = error.errors[0] if error.errors else {}
             hole = _NAMED_HOLE.match(first.get("highlight") or "")
@@ -1936,6 +1968,8 @@ def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: l
         start, end = tokens[a].start, tokens[b - 1].end
         held = {id(_term_holding(n, where, joins)): _term_holding(n, where, joins) for s, n in placed if start <= s <= end}
         text = " ".join(_respelled(read.text[start : end + 1], sql).split())
+        if "," in text:
+            text = _IN_LIST.sub(_listed_once, text)
         if len(held) > 1:
             agreed = False
         if len(held) != 1:

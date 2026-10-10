@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from bamboo.codemap import calls as calls_mod
 
 PACKAGE = "pkg"
@@ -1016,6 +1018,7 @@ def test_a_call_requiring_several_conditions_reads_each_as_a_tree_of_its_own(tmp
     ]
 
 
+@pytest.mark.reassembly("representation")
 def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):
     from bamboo.codemap.panda import sql
 
@@ -1081,6 +1084,7 @@ def test_a_callee_building_two_statements_hands_over_two_alternatives_not_one(tm
     ]
 
 
+@pytest.mark.reassembly("representation")
 def test_a_returned_call_and_a_returned_name_are_followed_to_their_text(tmp_path):
     roots = _tree(
         tmp_path,
@@ -1119,6 +1123,7 @@ def test_a_returned_call_and_a_returned_name_are_followed_to_their_text(tmp_path
     ]
 
 
+@pytest.mark.reassembly("representation")
 def test_a_statement_wrapped_around_itself_keeps_what_it_held(tmp_path):
     roots = _tree(
         tmp_path,
@@ -1139,6 +1144,7 @@ def test_a_statement_wrapped_around_itself_keeps_what_it_held(tmp_path):
     ]
 
 
+@pytest.mark.reassembly("representation")
 def test_a_fragment_held_under_a_local_name_is_appended_as_its_text(tmp_path):
     roots = _tree(
         tmp_path,
@@ -1819,6 +1825,52 @@ def test_an_order_a_loop_builds_says_its_column_and_an_order_a_format_hands_says
     assert chosen == {"fileID": ["not (mode == 'lumi')"], "lumiBlockNr,lfn": ["mode == 'lumi'"]}
 
 
+def test_a_term_a_callee_appends_is_placed_in_the_callee_with_the_way_its_test_is_handed_in(tmp_path):
+    """``getJobs``: ``construct_where_clause`` appends the term under ``if mem``, and returns the clause through ``build_where_clause``.
+
+    The test is the callee's, and ``mem`` is handed in from ``getJobs``'s own
+    parameter.  Read by name, the way stopped at ``sqlP += sql_where_clause``
+    and every test was said to be in ``getJobs``, with nothing handed in.
+    """
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def construct_where_clause(self, mem, disk_space):\n"
+        "        clause = 'WHERE jobStatus=:oldJobStatus '\n"
+        "        if mem not in [0, '0']:\n"
+        "            clause += 'AND (minRamCount<=:minRamCount OR minRamCount=0) '\n"
+        "        return clause, {':oldJobStatus': 'activated', ':minRamCount': mem}\n"
+        "    def getJobs(self, mem, diskSpace):\n"
+        "        def build_where_clause():\n"
+        "            tmp_clause, tmp_map = self.construct_where_clause(mem=mem, disk_space=diskSpace)\n"
+        "            return tmp_clause, tmp_map\n"
+        "        sql_where_clause, var_map = build_where_clause()\n"
+        "        sqlP = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 '\n"
+        "        sqlP += sql_where_clause\n"
+        "        self.cur.execute(sqlP, var_map)\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    (added,) = [one for one in statement.added_under if one.field == "conditions" and "minRamCount" in one.term]
+    (place,) = added.places
+    assert place.fragment == f"{PACKAGE}/db.py:5"
+    (test,) = place.tests
+    assert (test.test, test.at, test.function) == ("mem not in [0, '0']", f"{PACKAGE}/db.py:4", "construct_where_clause")
+    (read,) = test.reads
+    assert (read.parameter, read.at_site) == ("construct_where_clause.mem", "getJobs.mem")
+
+
 # ---------------------------------------------------------------------------
 # A class named through a module-level name, and an object declared as several
 # ---------------------------------------------------------------------------
@@ -2307,6 +2359,10 @@ def test_a_name_shared_with_every_container_names_five_receivers_and_counts_the_
 # -- X5: a statement read at a call ---------------------------------------------
 
 
+@pytest.mark.sqleval_gap(
+    "sqlwrite cuts every fragment the loop appends as on some paths only (a loop that may not run); "
+    "the reassembly tied the loop it unrolled to `sqlP = \"\"` before it, so its selects stay required"
+)
 def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_not_required(tmp_path):
     """``getPandaIDsWithTask_JEDI``: ``modificationTime>(CURRENT_DATE-30)`` is appended under a test of the table name.
 
