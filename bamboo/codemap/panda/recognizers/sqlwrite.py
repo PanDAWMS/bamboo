@@ -269,7 +269,7 @@ def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingSto
     and a gap in a ``SELECT``'s ``WHERE`` are the same reason and different
     answers to "which rows did this function pick up".
     """
-    read_tables = sorted({table for verb, table in _table_verbs(run.sql) if verb == "read"})
+    read_tables = sorted({table for verb, table in _table_verbs(run.reading) if verb == "read"})
     return [
         ReadingStop(
             reason=stop.reason,
@@ -463,7 +463,7 @@ def extract(
                     continue
                 seen.add(key)
                 stopped.extend(_run_stops(run, module.rel_path, owner))
-                for statement in sqltext.writes(run.sql):
+                for statement in sqltext.writes(run.reading):
                     spec_class = attributor.class_for_table(statement.table)
                     # Settled once per statement, not once per column: every
                     # column of one ``SET`` is bounded by the same ``WHERE``,
@@ -688,7 +688,7 @@ def _deciding_fragment(
     """
     if not run.variable:
         return run.call
-    for statement, spans in sql.variant_spans(func, run.variable, at=run.call, text=run.head or None):
+    for statement, spans in sql.variant_spans(func, run.variable, at=run.call, text=run.head or None, read=True):
         at = sqltext.supplied_at(statement, kind, column, supplied)
         if at is not None:
             return sql.fragment_holding(spans, at)
@@ -1021,7 +1021,7 @@ def _every_written(
                         guards=frozenset(statement.preconditions.values()),
                         passed=frozenset(tests),
                     )
-                    for statement in sqltext.writes(one.text)
+                    for statement in sqltext.writes(sql.reading_text(one.text, one.holes))
                 )
         held[id(call)] = found
     return held[id(call)]
@@ -1047,7 +1047,7 @@ def _guard_conditions(
     found: dict[str, list[str]] = {}
     for column, spans in statement.precondition_spans.items():
         supplied = statement.columns.get(column)
-        end = sqltext.supplied_at(run.sql, statement.kind, column, supplied) if supplied is not None else None
+        end = sqltext.supplied_at(run.reading, statement.kind, column, supplied) if supplied is not None else None
         if end is None:
             continue
         tests = list(path_condition(run.call))
@@ -1540,7 +1540,7 @@ def _run_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
     ``conditions``, ``added_under`` -- at every call site handing constants
     as well, and reading them again was most of the read side's time.
     """
-    key = (sql.reading_context(), run.variable, run.head, run.sql, id(run.call), run.pieces)
+    key = (sql.reading_context(), run.variable, run.head, run.sql, id(run.call), run.pieces, run.holes)
     held = getattr(func, "_run_builds_held", None)
     if held is None or held[0] != key[0][0]:
         held = (key[0][0], {})
@@ -1555,7 +1555,7 @@ def _read_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Executio
     if run.pieces:
         # Run (``sql.evaluated``): the statement is one the paths build as it stands -- every stretch of it is
         # appended on every path that builds it, so nothing is cut -- and each stretch says the way it came.
-        return [_Build(run.sql, run.sql, _evaluated_leaves(func, run))]
+        return [_Build(run.sql, run.reading, _evaluated_leaves(func, run))]
     if not run.variable:
         return [_Build(run.sql, run.sql, [])]
     variants = sql.variant_spans(func, run.variable, at=run.call)
@@ -1901,7 +1901,7 @@ def _outright_terms(
     in every one, a subject restricted is restricted in every one, to any of
     their values.
     """
-    whole = sqltext.outright(run.sql)
+    whole = sqltext.outright(run.reading)
     # Before the builds are asked for: they are the expensive half, and a
     # text nothing decides has no build that does.
     if not any(whole):
@@ -1910,7 +1910,7 @@ def _outright_terms(
         # Run: what every run asks is what every statement of the call asks, not
         # every statement of the covering set (:func:`sql.every_statement`).
         every = sql.every_statement(func, run.call.lineno)
-        floors = every if every is not None else [run.sql]
+        floors = every if every is not None else [run.reading]
     else:
         floors = _every_run_texts(func, run)
     if floors is None:
@@ -1995,7 +1995,7 @@ def _folded(
         every = sql.every_statement(func, line)
         if every is None:
             open_ended = True
-            texts_of = [(run, [run.sql]) for run in variants]
+            texts_of = [(run, [run.reading]) for run in variants]
         else:
             texts_of = [(variants[0], every)]
     else:
@@ -2004,7 +2004,7 @@ def _folded(
         window = run.window
         if window is None and run.varmap:
             window = sql.binding_window(func, run.varmap, line)
-        whole = None if run.pieces else set(sqltext.conditions(run.sql))
+        whole = None if run.pieces else set(sqltext.conditions(run.reading))
         for text in texts:
             # Only what the run itself requires: a cut inside a term leaves
             # one the statement never has -- ``computingSite IN ( )`` once the
@@ -2942,7 +2942,7 @@ def read_side(
             kept = kept._replace(unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved))))
             statements[site] = kept
         kept.tables.update(read_tables)
-        orders, limits = sqltext.ordering(run.sql)
+        orders, limits = sqltext.ordering(run.reading)
         kept.order_by.update(orders)
         for bound_to, strict in limits:
             values_of = bound(func, run, bound_to, file) if bound_to.startswith(":") else [bound_to]
@@ -3054,11 +3054,11 @@ def read_side(
 
     def reading_of(func, run, file: str) -> _CallReading:
         """What one run reads and asks by -- what a call site can narrow."""
-        reading = _CallReading({table for verb, table in _table_verbs(run.sql) if verb == "read"})
+        reading = _CallReading({table for verb, table in _table_verbs(run.reading) if verb == "read"})
         # The same terms the statement's own fields are filled from, read the
         # same way, or a call site would differ from the statement by the
         # reading alone.
-        for term in sqltext.terms(run.sql).terms:
+        for term in sqltext.terms(run.reading).terms:
             if term.verb != "read" or term.scope not in (sqltext.ROW, sqltext.CONSULT):
                 continue
             subject = _term_subject(attributor, term)
@@ -3289,11 +3289,15 @@ def read_side(
         def file_of(one: ast.AST) -> str:
             return (calls.types.file_of(one) if calls is not None else None) or file
 
-        def said(run: sql.Execution, order: str, index: int, item, templates: list[str], loops: list, where) -> OrderHole:
-            # The columns the template adds to the order, written in once.
-            filled = item.expression.replace("{}", templates[-1], 1)
+        def said(
+            run: sql.Execution, order: str, index: int, item, templates: list[str], loops: list, where, reading: Optional[str] = None
+        ) -> OrderHole:
+            # The columns the template adds to the order: read with the loop's passes in the hole
+            # (:func:`sql.reading_text`), or reassembled, with the last template written in once.
+            if reading is None:
+                reading = run.sql.replace(item.expression, item.expression.replace("{}", templates[-1], 1), 1)
             before = set(sqltext.order_owners(run.sql))
-            owners = sqltext.order_owners(run.sql.replace(item.expression, filled, 1))
+            owners = sqltext.order_owners(reading)
             subjects = sorted({_column_subject(attributor, table, column) for table, column in owners if (table, column) not in before})
             return OrderHole(
                 order=order,
@@ -3320,12 +3324,15 @@ def read_side(
                         continue
                     at = squeezed.count("{}", 0, start)
                     for index, item in enumerate(sqltext.order_items(order)):
-                        hole = run.holes[at][1] if item.blanked and at < len(run.holes) else None
+                        held = run.holes[at] if item.blanked and at < len(run.holes) else None
                         at += item.expression.count("{}")
+                        hole = held[1] if held is not None else None
                         if hole is None or not hole.repeats:
                             continue
                         where = enclosing_function(hole.stmt) or func
-                        hole_read = said(run, order, index, item, list(hole.repeats), [hole.stmt], where)
+                        hole_read = said(
+                            run, order, index, item, list(hole.repeats), [hole.stmt], where, sql.reading_text(run.sql, (held,))
+                        )
                         if hole_read not in found:
                             found.append(hole_read)
                 statements[(owner, run.call.lineno)] = kept._replace(order_holes=tuple(found))
@@ -3468,19 +3475,19 @@ def read_side(
         conjuncts: dict[int, list[tuple[str, str, tuple[str, ...]]]] = {}
         for run in variants:
             try:
-                whole = sqltext.terms(run.sql).terms
+                whole = sqltext.terms(run.reading).terms
             except Exception:  # noqa: BLE001 -- a text sqlglot will not scope is read as nothing
                 whole = ()
             row_terms[id(run)] = [term for term in whole if term.verb == "read" and term.scope == sqltext.ROW]
-            orders[id(run)] = sqltext.ordering(run.sql)[0]
-            found = sqltext.conditions(run.sql)
+            orders[id(run)] = sqltext.ordering(run.reading)[0]
+            found = sqltext.conditions(run.reading)
             seeds = _condition_seeds(func, run, line, found)
             own_conditions[id(run)] = [(plain(one), tuple(dict.fromkeys(one.binds))) for one in found]
-            for one, twin in zip(found, sqltext.condition_twins(run.sql)):
+            for one, twin in zip(found, sqltext.condition_twins(run.reading)):
                 spelled.setdefault(("conditions", plain(one)), _render_condition(one, seeds))
                 key = ("conditions", plain(one))
                 trees[key] = _merged_tree(trees.get(key), tree_of(func, run, file, twin))
-            joined = sqltext.conjoined(run.sql)
+            joined = sqltext.conjoined(run.reading)
             seeds = _condition_seeds(func, run, line, joined)
             conjuncts[id(run)] = [
                 (_render_condition(one, seeds), plain(one), tuple(dict.fromkeys(one.binds))) for one in joined
@@ -3552,7 +3559,7 @@ def read_side(
         read = [
             (run, build, holds(run, build))
             for run in variants
-            for build in _run_builds(func, run) or [_Build(run.sql, run.sql, [])]
+            for build in _run_builds(func, run) or [_Build(run.sql, run.reading, [])]
         ]
         readable = [held for _run, _build, held in read if held is not None]
         if not readable:
@@ -3827,7 +3834,7 @@ def read_side(
                     continue
                 seen.add((run.sql, run.window))
                 together: set[str] = set()
-                for verb, table in _rows_touched(run.sql):
+                for verb, table in _rows_touched(run.reading):
                     if _UNREAD_TABLE.fullmatch(table):
                         unreadable[owner] = unreadable.get(owner, 0) + 1
                         continue
@@ -3856,7 +3863,7 @@ def read_side(
                     # ``querySQLS(sql, {":name": name})``: the binds are
                     # filled in the call itself.
                     window = (run.call.lineno, run.call.end_lineno or run.call.lineno)
-                reading = sqltext.terms(run.sql)
+                reading = sqltext.terms(run.reading)
                 at = ReadStatement(
                     owner=owner,
                     package=module.package,
@@ -3879,7 +3886,7 @@ def read_side(
                         )
                     ),
                 )
-                read_tables = {table for verb, table in _table_verbs(run.sql) if verb == "read"}
+                read_tables = {table for verb, table in _table_verbs(run.reading) if verb == "read"}
                 # Each term once, on the table it belongs to and under the verb
                 # whose rows it picks.  Read off the text, one term was filed
                 # against every table the statement named and under every verb:
@@ -4602,12 +4609,12 @@ def selection_gates(
                 # it, so one table does not reach a reader under two names.
                 gates = {
                     never_written[t.lower()]
-                    for t in sqltext.joins(run.sql)
+                    for t in sqltext.joins(run.reading)
                     if t.lower() in never_written
                 }
                 if not gates:
                     continue
-                for term in sqltext.terms(run.sql).terms:
+                for term in sqltext.terms(run.reading).terms:
                     if term.scope != sqltext.ROW or not term.binds:
                         continue
                     # A table does not bound itself.  The statement's gates are

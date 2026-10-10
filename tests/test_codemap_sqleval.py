@@ -14,7 +14,7 @@ import textwrap
 
 import pytest
 
-from bamboo.codemap.panda import pathcond, sql, sqleval
+from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext
 
 
 @pytest.fixture(autouse=True)
@@ -688,6 +688,61 @@ def f(self, leaves):
         ("WHEN gshare=:leave{} THEN 0", "WHEN gshare=:leave{} THEN {}")
     ]
     assert 14 in reading.reached
+
+
+def test_a_part_a_loop_repeats_is_read_as_one_pass_of_each_text_it_appends():
+    """``getDatasetAttributesWithMap_JEDI`` appends ``AND {k}=:{k}`` per key after ``jediTaskID=:jediTaskID``.  The
+    statement holds a ``{}`` there, glued to the term before it, and read so, the stop named the whole term as
+    unread.  Read with a pass in its place (:func:`sql.reading_text`), the term before it is whole, and the one the
+    pass adds names its column from a key -- the pass's own holes stay holes."""
+    src = """
+def f(self, criteria):
+    sql = "SELECT a FROM T WHERE jediTaskID=:jediTaskID "
+    for k, v in criteria.items():
+        sql += f"AND {k}=:{k} "
+    self.cur.execute(sql, varMap)
+"""
+    got, reading = _texts(src)
+    assert got.get(6) == ["SELECT a FROM T WHERE jediTaskID=:jediTaskID {} "]
+    run = reading.cover(6)[0][0]
+    marked = sql.reading_text(run.text, run.holes)
+    assert marked == (
+        f"SELECT a FROM T WHERE jediTaskID=:jediTaskID {sqltext.REPEAT_OPEN}AND {{}}=:{{}}{sqltext.REPEAT_CLOSE} "
+    )
+    assert sqltext.plain(marked) == run.text
+    assert [stop.source for stop in sql._hole_stops(run.text, 6)] == [
+        "jediTaskID=:jediTaskID {}"
+    ]
+    assert [
+        (stop.source, stop.reason)
+        for stop in sql._hole_stops(sqltext.unmarked(marked), 6)
+    ] == [("{}=:{}", sql.COLUMN_IS_A_HOLE)]
+
+
+def test_a_list_a_loop_appends_to_is_read_as_its_items_joined_as_the_text_joins_them():
+    """``getTaskIDsWithCriteria_JEDI`` appends ``{k} IS NULL`` or ``{k}=:cr_{k}`` per key to a list and joins it with
+    `` AND ``.  The items hold no separator, so one of each is joined as the text joins them: the hole says what
+    joins its passes (:attr:`sqleval.HoleAt.joiner`), where the join reads the list."""
+    src = """
+def f(self, criteria):
+    conditions = []
+    for k, v in criteria.items():
+        if v is None:
+            conditions.append(f"{k} IS NULL")
+        else:
+            conditions.append(f"{k}=:cr_{k}")
+    sql = "SELECT a FROM T WHERE " + " AND ".join(conditions) + " AND b=:b"
+    self.cur.execute(sql, varMap)
+"""
+    got, reading = _texts(src)
+    assert got.get(10) == ["SELECT a FROM T WHERE {} AND b=:b"]
+    run = reading.cover(10)[0][0]
+    ((_at, hole),) = run.holes
+    assert (hole.listed, hole.joiner) == (True, " AND ")
+    marked = sql.reading_text(run.text, run.holes)
+    passes = marked.split(sqltext.REPEAT_OPEN)[1].split(sqltext.REPEAT_CLOSE)[0]
+    assert sorted(passes.split(" AND ")) == ["{} IS NULL", "{}=:cr_{}"]
+    assert sqltext.plain(marked) == run.text
 
 
 def test_a_list_of_objects_a_loop_appends_to_is_not_one_part():

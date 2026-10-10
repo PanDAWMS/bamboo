@@ -511,7 +511,7 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
     """
     read = _tables_tree(sql)
     if read is None:
-        return _reads_in_text(sql)
+        return _reads_in_text(plain(sql))
     tree, defined = read
     found: list[tuple[str, list[str]]] = []
     for select in _selects(tree):
@@ -552,7 +552,7 @@ def joins(sql: str) -> list[str]:
     """
     read = _tables_tree(sql)
     if read is None:
-        return _joins_in_text(sql)
+        return _joins_in_text(plain(sql))
     tree, defined = read
     found: list[str] = []
     for select in _selects(tree):
@@ -575,7 +575,7 @@ def joined_columns(sql: str, table: str) -> list[str]:
     """
     read = _tables_tree(sql)
     if read is None:
-        return _joined_columns_in_text(sql, table)
+        return _joined_columns_in_text(plain(sql), table)
     tree, defined = read
     aliases = {
         source.alias
@@ -617,13 +617,13 @@ def creates(sql: str) -> list[str]:
     reading the same way.
     """
     found = _targets(sql, exp.Insert)
-    return _creates_in_text(sql) if found is None else found
+    return _creates_in_text(plain(sql)) if found is None else found
 
 
 def updates(sql: str) -> list[str]:
     """Return the tables *sql* changes rows in.  ``SELECT ... FOR UPDATE`` changes none."""
     found = _targets(sql, exp.Update)
-    return _updates_in_text(sql) if found is None else found
+    return _updates_in_text(plain(sql)) if found is None else found
 
 
 def deletes(sql: str) -> list[str]:
@@ -634,28 +634,38 @@ def deletes(sql: str) -> list[str]:
     silently replaces one that was never picked up.
     """
     found = _targets(sql, exp.Delete)
-    return _deletes_in_text(sql) if found is None else found
+    return _deletes_in_text(plain(sql)) if found is None else found
 
 
 def _statement(sql: str):
     """*sql*'s ``UPDATE`` or ``INSERT`` node and its tokens, or ``None`` for any other statement.
 
-    The tokens are of *sql* itself, holes and all, so an offset taken from
-    them is an offset into what the caller holds -- the assembled variant a
-    fragment's span is measured in -- and not into the text the tree was
-    parsed from, where every hole is a name of another length.
+    The tokens are of *sql* itself, holes and all -- its repeated parts'
+    passes in place (:func:`_source`), which :func:`_at_plain` maps back --
+    so an offset taken from them is an offset into what the caller holds --
+    the assembled variant a fragment's span is measured in -- and not into
+    the text the tree was parsed from, where every hole is a name of another
+    length.
     """
     tree = parsed(sql).tree
     while isinstance(tree, exp.Subquery):
         tree = tree.this
     if not isinstance(tree, (exp.Update, exp.Insert)):
         return None
-    return tree, _tokens(sql)
+    return tree, _tokens(_source(sql)[0])
 
 
-def _spelled(sql: str, tokens: list, lo: int, hi: int) -> str:
-    """``tokens[lo:hi]`` as *sql* spells them, an ``IN`` list's repeated items once (:func:`_one_of_each`)."""
-    text = sql[tokens[lo].start : tokens[hi - 1].end + 1].strip() if hi > lo else ""
+def _spelled(sql: str, tokens: list, lo: int, hi: int, written: bool = False) -> str:
+    """``tokens[lo:hi]`` as *sql* spells them, an ``IN`` list's repeated items once (:func:`_one_of_each`) and a
+    repeated part ``{}`` (:data:`REPEAT_OPEN`) -- or with *written* as its passes wrote it: the value a column
+    takes on each pass that writes the column.  The tokens are of :func:`_source`'s text."""
+    text, regions = _source(sql)
+    if hi <= lo:
+        text = ""
+    elif written:
+        text = text[tokens[lo].start : tokens[hi - 1].end + 1].strip()
+    else:
+        text = _spell(text, regions, tokens[lo].start, tokens[hi - 1].end + 1).strip()
     return _IN_LIST.sub(_listed_once, text) if "," in text else text
 
 
@@ -731,7 +741,7 @@ def _update_pairs(node: exp.Update, sql: str, tokens: list) -> Optional[list[tup
         equals = _at_depth(tokens, lo, {_T.EQ}, hi)
         if _NAMED_HOLE.search(name) or equals is None:
             continue
-        found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi), False)))
+        found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi, written=True), False)))
     return found
 
 
@@ -773,7 +783,7 @@ def _insert_pairs(node: exp.Insert, sql: str, tokens: list) -> Optional[list[tup
     for name, (lo, hi), value in zip(names, spans, values, strict=False):
         if not _IDENTIFIER.fullmatch(name) or _NAMED_HOLE.search(name):
             continue
-        found.append((name, tokens[hi - 1].end + 1, _supplied(value, _spelled(sql, tokens, lo, hi), True)))
+        found.append((name, tokens[hi - 1].end + 1, _supplied(value, _spelled(sql, tokens, lo, hi, written=True), True)))
     return found
 
 
@@ -830,7 +840,11 @@ def _guards(
         return None
     lowered = {column.lower(): column for column in written}
     testing: dict[str, list[str]] = {}
+    repeated = _source(sql)[1]
     for (a, b), term in zip(spans, terms, strict=True):
+        # A term only a loop's passes append is on no row the loop gave no pass: required of none.
+        if any(lo <= tokens[a].start and tokens[b - 1].end < hi for lo, hi in repeated):
+            continue
         spelled = re.sub(r"\s+", " ", _spelled(sql, tokens, a, b)).strip()
         own = [column for column in term.find_all(exp.Column) if column.find_ancestor(exp.Select) is None]
         hits = list(dict.fromkeys(lowered[column.name.lower()] for column in own if column.name.lower() in lowered))
@@ -864,19 +878,19 @@ def writes(sql: str) -> list[SqlWrite]:
     """
     read = _statement(sql)
     if read is None:
-        return _writes_in_text(sql) if parsed(sql).tree is None else []
+        return _writes_in_text(plain(sql)) if parsed(sql).tree is None else []
     node, tokens = read
     table = _named_table(node.this.this if isinstance(node.this, exp.Schema) else node.this, set())
     if isinstance(node, exp.Update):
         pairs = _update_pairs(node, sql, tokens)
         if pairs is None:
-            return _writes_in_text(sql)
+            return _writes_in_text(plain(sql))
         columns = {name: value for name, _end, value in pairs}
         if not columns or table is None:
             return []
         guarded = _guards(node, sql, tokens, set(columns))
         if guarded is None:
-            return _writes_in_text(sql)
+            return _writes_in_text(plain(sql))
         preconditions, keys, spans = guarded
         return [
             SqlWrite(
@@ -885,12 +899,15 @@ def writes(sql: str) -> list[SqlWrite]:
                 columns=columns,
                 preconditions=preconditions,
                 keys=keys,
-                precondition_spans=spans,
+                precondition_spans={
+                    owner: [(_at_plain(sql, a), _at_plain(sql, b, end=True)) for a, b in found]
+                    for owner, found in spans.items()
+                },
             )
         ]
     pairs = _insert_pairs(node, sql, tokens)
     if pairs is None:
-        return _writes_in_text(sql)
+        return _writes_in_text(plain(sql))
     columns = {name: value for name, _end, value in pairs}
     return [SqlWrite(kind="insert", table=table, columns=columns)] if columns and table is not None else []
 
@@ -913,17 +930,17 @@ def supplied_at(
     """
     read = _statement(statement)
     if read is None:
-        return _supplied_at_in_text(statement, kind, column, supplied) if parsed(statement).tree is None else None
+        return _supplied_at_in_text(plain(statement), kind, column, supplied) if parsed(statement).tree is None else None
     node, tokens = read
     if kind == "insert":
         pairs = _insert_pairs(node, statement, tokens) if isinstance(node, exp.Insert) else []
     else:
         pairs = _update_pairs(node, statement, tokens) if isinstance(node, exp.Update) else []
     if pairs is None:
-        return _supplied_at_in_text(statement, kind, column, supplied)
+        return _supplied_at_in_text(plain(statement), kind, column, supplied)
     for name, end, value in pairs:
         if name == column and value == supplied:
-            return end
+            return _at_plain(statement, end, end=True)
     return None
 
 
@@ -943,7 +960,7 @@ def tables_named(sql: str) -> list[str]:
     """
     read = _tables_tree(sql)
     if read is None:
-        return list(dict.fromkeys(_table_of(name) for name in _TABLE_REFERENCE.findall(sql)))
+        return list(dict.fromkeys(_table_of(name) for name in _TABLE_REFERENCE.findall(plain(sql))))
     tree, defined = read
     # By where the text names them: a tree puts a ``WITH`` clause after the
     # query that uses it.
@@ -975,7 +992,8 @@ def where_clauses(sql: str) -> list[str]:
     ``ORDER BY`` or the like at its own depth, or at the parenthesis closing
     the subquery it is in; a subquery inside it is part of it, and is read
     again as a clause of its own.  What the clause requires of a row is read
-    off the tree, by :func:`conditions`.
+    off the tree, by :func:`conditions`.  A repeated part (:data:`REPEAT_OPEN`)
+    is read as its passes and spelled ``{}``.
     """
     found: list[str] = []
     for opened in _WHERE.finditer(sql):
@@ -993,7 +1011,7 @@ def where_clauses(sql: str) -> list[str]:
             elif depth == 0 and _CLAUSE_END.match(rest, index):
                 end = index
                 break
-        found.append(rest[:end])
+        found.append(plain(rest[:end]))
     return found
 
 
@@ -1039,6 +1057,95 @@ def own_clause_terms(term: str) -> list[str]:
 _HOLE = re.compile(r"\{\d*\}")
 _HOLE_NAME = "__h"
 _NAMED_HOLE = re.compile(rf"{_HOLE_NAME}\d+")
+_HOLE_NUMBER = re.compile(rf"{_HOLE_NAME}(\d+)")
+
+#: Where a loop of unknown length repeats a part, the statement holds a ``{}``.
+#: A reader handed ``sql.Execution.reading`` gets one pass of each text the
+#: loop appends there instead, between these two characters, and reads the
+#: statement with them: ``jediTaskID=:jediTaskID {}`` glued a whole term to
+#: the hole, ``jediTaskID=:jediTaskID AND {}=:{}`` is two.  What it says, it
+#: says of the statement: a stretch made only of what is between the marks is
+#: spelled ``{}``, and an offset is one into the statement's own text.
+REPEAT_OPEN, REPEAT_CLOSE = "\ue000", "\ue001"
+_MARKS = REPEAT_OPEN + REPEAT_CLOSE
+_REPEATED = re.compile(f"{REPEAT_OPEN}[^{_MARKS}]*{REPEAT_CLOSE}")
+
+
+def plain(sql: str) -> str:
+    """*sql* as the statement holds it: each repeated part (:data:`REPEAT_OPEN`) a ``{}``.
+
+    A part a clause's end cut in two (:func:`where_clauses`) is a ``{}`` for
+    what of it the clause holds.
+    """
+    if REPEAT_OPEN not in sql and REPEAT_CLOSE not in sql:
+        return sql
+    text = _REPEATED.sub("{}", sql)
+    closing = text.find(REPEAT_CLOSE)
+    if closing >= 0:
+        text = "{}" + text[closing + 1 :]
+    opening = text.find(REPEAT_OPEN)
+    if opening >= 0:
+        text = text[:opening] + "{}"
+    return text
+
+
+def unmarked(sql: str) -> str:
+    """*sql* with one pass of each text a loop repeats in place and the marks gone: what a stop names."""
+    return sql.replace(REPEAT_OPEN, "").replace(REPEAT_CLOSE, "")
+
+
+@functools.lru_cache(maxsize=None)
+def _source(sql: str) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """*sql* without its marks, and where each repeated part is in what is left."""
+    if REPEAT_OPEN not in sql:
+        return sql, ()
+    parts: list[str] = []
+    regions: list[tuple[int, int]] = []
+    length = at = 0
+    for match in _REPEATED.finditer(sql):
+        parts.append(sql[at : match.start()])
+        length += match.start() - at
+        body = match.group(0)[1:-1]
+        regions.append((length, length + len(body)))
+        parts.append(body)
+        length += len(body)
+        at = match.end()
+    parts.append(sql[at:])
+    return unmarked("".join(parts)), tuple(regions)
+
+
+def _spell(text: str, regions: tuple, start: int, end: int) -> str:
+    """``text[start:end]`` with what of it lies in a repeated part spelled ``{}``."""
+    out: list[str] = []
+    at = start
+    for a, b in regions:
+        # A part every pass of which was its end is empty here, and a ``{}`` in the statement.
+        inside = a < end and b > start if a < b else start < a < end
+        if not inside:
+            continue
+        out.append(text[at : max(a, start)])
+        out.append("{}")
+        at = max(at, min(b, end))
+    out.append(text[at:end])
+    return "".join(out)
+
+
+def _at_plain(sql: str, offset: int, end: bool = False) -> int:
+    """An offset into :func:`_source`'s text of *sql* as one into :func:`plain`'s.  One inside a repeated part is
+    the ``{}``'s start, or with *end* its end."""
+    shift = 0
+    for a, b in _source(sql)[1]:
+        if offset <= a:
+            break
+        if offset < b or (end and offset == b):
+            return a - shift + (2 if end else 0)
+        shift += (b - a) - 2
+    return offset - shift
+
+
+def _after_hole(sql: str, end: int) -> str:
+    """The character after a hole ending at *end*, past the marks: a word glued to it is spaced off."""
+    return sql[end : end + 4].lstrip(_MARKS)[:1]
 
 #: sqlglot's word for a part the grammar requires and the text lacks.
 _REQUIRED = "Required keyword"
@@ -1078,6 +1185,10 @@ class Parsed(NamedTuple):
     #: The text the tree was parsed from: holes named, and any read as empty
     #: gone.  The tree's positions are offsets into this.
     text: str = ""
+    #: Where each repeated part (:data:`REPEAT_OPEN`) is in :attr:`text`, and
+    #: the numbers of the named holes inside one.
+    regions: tuple[tuple[int, int], ...] = ()
+    repeated: frozenset[int] = frozenset()
 
 
 class Term(NamedTuple):
@@ -1197,7 +1308,7 @@ def _named_holes(sql: str) -> str:
     count = itertools.count(1)
 
     def name(match: re.Match) -> str:
-        after = sql[match.end() : match.end() + 1]
+        after = _after_hole(sql, match.end())
         # ``SET {}WHERE`` -- the fragment after the hole began without a space.
         return f"{_HOLE_NAME}{next(count)}" + (" " if after.isalpha() else "")
 
@@ -1265,21 +1376,28 @@ def parsed(sql: str) -> Parsed:
 
     Nothing else is forgiven.  A statement that does not parse is not read
     some other way; it is reported, see :data:`NOT_PARSED`.
+
+    A repeated part between marks (:data:`REPEAT_OPEN`) is parsed as the
+    passes it holds; :attr:`Parsed.regions` says where they are.
     """
-    text = _named_holes(sql)
+    marked = _named_holes(sql)
 
     def failed(failure: str, near: str) -> Parsed:
-        return Parsed(None, failure, " ".join(_NAMED_HOLE.sub("{}", near).split()))
+        return Parsed(None, failure, " ".join(_NAMED_HOLE.sub("{}", unmarked(near)).split()))
 
-    for _attempt in range(len(_NAMED_HOLE.findall(text)) + 1):
+    for _attempt in range(len(_NAMED_HOLE.findall(marked)) + 1):
+        text, regions = _source(marked)
+        repeated = frozenset(
+            int(number) for part in _REPEATED.finditer(marked) for number in _HOLE_NUMBER.findall(part.group(0))
+        )
         try:
-            return Parsed(_one_of_each(sqlglot.parse_one(text, read="oracle")), "", "", text)
+            return Parsed(_one_of_each(sqlglot.parse_one(text, read="oracle")), "", "", text, regions, repeated)
         except ParseError as error:
             said = [one.get("description") or "" for one in error.errors]
             if said and all(_REQUIRED in one for one in said):
                 tree = sqlglot.parse_one(text, read="oracle", error_level=ErrorLevel.IGNORE)
                 if tree is not None and _holes_stand_for_what_is_missing(tree):
-                    return Parsed(_one_of_each(tree), "", "", text)
+                    return Parsed(_one_of_each(tree), "", "", text, regions, repeated)
                 return failed(said[0], " ".join(text.split()[-8:]))
             first = error.errors[0] if error.errors else {}
             hole = _NAMED_HOLE.match(first.get("highlight") or "")
@@ -1287,10 +1405,10 @@ def parsed(sql: str) -> Parsed:
                 before = " ".join((first.get("start_context") or "").split()[-4:])
                 near = f"{before} {first.get('highlight') or ''}".strip()
                 return failed(said[0] if said else str(error), near or " ".join(text.split()[:8]))
-            text = re.sub(rf"\b{hole.group(0)}\b", "", text, count=1)
+            marked = re.sub(rf"\b{hole.group(0)}\b", "", marked, count=1)
         except SqlglotError as error:
             return failed(str(error).splitlines()[0], " ".join(text.split()[:8]))
-    return failed("every hole was read as empty and it still does not parse", " ".join(text.split()[-8:]))
+    return failed("every hole was read as empty and it still does not parse", " ".join(unmarked(marked).split()[-8:]))
 
 
 def _table_name(table: exp.Table) -> str:
@@ -1528,7 +1646,7 @@ def terms(sql: str) -> Reading:
     scopes, root = _scopes(tree)
     for scope, verb, kind in scopes:
         for column in _own_columns(scope):
-            term = _term(column, scope, root, verb, kind)
+            term = _term(column, scope, root, verb, kind, read.regions)
             if isinstance(term, Term):
                 found.append(term)
             elif term is not None:
@@ -1536,8 +1654,13 @@ def terms(sql: str) -> Reading:
     return Reading(tuple(found), tuple(sorted(unresolved)), True)
 
 
-def _term(column: exp.Column, scope, root, verb: str, kind: str) -> Optional[Term | str]:
-    """The term *column* is compared in, why its table is not known, or ``None``."""
+def _term(column: exp.Column, scope, root, verb: str, kind: str, regions: tuple = ()) -> Optional[Term | str]:
+    """The term *column* is compared in, why its table is not known, or ``None``.
+
+    A column in a repeated part (*regions*, :attr:`Parsed.regions`) is asked by
+    on the passes that append it, and decides nothing: a run whose loop gave
+    no such pass does not ask it.
+    """
     # ``tabT.{0}=:{0}`` -- a column Python names at run time, which the
     # reassembly already reports.  Read as a column called ``__h4``, it
     # came out as a key no table has.
@@ -1575,8 +1698,14 @@ def _term(column: exp.Column, scope, root, verb: str, kind: str) -> Optional[Ter
             value.this for value in values if isinstance(value, exp.Literal) and value.is_string
         ),
         undecided=undecided,
-        decided=_decides(column, holder, scope, root, excluding, undecided, values),
+        decided=_decides(column, holder, scope, root, excluding, undecided, values) and not _in_region(column, regions),
     )
+
+
+def _in_region(column: exp.Column, regions: tuple) -> bool:
+    """Whether *column*'s name is written in one of *regions* of the parsed text."""
+    start = column.this.meta.get("start") if isinstance(column.this, exp.Identifier) else None
+    return start is not None and any(a <= start < b for a, b in regions)
 
 
 def _decides(
@@ -1933,7 +2062,7 @@ def _term_kind(term: exp.Expression, scope, root) -> str:
 
 def _respelled(fragment: str, sql: str) -> str:
     """*fragment* of the parsed text with each named hole spelled as *sql* has it."""
-    holes = [(match.group(0), sql[match.end() : match.end() + 1].isalpha()) for match in _HOLE.finditer(sql)]
+    holes = [(match.group(0), _after_hole(sql, match.end()).isalpha()) for match in _HOLE.finditer(sql)]
 
     def back(match: re.Match) -> str:
         number = int(match.group(1)) - 1
@@ -1943,6 +2072,23 @@ def _respelled(fragment: str, sql: str) -> str:
         return spelled if padded or not match.group(2) else spelled + match.group(2)
 
     return re.sub(rf"{_HOLE_NAME}(\d+)( ?)", back, fragment)
+
+
+def _spelled_read(read: Parsed, sql: str, start: int, end: int) -> str:
+    """``read.text[start:end]`` as *sql*'s statement spells it: each hole as written, a repeated part ``{}``."""
+    return _respelled(_spell(read.text, read.regions, start, end), sql)
+
+
+def _repeated_only(node: exp.Expression, read: Parsed) -> bool:
+    """Whether all of *node* lies in a repeated part, by what of it says where it is: the words and literals the
+    parser placed, and the holes its names carry -- a bind ``:pt___h3`` is placed by neither."""
+    inside = [
+        any(a <= leaf.meta["start"] < b for a, b in read.regions)
+        for leaf in node.find_all(exp.Identifier, exp.Literal)
+        if "start" in leaf.meta
+    ]
+    inside += [int(number) in read.repeated for number in _HOLE_NUMBER.findall(node.sql(dialect="oracle"))]
+    return bool(inside) and all(inside)
 
 
 def _where_span(where: exp.Where, tokens: list) -> Optional[tuple[int, int]]:
@@ -1990,12 +2136,13 @@ def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: l
             return ("term", "", _DROP, None)
         start, end = tokens[a].start, tokens[b - 1].end
         held = {id(_term_holding(n, where, joins)): _term_holding(n, where, joins) for s, n in placed if start <= s <= end}
-        text = " ".join(_respelled(read.text[start : end + 1], sql).split())
+        text = " ".join(_spelled_read(read, sql, start, end + 1).split())
         if "," in text:
             text = _IN_LIST.sub(_listed_once, text)
         if len(held) > 1:
             agreed = False
-        if len(held) != 1:
+        # A term only a loop's passes append is on no row the loop gave no pass: required of none.
+        if len(held) != 1 or any(lo <= start and end < hi for lo, hi in read.regions):
             return ("term", text, _DROP, None)
         node = next(iter(held.values()))
         return ("term", text, _term_kind(node, scope, root), node)
@@ -2135,7 +2282,8 @@ def _clock_side(node: exp.Expression, text: str) -> Optional[Side]:
 
 def _side(node: exp.Expression, scope, root, sql: str) -> Side:
     """What *node*, the side a term compares its column with, is."""
-    text = _respelled(node.sql(dialect="oracle"), sql)
+    read = parsed(sql)
+    text = "{}" if read.regions and _repeated_only(node, read) else _respelled(node.sql(dialect="oracle"), sql)
     while isinstance(node, exp.Paren):
         node = node.this
     if isinstance(node, exp.Placeholder):
@@ -2428,7 +2576,7 @@ def _disjuncts(node: exp.Expression) -> list[exp.Expression]:
     return [node]
 
 
-def _outright(where: exp.Where, scope, root, verb: str, kind: str) -> tuple[Term, ...]:
+def _outright(where: exp.Where, scope, root, verb: str, kind: str, regions: tuple = ()) -> tuple[Term, ...]:
     """The terms of *where* every row it lets through meets -- :attr:`Term.decided`."""
     found: list[Term] = []
     own = {id(column) for column in _own_columns(scope)}
@@ -2436,7 +2584,7 @@ def _outright(where: exp.Where, scope, root, verb: str, kind: str) -> tuple[Term
         for column in conjunct.find_all(exp.Column):
             if id(column) not in own:
                 continue
-            term = _term(column, scope, root, verb, kind)
+            term = _term(column, scope, root, verb, kind, regions)
             if isinstance(term, Term) and term.decided:
                 found.append(term)
     return tuple(found)
@@ -2506,7 +2654,7 @@ def outright(sql: str) -> tuple[tuple[Term, ...], ...]:
         own: tuple[Term, ...] = ()
         if where is not None and entry is not None and entry[0] is not None:
             scope, verb, kind = entry
-            own = _outright(where, scope, root, verb, kind)
+            own = _outright(where, scope, root, verb, kind, read.regions)
         found = [own]
         sources = [node.args.get("from_")] + list(node.args.get("joins") or [])
         for source in (one.this for one in sources if one is not None):
@@ -2562,6 +2710,9 @@ def _rows_from(node: Optional[exp.Expression], ctes: dict[str, exp.Expression], 
 
 def _bound(node: exp.Expression, sql: str) -> Optional[str]:
     """A row limit as written: a bind key, a number, or the hole it is spelled through."""
+    read = parsed(sql)
+    if read.regions and _repeated_only(node, read):
+        return "{}"
     if isinstance(node, exp.Placeholder):
         return _respelled(f":{node.name}", sql)
     if isinstance(node, exp.Literal) and not node.is_string:
@@ -2606,7 +2757,7 @@ def _order_text(query: exp.Expression, order: exp.Order, read: Parsed, sql: str,
     if last <= opened[-1] + 1:
         return ""
     start, end = tokens[opened[-1] + 1].start, tokens[last - 1].end
-    return " ".join(_respelled(read.text[start : end + 1], sql).split())
+    return " ".join(_spelled_read(read, sql, start, end + 1).split())
 
 
 def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:

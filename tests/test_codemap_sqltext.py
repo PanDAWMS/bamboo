@@ -922,6 +922,95 @@ def test_a_precondition_says_where_each_of_its_conjuncts_is():
     } == {"ramCount": ["ramCount IS NOT NULL", "ramCount>:ramCount"], "status": ["status=:old"]}
 
 
+_O, _C = sqltext.REPEAT_OPEN, sqltext.REPEAT_CLOSE
+
+
+def test_a_repeated_part_is_read_as_its_passes_and_said_of_the_statement():
+    """``updateJobStatus`` appends ``,{key}=:{key}`` per parameter, and ``,memory_leak=:memory_leak`` on the pass for
+    the job's metrics.  Read as the statement holds it -- ``jobStatus=:jobStatus{}`` -- the hole glued itself to
+    the bind, and the column the pass writes was not there.  Read with the passes in its place, each column takes
+    the value its pass wrote, and every offset is one into the statement's own text: a value the passes wrote is
+    at the ``{}``."""
+    marked = (
+        f"UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus{_O},{{}}=:{{}},memory_leak=:memory_leak{_C}"
+        ",startTime=CURRENT_DATE WHERE PandaID=:PandaID AND NOT jobStatus=:ngStatus"
+    )
+    text = sqltext.plain(marked)
+    assert text == (
+        "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus{},startTime=CURRENT_DATE "
+        "WHERE PandaID=:PandaID AND NOT jobStatus=:ngStatus"
+    )
+    assert [write.columns["jobStatus"].text for write in sqltext.writes(text)] == [":jobStatus{}"]
+
+    (statement,) = sqltext.writes(marked)
+
+    assert {column: value.text for column, value in statement.columns.items()} == {
+        "jobStatus": ":jobStatus",
+        "memory_leak": ":memory_leak",
+        "startTime": "CURRENT_DATE",
+    }
+    assert {
+        column: [text[start:end] for start, end in spans] for column, spans in statement.precondition_spans.items()
+    } == {"jobStatus": ["NOT jobStatus=:ngStatus"]}
+    leak = sqltext.supplied_at(marked, "update", "memory_leak", statement.columns["memory_leak"])
+    assert text[:leak].endswith(":jobStatus{}")
+    started = sqltext.supplied_at(marked, "update", "startTime", statement.columns["startTime"])
+    assert text[:started].endswith("startTime=CURRENT_DATE")
+
+
+def test_a_term_only_a_loops_passes_append_is_required_of_no_row():
+    """A loop may give no pass that appends a term -- no key, or none its test lets through -- so a term only the
+    passes append holds on no row the loop left alone: not a condition, not a guard, and it decides nothing.  It is
+    still a column the statement asks by, on the passes that append it."""
+    selected = f"SELECT a FROM T WHERE id=:id {_O}AND status='done'{_C}"
+    updated = f"UPDATE T SET status=:new WHERE id=:id {_O}AND status=:old{_C}"
+
+    assert sqltext.conditions(selected) == ()
+    assert [branch.terms for one in sqltext.conjoined(selected) for branch in one.branches] == [("id=:id",)]
+    assert [(term.column, term.literals, term.decided) for term in sqltext.terms(selected).terms] == [
+        ("id", (), True),
+        ("status", ("done",), False),
+    ]
+    assert [[term.column for term in way] for way in sqltext.outright(selected)] == [["id"]]
+    (statement,) = sqltext.writes(updated)
+    assert statement.preconditions == {}
+    # The same statement, every row of it asked for the status, guards the write.
+    (unrepeated,) = sqltext.writes(sqltext.unmarked(updated))
+    assert unrepeated.preconditions == {"status": "status=:old"}
+
+
+def test_a_repeated_part_is_spelled_as_the_statement_holds_it():
+    """``undo_preassign``'s ``IN ({})`` and ``getJobs``' ``(CASE {} ELSE {} END)``: read with a pass in place, the
+    test knows its column and the ranking its share column, and both are spelled as the statement holds them."""
+    listed = f"SELECT t.jediTaskID FROM {{}}.JEDI_Tasks t WHERE t.jediTaskID IN ({_O}:pt_{{}}{_C}) AND t.site IS NOT NULL"
+    ranked = (
+        f"SELECT a FROM jobsActive4 WHERE x=:x ORDER BY (CASE {_O}WHEN gshare=:leave{{}} THEN 0 "
+        f"WHEN gshare=:leave{{}} THEN {{}}{_C} ELSE {{}} END), b"
+    )
+
+    assert [branch.terms for one in sqltext.conditions(listed) for branch in one.branches] == [
+        ("t.jediTaskID IN ({})",),
+        ("t.site IS NOT NULL",),
+    ]
+    tests = [
+        (test.test.kind, test.test.column, [side.text for side in test.test.sides])
+        for twin in sqltext.condition_twins(listed)
+        for branch in twin.items
+        for test in branch.items
+    ]
+    assert tests == [("equal", "jediTaskID", ["{}"]), ("not_null", "site", [])]
+    # Read as the statement holds it, the hole is a column the list is compared with.
+    assert [
+        (test.test.kind, test.test.column)
+        for twin in sqltext.condition_twins(sqltext.plain(listed))
+        for branch in twin.items
+        for test in branch.items
+    ][0] == ("other", "")
+    assert sqltext.ordering(ranked) == (["(CASE {} ELSE {} END), b"], [])
+    assert ("jobsActive4", "gshare") in sqltext.order_owners(ranked)
+    assert sqltext.where_clauses(listed) == [" t.jediTaskID IN ({}) AND t.site IS NOT NULL"]
+
+
 _PRINTED_GETJOBS = (
     "SELECT * FROM (SELECT /*+ INDEX_RS_ASC(tab (PRODSOURCELABEL COMPUTINGSITE JOBSTATUS) ) */ PandaID,currentPriority "
     "FROM ATLAS_PANDA.jobsActive4 tab WHERE computingSite=:computingSite AND jobStatus=:oldJobStatus "

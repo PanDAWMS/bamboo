@@ -339,11 +339,11 @@ def tables_never_written(modules: list[SourceModule]) -> dict[str, str]:
                 # ``TASK_ATTEMPTS`` is filled by an ``INSERT ... SELECT`` and
                 # ``Metrics`` by a positional insert; both were claimed here as
                 # kept current by something outside PanDA.
-                written.update(table.lower() for table in sqltext.creates(run.sql))
-                written.update(table.lower() for table in sqltext.updates(run.sql))
-                written.update(table.lower() for table in sqltext.deletes(run.sql))
-                read.update(table for table, _columns in sqltext.reads(run.sql))
-                read.update(sqltext.joins(run.sql))
+                written.update(table.lower() for table in sqltext.creates(run.reading))
+                written.update(table.lower() for table in sqltext.updates(run.reading))
+                written.update(table.lower() for table in sqltext.deletes(run.reading))
+                read.update(table for table, _columns in sqltext.reads(run.reading))
+                read.update(sqltext.joins(run.reading))
     spellings: dict[str, list[str]] = {}
     for table in read:
         if table.lower() in written or table == "{}":
@@ -412,10 +412,10 @@ def extract_read_only_tables(
                     # Folded for the lookups and kept as written for the
                     # columns: this statement spells the table its own way, and
                     # that spelling is what ``joined_columns`` has to match.
-                    (table, sqltext.joined_columns(run.sql, table))
-                    for table in sqltext.joins(run.sql)
+                    (table, sqltext.joined_columns(run.reading, table))
+                    for table in sqltext.joins(run.reading)
                 ]
-                readings += list(sqltext.reads(run.sql))
+                readings += list(sqltext.reads(run.reading))
                 for table, columns in readings:
                     folded = table.lower()
                     if folded not in never_written or folded in known:
@@ -474,7 +474,7 @@ def extract_shared_tables(
                     schema=known[suffix],
                     module=module,
                     node=run.call,
-                    statement=run.sql,
+                    statement=run.reading,
                 ):
                     explained += 1
         if candidates:

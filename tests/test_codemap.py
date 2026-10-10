@@ -2035,6 +2035,25 @@ def test_a_column_the_statement_interpolates_is_its_own_reason():
     assert {stop.reason for stop in stops} == {sql.COLUMN_IS_A_HOLE}
 
 
+def test_a_column_a_loops_passes_interpolate_is_named_as_a_pass_wrote_it():
+    """``getDatasetAttributesWithMap_JEDI`` appends ``AND {key}=:{key}`` per key after a term of its own.  Run, the
+    statement holds a ``{}`` where the passes are, glued to that term, and the stop named the term as unread; the
+    stop names what a pass wrote, as the reassembly did."""
+    source = (
+        "def f(self, criteria):\n"
+        "    sql = 'SELECT vuid FROM ATLAS_PANDA.Datasets WHERE vuid=:vuid '\n"
+        "    for key in criteria:\n"
+        "        sql += f'AND {key}=:{key} '\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    with sql.evaluated(True):
+        stops = {stop for run in sql.executions(func) for stop in run.unresolved}
+
+    assert [(stop.source, stop.reason) for stop in stops] == [("{}=:{}", sql.COLUMN_IS_A_HOLE)]
+
+
 def test_a_row_precondition_is_stored_with_the_value_its_bind_holds():
     """``jobStatus=:oldJobStatus`` is what the statement says; ``activated`` is
     what it means, and only the second can be compared with what a reader
@@ -2130,6 +2149,59 @@ def test_a_row_precondition_is_what_every_statement_writing_the_value_requires(g
 
     assert branch.outcome == "Y"
     assert branch.row_precondition == []
+
+
+def test_a_column_one_pass_of_a_loop_writes_is_said_where_its_bind_is_filled():
+    """``updateJobStatus`` appends ``,{key}=:{key}`` per parameter, and ``,memory_leak=:memory_leak`` on the pass
+    for the job's metrics.  Run, the statement holds a ``{}`` where the passes are, glued to the value before it:
+    ``status=:status{}`` named no bind, and the column a pass writes was not in the text.  Read with the passes in
+    place, each column takes its own bind, and the branch is where the bind is filled, under the pass's test."""
+    source = (
+        "class M:\n"
+        "    def f(self, jediTaskID, status, params):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status'\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        varMap[':status'] = status\n"
+        "        for key in params:\n"
+        "            sql += f',{key}=:{key}'\n"
+        "            varMap[f':{key}'] = params[key]\n"
+        "            if key == 'restart':\n"
+        "                sql += ',oldStatus=:oldStatus'\n"
+        "                varMap[':oldStatus'] = 'paused'\n"
+        "        sql += ' WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    with sql.evaluated(True):
+        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    by_column = {
+        junction.subject.split(".")[-1]: [(branch.outcome, branch.line, branch.path_condition) for branch in junction.branches]
+        for junction in junctions
+    }
+
+    assert by_column["oldStatus"] == [("paused", 12, ["key == 'restart'"])]
+    assert by_column["status"] == [("runtime(status)", 6, [])]
+
+
+def test_a_value_written_before_a_loops_passes_is_said_where_it_was_written():
+    """``harvesterIsAlive`` writes ``lastUpdate=CURRENT_DATE`` and then a column per key.  Run, the statement holds
+    ``lastUpdate=CURRENT_DATE{}``: read so, the value was a hole's, placed at the loop.  Read with the passes in
+    place, it is ``CURRENT_DATE``, written by the statement that wrote it -- found in the variant read the same way,
+    or not found at all."""
+    source = (
+        "class M:\n"
+        "    def f(self, jediTaskID, data):\n"
+        "        sql = \"UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,oldStatus='paused'\"\n"
+        "        for key in data:\n"
+        "            sql += ',{0}=:{0}'.format(key)\n"
+        "        sql += ' WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    with sql.evaluated(True):
+        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (junction,) = [one for one in junctions if one.subject.endswith(".oldStatus")]
+
+    assert [(branch.outcome, branch.line) for branch in junction.branches] == [("paused", 3)]
 
 
 def test_a_guard_some_writes_carry_is_said_with_the_test_that_adds_it():

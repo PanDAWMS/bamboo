@@ -1538,6 +1538,7 @@ def variant_spans(
     name: str,
     at: Optional[ast.AST] = None,
     text: Optional[str] = None,
+    read: bool = False,
 ) -> list[tuple[str, list[Span]]]:
     """:func:`variants`, with each statement's fragments and where they landed.
 
@@ -1551,9 +1552,13 @@ def variant_spans(
     copy in the second.  Without *at*, or reassembled, every variant of the
     name in the function, as :func:`_variant_spans` reads them, *text* or not:
     the reassembly's readers pick their own.
+
+    With *read*, each statement is given as a reader takes it
+    (:func:`reading_text`), its spans still positions in the statement's own
+    text: what sqltext reads off the one, it places in the other.
     """
     if _EVALUATED and at is not None:
-        return _evaluated_spans(func, name, at, text)
+        return _evaluated_spans(func, name, at, text, read)
     return _variant_spans(func, name)
 
 
@@ -1696,6 +1701,35 @@ class Execution(NamedTuple):
     def run_at(self) -> tuple[ast.Call, ...]:
         """The calls to read this run's binds at -- :attr:`calls`, or its own."""
         return self.calls or (self.call,)
+
+    @property
+    def reading(self) -> str:
+        """:attr:`sql` as a reader of the statement takes it: each part a loop of unknown length repeats as one
+        pass of each text the loop appends (:func:`reading_text`).  :attr:`sql` itself where nothing repeats, and
+        reassembled."""
+        return reading_text(self.sql, self.holes)
+
+
+def reading_text(text: str, holes: tuple) -> str:
+    """*text* with each ``{}`` a loop of unknown length repeats (:data:`sqleval.REPEATED`) as one pass of each text
+    the loop appends, between :data:`sqltext.REPEAT_OPEN` and :data:`sqltext.REPEAT_CLOSE`.
+
+    *holes* are *text*'s ``(offset, sqleval.HoleAt)``.  The passes are run
+    together, or joined as the list holding them was, less the end the hole
+    leaves after it (:attr:`sqleval.HoleAt.end`): ``jediTaskID=:jediTaskID
+    {}`` reads ``jediTaskID=:jediTaskID AND {}=:{}``, two terms, where the
+    ``{}`` glued the first one to the hole.  sqltext reads the statement with
+    them and says what it read in *text*'s terms (:data:`sqltext.REPEAT_OPEN`).
+    """
+    out = text
+    for at, hole in sorted(holes, key=lambda one: one[0], reverse=True):
+        if hole.reason != sqleval.REPEATED or not hole.repeats or out[at : at + 2] != "{}":
+            continue
+        passes = (hole.joiner or "").join(hole.repeats) if hole.listed else "".join(hole.repeats)
+        if hole.end and passes.endswith(hole.end):
+            passes = passes[: -len(hole.end)]
+        out = out[:at] + sqltext.REPEAT_OPEN + passes + sqltext.REPEAT_CLOSE + out[at + 2 :]
+    return out
 
 
 def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -3620,7 +3654,7 @@ def _spans_of(drawn: "sqleval.Rendered", anchor: ast.AST) -> list[Span]:
 
 
 def _evaluated_spans(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST, text: Optional[str]
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST, text: Optional[str], read: bool = False
 ) -> list[tuple[str, list[Span]]]:
     """:func:`variant_spans`, run: what *name* holds at *at*."""
     reading = _evaluation(func)
@@ -3631,7 +3665,9 @@ def _evaluated_spans(
         found = reading.copied(at.lineno, name, text)
         anchor = at
     found = [_fragments_out(one, func) for one in found]
-    return [(one.text, _spans_of(one, anchor)) for one in found if one.text]
+    return [
+        (reading_text(one.text, one.holes) if read else one.text, _spans_of(one, anchor)) for one in found if one.text
+    ]
 
 
 #: How many statements of one call :func:`every_statement` draws, at most.
@@ -3642,8 +3678,8 @@ EVERY_CAP = 512
 
 
 def every_statement(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> Optional[list[str]]:
-    """Run (:func:`evaluated`), every statement the call at *line* runs, as :func:`executions` gives each text; ``None``
-    past :data:`EVERY_CAP` of them.
+    """Run (:func:`evaluated`), every statement the call at *line* runs, each as a reader takes it
+    (:attr:`Execution.reading`); ``None`` past :data:`EVERY_CAP` of them.
 
     :func:`executions` hands a covering set -- every branch shows up, not
     every combination of branches -- which is all a reader of what some run
@@ -3653,7 +3689,7 @@ def every_statement(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> 
     run can go, the set required one of its combinations.
     """
     drawn = every_rendering(func, line)
-    return None if drawn is None else [one.text for one in drawn]
+    return None if drawn is None else [reading_text(one.text, one.holes) for one in drawn]
 
 
 def every_rendering(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> Optional[list["sqleval.Rendered"]]:
@@ -3852,7 +3888,9 @@ def _evaluated_executions_read(
                     variable=held,
                     call=node,
                     window=window,
-                    unresolved=_fragment_stops(one, func) + _hole_stops(run.text, line),
+                    # What a stop names is what the code wrote: a repeated part as its passes.
+                    unresolved=_fragment_stops(one, func)
+                    + _hole_stops(sqltext.unmarked(reading_text(run.text, run.holes)), line),
                     head=heads[0].text if heads else "",
                     pieces=run.pieces,
                     holes=run.holes,

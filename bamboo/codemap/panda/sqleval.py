@@ -139,12 +139,19 @@ class HoleAt(NamedTuple):
     """A piece whose text is not known: the statement it entered the text at, the expression, and why.
 
     For the part a loop of unknown length appends (:data:`REPEATED`), *stmt* is the loop, *source* the name it
-    appends to, and *repeats* each text one pass appends, ``{}`` for a hole: ``WHEN gshare=:leave{} THEN {}``."""
+    appends to, and *repeats* each text one pass appends, ``{}`` for a hole: ``WHEN gshare=:leave{} THEN {}``.  The
+    hole holds what the passes appended less *end*, which each of them ends with and which stands after the hole
+    where nothing cut it (``ret[:-1]`` cuts the comma of ``{},``).  Where the passes appended items to a list
+    (*listed*), each text is an item, and *joiner* is what the text joins them with once it does (``" AND
+    ".join(conditions)``, :func:`joined_by`)."""
 
     stmt: object
     source: str
     reason: str
     repeats: tuple = ()
+    end: str = ""
+    listed: bool = False
+    joiner: Optional[str] = None
 
 
 #: Why a hole stands where a loop of unknown length appended to a name: the passes'
@@ -1478,6 +1485,7 @@ def clear_memo() -> None:
     _HELD_BY.clear()
     _HOLDS.clear()
     _FACTUAL.clear()
+    _JOINED.clear()
 
 
 # ================================================================ the evaluator
@@ -3950,10 +3958,12 @@ class Ref:
         found = sequence(items)
         if found is None:
             return self.hole(node.args[0])
-        return str_join(
-            self.as_text(sep, node.func),
-            [self.text_of(item, node.args[0]) for item in found],
-        )
+        sep = self.as_text(sep, node.func)
+        joined = [self.text_of(item, node.args[0]) for item in found]
+        if type(sep) is Str and HOLE not in sep.s:
+            # A loop of unknown length's items, one part: the passes are joined by *sep*.
+            joined = [joined_by(item, sep.s) for item in joined]
+        return str_join(sep, joined)
 
     def format_call(self, template, node: ast.Call, env: Env) -> list:
         positional_choices = []
@@ -5116,7 +5126,7 @@ def repeated_part(loop, name: str, added: list) -> Callable:
     if listed and pieces and not (templates or capped):  # items, none a text
         return lambda before: Lst(before.items + (UNK,))
     end = "" if capped else _common_end(templates)
-    part = hole_str(HoleAt(loop, name, REPEATED, templates))
+    part = hole_str(HoleAt(loop, name, REPEATED, templates, end, listed))
     if end:
         part = make_cat([part, _ending(pieces, end, loop)])
     if listed:
@@ -5181,6 +5191,67 @@ def repeats(value) -> bool:
         if type(written) is HoleAt and written.reason == REPEATED:
             return True
     return False
+
+
+_JOINED: dict = {}  # (value, sep) -> joined_by(value, sep); emptied by clear_memo()
+
+
+def _unjoined(origin) -> bool:
+    written = written_at(origin)
+    return (
+        type(written) is HoleAt
+        and written.reason == REPEATED
+        and written.listed
+        and written.joiner is None
+    )
+
+
+def _rebased(origin, written):
+    """*origin* written as *written* instead, every name that carried it kept."""
+    if type(origin) is Via:
+        prior = origin.prior
+        return Via(
+            written,
+            origin.name,
+            origin.at,
+            None if prior is None else _rebased(prior, written),
+        )
+    return written
+
+
+def joined_by(value, sep: str):
+    """*value*, an item ``sep.join`` joins, with each part in it that a loop of unknown length appended to the list
+    as items saying *sep* joins them (:attr:`HoleAt.joiner`): one pass's text is one item."""
+    t = type(value)
+    if not (t is Str or t is Cat or t is Choice):
+        return value
+    key = (value, sep)
+    held = _JOINED.get(key)
+    if held is None:
+        if t is Str:
+            if any(_unjoined(origin) for _piece, origin in value.runs):
+                held = Str(
+                    value.s,
+                    tuple(
+                        (
+                            piece,
+                            _rebased(origin, written_at(origin)._replace(joiner=sep))
+                            if _unjoined(origin)
+                            else origin,
+                        )
+                        for piece, origin in value.runs
+                    ),
+                )
+            else:
+                held = value
+        elif t is Choice:
+            held = make_choice(
+                value.dim, [joined_by(branch, sep) for branch in value.branches]
+            )
+        else:
+            held = make_cat([joined_by(part, sep) for part in value.parts])
+        _JOINED[key] = held
+    return held
 
 
 # ================================================================ expansion

@@ -141,7 +141,7 @@ def foreign_readers(
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             for run in sql.executions(func):
-                if any(table in foreign_tables for table, _cols in sqltext.reads(run.sql)):
+                if any(table in foreign_tables for table, _cols in sqltext.reads(run.reading)):
                     found.add(func.name)
     return found
 

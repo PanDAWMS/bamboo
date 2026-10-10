@@ -591,10 +591,10 @@ class SpecAttributor:
                     stated.setdefault(table, set()).add(spec_class)
                 seen: set[str] = set()
                 for run in sql.executions(func):
-                    if run.sql in seen:
+                    if run.reading in seen:
                         continue
-                    seen.add(run.sql)
-                    for write in sqltext.writes(run.sql):
+                    seen.add(run.reading)
+                    for write in sqltext.writes(run.reading):
                         only = self._only_class_declaring(set(write.columns))
                         if only is not None:
                             inferred.setdefault(write.table, set()).add(only)
