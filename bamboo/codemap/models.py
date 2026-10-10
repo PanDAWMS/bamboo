@@ -362,6 +362,31 @@ class Emit(BaseModel):
 PASSTHROUGH_OUTCOME = re.compile(r"^passthrough\((?P<field>[^)]+)\)$")
 
 
+class ConditionalGuard(BaseModel):
+    """A row precondition some writes of a branch's value carry, and when they do.
+
+    ``updateJobStatus`` adds ``AND NOT jobStatus=:ngStatus`` only when the new
+    status is ``transferring``: a ``holding`` job may not move there, and may
+    move anywhere else.  ``row_precondition`` holds what every write of the
+    value requires, so it cannot say this, and saying it there would claim the
+    guard for every other status the same branch writes.
+    """
+
+    term: str
+    when: list[str] = Field(
+        ...,
+        description=(
+            "The tests, beside the branch's own path condition, under which a "
+            "write carries the term: where its text, the value its column is "
+            "set to (the term guards only a column the statement writes), and "
+            "the execute were written.  Each test is necessary, as a path "
+            "condition is; together they are taken as enough, which a "
+            "``return`` between them would break.  Two guards with one term "
+            "are alternatives."
+        ),
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -398,6 +423,16 @@ class Branch(BaseModel):
             "silent -- zero rows changed, no exception, a count the caller "
             "usually discards -- so a branch carrying one is a branch whose "
             "outcome the code can announce without the row ever taking it."
+        ),
+    )
+    row_precondition_when: list[ConditionalGuard] = Field(
+        default_factory=list,
+        description=(
+            "The guards only some writes of this value carry, each with when.  "
+            "Apart from ``row_precondition`` so that a reader taking every "
+            "guard there as unconditional stays right; read where the "
+            "statement was read by running the function, whose pieces say "
+            "where each part of the text was written."
         ),
     )
     tags: list[str] = Field(
@@ -2936,6 +2971,7 @@ class CandidateBranch(BaseModel):
     )
     conditions: list[str] = Field(default_factory=list)
     row_precondition: list[str] = Field(default_factory=list)
+    row_precondition_when: list[ConditionalGuard] = Field(default_factory=list)
     matched: bool = Field(
         default=False,
         description=(
@@ -3087,6 +3123,16 @@ class Candidate(BaseModel):
         seen: list[str] = []
         for branch in self.branches:
             for guard in branch.row_precondition:
+                if guard not in seen:
+                    seen.append(guard)
+        return seen
+
+    @property
+    def row_precondition_when(self) -> list[ConditionalGuard]:
+        """The guards only some of these arms' writes carry, each with when (:class:`ConditionalGuard`)."""
+        seen: list[ConditionalGuard] = []
+        for branch in self.branches:
+            for guard in branch.row_precondition_when:
                 if guard not in seen:
                     seen.append(guard)
         return seen

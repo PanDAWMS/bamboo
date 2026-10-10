@@ -244,6 +244,7 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 BRANCH_FIELDS: tuple[str, ...] = (
     "path_condition",
     "row_precondition",
+    "row_precondition_when",
     "tier",
     "emits",
     "log_level",

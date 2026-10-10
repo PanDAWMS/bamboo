@@ -61,6 +61,7 @@ from bamboo.codemap.models import (
     Anchor,
     Branch,
     CallReading,
+    ConditionalGuard,
     ConditionNode,
     ConditionReading,
     ConditionValue,
@@ -428,6 +429,7 @@ def extract(
     asks for it, and the seven above are unpacked in many places.
     """
     junctions: dict[str, JunctionNode] = {}
+    carriers: dict[int, tuple[Branch, list[_Carrier]]] = {}
     stopped: list[ReadingStop] = []
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str, str]] = set()
@@ -488,6 +490,15 @@ def extract(
                                     statement=run.call.lineno,
                                 )
                             )
+                    # When this run carries each guard, beside every term in
+                    # the order ``preconditions`` has them -- see
+                    # :func:`_guard_conditions`.
+                    carried_when = _guard_conditions(func, run, statement)
+                    term_when: dict[str, list[str]] = {}
+                    for column, term in sorted(statement.preconditions.items()):
+                        if column in carried_when:
+                            term_when.setdefault(term, carried_when[column])
+                    whens = [term_when.get(term) for term in sorted(statement.preconditions.values())]
                     if row_keys is not None and statement.preconditions:
                         row_keys.append(_row_key_source(func, run, statement, module.rel_path))
                     # A name nobody could read is not a table that holds no
@@ -569,6 +580,11 @@ def extract(
                             # any of them failing leaves the row untouched, so
                             # they bound this write as much as its own does.
                             row_precondition=preconditions,
+                            whens=whens,
+                            row_precondition_spelled=list(statement.preconditions.values()),
+                            call=run.call,
+                            column=column,
+                            carriers=carriers,
                             setters=setters,
                             beside=lambda node, terms=sorted(statement.preconditions.values()): [
                                 sql.settled_precondition(
@@ -603,6 +619,7 @@ def extract(
         )
         for qualifier, attribute, kind in sorted(attributed)
     ]
+    _settle_conditional_guards(carriers.values())
     # ``unexplained`` and ``stopped`` last: they are the two that are about
     # what this pass could *not* do, and a caller ignoring them still builds a
     # map.  Two lists rather than one because they answer different questions
@@ -862,12 +879,31 @@ def _record(
     row_precondition: list[str],
     setters: dict[str, object],
     beside=None,
+    whens: Optional[list[Optional[list[str]]]] = None,
+    row_precondition_spelled: Optional[list[str]] = None,
+    call: Optional[ast.AST] = None,
+    column: str = "",
+    carriers: Optional[dict[int, tuple[Branch, list[_Carrier]]]] = None,
 ) -> None:
     """Add one branch per decided value to this write site's junction.
 
     *beside*, where given, settles the row precondition for one branch from
     the binds that can run with the statement deciding its value -- see
     :func:`sql.settled_precondition`.
+
+    A branch another statement already made keeps only the terms this one
+    gives it too: the write lands under every statement that writes the value,
+    so a guard one of them leaves out is not one the value needs.  Kept from
+    the first statement, the answer followed the order statements were read
+    in -- ``ppEventServiceJob`` writes ``ready`` by an ``UPDATE`` guarded on
+    the event's status and by two ``INSERT ... SELECT`` that guard nothing,
+    and said the guard for all three.
+
+    *whens*, beside the terms in the order *beside* gives them, says when this
+    statement carries each (``None`` where that cannot be said).  What each
+    statement writing a branch's value into *column* carries, run by *call*,
+    goes into *carriers*, for :func:`_settle_conditional_guards` to say which
+    guards some of the statements the call runs carry and when.
     """
     subject = SubjectNode.make_name(spec_class, attribute)
     owner = f"{module.rel_path}::{func.name}"
@@ -903,9 +939,22 @@ def _record(
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
     for outcome, tier, node, extra, decided_at, frames in outcomes:
         condition = path_condition(node) + extra
+        guards = beside(node) if beside is not None else row_precondition
+        # The tests the branch's own condition already makes are not what tells
+        # one statement from another.
+        spelled = sorted(row_precondition_spelled or [])
+        conditional = [
+            (ConditionalGuard(term=term, when=[test for test in when if test not in condition]), raw)
+            for term, when, raw in zip(guards, whens or [], spelled, strict=False)
+            if when is not None
+        ]
+        carrier = _Carrier(func=func, call=call, column=column, conditional=conditional)
         held = known.get((outcome, tuple(condition)))
         if held is not None:
             held.value_frames = pooled_frames(held.value_frames, list(frames))
+            held.row_precondition = [term for term in held.row_precondition if term in guards]
+            if carriers is not None:
+                carriers[id(held)][1].append(carrier)
             continue
         # Read at the deciding statement rather than at the bind.  The two are
         # the same for a literal and far apart for a local: ``retryTask_JEDI``
@@ -916,7 +965,7 @@ def _record(
         branch = Branch(
             outcome=outcome,
             path_condition=condition,
-            row_precondition=beside(node) if beside is not None else row_precondition,
+            row_precondition=guards,
             order=len(junction.branches),
             tier=tier,
             tags=tags,
@@ -926,6 +975,163 @@ def _record(
         )
         known[(outcome, tuple(condition))] = branch
         junction.branches.append(branch)
+        if carriers is not None:
+            carriers[id(branch)] = (branch, [carrier])
+
+
+class _Carrier(NamedTuple):
+    """One statement writing a branch's value into *column*, run by *call* in *func*, and when it carries each
+    guard: the guard as the branch says it, beside the term as the statement spells it."""
+
+    func: ast.FunctionDef | ast.AsyncFunctionDef
+    call: Optional[ast.AST]
+    column: str
+    conditional: list[tuple[ConditionalGuard, str]]
+
+
+class _Written(NamedTuple):
+    """One statement a call runs, as :func:`_settle_conditional_guards` asks of it: the columns it writes, its
+    row preconditions as spelled, and the tests it is known to have passed."""
+
+    columns: frozenset[str]
+    guards: frozenset[str]
+    passed: frozenset[str]
+
+
+def _every_written(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.AST, held: dict[int, Optional[list[_Written]]]
+) -> Optional[list[_Written]]:
+    """Every statement *call* runs (:func:`sql.every_rendering`), ``None`` past the cap, held in *held* by call.
+
+    The tests passed are the execute's and those on every piece's way here: only what the pieces show -- a piece
+    left out passed no test this can see.
+    """
+    if id(call) not in held:
+        drawn = sql.every_rendering(func, call.lineno)
+        found: Optional[list[_Written]] = None
+        if drawn is not None:
+            found = []
+            for one in drawn:
+                tests = set(path_condition(call))
+                for _start, _end, way in one.pieces:
+                    tests.update(_tests_on_way(func, way) or ())
+                found.extend(
+                    _Written(
+                        columns=frozenset(name.lower() for name in statement.columns),
+                        guards=frozenset(statement.preconditions.values()),
+                        passed=frozenset(tests),
+                    )
+                    for statement in sqltext.writes(one.text)
+                )
+        held[id(call)] = found
+    return held[id(call)]
+
+
+def _guard_conditions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution, statement: sqltext.SqlWrite
+) -> dict[str, list[str]]:
+    """When *run* carries each of *statement*'s row preconditions, by column.
+
+    A term is a guard where the statement holds it and writes its column, so
+    the tests are those over the pieces holding the term's text and the value
+    the column is set to, and over the execute: ``updateJobStatus`` appends
+    ``AND NOT jobStatus=:ngStatus`` under ``if jobStatus == "transferring"``;
+    ``killJob``'s guard is in a text written once, run by the one execute that
+    is not a force kill.  Run (:func:`sql.evaluated`) only: the pieces say where
+    each stretch was written.  A column is left out where a stretch has no
+    piece, or a piece was written under a test of another function, whose
+    names say nothing here.
+    """
+    if not run.pieces:
+        return {}
+    found: dict[str, list[str]] = {}
+    for column, spans in statement.precondition_spans.items():
+        supplied = statement.columns.get(column)
+        end = sqltext.supplied_at(run.sql, statement.kind, column, supplied) if supplied is not None else None
+        if end is None:
+            continue
+        tests = list(path_condition(run.call))
+        for start, stop in [*spans, (end - 1, end)]:
+            ways = [way for begin, finish, way in run.pieces if begin < stop and start < finish]
+            said = [_tests_on_way(func, way) for way in ways]
+            if not ways or any(one is None for one in said):
+                break
+            for one in said:
+                tests.extend(one)
+        else:
+            found[column] = list(dict.fromkeys(tests))
+    return found
+
+
+def _tests_on_way(func: ast.FunctionDef | ast.AsyncFunctionDef, way: tuple) -> Optional[list[str]]:
+    """The tests *way* passes in *func* -- where the stretch was written and each name it was put into on its way.
+
+    ``None`` where a statement of another function on the way sits under a test.
+    """
+    tests: list[str] = []
+    for node in way:
+        if not isinstance(node, ast.stmt):
+            continue
+        if enclosing_function(node) is not func:
+            if path_condition(node):
+                return None
+            continue
+        tests.extend(path_condition(node))
+    return tests
+
+
+def _settle_conditional_guards(carried: Iterable[tuple[Branch, list[_Carrier]]]) -> None:
+    """Say on each branch the guards only some statements writing its value carry, where it can be said when.
+
+    A guard holds "when C" only if no statement writing the value without it
+    passes C, asked of every statement each call runs, not of the covering
+    set: ``getEventRanges`` narrows its jumbo subquery for one limit and not
+    for the other, and the covering set held only one of the two.  A statement
+    known to have passed a test contradicting C does not pass C.  One run by
+    the same execute does not either, unless the tests its pieces show passed
+    include all of C: C is where the guard's text was written and passed on
+    its way, so without the guard C did not hold -- except where the guard's
+    text is there and something appended inside it made another term of it.
+    One run by another execute, with nothing contradicting C, can run under
+    C: ``ppEventServiceJob`` writes ``ready`` by a guarded ``UPDATE`` and by
+    two ``INSERT ... SELECT`` that guard nothing, one after the other.  Past
+    the cap the same execute cannot be asked, and nothing is said.  A guard
+    every statement gives is in ``row_precondition`` already, and one with no
+    test would read as always.
+    """
+    held: dict[int, Optional[list[_Written]]] = {}
+    for branch, carriers in carried:
+        said: list[ConditionalGuard] = []
+        calls = {(id(carrier.call), carrier.column.lower()): carrier for carrier in carriers if carrier.call is not None}
+        for carrier in carriers:
+            for guard, spelled in carrier.conditional:
+                if not guard.when or guard.term in branch.row_precondition or guard in said:
+                    continue
+                if all(
+                    _none_without(guard, spelled, other, other.call is carrier.call, held)
+                    for other in calls.values()
+                ):
+                    said.append(guard)
+        branch.row_precondition_when = sorted(said, key=lambda guard: (guard.term, guard.when))
+
+
+def _none_without(
+    guard: ConditionalGuard, spelled: str, other: _Carrier, same: bool, held: dict[int, Optional[list[_Written]]]
+) -> bool:
+    """Whether no statement *other*'s call runs writes the value without *guard* (spelled *spelled*) and can pass
+    its tests -- see :func:`_settle_conditional_guards`."""
+    written = _every_written(other.func, other.call, held)
+    if written is None:
+        return not same and pathcond.exclusive(guard.when, path_condition(other.call))
+    for one in written:
+        if other.column.lower() not in one.columns or spelled in one.guards:
+            continue
+        if pathcond.exclusive(guard.when, sorted(one.passed)):
+            continue
+        if same and not set(guard.when) <= one.passed:
+            continue
+        return False
+    return True
 
 
 

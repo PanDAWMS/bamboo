@@ -3652,6 +3652,17 @@ def every_statement(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> 
     statement of its covering set appends none of them, so read as the ways a
     run can go, the set required one of its combinations.
     """
+    drawn = every_rendering(func, line)
+    return None if drawn is None else [one.text for one in drawn]
+
+
+def every_rendering(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> Optional[list["sqleval.Rendered"]]:
+    """:func:`every_statement`, each with the pieces it was built from as :func:`executions` gives them.
+
+    A reader asking whether some statement the call runs holds a guard, and which tests its pieces passed, needs
+    them all: a covering set showed ``getEventRanges`` narrowing its jumbo subquery for one limit and not for the
+    other.
+    """
     reading = _evaluation(func)
     held = getattr(reading, "_every", None)
     if held is None:
@@ -3663,7 +3674,7 @@ def every_statement(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> 
 
 def _every_statement(
     func: ast.FunctionDef | ast.AsyncFunctionDef, reading: "sqleval.Reading", line: int
-) -> Optional[list[str]]:
+) -> Optional[list["sqleval.Rendered"]]:
     if line in reading.full_capped:
         return None
     full = reading.texts.get(line) or {}
@@ -3679,11 +3690,13 @@ def _every_statement(
                 return None
             drawn.append(found[0])
     texts: list[str] = []
+    kept: list["sqleval.Rendered"] = []
     for one in drawn:
-        text = _fragments_out(one, func).text
-        if not _says_nothing(text) and text not in texts:
-            texts.append(text)
-    return texts
+        out = _fragments_out(one, func)
+        if not _says_nothing(out.text) and out.text not in texts:
+            texts.append(out.text)
+            kept.append(out)
+    return kept
 
 
 def _unrendered(hole: "sqleval.HoleAt", func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:

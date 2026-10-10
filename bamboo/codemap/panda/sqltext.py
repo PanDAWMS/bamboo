@@ -168,6 +168,15 @@ class SqlWrite(BaseModel):
             "say who named the rows -- see ``sqlwrite``'s ``RowKeySource``."
         ),
     )
+    precondition_spans: dict[str, list[tuple[int, int]]] = Field(
+        default_factory=dict,
+        description=(
+            "Column -> where each conjunct of its precondition sits in the text "
+            "read, as start and end offsets, so a caller holding the pieces "
+            "the text was built from can say which wrote it.  Empty where the "
+            "statement was read off its text rather than its tree."
+        ),
+    )
 
 
 #: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
@@ -790,8 +799,10 @@ def _conjunct_spans(tokens: list, lo: int, hi: int) -> list[tuple[int, int]]:
     return [span for a, b in zip(bounds, bounds[1:], strict=False) for span in _conjunct_spans(tokens, a + 1, b)]
 
 
-def _guards(node: exp.Update, sql: str, tokens: list, written: set[str]) -> Optional[tuple[dict[str, str], dict[str, str]]]:
-    """``(preconditions, keys)`` of an ``UPDATE``, off its tree and in its own spelling.
+def _guards(
+    node: exp.Update, sql: str, tokens: list, written: set[str]
+) -> Optional[tuple[dict[str, str], dict[str, str], dict[str, list[tuple[int, int]]]]]:
+    """``(preconditions, keys, spans)`` of an ``UPDATE``, off its tree and in its own spelling.
 
     A term counts only where every row has to meet it -- a conjunct of the
     ``WHERE`` -- and only its own columns do: the text reading took a term
@@ -800,13 +811,15 @@ def _guards(node: exp.Update, sql: str, tokens: list, written: set[str]) -> Opti
     whole of the test.  A conjunct naming a column the statement writes is a
     precondition, kept whole -- ``(lockedBy IS NULL OR lockedTime<:t)`` is the
     lock a compare-and-set takes, and neither half of it is.  ``None`` where
-    the two readings of the clause disagree on its terms.
+    the two readings of the clause disagree on its terms.  *spans* says where
+    in *sql* each precondition's conjuncts are.
     """
     where = node.args.get("where")
     preconditions: dict[str, str] = {}
     keys: dict[str, str] = {}
+    spans_of: dict[str, list[tuple[int, int]]] = {}
     if where is None:
-        return preconditions, keys
+        return preconditions, keys, spans_of
     at = _at_depth(tokens, (_at_depth(tokens, 0, {_T.SET}) or 0) + 1, {_T.WHERE})
     if at is None:
         return None
@@ -826,6 +839,7 @@ def _guards(node: exp.Update, sql: str, tokens: list, written: set[str]) -> Opti
         # the first dropped the one that says which rows are moved.
         for owner in hits:
             testing.setdefault(owner, []).append(spelled)
+            spans_of.setdefault(owner, []).append((tokens[a].start, tokens[b - 1].end + 1))
         if (
             not hits
             and isinstance(term, exp.EQ)
@@ -835,7 +849,7 @@ def _guards(node: exp.Update, sql: str, tokens: list, written: set[str]) -> Opti
         ):
             keys.setdefault(term.this.name, f":{term.expression.name}")
     preconditions.update((owner, " AND ".join(dict.fromkeys(said))) for owner, said in testing.items())
-    return preconditions, keys
+    return preconditions, keys, spans_of
 
 
 def writes(sql: str) -> list[SqlWrite]:
@@ -863,8 +877,17 @@ def writes(sql: str) -> list[SqlWrite]:
         guarded = _guards(node, sql, tokens, set(columns))
         if guarded is None:
             return _writes_in_text(sql)
-        preconditions, keys = guarded
-        return [SqlWrite(kind="update", table=table, columns=columns, preconditions=preconditions, keys=keys)]
+        preconditions, keys, spans = guarded
+        return [
+            SqlWrite(
+                kind="update",
+                table=table,
+                columns=columns,
+                preconditions=preconditions,
+                keys=keys,
+                precondition_spans=spans,
+            )
+        ]
     pairs = _insert_pairs(node, sql, tokens)
     if pairs is None:
         return _writes_in_text(sql)

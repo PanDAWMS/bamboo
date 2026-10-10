@@ -598,6 +598,12 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
                 f"  {'':<10} only lands on a row where "
                 f"{' and '.join(candidate.row_precondition)}"
             )
+        for guard in candidate.row_precondition_when:
+            # The same reading, for a guard some writes carry: said with its
+            # test, since without it the line would claim every write.
+            click.echo(
+                f"  {'':<10} when {' and '.join(guard.when)}, only lands on a row where {guard.term}"
+            )
         # Who calls the writer, where the map placed the calls.  Folded to a
         # few under the default listing and counted, as the creators are: a
         # helper called from seventeen places would otherwise bury the rest.

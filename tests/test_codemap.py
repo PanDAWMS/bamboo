@@ -2096,6 +2096,195 @@ def test_a_row_precondition_whose_bind_arrives_from_outside_keeps_its_bind():
     ) == ("jobStatus=:oldStatus", False)
 
 
+@pytest.mark.parametrize("guarded_first", [False, True])
+def test_a_row_precondition_is_what_every_statement_writing_the_value_requires(guarded_first):
+    """``killJob`` binds ``tobekilled`` once and runs one of two statements:
+    a force kill guarding nothing, or one that skips a job already being killed.
+
+    The value lands under either, so the branch holds the terms both give --
+    none.  Kept from the first statement read, it said the guard when the
+    guarded statement came first, and nothing when the other did.
+    """
+    plain = "'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted WHERE rse=:rse '"
+    guarded = (
+        "'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted WHERE rse=:rse "
+        "AND blacklisted=:old '"
+    )
+    first, second = (guarded, plain) if guarded_first else (plain, guarded)
+    source = (
+        "class M:\n"
+        "    def f(self, rse, force):\n"
+        f"        sqlA = {first}\n"
+        f"        sqlB = {second}\n"
+        "        varMap = {}\n"
+        "        varMap[':rse'] = rse\n"
+        "        varMap[':blacklisted'] = 'Y'\n"
+        "        varMap[':old'] = 'N'\n"
+        "        if force:\n"
+        "            self.cur.execute(sqlA + comment, varMap)\n"
+        "        else:\n"
+        "            self.cur.execute(sqlB + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = junctions[0].branches
+
+    assert branch.outcome == "Y"
+    assert branch.row_precondition == []
+
+
+def test_a_guard_some_writes_carry_is_said_with_the_test_that_adds_it():
+    """``updateJobStatus`` appends ``AND NOT jobStatus=:ngStatus`` only when the
+    new status is ``transferring``: a ``holding`` job may not move there.
+
+    Not every write of the value carries it, so it is not ``row_precondition``;
+    the pieces the run built the statement from say which test added it.  Read
+    by reassembling the function, there are no pieces, and the one statement
+    holding every fragment says the guard for every write, as before.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self, rse, status):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted'\n"
+        "        sqlW = ' WHERE rse=:rse '\n"
+        "        if status == 'Y':\n"
+        "            sqlW += 'AND NOT blacklisted=:ng '\n"
+        "        varMap = {}\n"
+        "        varMap[':rse'] = rse\n"
+        "        varMap[':blacklisted'] = status\n"
+        "        varMap[':ng'] = 'X'\n"
+        "        self.cur.execute(sqlU + sqlW + comment, varMap)\n"
+    )
+    with sql.evaluated(True):
+        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = junctions[0].branches
+
+    assert branch.row_precondition == []
+    assert [(guard.term, guard.when) for guard in branch.row_precondition_when] == [
+        ("NOT blacklisted=:ng", ["status == 'Y'"])
+    ]
+
+    with sql.evaluated(False):
+        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = junctions[0].branches
+
+    assert branch.row_precondition == ["NOT blacklisted=:ng"]
+    assert branch.row_precondition_when == []
+
+
+@pytest.mark.parametrize("apart", [True, False])
+def test_a_guard_one_execute_carries_is_said_only_where_no_other_can_run(apart):
+    """``killJob`` runs its guarded statement in the arm that is not a force
+    kill, so the guard holds when that arm's test does.
+
+    ``ppEventServiceJob`` writes ``ready`` by a guarded ``UPDATE`` and then by
+    an ``INSERT ... SELECT`` guarding nothing, one after the other: which test
+    built the ``UPDATE``'s text says nothing about the other write, so no
+    test is said at all.
+    """
+    plain = "'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted WHERE rse=:rse '"
+    runs = (
+        (
+            "        if force:\n"
+            "            self.cur.execute(sqlF + comment, varMap)\n"
+            "        else:\n"
+            "            self.cur.execute(sqlG + comment, varMap)\n"
+        )
+        if apart
+        else (
+            "        self.cur.execute(sqlG + comment, varMap)\n"
+            "        self.cur.execute(sqlF + comment, varMap)\n"
+        )
+    )
+    source = (
+        "class M:\n"
+        "    def f(self, rse, force, strict):\n"
+        f"        sqlF = {plain}\n"
+        f"        sqlG = {plain}\n"
+        "        if strict:\n"
+        "            sqlG += 'AND blacklisted=:old '\n"
+        "        varMap = {}\n"
+        "        varMap[':rse'] = rse\n"
+        "        varMap[':blacklisted'] = 'Y'\n"
+        "        varMap[':old'] = 'N'\n"
+        f"{runs}"
+    )
+    with sql.evaluated(True):
+        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = junctions[0].branches
+
+    assert branch.row_precondition == []
+    said = [(guard.term, guard.when) for guard in branch.row_precondition_when]
+    assert said == ([("blacklisted=N", ["not (force)", "strict"])] if apart else [])
+
+
+def test_a_guard_something_appended_inside_made_another_term_is_not_said_for_it():
+    """``getEventRanges`` narrows the subquery of its guard when not ``scattered``.
+
+    The shorter guard's text is written under ``strict``, so its own pieces
+    say "when ``strict``" -- yet under ``strict`` and not ``scattered`` the
+    statement holds the longer one instead.  The statement holding the longer
+    one passed every test the shorter one names, so the shorter one is not
+    said; the longer one is, with the test that narrows it.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self, rse, strict, scattered):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted WHERE rse=:rse '\n"
+        "        if strict:\n"
+        "            sqlU += 'AND blacklisted IN (SELECT b FROM ATLAS_PANDA.T WHERE x=:x'\n"
+        "            if not scattered:\n"
+        "                sqlU += ' AND y=:y'\n"
+        "            sqlU += ') '\n"
+        "        varMap = {}\n"
+        "        varMap[':rse'] = rse\n"
+        "        varMap[':blacklisted'] = 'Y'\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    with sql.evaluated(True):
+        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = junctions[0].branches
+
+    assert branch.row_precondition == []
+    assert [(guard.term, guard.when) for guard in branch.row_precondition_when] == [
+        (
+            "blacklisted IN (SELECT b FROM ATLAS_PANDA.T WHERE x=:x AND y=:y)",
+            ["strict", "not scattered"],
+        )
+    ]
+
+
+def test_a_guard_is_asked_of_every_statement_the_call_runs_not_of_a_covering_set():
+    """``getEventRanges`` spells its jumbo subquery with one limit or another, narrowed or not.
+
+    The covering set has three of the five statements -- each arm once, not
+    each combination -- and the narrowed one with the limit it does not hold
+    passes every test the narrowed one it holds names.  Asked of the covering
+    set, that guard was said "when strict and not scattered"; asked of every
+    statement, no guard here holds whenever its tests do.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self, rse, strict, scattered, limit=None):\n"
+        "        n = 9 if limit is None else limit\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted WHERE rse=:rse '\n"
+        "        if strict:\n"
+        "            sqlU += f'AND blacklisted IN (SELECT b FROM ATLAS_PANDA.T WHERE rownum<={n}'\n"
+        "            if not scattered:\n"
+        "                sqlU += ' AND y=:y'\n"
+        "            sqlU += ') '\n"
+        "        varMap = {}\n"
+        "        varMap[':rse'] = rse\n"
+        "        varMap[':blacklisted'] = 'Y'\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    with sql.evaluated(True):
+        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = junctions[0].branches
+
+    assert branch.row_precondition == []
+    assert branch.row_precondition_when == []
+
+
 def test_a_table_the_call_substitutes_is_read_from_the_loop_that_supplies_it():
     """``execute((sql + comment) % table)`` over a literal tuple of table names.
 

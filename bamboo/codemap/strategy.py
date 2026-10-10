@@ -369,6 +369,7 @@ def _candidate(junction: JunctionNode, observed: str, cut: Optional[int] = None)
                 messages=list(branch.messages),
                 conditions=list(branch.path_condition),
                 row_precondition=list(branch.row_precondition),
+                row_precondition_when=list(branch.row_precondition_when),
             )
             for branch in _reaching(junction, observed, cut)
         ],

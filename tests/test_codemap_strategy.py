@@ -557,6 +557,41 @@ async def test_a_run_time_candidate_says_where_its_value_comes_from():
     assert "value from" in copied
 
 
+async def test_a_guard_some_writes_carry_is_listed_with_its_test():
+    """``updateJobStatus`` refuses to move a ``holding`` job only when the new
+    status is ``transferring``.
+
+    Listed beside the candidate with that test, and not as "only lands on a
+    row where", which would claim it for every write.
+    """
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_candidates
+
+    guard = models.ConditionalGuard(term="NOT status=:ngStatus", when=["status == 'finishing'"])
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[_junction("a.py::move", Branch(outcome="finishing", row_precondition_when=[guard]))],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing")
+    )
+    (candidate,) = strategy.candidates
+
+    assert candidate.row_precondition == []
+    assert candidate.row_precondition_when == [guard]
+
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_candidates(strategy, 10, False, False))
+    output = runner.invoke(command).output
+
+    assert "when status == 'finishing', only lands on a row where NOT status=:ngStatus" in output
+    assert "   only lands on a row where" not in output
+
+
 def test_a_statement_read_only_in_part_says_so_beside_its_conditions():
     """``lockJobsForReassign`` -- the query the two-day reassign picks jobs up with.
 

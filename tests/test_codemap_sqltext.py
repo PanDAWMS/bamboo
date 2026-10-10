@@ -909,6 +909,18 @@ def test_every_test_of_a_written_column_is_its_precondition():
     assert preconditions == {"ramCount": "ramCount IS NOT NULL AND ramCount>:ramCount"}
 
 
+def test_a_precondition_says_where_each_of_its_conjuncts_is():
+    """Offsets into the text read, holes and all, so a caller holding the pieces it was built from can say which wrote a guard."""
+    text = (
+        "UPDATE {}.JEDI_Dataset_Contents SET ramCount=:ramCount,status=:s WHERE jediTaskID=:jediTaskID "
+        "AND ramCount IS NOT NULL AND status=:old AND ramCount>:ramCount"
+    )
+    (statement,) = sqltext.writes(text)
+
+    assert {
+        column: [text[start:end] for start, end in spans] for column, spans in statement.precondition_spans.items()
+    } == {"ramCount": ["ramCount IS NOT NULL", "ramCount>:ramCount"], "status": ["status=:old"]}
+
 
 _PRINTED_GETJOBS = (
     "SELECT * FROM (SELECT /*+ INDEX_RS_ASC(tab (PRODSOURCELABEL COMPUTINGSITE JOBSTATUS) ) */ PandaID,currentPriority "
