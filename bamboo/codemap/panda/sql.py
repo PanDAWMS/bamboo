@@ -14,14 +14,18 @@ regular enough to read naively::
 
 Four things follow, each of which cost a wrong assumption to learn:
 
-**The statement has to be reassembled.**  It is built by ``=`` then a run of
-``+=``, often with an f-string holding the schema, and interleaved with other
-statements being built in the same function.  Reassembly is per variable name.
+**The statement has to be put together from the Python.**  It is built by
+``=`` then a run of ``+=``, often with an f-string holding the schema, through
+``%``, ``.format``, loops and the calls that hand pieces in, and interleaved
+with other statements being built in the same function.  It is read by running
+the function on every path (:mod:`~bamboo.codemap.panda.sqleval`): what
+reaches a call that runs a statement is what that call runs.
 
-**Reassembly is the wrong unit for reading a branch.**  The fragments are
+**The statement is the wrong unit for reading a branch.**  The fragments are
 appended conditionally -- ``getTasksToExecCommand_JEDI`` appends either ``SET
 status=:status`` or ``SET status=oldStatus`` -- so the ``if`` that explains the
-value is on the fragment, not on the statement.  ``fragments`` keeps them.
+value is on the fragment, not on the statement.  Each stretch of a statement
+keeps the way it was written (:attr:`Execution.pieces`).
 
 **The bind key does not say whether it is a write.**  ``:status`` appears in
 ``SET status=:status`` *and* in another statement's ``WHERE status=:status``
@@ -32,18 +36,15 @@ so the statement is required; the bind key alone is not enough.
 **Which spec a table holds is not declared anywhere**, so it is inferred from
 the column names -- see ``SpecAttributor.learn_table_classes``.
 
-What the reassembled text says -- tables, columns, values, order -- is read
-by :mod:`~bamboo.codemap.panda.sqltext`.
+What the text says -- tables, columns, values, order -- is read by
+:mod:`~bamboo.codemap.panda.sqltext`.
 """
 
 from __future__ import annotations
 
 import ast
 import contextlib
-import itertools
 import logging
-import math
-import os
 import re
 import string
 from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional
@@ -53,34 +54,22 @@ from bamboo.codemap.panda.pathcond import (
     BIND_ANNOTATED,
     BIND_ASSIGN,
     BIND_FOR,
-    UNDECIDED,
     ancestors,
     attach_parents,
     bindings,
-    can_reach,
-    decided,
     enclosing_function,
-    loops_over,
     parted,
-    path_condition,
     ruled_out_by,
     surviving_writes,
     targets_of,
     written_value,
 )
-from bamboo.codemap.panda.values import blank_fields, rendered_text
+from bamboo.codemap.panda.values import rendered_text
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from bamboo.codemap.calls import Calls, Placed
 
 logger = logging.getLogger(__name__)
-
-# A run with this many branch combinations is folded rather than split.  Set
-# well above the corpus's worst case (12, in ``propagateResultToJEDI``) so it is
-# a guard against a pathological method rather than a working limit.
-_MAX_BRANCH_VARIANTS = 24
 
 
 class Span(NamedTuple):
@@ -103,9 +92,9 @@ class Span(NamedTuple):
 class Stop(NamedTuple):
     """Somewhere the reading of one statement stopped, and what it stopped on.
 
-    The reassembly is regex over rendered strings and always had places it
-    could not follow; what it did not have was a way to say so.  A fragment
-    with no text of its own was dropped and the statement read on without it,
+    A reading always has places it cannot follow; what it needs is a way to
+    say so.  A fragment with no text of its own was once dropped and the
+    statement read on without it,
     which is how ``getJobs``'s ``WHERE`` -- every condition the pilot's job
     request is answered by -- came to be missing from the map with nothing
     anywhere saying it was.
@@ -144,12 +133,12 @@ COLUMN_IS_A_HOLE = "the WHERE names its column through an interpolation"
 CONDITION_IS_A_HOLE = "the WHERE takes whole conditions through an interpolation"
 
 #: Where the binds go, as opposed to where the schema does.  ``{}.JEDI_Tasks``
-#: is a hole too and is not a gap: reassembly blanks the schema on purpose.
+#: is a hole too and is not a gap: the reading blanks the schema on purpose.
 _HOLE = re.compile(r"\{\d*\}")
 
 
 def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
-    """One :class:`Stop` per ``WHERE`` term the reassembly left a hole in.
+    """One :class:`Stop` per ``WHERE`` term the reading left a hole in.
 
     Read off the assembled text rather than off a fragment, because that is
     where it is decidable, and the four holes a ``WHERE`` can carry are four
@@ -320,44 +309,8 @@ def _imported_lists(func: ast.AST) -> dict[str, InList]:
     return found
 
 
-def _with_lists(node: ast.expr, lists: dict[str, InList]) -> ast.expr:
-    """*node* with each hole holding an ``IN`` list's placeholders spelled as its bind."""
-    if not lists or not isinstance(node, ast.JoinedStr):
-        return node
-    values: list[ast.expr] = []
-    changed = False
-    for part in node.values:
-        if (
-            isinstance(part, ast.FormattedValue)
-            and isinstance(part.value, ast.Name)
-            and part.value.id in lists
-        ):
-            values.append(ast.Constant(value=lists[part.value.id].bind))
-            changed = True
-        else:
-            values.append(part)
-    return ast.JoinedStr(values=values) if changed else node
-
-
 #: The corpus's calls, while a build reads statements through them.
 _CALLS: Optional["Calls"] = None
-
-#: Read statements by running the function (:mod:`sqleval`) instead of
-#: reassembling them -- for a whole process with ``BAMBOO_SQL_EVAL=1``, or for
-#: the length of a block (:func:`evaluated`).  The reassembly stays beside it,
-#: so the two can be compared on every field the map reads.
-_EVALUATED: bool = os.environ.get("BAMBOO_SQL_EVAL") == "1"
-
-
-@contextlib.contextmanager
-def evaluated(on: bool = True) -> Iterator[None]:
-    """Read statements, for the length of the block, by running the function (*on*) or by reassembling it."""
-    global _EVALUATED
-    previous, _EVALUATED = _EVALUATED, on
-    try:
-        yield
-    finally:
-        _EVALUATED = previous
 
 #: How many calls out a statement's text or binds are followed.  ``getJobs``
 #: is two: its ``WHERE`` is a closure's return, which is
@@ -534,28 +487,6 @@ def every_return(
     return found
 
 
-def _handed_texts(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, seen: frozenset[str]
-) -> list[str]:
-    """The statements local *name* holds, where a call hands it: one per variant the callee builds."""
-    if sum(":" in one for one in seen) >= RETURN_HOPS:
-        return []
-    texts: list[str] = []
-    for callee, value in returned(func, name):
-        if isinstance(value, ast.Name):
-            found = _variants(callee, value.id, seen | {f"{id(callee)}:{value.id}"})
-            found = found or _handed_texts(callee, value.id, seen | {f"{id(callee)}:{value.id}"})
-        else:
-            rendered = rendered_text(value)
-            found = [rendered] if rendered is not None else []
-        # An empty one is left out: ``ret_empty = "", {}`` is what a callee
-        # hands back when there is nothing to append, and the fragment
-        # appending it sits under ``if sorting_sql:`` -- a run appending the
-        # empty text is a run that skipped the fragment.
-        texts.extend(text for text in found if text and text not in texts)
-    return texts[:_MAX_BRANCH_VARIANTS]
-
-
 #: The function being read as one call site runs it, and the constants that
 #: call hands its parameters -- see :func:`at_call`.
 _AT_CALL: Optional[tuple[ast.AST, dict[str, object]]] = None
@@ -589,444 +520,6 @@ def ruled_out(node: ast.AST) -> bool:
     return ruled_out_by(node, func, values)
 
 
-def decided_here(test: ast.expr) -> object:
-    """What the call site being read (:func:`at_call`) makes of *test*: ``True``, ``False`` or ``UNDECIDED``.
-
-    Run (:func:`evaluated`), the way every path of the function took it under
-    that call's constants: a value the function settles itself decides it too.
-    """
-    if _EVALUATED:
-        func = enclosing_function(test)
-        if func is None:
-            return UNDECIDED
-        taken = _evaluation(func).decided(test)
-        return UNDECIDED if taken is None else taken
-    if not _AT_CALL:
-        return UNDECIDED
-    func, values = _AT_CALL
-    if enclosing_function(test) is not func:
-        return UNDECIDED
-    return decided(test, values)
-
-
-def _parts(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    name: str,
-    seen: frozenset[str] = frozenset(),
-    stops: Optional[list[Stop]] = None,
-) -> list[tuple[int, str, str, ast.stmt]]:
-    """Return ``(line, operator, text, node)`` for each statement building *name*.
-
-    *stops* is an out-parameter, filled with what this walk could not render.
-    Out rather than returned because every caller but one wants the fragments
-    alone, and because the account has to come from the walk that failed: a
-    second pass asking "why is this statement short" would be a different
-    reading of the same nodes, free to disagree with this one.  The same
-    reason :class:`BindScan` travels with its binds.
-    """
-    if name in seen:
-        return []
-    seen = seen | {name}
-    lists = in_lists(func)
-    parts: list[tuple[int, str, str, ast.stmt]] = []
-    for node in ast.walk(func):
-        if _AT_CALL and ruled_out(node):
-            continue
-        if targets := targets_of(node):
-            for target in targets:
-                if not (isinstance(target, ast.Name) and target.id == name):
-                    continue
-                trimmed = _trimmed(_with_lists(node.value, lists), name)
-                if trimmed is not None:
-                    # ``sql = sql[:-4]`` cuts the ``AND `` a loop left after
-                    # its last term.  Left unread, the statement ends in
-                    # ``AND`` -- a text PanDA never runs.
-                    _count, rest = trimmed
-                    parts.append((node.lineno, TRIM, "", node))
-                    if rest:
-                        parts.append((node.lineno, "+=", _joined(rest), node))
-                    continue
-                wrapped = _wrapping(_with_lists(node.value, lists), name)
-                if wrapped is not None:
-                    # ``sqlP = "SELECT * FROM (" + sqlP`` puts text around
-                    # what the name holds; read as a new statement, it is
-                    # one that starts with ``SELECT * FROM (`` and has no
-                    # table.
-                    before, after = wrapped
-                    if before:
-                        parts.append((node.lineno, PREFIX, before, node))
-                    if after:
-                        parts.append((node.lineno, "+=", after, node))
-                    continue
-                text = rendered_text(_with_lists(node.value, lists))
-                if text is None and not isinstance(node.value, ast.Name):
-                    composed = _composed_texts(func, node.value, seen)
-                    if composed:
-                        # ``sql = sqlH + sqlL`` and ``re.sub(p, r, sql_y)``:
-                        # each statement the names hold, put together or
-                        # rewritten, as alternatives in this one place.
-                        parts.extend((node.lineno, "=", one, node) for one in composed)
-                        continue
-                if text is None and isinstance(node.value, ast.Name):
-                    # ``sql = sqlTU`` -- the statement was built under another
-                    # name and *chosen* here.  The choosing assignment is the
-                    # better anchor of the two: in ``reactivatePendingTasks_JEDI``
-                    # the release statement is appended unconditionally and
-                    # picked in the ``else`` of the timeout test, so the reason
-                    # is on the alias and nowhere else.
-                    text = _fold(_parts(func, node.value.id, seen))
-                    if not text:
-                        # ``sql = where_clause`` where a call handed the
-                        # name its text: one fragment per statement the
-                        # callee builds, as alternatives in one place.
-                        parts.extend(
-                            (node.lineno, "=", one, node)
-                            for one in _handed_texts(func, node.value.id, seen)
-                        )
-                        continue
-                if text:
-                    parts.append((node.lineno, "=", text, node))
-        elif (
-            isinstance(node, ast.AugAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == name
-            and isinstance(node.op, ast.Add)
-        ):
-            text = rendered_text(_with_lists(node.value, lists))
-            if text is None and isinstance(node.value, ast.Name):
-                # ``sql += scout_filter`` appends text the function wrote
-                # down under another name; ``sqlP += sql_where_clause`` text a
-                # call handed it.  Either way each statement the name can
-                # hold is one alternative, appended in this one place.
-                held = _variants(func, node.value.id, seen) or _handed_texts(
-                    func, node.value.id, seen
-                )
-                if held:
-                    parts.extend((node.lineno, "+=", one, node) for one in held)
-                    continue
-            if text is not None:
-                parts.append((node.lineno, "+=", text, node))
-            elif stops is not None:
-                # Only ``+=``.  A ``=`` that renders nothing starts no
-                # statement, so nothing was dropped from one; and
-                # ``sql = sql[:-1]``, once most of them, is read above as a
-                # cut.
-                stops.append(
-                    Stop(node.lineno, ast.unparse(node.value), FRAGMENT_NOT_RENDERED)
-                )
-    parts.sort(key=lambda part: part[0])
-    return parts
-
-
-#: The operator of a fragment written in front of what the name holds.
-PREFIX = "=+"
-
-#: The operator of a fragment that cuts the end off what the name holds.  Its
-#: text is empty and the count is read off the node -- see :func:`_cut_of`.
-TRIM = "[:-]"
-
-
-def _trimmed(value: ast.expr, name: str) -> Optional[tuple[int, list[ast.expr]]]:
-    """``(count, rest)`` where *value* is *name* with its last *count* characters cut, then *rest*.
-
-    The two spellings the corpus runs a statement through, 15 times over 14
-    functions, each cutting what a loop left after its last item -- a comma,
-    or ``AND ``::
-
-        sql = sql[:-4]
-        sql_to_get_ids = sql_to_get_ids[:-1] + ") "
-    """
-    operands = _concatenated(value)
-    head = operands[0]
-    if not (
-        isinstance(head, ast.Subscript)
-        and isinstance(head.value, ast.Name)
-        and head.value.id == name
-        and isinstance(head.slice, ast.Slice)
-        and head.slice.lower is None
-        and head.slice.step is None
-    ):
-        return None
-    upper = head.slice.upper
-    if (
-        isinstance(upper, ast.UnaryOp)
-        and isinstance(upper.op, ast.USub)
-        and isinstance(upper.operand, ast.Constant)
-        and type(upper.operand.value) is int
-        and upper.operand.value > 0
-    ):
-        return upper.operand.value, operands[1:]
-    return None
-
-
-def _cut_of(node: ast.stmt) -> int:
-    """How many characters a :data:`TRIM` fragment cuts."""
-    value = written_value(node)
-    for target in targets_of(node):
-        if isinstance(target, ast.Name) and value is not None:
-            trimmed = _trimmed(value, target.id)
-            if trimmed is not None:
-                return trimmed[0]
-    return 0
-
-
-def _joined(pieces: list[ast.expr]) -> str:
-    """The text of a run of ``+`` operands, a piece that renders nothing being a hole."""
-    rendered = [rendered_text(piece) for piece in pieces]
-    return "".join(one if one is not None else _BARE_FIELD for one in rendered)
-
-
-def _wrapping(value: ast.expr, name: str) -> Optional[tuple[str, str]]:
-    """``(before, after)`` where *value* concatenates text around *name* itself, once.
-
-    An operand that renders nothing is a hole, as it is at the call.
-    """
-    operands = _concatenated(value)
-    at = [
-        index
-        for index, operand in enumerate(operands)
-        if isinstance(operand, ast.Name) and operand.id == name
-    ]
-    if len(at) != 1 or len(operands) < 2:
-        return None
-    return _joined(operands[: at[0]]), _joined(operands[at[0] + 1 :])
-
-
-def _composed_texts(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, value: ast.expr, seen: frozenset[str]
-) -> list[str]:
-    """The statements *value* builds out of names this function holds statements under.
-
-    Two spellings: a ``+`` of names and literals, each name standing for the
-    one statement it holds (a piece that renders nothing is a hole); and
-    ``re.sub(<literal>, <literal>, <name>)``, run on each statement the name
-    holds -- the pattern and the replacement are written down, so the result is
-    computed, not guessed (see :func:`_rewritten_values`).
-    """
-    if (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Attribute)
-        and value.func.attr == "sub"
-        and len(value.args) >= 3
-        and _is_literal(value.args[0])
-        and _is_literal(value.args[1])
-        and isinstance(value.args[2], ast.Name)
-    ):
-        try:
-            return [
-                re.sub(value.args[0].value, value.args[1].value, text)
-                for text in _variants(func, value.args[2].id, seen)
-            ][:_MAX_BRANCH_VARIANTS]
-        except re.error:
-            return []
-    operands = _concatenated(value)
-    if len(operands) < 2 or not any(isinstance(operand, ast.Name) for operand in operands):
-        return []
-    pieces: list[list[str]] = []
-    for operand in operands:
-        if isinstance(operand, ast.Name):
-            held = _variants(func, operand.id, seen)
-            if len(held) > 1:
-                # Two names each built several ways are not crossed: which
-                # header goes with which tail is decided by the branches that
-                # built them, and pairing every one with every other makes
-                # statements no run sends -- a header with no VALUES.
-                return []
-            pieces.append(held or [_BARE_FIELD])
-        elif isinstance(operand, ast.BinOp) and isinstance(operand.op, ast.Mod):
-            pieces.append(_percent_texts(func, operand, seen) or [_BARE_FIELD])
-        else:
-            rendered = rendered_text(operand)
-            pieces.append([rendered if rendered is not None else _BARE_FIELD])
-    if all(piece == [_BARE_FIELD] for piece in pieces):
-        return []
-    if math.prod(len(piece) for piece in pieces) > _MAX_BRANCH_VARIANTS:
-        return []
-    return ["".join(combination) for combination in itertools.product(*pieces)]
-
-
-def _percent_texts(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, value: ast.BinOp, seen: frozenset[str]
-) -> list[str]:
-    """``template % (a, b)``: the template's statements, each ``%s`` filled from what its argument holds.
-
-    An argument the source does not write out -- ``JobSpec.columnNames()`` --
-    stays a hole; a table name a loop or a list supplies fills it once per
-    name, as :func:`_table_choices` does for an f-string.
-    """
-    head = _concatenated(value.left)
-    templates: list[str] = [""]
-    for operand in head:
-        if isinstance(operand, ast.Name):
-            held = _variants(func, operand.id, seen)
-        else:
-            rendered = rendered_text(operand)
-            held = [rendered] if rendered is not None else []
-        if not held:
-            return []
-        templates = [one + more for one in templates for more in held]
-    arguments = value.right.elts if isinstance(value.right, ast.Tuple) else [value.right]
-    fills = [_literal_values(func, argument) or [_BARE_FIELD] for argument in arguments]
-    found: list[str] = []
-    for template in templates:
-        if template.count(_PERCENT_S) != len(fills):
-            found.append(template.replace(_PERCENT_S, _BARE_FIELD))
-            continue
-        for combination in itertools.product(*fills):
-            text = template
-            for fill in combination:
-                text = text.replace(_PERCENT_S, fill, 1)
-            found.append(text)
-    return found[:_MAX_BRANCH_VARIANTS]
-
-
-def _through_name(func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr) -> ast.expr:
-    """*expression*, or the ``%``/``.format`` expression the name at its head was bound to once.
-
-    ``sql_exe = (sql_jt + comment) % table`` and then ``execute(sql_exe,
-    ...)`` is ``execute((sql_jt + comment) % table, ...)`` read one line
-    apart: the table is filled in by the ``%``, which :func:`_call_site_fill`
-    reads where it is written into the call.
-    """
-    head = _concatenated(expression)[0]
-    if not isinstance(head, ast.Name) or _variants(func, head.id):
-        return expression
-    bound = [
-        node.value
-        for node in ast.walk(func)
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        and node.value is not None
-        and enclosing_function(node) is func
-        and any(isinstance(target, ast.Name) and target.id == head.id for target in targets_of(node))
-    ]
-    if len(bound) != 1:
-        return expression
-    value = bound[0]
-    percent = isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mod)
-    formatted = (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Attribute)
-        and value.func.attr == "format"
-    )
-    return value if percent or formatted else expression
-
-
-def _fold(parts: list[tuple[int, str, str, ast.stmt]]) -> str:
-    """Concatenate one ``=``-started run of fragments."""
-    assembled = ""
-    for _line, operator, text, node in parts:
-        if operator == "=":
-            assembled = text
-        elif operator == PREFIX:
-            assembled = text + assembled
-        elif operator == TRIM:
-            assembled = assembled[: max(len(assembled) - _cut_of(node), 0)]
-        else:
-            assembled += text
-    return assembled
-
-
-def _compatible_sets(
-    parts: list[tuple[int, str, str, ast.stmt]], start: int
-) -> list[frozenset[int]]:
-    """Return the fragment sets a single run of the code can append, largest first.
-
-    One set per statement a reader can meet.  The test between two fragments is
-    :func:`pathcond.parted`, reading the negations the path condition already
-    carries as the function runs; a statement is then a set no two of whose
-    members contradict, and
-    which nothing else can be added to -- a maximal clique of the compatibility
-    graph, enumerated with Bron-Kerbosch.
-
-    **Connected components were the wrong shape, and the corpus says where.**
-    Grouping the exclusive pairs and taking one member per group is right for
-    an ``if``/``elif``/``else``, whose arms are pairwise exclusive, and wrong
-    the moment two unrelated ``if``s touch.  ``insertTaskParams_JEDI`` builds
-    one INSERT across a backend test and a ``parent_tid`` test, and the inner
-    ``if`` repeats the outer one -- so one arm of each is exclusive with one arm
-    of the other and all five fragments collapse into a single alternative.
-    Exactly one of the five then survives per statement, and every statement
-    comes out with an opening parenthesis and no closing one, or the reverse.
-    ``writes`` reads none of them: the map reported six statements it could name
-    no column of, and ``ATLAS_DEFT.T_TASK`` lost ``priority``.
-
-    A fragment under no test is compatible with everything, so it lands in every
-    set without being special-cased.
-    """
-    indices = list(range(start, len(parts)))
-    # Two fragments one statement appends in one place are alternatives: the
-    # statements a name handed in can hold, of which a run appends one.
-    agrees = {
-        index: {
-            other
-            for other in indices
-            if other != index
-            and not (parts[other][3] is parts[index][3] and parts[other][1] == parts[index][1])
-            and not parted(parts[index][3], parts[other][3], exits=False)
-        }
-        for index in indices
-    }
-    if all(len(agrees[index]) == len(indices) - 1 for index in indices):
-        # Nothing contradicts anything: one statement, which is most runs.
-        return [frozenset(indices)]
-
-    found: list[frozenset[int]] = []
-
-    def expand(chosen: set[int], candidates: set[int], refused: set[int]) -> None:
-        if len(found) > _MAX_BRANCH_VARIANTS:
-            # The caller folds past the cap; stopping here keeps a pathological
-            # run from costing more than the answer it would be given.
-            return
-        if not candidates and not refused:
-            found.append(frozenset(chosen))
-            return
-        pivot = max(candidates | refused, key=lambda one: len(agrees[one] & candidates))
-        for one in sorted(candidates - agrees[pivot]):
-            expand(chosen | {one}, candidates & agrees[one], refused & agrees[one])
-            candidates = candidates - {one}
-            refused = refused | {one}
-
-    expand(set(), set(indices), set())
-    return sorted(found, key=lambda members: sorted(members))
-
-
-#: A hole standing where a whole table reference goes.  The keyword settles it
-#: from the left and the character after the hole settles it from the right:
-#: ``FROM {schemaJEDI}.JEDI_Tasks`` interpolates the *schema* and is followed by
-#: a dot, which is why reassembly blanks interpolations in the first place.
-#:
-#: The schema may itself be a hole, so the keyword need not be the hole's
-#: immediate neighbour: ``INSERT INTO {schema}.{table}`` puts a filled-in
-#: ``{}.`` between them.  Requiring adjacency lost the two statements that
-#: create a job row -- ``INSERT INTO {}.{} (...) RETURNING PandaID`` -- and so
-#: the map could not say where the system's most-read row comes into existence.
-_BEFORE_TABLE = re.compile(
-    r"\b(?:FROM|UPDATE|INTO|JOIN)\s+(?:(?:\{\}|[A-Za-z_][\w$]*)\.)?$", re.IGNORECASE
-)
-
-
-def _table_holes(text: str) -> set[int]:
-    """Which of *text*'s ``{}`` holes stand for a whole table name.
-
-    Position, not resolvability, is what this decides, and it decides it
-    narrowly on purpose.  :func:`rendered_text` serves two readers that want
-    opposite things from the same ``{}``: this one wants the hole *filled*,
-    because a statement needs its table named, while ``DiagnosticTemplate``
-    wants it *kept*, because the unfilled frame is the part a line observed in
-    production can be matched against.  Filling every hole a value could be
-    recovered for fills ninety-nine more across the corpus, nearly all of them
-    in log messages and dataset names -- and a template expanded over its own
-    values no longer matches the line that carried a different one.
-    """
-    found: set[int] = set()
-    position = index = 0
-    while (hole := text.find(_BARE_FIELD, position)) >= 0:
-        if text[hole + 2 : hole + 3] != "." and _BEFORE_TABLE.search(text[:hole]):
-            found.add(index)
-        position, index = hole + 2, index + 1
-    return found
-
-
 # A field marker whose value is derived from an argument rather than being one
 # -- ``{0.attr}``, ``{0[1]}``, ``{p:.3%}``, or an index the call passes nothing
 # for.  It holds a position so the markers and the ``{}``s stay in step, and
@@ -1039,10 +532,10 @@ def _format_arguments(node: ast.Call) -> Optional[list[ast.expr]]:
 
     One entry per marker in *source order, with repeats*, not one per distinct
     argument: ``"FROM {0}.{1} j, {0}.Datasets d"`` has three markers and two
-    arguments, and :func:`_table_choices` measures this list against the number
-    of ``{}`` the rendered text carries.  A list of distinct arguments is one
-    short, and a fragment whose count does not match is dropped rather than
-    truncated -- silently, which is how a table name goes missing.
+    arguments, and the list is measured against the number of ``{}`` the
+    rendered text carries.  A list of distinct arguments is one short, and a
+    fragment whose count does not match is dropped rather than truncated --
+    silently, which is how a table name goes missing.
 
     The indices are read back from the receiver, *before* :func:`rendered_text`
     flattens every marker to ``{}``.  Leaving them in the rendered text instead
@@ -1082,8 +575,8 @@ def _format_arguments(node: ast.Call) -> Optional[list[ast.expr]]:
             found.append(node.args[index] if index < len(node.args) else _DERIVED_FIELD)
         else:
             found.append(named.get(field, _DERIVED_FIELD))
-    # The same measurement :func:`_table_choices` will make, made here as well:
-    # composed under a ``+``, a list of the wrong length can be summed with a
+    # Measured here and not only on the whole statement: composed under a
+    # ``+``, a list of the wrong length can be summed with a
     # correct one into a total that matches and is aligned with nothing.
     rendered = rendered_text(node)
     if rendered is None or len(found) != rendered.count(_BARE_FIELD):
@@ -1121,509 +614,26 @@ def _hole_expressions(node: ast.expr) -> Optional[list[ast.expr]]:
     return None
 
 
-def _fill(text: str, values: dict[int, str]) -> str:
-    """Replace the numbered holes of *text*, leaving the rest as they are."""
-    out: list[str] = []
-    position = index = 0
-    while (hole := text.find(_BARE_FIELD, position)) >= 0:
-        out.append(text[position:hole])
-        # A filled name carries its own schema hole -- ``{}.jobsActive4`` -- so
-        # the scan continues past the original hole rather than over what
-        # replaced it.
-        out.append(values.get(index, _BARE_FIELD))
-        position, index = hole + 2, index + 1
-    out.append(text[position:])
-    return "".join(out)
-
-
-def _table_choices(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    parts: list[tuple[int, str, str, ast.stmt]],
-) -> tuple[list[tuple[list[ast.expr], set[int]]], dict[str, list[str]]]:
-    """Return each fragment's table holes, and the names each one can hold.
-
-    Keyed by the expression rather than by the hole, because one loop variable
-    interpolated into two fragments of a statement takes *one* value per pass;
-    treating the holes independently would cross them and read a union of two
-    tables as a single statement over both.
-    """
-    per_part: list[tuple[list[ast.expr], set[int]]] = []
-    choices: dict[str, list[str]] = {}
-    for _line, _operator, text, node in parts:
-        value = written_value(node)
-        expressions = _hole_expressions(value) if value is not None else None
-        if expressions is None or len(expressions) != text.count(_BARE_FIELD):
-            per_part.append(([], set()))
-            continue
-        holes = {
-            hole for hole in _table_holes(text) if _literal_values(func, expressions[hole])
-        }
-        per_part.append((expressions, holes))
-        for hole in holes:
-            choices.setdefault(
-                ast.unparse(expressions[hole]), _literal_values(func, expressions[hole])
-            )
-    return per_part, choices
-
-
-def _assignments(choices: dict[str, list[str]]) -> list[dict[str, str]]:
-    """One mapping of expression to table name per combination the code allows."""
-    if not choices:
-        return [{}]
-    names = sorted(choices)
-    return [
-        dict(zip(names, combination, strict=True))
-        for combination in itertools.product(*(choices[name] for name in names))
-    ]
-
-
-def _fold_filled(
-    parts: list[tuple[int, str, str, ast.stmt]],
-    per_part: list[tuple[list[ast.expr], set[int]]],
-    assignment: dict[str, str],
-    dropped: set[int],
-    key_fills: Optional[list[Optional[str]]] = None,
-) -> tuple[str, list[Span]]:
-    """:func:`_fold`, with each fragment's table holes filled from *assignment*.
-
-    Returns the statement and where in it each fragment landed.  The spans are
-    taken here rather than recomputed because they have to describe the text
-    *after* filling: ``_fill`` changes the length of any fragment carrying a
-    hole, so offsets measured on the unfilled text point at the wrong column as
-    soon as a table name is interpolated.
-
-    *key_fills* is the other kind of filling -- see :func:`_key_fills`.  A
-    fragment appended once per key of a mapping stands for all of them, so its
-    replacement is already the whole run and the table holes have nothing left
-    to say about it.
-    """
-    assembled = ""
-    spans: list[Span] = []
-    for index, (_line, operator, text, node) in enumerate(parts):
-        if index in dropped:
-            continue
-        if operator == TRIM:
-            # Cut from every fragment it reaches into, so no value is placed
-            # in a stretch the statement no longer has.
-            kept = max(len(assembled) - _cut_of(node), 0)
-            assembled = assembled[:kept]
-            spans = [Span(span.node, min(span.start, kept), min(span.end, kept)) for span in spans]
-            continue
-        if key_fills is not None and key_fills[index] is not None:
-            text = key_fills[index]
-            spans.append(Span(node, len(assembled), len(assembled) + len(text)))
-            assembled += text
-            continue
-        expressions, holes = per_part[index]
-        if holes and assignment:
-            text = _fill(
-                text,
-                {
-                    hole: assignment[ast.unparse(expressions[hole])]
-                    for hole in holes
-                    if ast.unparse(expressions[hole]) in assignment
-                },
-            )
-        if operator == "=":
-            assembled = ""
-            spans = []
-        if operator == PREFIX:
-            spans = [Span(node, 0, len(text))] + [
-                Span(span.node, span.start + len(text), span.end + len(text)) for span in spans
-            ]
-            assembled = text + assembled
-            continue
-        spans.extend(_part_spans(node, text, len(assembled)))
-        assembled += text
-    return assembled, spans
-
-
-def _accumulated(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    parts: list[tuple[int, str, str, ast.stmt]],
-    name: str,
-) -> list[tuple[int, str, str, ast.stmt]]:
-    """*parts*, with a loop that builds one statement over a list of tables written out.
-
-    A loop over table names reads as one statement per table when the
-    statement runs inside it.  When nothing in the loop runs a statement, the
-    loop is building one::
-
-        sqlP = ""
-        for tableName in tables:
-            if sqlP != "":
-                sqlP += "UNION ALL "
-            sqlP += f"SELECT PandaID FROM {tableName} WHERE jediTaskID=:jediTaskID "
-
-    and split per table, every pass kept the ``UNION ALL``: the test reads
-    what earlier passes appended, which no single pass can say, so each one
-    read as a statement beginning ``UNION ALL`` that PanDA never sends.
-    Written out pass by pass, that test is answered by what is assembled so
-    far, and a test on the table by :func:`_test_value`.  One neither can
-    decide keeps its fragment, as an optional fragment is kept everywhere
-    else -- and as one: it stays its own part, at the ``+=`` under the test,
-    so the readers of what some paths append see the test above it.  Pasted
-    into the pass's text, ``AND modificationTime>(CURRENT_DATE-30)`` under
-    ``if tableName.startswith(panda_config.schemaPANDAARCH):`` read as a
-    condition of every branch of ``getPandaIDsWithTask_JEDI``.
-    """
-    per_part, choices = _table_choices(func, parts)
-    for (_line, _operator, _text, node), (expressions, holes) in zip(parts, per_part, strict=True):
-        for hole in holes:
-            variable = ast.unparse(expressions[hole])
-            loop = next(
-                (
-                    one
-                    for one in ancestors(node)
-                    if isinstance(one, ast.For)
-                    and isinstance(one.target, ast.Name)
-                    and one.target.id == variable
-                ),
-                None,
-            )
-            if loop is None or any(
-                isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Attribute)
-                and call.func.attr in RUNNERS
-                for call in ast.walk(loop)
-            ):
-                continue
-            body = [
-                index
-                for index, part in enumerate(parts)
-                if any(one is loop for one in ancestors(part[3]))
-            ]
-            # Only a run of ``+=`` the loop owns outright: a ``=`` inside it
-            # starts a statement per pass, and that is the split's case.
-            if body != list(range(body[0], body[-1] + 1)) or any(parts[i][1] != "+=" for i in body):
-                return parts
-            assembled = _fold(parts[: body[0]])
-            text = ""
-            undecided: list[tuple[int, int, ast.stmt]] = []
-            for value in choices[variable]:
-                for index in body:
-                    _at, _op, fragment, held = parts[index]
-                    decided = _guarded(held, loop, {variable: value, name: assembled + text})
-                    if decided is False:
-                        continue
-                    fragment_expressions, fragment_holes = per_part[index]
-                    filled = _fill(
-                        fragment,
-                        {
-                            hole: value
-                            for hole in fragment_holes
-                            if ast.unparse(fragment_expressions[hole]) == variable
-                        },
-                    )
-                    if decided is None:
-                        undecided.append((len(text), len(text) + len(filled), held))
-                    text += filled
-            if undecided:
-                _undecided_passes(loop)[text] = undecided
-            return _accumulated(
-                func, parts[: body[0]] + [(loop.lineno, "+=", text, loop)] + parts[body[-1] + 1 :], name
-            )
-    return parts
-
-
-def _undecided_passes(loop: ast.AST) -> dict[str, list[tuple[int, int, ast.stmt]]]:
-    """Where, in each text :func:`_accumulated` wrote *loop* out to, a fragment under a test it could not decide landed.
-
-    ``{text: [(start, end, the fragment's statement), ...]}``, kept on the
-    loop node: one text per reading of the loop (a call's constants can drop
-    passes), and the loop is one part of the statement whichever.  The part
-    stays one -- two parts at one node read as alternatives
-    (:func:`_compatible_sets`) -- and its spans say where each such fragment
-    is (:func:`_part_spans`).
-    """
-    held = loop.__dict__.setdefault("undecided_passes", {})
-    return held  # type: ignore[no-any-return]
-
-
-def _part_spans(node: ast.stmt, text: str, at: int) -> list[Span]:
-    """The spans of a part appended at *at*: one, or a written-out loop's, split where an undecided fragment landed.
-
-    The fragment's span is the fragment's statement, under its ``if``, so
-    what some paths append (``sqlwrite._on_some_paths``) is read off it as
-    off any optional fragment.
-    """
-    ranges = node.__dict__.get("undecided_passes", {}).get(text) if isinstance(node, (ast.For, ast.AsyncFor)) else None
-    if not ranges:
-        return [Span(node, at, at + len(text))]
-    spans: list[Span] = []
-    done = 0
-    for start, end, held in ranges:
-        if start > done:
-            spans.append(Span(node, at + done, at + start))
-        spans.append(Span(held, at + start, at + end))
-        done = end
-    if done < len(text):
-        spans.append(Span(node, at + done, at + len(text)))
-    return spans
-
-
-def _guarded(node: ast.AST, loop: ast.For, bound: dict[str, str]) -> Optional[bool]:
-    """Whether the ``if``\\ s between *node* and *loop* let it through for *bound*; ``None`` if undecided."""
-    decided: Optional[bool] = True
-    child: ast.AST = node
-    for one in ancestors(node):
-        if one is loop:
-            break
-        if isinstance(one, ast.If):
-            value = _test_value(one.test, bound, loop)
-            taken = any(statement is child for statement in one.body)
-            if value is None:
-                decided = None
-            elif value is not taken:
-                return False
-        child = one
-    return decided
-
-
-def _run_variants(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    parts: list[tuple[int, str, str, ast.stmt]],
-    name: str,
-) -> list[tuple[str, list[Span]]]:
-    """Return the statements one ``=``-started run of fragments can produce.
-
-    Each comes with the spans saying which fragment contributed which stretch
-    of it -- see :func:`variant_spans` for why that is the interesting part.
-
-    Fragments appended under mutually exclusive branches are *alternatives*, not
-    parts of one statement, and folding them together builds a statement that
-    cannot exist::
-
-        UPDATE {}.JEDI_Tasks SET status=:status,SET status=oldStatus,...
-
-    which is not merely unreadable -- the second ``SET`` overwrote the first in
-    the column map, so the map lost the bind arm of the write entirely and, in
-    another method, gained a column no statement ever assigns.
-
-    Only mutual exclusion splits.  A fragment appended under an ``if`` with no
-    ``else`` is left in every variant: splitting on optional fragments too would
-    double the count for each one, and the resulting over-read is the safe
-    direction -- an extra ``AND`` clause is read, not a value invented.
-
-    The head of the run is never dropped.  It is what the statement *is*; the
-    alternatives are among the fragments appended to it.
-
-    **A table name the loop supplies splits the run the same way.**  A hole
-    standing for a whole table reference is not the schema -- ``FROM
-    {tableName}`` where ``tableName`` comes from a local list of names the
-    source writes out is four statements, one per table, and read as one it is
-    a statement about a table called ``{}``.  That is what hid the helper
-    fetching a task's jobs: the rows it selects belong to a table the map had
-    no name for.  That holds where the statement runs inside the loop; where
-    nothing in the loop runs one, the loop is building a single statement,
-    and :func:`_accumulated` writes it out pass by pass first.
-    """
-    parts = _accumulated(func, parts, name)
-    heads = [index for index, part in enumerate(parts) if part[1] == "="]
-    # One head is the statement and is never dropped.  Several are the arms of
-    # one ``if``/``else`` (see :func:`_runs`), and each set takes one of them.
-    start = 1 if heads == [0] else 0
-    statements = _compatible_sets(parts, start)
-    if len(heads) > 1:
-        statements = [members for members in statements if members & set(heads)]
-    per_part, choices = _table_choices(func, parts)
-    key_fills = _key_fills(func, parts)
-    assignments = _assignments(choices)
-    total = len(statements) * len(assignments)
-    if total > _MAX_BRANCH_VARIANTS:
-        # Folded as before rather than split into an arbitrary subset: a
-        # truncated list of statements reads as the complete one.  Said out
-        # loud, because a silent cap is indistinguishable from full coverage.
-        logger.warning(
-            "%s at line %d is built across %d combinations of branch and table, over "
-            "the cap of %d: read as one folded statement, so a conditionally assembled "
-            "column or an interpolated table name may be misread here",
-            name,
-            parts[0][0],
-            total,
-            _MAX_BRANCH_VARIANTS,
-        )
-        return [_fold_filled(parts, per_part, {}, set(), key_fills)]
-
-    every = set(range(start, len(parts)))
-    found: list[tuple[str, list[Span]]] = []
-    # Per arm, as when each arm was a run of its own: two arms writing the
-    # same text are two places the statement is built, and a call in the
-    # second arm is reached only by the second's fragments.
-    seen: set[tuple[Optional[int], str]] = set()
-    for members in statements:
-        dropped = every - members
-        arm = min(members & set(heads)) if len(heads) > 1 else None
-        for assignment in assignments:
-            text, spans = _fold_filled(parts, per_part, assignment, dropped, key_fills)
-            if text and (arm, text) not in seen:
-                seen.add((arm, text))
-                found.append((text, spans))
-    return found
-
-
-def variants(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, seen: frozenset[str] = frozenset()
-) -> list[str]:
-    """Return every statement local *name* can hold.
-
-    Run (:func:`evaluated`), every text *name* holds at a call that runs it.
-    A name no call here runs is not followed by the run at all -- ``other(sqlJ)``
-    hands its statement away -- and the reassembly (:func:`_variants`) is
-    then the only reading there is: coverage still has to count it.
-    """
-    if _EVALUATED and not seen:
-        held = _evaluation(func).named_everywhere(name)
-        if held:
-            return held
-    return _variants(func, name, seen)
-
-
-def _variants(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, seen: frozenset[str] = frozenset()
-) -> list[str]:
-    """Return every statement local *name* can hold, reassembled.
-
-    Two things make one name hold several statements, and both were learned by
-    getting them wrong.
-
-    **Reassignment.**  A name given a new ``=`` mid-function holds a different
-    statement from then on, and reading only the last quietly drops the others:
-    ``reactivatePendingTasks_JEDI`` picks between a timeout statement and a
-    release statement through one variable, so keeping one of the two loses half
-    of what the method does.
-
-    **Mutually exclusive fragments.**  A statement assembled across an
-    ``if``/``else`` is as much two statements as a reassigned one is -- see
-    :func:`_run_variants`.
-
-    Either way they are returned separately rather than concatenated, because
-    concatenating runs one statement's ``SET`` clause into the next one's, which
-    the column regexes cannot tell from a wider ``SET``.
-    """
-    return [text for run in _runs(_parts(func, name, seen)) for text, _spans in _run_variants(func, run, name) if text]
-
-
-def _runs(parts: list[tuple[int, str, str, ast.stmt]]) -> list[list[tuple[int, str, str, ast.stmt]]]:
-    """*parts* cut into the runs one statement each is built by, at each ``=``.
-
-    **Except a ``=`` that is another arm of the same ``if``.**  ``getNumberJobsUser``
-    writes::
-
-        if workingGroup is not None:
-            sql = "SELECT ... AND workingGroup=:workingGroup "
-        else:
-            sql = "SELECT ... AND workingGroup IS NULL "
-        sql += "AND NOT jobStatus IN (:failed,:merging) "
-
-    and cut at each ``=``, the shared ``+=`` went to the ``else`` arm alone:
-    the ``if`` arm's statement never refused ``failed``.  A ``=`` exclusive
-    with everything the current run holds opens an alternative of it rather
-    than a new run, and :func:`_run_variants` gives each set one arm.
-    """
-    runs: list[list[tuple[int, str, str, ast.stmt]]] = []
-    for part in parts:
-        if part[1] == "=" and runs and any(one[1] == "=" for one in runs[-1]):
-            if all(parted(one[3], part[3], exits=False) for one in runs[-1]):
-                runs[-1].append(part)
-                continue
-        if part[1] == "=" or not runs:
-            runs.append([])
-        runs[-1].append(part)
-    return runs
-
-
 def variant_spans(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     name: str,
-    at: Optional[ast.AST] = None,
+    at: ast.Call,
     text: Optional[str] = None,
     read: bool = False,
 ) -> list[tuple[str, list[Span]]]:
-    """:func:`variants`, with each statement's fragments and where they landed.
+    """Every statement *name* holds at *at*, with each statement's fragments and where they landed.
 
-    *at* is where the question is asked: a call that runs *name*, or a
-    statement copying it into the name a call runs (``sql = sqlIn``, which
-    sqlwrite cuts in ``sqlIn``'s own terms).  Run (:func:`evaluated`), the
-    answer is what *name* holds there -- the texts that reach it, each with the
-    statement that put each stretch into *name* -- and *text*, where given, is
-    the one statement asked about: ``updateSiteData`` copies ``sqlIn`` into
-    ``sql`` in two loops, and read by name the call in the first was handed the
-    copy in the second.  Without *at*, or reassembled, every variant of the
-    name in the function, as :func:`_variant_spans` reads them, *text* or not:
-    the reassembly's readers pick their own.
+    *at* is the call that runs *name*.  The answer is what *name* holds there
+    -- the texts that reach it, each with the statement that put each stretch
+    into *name* -- and *text*, where given, is the one statement asked
+    about: ``updateSiteData`` copies ``sqlIn`` into ``sql`` in two loops, and
+    read by name the call in the first was handed the copy in the second.
 
     With *read*, each statement is given as a reader takes it
     (:func:`reading_text`), its spans still positions in the statement's own
     text: what sqltext reads off the one, it places in the other.
     """
-    if _EVALUATED and at is not None:
-        return _evaluated_spans(func, name, at, text, read)
-    return _variant_spans(func, name)
-
-
-def _variant_spans(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
-) -> list[tuple[str, list[Span]]]:
-    """:func:`_variants`, with each statement's fragments and where they landed.
-
-    **The variant is the unit, not the fragment and not the whole function.**
-    A fragment is where a path condition lives, so it is tempting to read one
-    at a time; that is what ``assigns_in`` was doing, and it cannot see an
-    ``INSERT`` whose columns and values were appended on different lines.  It
-    is equally tempting to group fragments that share a guard, but::
-
-        sql  = "SELECT ... "          # no test above it
-        sql += "WHERE a=:a "          # no test above it
-        if wanted:
-            sql += "AND b=:b "        # under ``wanted``
-
-    has two statements a reader can meet -- with and without the third
-    fragment -- and the group ``["AND b=:b "]`` is neither of them.  It is not
-    a statement at all; nothing ever runs it alone.
-
-    :func:`_run_variants` already enumerates the statements properly, splitting
-    on mutual exclusion and keeping an ``if`` with no ``else`` in every variant.
-    All that was missing is which fragment contributed which stretch, so this
-    returns that rather than inventing a second decomposition.
-    """
-    return [
-        (text, spans)
-        for run in _runs(_parts(func, name))
-        for text, spans in _run_variants(func, run, name)
-        if text
-    ]
-
-
-def reconstruct(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
-    """Reassemble the SQL string held by local *name*, as last assigned.
-
-    Fragments are ordered by line, with ``=`` restarting the string and ``+=``
-    extending it.  This is not flow-sensitive: a statement built differently in
-    two branches comes back as one concatenation.  That over-reads rather than
-    under-reads, and the table and column names -- the parts used here -- are
-    the same in both branches when it happens.
-
-    Where the branches disagree about the *value*, ``fragments`` recovers what
-    this cannot: ``getTasksToExecCommand_JEDI`` appends ``SET status=:status``
-    or ``SET status=oldStatus`` depending on the command, and both appear here.
-    """
-    return _fold(_parts(func, name))
-
-
-def fragments(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
-) -> list[tuple[ast.stmt, str]]:
-    """Return the statements building *name*, each with the text it contributes.
-
-    Reassembly deliberately flattens a conditionally built statement, which is
-    right for reading the table and the columns and wrong for reading *why*.
-    A fragment appended under an ``else`` carries that ``else`` in its own path
-    condition, so the fragment is the anchor for any value written inline --
-    a literal or a copied column, neither of which has a bind assignment to
-    point at instead.
-    """
-    return [(node, text) for _line, _operator, text, node in _parts(func, name)]
+    return _evaluated_spans(func, name, at, text, read)
 
 
 class Execution(NamedTuple):
@@ -1681,16 +691,15 @@ class Execution(NamedTuple):
     """
 
     pieces: tuple = ()
-    """Run (:func:`evaluated`), each stretch of :attr:`sql` with its way to the run: ``(start, end, way)``.
+    """Each stretch of :attr:`sql` with its way to the run: ``(start, end, way)``.
 
     *way* is :func:`sqleval.way_of`: where the stretch was written, then each
     statement that put it into a name, each callee ``return`` and each call it
-    came back from.  Empty for the reassembly, whose readers cut the statement
-    into fragments themselves (``sqlwrite._run_builds``).
+    came back from.
     """
 
     holes: tuple = ()
-    """Run (:func:`evaluated`), each ``{}`` of :attr:`sql` in order: ``(offset, sqleval.HoleAt)``.
+    """Each ``{}`` of :attr:`sql` in order: ``(offset, sqleval.HoleAt)``.
 
     Where a loop of unknown length appended, the hole keeps the loop and what
     one pass appends (:attr:`sqleval.HoleAt.repeats`): ``getJobs``' ``(CASE {}
@@ -1705,8 +714,7 @@ class Execution(NamedTuple):
     @property
     def reading(self) -> str:
         """:attr:`sql` as a reader of the statement takes it: each part a loop of unknown length repeats as one
-        pass of each text the loop appends (:func:`reading_text`).  :attr:`sql` itself where nothing repeats, and
-        reassembled."""
+        pass of each text the loop appends (:func:`reading_text`).  :attr:`sql` itself where nothing repeats."""
         return reading_text(self.sql, self.holes)
 
 
@@ -1733,34 +741,22 @@ def reading_text(text: str, holes: tuple) -> str:
 
 
 def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
-    """Return the expressions interpolated into the fragments building *name*.
+    """Return the expressions interpolated into the statements the calls holding *name* run.
 
-    Reassembly blanks them, which is right for reading columns and wrong for
+    The text blanks them, which is right for reading columns and wrong for
     reading *whose* table this is: the schema is interpolated into the head of
     the statement (``f"UPDATE {panda_config.schemaDEFT}.T_TASK "``) while the
     columns arrive in later ``+=`` fragments, so neither half can be read
-    without the other.  Run, they are the holes of the statements the calls
-    holding *name* run: what each was written as (``panda_config.schemaDEFT``).
+    without the other.  They are the holes of the runs: what each was written
+    as (``panda_config.schemaDEFT``).
     """
-    if _EVALUATED:
-        return [
-            hole.source
-            for run in executions(func)
-            if run.variable == name
-            for _at, hole in run.holes
-            if hole.source
-        ]
-    found: list[str] = []
-    for _line, _operator, _text, node in _parts(func, name):
-        value = written_value(node)
-        if not isinstance(value, ast.JoinedStr):
-            continue
-        found.extend(
-            ast.unparse(part.value)
-            for part in value.values
-            if isinstance(part, ast.FormattedValue)
-        )
-    return found
+    return [
+        hole.source
+        for run in executions(func)
+        if run.variable == name
+        for _at, hole in run.holes
+        if hole.source
+    ]
 
 
 def _is_literal(node: ast.expr) -> bool:
@@ -1810,46 +806,7 @@ def _concatenated(node: ast.expr) -> list[ast.expr]:
     return [node]
 
 
-#: ``UPDATE %s SET`` and ``UPDATE ATLAS_PANDA.{0} SET`` -- a table name the call
-#: supplies rather than the statement.  Both markers are unambiguous: rendered
-#: text spells an f-string interpolation ``{}``, never either of these.
-_PERCENT_S = "%s"
 _BARE_FIELD = "{}"
-
-
-def _interpolates(node: ast.expr) -> bool:
-    """Whether any brace this expression renders could be a hole, not a brace."""
-    return any(
-        isinstance(child, ast.JoinedStr)
-        or (
-            isinstance(child, ast.Call)
-            and isinstance(child.func, ast.Attribute)
-            and child.func.attr == "format"
-        )
-        for child in ast.walk(node)
-    )
-
-
-def _braces_are_literal(sources: list[ast.stmt]) -> bool:
-    """Whether every ``{}`` the fragments in *sources* wrote is a placeholder.
-
-    Rendered text spells an f-string interpolation ``{}`` as well, so a bare
-    brace is either the hole a schema went into or a field a ``.format`` at the
-    call fills.  The fragments settle it without a guess: if none of them
-    interpolates, every brace came from a literal.
-
-    **The fragments of this statement, not every assignment to the name.**
-    Asked across the whole function it is a different question, and a bigger
-    one than the answer can bear: ``copyArchive.main`` assigns ``sql``
-    forty-four times and exactly one of those is an f-string, which disqualified
-    the other forty-three.  Among them is the query whose table the loop
-    supplies, so ``JOBS_SHARE_STATS`` and ``JOBSDEFINED_SHARE_STATS`` were read
-    as ``FROM ATLAS_PANDA.{}`` -- naming no table at all.
-    """
-    return not any(
-        (value := written_value(node)) is not None and _interpolates(value)
-        for node in sources
-    )
 
 
 def _elements(node: ast.expr) -> Optional[list[str]]:
@@ -2306,61 +1263,12 @@ def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
     return kept
 
 
-def _key_fills(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    parts: list[tuple[int, str, str, ast.stmt]],
-) -> list[Optional[str]]:
-    """For each fragment, the text the loop around it actually appends.
-
-    A loop over a mapping appends *one* fragment per key to *one* statement, so
-    the expansion belongs here and not in :func:`_run_variants`: a table name
-    the loop supplies makes four statements, and a column name it supplies
-    makes one statement four columns wider.  ``None`` leaves the fragment as
-    reassembly already reads it.
-    """
-    fills: list[Optional[str]] = []
-    for _line, _operator, text, node in parts:
-        value = written_value(node)
-        expressions = _hole_expressions(value) if value is not None else None
-        loop = next(
-            (one for one in ancestors(node) if isinstance(one, ast.For)), None
-        )
-        if expressions is None or not expressions or loop is None:
-            fills.append(None)
-            continue
-        if len(expressions) != text.count(_BARE_FIELD):
-            fills.append(None)
-            continue
-        key, mapping = _mapping_iterated(loop)
-        if not key or mapping is None or not any(
-            _reads(expression, key) or isinstance(expression, ast.Name)
-            for expression in expressions
-        ):
-            fills.append(None)
-            continue
-        keys = _mapping_keys(func, mapping)
-        kept = _kept_keys(loop, key, keys) if keys else None
-        if not kept:
-            fills.append(None)
-            continue
-        pieces: list[str] = []
-        for one in kept:
-            bound = {key: one}
-            filled = [_string_value(expression, bound, loop) for expression in expressions]
-            if any(part is None for part in filled):
-                pieces = []
-                break
-            pieces.append(_fill(text, dict(enumerate(filled))))
-        fills.append("".join(pieces) if pieces else None)
-    return fills
-
-
 def spells_key(
     func: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, spelled: ast.expr, key: str
 ) -> bool:
     """Whether ``<varmap>[<spelled>]`` fills *key* on one pass of its loop.
 
-    The bind side of :func:`_key_fills`.  ``setScoutJobData_JEDI`` writes
+    The bind side of a column named from a key.  ``setScoutJobData_JEDI`` writes
     ``varMap[tmpScoutKey] = scoutVal`` beside the fragment that names the
     column, so a statement whose ``SET`` clause now spells ``:cpuTime`` still
     had no value for it: the placeholder was read as computed and passed over.
@@ -2389,7 +1297,7 @@ class KeyColumnCensus(NamedTuple):
 
 
 def key_column_census(func: ast.FunctionDef | ast.AsyncFunctionDef) -> KeyColumnCensus:
-    """Count the fragments :func:`_key_fills` is asked about, and how it answered.
+    """Count the fragments written from a mapping's keys, and how many the run read.
 
     An unresolved one leaves the statement naming no column at all, which looks
     exactly like a statement that writes none.  The count is reported so that
@@ -2399,21 +1307,10 @@ def key_column_census(func: ast.FunctionDef | ast.AsyncFunctionDef) -> KeyColumn
     loops = resolved = from_parameter = 0
     arguments = {argument.arg for argument in func.args.args}
     counted: set[int] = set()
-    if _EVALUATED:
-        # Run: the fragments are where each stretch of what the calls run was
-        # written, and the ones a hole stands for; read when no hole is left.
-        fragments, unread = _run_fragments(func)
-        asked = [(node, id(node) not in unread) for node in fragments]
-    else:
-        asked = []
-        for name in {run.variable for run in executions(func) if run.variable}:
-            parts = _parts(func, name)
-            asked += [
-                (node, fill is not None)
-                for (_line, _operator, _text, node), fill in zip(
-                    parts, _key_fills(func, parts), strict=True
-                )
-            ]
+    # The fragments are where each stretch of what the calls run was written,
+    # and the ones a hole stands for; read when no hole is left.
+    fragments, unread = _run_fragments(func)
+    asked = [(node, id(node) not in unread) for node in fragments]
     for node, read in asked:
         fed = _fed_by_key(node)
         if fed is None or id(node) in counted:
@@ -2481,82 +1378,9 @@ def _run_fragments(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[a
     return list(fragments.values()), unread
 
 
-def _reads(expression: ast.expr, name: str) -> bool:
-    """Whether *expression* reads *name* -- editing what is there, not replacing it."""
-    return any(
-        isinstance(node, ast.Name) and node.id == name for node in ast.walk(expression)
-    )
-
-
-def _runs_before(site: ast.stmt, call: ast.AST) -> bool:
-    """Whether reaching *call* means having run *site* on the same pass.
-
-    Position is not enough.  A rebinding under an arm the call is not in never
-    runs for that call, and one inside a loop the call is outside leaves the
-    first pass -- where the earlier statement is still what the name holds.
-    Both are read as containment: every condition guarding the rebinding also
-    guards the call, and every loop holding it holds the call.
-    """
-    return set(path_condition(site)) <= set(path_condition(call)) and loops_over(
-        site
-    ) <= loops_over(call)
-
-
-def _discarded(discards: list[ast.stmt], built: list[ast.stmt], call: ast.AST) -> bool:
-    """Whether the statement *built* was thrown away before *call* ran.
-
-    Reachability is positional and path-sensitive and still leaves
-    ``copyArchive.main`` claiming nine statements at each of its calls: a
-    fragment written at line 532 does reach a call hundreds of lines below,
-    and what stops it is the plain ``sql = ...`` in between, each of which
-    discards the statement before it.
-
-    From the last fragment, because that is when the statement exists.
-    """
-    after = max(part.lineno for part in built)
-    return any(
-        after < part.lineno < getattr(call, "lineno", 0) and _runs_before(part, call)
-        for part in discards
-    )
-
-
 #: How the call fills in the statement it runs, as :func:`_call_site_fill` reads it.
 _BY_PERCENT = "%"
 _BY_FORMAT = "format"
-
-
-def _substituted(
-    text: str,
-    sources: list[ast.stmt],
-    fillers: list[list[str]],
-    spelling: str,
-) -> list[str]:
-    """Return *text* with the call's arguments filled in, or as it stands."""
-    if spelling == _BY_PERCENT:
-        return [text.replace(_PERCENT_S, value) for value in fillers[0]] or [text]
-    if spelling != _BY_FORMAT:
-        # Not a template: a brace here is the statement's own text.
-        return [text]
-    filled = [text]
-    for index, values in enumerate(fillers):
-        marker = f"{{{index}}}"
-        if not values:
-            continue
-        if marker in filled[0]:
-            filled = [one.replace(marker, value) for one in filled for value in values]
-        elif index == 0 and _BARE_FIELD in filled[0] and _braces_are_literal(sources):
-            filled = [
-                one.replace(_BARE_FIELD, value) for one in filled for value in values
-            ]
-    # A field no argument filled is a hole like any other, and spelled like
-    # one.  Left as ``{0}``, the table in ``getUserJobMetadata``'s ``FROM {0}
-    # j,{1} m`` -- filled from a loop over pairs this cannot read -- was taken
-    # for a table named ``{0}``, and then for a boundary to a system that keeps
-    # it.  Named fields too, which no argument here fills: ``jobStatus IN
-    # {q_status_list_str}`` was neither a condition nor a stop, and dropped
-    # out of the statement silently.  After the loop, because the markers are
-    # what it fills by.
-    return [blank_fields(one) for one in filled]
 
 
 def _call_site_fill(
@@ -2615,217 +1439,41 @@ def executions(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     skipped: Optional[list["Skip"]] = None,
 ) -> list[Execution]:
-    """Return one :class:`Execution` per cursor execution in *func*.
+    """Return one :class:`Execution` per statement each cursor execution in *func* runs.
 
     The call is what pairs a statement with its binds.  Reading them separately
     -- every statement in the function against every bind in the function --
     would attach a task's status write to a dataset's statement whenever both
     appear in one method, which in ``db_proxy_mods`` is most of them.
 
-    **The statement can arrive in more than two pieces.**  Reading only the
-    operand to the left of the comment is right for ``execute(sqlU + comment)``
-    and wrong for ``execute(sqlU + sql + comment)``, where the second name holds
-    the ``WHERE`` clause -- and it did not merely truncate those statements, it
-    dropped them, because the left operand was itself an addition rather than a
-    name.  That cost the ``jobStatus`` write in ``updateJobStatus`` and the
-    whole of ``updateTask_JEDI``, silently: a statement that is never read
-    leaves nothing behind for a graph invariant to catch.
+    What a call runs is read by running the function (:mod:`sqleval`): each
+    covering statement of what reaches the call, every path at once, with the
+    text of the name it runs.  A statement is not run by every call in the
+    function -- ``copyArchive.main`` assigns ``sql`` forty-four times and runs
+    it twenty-three -- and each call is given only what reaches it.  A
+    statement written into the call is read as any other.
 
-    An operand that says nothing about its own text becomes ``{}``, the same
-    hole an f-string interpolation leaves, rather than sinking the statement.
-    The head is still required to be a readable name: it is what the statement
-    *is*, and without it there is no anchor to hang the execution on.
+    **A call it reads nothing out of is said, where *skipped* is given.**  A
+    call passed over in silence leaves its statements in no node, no stop and
+    no count: ``queryTasksToBePending_JEDI`` runs the ``SELECT`` its caller
+    hands it, and the one function that moves ``ready`` tasks to ``pending``
+    looked like one whose write picks its own rows.  Each is a :class:`Skip`
+    with the reason, so a consumer can tell "read in full" from "never read"
+    -- see :data:`SKIP_REASONS`.
 
-    **A statement is not run by every call in the function.**  The variants of
-    a name are read across the whole function, and pairing each with every
-    execution in it is a cross product, not a reading.  ``copyArchive.main``
-    assigns ``sql`` forty-four times and runs it twenty-three: 21 of the 31
-    statements this build reported as having a table name supplied at run time
-    were *one* statement claimed at 21 call sites that never run it, and its
-    table is resolved at the call that does.  A fragment below the call, or
-    under an arm the call is not in, cannot be part of what the call runs --
-    :func:`pathcond.can_reach` is the predicate the walk already uses to decide
-    whether a binding can be what an arm read, and this is the same question
-    asked of a different pair.
-
-    **A call it reads nothing out of is said, where *skipped* is given.**  Every
-    ``continue`` below used to be silent, and the statements behind them were
-    in no node, no stop and no count: ``queryTasksToBePending_JEDI`` runs the
-    ``SELECT`` its caller hands it, and the one function that moves ``ready``
-    tasks to ``pending`` looked like one whose write picks its own rows.  Each
-    is a :class:`Skip` with the reason, so a consumer can tell "read in full"
-    from "never read" -- see :data:`SKIP_REASONS`.
+    Kept per reading context (:func:`reading_context`), as the run is.
     """
-    if _EVALUATED:
-        return _evaluated_executions(func, skipped)
-    # ``_compatible_sets`` reads the arms a fragment sits under off the ancestor
-    # chain, and two of this function's callers -- ``boundary`` and ``trigger``
-    # -- never attached one.  A tree without parents does not raise: every
-    # fragment reads as unconditional, so the two arms of one ``if`` are
-    # concatenated into a statement nobody runs and the two the code does run
-    # are never seen.  Idempotent, so attaching again costs a walk and nothing
-    # else.
     attach_parents(func)
-    found: list[Execution] = []
-    for node in ast.walk(func):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        forwarded = node.func.attr in _FORWARDED
-        if not forwarded and node.func.attr not in {"execute", "executemany"}:
-            continue
-        if _AT_CALL and ruled_out(node):
-            continue
-        if not node.args:
-            continue
-        if len(node.args) < 2:
-            if skipped is not None:
-                skip = _skip_without_binds(func, node)
-                if skip is not None:
-                    skipped.append(skip)
-            continue
-        expression = node.args[0]
-        # Filled by the reassembly below, and handed to every Execution this
-        # call yields: the variants of one name are variants of one statement,
-        # and a fragment the reader could not follow was missing from all of
-        # them.
-        stops: list[Stop] = []
-        statement, fillers, spelling = _call_site_fill(func, _through_name(func, expression))
-        operands = _concatenated(statement)
-        sources: dict[str, list[ast.stmt]] = {}
-        reaching: dict[str, list[ast.stmt]] = {}
-        discards: list[ast.stmt] = []
-        if isinstance(operands[0], ast.Name):
-            base = operands[0]
-            head = []
-            for text, spans in _variant_spans(func, base.id):
-                if not text:
-                    continue
-                head.append(text)
-                # Which fragments built this variant, so that filling its holes
-                # asks about them and not about every other statement the name
-                # has held.
-                sources.setdefault(text, [span.node for span in spans])
-                # The same fragments, pooled across variants instead of kept
-                # for the first.  Two arms of one ``if`` often build the same
-                # statement, and asking the first arm's copy whether it reaches
-                # a call in the second answers no: ``activateJob`` loses
-                # ``sqlF`` and ``sqlJob`` that way, four statements over the
-                # corpus.  Filling cannot pool them -- ``_braces_are_literal``
-                # is answered per statement, for the reason its docstring
-                # gives -- so this is a second reading and not a wider one.
-                reaching.setdefault(text, []).extend(span.node for span in spans)
-            held = base.id
-            # Where the name is thrown away and given a new statement.  A
-            # statement that reads its own name is not one of these:
-            # ``sql_to_get_ids = sql_to_get_ids[:-1] + ") "`` closes a bracket
-            # on what is already there, and counting it cost three real read
-            # edges, measured.  It reaches ``_parts`` as a :data:`TRIM` and a
-            # ``+=``, not as a ``=``; the rest of that spelling only where it
-            # renders -- ``sql = f"{sql} AND x"`` does.
-            built = _parts(func, base.id, stops=stops)
-            discards = [
-                part
-                for _line, operator, _text, part in built
-                if operator == "=" and not _reads(part.value, base.id)
-            ]
-        elif forwarded:
-            # The daemons write the statement into the call.  ``execute`` is
-            # left requiring a name on purpose: widening it would move the
-            # stored map and make ``diff-map`` report condition drift where
-            # there is none.  Measured, that costs 36 statements on the
-            # ``execute`` side and is a deliberate debt, not an oversight.
-            rendered = rendered_text(operands[0])
-            head = [rendered] if rendered is not None else []
-            held = ""
-        else:
-            if skipped is not None:
-                rendered = rendered_text(operands[0])
-                skipped.append(
-                    Skip(
-                        node.lineno,
-                        SKIP_INLINE,
-                        _clipped(rendered if rendered is not None else _unparsed(operands[0])),
-                        (rendered,) if rendered else (),
-                    )
-                )
-            continue
-        if not head:
-            if skipped is not None:
-                skip = _skip_without_text(func, node, operands[0], forwarded)
-                if skip is not None:
-                    skipped.append(skip)
-            continue
-        pieces: list[list[str]] = [head]
-        for operand in operands[1:]:
-            if isinstance(operand, ast.Name):
-                pieces.append(
-                    _variants(func, operand.id) or _handed_texts(func, operand.id, frozenset()) or ["{}"]
-                )
-                continue
-            rendered = rendered_text(operand)
-            pieces.append([rendered if rendered is not None else "{}"])
-        total = math.prod(len(choices) for choices in pieces)
-        if total > _MAX_BRANCH_VARIANTS:
-            # Said out loud, for the reason in ``_run_variants``: a silent cap
-            # reads exactly like full coverage.  Falling back to the head alone
-            # is what this function did for every statement until now.
-            logger.warning(
-                "the statement executed at line %d joins %d variants of %d name(s), "
-                "over the cap of %d: read as %s alone, so its trailing clauses are "
-                "not read here",
-                node.lineno,
-                total,
-                len(pieces),
-                _MAX_BRANCH_VARIANTS,
-                base.id,
-            )
-            pieces = [head]
-        varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
-        window = (
-            binding_window(func, varmap, node.lineno)
-            if forwarded and varmap is not None
-            else None
-        )
-        produced = len(found)
-        for combination in itertools.product(*pieces):
-            built_by = reaching.get(combination[0], [])
-            if built_by and not any(can_reach(fragment, node, current=True) for fragment in built_by):
-                # Nothing that built this statement can be part of what this
-                # call runs.  Guarded on having a fragment at all, because the
-                # daemon layer writes the statement into the call and has none:
-                # "no fragment reaches here" and "there is no fragment" are
-                # different answers, and reading the second as the first would
-                # drop 30 pairs.
-                continue
-            if built_by and _discarded(discards, built_by, node):
-                continue
-            assembled = "".join(combination)
-            for text in _substituted(
-                assembled, sources.get(combination[0], []), fillers, spelling
-            ):
-                found.append(
-                    Execution(
-                        sql=text,
-                        varmap=varmap,
-                        variable=held,
-                        call=node,
-                        window=window,
-                        unresolved=tuple(stops) + _hole_stops(text, node.lineno),
-                        head=combination[0],
-                    )
-                )
-        if skipped is not None and len(found) == produced:
-            # Every statement the name held was built somewhere this call
-            # cannot be reached from, or thrown away before it: the call runs
-            # something, and nothing here says what.
-            skipped.append(Skip(node.lineno, SKIP_UNREACHED, held, tuple(head)))
-    together: dict[tuple, dict[ast.Call, None]] = {}
-    for run in found:
-        together.setdefault((run.variable, run.sql, run.varmap, run.window), {})[run.call] = None
-    return [
-        run._replace(calls=tuple(together[(run.variable, run.sql, run.varmap, run.window)]))
-        for run in found
-    ]
+    key = reading_context()
+    held = getattr(func, "_sqleval_runs", None)
+    if held is None:
+        held = func._sqleval_runs = {}  # type: ignore[union-attr]
+    if key not in held:
+        held[key] = _executions_read(func)
+    found, skips = held[key]
+    if skipped is not None:
+        skipped.extend(skips)
+    return list(found)
 
 
 class Skip(NamedTuple):
@@ -2852,15 +1500,13 @@ SKIP_NO_VARMAP = (
 SKIP_HANDED_IN = "the statement is handed in by the caller, so its text is not in this function"
 SKIP_UNBOUND = "the statement is a name this function does not bind"
 SKIP_UNREAD_NAME = "the statement is a name bound here to text this build cannot render"
-SKIP_INLINE = "the statement is written into the call, and this build reads it there only from a name"
-SKIP_UNRENDERED = "the statement written into the forwarded call does not render"
+SKIP_UNRENDERED = "the statement written into the call does not render"
 SKIP_UNREACHED = "no statement this function builds reaches this call"
 SKIP_REASONS = (
     SKIP_NO_VARMAP,
     SKIP_HANDED_IN,
     SKIP_UNBOUND,
     SKIP_UNREAD_NAME,
-    SKIP_INLINE,
     SKIP_UNRENDERED,
     SKIP_UNREACHED,
 )
@@ -2884,21 +1530,10 @@ def _clipped(text: str, width: int = 72) -> str:
     return flat if len(flat) <= width else flat[: width - 1] + "\u2026"
 
 
-def _head_texts(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, head: ast.expr
-) -> tuple[str, ...]:
-    """What the head of a statement can be read to hold, without pairing binds."""
-    if isinstance(head, ast.Name):
-        return tuple(text for text in _variants(func, head.id) if text)
-    rendered = rendered_text(head)
-    return (rendered,) if rendered else ()
-
-
 def _skip_without_text(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     call: ast.Call,
     head: ast.expr,
-    forwarded: bool,
 ) -> Optional[Skip]:
     """Why a call whose statement has no text here was not read, or ``None``.
 
@@ -2920,31 +1555,26 @@ def _skip_without_text(
             for node in ast.walk(func)
         )
         return Skip(call.lineno, SKIP_UNREAD_NAME if bound else SKIP_UNBOUND, head.id)
-    if forwarded:
-        return Skip(call.lineno, SKIP_UNRENDERED, _clipped(_unparsed(head)))
-    return Skip(call.lineno, SKIP_INLINE, _clipped(_unparsed(head)))
+    return Skip(call.lineno, SKIP_UNRENDERED, _clipped(_unparsed(head)))
 
 
 def _skip_without_binds(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     call: ast.Call,
-    texts: Optional[tuple[str, ...]] = None,
+    texts: tuple[str, ...],
 ) -> Optional[Skip]:
     """The skip for ``execute(sql)``, which names no bind map to pair it with.
 
     ``None`` on the same terms as :func:`_skip_without_text`: a wrapper of the
-    cursor handing on its caller's statement.  *texts*, where the function was
-    run: what the call runs (:func:`_texts_at`); else what the head can be
-    reassembled to hold.
+    cursor handing on its caller's statement.  *texts* is what the call runs
+    (:func:`_texts_at`).
     """
     statement, _fillers, _spelling = _call_site_fill(func, call.args[0])
     head = _concatenated(statement)[0]
-    if texts is None:
-        texts = _head_texts(func, head)
     if not texts:
         # No text either: a statement handed in is handed in whether or not a
         # map comes with it, and saying so is the more useful of the two.
-        skip = _skip_without_text(func, call, head, call.func.attr in _FORWARDED)
+        skip = _skip_without_text(func, call, head)
         if skip is None or skip.reason == SKIP_HANDED_IN:
             return skip
     detail = head.id if isinstance(head, ast.Name) else _clipped(texts[0] if texts else _unparsed(head))
@@ -2971,112 +1601,23 @@ _FORWARDED = frozenset({"querySQL", "querySQLS"})
 #: read side's denominator is to catch a form nobody added.
 RUNNERS = frozenset({"execute", "executemany"}) | _FORWARDED
 
-#: ``RETURNING <column> INTO <bind>``, either side a comma list: the binds the
-#: database writes into the map the statement ran with.
-_RETURNING_INTO = re.compile(
-    r"\bRETURNING\s+[\w.$]+(?:\s*,\s*[\w.$]+)*\s+INTO\s+(:\w+(?:\s*,\s*:\w+)*)", re.IGNORECASE
-)
-
-
-def written_back(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call
-) -> Optional[tuple[str, ...]]:
-    """The keys of its map that running *call* writes, spelt as the map spells them.
-
-    A reader that cannot see inside the cursor has to take a map handed to
-    ``execute`` as rewritten, and then the value an arm put in it is not the
-    one printed after the call: ``kickExhaustedTasks_JEDI`` sets
-    ``varMap[":newStatus"]`` to ``exhausted`` or ``finishing`` under an ``if``,
-    runs the ``UPDATE``, and prints the key where the two arms have joined.
-    PanDA's ``WrappedCursor.execute`` touches no key of the map but the binds a
-    ``RETURNING ... INTO`` names -- Oracle fills the variable bound there, the
-    mysql branch deletes the key and writes it again -- and the statement is
-    what names them.
-
-    ``()`` when every statement the call runs was read and none returns into a
-    bind.  ``None`` when this cannot say: no statement was read for the call,
-    or one is missing a piece that has no text of its own
-    (:data:`FRAGMENT_NOT_RENDERED`), which could have held the clause.  A hole
-    the statement keeps for a schema name, a value or an ``IN`` list cannot,
-    and is read past.
-    """
-    runs = [run for run in _executions_held(func) if any(one is call for one in run.run_at)]
-    if not runs:
-        return None
-    keys = {
-        key.strip()
-        for run in runs
-        for match in _RETURNING_INTO.finditer(run.sql)
-        for key in match.group(1).split(",")
-    }
-    if keys:
-        return tuple(sorted(keys))
-    if any(stop.reason == FRAGMENT_NOT_RENDERED for run in runs for stop in run.unresolved):
-        return None
-    return ()
-
 
 def reading_context() -> tuple:
     """What a reading of a function can be kept against.
 
-    The calls the statements are read across (:func:`across_calls`), as
-    :func:`_executions_held` keeps its runs, and under :func:`at_call` the
-    function read and the constants handed to it: every call handing the
-    same constants is read the same way, and the reader reads each one.
+    The calls the statements are read across (:func:`across_calls`), and
+    under :func:`at_call` the function read and the constants handed to it:
+    every call handing the same constants is read the same way, and the
+    reader reads each one.
     """
     if _AT_CALL is None:
-        return (id(_CALLS), _EVALUATED)
+        return (id(_CALLS),)
     func, values = _AT_CALL
     return (
         id(_CALLS),
-        _EVALUATED,
         id(func),
         tuple(sorted((name, repr(value)) for name, value in values.items())),
     )
-
-
-def _executions_held(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
-    """:func:`executions` for :func:`written_back`, kept on the function.
-
-    A reader asks about every call of a function in turn, and reading the
-    function's statements is the whole cost: ``archiveJob``'s 27 calls took
-    5.0 seconds read again for each.  Kept per reading context, as
-    :func:`_imported_lists` is -- the calls the statements are read across --
-    and not kept under :func:`at_call`, which reads one run's values.
-    """
-    if _AT_CALL is not None:
-        return executions(func)
-    held = getattr(func, "_written_back_runs", None)
-    if held is not None and held[0] == (id(_CALLS), _EVALUATED):
-        return held[1]
-    runs = executions(func)
-    func._written_back_runs = ((id(_CALLS), _EVALUATED), runs)  # type: ignore[attr-defined]
-    return runs
-
-
-def written_back_at(path: Path, line: int) -> Optional[tuple[str, ...]]:
-    """:func:`written_back` for the ``execute`` or ``executemany`` call on *line* of *path*.
-
-    For a reader holding a file and a line and no tree.  It reads the tree the
-    rest of the map reads (:func:`~bamboo.codemap.calls.parsed`), so the call is
-    the node the statement was paired with.  ``None`` as well where the file
-    does not parse or no such call starts on the line.
-    """
-    from bamboo.codemap.calls import parsed
-
-    held = parsed(path)
-    if held is None:
-        return None
-    for node in ast.walk(held[1]):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"execute", "executemany"}
-            and node.lineno == line
-        ):
-            func = enclosing_function(node)
-            return written_back(func, node) if func is not None else None
-    return None
 
 
 def binding_window(
@@ -3206,9 +1747,9 @@ def declared_row_classes(
     column set ever separates them -- while its ``INSERT`` names ``FileSpec``
     in the f-string.
 
-    Read here rather than during reassembly because reassembly deliberately
-    blanks interpolations: they are usually the schema, and keeping them would
-    make every statement unique.  This looks at the one interpolation that
+    Read here rather than off the statement's text because the text
+    deliberately blanks interpolations: they are usually the schema, and
+    keeping them would make every statement unique.  This looks at the one interpolation that
     carries meaning instead of at all of them.
     """
     found: dict[str, str] = {}
@@ -3693,8 +2234,7 @@ def _text_branches(value) -> list:
 
 def names_carried(runs: list["Execution"]) -> set[str]:
     """The local names the text of *runs* went through on its way to the run (:attr:`Execution.pieces`): every name a
-    statement on a stretch's way wrote it into or carried it on in.  Nothing for a reassembled run, which has no
-    pieces."""
+    statement on a stretch's way wrote it into or carried it on in."""
     found: set[str] = set()
     for run in runs:
         for _start, _end, way in run.pieces:
@@ -3705,18 +2245,15 @@ def names_carried(runs: list["Execution"]) -> set[str]:
     return found
 
 
-def assembled_texts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[dict[str, list[str]]]:
+def assembled_texts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, list[str]]:
     """Every statement *func* assembles, by the local holding it, read apart from the calls that run statements.
 
     What each name the function writes statement text into holds where the
     code uses it -- runs it, hands it to a call, formats it into another name,
     returns it -- or where the function ends (:func:`sqleval.assembled`).  The
     sql-read slice's denominator: a statement no accepted call runs is in it
-    and not among :func:`executions`, which is what it is for.  ``None`` while
-    statements are reassembled, where :func:`variants` answers the same.
+    and not among :func:`executions`, which is what it is for.
     """
-    if not _EVALUATED:
-        return None
     constants = dict(_AT_CALL[1]) if _AT_CALL is not None and _AT_CALL[0] is func else {}
     key = (id(_CALLS), tuple(sorted((name, repr(value)) for name, value in constants.items())))
     held = getattr(func, "_sqleval_assembled", None)
@@ -3781,17 +2318,12 @@ def _spans_of(drawn: "sqleval.Rendered", anchor: ast.AST) -> list[Span]:
 
 
 def _evaluated_spans(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST, text: Optional[str], read: bool = False
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.Call, text: Optional[str], read: bool = False
 ) -> list[tuple[str, list[Span]]]:
     """:func:`variant_spans`, run: what *name* holds at *at*."""
     reading = _evaluation(func)
-    if isinstance(at, ast.Call):
-        found = reading.named(at.lineno, name, text)
-        anchor = _statement_of(at)
-    else:
-        found = reading.copied(at.lineno, name, text)
-        anchor = at
-    found = [_fragments_out(one, func) for one in found]
+    found = [_fragments_out(one, func) for one in reading.named(at.lineno, name, text)]
+    anchor = _statement_of(at)
     return [
         (reading_text(one.text, one.holes) if read else one.text, _spans_of(one, anchor)) for one in found if one.text
     ]
@@ -3805,7 +2337,7 @@ EVERY_CAP = 512
 
 
 def every_statement(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> Optional[list[str]]:
-    """Run (:func:`evaluated`), every statement the call at *line* runs, each as a reader takes it
+    """Every statement the call at *line* runs, each as a reader takes it
     (:attr:`Execution.reading`); ``None`` past :data:`EVERY_CAP` of them.
 
     :func:`executions` hands a covering set -- every branch shows up, not
@@ -3892,11 +2424,10 @@ def _unrendered(hole: "sqleval.HoleAt", func: ast.FunctionDef | ast.AsyncFunctio
 def _fragments_out(
     drawn: "sqleval.Rendered", func: ast.FunctionDef | ast.AsyncFunctionDef
 ) -> "sqleval.Rendered":
-    """*drawn* without the ``+=`` fragments *func* appends that have no text of its own, as the reassembly reads
-    them.
+    """*drawn* without the ``+=`` fragments *func* appends that have no text of its own.
 
     ``sqlP += sql_where_clause`` with nothing known of the name: the
-    reassembly leaves the fragment out of the statement and says so, once
+    reading leaves the fragment out of the statement and says so, once
     (:func:`_fragment_stops`).  Kept in as ``{}`` it would be said a second
     time, as a ``WHERE`` that takes whole conditions through an interpolation,
     and a head and the statement it starts would disagree on every position
@@ -3938,8 +2469,7 @@ def _fragments_out(
 def _fragment_stops(
     drawn: "sqleval.Rendered", func: ast.FunctionDef | ast.AsyncFunctionDef
 ) -> tuple[Stop, ...]:
-    """A ``+=`` *func* appends whose right-hand side has no text of its own: :data:`FRAGMENT_NOT_RENDERED`, as the
-    reassembly says it."""
+    """A ``+=`` *func* appends whose right-hand side has no text of its own: :data:`FRAGMENT_NOT_RENDERED`."""
     found = {
         Stop(hole.stmt.lineno, hole.source, FRAGMENT_NOT_RENDERED)
         for _at, hole in drawn.holes
@@ -3948,33 +2478,10 @@ def _fragment_stops(
     return tuple(sorted(found))
 
 
-def _evaluated_executions(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, skipped: Optional[list["Skip"]]
-) -> list[Execution]:
-    """:func:`executions`, run: each covering statement of each call, with the text of the name it runs.
-
-    Which calls are executions, the binds they are paired with, the window of
-    the forwarded form and the reasons a call is not read are the reassembly's
-    own rules; only what a call runs is read by running the function.  A
-    statement written into the call is read as any other (the reassembly read
-    it only through a name).  Kept per reading context, as the run is.
-    """
-    attach_parents(func)
-    key = reading_context()
-    held = getattr(func, "_sqleval_runs", None)
-    if held is None:
-        held = func._sqleval_runs = {}  # type: ignore[union-attr]
-    if key not in held:
-        held[key] = _evaluated_executions_read(func)
-    found, skips = held[key]
-    if skipped is not None:
-        skipped.extend(skips)
-    return list(found)
-
-
-def _evaluated_executions_read(
+def _executions_read(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> tuple[list[Execution], list["Skip"]]:
+    """:func:`executions` and its skips, read off one run of *func*."""
     reading = _evaluation(func)
     found: list[Execution] = []
     skips: list[Skip] = []
@@ -3994,8 +2501,7 @@ def _evaluated_executions_read(
                 skips.append(skip)
             continue
         # The name the call runs, as written: ``sql_exe = (sql_jt + comment) %
-        # table`` is read where ``sql_exe`` runs.  (:func:`_through_name` looks
-        # past it to ``sql_jt`` for the reassembly, which cannot read the ``%``.)
+        # table`` is read where ``sql_exe`` runs.
         statement, _fillers, _spelling = _call_site_fill(func, node.args[0])
         operands = _concatenated(statement)
         held = operands[0].id if isinstance(operands[0], ast.Name) else ""
@@ -4013,7 +2519,7 @@ def _evaluated_executions_read(
             if not _says_nothing(_fragments_out(one, func).text)
         ]
         if not drawn:
-            skip = _skip_without_text(func, node, operands[0], forwarded)
+            skip = _skip_without_text(func, node, operands[0])
             if skip is not None:
                 skips.append(skip)
             continue

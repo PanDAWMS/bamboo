@@ -826,7 +826,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
     @property
     def unreadable_tables(self) -> dict[str, int]:
-        """``{owner: statements whose table name the reassembly could not read}``.
+        """``{owner: statements whose table name the reading could not read}``.
 
         Apart from :attr:`uncovered_tables`, which is about tables that hold no
         spec: this is about statements whose table nobody could name at all.

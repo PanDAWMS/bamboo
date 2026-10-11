@@ -1460,7 +1460,6 @@ def _sql_unexplained(
     return unexplained, coverage
 
 
-
 def test_a_varmap_handed_to_executemany_is_named_as_the_reason():
     # 104 of the corpus's 140 unaccounted-for written columns are this one
     # shape, and every number beside it said only "89%".  executemany takes
@@ -1560,14 +1559,14 @@ class TaskModule:
     assert (junction.anchor.line_start, junction.anchor.line_end) == (10, 12)
 
 
-def test_statement_is_reassembled_from_its_concatenation():
+def test_statement_is_read_from_its_concatenation():
     """A statement is built by ``=`` then a run of ``+=``, interleaved with others."""
     module = _module(_SQL_SOURCE, "x.py")
     func = next(
         n for n in ast.walk(module.tree)
         if isinstance(n, ast.FunctionDef) and n.name == "updateTaskStatus"
     )
-    text = sql.reconstruct(func, "sqlU")
+    (text,) = _held(func, "sqlU")
 
     assert "UPDATE {}.JEDI_Tasks" in text
     assert "SET status=:status" in text
@@ -1651,7 +1650,7 @@ def test_a_statement_chosen_through_another_variable_is_still_read():
     )
     func = ast.parse(source).body[0]
 
-    statements = [w for text in sql.variants(func, "sql") for w in sqltext.writes(text)]
+    statements = [w for text in _held(func, "sql") for w in sqltext.writes(text)]
 
     assert [w.columns["status"].text for w in statements] == [":newStatus", "oldStatus"]
 
@@ -1677,7 +1676,7 @@ def test_a_statement_assembled_across_an_if_else_is_two_statements():
     )
     func = _func(source)
 
-    statements = [w for text in sql.variants(func, "sqlTU") for w in sqltext.writes(text)]
+    statements = [w for text in _held(func, "sqlTU") for w in sqltext.writes(text)]
 
     assert [w.columns["status"].kind for w in statements] == ["bind", "column"]
     assert [w.columns["status"].text for w in statements] == [":status", "oldStatus"]
@@ -1687,7 +1686,8 @@ def test_a_statement_assembled_across_an_if_else_is_two_statements():
 
 def test_two_independent_if_elses_give_every_combination():
     """``getTasksToExecCommand_JEDI`` picks the status arm and the oldStatus arm
-    on unrelated tests, so all four statements are reachable."""
+    on unrelated tests, so all four statements are reachable: every statement
+    the call runs (:func:`sql.every_statement`), not only a covering set."""
     source = (
         "def f(self, newTaskStatus, taskStatus):\n"
         "    sqlTU = 'UPDATE ATLAS_PANDA.JEDI_Tasks '\n"
@@ -1700,39 +1700,18 @@ def test_two_independent_if_elses_give_every_combination():
         "    else:\n"
         "        sqlTU += 'oldStatus=status,'\n"
         "    sqlTU += 'modificationTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID '\n"
+        "    self.cur.execute(sqlTU + comment, varMap)\n"
     )
     func = _func(source)
 
-    statements = [w for text in sql.variants(func, "sqlTU") for w in sqltext.writes(text)]
+    statements = [w for text in sql.every_statement(func, 12) for w in sqltext.writes(text)]
 
-    assert [(w.columns["status"].text, w.columns["oldStatus"].text) for w in statements] == [
+    assert sorted((w.columns["status"].text, w.columns["oldStatus"].text) for w in statements) == [
         (":status", "None"),
         (":status", "status"),
         ("oldStatus", "None"),
         ("oldStatus", "status"),
     ]
-
-
-def test_an_optional_fragment_does_not_split_the_statement():
-    """An ``if`` with no ``else`` makes the fragment optional, not alternative.
-
-    Splitting on those too would double the count for every one of them, and
-    the over-read is the safe direction: an extra clause is read, where a
-    mis-split would attribute a value to a statement that never carries it.
-    """
-    source = (
-        "def f(self, resetFrozenTime):\n"
-        "    sqlTU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,'\n"
-        "    if resetFrozenTime:\n"
-        "        sqlTU += 'frozenTime=NULL,'\n"
-        "    sqlTU += 'modificationTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID '\n"
-    )
-    func = _func(source)
-
-    texts = sql.variants(func, "sqlTU")
-
-    assert len(texts) == 1
-    assert "frozenTime=NULL" in texts[0]
 
 
 def test_a_loop_that_runs_nothing_builds_one_statement_over_its_tables():
@@ -1764,52 +1743,6 @@ def test_a_loop_that_runs_nothing_builds_one_statement_over_its_tables():
         "UNION ALL SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jediTaskID=:t AND jobStatus<>:st ",
         "SELECT COUNT(*) FROM ATLAS_PANDA.jobsDefined4 WHERE x=:x ",
         "SELECT COUNT(*) FROM ATLAS_PANDA.jobsActive4 WHERE x=:x ",
-    ]
-
-
-@pytest.mark.reassembly("one_pass")
-def test_a_cut_off_the_end_of_a_statement_is_applied():
-    """``sql = sql[:-4]`` drops the ``AND `` a loop leaves after its last term.
-
-    Left unread, the statement ``updateTask_JEDI`` runs ended in ``AND`` --
-    not SQL, and not what PanDA sends.  The ``+ ") "`` spelling closes the
-    bracket a loop left a comma in, and the comma cut before ``FROM`` is what
-    let ``reads`` see the table at all: ``SELECT {},FROM t`` has no space for
-    its ``FROM`` to stand after.
-    """
-    func = _func(
-        "def f(self, criteria, sites, attrs):\n"
-        "    sql = 'SELECT status FROM t WHERE '\n"
-        "    for key in criteria:\n"
-        "        sql += f'{key}=:{key} AND '\n"
-        "    sql += 'status IN (:a,:b) AND '\n"
-        "    sql = sql[:-4]\n"
-        "    self.cur.execute(sql, varMap)\n"
-        "    sqlI = 'SELECT PandaID FROM j WHERE site IN ('\n"
-        "    for site in sites:\n"
-        "        sqlI += ':s,'\n"
-        "    sqlI = sqlI[:-1] + ') '\n"
-        "    self.cur.execute(sqlI, varMap)\n"
-        "    sqlA = 'SELECT '\n"
-        "    for attr in attrs:\n"
-        "        sqlA += f'{attr},'\n"
-        "    sqlA = sqlA[:-1] + ' '\n"
-        "    sqlA += 'FROM d WHERE id=:id '\n"
-        "    self.cur.execute(sqlA, varMap)\n"
-    )
-
-    assert [run.sql for run in sql.executions(func)] == [
-        "SELECT status FROM t WHERE {}=:{} AND status IN (:a,:b) ",
-        "SELECT PandaID FROM j WHERE site IN (:s) ",
-        "SELECT {} FROM d WHERE id=:id ",
-    ]
-    assert sqltext.reads("SELECT {} FROM d WHERE id=:id ") == [("d", [])]
-    # Each fragment keeps the stretch it still has, and no more.
-    ((text, spans),) = sql.variant_spans(func, "sqlI")
-    assert [text[span.start : span.end] for span in spans] == [
-        "SELECT PandaID FROM j WHERE site IN (",
-        ":s",
-        ") ",
     ]
 
 
@@ -1886,7 +1819,7 @@ def test_a_where_whose_binds_are_interpolated_names_the_term_it_cannot_fill():
 def test_a_schema_interpolated_into_the_where_is_not_something_it_stopped_on():
     """``datasetID IN (SELECT datasetID FROM {}.JEDI_Datasets ...)``.
 
-    Reassembly blanks the schema everywhere on purpose, and a subquery puts
+    The reading blanks the schema everywhere on purpose, and a subquery puts
     one inside the ``WHERE``.  Counting it would report 17 statements as
     unreadable that are read in full, and a census with false entries is worse
     than none: it is what the next round would be planned from.
@@ -1901,116 +1834,6 @@ def test_a_schema_interpolated_into_the_where_is_not_something_it_stopped_on():
     func = _func(source)
 
     assert [run.unresolved for run in sql.executions(func)] == [()]
-
-
-def _the_execute(func):
-    return next(
-        node
-        for node in ast.walk(func)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "execute"
-    )
-
-
-def test_a_statement_returning_into_a_bind_writes_that_key_back():
-    """``RETURNING row_ID INTO :newRowID`` -- the one key the cursor writes.
-
-    A reader that cannot see inside ``execute`` takes the map as rewritten
-    whole; the statement says which key is, spelt as the map spells it.
-    """
-    func = _func(
-        "def f(self):\n"
-        "    sql = 'INSERT INTO ATLAS_PANDA.jobParamsTable (PandaID) VALUES (:PandaID) '\n"
-        "    sql += 'RETURNING row_ID INTO :newRowID '\n"
-        "    varMap[':newRowID'] = self.cur.var(varNUMBER)\n"
-        "    self.cur.execute(sql + comment, varMap)\n"
-    )
-
-    assert sql.written_back(func, _the_execute(func)) == (":newRowID",)
-
-
-def test_a_statement_with_no_returning_writes_nothing_back_past_its_schema_hole():
-    """``kickExhaustedTasks_JEDI``'s ``UPDATE``: the arm's ``:newStatus`` is what was sent.
-
-    The schema is a hole in every statement the reassembly reads, and a hole
-    there cannot hold a clause; read as "cannot say", it would leave nearly
-    every map in the corpus rewritten.
-    """
-    func = _func(
-        "def f(self, flag):\n"
-        "    sql = f'UPDATE {schema}.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID '\n"
-        "    if flag:\n"
-        "        varMap[':newStatus'] = 'exhausted'\n"
-        "    else:\n"
-        "        varMap[':newStatus'] = 'finishing'\n"
-        "    self.cur.execute(sql + comment, varMap)\n"
-    )
-
-    assert sql.written_back(func, _the_execute(func)) == ()
-
-
-def test_a_statement_missing_a_piece_cannot_say_what_it_writes_back():
-    """``sqlP += sql_where_clause``: the piece nobody can read could hold the clause."""
-    func = _func(
-        "def f(self):\n"
-        "    sqlP = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab '\n"
-        "    sqlP += sql_where_clause\n"
-        "    self.cur.execute(sqlP + comment, getValMap)\n"
-    )
-
-    assert sql.written_back(func, _the_execute(func)) is None
-
-
-def test_a_call_running_either_of_two_statements_writes_back_what_either_returns():
-    """One arm inserts and returns the new id, the other updates in place: the key may be written."""
-    func = _func(
-        "def f(self, new):\n"
-        "    if new:\n"
-        "        sql = 'INSERT INTO ATLAS_PANDA.T (a) VALUES (:a) RETURNING PandaID INTO :newPandaID '\n"
-        "    else:\n"
-        "        sql = 'UPDATE ATLAS_PANDA.T SET a=:a WHERE PandaID=:PandaID '\n"
-        "    self.cur.execute(sql + comment, varMap)\n"
-    )
-
-    assert sql.written_back(func, _the_execute(func)) == (":newPandaID",)
-
-
-def test_written_back_is_found_from_a_file_and_the_line_of_the_call(tmp_path):
-    """The reader holds a file and a line, not a tree."""
-    module = tmp_path / "m.py"
-    module.write_text(
-        "def f(self):\n"
-        "    sql = 'INSERT INTO ATLAS_PANDA.T (a) VALUES (:a) RETURNING row_ID INTO :newRowID '\n"
-        "    self.cur.execute(sql + comment, varMap)\n"
-        "    return varMap[':newRowID']\n"
-    )
-
-    assert sql.written_back_at(module, 3) == (":newRowID",)
-    assert sql.written_back_at(module, 2) is None
-
-
-def test_a_function_is_read_once_for_all_the_calls_asked_about(monkeypatch):
-    """``archiveJob``'s 27 calls read its statements 27 times: 5.0 seconds, where once is enough."""
-    func = _func(
-        "def f(self):\n"
-        "    sql = 'UPDATE ATLAS_PANDA.T SET a=:a WHERE b=:b '\n"
-        "    self.cur.execute(sql + comment, varMap)\n"
-        "    sqlI = 'INSERT INTO ATLAS_PANDA.T (a) VALUES (:a) RETURNING row_ID INTO :newRowID '\n"
-        "    self.cur.execute(sqlI + comment, varMap)\n"
-    )
-    first, second = [
-        node
-        for node in ast.walk(func)
-        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "execute"
-    ]
-    reads = []
-    real = sql.executions
-    monkeypatch.setattr(sql, "executions", lambda one: reads.append(one) or real(one))
-
-    assert sql.written_back(func, first) == ()
-    assert sql.written_back(func, second) == (":newRowID",)
-    assert reads == [func]
 
 
 def test_a_column_the_statement_interpolates_is_its_own_reason():
@@ -2048,8 +1871,7 @@ def test_a_column_a_loops_passes_interpolate_is_named_as_a_pass_wrote_it():
     )
     func = _func(source)
 
-    with sql.evaluated(True):
-        stops = {stop for run in sql.executions(func) for stop in run.unresolved}
+    stops = {stop for run in sql.executions(func) for stop in run.unresolved}
 
     assert [(stop.source, stop.reason) for stop in stops] == [("{}=:{}", sql.COLUMN_IS_A_HOLE)]
 
@@ -2172,8 +1994,7 @@ def test_a_column_one_pass_of_a_loop_writes_is_said_where_its_bind_is_filled():
         "        sql += ' WHERE jediTaskID=:jediTaskID '\n"
         "        self.cur.execute(sql + comment, varMap)\n"
     )
-    with sql.evaluated(True):
-        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
     by_column = {
         junction.subject.split(".")[-1]: [(branch.outcome, branch.line, branch.path_condition) for branch in junction.branches]
         for junction in junctions
@@ -2197,8 +2018,7 @@ def test_a_value_written_before_a_loops_passes_is_said_where_it_was_written():
         "        sql += ' WHERE jediTaskID=:jediTaskID '\n"
         "        self.cur.execute(sql + comment, varMap)\n"
     )
-    with sql.evaluated(True):
-        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
     (junction,) = [one for one in junctions if one.subject.endswith(".oldStatus")]
 
     assert [(branch.outcome, branch.line) for branch in junction.branches] == [("paused", 3)]
@@ -2209,9 +2029,7 @@ def test_a_guard_some_writes_carry_is_said_with_the_test_that_adds_it():
     new status is ``transferring``: a ``holding`` job may not move there.
 
     Not every write of the value carries it, so it is not ``row_precondition``;
-    the pieces the run built the statement from say which test added it.  Read
-    by reassembling the function, there are no pieces, and the one statement
-    holding every fragment says the guard for every write, as before.
+    the pieces the run built the statement from say which test added it.
     """
     source = (
         "class M:\n"
@@ -2226,21 +2044,13 @@ def test_a_guard_some_writes_carry_is_said_with_the_test_that_adds_it():
         "        varMap[':ng'] = 'X'\n"
         "        self.cur.execute(sqlU + sqlW + comment, varMap)\n"
     )
-    with sql.evaluated(True):
-        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
     (branch,) = junctions[0].branches
 
     assert branch.row_precondition == []
     assert [(guard.term, guard.when) for guard in branch.row_precondition_when] == [
         ("NOT blacklisted=:ng", ["status == 'Y'"])
     ]
-
-    with sql.evaluated(False):
-        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
-    (branch,) = junctions[0].branches
-
-    assert branch.row_precondition == ["NOT blacklisted=:ng"]
-    assert branch.row_precondition_when == []
 
 
 @pytest.mark.parametrize("apart", [True, False])
@@ -2280,8 +2090,7 @@ def test_a_guard_one_execute_carries_is_said_only_where_no_other_can_run(apart):
         "        varMap[':old'] = 'N'\n"
         f"{runs}"
     )
-    with sql.evaluated(True):
-        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
     (branch,) = junctions[0].branches
 
     assert branch.row_precondition == []
@@ -2312,8 +2121,7 @@ def test_a_guard_something_appended_inside_made_another_term_is_not_said_for_it(
         "        varMap[':blacklisted'] = 'Y'\n"
         "        self.cur.execute(sqlU + comment, varMap)\n"
     )
-    with sql.evaluated(True):
-        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
     (branch,) = junctions[0].branches
 
     assert branch.row_precondition == []
@@ -2349,8 +2157,7 @@ def test_a_guard_is_asked_of_every_statement_the_call_runs_not_of_a_covering_set
         "        varMap[':blacklisted'] = 'Y'\n"
         "        self.cur.execute(sqlU + comment, varMap)\n"
     )
-    with sql.evaluated(True):
-        _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
     (branch,) = junctions[0].branches
 
     assert branch.row_precondition == []
@@ -2400,7 +2207,7 @@ def test_a_bare_placeholder_is_filled_only_where_no_f_string_built_the_text():
     """``{}`` is ambiguous, and the fragments settle it.
 
     The map renders an f-string interpolation as ``{}`` too, so a bare brace in
-    reassembled text is either a hole the schema went into or a placeholder the
+    the statement's text is either a hole the schema went into or a placeholder the
     call fills.  Which one is not a guess: if no fragment building the name
     interpolates, every brace in it is a literal the source wrote.
     """
@@ -2473,39 +2280,6 @@ def test_an_index_used_twice_fills_both_of_its_holes():
     ]
 
 
-@pytest.mark.reassembly("python")
-def test_a_format_call_that_cannot_be_lined_up_leaves_the_hole_alone():
-    """The four shapes where marker and argument stop corresponding.
-
-    A hole filled from the wrong argument names a table with exactly the
-    confidence of one the code wrote, so each of these is read as written:
-
-    ``*args`` / ``**kwargs``      the source does not say how many, or which
-    ``{{`` / ``}}``               an escaped brace is not a field, but the
-                                  ``{}`` inside ``{{}}`` is matched as one, so
-                                  the two counts stop describing the same text
-    a receiver with its own hole  an f-string renders ``{}`` as well, and
-                                  afterwards nothing says which came from where
-    """
-    unreadable = {
-        "starred": "'FROM {0}.{1} '.format(*names)",
-        "keywords": "'FROM {0}.{1} '.format(**names)",
-        "escaped brace": "'FROM {0}.{1} {{}} '.format(schemaPANDA, 'jobsActive4')",
-        "receiver has a hole": "f'FROM {schemaPANDA}.{{1}} '.format('x', 'jobsActive4')",
-    }
-
-    for why, expression in unreadable.items():
-        source = (
-            "def f(self):\n"
-            f"    sqlJ = 'SELECT PandaID ' + {expression}\n"
-            "    self.cur.execute(sqlJ + comment, varMap)\n"
-        )
-
-        (run,) = sql.executions(_func(source))
-
-        assert "jobsActive4" not in run.sql, why
-
-
 def test_a_derived_field_holds_its_position_without_naming_anything():
     """``{0[1]}`` and ``{2:.3%}`` take a marker but name a value computed from
     an argument rather than the argument.
@@ -2523,90 +2297,6 @@ def test_a_derived_field_holds_its_position_without_naming_anything():
 
     assert [run.sql for run in sql.executions(_func(source))] == [
         "SELECT PandaID FROM {}.jobsActive4 WHERE pct>{} "
-    ]
-
-
-@pytest.mark.reassembly("representation")
-def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
-    """A hole standing for a whole table is not the schema.
-
-    ``getPandaIDsWithTask_JEDI`` fetches a task's jobs by looping over a list of
-    tables and interpolating each one, so the statement read as a query against
-    a table named ``{}`` -- which is to say the map had no name for the rows the
-    helper selects, and read it as consulting nothing at all.
-    """
-    source = (
-        "def f(self, jediTaskID, onlyActive):\n"
-        "    tables = [f'{schemaPANDA}.jobsDefined4', f'{schemaPANDA}.jobsActive4']\n"
-        "    if not onlyActive:\n"
-        "        tables += [f'{schemaARCH}.jobsArchived']\n"
-        "    sqlP = ''\n"
-        "    for tableName in tables:\n"
-        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE jediTaskID=:jediTaskID '\n"
-        "    self.cur.execute(sqlP + comment, varMap)\n"
-    )
-    func = _func(source)
-
-    tables = [
-        table for run in sql.executions(func) for table, _columns in sqltext.reads(run.sql)
-    ]
-
-    assert tables == ["jobsDefined4", "jobsActive4", "jobsArchived"]
-
-
-@pytest.mark.reassembly("python")
-def test_a_table_list_built_by_append_is_read_as_the_tables_it_holds():
-    """The same list, one ``append`` per flag.
-
-    ``peekJob`` builds its job tables that way and fills ``SELECT %s FROM %s``
-    from the loop, so the one read every job lookup makes was over a table
-    named ``{}``.  An element that is not written out still refuses the list:
-    ``tables.append(archive)`` names no table, and neither does the statement.
-    """
-    source = (
-        "def f(self, fromDefined, fromActive, archive):\n"
-        "    sql1_0 = 'SELECT %s FROM %s '\n"
-        "    sql1_1 = 'WHERE PandaID=:PandaID'\n"
-        "    tables = []\n"
-        "    if fromDefined:\n"
-        "        tables.append('ATLAS_PANDA.jobsDefined4')\n"
-        "    if fromActive:\n"
-        "        tables.extend(['ATLAS_PANDA.jobsActive4'])\n"
-        "    for table in tables:\n"
-        "        sql = sql1_0 % (JobSpec.columnNames(), table) + sql1_1\n"
-        "        self.cur.execute(sql + comment, varMap)\n"
-    )
-    unread = source.replace(
-        "tables.extend(['ATLAS_PANDA.jobsActive4'])", "tables.append(archive)"
-    )
-
-    assert [run.sql for run in sql.executions(_func(source))] == [
-        "SELECT {} FROM ATLAS_PANDA.jobsDefined4 WHERE PandaID=:PandaID",
-        "SELECT {} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID",
-    ]
-    assert [run.sql for run in sql.executions(_func(unread))] == [
-        "SELECT {} FROM {} WHERE PandaID=:PandaID"
-    ]
-
-
-@pytest.mark.reassembly("python")
-def test_an_interpolated_schema_is_still_left_blank():
-    """The reason reassembly blanks interpolations in the first place.
-
-    ``FROM {schemaJEDI}.JEDI_Tasks`` names its table outright and interpolates
-    only where the rows live.  The dot after the hole says which is which, and
-    filling this one would put a deployment's schema into the map as though it
-    were part of the statement.
-    """
-    source = (
-        "def f(self):\n"
-        "    schema = 'ATLAS_PANDA'\n"
-        "    sqlT = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
-        "    self.cur.execute(sqlT + comment, varMap)\n"
-    )
-
-    assert [run.sql for run in sql.executions(_func(source))] == [
-        "SELECT jediTaskID FROM {}.JEDI_Tasks WHERE status=:status "
     ]
 
 
@@ -3223,25 +2913,6 @@ def test_an_argument_with_no_default_leaves_the_hole():
     ]
 
 
-@pytest.mark.reassembly("python")
-def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
-    """Half a list of tables read as the list is a statement about tables the
-    code never runs over, which is worse than the hole it replaces."""
-    source = (
-        "def f(self):\n"
-        "    tables = [f'{schemaPANDA}.jobsActive4']\n"
-        "    tables.append(pick_one())\n"
-        "    sqlP = ''\n"
-        "    for tableName in tables:\n"
-        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
-        "    self.cur.execute(sqlP + comment, varMap)\n"
-    )
-
-    assert [run.sql for run in sql.executions(_func(source))] == [
-        "SELECT PandaID FROM {} WHERE x=:x "
-    ]
-
-
 def test_a_dict_keyed_by_table_name_is_a_list_of_tables():
     """``getDispatchDatasetsPerUser`` writes its list of tables as a dict, so
     each one can carry the statuses to ask it about, and adds two of the three
@@ -3270,36 +2941,6 @@ def test_a_dict_keyed_by_table_name_is_a_list_of_tables():
     ]
 
 
-@pytest.mark.reassembly("python")
-def test_a_dict_of_tables_mutated_some_other_way_leaves_the_hole_alone():
-    """``update`` and ``setdefault`` add keys from somewhere this cannot see,
-    and ``pop`` and ``clear`` take them away again.
-
-    The same reading as ``append`` on a list, for the same reason: a missing
-    table is not a smaller answer here, it is a statement the map says the
-    code runs over a set of tables it does not.
-    """
-    for mutation in (
-        "tableStatMap.update(more)",
-        "tableStatMap.setdefault(pick_one(), None)",
-        "tableStatMap.pop('jobsDefined4')",
-        "tableStatMap.clear()",
-    ):
-        source = (
-            "def f(self):\n"
-            "    tableStatMap = {'jobsDefined4': ['defined']}\n"
-            f"    {mutation}\n"
-            "    for tableName in tableStatMap:\n"
-            "        sqlJ = 'SELECT prodUserName '\n"
-            "        sqlJ += 'FROM {0}.{1} j '.format(schemaPANDA, tableName)\n"
-            "        self.cur.execute(sqlJ + comment, varMap)\n"
-        )
-
-        assert [run.sql for run in sql.executions(_func(source))] == [
-            "SELECT prodUserName FROM {}.{} j "
-        ], mutation
-
-
 def test_a_dict_whose_keys_are_not_written_out_leaves_the_hole_alone():
     """A key computed at run time names no table, and ``{**other}`` is a whole
     key set from somewhere this cannot see."""
@@ -3316,28 +2957,6 @@ def test_a_dict_whose_keys_are_not_written_out_leaves_the_hole_alone():
         assert [run.sql for run in sql.executions(_func(source))] == [
             "SELECT prodUserName FROM {}.{} j "
         ], literal
-
-
-@pytest.mark.reassembly("python")
-def test_more_tables_than_the_cap_allows_are_not_split_at_all():
-    """A silent cap reads exactly like full coverage.
-
-    Over the cap the statement is read as written, holes and all, and the
-    warning says so -- rather than an arbitrary subset of the tables, which a
-    reader would take for the whole list.
-    """
-    names = ", ".join(f"'ATLAS_PANDA.t{index}'" for index in range(40))
-    # One statement per table: the loop runs it on every pass.
-    source = (
-        "def f(self):\n"
-        f"    for tableName in ({names}):\n"
-        "        sqlP = f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
-        "        self.cur.execute(sqlP + comment, varMap)\n"
-    )
-
-    assert [run.sql for run in sql.executions(_func(source))] == [
-        "SELECT PandaID FROM {} WHERE x=:x "
-    ]
 
 
 def test_one_loop_variable_in_two_fragments_takes_one_value_at_a_time():
@@ -3469,9 +3088,8 @@ def test_a_query_run_under_another_name_counts_as_read_and_one_nothing_here_runs
     )
     module = _module(source, "pandaserver/taskbuffer/db_proxy_mods/job_standalone_module.py")
 
-    with sql.evaluated():
-        (stat,), unexplained = sqlwrite.read_coverage([module])
-        assembled = sqlwrite._assembled_queries(module.tree.body[0])
+    (stat,), unexplained = sqlwrite.read_coverage([module])
+    assembled = sqlwrite._assembled_queries(module.tree.body[0])
 
     assert sorted(assembled.values()) == ["sqlA", "sqlC", "sql_exe", "sql_exe", "sql_jt", "sql_jt"]
     assert "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 " not in assembled
@@ -3485,7 +3103,7 @@ def test_a_query_run_under_another_name_counts_as_read_and_one_nothing_here_runs
 def test_a_run_statement_is_held_by_the_name_the_call_runs():
     """Run, ``sql_exe = (sql_jt + comment) % table`` is read where ``sql_exe`` runs, under that name.
 
-    The reassembly cannot read the ``%`` and looked past ``sql_exe`` to
+    The reassembly that came before could not read the ``%`` and looked past ``sql_exe`` to
     ``sql_jt``; the run reads it.  A call with no bind map is said with what
     it runs, and the schema an f-string interpolates is a hole of the run.
     """
@@ -3499,9 +3117,8 @@ def test_a_run_statement_is_held_by_the_name_the_call_runs():
     )
     func = _func(source)
 
-    with sql.evaluated():
-        (run,) = sql.executions(func, skipped := [])
-        interpolated = sql.interpolations(func, "sql_exe")
+    (run,) = sql.executions(func, skipped := [])
+    interpolated = sql.interpolations(func, "sql_exe")
 
     assert (run.variable, run.head) == ("sql_exe", run.sql)
     assert [(skip.reason, skip.detail, skip.texts) for skip in skipped] == [
@@ -4530,7 +4147,7 @@ def test_a_column_copied_from_another_becomes_a_passthrough_branch():
 
 
 def test_a_conditionally_appended_fragment_carries_its_own_condition():
-    """Reassembly flattens the ``if``; the fragment is what still holds it.
+    """A statement's text flattens the ``if``; the fragment is what still holds it.
 
     ``getTasksToExecCommand_JEDI`` appends ``SET status=:status`` or ``SET
     status=oldStatus`` in the two arms of one test, so anchoring an inline value
@@ -4603,6 +4220,11 @@ def _func(source: str, name: str = "f"):
     )
 
 
+def _held(func, name: str) -> list[str]:
+    """Every statement the local *name* holds where the code uses it (:func:`sql.assembled_texts`)."""
+    return sql.assembled_texts(func).get(name, [])
+
+
 def test_a_guarded_chain_gives_each_value_its_own_condition():
     func = _func(
         "def f(self, spec):\n"
@@ -4653,7 +4275,6 @@ def test_a_later_write_that_is_not_exclusive_becomes_a_condition():
     assert values["done"] == ["not (spec.status == 'toabort')", "not (spec.is_hpo())"]
     # The overwriting write itself has nothing after it.
     assert values["finished"] == ["spec.is_hpo()"]
-
 
 
 def test_exclusive_siblings_do_not_negate_each_other():
@@ -10796,10 +10417,9 @@ def test_a_statement_built_with_str_format_is_read():
     )
     func = ast.parse(source).body[0].body[0]
 
-    assert sql.reconstruct(func, "sqlR").startswith(
-        "SELECT jediTaskID FROM {}.JEDI_Tasks tabT "
-    )
-    ((term,),) = [sqltext.terms(sql.reconstruct(func, "sqlR")).terms]
+    (text,) = _held(func, "sqlR")
+    assert text.startswith("SELECT jediTaskID FROM {}.JEDI_Tasks tabT ")
+    ((term,),) = [sqltext.terms(text).terms]
     assert (term.table, term.column, term.literals) == ("JEDI_Tasks", "status", ("running",))
 
 
@@ -15054,27 +14674,6 @@ def test_the_daemon_layer_speaks_through_the_task_buffer():
     assert "jobsActive4" in runs[0].sql
 
 
-@pytest.mark.reassembly("inline")
-def test_a_statement_written_into_the_call_is_read_for_the_forwarded_form():
-    """22 of the 114 forwarded sites pass the statement as a literal rather
-    than through a name.  ``execute`` still requires a name -- widening it
-    would move the stored map and make ``diff-map`` report condition drift
-    where there is none -- so those 36 stay unread and are a stated debt."""
-    forwarded = _func(
-        "def f():\n"
-        "    status, res = taskBuffer.querySQLS("
-        "'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus', var_map)\n"
-    )
-    direct = _func(
-        "def f(self):\n"
-        "    self.cur.execute("
-        "'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus', varMap)\n"
-    )
-
-    assert len(sql.executions(forwarded)) == 1
-    assert sql.executions(direct) == []
-
-
 def test_the_binds_of_a_forwarded_run_are_the_ones_of_its_own_block():
     """The reason a window is needed at all.  ``copyArchive.main`` binds
     ``sql`` 23 times and ``:jobStatus`` to 11 values; pairing a statement with
@@ -15371,7 +14970,7 @@ def test_an_annotated_literal_is_a_value_the_name_can_hold():
 def test_an_augmented_assignment_is_still_a_fragment_not_a_statement():
     """``pathcond.targets_of`` leaves ``AugAssign`` out on purpose.  Folding it in would
     make ``sql += ' AND x=1'`` look like the whole statement rather than a piece
-    of it, and the reassembled text is what every reader downstream matches."""
+    of it."""
     source = (
         "def f(self):\n"
         "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 '\n"
@@ -15380,10 +14979,8 @@ def test_an_augmented_assignment_is_still_a_fragment_not_a_statement():
     )
     func = _func(source)
 
-    assert [operator for _line, operator, _text, _node in sql._parts(func, "sql")] == [
-        "=",
-        "+=",
-    ]
+    assert [ast.unparse(target) for node in ast.walk(func) for target in pathcond.targets_of(node)] == ["sql"]
+    assert _held(func, "sql") == ["SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus"]
 
 def test_an_annotated_local_is_a_value_the_name_can_hold():
     """``assigned_expressions`` is what the emit pass follows one hop through.
@@ -15794,37 +15391,6 @@ def test_an_arm_that_uses_the_tested_name_does_not_join_the_other_arm():
     ]
 
 
-@pytest.mark.reassembly("cover")
-def test_two_tests_of_a_name_given_a_new_value_between_them_can_both_hold():
-    """``getTasksWithCriteria_JEDI``: the second ``for`` gives ``tmpVal`` its new value.
-
-    A list among the task criteria and a scalar among the dataset criteria go
-    into one statement.  Compared as text, ``isinstance(tmpVal, list)`` and
-    ``not (isinstance(tmpVal, list))`` contradict, and the statement was split
-    into variants none of which holds both.
-    """
-    source = (
-        "def f(self, taskCriteria, datasetCriteria):\n"
-        "    sql = 'SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:status '\n"
-        "    for tmpKey, tmpVal in taskCriteria.items():\n"
-        "        if isinstance(tmpVal, list):\n"
-        "            sql += 'AND a IN (:a) '\n"
-        "        else:\n"
-        "            sql += 'AND a=:a '\n"
-        "    for tmpKey, tmpVal in datasetCriteria.items():\n"
-        "        if isinstance(tmpVal, list):\n"
-        "            sql += 'AND b IN (:b) '\n"
-        "        else:\n"
-        "            sql += 'AND b=:b '\n"
-        "    self.cur.execute(sql, varMap)\n"
-    )
-
-    texts = {r.sql for r in sql.executions(_func(source))}
-
-    assert "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:status AND a IN (:a) AND b=:b " in texts
-    assert "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:status AND a=:a AND b IN (:b) " in texts
-
-
 def test_a_call_inside_a_test_is_not_a_new_value_after_it():
     """A test spanning lines holds calls below its ``if`` line, and they ran before the test did."""
     func = _func(
@@ -15905,33 +15471,6 @@ def test_a_statement_thrown_away_before_the_call_is_not_what_it_ran():
     assert second == ["SELECT b FROM ATLAS_PANDA.t2 "]
 
 
-@pytest.mark.reassembly("python")
-def test_a_statement_editing_itself_does_not_throw_itself_away():
-    """``sql_to_get_ids = sql_to_get_ids[:-1] + ") "`` closes a bracket.
-
-    Counting a self-reference as a replacement cost three real read edges when
-    it was measured that way, which is the whole difference between this rule
-    and a wrong one.  Most of that spelling never reaches ``_parts``, which
-    keeps only what renders; the f-string spelling does.
-
-    Both halves stay: the fragment the second line edits is still what the
-    call runs, and the map reads the edit as its own variant because the
-    reassembly cannot fold a name back into itself.  That is untouched here --
-    what matters is that the edit does not throw the first away.
-    """
-    source = (
-        "def f(self):\n"
-        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 WHERE x IN ('\n"
-        "    sql = f'{sql}:v) '\n"
-        "    self.cur.execute(sql, varMap)\n"
-    )
-
-    assert sorted(r.sql for r in sql.executions(_func(source))) == [
-        "SELECT a FROM ATLAS_PANDA.t1 WHERE x IN (",
-        "{}:v) ",
-    ]
-
-
 def test_a_rebinding_under_an_arm_the_call_is_not_in_throws_nothing_away():
     """One arm's rebinding is not the other arm's."""
     source = (
@@ -15945,23 +15484,6 @@ def test_a_rebinding_under_an_arm_the_call_is_not_in_throws_nothing_away():
 
     assert [r.sql for r in sql.executions(_func(source))] == [
         "SELECT a FROM ATLAS_PANDA.t1 "
-    ]
-
-
-@pytest.mark.reassembly("one_pass")
-def test_a_rebinding_inside_a_loop_leaves_the_first_pass_alone():
-    """The pass before it ran is a pass where the earlier statement stood."""
-    source = (
-        "def f(self):\n"
-        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
-        "    for row in rows:\n"
-        "        sql = 'SELECT b FROM ATLAS_PANDA.t2 '\n"
-        "    self.cur.execute(sql, varMap)\n"
-    )
-
-    assert sorted(r.sql for r in sql.executions(_func(source))) == [
-        "SELECT a FROM ATLAS_PANDA.t1 ",
-        "SELECT b FROM ATLAS_PANDA.t2 ",
     ]
 
 
@@ -16179,54 +15701,6 @@ def test_the_value_is_found_after_the_table_name_is_filled_in():
     assert _branches_of(source, "jobsDefined4.jobStatus") == {("holding", ())}
 
 
-@pytest.mark.reassembly("per_call")
-def test_the_reading_is_chosen_by_kind_so_an_upsert_keeps_its_two_reasons():
-    """The ablation for choosing the reading rather than trying both.
-
-    Both arms of an UPSERT spell the same column with the same value, so a
-    reading that accepted either answers for the ``INSERT`` when asked about
-    the ``UPDATE``.  Measured on the installed corpus, trying both moves six
-    anchors where choosing moves three -- the extra three being the ``UPDATE``
-    halves of the same three UPSERTs, which is the mis-anchoring this path
-    removes, arriving from the other side.
-    """
-    source = (
-        "class M:\n"
-        "    def claim(self, row):\n"
-        "        if row is None:\n"
-        "            sql = (\"INSERT INTO ATLAS_PANDA.jobsActive4 \"\n"
-        "                   \"(PandaID,jobStatus) \"\n"
-        "                   \"VALUES (:PandaID,'running') \")\n"
-        "            self.cur.execute(sql + comment, varMap)\n"
-        "        else:\n"
-        "            sql = (\"UPDATE ATLAS_PANDA.jobsActive4 \"\n"
-        "                   \"SET jobStatus='running' \"\n"
-        "                   \"WHERE PandaID=:PandaID \")\n"
-        "            self.cur.execute(sql + comment, varMap)\n"
-    )
-    modules = [
-        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
-        _module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
-    ]
-    func = next(
-        n for n in ast.walk(modules[1].tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "claim"
-    )
-    pathcond.attach_parents(modules[1].tree)
-    running = sqltext.ColumnValue(kind="literal", text="running")
-    runs = {run.sql.split()[0].upper(): run for run in sql.executions(func)}
-
-    insert_at = sqlwrite._deciding_fragment(func, runs["INSERT"], "jobStatus", running, "insert")
-    update_at = sqlwrite._deciding_fragment(func, runs["UPDATE"], "jobStatus", running, "update")
-
-    assert insert_at.lineno != update_at.lineno
-    # Asking the UPDATE with the INSERT's reading is how the two collapse.
-    assert (
-        sqlwrite._deciding_fragment(func, runs["UPDATE"], "jobStatus", running, "insert").lineno
-        == insert_at.lineno
-    )
-
-
 # --------------------------------------------------------------------------- #
 # the verb a statement uses on a row
 # --------------------------------------------------------------------------- #
@@ -16429,7 +15903,7 @@ def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
     which is why the map had the scout writing nothing of ``JediTaskSpec``.
     """
     with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
-        statements = [w for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text)]
+        statements = [w for text in _held(func, "sqlTSD") for w in sqltext.writes(text)]
 
     (statement,) = statements
     assert sorted(statement.columns) == ["ramCount", "walltime"]
@@ -16438,7 +15912,7 @@ def test_a_column_named_by_a_mapping_key_is_read_from_the_callee():
 def test_a_key_the_loop_passes_over_is_not_a_column():
     """``if scoutKey in ["newNG"]: continue`` -- the statement never writes it."""
     with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
+        columns = {c for text in _held(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert "newNG" not in columns
 
@@ -16452,22 +15926,9 @@ def test_a_skip_written_as_a_prefix_test_is_read_too():
         '            if not scoutKey.startswith("wall"):',
     )
     with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
+        columns = {c for text in _held(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == {"walltime"}
-
-
-@pytest.mark.reassembly("union")
-def test_a_skip_this_cannot_read_leaves_the_column_unnamed():
-    """Missing a skip does not shorten the answer, it falsifies it."""
-    source = _SCOUT_SOURCE.replace(
-        '            if scoutKey in ["newNG"]:',
-        "            if self.excluded(scoutKey):",
-    )
-    with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
-
-    assert columns == set()
 
 
 def test_a_literal_before_the_key_stays_in_the_column_name():
@@ -16477,7 +15938,7 @@ def test_a_literal_before_the_key_stays_in_the_column_name():
         '            sqlTSD += f"merge{scoutKey}={tmpScoutKey},"',
     )
     with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
+        columns = {c for text in _held(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == {"mergeramCount", "mergewalltime"}
 
@@ -16489,7 +15950,7 @@ def test_the_placeholder_the_loop_computes_is_resolved_with_the_column():
     walk cannot follow it to ``varMap[tmpScoutKey] = scoutVal``.
     """
     with _in_build(_SCOUT_SOURCE, "set_scout_data") as func:
-        (statement,) = [w for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text)]
+        (statement,) = [w for text in _held(func, "sqlTSD") for w in sqltext.writes(text)]
         bound = [ast.unparse(b.value) for b in sql.bound_values(func, "varMap", ":ramCount")]
 
     assert statement.columns["ramCount"].kind == "bind"
@@ -16508,7 +15969,7 @@ def test_the_mapping_is_read_from_the_method_the_call_lands_in():
         "        return True, returnMap, extra\n"
     ) + _SCOUT_SOURCE
     with _in_build(source, "set_scout_data") as func:
-        columns = {c for text in sql.variants(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
+        columns = {c for text in _held(func, "sqlTSD") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == {"ramCount", "walltime"}
 
@@ -16525,7 +15986,7 @@ def test_a_mapping_that_arrives_as_a_parameter_is_the_callers_to_state():
     )
     func = _func(source, "update")
 
-    columns = {c for text in sql.variants(func, "sql") for w in sqltext.writes(text) for c in w.columns}
+    columns = {c for text in _held(func, "sql") for w in sqltext.writes(text) for c in w.columns}
 
     assert columns == set()
     assert sql.key_column_census(func) == sql.KeyColumnCensus(
@@ -16582,9 +16043,6 @@ def _skips(source: str, name: str) -> list:
     [
         ("queryTasksToBePending_JEDI", sql.SKIP_HANDED_IN, "sql_query"),
         ("getSiteInfo", sql.SKIP_NO_VARMAP, "sql"),
-        pytest.param(
-            "inline", sql.SKIP_INLINE, "SELECT LAST_INSERT_ID()", marks=pytest.mark.reassembly("inline")
-        ),
         ("unbound", sql.SKIP_UNBOUND, "SQL_FROM_ELSEWHERE"),
         ("peekJob", sql.SKIP_UNREAD_NAME, "sql"),
     ],

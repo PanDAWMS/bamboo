@@ -109,8 +109,8 @@ def written_value(node: ast.AST) -> Optional[ast.expr]:
     """What an assignment writes, across all three spellings of one.
 
     Unlike :func:`targets_of` this does fold in ``AugAssign``, because its
-    callers are reassembling a statement from the ``=`` and ``+=`` fragments
-    that build it and need the right-hand side of both.
+    callers read what the ``=`` and ``+=`` fragments of a value write and need
+    the right-hand side of both.
     """
     if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
         return node.value
@@ -961,8 +961,8 @@ def _tested_by(node: ast.AST, exits: bool) -> list[tuple[str, Optional[ast.stmt]
     :func:`path_condition`'s, and with *exits* :func:`reachable_when`'s early
     exits too.  A condition ``path_condition`` could not pair with its ``if``
     -- it skipped a test it could not render -- carries ``None``, and
-    :func:`parted` then reads it as written.  Held on the node, since the
-    reassembly asks it of every pair of a statement's fragments.
+    :func:`parted` then reads it as written.  Held on the node, since it is
+    asked of many pairs.
     """
     held: Optional[dict[bool, list[tuple[str, Optional[ast.stmt]]]]] = getattr(
         node, "_tested_by", None
@@ -1057,14 +1057,13 @@ def parted(one: ast.AST, other: ast.AST, exits: bool = True) -> bool:
     of one ``if`` lost each other as soon as either arm assigned the name or
     called a method on it (``elif workingGroup is not None:`` ...
     ``workingGroup.upper()``), and a multi-line test counted the calls inside
-    it.  Over the corpus's reassembly, 98.5% of the "cannot meet" answers come
+    it.  When statements were reassembled, 98.5% of the "cannot meet" answers came
     from one statement's arms; that rule turned 334 of them into "can meet" and
     would have built statements no run sends.  Read by statement, 12 pairs
     change there, all in ``getTasksWithCriteria_JEDI``.
 
     *exits* reads :func:`reachable_when`'s early exits as well as the ``if``
-    tests, as :func:`compatible` does; the reassembly reads the tests alone,
-    as it always has.
+    tests, as :func:`compatible` does; without it, the tests alone.
     """
     func = enclosing_function(one)
     mine, theirs = _tested_by(one, exits), _tested_by(other, exits)

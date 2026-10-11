@@ -1,7 +1,7 @@
 """Reading the SQL a function hands its cursor by running the function, on every path, over values.
 
-:mod:`~bamboo.codemap.panda.sql` reassembles a statement from the shapes of the Python that builds it; this runs the
-Python.  A small abstract interpreter over one function at a time:
+:mod:`~bamboo.codemap.panda.sql` asks it what each call that runs a statement runs; this runs the Python.  A small
+abstract interpreter over one function at a time:
 
 - Every path is run.  An ``if`` whose test it cannot settle runs both arms, and two tests spelled the same, on names
   nothing rebinds in between, are taken the same way (facts).  A test that reads attributes (``self.backend ==
@@ -45,9 +45,8 @@ What it keeps besides the texts, because the readers of the map ask for it:
   (:class:`AtLeast`), so ``len(varMap) == 0`` reads False after the first write (``queryDatasetWithMap``).
 - A bool a loop carries from one pass to the next is kept where a test deciding whether a call runs reads it
   (``propagateResultToJEDI``'s ``toUpdateFlag``).
-- What the readers ask besides a call's text (:meth:`Reading.heads`, :meth:`Reading.copied`, :meth:`Reading.decided`):
-  the text of the name a call runs, drawn as each covering statement was; what a copied name (``sql = sqlIn``) held
-  where it was copied; and the way every path took an ``if``'s test.
+- What the readers ask besides a call's text (:meth:`Reading.heads`, :meth:`Reading.named`): the text of the name a
+  call runs, drawn as each covering statement was.
 
 Limits, each said rather than hidden:
 
@@ -1642,13 +1641,8 @@ class Ref:
         ] = {}  # line -> {value: None}, in the order the paths reached it
         # What a consumer asks besides the call's text.  line -> {call's value: {text
         # name in it: {its value}}} (Execution.head, drawn with the cover's own
-        # choices); the line of a statement copying a name into a text name (sql =
-        # sqlIn, sql += where) -> {copied name: {its value there}} (sqlwrite's _cut_name
-        # asks it); an if's test -> the ways the paths took it, True and / or False
-        # (decided_here).
+        # choices).
         self.names_at: dict[int, dict] = {}
-        self.copied_at: dict[int, dict] = {}
-        self.taken: dict = {}
         self.no_text: dict[int, int] = {}
         self.reached: set[int] = set()
         self.overflow: Optional[str] = None
@@ -2546,29 +2540,6 @@ class Ref:
             self._loads[key] = held
         return held
 
-    def copied(self, stmt: ast.stmt, envs: list[Env]) -> None:
-        """At ``sql = sqlIn`` or ``sql += where`` (a text name copied into one), what the copied name holds there."""
-        if (
-            self.mode == "return"
-            or not isinstance(stmt.value, ast.Name)
-            or stmt.value.id not in self.text_names
-        ):
-            return
-        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
-        if not any(
-            isinstance(target, ast.Name) and target.id in self.text_names
-            for target in targets
-        ):
-            return
-        name = stmt.value.id
-        # A dict, not a set: the order the paths came in, so two values drawing one text
-        # answer the same way every run (a set goes by address).
-        held = self.copied_at.setdefault(stmt.lineno, {}).setdefault(name, {})
-        for env in envs:
-            one = env.vars.get(name)
-            if one is not None:
-                held[one] = None
-
     def hold_use(self, name: str, envs: list[Env]) -> None:
         held = self.used.setdefault(name, {})
         for env in envs:
@@ -2859,7 +2830,6 @@ class Ref:
             return self.dedupe(envs), [], []
         if isinstance(stmt, ast.Assign):
             self.record(stmt.value, envs)
-            self.copied(stmt, envs)
             out = []
             lost = self.escaped(stmt.value)
             self._for_text = self.builds_text(stmt)
@@ -2910,7 +2880,6 @@ class Ref:
             return self.dedupe(out), [], []
         if isinstance(stmt, ast.AugAssign):
             self.record(stmt.value, envs)
-            self.copied(stmt, envs)
             if isinstance(stmt.target, ast.Name):
                 expression = self._augmented.get(id(stmt))
                 if expression is None:
@@ -2946,12 +2915,6 @@ class Ref:
         if isinstance(stmt, ast.If):
             self.record(stmt.test, envs)
             yes, no = self.split(stmt.test, envs)
-            if self.mode != "return":
-                taken = self.taken.setdefault(stmt.test, set())
-                if yes:
-                    taken.add(True)
-                if no:
-                    taken.add(False)
             a = self.block(stmt.body, yes, after=after) if yes else ([], [], [])
             b = self.block(stmt.orelse, no, after=after) if no else ([], [], [])
             return self.dedupe(a[0] + b[0]), a[1] + b[1], a[2] + b[2]
@@ -5813,8 +5776,6 @@ class Reading:
     ):
         self.values: dict[int, dict] = {}
         self.names_at: dict[int, dict] = {}
-        self.copied_at: dict[int, dict] = {}
-        self.taken: dict = {}
         self.reached: set[int] = set()
         self.overflow_at: dict[int, str] = {}
         self.widened_at: set[int] = set()
@@ -5850,11 +5811,7 @@ class Reading:
                 whole.reached,
                 whole.defaults_used,
             )
-            self.names_at, self.copied_at, self.taken = (
-                whole.names_at,
-                whole.copied_at,
-                whole.taken,
-            )
+            self.names_at = whole.names_at
             self.widened_at |= whole.widened_lines
             return
         # Past the budget: each call by its own run, which tracks only the names that
@@ -5875,11 +5832,6 @@ class Reading:
             self.widened_at |= one.widened_lines
             self.values.update(one.values)
             self.names_at.update(one.names_at)
-            for at, names in one.copied_at.items():
-                for name, held in names.items():
-                    self.copied_at.setdefault(at, {}).setdefault(name, {}).update(held)
-            for test, taken in one.taken.items():
-                self.taken.setdefault(test, set()).update(taken)
             self.reached |= one.reached
             self.defaults_used |= one.defaults_used
 
@@ -5931,26 +5883,6 @@ class Reading:
             )
         return out
 
-    def copied(
-        self, line: int, name: str, text: Optional[str] = None
-    ) -> list[Rendered]:
-        """What *name* held where the statement at *line* copied it into a text name (sqlwrite's ``_cut_name``): the
-        ways it renders *text*, or without *text* its covering statements.  A cover alone may lack the combination
-        the outer statement was drawn with, so a consumer naming the piece passes its text."""
-        held = list(self.copied_at.get(line, {}).get(name, ()))
-        if text is not None:
-            return rendered_as(held, text)
-        out: dict = {}
-        for value in held:
-            for one in cover([value])[0]:
-                out.setdefault(one.text, one)
-        return [out[t] for t in sorted(out)]
-
-    def decided(self, test) -> Optional[bool]:
-        """True or False where every path that met *test* took it that way, else None (:func:`sql.decided_here`)."""
-        taken = self.taken.get(test)
-        return next(iter(taken)) if taken and len(taken) == 1 else None
-
     def named(self, line: int, name: str, text: Optional[str] = None) -> list[Rendered]:
         """What the text name *name* held at the call at *line*: the ways it renders *text*, or without *text* each
         covering statement's drawing of it (:meth:`heads`), one per text."""
@@ -5964,14 +5896,6 @@ class Reading:
             for one in drawings:
                 out.setdefault(one.text, one)
         return [out[t] for t in sorted(out)]
-
-    def named_everywhere(self, name: str) -> list[str]:
-        """Every text *name* holds at a call that runs it."""
-        texts: set = set()
-        for line, by_value in self.names_at.items():
-            if any(name in by_name for by_name in by_value.values()):
-                texts |= {one.text for one in self.named(line, name)}
-        return sorted(texts)
 
     @property
     def overflow(self) -> Optional[str]:

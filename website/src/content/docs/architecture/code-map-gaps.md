@@ -16,9 +16,7 @@ whether anything is planned.
 :::caution[What this page covers]
 Only the SQL reader: the statements (`read_sites`), the terms some of a statement's builds
 hold (`added_under`), the row preconditions on junction branches, and the columns the write
-side reads. It describes the reader that runs the function (`BAMBOO_SQL_EVAL=1`); the
-reader that reassembles statements from their shapes has gaps of its own that are not
-listed. Other slices are not covered yet. **A gap missing from this page is not evidence
+side reads. Other slices are not covered yet. **A gap missing from this page is not evidence
 that the map is right.**
 :::
 
@@ -31,8 +29,9 @@ that the map is right.**
   counts it, and the graph does not carry it; *Latent* — not wrong today, and nothing would
   say so if it became wrong.
 - **Size** is counted on panda-server `2cd8c424` with bamboo `14ad4d6` and
-  `BAMBOO_SQL_EVAL=1`, from `bamboo diff-map --dump` or from a census over the same reader,
-  unless the row says otherwise. As everywhere on these pages, the command is the authority:
+  `BAMBOO_SQL_EVAL=1` (the switch that chose this reader then; it is now the only one), from
+  `bamboo diff-map --dump` or from a census over the same reader, unless the row says
+  otherwise. As everywhere on these pages, the command is the authority:
   a later build moves these figures.
 - **Status** is *open* (nothing decided), *deferred* (decided to do later) or *accepted*
   (decided not to fix; the row says why).
@@ -50,6 +49,7 @@ These matter most: nothing in the output tells a reader to doubt the entry.
 | **A loop that reads the text it builds is read as one or two passes.** Only a loop whose body does nothing with the name but append to it is read as a repeated part. | a spec's `columnNames` (`if ret != "": ret += ","`): the column lists of `SELECT` and `INSERT INTO` | 74 calls in 38 functions, 70 of them through `columnNames` | deferred |
 | **The evaluator's own approximations.** Values a loop carries between passes are forgotten (numbers always); the tests that decide a guard are not tracked; a dict is tracked by literal keys only; lists are values, not aliases; a nested function runs only when the resolver calls it; a loop over a sequence of unknown length is taken to run at least once. Each is documented in `bamboo/codemap/panda/sqleval.py`. Where one leaves a value unknown, the statement holds a hole and that is said; where it leaves a value wrong, nothing is. | — | not counted | accepted: the stated limits of the evaluator's design |
 | **What needs every statement says less past the cap.** A call can run more statements than the reader expands (512). Past it, the values every statement refuses or restricts (`refuses`, `restricts`) are read off the statements the reader draws, a disjunction of conditions across statements is not said, and neither is a precondition only some statements carry (`row_precondition_when`). Whether some build lacks a term (`added_under`) is always read off the statements drawn. | `getJobs`, `duplicateFilesForReuse_JEDI` | 2 calls | accepted: the cap bounds the build's time |
+| **A branch under each arm of another test can be missing from every statement drawn.** The reader draws a covering set of statements — every branch in some statement, not every combination — and counts a branch by the test it sits under. Two fragments chosen by one test, each under a different arm of an earlier test, can then share one place in the set, and one of them is in no statement drawn. | `getActiveDebugJobs`: `if prodRole / elif workingGroup is not None / else`, then a loop over two tables. No statement drawn holds `UPPER(workingGroup) IN (:wg1,:wg2)`, so nothing the map reads off the statements names it. | 1 found; not counted | open: keyed by the branch instead, the set holds it, but 61 call lines then draw a callee's loop with nothing chosen |
 | **A conditional precondition is approximate.** `row_precondition_when` comes from the statements the reader draws, so a combination it does not draw is not said. "Under C the fragment carrying the term is appended" is read off the path, and a `return` or exception between C and the fragment breaks it. A local flag (`updateAttemptNr is True`) is given as written, which a reader cannot evaluate. | `updateJobStatus` appends `AND NOT jobStatus=:ngStatus` only under `jobStatus == "transferring"` | not counted | open |
 | **A flush method's guard under a test on its parameter is said for every caller.** A method that saves a spec through `bindUpdateChangesExpression` gives its callers' branches the terms of its `WHERE` as the row they need (`row_precondition`), leaving out a term a parameter decides for a caller that does not pass the parameter. The parameter is found by looking for the term's text in the method's source, so a term the method formats (`f"status IN ({names})"`) is tied to none, and every caller is told it. | `updateTask_JEDI` appends `status IN (:old___in)` only `if oldStatus is not None`. `AtlasProdWatchDog.doActionForReassign` passes no `oldStatus`, yet its branches carry the term, and the answer for `JediTaskSpec.status` `ready` prints "only lands on a row where status IN (:old___in)" under it. | 15 branches in 5 functions; the 26 branches whose callers pass `oldStatus` are right. No other flush method's guard is of this kind | open |
 
@@ -103,6 +103,15 @@ Counted as distinct (function, table, column).
 | `the execute call names no varmap` | 9 | |
 | `the placeholder is bound without its leading colon` | 4 | |
 | `bound outside the window this execution owns` | 2 | |
+
+Statements a function builds that the read side did not see run. `build-map` prints them under
+`sql-read candidates not accounted for`. Counted as statements, at bamboo `d158203`.
+
+| Reason | Count | What it usually is |
+|---|---|---|
+| `run through an accepted call with no varmap argument` | 27 | `execute(sql)`: not read, and the call is said under *Said* (`the statement runs with no bind map, ...`); this list counts its statements |
+| `run through a call form the reader does not accept` | 15 | the text handed to a helper that runs it: `getClobObj` (most), `queryTasksToPreassign_JEDI`, `queryTasksToBePending_JEDI`, `query_column_sql` |
+| `assembled here and not run here` | 6 | not a gap: a statement no path runs (`getEventRanges`'s `sqlGD`, `sqlLK`), or one returned to a caller (`WorkQueueMapper.getSqlQuery`) |
 
 ## Latent
 

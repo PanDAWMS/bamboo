@@ -133,9 +133,5 @@ markers = [
     # step -- kept visible rather than deleted, kept out of the gate rather than
     # making the gate meaningless.
     "timing: passes or fails on how fast the machine is; not a merge gate.",
-    # BAMBOO_SQL_EVAL=1 reads SQL with the evaluator (codemap.panda.sqleval) in
-    # place of sql.py's reassembly; tests/conftest.py says what each does there.
-    "reassembly(kind): pins the reassembly's reading of a statement the evaluator reads otherwise by design.",
-    "sqleval_gap(reason): a reading the evaluator does not give yet; expected to fail with it on.",
 ]
 

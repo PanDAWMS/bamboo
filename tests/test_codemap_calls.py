@@ -5,8 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 from bamboo.codemap import calls as calls_mod
 
 PACKAGE = "pkg"
@@ -1018,45 +1016,6 @@ def test_a_call_requiring_several_conditions_reads_each_as_a_tree_of_its_own(tmp
     ]
 
 
-@pytest.mark.reassembly("representation")
-def test_a_where_clause_a_call_returns_is_read_into_the_statement_with_its_binds(tmp_path):
-    from bamboo.codemap.panda import sql
-
-    roots = _tree(
-        tmp_path,
-        db=(
-            "class DB:\n"
-            "    def where(self, label):\n"
-            "        vm = {':status': 'activated'}\n"
-            "        clause = 'WHERE jobStatus=:status '\n"
-            "        if label:\n"
-            "            clause += 'AND label=:label '\n"
-            "            vm[':label'] = label\n"
-            "        return clause, vm\n"
-            "\n"
-            "    def get(self, cur, label):\n"
-            "        def build():\n"
-            "            c, v = self.where(label)\n"
-            "            return c, v\n"
-            "        clause, orig = build()\n"
-            "        vm = dict(orig)\n"
-            "        sql = 'SELECT PandaID FROM jobsActive4 '\n"
-            "        sql += clause\n"
-            "        cur.execute(sql, vm)\n"
-        ),
-    )
-    calls = _calls(roots)
-    func, runs = _runs(calls, "db", "get")
-
-    (run,) = runs
-    assert run.sql == "SELECT PandaID FROM jobsActive4 WHERE jobStatus=:status AND label=:label "
-    assert run.unresolved == ()
-    with sql.across_calls(calls):
-        binds = sql.bound_values(func, "vm", ":status", across=True)
-        assert sql.bound_values(func, "vm", ":status") == []
-    assert [ast.unparse(bind.value) for bind in binds] == ["'activated'"]
-
-
 def test_a_callee_building_two_statements_hands_over_two_alternatives_not_one(tmp_path):
     roots = _tree(
         tmp_path,
@@ -1082,87 +1041,6 @@ def test_a_callee_building_two_statements_hands_over_two_alternatives_not_one(tm
         "SELECT PandaID FROM jobsActive4 ORDER BY age",
         "SELECT PandaID FROM jobsActive4 ORDER BY share",
     ]
-
-
-@pytest.mark.reassembly("representation")
-def test_a_returned_call_and_a_returned_name_are_followed_to_their_text(tmp_path):
-    roots = _tree(
-        tmp_path,
-        db=(
-            "class DB:\n"
-            "    def criteria(self, fast):\n"
-            "        if fast:\n"
-            "            return self.by_age()\n"
-            "        return self.by_share()\n"
-            "\n"
-            "    def by_age(self):\n"
-            "        empty = '', {}\n"
-            "        if self.enabled:\n"
-            "            return ' ORDER BY age', {}\n"
-            "        return empty\n"
-            "\n"
-            "    def by_share(self):\n"
-            "        return ' ORDER BY share', {}\n"
-            "\n"
-            "    def get(self, cur, fast):\n"
-            "        sorting, _vm = self.criteria(fast)\n"
-            "        sql = 'SELECT PandaID FROM jobsActive4'\n"
-            "        if sorting:\n"
-            "            sql += sorting\n"
-            "        cur.execute(sql, {})\n"
-        ),
-    )
-    calls = _calls(roots)
-    _func, runs = _runs(calls, "db", "get")
-
-    # The empty text ``by_age`` hands back when disabled is the run that skips
-    # the ``if``, not a third alternative.
-    assert sorted(run.sql for run in runs) == [
-        "SELECT PandaID FROM jobsActive4 ORDER BY age",
-        "SELECT PandaID FROM jobsActive4 ORDER BY share",
-    ]
-
-
-@pytest.mark.reassembly("representation")
-def test_a_statement_wrapped_around_itself_keeps_what_it_held(tmp_path):
-    roots = _tree(
-        tmp_path,
-        db=(
-            "def get(cur, limit):\n"
-            "    sql = 'SELECT PandaID FROM jobsActive4 WHERE a=:a '\n"
-            "    if limit:\n"
-            "        sql = 'SELECT * FROM (' + sql\n"
-            "        sql += ') WHERE ROWNUM <= :n'\n"
-            "    cur.execute(sql, {':a': 1})\n"
-        ),
-    )
-    calls = _calls(roots)
-    _func, runs = _runs(calls, "db", "get")
-
-    assert [run.sql for run in runs] == [
-        "SELECT * FROM (SELECT PandaID FROM jobsActive4 WHERE a=:a ) WHERE ROWNUM <= :n"
-    ]
-
-
-@pytest.mark.reassembly("representation")
-def test_a_fragment_held_under_a_local_name_is_appended_as_its_text(tmp_path):
-    roots = _tree(
-        tmp_path,
-        db=(
-            "def get(cur, failed_only):\n"
-            "    failed = \"AND jobStatus IN ('failed','closed') \"\n"
-            "    sql = 'SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:t '\n"
-            "    if failed_only:\n"
-            "        sql += failed\n"
-            "    cur.execute(sql, {':t': 1})\n"
-        ),
-    )
-    calls = _calls(roots)
-    _func, runs = _runs(calls, "db", "get")
-
-    (run,) = runs
-    assert run.sql == "SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:t AND jobStatus IN ('failed','closed') "
-    assert run.unresolved == ()
 
 
 def test_a_local_name_settles_only_where_every_binding_of_it_does(tmp_path):
@@ -1864,7 +1742,7 @@ def test_a_term_whose_text_several_fragments_make_is_placed_where_they_are(tmp_p
     attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
     calls = sqlwrite.corpus_calls(modules, roots)
 
-    with sql.across_calls(calls), sql.evaluated(True):
+    with sql.across_calls(calls):
         side = sqlwrite.read_side(modules, attributor, calls)
 
     def placed(owner: str) -> dict:
@@ -1909,7 +1787,7 @@ def test_a_term_appended_before_re_sub_adds_a_hint_is_placed_under_its_test(tmp_
     attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
     calls = sqlwrite.corpus_calls(modules, roots)
 
-    with sql.across_calls(calls), sql.evaluated(True):
+    with sql.across_calls(calls):
         side = sqlwrite.read_side(modules, attributor, calls)
 
     (statement,) = side.statements.values()
@@ -2454,16 +2332,13 @@ def test_a_name_shared_with_every_container_names_five_receivers_and_counts_the_
 # -- X5: a statement read at a call ---------------------------------------------
 
 
-@pytest.mark.sqleval_gap(
-    "sqlwrite cuts every fragment the loop appends as on some paths only (a loop that may not run); "
-    "the reassembly tied the loop it unrolled to `sqlP = \"\"` before it, so its selects stay required"
-)
 def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_not_required(tmp_path):
     """``getPandaIDsWithTask_JEDI``: ``modificationTime>(CURRENT_DATE-30)`` is appended under a test of the table name.
 
     No pass can say whether ``{}.jobsArchived`` starts with the archive schema,
-    so every pass keeps the fragment -- the statement's text is unchanged --
-    but it is kept as appended under that ``if``, not as what every branch requires.
+    so each pass may append the fragment or not -- some statement has it in
+    every part, some in none -- and it is kept as appended under that ``if``,
+    not as what every branch requires.
     """
     from bamboo.codemap.panda import sql
 
@@ -2493,8 +2368,8 @@ def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_n
     side = _read_side(tmp_path, db=db, main=main)
 
     (got,) = side.statements.values()
-    (run,) = sql.executions(_function(_calls(_tree(tmp_path, db=db, main=main)), "db", "get_ids"))
-    assert run.sql.count("AND modificationTime>(CURRENT_DATE-30)") == 4
+    runs = sql.executions(_function(_calls(_tree(tmp_path, db=db, main=main)), "db", "get_ids"))
+    assert {run.sql.count("AND modificationTime>(CURRENT_DATE-30)") for run in runs} >= {0, 4}
     assert got.conditions == []
     (added,) = [one for one in got.added_under if one.field == "conditions"]
     assert added.term == "modificationTime>(CURRENT_DATE-30)"

@@ -1,6 +1,6 @@
 """Reading the SQL a function hands its cursor by running it (``sqleval``).
 
-The shapes are the ones the corpus census found the map's reassembly misread
+The shapes are the ones the corpus census found the map's former reassembly misread
 (H1-H6) and the control flow a statement is built through; each pins what
 running the Python on every path says, line numbers counted from the source
 string's first (empty) line.
@@ -1168,56 +1168,21 @@ def f(self, a):
     ]
 
 
-def test_what_a_copied_name_held_where_it_was_copied():
-    """sqlwrite cuts ``sql = sqlIn`` in ``sqlIn``'s own terms: its text there and who put each piece into it."""
-    reading = _reading(COPY)
-    assert [(one.text, _lines(one.carried)) for one in reading.copied(6, "sqlIn")] == [
-        ("INSERT INTO T (a) VALUES (:a)", [(3, 0, 29)])
-    ]
-    found = reading.copied(6, "sqlIn", "INSERT INTO T (a) VALUES (:a)")
-    assert [one.text for one in found] == ["INSERT INTO T (a) VALUES (:a)"]
-
-
-FLAGGED = """
-def f(self, flag, res):
-    sql = "SELECT a FROM T"
-    if flag:
-        sql += " WHERE b=:b"
-    if res is None:
-        sql += " ORDER BY a"
-    self.cur.execute(sql, varMap)
-"""
-
-
-def test_a_constant_decides_a_test_a_value_from_elsewhere_does_not():
-    """``decided_here``: the way every path took an ``if``'s test; both ways is undecided."""
-    func = _function(FLAGGED)
-    tests = [n.test for n in func.body if isinstance(n, ast.If)]
-    assert [sqleval.evaluate(func, {"flag": True}).decided(t) for t in tests] == [
-        True,
-        None,
-    ]
-    assert [sqleval.evaluate(func).decided(t) for t in tests] == [None, None]
-
-
-# ---------------------------------------------------------------- what sql.py reads with the evaluator on
+# ---------------------------------------------------------------- what sql.py reads
 #
-# Tests in test_codemap.py and test_codemap_calls.py marked ``reassembly(kind)``
-# pin how sql.py's reassembly reads a statement the evaluator reads otherwise
-# by design.  Under BAMBOO_SQL_EVAL=1 they are skipped (tests/conftest.py says
-# each kind), and these pin what the evaluator reads instead, one test per
-# kind.  The marked tests go when the reassembly does.
+# Where the reassembly sql.py read statements with before read one otherwise
+# by design, these pin what the evaluator reads, one test per kind of
+# difference (named first in each docstring).
 
 
 def _run_sql(src: str, name: str = "f") -> list[str]:
-    """The statements ``sql.executions`` reads of *name* with the evaluator on."""
+    """The statements ``sql.executions`` reads of *name*."""
     tree = ast.parse(textwrap.dedent(src))
     pathcond.attach_parents(tree)
     func = next(
         n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name
     )
-    with sql.evaluated():
-        return [run.sql for run in sql.executions(func)]
+    return [run.sql for run in sql.executions(func)]
 
 
 def _read_side(tmp_path, text: str) -> dict:
@@ -1292,24 +1257,23 @@ _WRAPPED = (
 def test_a_fragment_an_if_adds_is_one_statement_with_it_and_one_without(
     tmp_path, src, texts
 ):
-    """``reassembly("representation")``: one statement per way the ``if`` goes.
+    """Representation: one statement per way the ``if`` goes.
 
-    The reassembly reads one statement holding the fragment as optional.  What
+    The reassembly read one statement holding the fragment as optional.  What
     ``sqlwrite`` reads of it -- the fragment added under the ``if`` -- is the
     same either way.
     """
     assert sorted(_run_sql(src, "get")) == sorted(texts)
     off = _read_side(tmp_path / "off", src)
     sqleval.clear_memo()
-    with sql.evaluated():
-        on = _read_side(tmp_path / "on", src)
+    on = _read_side(tmp_path / "on", src)
     assert off and on == off
 
 
 def test_a_table_an_if_adds_to_the_list_a_loop_reads_is_another_statement():
-    """``reassembly("representation")``: ``getPandaIDsWithTask_JEDI``'s table list.
+    """Representation: ``getPandaIDsWithTask_JEDI``'s table list.
 
-    The reassembly reads one statement over all three tables; the evaluator one
+    The reassembly read one statement over all three tables; the evaluator one
     per way ``onlyActive`` goes, the archive only in the second.
     """
     texts = _run_sql(
@@ -1418,9 +1382,9 @@ _FORTY = ", ".join(f"'ATLAS_PANDA.t{index}'" for index in range(40))
     ],
 )
 def test_the_statement_is_what_the_python_builds(src, texts):
-    """``reassembly("python")``: where the reassembly leaves a hole or misreads.
+    """Python: where the reassembly left a hole or misread.
 
-    The reassembly leaves the brace, the list, the schema and the forty tables
+    The reassembly left the brace, the list, the schema and the forty tables
     as holes, splits ``sql = f'{sql}:v) '`` in two, and reads a loop over a
     cleared dict as running.
     """
@@ -1456,10 +1420,10 @@ def set_scout_data(self, task_id, excluded):
     ],
 )
 def test_the_columns_a_loop_over_a_dicts_keys_writes_are_their_union(skip, columns):
-    """``reassembly("union")``: ``setScoutJobData_JEDI`` with a skip read and unread.
+    """Union: ``setScoutJobData_JEDI`` with a skip read and unread.
 
     A skip the evaluator decides leaves its key out; one it cannot leaves every
-    key the callee may put in.  The reassembly names no column when it cannot
+    key the callee may put in.  The reassembly named no column when it could not
     read the skip.
     """
     tree = ast.parse(textwrap.dedent(SCOUT.replace("SKIP", skip)))
@@ -1493,17 +1457,17 @@ def test_the_columns_a_loop_over_a_dicts_keys_writes_are_their_union(skip, colum
     ],
 )
 def test_a_statement_written_into_the_call_is_read(src, name, texts):
-    """``reassembly("inline")``: the reassembly reads a statement only through a name."""
+    """Inline: the reassembly read a statement only through a name."""
     assert _run_sql(src, name) == texts
 
 
 def test_a_name_given_a_new_value_between_two_tests_is_read_as_every_piece_not_every_combination():
-    """``reassembly("cover")``, a known cost: ``getTasksWithCriteria_JEDI``.
+    """Cover, a known cost: ``getTasksWithCriteria_JEDI``.
 
     Every way each ``if`` goes is in some statement, and a list among the task
     criteria stands beside a scalar among the dataset criteria in one -- but
     not every combination is a statement of its own: a single list beside a
-    single scalar is not.  The reassembly lists all four.  The function's own
+    single scalar is not.  The reassembly listed all four.  The function's own
     tests sit in loops over the criteria, whose passes are one part each, both
     ways a pass goes among what it appends.
     """
@@ -1541,8 +1505,7 @@ def test_a_name_given_a_new_value_between_two_tests_is_read_as_every_piece_not_e
         "    self.cur.execute(sql, varMap)\n"
     )
     pathcond.attach_parents(tree)
-    with sql.evaluated():
-        (run,) = sql.executions(tree.body[0])
+    (run,) = sql.executions(tree.body[0])
     assert run.sql.removeprefix(head) == "{} {} "
     assert [hole.repeats for _at, hole in run.holes] == [
         ("AND a IN (:a) ", "AND a=:a "),
@@ -1551,11 +1514,11 @@ def test_a_name_given_a_new_value_between_two_tests_is_read_as_every_piece_not_e
 
 
 def test_a_loop_over_an_input_of_unknown_length_runs_at_least_once():
-    """``reassembly("one_pass")``, a known cost: a loop over an input runs at least once.
+    """One pass, a known cost: a loop over an input runs at least once.
 
     ``sql = sql[:-4]`` cuts the ``AND`` every pass ends with, and no
     statement is read for an empty input -- nor is the one a rebinding in the
-    loop replaces.  The reassembly reads one pass, and the statement before
+    loop replaces.  The reassembly read one pass, and the statement before
     the loop beside the one in it.
     """
     assert _run_sql(
@@ -1585,9 +1548,9 @@ def test_a_loop_over_an_input_of_unknown_length_runs_at_least_once():
 
 
 def test_the_spans_of_a_name_are_the_ones_the_call_runs():
-    """``reassembly("per_call")``: an UPSERT's two runs of ``sql``.
+    """Per call: an UPSERT's two runs of ``sql``.
 
-    The reassembly gives each call the spans of every statement the name held,
+    The reassembly gave each call the spans of every statement the name held,
     so the ``UPDATE`` was asked with the ``INSERT``'s reading.
     """
     tree = ast.parse(
@@ -1606,14 +1569,13 @@ def test_the_spans_of_a_name_are_the_ones_the_call_runs():
         for n in ast.walk(func)
         if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "execute"
     ]
-    with sql.evaluated():
-        spans = {
-            call.lineno: [
-                (text.split()[0], sorted({span.node.lineno for span in held}))
-                for text, held in sql.variant_spans(func, "sql", at=call)
-            ]
-            for call in calls
-        }
+    spans = {
+        call.lineno: [
+            (text.split()[0], sorted({span.node.lineno for span in held}))
+            for text, held in sql.variant_spans(func, "sql", at=call)
+        ]
+        for call in calls
+    }
     assert spans == {4: [("INSERT", [3])], 7: [("UPDATE", [6])]}
 
 
@@ -1635,13 +1597,12 @@ def test_a_run_whose_where_names_nothing_still_reads_its_table_whichever_run_com
         "    for sql_tmp, var_map in [(sql_defined, {}), (sql_failed, {':jobStatus': 'failed'})]:\n"
         "        self.cur.execute(sql_tmp + comment, var_map)\n"
     )
-    with sql.evaluated():
-        (statement,) = _read_side(tmp_path, src).values()
+    (statement,) = _read_side(tmp_path, src).values()
     assert sorted(statement.tables) == ["jobsActive4", "jobsDefined4"]
 
 
 def _corpus_executions(tmp_path, text: str, name: str) -> list:
-    """``sql.executions`` of *name* in ``pkg/db.py`` with the evaluator on, through the module's own calls."""
+    """``sql.executions`` of *name* in ``pkg/db.py``, through the module's own calls."""
     from bamboo.codemap.gitsource import blob_sha
     from bamboo.codemap.models import SourceModule
     from bamboo.codemap.panda.recognizers import sqlwrite
@@ -1663,7 +1624,7 @@ def _corpus_executions(tmp_path, text: str, name: str) -> list:
     func = next(
         n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name
     )
-    with sql.across_calls(calls), sql.evaluated():
+    with sql.across_calls(calls):
         return sql.executions(func)
 
 

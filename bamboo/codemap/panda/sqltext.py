@@ -1,7 +1,7 @@
 """Reading SQL text.
 
-:mod:`~bamboo.codemap.panda.sql` reassembles a statement from the Python that
-builds it; this reads the reassembled text -- which tables it touches, which
+:mod:`~bamboo.codemap.panda.sql` reads a statement out of the Python that
+builds it; this reads the text -- which tables it touches, which
 columns it writes and with what, which values it asks rows by, and in what
 order and how many come back.  Nothing here looks at Python: every function
 takes the statement as a string.
@@ -35,7 +35,7 @@ from sqlglot.errors import ErrorLevel, ParseError, SqlglotError
 from sqlglot.optimizer.scope import ScopeType, traverse_scope
 
 # ``UPDATE [/*+ hint */] <schema>.<table> [alias] SET <assignments> [WHERE ...]``.
-# The schema is usually an f-string placeholder, which reassembly leaves as
+# The schema is usually an f-string placeholder, which the reading leaves as
 # ``{}``.  The optimizer hint and the table alias are both optional and both
 # occur: ``UPDATE /*+ index(tab ...) */ ATLAS_PANDA.filesTable4 tab SET
 # status='ready'`` is one statement, and without either allowance it reads as no
@@ -1051,7 +1051,7 @@ def own_clause_terms(term: str) -> list[str]:
     return [one for one in found if one.strip()]
 
 
-#: A hole the reassembly left where the source interpolates -- ``{}``,
+#: A hole the reading left where the source interpolates -- ``{}``,
 #: ``{0}``.  Read as a name, which is what most of them are: the schema, a
 #: table, a column.
 _HOLE = re.compile(r"\{\d*\}")
@@ -1222,7 +1222,7 @@ class Term(NamedTuple):
     """One column a statement compares with a value."""
 
     #: The table the column belongs to, schema stripped; ``{}`` for a table
-    #: name the reassembly could not render.
+    #: name the reading could not render.
     table: str
     column: str
     #: Whose rows the term picks: ``read``, ``updated`` or ``deleted``.  An
@@ -1731,7 +1731,7 @@ def _term(column: exp.Column, scope, root, verb: str, kind: str, regions: tuple 
     no such pass does not ask it.
     """
     # ``tabT.{0}=:{0}`` -- a column Python names at run time, which the
-    # reassembly already reports.  Read as a column called ``__h4``, it
+    # reading already reports.  Read as a column called ``__h4``, it
     # came out as a key no table has.
     if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_NAMES:
         return None

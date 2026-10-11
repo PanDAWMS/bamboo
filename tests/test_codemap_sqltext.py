@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import ast
 
-import pytest
-
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import attribution, sql, sqltext
@@ -158,7 +156,7 @@ def test_a_hole_is_a_name_and_a_part_the_grammar_needs_but_never_a_cut():
     in Python -- and ``do_preassign`` has three ``.format`` fields where
     predicates go.  A statement ending in ``AND`` does not parse: PanDA cuts
     that ``AND`` off before running it, and reading on would hide that the
-    reassembly did not.
+    reading did not.
     """
     terms, unresolved = _said(
         "SELECT * FROM (SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab WHERE jobStatus=:old "
@@ -623,27 +621,6 @@ def test_a_value_left_out_of_rows_that_may_be_null_is_still_a_refusal():
     assert _refused("SELECT jediTaskID FROM JEDI_Tasks WHERE (status IS NULL OR status<>:x OR status<>:y)") == [[]]
 
 
-def test_a_variant_is_recognised_in_the_statement_its_holes_were_filled_into():
-    """``(sql + comment) % tableName`` in a loop: the variant says ``FROM %s``, the run names the table and ends in the comment."""
-    variant = "SELECT PandaID FROM %s WHERE jobStatus NOT IN (:a,:b)  AND rownum <= 1"
-    run = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a,:b) AND rownum <= 1"
-    assert sqlwrite._filled(variant, run) == (["ATLAS_PANDA.jobsActive4"], "")
-    assert sqlwrite._filled(variant, run + " /* DBProxy.main */") == (["ATLAS_PANDA.jobsActive4"], " /* DBProxy.main */")
-    assert sqlwrite._filled("SELECT a FROM {}.JEDI_Tasks WHERE b=:b", "SELECT a FROM ATLAS_PANDA.JEDI_Tasks WHERE b=:b") == (["ATLAS_PANDA"], "")
-    assert sqlwrite._filled(variant, "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus NOT IN (:a)") is None
-
-
-def test_a_cut_takes_the_fragment_out_of_the_run_and_keeps_what_the_call_fills():
-    """The build is what the database is sent less the cut: the table filled in, the comment kept."""
-    variant = "SELECT PandaID FROM %s WHERE a=:a AND b=:b "
-    run = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE a=:a AND b=:b  /* c */"
-    cut = variant.index("AND b=:b")
-    assert " ".join(sqlwrite._cut_text(variant, [(cut, cut + len("AND b=:b "))], run).split()) == (
-        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE a=:a /* c */"
-    )
-    assert sqlwrite._cut_text(variant, [], run) == run
-
-
 def test_a_statement_refuses_a_value_only_where_every_run_passes_it_over():
     """Built two ways, bound two ways: what is left out of every row on every run.
 
@@ -714,20 +691,10 @@ def test_conditions_drop_what_some_paths_append():
     assert fed.conditions == ["oldStatus IS NULL"]
 
 
-@pytest.mark.reassembly("python")
-def test_conditions_invent_nothing_from_a_cut_list():
-    """A cut list leaves no ``IN ( )``: the reassembly cuts the loop filling it, and says nothing of it."""
-    side = _read_side(_FEED_AND_SITES)
-
-    (sited,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::sites"]
-    assert sited.conditions == ["oldStatus IS NULL"]
-
-
 def test_conditions_read_a_list_a_loop_fills_as_one_requirement():
     """Run, what the loop appends is one part however many sites there are -- ``IN ({})`` -- and every run asks it:
     ``site`` is one of the list's.  Not a disjunction of lengths, and no ``IN ( )``."""
-    with sql.evaluated(True):
-        side = _read_side(_FEED_AND_SITES)
+    side = _read_side(_FEED_AND_SITES)
 
     (sited,) = [s for (owner, _line), s in side.statements.items() if owner == "x.py::sites"]
     assert sited.conditions == ["oldStatus IS NULL", "site IN ({})"]
