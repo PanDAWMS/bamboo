@@ -67,6 +67,8 @@ from bamboo.codemap.panda.pathcond import (
 from bamboo.codemap.panda.values import rendered_text
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from bamboo.codemap.calls import Calls, Placed
 
 logger = logging.getLogger(__name__)
@@ -1602,6 +1604,51 @@ _FORWARDED = frozenset({"querySQL", "querySQLS"})
 RUNNERS = frozenset({"execute", "executemany"}) | _FORWARDED
 
 
+#: ``RETURNING <column> INTO <bind>``, either side a comma list: the binds the
+#: database writes into the map the statement ran with.
+_RETURNING_INTO = re.compile(
+    r"\bRETURNING\s+[\w.$]+(?:\s*,\s*[\w.$]+)*\s+INTO\s+(:\w+(?:\s*,\s*:\w+)*)", re.IGNORECASE
+)
+
+
+def written_back(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call
+) -> Optional[tuple[str, ...]]:
+    """The keys of its map that running *call* writes, spelt as the map spells them.
+
+    A reader that cannot see inside the cursor has to take a map handed to
+    ``execute`` as rewritten, and then the value an arm put in it is not the
+    one printed after the call: ``kickExhaustedTasks_JEDI`` sets
+    ``varMap[":newStatus"]`` to ``exhausted`` or ``finishing`` under an ``if``,
+    runs the ``UPDATE``, and prints the key where the two arms have joined.
+    PanDA's ``WrappedCursor.execute`` touches no key of the map but the binds a
+    ``RETURNING ... INTO`` names -- Oracle fills the variable bound there, the
+    mysql branch deletes the key and writes it again -- and the statement is
+    what names them.
+
+    ``()`` when every statement the call runs was read and none returns into a
+    bind.  ``None`` when this cannot say: no statement was read for the call,
+    or one is missing a piece that has no text of its own
+    (:data:`FRAGMENT_NOT_RENDERED`), which could have held the clause.  A hole
+    the statement keeps for a schema name, a value or an ``IN`` list cannot,
+    and is read past.
+    """
+    runs = [run for run in executions(func) if any(one is call for one in run.run_at)]
+    if not runs:
+        return None
+    keys = {
+        key.strip()
+        for run in runs
+        for match in _RETURNING_INTO.finditer(run.sql)
+        for key in match.group(1).split(",")
+    }
+    if keys:
+        return tuple(sorted(keys))
+    if any(stop.reason == FRAGMENT_NOT_RENDERED for run in runs for stop in run.unresolved):
+        return None
+    return ()
+
+
 def reading_context() -> tuple:
     """What a reading of a function can be kept against.
 
@@ -1618,6 +1665,31 @@ def reading_context() -> tuple:
         id(func),
         tuple(sorted((name, repr(value)) for name, value in values.items())),
     )
+
+
+def written_back_at(path: Path, line: int) -> Optional[tuple[str, ...]]:
+    """:func:`written_back` for the ``execute`` or ``executemany`` call on *line* of *path*.
+
+    For a reader holding a file and a line and no tree.  It reads the tree the
+    rest of the map reads (:func:`~bamboo.codemap.calls.parsed`), so the call is
+    the node the statement was paired with.  ``None`` as well where the file
+    does not parse or no such call starts on the line.
+    """
+    from bamboo.codemap.calls import parsed
+
+    held = parsed(path)
+    if held is None:
+        return None
+    for node in ast.walk(held[1]):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"execute", "executemany"}
+            and node.lineno == line
+        ):
+            func = enclosing_function(node)
+            return written_back(func, node) if func is not None else None
+    return None
 
 
 def binding_window(
