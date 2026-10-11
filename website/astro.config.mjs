@@ -64,6 +64,7 @@ export default defineConfig({
 						{ label: 'Code Map', slug: 'architecture/code-map' },
 						{ label: 'Code Map: Building', slug: 'architecture/code-map-building' },
 						{ label: 'Code Map: Verification', slug: 'architecture/code-map-verification' },
+						{ label: 'Code Map: Known Gaps', slug: 'architecture/code-map-gaps' },
 					],
 				},
 				{

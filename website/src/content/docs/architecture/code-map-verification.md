@@ -191,6 +191,10 @@ Worth knowing, because it calibrates how much to trust them.
   found and removed — chains sharing a log file, a step the map places at two points, and
   a lone reversed observation being read as a majority.
 
+The gaps the map's reading of SQL is known to have — the ones it reports, the ones it
+reports wrongly, and the silent ones — are listed on their own page:
+[Known gaps](/bamboo/architecture/code-map-gaps/).
+
 ## Keeping this page honest
 
 Every figure here comes from `build-map` or `check-map` output at a stated version, and

@@ -14,6 +14,8 @@ they can query.
 
 from __future__ import annotations
 
+import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -128,3 +130,55 @@ def test_the_stated_interface_sizes_match_the_abstract_classes(
     assert f"`GraphDatabaseBackend` interface with {graph} methods" in checklist
     assert f"`VectorDatabaseBackend` interface with {vector} methods" in checklist
     assert f"Full implementation of all {graph} methods" in checklist
+
+
+GAPS_PAGE = SCHEMA_PAGE.parent / "code-map-gaps.md"
+#: The SQL reader, whose reasons the gaps page quotes.
+_READER = Path(__file__).resolve().parent.parent / "bamboo" / "codemap" / "panda"
+_READER_MODULES = ("sql.py", "sqltext.py", "sqleval.py", "recognizers/sqlwrite.py")
+
+
+def _quoted_reasons(page: str) -> list[str]:
+    """What the page quotes in backticks in each table column headed ``Reason`` or ``Shows as``."""
+    found: list[str] = []
+    columns: list[int] | None = None
+    for line in page.splitlines():
+        if not line.startswith("|"):
+            columns = None
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if columns is None:
+            columns = [index for index, cell in enumerate(cells) if cell in ("Reason", "Shows as")]
+            continue
+        if not "".join(cells).strip("-: "):
+            continue
+        for index in columns:
+            if index < len(cells):
+                found.extend(re.findall(r"`([^`]+)`", cells[index]))
+    return found
+
+
+def test_every_reason_the_gaps_page_quotes_is_one_the_reader_gives() -> None:
+    """The gaps page tells a reader which text in the map's output marks which gap.
+
+    That is only true while the texts are the ones the reader gives: a reason
+    reworded in the code would leave the page describing output the map no
+    longer produces, and a reader searching the output for it would find
+    nothing and conclude the gap is gone.  So each quoted reason has to begin a
+    string the reader's modules hold -- ``no test chooses it`` is the start of
+    the longer text ``added_under`` carries.  The sizes on the page are not
+    checked: each names the build it was counted at.
+    """
+    if not GAPS_PAGE.exists():  # pragma: no cover - only if the site moves
+        pytest.skip(f"{GAPS_PAGE} is not in this checkout")
+    texts = {
+        node.value
+        for name in _READER_MODULES
+        for node in ast.walk(ast.parse((_READER / name).read_text()))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    quoted = _quoted_reasons(GAPS_PAGE.read_text())
+    unknown = sorted({one for one in quoted if not any(text.startswith(one) for text in texts)})
+
+    assert quoted, "the gaps page quotes no reason: its tables' headers moved"
+    assert not unknown, f"reasons the gaps page quotes that the SQL reader does not give: {unknown}"

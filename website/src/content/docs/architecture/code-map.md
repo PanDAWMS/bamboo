@@ -186,5 +186,7 @@ the map was built, and it will get its own page when it runs.
   promotion, and `build-map`
 - [Verifying the map](/bamboo/architecture/code-map-verification/) — the gates, `check-map`,
   and how to read a report
+- [Known gaps](/bamboo/architecture/code-map-gaps/) — where the map's reading of SQL is known
+  to fall short, and how each gap shows in its output
 - [Graph Schema](/bamboo/architecture/schema/) — the labels, and why the Code Map is a
   separate namespace in the same database
