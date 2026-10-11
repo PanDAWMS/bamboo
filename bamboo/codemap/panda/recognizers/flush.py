@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Iterator, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from bamboo.codemap.models import Emit, JunctionNode, RowKeySource, SourceModule, SubjectNode
 from bamboo.codemap.panda import sql, sqltext, values
@@ -60,14 +60,11 @@ from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
     handed_in,
-    path_condition,
     targets_of,
-    written_value,
 )
-from bamboo.codemap.panda.recognizers import logfile
+from bamboo.codemap.panda.recognizers import logfile, sqlwrite
 from bamboo.codemap.panda.recognizers.emit import row_count_lines
 from bamboo.codemap.panda.recognizers.trigger import sole_definitions
-from bamboo.codemap.panda.values import rendered_text
 
 #: The spec classes declare this to build a ``SET`` clause out of whatever was
 #: assigned to them.  Its presence is the method saying it is a flush.
@@ -90,23 +87,6 @@ class Flush(NamedTuple):
     rows_emits: tuple[Emit, ...] = ()
 
 
-def _string_fragments(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> Iterator[tuple[ast.stmt, str]]:
-    """Every statement in *func* that appends literal text to a local name."""
-    for node in ast.walk(func):
-        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-            targets = [node.target]
-        else:
-            targets = [t for t in targets_of(node) if isinstance(t, ast.Name)]
-        value = written_value(node)
-        if not targets or value is None:
-            continue
-        text = rendered_text(value)
-        if text:
-            yield node, text
-
-
 def _parameters(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]:
     """Positional parameters in order, ``self`` included so indices line up."""
     return tuple(arg.arg for arg in func.args.args) + tuple(
@@ -114,29 +94,90 @@ def _parameters(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]
     )
 
 
-def _gating_parameters(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, term: str, parameters: tuple[str, ...]
-) -> frozenset[str]:
-    """Parameters whose value decides whether *term* is appended to the clause.
+def _is_flush_call(node: object) -> bool:
+    """Whether *node* is a ``spec.bindUpdateChangesExpression()`` call."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == FLUSH_EXPRESSION
+    )
 
-    Matched on the whole term rather than on the column name.  The column name
-    is not selective enough: ``updateTask_JEDI`` also builds a ``T_TASK`` update
-    mentioning ``status`` under ``if updateDEFT``, and reading that fragment's
-    condition made the guard look conditional on a parameter that has nothing
-    to do with it -- which then dropped the guard for every caller relying on
-    that parameter's default.
+
+def _names_flush_call(source: str) -> bool:
+    """Whether a hole's *source* -- the expression the run did not follow -- is a flush call."""
+    try:
+        return _is_flush_call(ast.parse(source, mode="eval").body)
+    except SyntaxError:
+        return False
+
+
+def _flushed_set(run: sql.Execution, match: re.Match) -> bool:
+    """Whether the ``SET`` of *match* is what a ``bindUpdateChangesExpression()`` call returned, as the run says.
+
+    Its text came from the call -- a piece whose way passes it, or the hole
+    that stands for it where the run did not follow it -- and nothing but
+    whitespace came from anywhere else.  Where the build follows the call, the
+    clause is the callee's loop: a hole where an attribute changed, nothing
+    where none did.  The text alone cannot tell that nothing from a clause the
+    method left empty: ``updateJob`` appends the ``SET`` of its
+    ``JEDI_Datasets`` update under ``if cType == "hold"`` / ``elif cType ==
+    "touse"`` with no ``else``, and on the third path the clause is empty --
+    whose ``WHERE`` was then read as the flush's.
     """
-    gating: set[str] = set()
-    for node, text in _string_fragments(func):
-        if term not in re.sub(r"\s+", " ", text):
-            continue
-        for condition in path_condition(node):
-            gating.update(
-                name
-                for name in parameters
-                if name != "self" and re.search(rf"\b{re.escape(name)}\b", condition)
-            )
-    return frozenset(gating)
+    start = run.sql.upper().rfind("SET", match.start(), match.start(2)) + len("SET")
+    end = match.end(2)
+    rest = list(run.sql[start:end])
+    called = False
+
+    def came_from_the_call(begin: int, finish: int) -> None:
+        nonlocal called
+        called = True
+        for at in range(max(begin, start), min(finish, end)):
+            rest[at - start] = " "
+
+    for at, hole in run.holes:
+        if start <= at < end and _names_flush_call(hole.source):
+            came_from_the_call(at, at + len("{}"))
+    for begin, finish, way in run.pieces:
+        if begin < end and start < finish and any(_is_flush_call(node) for node in way):
+            came_from_the_call(begin, finish)
+    return called and not "".join(rest).strip()
+
+
+def _gating_parameters(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: sql.Execution,
+    span: tuple[int, int],
+    parameters: tuple[str, ...],
+) -> Optional[frozenset[str]]:
+    """Parameters whose value decides whether the term at *span* of *run* is appended, or ``None`` if unknown.
+
+    The tests are those on the way of each piece holding the term
+    (:attr:`sql.Execution.pieces`), as the SQL slice reads the guards of a
+    statement it can read whole (``sqlwrite._guard_conditions``).  Looking for
+    the term's text among the method's literals instead tied it to nothing
+    where the method formats it -- ``updateTask_JEDI`` appends
+    ``f"status IN ({old_status_var_names_str}) AND "`` -- so every caller was
+    told the guard; and to a parameter tested above the same text elsewhere --
+    ``registerTaskInOneShot_JEDI``'s ``jediTaskID=:jediTaskID``, unconditional
+    in its flush, to ``taskParams``.
+
+    ``None`` where no piece holds the term, or one was written under a test of
+    another function, whose names say nothing here: the term is then not said,
+    as the SQL slice leaves such a column out.
+    """
+    start, end = span
+    ways = [way for begin, finish, way in run.pieces if begin < end and start < finish]
+    said = [sqlwrite._tests_on_way(func, way) for way in ways]
+    if not ways or any(one is None for one in said):
+        return None
+    return frozenset(
+        name
+        for name in parameters
+        if name != "self"
+        for tests in said
+        if any(re.search(rf"\b{re.escape(name)}\b", test) for test in tests or ())
+    )
 
 
 def flush_methods(
@@ -184,12 +225,16 @@ def flush_methods(
             guards: dict[str, tuple[str, frozenset[str]]] = {}
             for run in sql.executions(func):
                 for match in sqltext._UPDATE.finditer(run.sql):
-                    if match.group(2).strip().strip(",") not in ("{}", ""):
+                    if not _flushed_set(run, match):
                         # A readable ``SET`` is the SQL slice's business; this
-                        # reader exists for the clause that is a single hole.
+                        # reader exists for the clause the spec writes.
                         continue
-                    for raw, column in sqltext._TERM.findall(run.sql[match.end(2) :]):
+                    for term_match in sqltext._TERM.finditer(run.sql, match.end(2)):
+                        raw, column = term_match.group(1), term_match.group(2)
                         if column in guards:
+                            continue
+                        gating = _gating_parameters(func, run, term_match.span(1), parameters)
+                        if gating is None:
                             continue
                         term = re.sub(r"\s+", " ", raw).strip()
                         # Settled here for the same reason the SQL slice
@@ -197,10 +242,7 @@ def flush_methods(
                         # ``row_precondition`` list, and one half spelling the
                         # bind while the other spells the value would leave the
                         # list unreadable and the gate comparing it against a
-                        # reader's values half blind.  ``_gating_parameters``
-                        # is asked of the raw term, which is what names the
-                        # parameter.
-                        gating = _gating_parameters(func, term, parameters)
+                        # reader's values half blind.
                         settled, _done = sql.settled_precondition(
                             term, func, run.varmap, run.window, settle, at=run.run_at
                         )

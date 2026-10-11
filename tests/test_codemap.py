@@ -3788,6 +3788,85 @@ class Knight:
     assert guards.get("JediTaskSpec.jediTaskID", []) == []
 
 
+def _flush_methods(proxy: str) -> dict:
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(proxy, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_self_attributes(modules)
+    return flush.flush_methods(modules, attributor)
+
+
+def test_a_guard_the_flush_formats_is_still_tied_to_its_parameter():
+    """``updateTask_JEDI`` formats its ``status IN`` term from the names the in-list helper returns.
+
+    The term's text, ``status IN (:old___in)``, is in none of the method's
+    literals, so looking for it there tied it to no parameter, and every caller
+    -- the ones that pass no ``oldStatus`` too -- was told its write races.
+    """
+    proxy = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec, criteria, oldStatus=None):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE jediTaskID=:cr_jediTaskID AND "
+        if oldStatus is not None:
+            names, old_map = get_sql_IN_bind_variables(oldStatus, prefix=":old_", value_as_suffix=True)
+            sql += f"status IN ({names}) AND "
+        sql = sql[:-4]
+        self.cur.execute(sqlU + sql + comment, varMap)
+'''
+    term, gating = _flush_methods(proxy)["updateTask_JEDI"].guards["status"]
+
+    assert "status IN (" in term
+    assert gating == frozenset({"oldStatus"})
+
+
+def test_a_guard_is_not_tied_to_a_test_above_the_same_text_elsewhere():
+    """``registerTaskInOneShot_JEDI`` flushes under no test; another statement with the same term is under one."""
+    proxy = '''
+class TaskModule:
+    def registerTask(self, taskSpec: JediTaskSpec, taskParams):
+        sql = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} WHERE "
+        sql += "jediTaskID=:jediTaskID AND status=:preStatus "
+        self.cur.execute(sql + comment, varMap)
+        if taskParams is not None:
+            sql = f"UPDATE {panda_config.schemaJEDI}.JEDI_TaskParams SET taskParams=:taskParams "
+            sql += "WHERE jediTaskID=:jediTaskID AND status=:preStatus "
+            self.cur.execute(sql + comment, varMap)
+'''
+    guards = _flush_methods(proxy)["registerTask"].guards
+
+    assert guards["status"] == ("status=:preStatus", frozenset())
+
+
+def test_a_set_the_method_left_empty_is_not_a_flush():
+    """``updateJob`` appends a ``SET`` under ``if`` / ``elif`` with no ``else``: on the third path it is empty.
+
+    An empty clause looked like the flush's hole, and that statement's
+    ``WHERE`` -- another table's row -- was read as the flush's guards.
+    """
+    proxy = '''
+class TaskModule:
+    def updateTask(self, taskSpec: JediTaskSpec, cType):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sqlU += "WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlU + comment, varMap)
+        sqlD = f"UPDATE {panda_config.schemaJEDI}.JEDI_Datasets SET "
+        if cType == "hold":
+            sqlD += "nFilesOnHold=nFilesOnHold+:diffNum "
+        elif cType == "touse":
+            sqlD += "nFilesTobeUsed=nFilesTobeUsed+:diffNum "
+        sqlD += "WHERE jediTaskID=:jediTaskID AND datasetID=:datasetID "
+        self.cur.execute(sqlD + comment, varMap)
+'''
+    guards = _flush_methods(proxy)["updateTask"].guards
+
+    assert set(guards) == {"jediTaskID"}
+
+
 def test_table_class_is_inferred_from_the_column_names():
     """Nothing declares which spec a table holds; the columns give it away."""
     _s, _j, _c, _u, conflicts, attributor = _sql_extract(_SQL_SOURCE)
