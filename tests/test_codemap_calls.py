@@ -1825,6 +1825,66 @@ def test_an_order_a_loop_builds_says_its_column_and_an_order_a_format_hands_says
     assert chosen == {"fileID": ["not (mode == 'lumi')"], "lumiBlockNr,lfn": ["mode == 'lumi'"]}
 
 
+def test_a_term_whose_text_several_fragments_make_is_placed_where_they_are(tmp_path):
+    """``analy_pmerge_jobs_wait_time`` formats a status list into ``jobStatus IN {q}``, the list written before an
+    ``if`` and again under it; ``getJobs`` wraps a loop's ``WHEN`` arms in ``ORDER BY (CASE ... END)``.  Run, each
+    term's text is a template's words and what a branch or a loop writes, and no fragment's text names it whole: both
+    were "the fragment appending it was not found".  Placed by where the term is, a term is under every test above a
+    fragment of it, but not above what the loop's passes write: the ``CASE`` is there however many arms the loop
+    gives it.  The list written before the ``if`` is under none -- the ``if`` that does not rewrite it is no test
+    above it -- and is said so."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def wait(self, site, workflow):\n"
+        "        template = 'SELECT COUNT(*) FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus IN {q} AND computingSite=:site'\n"
+        "        q = \"('activated', 'sent')\"\n"
+        "        if workflow == 'push':\n"
+        "            q = \"('activated', 'sent', 'starting')\"\n"
+        "        self.cur.execute(template.format(q=q), {':site': site})\n"
+        "\n"
+        "    def pick(self, leaves, sorting):\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s '\n"
+        "        if sorting:\n"
+        "            arms = []\n"
+        "            for leaf in leaves:\n"
+        "                if leaf == 'Test':\n"
+        "                    arms.append(f'WHEN gshare=:leave{leaf} THEN 0')\n"
+        "                else:\n"
+        "                    arms.append(f'WHEN gshare=:leave{leaf} THEN {leaf}')\n"
+        "            sql += f'ORDER BY (CASE {\" \".join(arms)} ELSE 1 END), currentpriority desc'\n"
+        "        self.cur.execute(sql, {':s': 'activated'})\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls), sql.evaluated(True):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    def placed(owner: str) -> dict:
+        statement = next(one for (name, _line), one in side.statements.items() if name.endswith(f"::{owner}"))
+        return {
+            (one.field, one.term): [(place.fragment.rsplit(":", 1)[1], [test.test for test in place.tests]) for place in one.places]
+            or one.unplaced.split(":")[0]
+            for one in statement.added_under
+        }
+
+    assert placed("wait") == {
+        ("conditions", "jobStatus IN ('activated', 'sent', 'starting')"): [("6", ["workflow == 'push'"])],
+        ("conditions", "jobStatus IN ('activated', 'sent')"): "no test chooses it",
+        ("selects", "jobsActive4.jobStatus=starting"): [("6", ["workflow == 'push'"])],
+    }
+    assert placed("pick") == {
+        ("order_by", "(CASE {} ELSE 1 END), currentpriority desc"): [("18", ["sorting"])],
+    }
+
+
 def test_a_term_a_callee_appends_is_placed_in_the_callee_with_the_way_its_test_is_handed_in(tmp_path):
     """``getJobs``: ``construct_where_clause`` appends the term under ``if mem``, and returns the clause through ``build_where_clause``.
 

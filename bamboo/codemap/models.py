@@ -1197,9 +1197,22 @@ class TermGuard(BaseModel):
 
 
 class TermPlace(BaseModel):
-    """One way a term gets into a statement: the fragment appending it and every test above it."""
+    """One way a term gets into a statement: the fragment appending it and every test above it.
 
-    fragment: str = Field(..., description="``<file>:<line>`` of the statement that appends the text.")
+    A term whose text several fragments make -- ``jobStatus IN ('activated',
+    'sent', 'starting')``, a template's words and a list one branch writes --
+    is there where every one of them is, so it is under every test above any
+    of them.  What a loop's passes write where the statement holds them as
+    one repeated part is not among them: any number of passes holds the term.
+    """
+
+    fragment: str = Field(
+        ...,
+        description=(
+            "``<file>:<line>`` of the statement that appends the text; of several, "
+            "the one the most tests are above -- the one a branch chooses."
+        ),
+    )
     term: str = Field(
         default="",
         description=(
@@ -1234,7 +1247,9 @@ class TermPlace(BaseModel):
             "Outermost first, all of them holding: the ones between where the "
             "statement's text is used and the ``execute`` first, then each function "
             "the text passed through, out to in, ending in the fragment's own.  A "
-            "guard above the ``execute`` holds for every build and is not here."
+            "guard above the ``execute`` holds for every build and is not here.  "
+            "Of a term several fragments make, each one's, in the order they are "
+            "in the statement, each test once."
         ),
     )
 

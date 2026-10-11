@@ -1147,6 +1147,33 @@ def _after_hole(sql: str, end: int) -> str:
     """The character after a hole ending at *end*, past the marks: a word glued to it is spaced off."""
     return sql[end : end + 4].lstrip(_MARKS)[:1]
 
+
+def _plain_at(read: "Parsed", sql: str, offset: int, end: bool = False) -> int:
+    """An offset into ``read.text`` as one into :func:`plain`'s text of *sql*.
+
+    The parsed text names each hole (:func:`_named_holes`) and drops one read
+    as empty; each goes back to the hole it was, and a repeated part to its
+    ``{}`` (:func:`_at_plain`).  One inside a name is the hole's start, or
+    with *end* its end.
+    """
+    source = _source(sql)[0]
+    kept = {int(number) for number in _HOLE_NUMBER.findall(read.text)}
+    shift = 0
+    for number, hole in enumerate(_HOLE.finditer(source), 1):
+        length = (len(f"{_HOLE_NAME}{number}") if number in kept else 0) + _after_hole(source, hole.end()).isalpha()
+        at = hole.start() + shift
+        if offset <= at:
+            break
+        if offset < at + length:
+            return _at_plain(sql, hole.end() if end else hole.start(), end=end)
+        shift += length - (hole.end() - hole.start())
+    return _at_plain(sql, offset - shift, end=end)
+
+
+def _plain_span(read: "Parsed", sql: str, start: int, end: int) -> tuple[int, int]:
+    """``read.text[start:end]`` as a stretch of :func:`plain`'s text of *sql* (:func:`_plain_at`)."""
+    return _plain_at(read, sql, start), _plain_at(read, sql, end, end=True)
+
 #: sqlglot's word for a part the grammar requires and the text lacks.
 _REQUIRED = "Required keyword"
 
@@ -1243,7 +1270,10 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
     refusals.cache_clear()
     outright.cache_clear()
     condition_twins.cache_clear()
+    condition_spans.cache_clear()
     _readings.cache_clear()
+    term_spans.cache_clear()
+    _terms_read.cache_clear()
     try:
         yield
     finally:
@@ -1254,7 +1284,10 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
         refusals.cache_clear()
         outright.cache_clear()
         condition_twins.cache_clear()
+        condition_spans.cache_clear()
         _readings.cache_clear()
+        term_spans.cache_clear()
+        _terms_read.cache_clear()
 
 
 _CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
@@ -1637,11 +1670,34 @@ def terms(sql: str) -> Reading:
     bind keys and quoted literals, ``=`` and ``IN`` asking, ``<>``, ``!=`` and
     ``NOT IN`` excluding.  A number is not read.
     """
+    return _terms_read(sql)[0]
+
+
+@functools.lru_cache(maxsize=None)
+def term_spans(sql: str) -> tuple[tuple[int, int], ...]:
+    """Where each of :func:`terms`' terms is in *sql*'s statement, in the same order, as offsets into
+    :func:`plain`'s text: the term of its ``WHERE`` the column is compared in -- ``jobStatus IN ('activated',
+    'sent')``, whatever fragments of the text its column and its values fall in -- or the column alone where it
+    is in none."""
+    return _terms_read(sql)[1]
+
+
+@functools.lru_cache(maxsize=None)
+def _terms_read(sql: str) -> tuple[Reading, tuple[tuple[int, int], ...]]:
+    """:func:`terms` and :func:`term_spans`."""
     read = parsed(sql)
     tree = read.tree
     if tree is None:
-        return Reading((), (f"{read.near} -- {NOT_PARSED}",), False)
+        return Reading((), (f"{read.near} -- {NOT_PARSED}",), False), ()
+    tokens = _tokens(read.text)
+    # The terms each ``WHERE`` ``AND``\ s and ``OR``\ s together: a subquery's are inside its own.
+    pieces: list[tuple[int, int]] = []
+    for where in tree.find_all(exp.Where):
+        clause = _where_span(where, tokens)
+        if clause is not None and clause[0] < clause[1]:
+            pieces.extend(_leaves(_split(tokens, *clause), tokens))
     found: list[Term] = []
+    spans: list[tuple[int, int]] = []
     unresolved: set[str] = set()
     scopes, root = _scopes(tree)
     for scope, verb, kind in scopes:
@@ -1649,9 +1705,22 @@ def terms(sql: str) -> Reading:
             term = _term(column, scope, root, verb, kind, read.regions)
             if isinstance(term, Term):
                 found.append(term)
+                meta = column.this.meta if isinstance(column.this, exp.Identifier) else {}
+                start = meta.get("start", 0)
+                around = [(a, b) for a, b in pieces if a <= start < b]
+                span = min(around, key=lambda one: one[1] - one[0]) if around else (start, meta.get("end", start) + 1)
+                spans.append(_plain_span(read, sql, *span))
             elif term is not None:
                 unresolved.add(term)
-    return Reading(tuple(found), tuple(sorted(unresolved)), True)
+    return Reading(tuple(found), tuple(sorted(unresolved)), True), tuple(spans)
+
+
+def _leaves(node, tokens: list) -> list[tuple[int, int]]:
+    """The stretches of the parsed text a :func:`_split` tree's leaves are."""
+    if node[0] == "leaf":
+        _leaf, a, b = node
+        return [(tokens[a].start, tokens[b - 1].end + 1)] if a < b else []
+    return [span for child in node[1] for span in _leaves(child, tokens)]
 
 
 def _term(column: exp.Column, scope, root, verb: str, kind: str, regions: tuple = ()) -> Optional[Term | str]:
@@ -2104,13 +2173,14 @@ def _where_span(where: exp.Where, tokens: list) -> Optional[tuple[int, int]]:
 
 
 def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: list):
-    """*where*'s clause as a tree of ``("term", text, kind, node)``, or ``None``.
+    """*where*'s clause as a tree of ``("term", text, kind, node, span)``, or ``None``.
 
     Split on the tokens, so each term keeps the statement's own spelling --
     a tree regenerated by sqlglot respells it (``endTime IS NOT NULL`` comes
     back as ``NOT endTime IS NULL``).  Each piece is then matched to the term
     of the tree it spans, which says what it is.  ``None`` when the two do not
-    agree on where a term begins and ends.
+    agree on where a term begins and ends.  *span* is where the term is in
+    the statement (:func:`_plain_span`).
     """
     placed = [
         (node.meta["start"], node)
@@ -2133,8 +2203,9 @@ def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: l
         _leaf, a, b = node
         if a >= b:
             agreed = False
-            return ("term", "", _DROP, None)
+            return ("term", "", _DROP, None, None)
         start, end = tokens[a].start, tokens[b - 1].end
+        span = _plain_span(read, sql, start, end + 1)
         held = {id(_term_holding(n, where, joins)): _term_holding(n, where, joins) for s, n in placed if start <= s <= end}
         text = " ".join(_spelled_read(read, sql, start, end + 1).split())
         if "," in text:
@@ -2143,9 +2214,9 @@ def _where_tree(where: exp.Where, scope, root, read: Parsed, sql: str, tokens: l
             agreed = False
         # A term only a loop's passes append is on no row the loop gave no pass: required of none.
         if len(held) != 1 or any(lo <= start and end < hi for lo, hi in read.regions):
-            return ("term", text, _DROP, None)
+            return ("term", text, _DROP, None, span)
         node = next(iter(held.values()))
-        return ("term", text, _term_kind(node, scope, root), node)
+        return ("term", text, _term_kind(node, scope, root), node, span)
 
     tree = build(_split(tokens, lo, hi))
     return tree if agreed else None
@@ -2383,32 +2454,48 @@ def _anded(node) -> list:
     return [node]
 
 
-def _either(alternatives: list[list[tuple[Condition, Twin]]]) -> list[tuple[Condition, Twin]]:
-    """What a row from any one of *alternatives* is required to satisfy, each with its :class:`Twin`.
+#: A condition, its :class:`Twin`, and where it is in the statement: each
+#: place it is read off, as the stretches of the terms it is made of
+#: (:func:`condition_spans`).
+_Read = tuple[Condition, Twin, tuple[tuple[tuple[int, int], ...], ...]]
+
+
+def _either(alternatives: list[list[_Read]]) -> list[_Read]:
+    """What a row from any one of *alternatives* is required to satisfy, each with its :class:`Twin` and where it is.
 
     ``(A and B) or (A and C)`` is ``A``, required outright, and ``B or C`` as
     one condition; an alternative that requires nothing beyond the common
-    part makes that disjunction free, and then it is not recorded.
+    part makes that disjunction free, and then it is not recorded.  A
+    condition read off several branches is where each of them is: the
+    statement holds it as long as it holds them all.
     """
+
+    def where(condition: Condition, among: list[list[_Read]]) -> tuple[tuple[tuple[int, int], ...], ...]:
+        return (tuple(span for one in among for read in one if read[0] == condition for at in read[2] for span in at),)
+
     common = [
-        (condition, twin)
-        for condition, twin in alternatives[0]
-        if all(condition in [one for one, _ in other] for other in alternatives[1:])
+        (condition, twin, where(condition, alternatives))
+        for condition, twin, _at in alternatives[0]
+        if all(condition in [read[0] for read in other] for other in alternatives[1:])
     ]
-    held = [condition for condition, _twin in common]
-    remainders: list[tuple[tuple[Condition, Twin], ...]] = []
+    held = [read[0] for read in common]
+    remainders: list[list[_Read]] = []
     for alternative in alternatives:
-        rest = tuple((one, twin) for one, twin in alternative if one not in held)
-        if [one for one, _ in rest] not in [[one for one, _ in other] for other in remainders]:
+        rest = [read for read in alternative if read[0] not in held]
+        same = [other for other in remainders if [read[0] for read in other] == [read[0] for read in rest]]
+        if same:
+            same[0][:] = [(one, twin, where(one, [same[0], rest])) for one, twin, _at in same[0]]
+        else:
             remainders.append(rest)
     if len(remainders) == 1:
-        return common + list(remainders[0])
+        return common + remainders[0]
     if not all(remainders):
         return common
     folded = Condition(
-        tuple(_branch(tuple(term for one, _twin in rest for term in _as_terms(one))) for rest in remainders)
+        tuple(_branch(tuple(term for read in rest for term in _as_terms(read[0]))) for rest in remainders)
     )
-    return common + [(folded, Twin("any", tuple(Twin("all", tuple(twin for _one, twin in rest)) for rest in remainders)))]
+    twin = Twin("any", tuple(Twin("all", tuple(read[1] for read in rest)) for rest in remainders))
+    return common + [(folded, twin, (tuple(span for rest in remainders for read in rest for at in read[2] for span in at),))]
 
 
 def _set_operands(node: exp.Expression, kind: type) -> list[exp.Expression]:
@@ -2476,7 +2563,7 @@ def conjoined(sql: str) -> tuple[Condition, ...]:
 
 def _required(sql: str, held: bool) -> tuple[Condition, ...]:
     """:func:`conditions`, and with *held* :func:`conjoined`."""
-    return tuple(condition for condition, _twin in _readings(sql, held))
+    return tuple(read[0] for read in _readings(sql, held))
 
 
 @functools.lru_cache(maxsize=None)
@@ -2493,12 +2580,25 @@ def condition_twins(sql: str) -> tuple[Twin, ...]:
     -- is ``other``, never left out: an entry false for a row is false
     because of its terms, and dropping one would make it look decided.
     """
-    return tuple(twin for _condition, twin in _readings(sql, False))
+    return tuple(read[1] for read in _readings(sql, False))
 
 
 @functools.lru_cache(maxsize=None)
-def _readings(sql: str, held: bool) -> tuple[tuple[Condition, Twin], ...]:
-    """:func:`_required` with each condition's :class:`Twin`."""
+def condition_spans(sql: str) -> tuple[tuple[tuple[tuple[int, int], ...], ...], ...]:
+    """Where each entry of :func:`conditions` is in *sql*'s statement, in the same order.
+
+    Each place the entry is read off -- a ``WHERE`` of the statement, of a
+    derived table -- as the stretches of the terms it is made of, offsets
+    into :func:`plain`'s text.  The statement holds the entry where it holds
+    every stretch of one place: what puts a term there is what puts that text
+    there, whichever fragments of the text the term's own words fall in.
+    """
+    return tuple(read[2] for read in _readings(sql, False))
+
+
+@functools.lru_cache(maxsize=None)
+def _readings(sql: str, held: bool) -> tuple[_Read, ...]:
+    """:func:`_required` with each condition's :class:`Twin` and where it is."""
     read = parsed(sql)
     if read.tree is None:
         return ()
@@ -2508,7 +2608,7 @@ def _readings(sql: str, held: bool) -> tuple[tuple[Condition, Twin], ...]:
     ctes: dict[str, exp.Expression] = {}
     entered: set[int] = set()
 
-    def required(node: Optional[exp.Expression]) -> list[tuple[Condition, Twin]]:
+    def required(node: Optional[exp.Expression]) -> list[_Read]:
         if node is None or id(node) in entered:
             return []
         entered.add(id(node))
@@ -2527,7 +2627,7 @@ def _readings(sql: str, held: bool) -> tuple[tuple[Condition, Twin], ...]:
             return []
         for cte in (node.args.get("with_") or exp.With()).expressions:
             ctes[cte.alias_or_name.lower()] = cte.this
-        found: list[tuple[Condition, Twin]] = []
+        found: list[_Read] = []
         where = node.args.get("where")
         scope = root if isinstance(node, (exp.Update, exp.Delete)) else scope_of.get(id(node))
         if where is not None and scope is not None:
@@ -2535,7 +2635,7 @@ def _readings(sql: str, held: bool) -> tuple[tuple[Condition, Twin], ...]:
             kept = _prune(clause, False, held) if clause is not None else None
             if kept is not None:
                 found.extend(
-                    (_as_condition(child), _as_twin(child, scope, root, sql))
+                    (_as_condition(child), _as_twin(child, scope, root, sql), (_spans_of(child),))
                     for child in (kept[1] if kept[0] == "and" else [kept])
                 )
         sources = [node.args.get("from_")] + list(node.args.get("joins") or [])
@@ -2549,11 +2649,22 @@ def _readings(sql: str, held: bool) -> tuple[tuple[Condition, Twin], ...]:
     if isinstance(read.tree, exp.Query):
         for cte in (read.tree.args.get("with_") or exp.With()).expressions:
             ctes[cte.alias_or_name.lower()] = cte.this
-    found: list[tuple[Condition, Twin]] = []
-    for one, twin in required(read.tree):
-        if one not in [condition for condition, _ in found]:
-            found.append((one, twin))
+    found: list[_Read] = []
+    for one, twin, at in required(read.tree):
+        same = [index for index, read in enumerate(found) if read[0] == one]
+        if same:
+            # Read off two clauses -- the statement's and a derived table's: either one holding it is enough.
+            found[same[0]] = (one, found[same[0]][1], found[same[0]][2] + at)
+        else:
+            found.append((one, twin, at))
     return tuple(found)
+
+
+def _spans_of(node) -> tuple[tuple[int, int], ...]:
+    """The stretches of the statement a pruned clause tree's terms are."""
+    if node[0] == "term":
+        return (node[4],) if node[4] is not None else ()
+    return tuple(span for child in node[1] for span in _spans_of(child))
 
 
 def _conjuncts(node: exp.Expression) -> Iterator[exp.Expression]:
@@ -2723,7 +2834,13 @@ def _bound(node: exp.Expression, sql: str) -> Optional[str]:
 
 
 def _order_text(query: exp.Expression, order: exp.Order, read: Parsed, sql: str, tokens: list) -> str:
-    """*order*'s list as the statement spells it.
+    """*order*'s list as the statement spells it."""
+    span = _order_span(query, tokens)
+    return " ".join(_spelled_read(read, sql, *span).split()) if span is not None else ""
+
+
+def _order_span(query: exp.Expression, tokens: list) -> Optional[tuple[int, int]]:
+    """Where *query*'s ``ORDER BY`` list is in the parsed text, if it has one.
 
     Found as the first ``ORDER BY`` after the rest of *query* that comes
     before it, not by the list's own positions: ``DBMS_RANDOM.value`` is read
@@ -2740,7 +2857,7 @@ def _order_text(query: exp.Expression, order: exp.Order, read: Parsed, sql: str,
     after = max(before) if before else -1
     opened = [index for index, token in enumerate(tokens) if token.token_type == _T.ORDER_BY and token.start > after][:1]
     if not opened:
-        return ""
+        return None
     depth, last = 0, len(tokens)
     for index in range(opened[-1] + 1, len(tokens)):
         kind = tokens[index].token_type
@@ -2755,9 +2872,8 @@ def _order_text(query: exp.Expression, order: exp.Order, read: Parsed, sql: str,
             last = index
             break
     if last <= opened[-1] + 1:
-        return ""
-    start, end = tokens[opened[-1] + 1].start, tokens[last - 1].end
-    return " ".join(_spelled_read(read, sql, start, end + 1).split())
+        return None
+    return tokens[opened[-1] + 1].start, tokens[last - 1].end + 1
 
 
 def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
@@ -2809,6 +2925,28 @@ def ordering(sql: str) -> tuple[list[str], list[tuple[str, bool]]]:
             if value is not None:
                 limits.append((value, isinstance(comparison, (exp.LT, exp.GT))))
     return orders, limits
+
+
+def ordering_spans(sql: str) -> tuple[tuple[tuple[tuple[int, int], ...], ...], ...]:
+    """Where each ``ORDER BY`` list of :func:`ordering` is in *sql*'s statement, in the same order: each place
+    it is read off, as its stretch of :func:`plain`'s text (the shape :func:`condition_spans` has)."""
+    read = parsed(sql)
+    if read.tree is None:
+        return ()
+    tokens = _tokens(read.text)
+    orders: list[str] = []
+    places: list[list[tuple[tuple[int, int], ...]]] = []
+    for query in _rows_from(read.tree, {}, set()):
+        order = query.args.get("order")
+        span = _order_span(query, tokens) if isinstance(order, exp.Order) else None
+        text = " ".join(_spelled_read(read, sql, *span).split()) if span is not None else ""
+        if not text:
+            continue
+        if text not in orders:
+            orders.append(text)
+            places.append([])
+        places[orders.index(text)].append((_plain_span(read, sql, *span),))
+    return tuple(tuple(one) for one in places)
 
 
 class OrderItem(NamedTuple):

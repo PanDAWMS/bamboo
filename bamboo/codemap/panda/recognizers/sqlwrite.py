@@ -52,7 +52,7 @@ import dataclasses
 import re
 import time
 from pathlib import Path
-from typing import Callable, Iterable, NamedTuple, Optional
+from typing import Any, Callable, Iterable, NamedTuple, Optional
 
 from bamboo.codemap.calls import FILLERS, Calls, Route, Target, Types, _rebinds
 from bamboo.codemap.models import (
@@ -81,7 +81,7 @@ from bamboo.codemap.models import (
     TermPlace,
     pooled_frames,
 )
-from bamboo.codemap.panda import pathcond, sql, sqltext, values
+from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     UNDECIDED,
@@ -1816,6 +1816,33 @@ def _place(leaf: _Leaf, term: str, file_of, decides: Optional[bool] = None) -> T
     )
 
 
+def _placed(leaves: list[_Leaf], term: str, file_of, decides: Optional[bool] = None) -> TermPlace:
+    """Where a term whose text is made of *leaves* is appended: under every test above any of them.
+
+    The statement holds the term where it holds every one, so the tests add
+    up.  The place is named by the fragment with the most tests -- the one a
+    branch chooses: ``jobStatus IN ('activated', 'sent', 'starting')`` is
+    the template's ``jobStatus IN `` and the list written under ``if
+    site_workflow ...``.
+    """
+    each = [_place(leaf, term, file_of, decides) for leaf in leaves]
+    tests: list[TermGuard] = []
+    for place in each:
+        tests.extend(one for one in place.tests if one not in tests)
+    lead = max(each, key=lambda place: len(place.tests))
+    return TermPlace(fragment=lead.fragment, term=term, decides=decides, tests=tests)
+
+
+def _in_loop(node: ast.AST, loops: set[int]) -> bool:
+    """Whether *node* is one of *loops* (by ``id``) or in one's body."""
+    return id(node) in loops or any(id(one) in loops for one in ancestors(node))
+
+
+def _tests_of(place: TermPlace) -> tuple[tuple[str, str, str], ...]:
+    """*place*'s tests, as what tells two places of one fragment apart."""
+    return tuple((one.kind, one.test, one.at) for one in place.tests)
+
+
 def _condition_seeds(
     func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution, line: int, found
 ) -> dict[str, list[int]]:
@@ -3473,11 +3500,15 @@ def read_side(
         # ``(spelling, plain, binds)`` of each term the run's ``WHERE`` ``AND``\ s
         # together -- what a pair enters the statement in (:func:`sqltext.conjoined`).
         conjuncts: dict[int, list[tuple[str, str, tuple[str, ...]]]] = {}
+        # Where each conditions term, order and row term is in an evaluated run's
+        # statement (``run.pieces``): each place it is read off, as stretches.
+        located: dict[int, list[tuple[str, Any, tuple[tuple[tuple[int, int], ...], ...]]]] = {}
         for run in variants:
             try:
                 whole = sqltext.terms(run.reading).terms
+                whole_at = sqltext.term_spans(run.reading)
             except Exception:  # noqa: BLE001 -- a text sqlglot will not scope is read as nothing
-                whole = ()
+                whole, whole_at = (), ()
             row_terms[id(run)] = [term for term in whole if term.verb == "read" and term.scope == sqltext.ROW]
             orders[id(run)] = sqltext.ordering(run.reading)[0]
             found = sqltext.conditions(run.reading)
@@ -3492,6 +3523,18 @@ def read_side(
             conjuncts[id(run)] = [
                 (_render_condition(one, seeds), plain(one), tuple(dict.fromkeys(one.binds))) for one in joined
             ]
+            if run.pieces:
+                found_at = sqltext.condition_spans(run.reading)
+                orders_at = sqltext.ordering_spans(run.reading)
+                located[id(run)] = (
+                    [("conditions", plain(one), at) for one, at in zip(found, found_at, strict=True)]
+                    + [("order_by", order, at) for order, at in zip(orders[id(run)], orders_at, strict=True)]
+                    + [
+                        ("term", term, ((at,),))
+                        for term, at in zip(whole, whole_at, strict=True)
+                        if term.verb == "read" and term.scope == sqltext.ROW
+                    ]
+                )
 
         def values(run, key: str, along: Optional[dict[int, list[ast.AST]]]) -> list[str]:
             """What *key* is filled with in a run passing *along*; every value where *along* is ``None``."""
@@ -3542,18 +3585,51 @@ def read_side(
                 for pair, binds, words in pairs(run, term, along):
                     if not _names(piece, binds, words):
                         continue
-                    # The term of this run's ``WHERE`` that holds it -- an ``OR``
-                    # with another column whole -- and nothing where none does:
-                    # the fragment's own text can hold other terms' ``OR``\ s.
-                    within = next(
-                        (
-                            spelling
-                            for spelling, text, holding in conjuncts[id(run)]
-                            if (set(binds) <= set(holding) if binds else _names(text, (), words))
-                        ),
-                        "",
-                    )
-                    found.setdefault(pair, []).append((within, term.decided))
+                    found.setdefault(pair, []).append((within(run, binds, words), term.decided))
+            return found
+
+        def within(run, binds: tuple[str, ...], words: tuple[str, ...]) -> str:
+            """The term of *run*'s ``WHERE`` that holds a pair -- an ``OR`` with another column whole -- and nothing
+            where none does: the fragment's own text can hold other terms' ``OR``\\ s."""
+            return next(
+                (
+                    spelling
+                    for spelling, text, holding in conjuncts[id(run)]
+                    if (set(binds) <= set(holding) if binds else _names(text, (), words))
+                ),
+                "",
+            )
+
+        def at(
+            run, build: _Build, along: Optional[dict[int, list[ast.AST]]]
+        ) -> dict[tuple[str, str], list[tuple[list[_Leaf], str, Optional[bool]]]]:
+            """``{(field, term): [(the fragments its text is made of, the term it enters in, whether that decides it)]}``.
+
+            For a run the evaluator read (:attr:`sql.Execution.pieces`), off
+            where each term is in the statement: every fragment its text
+            overlaps is one the statement needs to hold it.  ``jobStatus IN
+            ('activated', 'sent', 'starting')`` is a template's words around a
+            list one branch writes, and asking which fragment's text names the
+            term found neither.  What a loop's passes write, where the
+            statement holds them as one repeated part (``getJobs``' ``(CASE {}
+            ELSE {} END)``), is not: any number of passes holds the term, and
+            it is placed by them only where they are all of it.
+            """
+            looped = {id(hole.stmt) for _at, hole in run.holes or () if hole.reason == sqleval.REPEATED}
+            found: dict[tuple[str, str], list[tuple[list[_Leaf], str, Optional[bool]]]] = {}
+            for kind, what, places_of in located[id(run)]:
+                for spans in places_of:
+                    leaves = [leaf for leaf in build.leaves if any(leaf.start < b and a < leaf.end for a, b in spans)]
+                    leaves = [leaf for leaf in leaves if not _in_loop(leaf.node, looped)] or leaves
+                    if not leaves:
+                        continue
+                    if kind == "conditions":
+                        found.setdefault(("conditions", what), []).append((leaves, spelled[("conditions", what)], None))
+                    elif kind == "order_by":
+                        found.setdefault(("order_by", what), []).append((leaves, what, None))
+                    else:
+                        for pair, binds, words in pairs(run, what, along):
+                            found.setdefault(pair, []).append((leaves, within(run, binds, words), what.decided))
             return found
 
         read = [
@@ -3572,18 +3648,30 @@ def read_side(
             + [("order_by", order) for order in kept.order_by]
         )
         missing = sorted(set(fields) - every)
-        places: dict[tuple[str, str], dict[tuple[str, str], TermPlace]] = {key: {} for key in missing}
+        places: dict[tuple[str, str], dict[tuple, TermPlace]] = {key: {} for key in missing}
+
+        def hold(key: tuple[str, str], place: TermPlace, by_position: bool) -> None:
+            # Placed by where the term is, one fragment names places with other tests too: what else of the term's
+            # text a statement holds.  Placed by text, a fragment has its tests, and the first is kept.
+            held = places[key].setdefault(
+                (place.fragment, place.term, _tests_of(place) if by_position else ()), place
+            )
+            # Two terms of one place naming the pair: either one ruling it out is enough.
+            if place.decides and not held.decides:
+                held.decides = True
+
         for run, build, _held in read:
             kept_nodes = [node for leaf in build.leaves if leaf.kept for node in _trail(leaf)]
+            if run.pieces:
+                for key, ways in at(run, build, _along(kept_nodes)).items():
+                    for leaves, term, decides in ways if key in places else ():
+                        hold(key, _placed(leaves, term, file_of, decides), True)
+                continue
             for leaf in build.leaves:
                 piece = build.variant[leaf.start : leaf.end]
                 for key, terms in carried(run, piece, _along([*kept_nodes, *_trail(leaf)])).items():
                     for term, decides in terms if key in places else ():
-                        place = _place(leaf, term, file_of, decides)
-                        held = places[key].setdefault((place.fragment, place.term), place)
-                        # Two terms of one place naming the pair: either one ruling it out is enough.
-                        if decides and not held.decides:
-                            held.decides = True
+                        hold(key, _place(leaf, term, file_of, decides), False)
 
         def argued(text: str, term: str) -> list[TermPlace]:
             """Where a value the ``execute`` formats into the statement is written as *text*, with the tests that choose it.
@@ -3591,7 +3679,10 @@ def read_side(
             ``sql_read_files.format(order_by_policy, ...)``: the order is no
             fragment of the statement, it is ``order_by_policy``, and each
             of its writes under an ``if`` -- ``"lumiBlockNr,lfn"``,
-            ``"boundaryID"`` -- is a build of its own.
+            ``"boundaryID"`` -- is a build of its own.  Run, the value is a
+            fragment, but the statements read are one per text: three
+            branches writing ``"fileID"`` are one statement, and the other
+            two ways it gets in are found here.
             """
             found: dict[tuple[str, str], TermPlace] = {}
             for run in variants:
@@ -3622,15 +3713,20 @@ def read_side(
         def named(key: tuple[str, str]) -> bool:
             """Whether a fragment appends *key*'s term with its values read across every branch."""
             return any(
-                key in carried(run, build.variant[leaf.start : leaf.end], None)
+                key in at(run, build, None)
+                if run.pieces
+                else any(key in carried(run, build.variant[leaf.start : leaf.end], None) for leaf in build.leaves)
                 for run, build, _held in read
-                for leaf in build.leaves
             )
 
+        evaluated = any(run.pieces for run in variants)
         added: list[AddedTerm] = []
         for key in missing:
             field, said = key
             term = spelled.get(key, said)
+            if evaluated and field in ("order_by", "conditions"):
+                for place in argued(said, term):
+                    hold(key, place, True)
             chosen = [place for place in places[key].values() if place.tests]
             if chosen:
                 added.append(AddedTerm(field=field, term=term, places=chosen))
@@ -3641,7 +3737,7 @@ def read_side(
                         term=term,
                         unplaced=(
                             "no test chooses it: the map reads several statements at this call, at "
-                            + ", ".join(sorted({fragment for fragment, _term in places[key]}))
+                            + ", ".join(sorted({held[0] for held in places[key]}))
                         ),
                     )
                 )

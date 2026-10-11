@@ -979,6 +979,39 @@ def test_a_term_only_a_loops_passes_append_is_required_of_no_row():
     assert unrepeated.preconditions == {"status": "status=:old"}
 
 
+def test_where_each_term_is_in_the_statement_is_read_off_the_statement_the_evaluator_hands():
+    """A term placed by where it is, not by which fragment's text names it: ``jobStatus IN ('activated', 'sent',
+    'starting')`` is a template's words and a list a branch writes.  The stretch is the statement's own -- the text
+    the fragments index -- past holes the parse names or reads as empty, and a repeated part's ``{}``."""
+    statement = (
+        f"SELECT {{}} FROM {{}}.jobsActive4 WHERE jobStatus IN ('activated', 'sent', 'starting') AND x=:x {{}} {{}} "
+        f"AND (y=:y OR z IN ({{}})) AND NOT EXISTS (SELECT 1 FROM {{}}.u WHERE u.id=jobsActive4.id AND u.k IN (:k1,:k2)) "
+        f"ORDER BY (CASE {_O}WHEN gshare=:leave{{}} THEN 0 {_C} ELSE {{}} END), b"
+    )
+    plain = sqltext.plain(statement)
+
+    def said(spans) -> list:
+        return [[plain[a:b] for a, b in place] for place in spans]
+
+    assert [said(at) for at in sqltext.condition_spans(statement)] == [
+        [["jobStatus IN ('activated', 'sent', 'starting')"]],
+        [["y=:y", "z IN ({})"]],
+        [["NOT EXISTS (SELECT 1 FROM {}.u WHERE u.id=jobsActive4.id AND u.k IN (:k1,:k2))"]],
+    ]
+    assert len(sqltext.condition_spans(statement)) == len(sqltext.conditions(statement))
+    assert [said(at) for at in sqltext.ordering_spans(statement)] == [[["(CASE {} ELSE {} END), b"]]]
+    assert {
+        f"{term.table}.{term.column}": plain[a:b]
+        for term, (a, b) in zip(sqltext.terms(statement).terms, sqltext.term_spans(statement), strict=True)
+    } == {
+        "jobsActive4.jobStatus": "jobStatus IN ('activated', 'sent', 'starting')",
+        "jobsActive4.x": "x=:x",
+        "jobsActive4.y": "y=:y",
+        "jobsActive4.z": "z IN ({})",
+        "u.k": "u.k IN (:k1,:k2)",
+    }
+
+
 def test_a_repeated_part_is_spelled_as_the_statement_holds_it():
     """``undo_preassign``'s ``IN ({})`` and ``getJobs``' ``(CASE {} ELSE {} END)``: read with a pass in place, the
     test knows its column and the ranking its share column, and both are spelled as the statement holds them."""
