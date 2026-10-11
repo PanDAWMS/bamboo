@@ -2580,6 +2580,12 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
                     for execution in executions
                 )
             }
+            # Run under another name: the name's text reached a run through a
+            # statement putting it into another (``sql_exe = (sql_jt + comment)
+            # % table``, a loop over ``(sql, varmap)`` pairs) or as a part of one
+            # (a subquery), which the way of each stretch says.
+            carried = sql.names_carried(executions)
+            seen |= {text for text, name in assembled.items() if name in carried}
             explained += len(seen)
             for text, name in sorted(assembled.items()):
                 if text in seen:
@@ -2667,6 +2673,15 @@ def _assembled_queries(
     and stay one, because the denominator counts statements.  Keying by the pair
     instead would have moved ``sql-read``'s candidate count.
     """
+    held = sql.assembled_texts(func)
+    if held is not None:
+        # Run, apart from the runs: what each name holds where the code uses it or where the function ends.
+        return {
+            text: name
+            for name in sorted(held, reverse=True)
+            for text in held[name]
+            if any(verb == "read" for verb, _table in _table_verbs(text))
+        }
     names = {
         target.id
         for node in ast.walk(func)

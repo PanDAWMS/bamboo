@@ -1739,8 +1739,17 @@ def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> l
     reading *whose* table this is: the schema is interpolated into the head of
     the statement (``f"UPDATE {panda_config.schemaDEFT}.T_TASK "``) while the
     columns arrive in later ``+=`` fragments, so neither half can be read
-    without the other.
+    without the other.  Run, they are the holes of the statements the calls
+    holding *name* run: what each was written as (``panda_config.schemaDEFT``).
     """
+    if _EVALUATED:
+        return [
+            hole.source
+            for run in executions(func)
+            if run.variable == name
+            for _at, hole in run.holes
+            if hole.source
+        ]
     found: list[str] = []
     for _line, _operator, _text, node in _parts(func, name):
         value = written_value(node)
@@ -2390,35 +2399,86 @@ def key_column_census(func: ast.FunctionDef | ast.AsyncFunctionDef) -> KeyColumn
     loops = resolved = from_parameter = 0
     arguments = {argument.arg for argument in func.args.args}
     counted: set[int] = set()
-    for name in {run.variable for run in executions(func) if run.variable}:
-        parts = _parts(func, name)
-        for (_line, _operator, _text, node), fill in zip(
-            parts, _key_fills(func, parts), strict=True
-        ):
-            loop = next((one for one in ancestors(node) if isinstance(one, ast.For)), None)
-            if loop is None or id(node) in counted:
-                continue
-            key, mapping = _mapping_iterated(loop)
-            if not key or mapping is None:
-                continue
-            value = written_value(node)
-            holes = _hole_expressions(value) if value is not None else None
-            # Fed by the key, asked by substituting two of them: a fragment
-            # whose only hole is the schema sits inside the loop without the
-            # loop having anything to do with its text.
-            if not holes or not any(
-                _string_value(hole, {key: "\x00one"}, loop)
-                != _string_value(hole, {key: "\x00two"}, loop)
-                for hole in holes
-            ):
-                continue
-            counted.add(id(node))
-            loops += 1
-            if fill is not None:
-                resolved += 1
-            elif isinstance(mapping, ast.Name) and mapping.id in arguments:
-                from_parameter += 1
+    if _EVALUATED:
+        # Run: the fragments are where each stretch of what the calls run was
+        # written, and the ones a hole stands for; read when no hole is left.
+        fragments, unread = _run_fragments(func)
+        asked = [(node, id(node) not in unread) for node in fragments]
+    else:
+        asked = []
+        for name in {run.variable for run in executions(func) if run.variable}:
+            parts = _parts(func, name)
+            asked += [
+                (node, fill is not None)
+                for (_line, _operator, _text, node), fill in zip(
+                    parts, _key_fills(func, parts), strict=True
+                )
+            ]
+    for node, read in asked:
+        fed = _fed_by_key(node)
+        if fed is None or id(node) in counted:
+            continue
+        counted.add(id(node))
+        loops += 1
+        if read:
+            resolved += 1
+        elif isinstance(fed, ast.Name) and fed.id in arguments:
+            from_parameter += 1
     return KeyColumnCensus(loops, resolved, from_parameter)
+
+
+def _fed_by_key(node: ast.stmt) -> Optional[ast.expr]:
+    """The mapping whose keys the text *node* writes is made of, inside ``for k, v in d.items()``; ``None`` where
+    it is not."""
+    loop = next((one for one in ancestors(node) if isinstance(one, ast.For)), None)
+    if loop is None:
+        return None
+    key, mapping = _mapping_iterated(loop)
+    if not key or mapping is None:
+        return None
+    value = written_value(node)
+    holes = _hole_expressions(value) if value is not None else None
+    # Fed by the key, asked by substituting two of them: a fragment
+    # whose only hole is the schema sits inside the loop without the
+    # loop having anything to do with its text.
+    if not holes or not any(
+        _string_value(hole, {key: "\x00one"}, loop)
+        != _string_value(hole, {key: "\x00two"}, loop)
+        for hole in holes
+    ):
+        return None
+    return mapping
+
+
+def _run_fragments(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[ast.stmt], set[int]]:
+    """The statements that wrote what *func*'s calls run, and those of them a hole stands for.
+
+    A part a loop of unknown length repeats is a hole at the loop: what the
+    loop appends to the name is the fragment, and unread.
+    """
+    fragments: dict[int, ast.stmt] = {}
+    unread: set[int] = set()
+    for run in executions(func):
+        for _start, _end, way in run.pieces:
+            if way and isinstance(way[0], ast.stmt):
+                fragments.setdefault(id(way[0]), way[0])
+        for _at, hole in run.holes:
+            if isinstance(hole.stmt, (ast.For, ast.AsyncFor, ast.While)):
+                inside = [
+                    node
+                    for node in ast.walk(hole.stmt)
+                    if isinstance(node, (ast.Assign, ast.AugAssign))
+                    and any(
+                        isinstance(t, ast.Name) and t.id == hole.source
+                        for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                    )
+                ]
+            else:
+                inside = [hole.stmt] if isinstance(hole.stmt, ast.stmt) else []
+            for node in inside:
+                fragments.setdefault(id(node), node)
+                unread.add(id(node))
+    return list(fragments.values()), unread
 
 
 def _reads(expression: ast.expr, name: str) -> bool:
@@ -2866,16 +2926,21 @@ def _skip_without_text(
 
 
 def _skip_without_binds(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.Call,
+    texts: Optional[tuple[str, ...]] = None,
 ) -> Optional[Skip]:
     """The skip for ``execute(sql)``, which names no bind map to pair it with.
 
     ``None`` on the same terms as :func:`_skip_without_text`: a wrapper of the
-    cursor handing on its caller's statement.
+    cursor handing on its caller's statement.  *texts*, where the function was
+    run: what the call runs (:func:`_texts_at`); else what the head can be
+    reassembled to hold.
     """
     statement, _fillers, _spelling = _call_site_fill(func, call.args[0])
     head = _concatenated(statement)[0]
-    texts = _head_texts(func, head)
+    if texts is None:
+        texts = _head_texts(func, head)
     if not texts:
         # No text either: a statement handed in is handed in whether or not a
         # map comes with it, and saying so is the more useful of the two.
@@ -3600,14 +3665,76 @@ def _evaluation(func: ast.FunctionDef | ast.AsyncFunctionDef) -> "sqleval.Readin
         # Values are interned per run; one kept from an earlier run stays
         # valid, but is never the same object as an equal one made later.
         sqleval.clear_memo()
-        lists = in_lists(func)
-        conventions = {
-            "in_list_helper": IN_LIST_HELPER,
-            "globals": {name: sqleval.lit(one.bind, one.site) for name, one in lists.items()},
-            # ``execute(sqlU + comment)``: the tag the call appends is not the statement (:func:`_call_site_fill`).
-            "tracing_tag": True,
-        }
-        held[key] = sqleval.evaluate(func, constants, _placed_callees(), conventions)
+        held[key] = sqleval.evaluate(func, constants, _placed_callees(), _conventions(func))
+    return held[key]
+
+
+def _conventions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
+    """What a run of *func* is told besides the code: the in-list helper, the lists it builds, the tracing tag."""
+    lists = in_lists(func)
+    return {
+        "in_list_helper": IN_LIST_HELPER,
+        "globals": {name: sqleval.lit(one.bind, one.site) for name, one in lists.items()},
+        # ``execute(sqlU + comment)``: the tag the call appends is not the statement (:func:`_call_site_fill`).
+        "tracing_tag": True,
+    }
+
+
+def _text_branches(value) -> list:
+    """*value*'s texts: itself, or each branch of a choice that is one -- a name bound on some paths only is a
+    choice between its text and nothing where the paths meet.  One level: a branch that is itself such a choice
+    is left out rather than taken apart."""
+    if sqleval.is_text(value):
+        return [value]
+    if type(value) is sqleval.Choice:
+        return [branch for branch in value.branches if sqleval.is_text(branch)]
+    return []
+
+
+def names_carried(runs: list["Execution"]) -> set[str]:
+    """The local names the text of *runs* went through on its way to the run (:attr:`Execution.pieces`): every name a
+    statement on a stretch's way wrote it into or carried it on in.  Nothing for a reassembled run, which has no
+    pieces."""
+    found: set[str] = set()
+    for run in runs:
+        for _start, _end, way in run.pieces:
+            for at in way:
+                if isinstance(at, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    targets = at.targets if isinstance(at, ast.Assign) else [at.target]
+                    found |= {target.id for target in targets if isinstance(target, ast.Name)}
+    return found
+
+
+def assembled_texts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[dict[str, list[str]]]:
+    """Every statement *func* assembles, by the local holding it, read apart from the calls that run statements.
+
+    What each name the function writes statement text into holds where the
+    code uses it -- runs it, hands it to a call, formats it into another name,
+    returns it -- or where the function ends (:func:`sqleval.assembled`).  The
+    sql-read slice's denominator: a statement no accepted call runs is in it
+    and not among :func:`executions`, which is what it is for.  ``None`` while
+    statements are reassembled, where :func:`variants` answers the same.
+    """
+    if not _EVALUATED:
+        return None
+    constants = dict(_AT_CALL[1]) if _AT_CALL is not None and _AT_CALL[0] is func else {}
+    key = (id(_CALLS), tuple(sorted((name, repr(value)) for name, value in constants.items())))
+    held = getattr(func, "_sqleval_assembled", None)
+    if held is None:
+        held = func._sqleval_assembled = {}  # type: ignore[union-attr]
+    if key not in held:
+        sqleval.clear_memo()
+        run = sqleval.assembled(func, constants, _placed_callees(), _conventions(func))
+        found: dict[str, list[str]] = {}
+        for name, values in run.used.items():
+            texts: list[str] = []
+            for one in sqleval.cover([text for value in values for text in _text_branches(value)])[0]:
+                text = _fragments_out(one, func).text
+                if not _says_nothing(text) and text not in texts:
+                    texts.append(text)
+            if texts:
+                found[name] = texts
+        held[key] = found
     return held[key]
 
 
@@ -3735,6 +3862,16 @@ def _every_statement(
     return kept
 
 
+def _texts_at(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, reading: "sqleval.Reading", line: int
+) -> tuple[str, ...]:
+    """What the runner call on *line* runs, as the run read it: nothing where no path reaches it."""
+    if line not in reading.reached:
+        return ()
+    texts = (_fragments_out(one, func).text for one in reading.cover(line)[0])
+    return tuple(text for text in dict.fromkeys(texts) if not _says_nothing(text))
+
+
 def _unrendered(hole: "sqleval.HoleAt", func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """A hole that is a whole ``+=`` fragment with no text of its own (:data:`FRAGMENT_NOT_RENDERED`), appended
     by *func* itself.
@@ -3852,11 +3989,14 @@ def _evaluated_executions_read(
         if not node.args:
             continue
         if len(node.args) < 2:
-            skip = _skip_without_binds(func, node)
+            skip = _skip_without_binds(func, node, _texts_at(func, reading, node.lineno))
             if skip is not None:
                 skips.append(skip)
             continue
-        statement, _fillers, _spelling = _call_site_fill(func, _through_name(func, node.args[0]))
+        # The name the call runs, as written: ``sql_exe = (sql_jt + comment) %
+        # table`` is read where ``sql_exe`` runs.  (:func:`_through_name` looks
+        # past it to ``sql_jt`` for the reassembly, which cannot read the ``%``.)
+        statement, _fillers, _spelling = _call_site_fill(func, node.args[0])
         operands = _concatenated(statement)
         held = operands[0].id if isinstance(operands[0], ast.Name) else ""
         line = node.lineno

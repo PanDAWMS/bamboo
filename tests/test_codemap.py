@@ -3440,6 +3440,76 @@ def test_a_query_the_call_fills_in_counts_as_read_by_its_own_runs_only():
     ]
 
 
+def test_a_query_run_under_another_name_counts_as_read_and_one_nothing_here_runs_does_not():
+    """Run, the denominator is what each name holds where the code uses it or the function ends.
+
+    ``sql_exe = (sql_jt + comment) % column`` runs ``sql_jt``'s two statements:
+    read, though no run is of ``sql_jt`` itself -- counted under both names, as
+    written and as run, the way the reassembly counted them.  A statement handed to a call
+    the reader does not accept, and one written and never used, are assembled
+    here and not read here -- which is what the denominator is for.  The half
+    a ``try`` had built when it raised is no statement, and a log line saying
+    "select" is none either.
+    """
+    source = (
+        "def f(self, column, flag):\n"
+        "    sql_jt = 'SELECT a FROM ATLAS_PANDA.jobsActive4 WHERE %s=:b '\n"
+        "    if flag:\n"
+        "        sql_jt += 'AND c=:c '\n"
+        "    sql_exe = (sql_jt + comment) % column\n"
+        "    self.cur.execute(sql_exe, varMap)\n"
+        "    sqlC = 'SELECT data FROM ATLAS_PANDA.Secrets WHERE owner=:owner '\n"
+        "    self.getClobObj(sqlC, varMap)\n"
+        "    try:\n"
+        "        sqlA = 'SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 '\n"
+        "        sqlA += 'WHERE jobDefinitionID=:j '\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    tmpLog = 'failed to select from ATLAS_PANDA.jobsDefined4'\n"
+    )
+    module = _module(source, "pandaserver/taskbuffer/db_proxy_mods/job_standalone_module.py")
+
+    with sql.evaluated():
+        (stat,), unexplained = sqlwrite.read_coverage([module])
+        assembled = sqlwrite._assembled_queries(module.tree.body[0])
+
+    assert sorted(assembled.values()) == ["sqlA", "sqlC", "sql_exe", "sql_exe", "sql_jt", "sql_jt"]
+    assert "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 " not in assembled
+    assert (stat.candidates, stat.explained) == (6, 4)
+    assert sorted((one.table, one.reason) for one in unexplained) == [
+        ("sqlA", sqlwrite.NOT_RUN_HERE),
+        ("sqlC", f"{sqlwrite.RUN_THROUGH_OTHER_FORM}: getClobObj"),
+    ]
+
+
+def test_a_run_statement_is_held_by_the_name_the_call_runs():
+    """Run, ``sql_exe = (sql_jt + comment) % table`` is read where ``sql_exe`` runs, under that name.
+
+    The reassembly cannot read the ``%`` and looked past ``sql_exe`` to
+    ``sql_jt``; the run reads it.  A call with no bind map is said with what
+    it runs, and the schema an f-string interpolates is a hole of the run.
+    """
+    source = (
+        "def f(self, table):\n"
+        "    sql_jt = f'SELECT a FROM {panda_config.schemaPANDA}.%s WHERE b=:b '\n"
+        "    sql_exe = (sql_jt + comment) % table\n"
+        "    self.cur.execute(sql_exe, varMap)\n"
+        "    sqlN = 'SELECT c FROM ATLAS_PANDA.jobsActive4'\n"
+        "    self.cur.execute(sqlN + comment)\n"
+    )
+    func = _func(source)
+
+    with sql.evaluated():
+        (run,) = sql.executions(func, skipped := [])
+        interpolated = sql.interpolations(func, "sql_exe")
+
+    assert (run.variable, run.head) == ("sql_exe", run.sql)
+    assert [(skip.reason, skip.detail, skip.texts) for skip in skipped] == [
+        (sql.SKIP_NO_VARMAP, "sqlN", ("SELECT c FROM ATLAS_PANDA.jobsActive4",))
+    ]
+    assert "panda_config.schemaPANDA" in interpolated
+
+
 def test_an_unreadable_piece_leaves_a_hole_rather_than_dropping_the_statement():
     """A run-time operand is a hole, the same as one inside an f-string."""
     source = (

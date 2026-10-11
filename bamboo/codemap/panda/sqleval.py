@@ -990,6 +990,126 @@ def runner_calls(func: ast.AST) -> list[ast.Call]:
     ]
 
 
+#: How a piece of statement text reads, and a log line does not: a verb in capitals anywhere; a statement that
+#: starts with its verb, in any case (42 in the corpus are written in lower case); a fragment that starts with a
+#: clause word in capitals (``"AND status=:s "``).  "failed to update the files" and "with taskName=" are not
+#: statement text (574 and 55 literals of the corpus a looser rule took).
+_STATEMENT_VERB = re.compile(r"\b(?:SELECT|INSERT|UPDATE|DELETE|MERGE)\b")
+_STATEMENT_START = re.compile(
+    r"^\s*\(?\s*(?:(?i:select|insert|update|delete|merge)|WITH)\b"
+)
+_STATEMENT_CLAUSE = re.compile(
+    r"^\s*(?:AND|OR|WHERE|SET|FROM|VALUES|JOIN|UNION|MINUS|ORDER BY|GROUP BY)\b"
+)
+
+
+def _statement_literal(value: ast.AST) -> bool:
+    """Whether *value* holds a literal piece of statement text (:data:`_STATEMENT_VERB`)."""
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and bool(
+            _STATEMENT_VERB.search(node.value)
+            or _STATEMENT_START.search(node.value)
+            or _STATEMENT_CLAUSE.search(node.value)
+        )
+        for node in ast.walk(value)
+    )
+
+
+#: Methods of a text whose result is the text again, filled in or trimmed: what ``sql = sqlR.format(table)`` makes
+#: of a statement is a statement.
+_TEXT_RESULT = frozenset(
+    {"format", "replace", "join", "strip", "rstrip", "lstrip", "upper", "lower"}
+)
+
+
+def _text_reads(value: ast.AST) -> set[str]:
+    """The names *value* makes text of: read as operands, items, fields or the receiver or arguments of a
+    :data:`_TEXT_RESULT` method -- not as the argument of any other call, whose result is that call's."""
+    found: set[str] = set()
+    stack = [value]
+    while stack:
+        here = stack.pop()
+        if isinstance(here, ast.Name) and isinstance(here.ctx, ast.Load):
+            found.add(here.id)
+        elif isinstance(here, ast.Call):
+            if isinstance(here.func, ast.Attribute) and here.func.attr in _TEXT_RESULT:
+                stack.append(here.func.value)
+                stack.extend(here.args)
+        elif not isinstance(here, ast.Lambda):
+            stack.extend(ast.iter_child_nodes(here))
+    return found
+
+
+def _built_names(func: ast.AST) -> frozenset:
+    """The local names holding statement text in *func*: one written a literal piece of it
+    (:func:`_statement_literal`), one a runner runs, and one made of either -- ``sql = sqlX % table``,
+    ``sql_exe = (sql_jt + comment) % table``, ``for sql, var_map in [(sql_defined, {}), ...]``."""
+    found: set = {
+        n.id
+        for call in runner_calls(func)
+        for n in ast.walk(call.args[0])
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    }
+    writes: list = []
+    for node in _own_nodes(func):
+        if (
+            isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+            and node.value is not None
+        ):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets, value = [node.target], node.iter
+        else:
+            continue
+        names = {
+            n.id
+            for target in targets
+            for n in ast.walk(target)
+            if isinstance(n, ast.Name)
+        }
+        if not names:
+            continue
+        if not isinstance(node, (ast.For, ast.AsyncFor)) and _statement_literal(value):
+            found |= names
+        writes.append((names, _text_reads(value)))
+    changed = True
+    while changed:
+        changed = False
+        for names, reads in writes:
+            if reads & found and not names <= found:
+                found |= names
+                changed = True
+    return frozenset(found)
+
+
+def _uses(func: ast.AST, names: frozenset) -> list[ast.Name]:
+    """Where *func* reads one of *names* other than to go on building it: ``sql = sql + x`` and
+    ``sql = sql.replace(...)`` build ``sql``; ``sql_exe = sql_jt % table`` and ``execute(sql)`` use it."""
+    building: set = set()
+    for node in _own_nodes(func):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            written = {t.id for t in targets if isinstance(t, ast.Name)}
+            building |= {
+                id(n)
+                for n in ast.walk(node.value)
+                if isinstance(n, ast.Name)
+                and isinstance(n.ctx, ast.Load)
+                and n.id in written
+            }
+    return [
+        node
+        for node in _own_nodes(func)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in names
+        and id(node) not in building
+    ]
+
+
 _PURE: dict[int, tuple[ast.AST, bool]] = {}
 _SPELLED: dict[int, tuple[ast.AST, str]] = {}
 _SOURCE: dict[int, tuple[ast.AST, str]] = {}
@@ -1542,6 +1662,10 @@ class Ref:
         self.free = dict(free or {})
         self.stack = stack | {id(func)}
         self.returns: list = []
+        self.built_names: frozenset = frozenset()
+        self.used: dict[
+            str, dict
+        ] = {}  # mode "uses": name -> {value it held at a use or an exit}
         self._for_text = False  # evaluating what a text is built from: only there is a call followed (d)
         self._epoch = 0  # bumped at each pass of a loop: a call run again on one path gets fresh choices
         self._handed: dict = {}  # (call, arguments, epoch) -> the callee's values, its choices renamed for that call
@@ -1563,6 +1687,18 @@ class Ref:
             self._targets = {id(n) for n in returns}
             self._last_target = max((n.lineno for n in returns), default=0)
             seeds = [n.value for n in returns if n.value is not None]
+        elif mode == "uses":
+            # What each name the function builds a statement into holds where the code uses it, and where the
+            # function ends: the statements it assembles, whether a runner runs them or not
+            # (sql.assembled_texts).  The names are seeds too, so one nothing uses is read to the end.
+            self.runners = []
+            self.built_names = _built_names(func)
+            uses = _uses(func, self.built_names)
+            self._targets = {id(n) for n in uses}
+            self._last_target = func.end_lineno or 0
+            seeds = list(uses) + [
+                ast.Name(id=name, ctx=ast.Load()) for name in sorted(self.built_names)
+            ]
         else:
             self.runners = [
                 call
@@ -1988,6 +2124,8 @@ class Ref:
             envs, _, _ = self.block(self.func.body, [self.initial()])
             if self.mode == "return" and envs:
                 self.returns.append(None)  # the end of the body: ``return None``
+            if self.mode == "uses":
+                self.hold_exit(envs)
         except Overflow as error:
             self.overflow = str(error)
         return self
@@ -2431,7 +2569,25 @@ class Ref:
             if one is not None:
                 held[one] = None
 
+    def hold_use(self, name: str, envs: list[Env]) -> None:
+        held = self.used.setdefault(name, {})
+        for env in envs:
+            one = env.vars.get(name)
+            if one is not None:
+                held[one] = None
+
+    def hold_exit(self, envs: list[Env]) -> None:
+        """Mode ``uses``: what every built name holds where the function returns or ends."""
+        for name in sorted(self.built_names):
+            self.hold_use(name, envs)
+
     def record(self, node: Optional[ast.AST], envs: list[Env]) -> None:
+        if self.mode == "uses":
+            if node is not None and self.contains_target(node):
+                for here in _expression_nodes(node):
+                    if id(here) in self._targets:
+                        self.hold_use(here.id, envs)
+            return
         if node is None or self.mode == "return" or not self.contains_target(node):
             return
         calls = [
@@ -2639,6 +2795,7 @@ class Ref:
     ):
         if (
             not self._loops_with_target
+            and self.mode != "uses"  # it reads the names where the function ends, too
             and stmts
             and stmts[-1].end_lineno >= self._last_target
         ):
@@ -2659,7 +2816,8 @@ class Ref:
                 for env in envs:
                     one = self.project(env, live)
                     seen.setdefault(one.key(), one)
-            rest = after | suffix[i + 1]
+            # Mode ``uses`` reads every built name where the function ends: live to the end.
+            rest = after | suffix[i + 1] | self.built_names
             ctl = self.ctl_names(stmt)
             if ctl:
                 envs = self.concretize(envs, ctl)
@@ -2831,6 +2989,8 @@ class Ref:
                     self._for_text = False
             else:
                 self.record(stmt.value, envs)
+                if self.mode == "uses":
+                    self.hold_exit(envs)
             return [], [], []
         if isinstance(stmt, ast.Raise):
             self.record(stmt.exc, envs)
@@ -3328,6 +3488,18 @@ class Ref:
                 one = self.project(env, handler_reads)
                 seen.setdefault(one.key(), one)
             starts = list(seen.values())
+            if self.mode == "uses":
+                # A statement the body was still building when it raised is not one the function builds: the
+                # handler starts without what the body writes into a built name.
+                cut = self.built_names & {
+                    n.id
+                    for part in stmt.body
+                    for n in ast.walk(part)
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                }
+                for name in sorted(cut):
+                    starts = [self.forget(env, name) for env in starts]
+                starts = self.dedupe(starts) if cut else starts
             for handler in stmt.handlers:
                 here = starts
                 if handler.name:
@@ -5813,6 +5985,26 @@ def evaluate(
     conventions: Optional[dict] = None,
 ) -> Reading:
     return Reading(func, constants, resolver, conventions=conventions)
+
+
+def assembled(
+    func,
+    constants: Optional[dict] = None,
+    resolver: Optional[Callable] = None,
+    conventions: Optional[dict] = None,
+) -> "Ref":
+    """What each name *func* builds a statement into holds where the code uses it or where *func* ends (mode
+    ``uses``): every statement it assembles, run or not.  One run within :data:`WHOLE_WORK`; past it, ``overflow``
+    says so and what was held up to there is all there is."""
+    return Ref(
+        func,
+        constants,
+        None,
+        resolver=resolver,
+        conventions=conventions,
+        mode="uses",
+        work_cap=WHOLE_WORK,
+    ).run()
 
 
 def evaluate_line(
