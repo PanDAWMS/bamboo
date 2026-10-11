@@ -3937,6 +3937,10 @@ class Ref:
         return Tup((lit(f"{prefix}__in", self.stmt_of(node)), Opn(0)))
 
     def _resub(self, pattern, repl, text, node):
+        """``re.sub(pattern, repl, text)``: what the pattern does not touch keeps where it was written, and what it
+        writes is the call's.  ``_read_unprocessed_inputs`` adds a hint to a statement whose terms were appended under
+        ``if not simulation_with_file_stat``; read as one text the call wrote, the terms were under no test, and a
+        loop's repeated part in it was text."""
         if (
             type(pattern) in (Str, str)
             and type(repl) in (Str, str)
@@ -3945,10 +3949,19 @@ class Ref:
             and type(text) in (Str, str)
         ):
             try:
-                out = re.sub(to_py(pattern), to_py(repl), to_py(text))
-            except re.error:
+                compiled = re.compile(to_py(pattern))
+                matches = list(compiled.finditer(to_py(text)))
+                written = [match.expand(to_py(repl)) for match in matches]
+            except (re.error, IndexError):
                 return UNK
-            return lit(out, self.stmt_of(node))
+            if type(text) is not Str:
+                return lit(compiled.sub(to_py(repl), text), self.stmt_of(node))
+            out, at = EMPTY, 0
+            for match, one in zip(matches, written, strict=True):
+                kept = str_slice(text, at, match.start())
+                out = str_concat(str_concat(out, kept), lit(one, self.stmt_of(node)))
+                at = match.end()
+            return str_concat(out, str_slice(text, at, len(text.s)))
         return UNK
 
     def join(self, node: ast.Call, sep, items):

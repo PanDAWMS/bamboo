@@ -1885,6 +1885,41 @@ def test_a_term_whose_text_several_fragments_make_is_placed_where_they_are(tmp_p
     }
 
 
+def test_a_term_appended_before_re_sub_adds_a_hint_is_placed_under_its_test(tmp_path):
+    """``_read_unprocessed_inputs`` appends ``AND (maxAttempt IS NULL OR attemptNr<maxAttempt)`` under ``if not
+    simulation_with_file_stat`` and then adds a hint with ``re.sub``.  The term was "no test chooses it": the
+    statement read was one text ``re.sub`` wrote."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "import re\n"
+        "class Files:\n"
+        "    def read(self, sim):\n"
+        "        sql = 'SELECT fileID FROM ATLAS_PANDA.filesTable4 WHERE PandaID=:PandaID '\n"
+        "        if not sim:\n"
+        "            sql += 'AND (maxAttempt IS NULL OR attemptNr<maxAttempt) '\n"
+        "        hinted = re.sub('PandaID=:PandaID ', 'PandaID=:PandaID AND is_waiting IS NULL ', sql)\n"
+        "        self.cur.execute(hinted, {':PandaID': 1})\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls), sql.evaluated(True):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    assert {
+        one.term: [(place.fragment.rsplit(":", 1)[1], [test.test for test in place.tests]) for place in one.places]
+        or one.unplaced
+        for one in statement.added_under
+    } == {"maxAttempt IS NULL OR attemptNr<maxAttempt": [("6", ["not sim"])]}
+
+
 def test_a_term_a_callee_appends_is_placed_in_the_callee_with_the_way_its_test_is_handed_in(tmp_path):
     """``getJobs``: ``construct_where_clause`` appends the term under ``if mem``, and returns the clause through ``build_where_clause``.
 

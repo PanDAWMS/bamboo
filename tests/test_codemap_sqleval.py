@@ -446,6 +446,35 @@ def f(self, table):
     assert got.get(5) == ["SELECT a FROM {}.filesTable_ARCH"]
 
 
+def test_re_sub_keeps_where_what_it_does_not_touch_was_written():
+    """``_read_unprocessed_inputs`` adds a hint with ``re.sub`` to a statement whose terms were appended under ``if
+    not simulation_with_file_stat``.  Read as one text the call wrote, those terms were under no test and a hole in
+    it was text: what the pattern does not touch keeps its way, and what it writes is the call's."""
+    src = """
+def f(self, sim):
+    sql = f"SELECT a FROM {panda_config.schemaJEDI}.T WHERE jediTaskID=:jediTaskID "
+    if not sim:
+        sql += "AND status=:status "
+    hinted = re.sub("jediTaskID=:jediTaskID ", "jediTaskID=:jediTaskID AND is_waiting IS NULL ", sql)
+    self.cur.execute(hinted, varMap)
+"""
+    reading = _reading(src)
+    (one,) = [one for one in reading.cover(7)[0] if "status" in one.text]
+    assert one.text == (
+        "SELECT a FROM {}.T WHERE jediTaskID=:jediTaskID AND is_waiting IS NULL AND status=:status "
+    )
+    ways = {
+        one.text[start:end]: [(type(node).__name__, node.lineno) for node in way]
+        for start, end, way in one.pieces
+    }
+    assert ways == {
+        "SELECT a FROM {}.T WHERE ": [("Assign", 3), ("Assign", 6)],
+        "jediTaskID=:jediTaskID AND is_waiting IS NULL ": [("Assign", 6)],
+        "AND status=:status ": [("AugAssign", 5), ("Assign", 6)],
+    }
+    assert [(at, hole.reason) for at, hole in one.holes] == [(14, "an attribute")]
+
+
 def test_a_compound_test_twice_is_taken_the_same_way():
     """``archiveJob``'s ``sql0``."""
     src = """
