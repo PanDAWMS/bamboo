@@ -13,14 +13,12 @@ The cases, their inputs and the runs are machine-local and stay out of the
 repository, in a directory named by ``--home`` or ``FIELDTEST_HOME``:
 
 ``fieldtest.json``
-    ``python`` (the interpreter the querier runs under; default: this one),
-    ``drivers`` (the directory holding ``dump_driver.py``, ``next_target.py``
-    and ``taken_driver.py``, the chain that runs the querier against a map
-    dump), ``cwd`` (where the querier runs; default: the home).
+    ``python`` (the interpreter the querier runs under; default: this one) and
+    ``cwd`` (where the querier runs; default: the home).
 ``cases/**/*.json``
     One case each (:func:`bamboo.fieldtest.run.load_case`).
 ``pairs/*.json``, ``pairs/current.json``
     The pairs a case can run on, and the one each pin runs on now.
-``runs/``, ``snapshots/``
-    What the runs wrote, and the copies of the driver chain they ran.
+``runs/``
+    What the runs wrote.
 """

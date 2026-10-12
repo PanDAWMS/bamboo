@@ -20,10 +20,13 @@ sha256.  :func:`load_pair` checks a pair the way the querier's
 bamboo sha, and the dump's ``derived_from`` naming the pin.  The pair is written
 into every command, never taken from the querier's defaults.
 
-The driver chain in front of ``bamboo.querier.rerun`` (``dump_driver.py`` and
-the two it hands on to) lives outside this repository; each batch copies it
-into ``snapshots/<sha>`` once and runs the copy, and records the git state of
-the directory it came from.
+The querier runs as ``python -m bamboo.querier.rerun`` from the run tree.  It
+installs ``MAP_DUMP`` itself and says in its ``# map:`` line which dump it
+installed (since the querier's e2a9fff); each run checks that line against the
+pair.  A run is never given a Neo4j it can reach (:data:`NO_GRAPH`), so a
+querier that reads the map store instead of the dump -- one older than e2a9fff,
+or an entry that does not install -- fails rather than answering from whatever
+map the store holds at the time.
 
 **What is scored.**  No ``--hand``: the steps before the first ``STOP`` are the
 ones that ran with no judgement.  :func:`score` reads the hops the run opened,
@@ -40,7 +43,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -48,8 +50,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-#: the driver chain a snapshot copies (the querier itself is in the run tree)
-DRIVERS = ("dump_driver.py", "next_target.py", "taken_driver.py")
 QUERIER_MODULE = "bamboo.querier.rerun"
 KINDS = ("default", "late", "stuck")
 
@@ -60,6 +60,10 @@ STOP = re.compile(
 END = re.compile(r"^END (?P<what>.*)")
 REACHED = re.compile(r"^== reached the end; HAND used (?P<hand>\d+) time")
 DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
+MAP = re.compile(r"^# map: (?P<map>.*)$", re.M)
+
+#: where a run's Neo4j is: a closed port (bamboo's settings take the environment over .env)
+NO_GRAPH = {"NEO4J_URI": "bolt://127.0.0.1:1"}
 
 
 class FieldTestError(Exception):
@@ -72,7 +76,6 @@ class Home:
 
     root: Path
     python: str
-    drivers: Path
     cwd: Path
 
     @classmethod
@@ -85,59 +88,15 @@ class Home:
         if not config_file.exists():
             raise FieldTestError(f"{config_file} does not exist")
         config = json.loads(config_file.read_text())
-        if "drivers" not in config:
-            raise FieldTestError(f"{config_file} names no 'drivers' directory")
         return cls(
             root=home,
             python=config.get("python") or sys.executable,
-            drivers=Path(config["drivers"]).expanduser(),
             cwd=Path(config.get("cwd") or home).expanduser(),
         )
 
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def git_state(directory: Path) -> dict:
-    """The HEAD and uncommitted paths of the repository *directory* is in, or why there are none."""
-
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", "-C", str(directory), *args],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-
-    try:
-        return {
-            "head": git("rev-parse", "HEAD").strip(),
-            "status": git("status", "--porcelain").splitlines(),
-        }
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        return {"head": None, "error": str(e)}
-
-
-def snapshot(home: Home) -> tuple[Path, str]:
-    """Copy the driver chain to ``snapshots/<sha16>`` (once per content); return the copy and its sha."""
-    files = [home.drivers / name for name in DRIVERS]
-    if missing := [p for p in files if not p.exists()]:
-        raise FieldTestError(f"the driver chain lacks {[str(p) for p in missing]}")
-    digest = hashlib.sha256()
-    for p in files:
-        digest.update(f"{p.name}\0{sha256(p)}\n".encode())
-    sha = digest.hexdigest()[:16]
-    dest = home.root / "snapshots" / sha
-    if not dest.exists():
-        tmp = dest.with_name(sha + ".tmp")
-        shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
-        for p in files:
-            shutil.copy2(p, tmp / p.name)
-        (tmp / "MANIFEST").write_text("".join(f"{sha256(p)}  {p}\n" for p in files))
-        tmp.rename(dest)
-    return dest, sha
 
 
 def load_case(path: Path) -> dict:
@@ -198,9 +157,9 @@ def load_pair(home: Home, name: str) -> dict:
     return pair | {"QUERIER_SHA": querier}
 
 
-def command(home: Home, case: dict, code: Path, out: Path) -> list[str]:
+def command(home: Home, case: dict, out: Path) -> list[str]:
     q, i, m = case["question"], case["inputs"], case["modes"]
-    args = [home.python, str(code / "dump_driver.py"), QUERIER_MODULE]
+    args = [home.python, "-m", QUERIER_MODULE]
     if q["kind"] != "default":
         args.append(f"--{q['kind']}")
     args += [
@@ -258,15 +217,15 @@ def lines_differ(baseline: str, text: str) -> int:
     return sum(1 for x in difflib.ndiff(a, b) if x[:2] in ("- ", "+ "))
 
 
-def run_case(
-    home: Home,
-    path: Path,
-    code: Path,
-    code_sha: str,
-    git: dict,
-    batch: Path,
-    override: str = "",
-) -> dict:
+def map_said(text: str, pair: dict) -> dict:
+    """The run's ``# map:`` line, and whether it names the pair's dump and its sha256."""
+    m = MAP.search(text)
+    said = m["map"] if m else None
+    want = f"dump {pair['MAP_DUMP']} (sha256 {pair['MAP_DUMP_SHA256'][:16]})"
+    return {"said": said, "ok": said == want}
+
+
+def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
     case = load_case(path)
     name = pair_name(home, case, override)
     pair = load_pair(home, name)
@@ -277,9 +236,10 @@ def run_case(
     where = batch / case["name"]
     where.mkdir(parents=True, exist_ok=True)
     out = where / "out.txt"
-    args = command(home, case, code, out)
+    args = command(home, case, out)
     env = {k: pair[k] for k in ("PANDA_PIN", "BAMBOO_TREE", "MAP_DUMP")}
     env |= {"PYTHONPATH": pair["BAMBOO_TREE"], "PYTHONDONTWRITEBYTECODE": "1"}
+    env |= NO_GRAPH
     t0 = time.time()
     with (where / "stdout.log").open("w") as log:
         rc = subprocess.run(
@@ -298,8 +258,6 @@ def run_case(
         "seconds": round(time.time() - t0, 2),
         "pair": name,
         "querier_sha": pair["QUERIER_SHA"],
-        "driver_snapshot": code_sha,
-        "driver_git": git,
         "env": env,
         "cwd": str(home.cwd),
         "argv": args,
@@ -308,6 +266,7 @@ def run_case(
             for p in [case["inputs"]["rows"], *case["inputs"]["logs"]]
         },
         "score": score(text),
+        "map": map_said(text, pair),
     }
     if base := case.get("baseline"):
         record["baseline"] = {
@@ -329,6 +288,8 @@ def line(r: dict) -> str:
     else:
         where = "no terminal line"
     base = f"  baseline diff {r['baseline']['lines_differ']}" if "baseline" in r else ""
+    if not r.get("map", {"ok": True})["ok"]:
+        base += f"  MAP NOT THE PAIR'S: {r['map']['said']}"
     return (
         f"{r['name']:<8} {r['pair']} q{r.get('querier_sha', '?')[:7]}  exit {r['exit']}  {r['seconds']:>6}s  "
         f"hops {len(s['hops']):>2} (last {s['last_hop']})  hand {s['hand']}  {where}{base}"
@@ -351,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument(
         "--batch",
         default="",
-        help="where the runs go (default: <home>/runs/<time>-<driver sha>)",
+        help="where the runs go (default: <home>/runs/<time>)",
     )
     r.add_argument(
         "--pair",
@@ -367,19 +328,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         home = Home.load(a.home)
-        code, code_sha = snapshot(home)
-        git = git_state(home.drivers)
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        batch = Path(a.batch) if a.batch else home.root / "runs" / f"{stamp}-{code_sha}"
+        batch = Path(a.batch) if a.batch else home.root / "runs" / stamp
         batch.mkdir(parents=True, exist_ok=True)
-        print(
-            f"# batch {batch}; driver snapshot {code_sha}; drivers HEAD {git.get('head')}"
-            f" ({len(git.get('status', []))} uncommitted path(s))",
-            flush=True,
-        )
+        print(f"# batch {batch}", flush=True)
         with ThreadPoolExecutor(a.jobs) as pool:
             for rec in pool.map(
-                lambda p: run_case(home, Path(p), code, code_sha, git, batch, a.pair),
+                lambda p: run_case(home, Path(p), batch, a.pair),
                 a.cases,
             ):
                 print(line(rec), flush=True)

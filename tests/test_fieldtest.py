@@ -2,8 +2,8 @@
 
 The real cases run the querier against production logs and rows, which stay
 out of the repository.  These checks need neither: the runner is driven by a
-stand-in driver chain that writes a querier-shaped output, and the census by a
-small dump written here.
+stand-in querier in a stand-in run tree that writes a querier-shaped output,
+and the census by a small dump written here.
 """
 
 from __future__ import annotations
@@ -75,21 +75,18 @@ def test_lines_differ_leaves_out_comment_lines():
 # ------------------------------------------------------------------ home, cases, pairs
 
 
-def _home(tmp_path: Path, drivers: Path | None = None) -> F.Home:
+def _home(tmp_path: Path) -> F.Home:
     root = tmp_path / "home"
     (root / "pairs").mkdir(parents=True)
-    drivers = drivers or tmp_path / "drivers"
-    drivers.mkdir(exist_ok=True)
-    (root / "fieldtest.json").write_text(json.dumps({"drivers": str(drivers)}))
+    (root / "fieldtest.json").write_text("{}")
     return F.Home.load(root)
 
 
-def test_home_needs_a_directory_and_its_drivers(tmp_path, monkeypatch):
+def test_home_needs_a_directory_with_its_config(tmp_path, monkeypatch):
     monkeypatch.delenv("FIELDTEST_HOME", raising=False)
     with pytest.raises(F.FieldTestError, match="no home"):
         F.Home.load(None)
-    (tmp_path / "fieldtest.json").write_text("{}")
-    with pytest.raises(F.FieldTestError, match="drivers"):
+    with pytest.raises(F.FieldTestError, match="fieldtest.json does not exist"):
         F.Home.load(tmp_path)
     home = _home(tmp_path)
     assert home.cwd == home.root and home.python  # defaults: the home, this interpreter
@@ -211,36 +208,60 @@ def test_a_case_runs_on_the_pair_current_names_for_its_pin(tmp_path):
 def test_the_command_carries_the_question(tmp_path):
     home = _home(tmp_path)
     case = F.load_case(_case(tmp_path))
-    args = F.command(home, case, Path("/code"), Path("/out.txt"))
-    assert args[1:4] == ["/code/dump_driver.py", "bamboo.querier.rerun", "--stuck"]
+    args = F.command(home, case, Path("/out.txt"))
+    assert args[1:4] == ["-m", "bamboo.querier.rerun", "--stuck"]
     assert args[args.index("--key") + 1] == "5" and args[-2:] == ["--out", "/out.txt"]
     case["question"]["kind"] = "default"
-    assert "--stuck" not in F.command(home, case, Path("/code"), Path("/out.txt"))
+    assert "--stuck" not in F.command(home, case, Path("/out.txt"))
 
 
-# ------------------------------------------------------------------ a run, through a stand-in driver chain
+def test_a_run_says_whether_it_read_the_pairs_dump():
+    pair = {"MAP_DUMP": "/d/map.json", "MAP_DUMP_SHA256": "ab" * 32}
+    assert F.map_said(
+        f"# x\n# map: dump /d/map.json (sha256 {'ab' * 8})\n== H1\n", pair
+    ) == {
+        "said": f"dump /d/map.json (sha256 {'ab' * 8})",
+        "ok": True,
+    }
+    assert not F.map_said("# map: the one stored in Neo4j\n", pair)["ok"]
+    assert not F.map_said(f"# map: dump /d/map.json (sha256 {'cd' * 8})\n", pair)["ok"]
+    assert F.map_said("Traceback (most recent call last):\n", pair) == {
+        "said": None,
+        "ok": False,
+    }
 
-#: a stand-in for dump_driver.py: writes a querier-shaped output, and the pair it was handed
-FAKE_DRIVER = textwrap.dedent(
+
+# ------------------------------------------------------------------ a run, of a stand-in querier
+
+#: a stand-in for bamboo.querier.rerun: writes a querier-shaped output naming the dump it was handed, and says
+#: where it was imported from and which Neo4j it was given
+FAKE_QUERIER = textwrap.dedent(
     """
-    import os, sys
+    import hashlib, os, sys
+    import bamboo
     out = sys.argv[sys.argv.index("--out") + 1]
+    dump = os.environ["MAP_DUMP"]
+    sha = hashlib.sha256(open(dump, "rb").read()).hexdigest()[:16]
     with open(out, "w") as f:
         f.write("# start: tree " + os.environ["BAMBOO_TREE"] + "\\n")
+        f.write(f"# map: dump {dump} (sha256 {sha})\\n")
         f.write("== S1 what moves it on\\nEND a legitimate wait\\n== reached the end; HAND used 0 time(s) []\\n")
-    print(sys.argv[1], os.environ["PYTHONPATH"] == os.environ["BAMBOO_TREE"])
+    print(__name__, bamboo.__file__.startswith(os.environ["BAMBOO_TREE"]), os.environ["NEO4J_URI"])
     """
 )
 
 
-def test_a_case_runs_from_a_snapshot_and_is_scored(tmp_path):
-    drivers = tmp_path / "drivers"
-    drivers.mkdir()
-    (drivers / "dump_driver.py").write_text(FAKE_DRIVER)
-    (drivers / "next_target.py").write_text("")
-    (drivers / "taken_driver.py").write_text("")
-    home = _home(tmp_path, drivers)
-    _pair(tmp_path, home)
+def _querier_tree(pair: dict) -> None:
+    pkg = Path(pair["BAMBOO_TREE"]) / "bamboo" / "querier"
+    pkg.mkdir(parents=True)
+    (pkg.parent / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text("")
+    (pkg / "rerun.py").write_text(FAKE_QUERIER)
+
+
+def test_a_case_runs_the_querier_of_its_pair_and_is_scored(tmp_path):
+    home = _home(tmp_path)
+    _querier_tree(_pair(tmp_path, home))
     _write(home.root / "pairs", "current.json", {"abc-f2": "P"})
     baseline = _write(
         tmp_path,
@@ -249,48 +270,31 @@ def test_a_case_runs_from_a_snapshot_and_is_scored(tmp_path):
         "== reached the end; HAND used 0 time(s) []\n",
     )
     case_path = _case(tmp_path, baseline=str(baseline))
-    code, code_sha = F.snapshot(home)
-    assert code == home.root / "snapshots" / code_sha and (code / "MANIFEST").exists()
-    assert F.snapshot(home)[1] == code_sha  # once per content
 
-    rec = F.run_case(
-        home, case_path, code, code_sha, {"head": None}, tmp_path / "batch"
-    )
+    rec = F.run_case(home, case_path, tmp_path / "batch")
     assert (
         rec["exit"] == 0
         and rec["score"]["terminal"] == "END"
         and rec["baseline"]["lines_differ"] == 0
     )
+    assert rec["map"]["ok"] and "MAP NOT" not in F.line(rec)
     assert (
         rec["querier_sha"] == "beefcafe0"
         and rec["env"]["PYTHONPATH"] == rec["env"]["BAMBOO_TREE"]
     )
-    assert rec["argv"][1] == str(code / "dump_driver.py")
+    assert rec["argv"][1:3] == ["-m", "bamboo.querier.rerun"]
     stdout = (tmp_path / "batch" / "C1" / "stdout.log").read_text()
-    assert stdout.split() == ["bamboo.querier.rerun", "True"]
+    assert stdout.split() == ["__main__", "True", F.NO_GRAPH["NEO4J_URI"]]
     assert (
         json.loads((tmp_path / "batch" / "C1" / "run.json").read_text())["name"] == "C1"
     )
 
 
 def test_a_case_of_another_pin_does_not_run(tmp_path):
-    drivers = tmp_path / "drivers"
-    drivers.mkdir()
-    for name in F.DRIVERS:
-        (drivers / name).write_text("")
-    home = _home(tmp_path, drivers)
+    home = _home(tmp_path)
     _pair(tmp_path, home)
-    code, code_sha = F.snapshot(home)
     with pytest.raises(F.FieldTestError, match="was written by pin-other"):
-        F.run_case(
-            home,
-            _case(tmp_path, pin="other"),
-            code,
-            code_sha,
-            {},
-            tmp_path / "batch",
-            "P",
-        )
+        F.run_case(home, _case(tmp_path, pin="other"), tmp_path / "batch", "P")
 
 
 # ------------------------------------------------------------------ census
