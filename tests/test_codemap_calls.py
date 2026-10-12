@@ -131,6 +131,111 @@ def f(site_mapper: SiteMapper, other):
     assert unplaced.unplaced == calls_mod.UNPLACED_RECEIVER
 
 
+_TWO_BUFFERS = '''\
+class TaskBuffer:
+    def update(self, x):
+        return x
+
+class JediTaskBuffer(TaskBuffer):
+    def update(self, x):
+        return x
+'''
+
+_ANY_HOLDER = '''\
+from typing import Any
+
+class Interface:
+    def __init__(self, task_buffer: Any):
+        self.tbif = task_buffer
+
+    def run(self):
+        return self.tbif.update(1)
+'''
+
+
+def test_a_field_declared_any_is_every_class_its_constructions_hand_it(tmp_path):
+    """``WorkflowInterface(task_buffer: Any)``: JEDI builds it with its task buffer, the server with ``TaskBuffer``.
+
+    Each construction says which, so ``self.tbif.update(...)`` lands at both
+    classes' ``update`` -- the override and the base.  A construction handing
+    ``None`` adds nothing.
+    """
+    roots = _tree(
+        tmp_path,
+        buffers=_TWO_BUFFERS,
+        wf=_ANY_HOLDER,
+        server="from pkg.buffers import TaskBuffer\nfrom pkg.wf import Interface\n\ndef serve(tb: TaskBuffer):\n    return Interface(tb)\n",
+        jedi=(
+            "from pkg.buffers import JediTaskBuffer\nfrom pkg.wf import Interface\n\n"
+            "def watch(tb: JediTaskBuffer):\n    return Interface(tb)\n\n"
+            "def empty():\n    return Interface(None)\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    placed = _placed(calls, "wf", "run", "self.tbif.update")
+
+    assert sorted((t.cls.name, t.func.name) for t in placed.targets) == [
+        ("JediTaskBuffer", "update"),
+        ("TaskBuffer", "update"),
+    ]
+    assert placed.unplaced == ""
+
+
+def test_a_parameter_declared_any_says_nothing_where_a_call_hands_what_is_not_declared(tmp_path):
+    """One undeclared value, no call at all, or a cycle of ``Any`` parameters: the class is not read, not guessed.
+
+    The daemons' ``main(tbuf: Any)`` is called by the name a configuration
+    gives ``importlib``: no call in the corpus says what it is handed.
+    """
+    roots = _tree(
+        tmp_path,
+        buffers=_TWO_BUFFERS,
+        wf=_ANY_HOLDER,
+        server=(
+            "from pkg.buffers import TaskBuffer\nfrom pkg.wf import Interface\n\n"
+            "def serve(tb: TaskBuffer):\n    return Interface(tb)\n\n"
+            "def other(tb):\n    return Interface(tb)\n"
+        ),
+        daemon="from typing import Any\n\ndef main(tbuf: Any = None):\n    return tbuf.update(1)\n",
+        loop=(
+            "from typing import Any\n\n"
+            "def ping(x: Any):\n    x.update(1)\n    return pong(x)\n\n"
+            "def pong(y: Any):\n    return ping(y)\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    for file, func, call in (("wf", "run", "self.tbif.update"), ("daemon", "main", "tbuf.update"), ("loop", "ping", "x.update")):
+        placed = _placed(calls, file, func, call)
+        assert placed.targets == ()
+        assert placed.unplaced == calls_mod.UNPLACED_RECEIVER
+
+
+def test_an_alias_of_any_and_an_optional_any_are_any(tmp_path):
+    """``TaskBufferLike: TypeAlias = Any`` -- the alias PanDA writes where it leaves a parameter open on purpose."""
+    roots = _tree(
+        tmp_path,
+        buffers=_TWO_BUFFERS,
+        like="from typing import Any, TypeAlias\n\nTaskBufferLike: TypeAlias = Any\n",
+        run=(
+            "from typing import Any, Optional\nfrom pkg.like import TaskBufferLike\n\n"
+            "def run(tbuf: TaskBufferLike = None):\n    return tbuf.update(1)\n\n"
+            "def handle(tb: Optional[Any]):\n    return tb.update(2)\n\n"
+            "def other(tb: Any | None):\n    return tb.update(3)\n"
+        ),
+        caller=(
+            "from pkg.buffers import TaskBuffer\nfrom pkg.run import handle, other, run\n\n"
+            "def go(tb: TaskBuffer):\n    run(tbuf=tb)\n    handle(tb)\n    other(tb)\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    for func, call in (("run", "tbuf.update"), ("handle", "tb.update"), ("other", "tb.update")):
+        (target,) = _placed(calls, "run", func, call).targets
+        assert (target.cls.name, target.func.name) == ("TaskBuffer", "update")
+
+
 def test_a_module_instance_is_what_the_module_constructs(tmp_path):
     """``taskBuffer = TaskBuffer()`` and ``rucioAPI = RucioAPI()`` are what daemons import."""
     roots = _tree(

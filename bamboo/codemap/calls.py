@@ -32,7 +32,7 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional
 
 from bamboo.codemap.panda import pathcond
 
@@ -355,6 +355,10 @@ class Calls:
         self._by_name: Optional[dict[str, list[CallSite]]] = None
         self._callers: dict[tuple[str, int], list[CallSite]] = {}
         self._missed: dict[tuple[str, int], list[str]] = {}
+        #: The parameters :meth:`handed_classes` is reading now: one asked
+        #: again on the way is a cycle, and says nothing.
+        self._handing: set[tuple[str, int, str]] = set()
+        types.handed_to = self.handed_classes
 
     # -- where a call lands -------------------------------------------------
 
@@ -625,6 +629,47 @@ class Calls:
     def handed(self, site: CallSite, target: Target) -> dict[str, Optional[ast.expr]]:
         """:func:`bind` for *site*, its method read off a class where :meth:`callees` placed it so."""
         return bind(site.call, target, self.callees(site.file, site.func, site.call).on_class)
+
+    def handed_classes(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[Classes]:
+        """The classes every call of *func* hands its parameter *name*, declared ``Any``; ``None`` where one is not declared.
+
+        PanDA writes ``Any`` where no one class it can name covers what
+        arrives: ``WorkflowInterface(task_buffer: Any)`` is built with
+        JEDI's ``JediTaskBufferInterface`` by its watchdog and with the
+        server's ``TaskBuffer`` by ``workflow_api`` -- and naming the JEDI
+        class would make ``pandaserver`` import ``pandajedi``
+        (``pandaserver.asyncprocess.TaskBufferLike`` says so).  Each call
+        says which one it hands, so the parameter holds what the calls hand
+        it, read by their declarations: every class any of them hands, as an
+        annotation naming them all would.  A ``None`` handed adds nothing,
+        as an assignment of ``None`` does not (:meth:`Types.declared`).
+
+        Nothing where a call hands what is not declared, or what a ``*args``
+        hides, or where no call is placed: the daemons' ``main(tbuf: Any)``
+        is called by the name a configuration gives ``importlib``.
+        """
+        key = (file, getattr(func, "lineno", 0), name)
+        if depth > self.types.DEPTH or key in self._handing:
+            return None
+        self._handing.add(key)
+        try:
+            owned = self.types.method_class(file, func)
+            target = Target(file, func, owned[1] if owned else None)
+            sites = self.callers(target)
+            found: set[tuple[str, ast.ClassDef]] = set()
+            for site in sites:
+                value = self.handed(site, target).get(name)
+                if value is None:
+                    return None
+                if isinstance(value, ast.Constant) and value.value is None:
+                    continue
+                classes = self.types.declared(site.file, site.func, value, depth + 1)
+                if classes is None:
+                    return None
+                found |= classes
+            return frozenset(found) or None
+        finally:
+            self._handing.discard(key)
 
     def filled(self, site: CallSite, target: Target) -> set[str]:
         """:func:`said` for *site*, as :meth:`handed`."""
@@ -1196,6 +1241,10 @@ class Types:
     walked straight through the other.  What the object *is* does not depend
     on what someone called it.
 
+    Where the code declares ``Any``, a type checker learns nothing more; this
+    asks the calls what they hand (:meth:`Calls.handed_classes`), since PanDA
+    writes ``Any`` where the classes that arrive differ by caller.
+
     Its own record of what it read, apart from the walk's: reading a base
     class or the interface's own module to learn a type is not a step on the
     path, so it does not spend the walk's file budget.  The trees are the
@@ -1227,6 +1276,10 @@ class Types:
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
         self._mro: dict[int, tuple[ast.ClassDef, list[tuple[str, ast.ClassDef]]]] = {}
+        #: The classes the calls of a function hand its parameter declared
+        #: ``Any`` -- :meth:`Calls.handed_classes`, set by the :class:`Calls`
+        #: that reads this tree; ``None`` reads the declaration alone.
+        self.handed_to: Optional[Callable[[str, ast.AST, str, int], Optional[Classes]]] = None
 
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
         """``pathcond.assigned_expressions``, once per function."""
@@ -1461,6 +1514,37 @@ class Types:
             return None
         named = self.class_named(file, annotation)
         return frozenset({named}) if named is not None else None
+
+    def states_any(self, file: str, annotation: Optional[ast.expr], depth: int = 0) -> bool:
+        """Whether *annotation* declares ``Any`` and nothing else, ``| None`` aside -- spelled so, or by an alias of it.
+
+        ``TaskBufferLike: TypeAlias = Any`` in ``pandaserver.asyncprocess``
+        is one: the alias says why the parameter is left open.
+        """
+        if annotation is None or depth > 2:
+            return False
+        annotation = _unquoted(annotation)
+        members = _union_members(annotation)
+        if members is not None:
+            rest = [one for one in members if not (isinstance(one, ast.Constant) and one.value is None)]
+            return bool(rest) and all(self.states_any(file, one, depth) for one in rest)
+        if isinstance(annotation, ast.Attribute):
+            return annotation.attr == "Any"
+        if not isinstance(annotation, ast.Name):
+            return False
+        held = self.imports(file).get(annotation.id)
+        if annotation.id == "Any":
+            return held is None or held[0] == "typing"
+        where, alias = file, annotation.id
+        if held is not None:
+            where, alias = self.module_file(held[0]) or "", held[1] or annotation.id
+        tree = self.tree(where) if where else None
+        for node in tree.body if tree is not None else ():
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == alias:
+                return node.value is not None and self.states_any(where, node.value, depth + 1)
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == alias for t in node.targets):
+                return self.states_any(where, node.value, depth + 1)
+        return False
 
     def lineage(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
         """*cls* and its bases, nearest first, followed across files through imports."""
@@ -1739,6 +1823,8 @@ class Types:
         args = getattr(func, "args", None)
         for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
             if argument.arg == name:
+                if self.handed_to is not None and self.states_any(file, argument.annotation):
+                    return self.handed_to(file, func, name, depth)
                 return self.annotated_all(file, argument.annotation)
         for node in ast.walk(func):
             if (
