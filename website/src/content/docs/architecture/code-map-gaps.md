@@ -112,6 +112,15 @@ Statements a function builds that the read side did not see run. `build-map` pri
 | `run through a call form the reader does not accept` | 15 | the text handed to a helper that runs it: `getClobObj` (most), `queryTasksToPreassign_JEDI`, `queryTasksToBePending_JEDI`, `query_column_sql` |
 | `assembled here and not run here` | 6 | not a gap: a statement no path runs (`getEventRanges`'s `sqlGD`, `sqlLK`), or one returned to a caller (`WorkQueueMapper.getSqlQuery`) |
 
+Calls the walk cannot enter. `build-map` prints them under `where calls could not be followed`:
+4,117 of 16,148 calls at bamboo `d2b1d9a`. The row below is the task buffer's share, where
+which tables a call reads waits on the class of the object it is made on. Counted at bamboo
+`d2b1d9a` as calls of a `TaskBuffer` or `JediTaskBuffer` method.
+
+| Reason | Count | What it usually is |
+|---|---|---|
+| `the receiver's class is not declared` | 153 | a task buffer PanDA declares `Any`, where no call says which class it hands. `daemons/scripts` 76: `main(tbuf)` is called through `importlib` from the daemon configuration. `DataCarousel` 40 and `asyncprocess` 15: the server's route ends at a daemon, and the handlers are called from a `HANDLERS` table built with `functools.partial`. Workflow handlers 19: built through `importlib` from a flavor map, with the task buffer handed on in `*args`. 3 others. Where every call says the class, the map reads it (`d2b1d9a`: `WorkflowInterface`, 86 calls). Declaring the task buffer at the daemon boundary is undecided |
+
 ## Latent
 
 Nothing is wrong here today, but nothing would say so if it became wrong.

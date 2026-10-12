@@ -133,9 +133,9 @@ def test_the_stated_interface_sizes_match_the_abstract_classes(
 
 
 GAPS_PAGE = SCHEMA_PAGE.parent / "code-map-gaps.md"
-#: The SQL reader, whose reasons the gaps page quotes.
-_READER = Path(__file__).resolve().parent.parent / "bamboo" / "codemap" / "panda"
-_READER_MODULES = ("sql.py", "sqltext.py", "sqleval.py", "recognizers/sqlwrite.py")
+#: The SQL reader and the call graph, whose reasons the gaps page quotes.
+_READER = Path(__file__).resolve().parent.parent / "bamboo" / "codemap"
+_READER_MODULES = ("panda/sql.py", "panda/sqltext.py", "panda/sqleval.py", "panda/recognizers/sqlwrite.py", "calls.py")
 
 
 def _quoted_reasons(page: str) -> list[str]:
@@ -181,4 +181,4 @@ def test_every_reason_the_gaps_page_quotes_is_one_the_reader_gives() -> None:
     unknown = sorted({one for one in quoted if not any(text.startswith(one) for text in texts)})
 
     assert quoted, "the gaps page quotes no reason: its tables' headers moved"
-    assert not unknown, f"reasons the gaps page quotes that the SQL reader does not give: {unknown}"
+    assert not unknown, f"reasons the gaps page quotes that neither the SQL reader nor the call graph gives: {unknown}"
