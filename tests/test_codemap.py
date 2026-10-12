@@ -1895,6 +1895,67 @@ def test_a_statement_missing_a_piece_cannot_say_what_it_writes_back():
     assert sql.written_back(func, _the_execute(func)) is None
 
 
+def test_a_hole_at_the_end_of_an_update_cannot_say_what_it_writes_back():
+    """``updateDataset``'s ``AND {withCriteria}``: the caller's condition ends the statement.
+
+    ``RETURNING ... INTO`` is a statement's last clause, and nothing stands
+    after this hole.  Read past it, the answer said the map was not rewritten
+    on no evidence at all.
+    """
+    func = _func(
+        "def f(self, datasets, withCriteria):\n"
+        "    sql1 = 'UPDATE ATLAS_PANDA.Datasets SET status=:status WHERE vuid=:vuid'\n"
+        "    if withCriteria != '':\n"
+        "        sql1 += f' AND {withCriteria}'\n"
+        "    self.cur.execute(sql1 + comment, varMap)\n"
+    )
+
+    assert sql.written_back(func, _the_execute(func)) is None
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # updateTask_JEDI: a bind named after each key it is handed; the end is a name's piece
+        "def f(self, criteria):\n"
+        "    sql = f'UPDATE {schema}.JEDI_Tasks SET status=:status WHERE '\n"
+        "    for tmpKey in criteria:\n"
+        "        sql += f'{tmpKey}=:cr_{tmpKey} AND '\n"
+        "    sql = sql[:-4]\n"
+        "    self.cur.execute(sql + comment, varMap)\n",
+        # an IN list: the hole is inside the parentheses
+        "def f(self, ids):\n"
+        "    sql = f'UPDATE ATLAS_PANDA.jedi_tasks SET gshare=:gshare WHERE jeditaskid IN ({ids})'\n"
+        "    self.cur.execute(sql + comment, varMap)\n",
+        # the SET list: a WHERE comes after it
+        "def f(self, changes):\n"
+        "    sql = f'UPDATE ATLAS_PANDA.filesTable4 SET {changes} WHERE row_ID=:row_ID'\n"
+        "    self.cur.execute(sql + comment, varMap)\n",
+        # a SELECT returns into nothing, whatever ends it
+        "def f(self, extra):\n"
+        "    sql = f'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE {extra}'\n"
+        "    self.cur.execute(sql + comment, varMap)\n",
+    ],
+    ids=["bind-name", "in-list", "set-list", "select"],
+)
+def test_a_hole_that_cannot_end_the_statement_is_read_past(source):
+    """The holes that cannot hold the clause: inside, before more text, a bind's name, a ``SELECT``."""
+    func = _func(source)
+
+    assert sql.written_back(func, _the_execute(func)) == ()
+
+
+def test_a_block_with_a_hole_anywhere_cannot_say_what_it_writes_back():
+    """A PL/SQL block takes whole statements: any of its holes could return into a bind."""
+    func = _func(
+        "def f(self, body):\n"
+        "    sql = f'BEGIN {body}; COMMIT; END;'\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    assert sql.written_back(func, _the_execute(func)) is None
+
+
 def test_a_call_running_either_of_two_statements_writes_back_what_either_returns():
     """One arm inserts and returns the new id, the other updates in place: the key may be written."""
     func = _func(
@@ -1921,6 +1982,43 @@ def test_written_back_is_found_from_a_file_and_the_line_of_the_call(tmp_path):
 
     assert sql.written_back_at(module, 3) == (":newRowID",)
     assert sql.written_back_at(module, 2) is None
+
+
+def test_written_back_from_a_file_reads_through_the_calls_the_build_reads_through(tmp_path):
+    """``sql += JobSpec.bindValuesExpression()`` is a ``VALUES`` list only in the callee.
+
+    Read without the corpus's calls it is a piece with no text of its own,
+    which could hold the clause: 23 ``INSERT``s the build reads as writing
+    nothing back answered "cannot say" to a reader holding a file and a line.
+    """
+    proxy = tmp_path / "pandaserver" / "taskbuffer" / "db_proxy_mods" / "job_module.py"
+    proxy.parent.mkdir(parents=True)
+    (tmp_path / "pandaserver" / "taskbuffer" / "JobSpec.py").write_text(
+        "class JobSpec:\n"
+        "    attributes = ('PandaID', 'jobStatus')\n"
+        "\n"
+        "    @classmethod\n"
+        "    def bindValuesExpression(cls):\n"
+        "        values_str = ','.join([f':{attr}' for attr in cls.attributes])\n"
+        "        return f'VALUES({values_str})'\n"
+    )
+    proxy.write_text(
+        "from pandaserver.taskbuffer.JobSpec import JobSpec\n"
+        "\n"
+        "\n"
+        "class JobModule:\n"
+        "    def insert(self, job):\n"
+        "        sql = 'INSERT INTO ATLAS_PANDA.jobsDefined4 (PandaID,jobStatus) '\n"
+        "        sql += JobSpec.bindValuesExpression()\n"
+        "        self.cur.execute(sql + comment, job.valuesMap())\n"
+    )
+    func = _func(proxy.read_text(), "insert")
+
+    assert sql.written_back(func, _the_execute(func)) is None
+    assert sql.written_back_at(proxy, 8) == ()
+    # the file changes under the reader: the calls are read again, not left on the old tree
+    proxy.write_text("\n" + proxy.read_text())
+    assert sql.written_back_at(proxy, 9) == ()
 
 
 def test_a_function_is_read_once_for_all_the_calls_asked_about(monkeypatch):

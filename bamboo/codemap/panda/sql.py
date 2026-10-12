@@ -1610,6 +1610,66 @@ _RETURNING_INTO = re.compile(
     r"\bRETURNING\s+[\w.$]+(?:\s*,\s*[\w.$]+)*\s+INTO\s+(:\w+(?:\s*,\s*:\w+)*)", re.IGNORECASE
 )
 
+#: What a statement starts with past blanks, comments and a loop's marks: its verb, or a hole.
+_LEADING = re.compile(
+    r"(?:\s|/\*.*?\*/|--[^\n]*|[" + sqltext.REPEAT_OPEN + sqltext.REPEAT_CLOSE + r"])*(\{\}|[A-Za-z]+)",
+    re.DOTALL,
+)
+#: The statements a ``RETURNING ... INTO`` ends, and the ones that return into nothing.
+_RETURNING_VERBS = frozenset({"INSERT", "UPDATE", "DELETE", "MERGE"})
+_READING_VERBS = frozenset({"SELECT", "WITH"})
+#: What may stand after the clause's hole: blanks, comments, other holes, a loop's marks.
+_NOTHING_AFTER = re.compile(
+    r"(?:\s|;|\{\}|/\*.*?\*/|--[^\n]*|[" + sqltext.REPEAT_OPEN + sqltext.REPEAT_CLOSE + r"])*", re.DOTALL
+)
+
+
+def _could_end_unread(text: str) -> bool:
+    """Whether a hole of *text* stands where a ``RETURNING ... INTO`` could.
+
+    The clause is the last of an ``INSERT``, ``UPDATE``, ``DELETE`` or
+    ``MERGE``, so a hole inside parentheses or quotes, or with any text after
+    it, cannot hold it: ``IN ({})``, ``VALUES ({})``, ``SET {} WHERE``.  Nor
+    can one that goes on a bind's name: ``updateTask_JEDI`` names a bind
+    ``:cr_{}`` after each key of the criteria it is handed, and the last ends
+    the statement.  ``updateDataset``'s ``AND {withCriteria}`` can -- the
+    caller's condition is the statement's end.  A ``SELECT`` returns into
+    nothing; any other statement, a PL/SQL block or one whose verb is a hole,
+    could hold the clause at any of its holes.
+    """
+    leading = _LEADING.match(text)
+    verb = leading.group(1).upper() if leading else ""
+    if verb in _READING_VERBS:
+        return False
+    if verb not in _RETURNING_VERBS:
+        return "{}" in text
+    depth, index = 0, 0
+    while index < len(text):
+        if text.startswith("/*", index):
+            closing = text.find("*/", index + 2)
+            index = len(text) if closing < 0 else closing + 2
+            continue
+        if text.startswith("--", index):
+            closing = text.find("\n", index + 2)
+            index = len(text) if closing < 0 else closing + 1
+            continue
+        char = text[index]
+        if char == "'":
+            closing = text.find("'", index + 1)
+            index = len(text) if closing < 0 else closing
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif text.startswith("{}", index):
+            ended = _NOTHING_AFTER.fullmatch(text, index + 2) is not None
+            named = re.search(r":\w*$", text[:index].rstrip(sqltext.REPEAT_OPEN + sqltext.REPEAT_CLOSE))
+            if depth == 0 and ended and named is None:
+                return True
+            index += 1
+        index += 1
+    return False
+
 
 def written_back(
     func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call
@@ -1628,10 +1688,11 @@ def written_back(
 
     ``()`` when every statement the call runs was read and none returns into a
     bind.  ``None`` when this cannot say: no statement was read for the call,
-    or one is missing a piece that has no text of its own
-    (:data:`FRAGMENT_NOT_RENDERED`), which could have held the clause.  A hole
-    the statement keeps for a schema name, a value or an ``IN`` list cannot,
-    and is read past.
+    one is missing a piece that has no text of its own
+    (:data:`FRAGMENT_NOT_RENDERED`), or a hole stands where the clause could
+    (:func:`_could_end_unread`) -- either could have held it.  A hole the
+    statement keeps for a schema name, a value, an ``IN`` list or a bind's
+    name cannot, and is read past.
     """
     runs = [run for run in executions(func) if any(one is call for one in run.run_at)]
     if not runs:
@@ -1645,6 +1706,8 @@ def written_back(
     if keys:
         return tuple(sorted(keys))
     if any(stop.reason == FRAGMENT_NOT_RENDERED for run in runs for stop in run.unresolved):
+        return None
+    if any(_could_end_unread(run.reading) for run in runs):
         return None
     return ()
 
@@ -1672,8 +1735,12 @@ def written_back_at(path: Path, line: int) -> Optional[tuple[str, ...]]:
 
     For a reader holding a file and a line and no tree.  It reads the tree the
     rest of the map reads (:func:`~bamboo.codemap.calls.parsed`), so the call is
-    the node the statement was paired with.  ``None`` as well where the file
-    does not parse or no such call starts on the line.
+    the node the statement was paired with, and through the calls the build
+    reads through (:func:`across_calls`) unless the reader set its own:
+    ``sql += JobSpec.bindValuesExpression()`` is a ``VALUES`` list only in the
+    callee, and without them 23 ``INSERT``s the build reads as writing nothing
+    back answered ``None``.  ``None`` as well where the file does not parse or
+    no such call starts on the line.
     """
     from bamboo.codemap.calls import parsed
 
@@ -1688,8 +1755,49 @@ def written_back_at(path: Path, line: int) -> Optional[tuple[str, ...]]:
             and node.lineno == line
         ):
             func = enclosing_function(node)
-            return written_back(func, node) if func is not None else None
+            if func is None:
+                return None
+            with across_calls(_CALLS or _corpus_calls(path, held[1])):
+                return written_back(func, node)
     return None
+
+
+#: The calls of each corpus a reader holding a file asks about (:func:`_corpus_calls`), by its directory.
+_CORPUS_CALLS: dict[str, "Calls"] = {}
+
+
+def _corpus_calls(path: Path, tree: ast.Module) -> Optional["Calls"]:
+    """The calls of the corpus *path* is in, over every module's tree as the build holds them.
+
+    The corpus is the directory holding the package *path* is in, spelt as
+    *path* spells it, so that *tree*, the one read for the call, is the one
+    handed in.  ``None`` outside a package the map reads.  The trees are
+    handed in as the build hands them
+    (:func:`~bamboo.codemap.panda.recognizers.sqlwrite.corpus_calls`): a
+    function in a module the reader was not handed has no file, and none of
+    its calls is placed -- so where *tree* is not the one held for its file,
+    the file changed since, and the corpus is read again.  A test module is
+    not held, as the build holds none.
+    """
+    from bamboo.codemap.calls import Calls, Types, parsed
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.panda.plugin import PACKAGES
+
+    package = next((one for one in path.parents if one.name in PACKAGES), None)
+    if package is None:
+        return None
+    corpus = package.parent
+    held = _CORPUS_CALLS.get(str(corpus))
+    walked_tree = held.types.walked.get(str(path.relative_to(corpus)), (None, tree))[1] if held else None
+    if held is None or walked_tree is not tree:
+        roots = {name: corpus / name for name in PACKAGES if (corpus / name).is_dir()}
+        walked = {}
+        for file in Types(roots, {}).corpus_files():
+            read = parsed(corpus / file)
+            if read is not None:
+                walked[file] = (blob_sha(read[0]), read[1])
+        held = _CORPUS_CALLS[str(corpus)] = Calls(Types(roots, walked))
+    return held
 
 
 def binding_window(
