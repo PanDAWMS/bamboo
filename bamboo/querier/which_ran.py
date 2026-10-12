@@ -41,6 +41,7 @@ from pathlib import Path
 
 from bamboo.codemap.panda import pathcond  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
+from bamboo.querier import mapdump  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 from bamboo.querier.records import Run, read_log, runs_for  # noqa: E402
@@ -538,6 +539,7 @@ def main() -> None:
     ap.add_argument("--patterns", default="outside", choices=R.PATTERN_MODES)
     ap.add_argument("--decide", default="positive", choices=("positive", "strict"))
     args = ap.parse_args()
+    mapdump.install_from_env()
     logs = {}
     for path in args.log:
         log = read_log(path)

@@ -10,6 +10,7 @@ out of the repository; these tests need neither.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -89,6 +90,40 @@ def test_no_corpus_no_run(tmp_path):
     done = _run(tmp_path, "import bamboo.querier.records", PANDA_PIN=None)
     assert done.returncode != 0
     assert "set PANDA_PIN" in done.stderr
+
+
+def test_the_header_names_the_dump_installed_not_the_one_asked_for(tmp_path):
+    fragment = json.dumps({"map_id": "panda", "derived_from": f"source-root:{_corpus(tmp_path)}"})
+    dump, other = tmp_path / "map.json", tmp_path / "other.json"
+    dump.write_text(fragment)
+    other.write_text(fragment)
+    out = _ok(
+        _run(
+            tmp_path,
+            f"""
+            import json, os
+            from bamboo.querier import mapdump
+
+            asked = mapdump.described()
+            mapdump.install_from_env()
+            once = mapdump.described()
+            mapdump.install(os.environ["MAP_DUMP"])
+            try:
+                mapdump.install({str(other)!r})
+                refused = ""
+            except RuntimeError as e:
+                refused = str(e)
+            print(json.dumps([asked, once, mapdump.described(), refused]))
+            """,
+            MAP_DUMP=str(dump),
+        )
+    )
+    asked, once, twice, refused = json.loads(out)
+    # MAP_DUMP alone swaps nothing: until a dump is installed, the map a run reads is Neo4j's
+    assert asked == "the one stored in Neo4j"
+    # a driver's install and the entry's are one install
+    assert once == twice == f"dump {dump} (sha256 {hashlib.sha256(dump.read_bytes()).hexdigest()[:16]})"
+    assert "installed already" in refused
 
 
 def test_handed_to_binds_arguments_and_states_defaults(tmp_path):

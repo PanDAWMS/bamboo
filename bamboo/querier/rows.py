@@ -41,7 +41,7 @@ from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.selection import log_level
 
-from . import TREE
+from . import TREE, mapdump
 from .records import CORPUS, LEVEL_OF_METHOD, Record, Run
 
 #: the bamboo tree the map's code is imported from (the package's own; see :mod:`bamboo.querier`)
@@ -807,8 +807,8 @@ def check_blobs(answer: object, what: str) -> None:
     if bad:
         shown = "; ".join(f"{rel} map {b[:12]} corpus {h[:12]}" for rel, (b, h) in sorted(bad.items())[:5])
         raise RuntimeError(
-            f"{what}: the map read {len(bad)} file(s) at another version than the corpus ({CORPUS}): {shown}"
-            " -- run with the map built from this corpus (MAP_DUMP)"
+            f"{what}: the map ({mapdump.described()}) read {len(bad)} file(s) at another version than the corpus "
+            f"({CORPUS}): {shown} -- run with the map built from this corpus (MAP_DUMP)"
         )
 
 
@@ -824,7 +824,7 @@ def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[in
         # the map read another version of the file: its rows sit at other lines
         raise RuntimeError(
             f"the map's prints for {rel} are of blob {found.anchor.blob_sha[:12]}, the corpus file is "
-            f"{_blob_sha(rel)[:12]} ({CORPUS}): run with ROWS_FROM=walk or the map's corpus"
+            f"{_blob_sha(rel)[:12]} ({CORPUS}), the map is {mapdump.described()}: run with ROWS_FROM=walk or the map's corpus"
         )
     by_line = {s.line: list(s.rows) for s in found.statements} if found is not None else {}
     armed = {}

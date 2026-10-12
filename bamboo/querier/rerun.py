@@ -61,7 +61,6 @@ import argparse
 import ast
 import asyncio
 import datetime
-import hashlib
 import importlib
 import json
 import os
@@ -84,6 +83,7 @@ from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
 from bamboo.querier import census as C
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
+from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
 from bamboo.querier import raised as X
@@ -653,9 +653,7 @@ class Rerun:
         """
         head, corpus = tree_stamp(BAMBOO), tree_stamp(CORPUS)
         self.say(f"# {when}: bamboo {head}, panda-server {corpus}")
-        dump = os.environ.get("MAP_DUMP")
-        self.say(f"# map: dump {dump} (sha256 {hashlib.sha256(Path(dump).read_bytes()).hexdigest()[:16]})"
-                 if dump else "# map: the one stored in Neo4j")
+        self.say(f"# map: {mapdump.described()}")
         if corpus.endswith("-dirty"):
             self.say("# the corpus is dirty: this run is void")
         if head.endswith("-dirty"):
@@ -1977,6 +1975,7 @@ def main() -> None:
     ap.add_argument("--stuck", action="store_true", help="ask why nothing moved the observed value on")
     ap.add_argument("--late", action="store_true", help="ask why the observed value was moved on so late")
     args = ap.parse_args()
+    mapdump.install_from_env()
     r = Rerun(args)
     try:
         r.run()
