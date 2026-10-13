@@ -1,7 +1,7 @@
 """Run the querier on cases held as data, and record how far each run got with no one choosing.
 
-    python -m bamboo.fieldtest.run --home <dir> run <case.json>... [--jobs N] [--pair NAME] [--batch DIR]
-    python -m bamboo.fieldtest.run --home <dir> summary <batch dir>
+    python -m bamboo.scripts.panda.fieldtest.run --home <dir> run <case.json>... [--jobs N] [--pair NAME] [--batch DIR]
+    python -m bamboo.scripts.panda.fieldtest.run --home <dir> summary <batch dir>
 
 A case is a JSON file (:func:`load_case`): the question (kind, subject, observed
 value, key), its inputs (a rows file and log files), the querier's modes, the
@@ -298,7 +298,8 @@ def line(r: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="python -m bamboo.fieldtest.run", description=__doc__.split("\n\n")[0]
+        prog="python -m bamboo.scripts.panda.fieldtest.run",
+        description=__doc__.split("\n\n")[0],
     )
     ap.add_argument(
         "--home",

@@ -1,4 +1,4 @@
-"""Field tests -- ``bamboo.fieldtest``.
+"""Field tests -- ``bamboo.scripts.panda.fieldtest``.
 
 The real cases run the querier against production logs and rows, which stay
 out of the repository.  These checks need neither: the runner is driven by a
@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from bamboo.fieldtest import census as C
-from bamboo.fieldtest import run as F
+from bamboo.scripts.panda.fieldtest import census as C
+from bamboo.scripts.panda.fieldtest import run as F
 
 STOPPED = """\
 # rerun: patterns=outside, decide=positive, hand=none

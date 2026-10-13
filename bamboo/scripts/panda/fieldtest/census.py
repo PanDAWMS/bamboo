@@ -1,6 +1,6 @@
 """Size each class of input the querier asks PanDA for, over the whole corpus, from one map dump.
 
-    python -m bamboo.fieldtest.census <map dump.json> [--json out.json] [--tables N] [--exclude T ...]
+    python -m bamboo.scripts.panda.fieldtest.census <map dump.json> [--json out.json] [--tables N] [--exclude T ...]
 
 The classes are where a value lives, as the map tells them apart: a database
 row (H, a status history; R, a row read by its columns), a view PanDA builds in
@@ -251,7 +251,8 @@ def report(out: dict, w=None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="python -m bamboo.fieldtest.census", description=__doc__.split("\n\n")[0]
+        prog="python -m bamboo.scripts.panda.fieldtest.census",
+        description=__doc__.split("\n\n")[0],
     )
     ap.add_argument("dump")
     ap.add_argument("--json", default="", help="also write the census as JSON here")
