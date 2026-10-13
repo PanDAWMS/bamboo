@@ -273,3 +273,39 @@ def test_runs_are_cut_by_the_instance_token_and_the_key_is_a_whole_token(tmp_pat
     assert continuation == ["Traceback (most recent call last):"]
     # a run that printed DEBUG lines had ERROR switched on
     assert would_print is True
+
+
+def test_the_file_door_answers_each_log_with_its_file(tmp_path):
+    line = "2026-01-01 00:00:00,000 panda.log.Adder: DEBUG    <PandaID=12345> start\n"
+    for name in ("panda-adder.log", "panda-setupper.log.12345", "panda-adder.log.1"):
+        (tmp_path / name).write_text(line)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.records import FileLogs
+
+            logs = FileLogs(["panda-setupper.log.12345", "panda-adder.log"])
+            one = logs.log("panda-adder.log", "12345")
+            same = all(
+                logs.log("panda-adder.log", key, window) is one
+                for key in ("12345", "999")
+                for window in (None, ("2026-01-01 00:00:00", "2026-01-01 00:00:00"), ("2027-01-01 00:00:00", "2027-01-01 00:00:00"))
+            )
+            try:
+                FileLogs(["panda-adder.log", "panda-adder.log.1"])
+                twice = ""
+            except SystemExit as e:
+                twice = str(e)
+            print(json.dumps([logs.names(), one.path, same, twice]))
+            """,
+        )
+    )
+    names, path, same, twice = json.loads(out)
+    # the order given, and the names the map uses
+    assert names == ["panda-setupper.log", "panda-adder.log"]
+    assert path == "panda-adder.log"
+    # a file holds what it holds: neither the key nor the window selects from it
+    assert same is True
+    assert "are both panda-adder.log" in twice

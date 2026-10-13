@@ -26,6 +26,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 #: the panda-server tree every reading here is taken from: ``PANDA_PIN``, a pinned copy (a ``git archive`` of the
 #: commit the logs were written by), so every run reads a tree no one edits.  Required: a default to a live tree
@@ -260,6 +261,46 @@ def read_log(path: str) -> Log:
         elif records:
             records[-1].continuation.append(line)
     return Log(path, records, extract_key)
+
+
+#: (from, to) in the statuslog's form, ``YYYY-MM-DD HH:MM:SS``
+Window = tuple[str, str]
+
+
+class Logs(Protocol):
+    """The logs a run reads, asked one at a time: (log name, key, window) -> Log.
+
+    A run asks only through here, so what answers -- files handed over, or a search of the servers' logs -- is the
+    door's business.  *window* is when the asker needs the key's runs, or None for whenever the log holds them.
+    """
+
+    def names(self) -> list[str]:
+        """The logs to hand, in the order they were given."""
+        ...
+
+    def log(self, name: str, key: str, window: Window | None = None) -> Log: ...
+
+
+class FileLogs:
+    """The door over files: one file per log, read once.
+
+    A file holds what it holds, so the key and the window select nothing here: every ask of a log returns the same
+    :class:`Log` (``pattern_finds`` caches by it).
+    """
+
+    def __init__(self, paths: list[str]) -> None:
+        self._logs: dict[str, Log] = {}
+        for path in paths:
+            log = read_log(path)
+            if log.name in self._logs:
+                raise SystemExit(f"{path} and {self._logs[log.name].path} are both {log.name}: give one file per log")
+            self._logs[log.name] = log
+
+    def names(self) -> list[str]:
+        return list(self._logs)
+
+    def log(self, name: str, key: str, window: Window | None = None) -> Log:
+        return self._logs[name]
 
 
 def keyed(key: str) -> re.Pattern[str]:

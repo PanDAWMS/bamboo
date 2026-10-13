@@ -90,7 +90,7 @@ from bamboo.querier import raised as X
 from bamboo.querier import reproduce as P
 from bamboo.querier import rows as R
 from bamboo.querier import value_diff as V
-from bamboo.querier.records import CORPUS, read_log, runs_for
+from bamboo.querier.records import CORPUS, FileLogs, Logs, Window, runs_for
 from bamboo.querier.which_ran import Candidate, class_of, judge, stable_holes
 from bamboo.scripts.derive_strategy import _investigate
 
@@ -549,12 +549,7 @@ class Rerun:
         self.data = json.loads(Path(args.rows).read_text())
         self.hand = json.loads(Path(args.hand).read_text()) if args.hand else {}
         self.hand_used: list[str] = []
-        self.logs = {}
-        for path in args.log:
-            log = read_log(path)
-            if log.name in self.logs:
-                raise SystemExit(f"{path} and {self.logs[log.name].path} are both {log.name}: give one file per log")
-            self.logs[log.name] = log
+        self.logs: Logs = FileLogs(args.log)
         self.lines: list[str] = []
         self.hop = ""
         self.touched: list[tuple[R.Function, object]] = []  # (function, run) this investigation read
@@ -634,8 +629,8 @@ class Rerun:
             if key not in before and "<" in key:
                 self.row_facts[expr] = (printed, env.values[key].source)
 
-    def runs(self, key: str) -> dict[str, list]:
-        return {name: runs_for(log, key) for name, log in self.logs.items()}
+    def runs(self, key: str, window: Window | None = None) -> dict[str, list]:
+        return {name: runs_for(self.logs.log(name, key, window), key) for name in self.logs.names()}
 
     def frames_of(self, run) -> dict[str, set[int]]:
         out: dict[str, set[int]] = {}
@@ -757,11 +752,13 @@ class Rerun:
         if when is None:
             states = self.data["statuslog"]["states"]
             when = self.need(f"a statuslog time for {value}", next((s["time"] for s in states if s["status"] == value), None))
-        runs = self.runs(key)
-        question = self.need(
-            f"a run of {key} at {when}",
-            next((r for rs in runs.values() for r in rs if r.first[:19] <= when <= r.last[:19]), None),
-        )
+        runs = self.runs(key, (when, when))
+        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= when <= r.last[:19]])}
+        if len(at) > 1:
+            # the first would be the first log asked, and that order is the asker's, not the case's
+            name = self.need(f"one log with a run of {key} at {when}, not {len(at)}: {', '.join(at)}", None)
+            at = {name: at.get(name, [])}
+        question = self.need(f"a run of {key} at {when}", next((r for rs in at.values() for r in rs), None))
         self.say(f"the run: {question.describe()}")
         self.question = question
         cands = [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
@@ -1218,12 +1215,12 @@ class Rerun:
                     arm = arms.setdefault(b.line, Arm(b.line, [], list(b.path_condition)))
                     arm.outcomes.append(b.outcome)
             files = self.files_of(owner, list(dict.fromkeys(files or follow.reader_log_files)), list(arms))
-            to_hand = [f for f in files if f in self.logs]
+            to_hand = [f for f in files if f in self.logs.names()]
             if to_hand:
                 self.warn_split(owner, list(arms))
             self.say(f"  {owner.split('::')[-1]}: {len(arms)} arm(s) that write another value "
                      f"{[(a.line, a.outcomes) for a in arms.values()]}; logs {files} ({'to hand: ' + str(to_hand) if to_hand else 'none to hand'})")
-            if to_hand and any(runs_for(self.logs[f], q.key) for f in to_hand):
+            if to_hand and any(runs_for(self.logs.log(f, q.key), q.key) for f in to_hand):
                 chosen.append(Passes(owner, to_hand[0], list(arms.values()), q.key))
         self.need("one mover with a run of the key in a log to hand", len(chosen) == 1)
         return chosen[0]
@@ -1245,7 +1242,7 @@ class Rerun:
         self.start("S2", "which way each pass went")
         rel, func = q.owner.split("::", 1)
         fn = R.function(rel, func, [a.line for a in q.arms])
-        log = self.logs[q.log]
+        log = self.logs.log(q.log, q.key)
         found = []
         for run in runs_for(log, q.key):
             parts, how = R.passes(fn, run, self.mode)

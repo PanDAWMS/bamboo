@@ -44,7 +44,7 @@ from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import mapdump  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
-from bamboo.querier.records import Run, read_log, runs_for  # noqa: E402
+from bamboo.querier.records import FileLogs, Run, runs_for  # noqa: E402
 
 #: ``WHICH_RUN_BY_ROWS=0``: a candidate with no run of its own takes the key's first run in the window, whatever
 #: function it is.  With several runs there -- a DB proxy log, whose token is the method --
@@ -540,10 +540,8 @@ def main() -> None:
     ap.add_argument("--decide", default="positive", choices=("positive", "strict"))
     args = ap.parse_args()
     mapdump.install_from_env()
-    logs = {}
-    for path in args.log:
-        log = read_log(path)
-        logs[log.name] = runs_for(log, args.key)
+    files = FileLogs(args.log)
+    logs = {name: runs_for(files.log(name, args.key), args.key) for name in files.names()}
     question = next(iter(logs.values()))[0]
     cands = []
     for site in args.site:
