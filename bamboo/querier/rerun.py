@@ -543,6 +543,7 @@ def _same_order(mine: tuple, ran: tuple) -> bool:
 
 class Rerun:
     def __init__(self, args: argparse.Namespace) -> None:
+        mapdump.require("rerun")  # _investigate and _writers_of open their own graph clients
         self.args = args
         self.mode, self.decide = args.patterns, args.decide
         self.data = json.loads(Path(args.rows).read_text())

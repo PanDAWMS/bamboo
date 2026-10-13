@@ -11,6 +11,10 @@ today -- census_p's ``--jobs`` workers read no map store at all (census_p.py say
 The entries that read the map (``rerun`` and ``which_ran``) call ``install_from_env()`` first thing in ``main``, so
 ``MAP_DUMP`` means the same run with or without a driver that installed it before them; ``described()`` says what was
 installed, not what the environment asks for.
+
+There is no map but a dump (2026-10-13: Neo4j keeps only the incident graph).  A run without ``MAP_DUMP`` stops, and
+so does a reader in the package that would open a graph client with no dump installed (``require``): the client it
+would get is Neo4j's, whose store holds no map, and an empty answer from it reads as "nothing writes it".
 """
 from __future__ import annotations
 
@@ -58,17 +62,25 @@ def install(path: str) -> None:
 
 
 def install_from_env() -> None:
-    """``install($MAP_DUMP)`` where it is set and not empty; the map in Neo4j otherwise."""
+    """``install($MAP_DUMP)``; a run without it stops."""
     path = os.environ.get("MAP_DUMP")
-    if path:
-        install(path)
+    if not path:
+        raise SystemExit("set MAP_DUMP to the dump of the map built on PANDA_PIN: the map is read from a dump, never from Neo4j")
+    install(path)
+
+
+def require(what: str) -> None:
+    """Stop before *what* opens a graph client with no dump installed: that client would be Neo4j's."""
+    if not _INSTALLED:
+        raise RuntimeError(f"{what} reads the map, and no map dump is installed: install_from_env() first (MAP_DUMP)")
 
 
 def described() -> str:
     """``dump <path> (sha256 <16>)`` or ``the one stored in Neo4j`` -- for an output's header.
 
     It reads what :func:`install` put in place, with the hash of the bytes it read: a ``MAP_DUMP`` nobody installed is
-    not the map a run read.
+    not the map a run read.  The second form names the state before any install; no reader gets past :func:`require`
+    in it.
     """
     if not _INSTALLED:
         return "the one stored in Neo4j"

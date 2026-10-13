@@ -701,7 +701,8 @@ def _function_prints(owner: str):
     """The map's ``FunctionPrintsNode`` for *owner*, or None: one connection per process.
 
     The client class is looked up at call time, so the
-    in-memory map of :func:`bamboo.querier.mapdump.install` stands in for Neo4j the same way it does for the rest.
+    in-memory map of :func:`bamboo.querier.mapdump.install` stands in for Neo4j the same way it does for the rest;
+    with no dump installed it stops (:func:`bamboo.querier.mapdump.require`).
     """
     if owner in _GRAPH:
         return _GRAPH[owner]
@@ -712,6 +713,7 @@ def _function_prints(owner: str):
     from bamboo.database import graph_database_client
 
     if "loop" not in _GRAPH:
+        mapdump.require(f"the prints of {owner}")
         loop = asyncio.new_event_loop()
         client = graph_database_client.GraphDatabaseClient()
         loop.run_until_complete(client.connect())

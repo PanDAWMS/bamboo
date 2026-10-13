@@ -119,11 +119,41 @@ def test_the_header_names_the_dump_installed_not_the_one_asked_for(tmp_path):
         )
     )
     asked, once, twice, refused = json.loads(out)
-    # MAP_DUMP alone swaps nothing: until a dump is installed, the map a run reads is Neo4j's
+    # MAP_DUMP alone swaps nothing: until a dump is installed, the graph client is Neo4j's
     assert asked == "the one stored in Neo4j"
     # a driver's install and the entry's are one install
     assert once == twice == f"dump {dump} (sha256 {hashlib.sha256(dump.read_bytes()).hexdigest()[:16]})"
     assert "installed already" in refused
+
+
+def test_no_dump_no_map(tmp_path):
+    # the map lives in dumps only: an entry without MAP_DUMP stops, and a reader with no dump installed stops before
+    # it opens Neo4j's client, whose empty store would read as "nothing writes it"
+    for unset in (None, ""):
+        done = _run(tmp_path, "from bamboo.querier import mapdump; mapdump.install_from_env()", MAP_DUMP=unset)
+        assert done.returncode != 0
+        assert "set MAP_DUMP" in done.stderr
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            from bamboo.database import graph_database_client
+            from bamboo.querier import rows
+
+            class Refused:
+                def __init__(self, *a, **k):
+                    raise AssertionError("a graph client was opened")
+
+            graph_database_client.GraphDatabaseClient = Refused
+            try:
+                rows._function_prints("pandaserver/x.py::f")
+            except RuntimeError as e:
+                print(e)
+            """,
+            MAP_DUMP=None,
+        )
+    )
+    assert "no map dump is installed" in out
 
 
 def test_handed_to_binds_arguments_and_states_defaults(tmp_path):
