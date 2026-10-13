@@ -266,6 +266,11 @@ async def test_a_jobs_rows_file_spells_its_columns_formats_its_times_and_keeps_o
     assert "decision at 2026-10-07 13:08:03.877599" in out["after"]["source"]
     states = out["statuslog"]["states"]
     assert [s["status"] for s in states] == ["pending", "activated", "failed"]
+    # whole from where it was asked, since the partitions go back further
+    assert (out["statuslog"]["as_of"], out["statuslog"]["retained_from"]) == (
+        "2026-10-13 10:00:00",
+        "2026-10-07 13:06:45",
+    )
     assert (
         states[1]["time"] == "2026-10-07 13:06:46"
         and states[1]["time_extended"] == "2026-10-07 13:06:46.000000"
@@ -274,6 +279,40 @@ async def test_a_jobs_rows_file_spells_its_columns_formats_its_times_and_keeps_o
     assert out["files"][0]["destinationDBlock"]["value"] == "user.x_sub1"
     assert out["collections"]["job.Files"] == {"rows": "files", "entity": "file"}
     assert "newcolumn" in out["about"] and out["after"]["newcolumn"] == 1
+
+
+def test_a_historys_span_is_cut_to_seconds_without_claiming_a_second_it_may_not_hold():
+    bounds = RB.bounds_of(
+        {
+            "as_of": T("2026-10-13T10:00:00.900000"),
+            "retained_from": T("2026-07-12T00:00:00.100000"),
+        }
+    )
+    assert bounds == {
+        "as_of": "2026-10-13 10:00:00",
+        "retained_from": "2026-07-12 00:00:01",
+    }
+
+
+def test_a_historys_span_is_only_what_was_asked():
+    bounds = RB.bounds_of(
+        {
+            "as_of": T("2026-10-13T10:00:00"),
+            "retained_from": T("2026-07-12T00:00:00"),
+            "since": T("2026-09-28T00:00:00"),
+            "until": T("2026-10-01T00:00:00"),
+        }
+    )
+    # until is exclusive: the last second held is the one before it
+    assert bounds == {
+        "as_of": "2026-09-30 23:59:59",
+        "retained_from": "2026-09-28 00:00:00",
+    }
+    # a since does not make a history whole where the server cannot tell
+    unknown = RB.bounds_of(
+        {"as_of": T(AS_OF), "retained_from": None, "since": T("2026-09-28T00:00:00")}
+    )
+    assert unknown["retained_from"] is None
 
 
 async def test_a_cut_answer_is_left_out_and_said():
@@ -427,7 +466,16 @@ async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
         ("jobsArchived4", "failed", 1),
         ("jobsArchived4", "finished", 1),
     ]
+    assert (
+        out["job_statuslog"]["as_of"],
+        out["job_statuslog"]["retained_from"],
+    ) == ("2026-10-13 10:00:00", "2026-09-27 07:08:32")
     assert [s["status"] for s in out["statuslog"]["states"]] == ["running", "finished"]
+    # the server could not tell how far back the task's history is whole
+    assert (out["statuslog"]["as_of"], out["statuslog"]["retained_from"]) == (
+        "2026-10-13 10:00:00",
+        None,
+    )
     assert (
         out["statuslog"]["states"][0]["time_extended"] == "2026-09-27 06:55:15.975402"
     )

@@ -15,7 +15,9 @@ A column the list does not have is kept in lower case and counted in
 **Times.**  The querier compares a history's times with log stamps as text
 (``rerun.py`` S5, ``time_extended < when``), so ``time`` is
 ``%Y-%m-%d %H:%M:%S`` and ``time_extended`` always carries six digits of
-microseconds.  All are UTC, as the database gives them.
+microseconds.  All are UTC, as the database gives them.  A history also says
+the span it is whole for, ``as_of`` and ``retained_from`` (:func:`bounds_of`),
+on the clock of its own times, so the querier can compare them as text too.
 
 **What is left out.**  A section whose answer is not complete -- rejected,
 failed, past its deadline, truncated -- is left out, and ``about`` says why: a
@@ -189,6 +191,38 @@ def states_of(response: dict, kind: str) -> tuple[list[dict] | None, str]:
     return out, source
 
 
+def bounds_of(response: dict) -> dict[str, str | None]:
+    """The span this answer is whole for: every change from ``retained_from`` to ``as_of`` is in it.
+
+    Not the server's two values as they are: the answer holds only what was
+    asked, so ``retained_from`` is raised to the asked ``since`` and ``as_of``
+    lowered to just before the asked ``until``.  All are on the clock of the
+    history's own times, the database's, in UTC: the server sets every Oracle
+    session to UTC (``WrappedCursor.initialize``), a job's history row takes
+    ``CURRENT_DATE`` and a task's ``CURRENT_TIMESTAMP``, ``as_of`` is
+    ``SYS_EXTRACT_UTC(CURRENT_TIMESTAMP)`` taken before the read, and
+    ``retained_from`` is a bound of the partitions on that same column.  Each is
+    cut to seconds the safe way, ``as_of`` down and ``retained_from`` up, so
+    neither claims a second the answer may not hold.  ``retained_from`` is None
+    when the server cannot tell.
+    """
+    data = response if "as_of" in response else response["data"]
+    upper = when(data["as_of"])
+    until = when(data.get("until"))
+    if until is not None:
+        upper = min(upper, until - datetime.timedelta(microseconds=1))
+    lower = when(data.get("retained_from"))
+    since = when(data.get("since"))
+    if lower is not None and since is not None:
+        lower = max(lower, since)
+    if lower is not None and lower.microsecond:
+        lower = lower.replace(microsecond=0) + datetime.timedelta(seconds=1)
+    return {
+        "as_of": f"{upper:%Y-%m-%d %H:%M:%S}",
+        "retained_from": f"{lower:%Y-%m-%d %H:%M:%S}" if lower else None,
+    }
+
+
 def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
     q = record["question"]
     cls = record["key_class"]
@@ -221,6 +255,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
     else:
         out["statuslog"] = {
             "source": history_source,
+            **bounds_of(laid.histories[history_part]),
             "states": [{k: v for k, v in s.items() if k != "pandaid"} for s in states],
         }
 
@@ -313,7 +348,11 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
         "a PandaID in two tables is two rows",
         "rows": rows,
     }
-    out["job_statuslog"] = {"source": source, "by_pandaid": by_pandaid}
+    out["job_statuslog"] = {
+        "source": source,
+        **(bounds_of(laid.histories["job_history"]) if laid.rows["job_rows"] else {}),
+        "by_pandaid": by_pandaid,
+    }
     if laid.complete("job_counts"):
         out["counts"] = {
             "source": f"R as of {laid.as_of.get('job_counts')}, every job of the task by table and jobStatus",
