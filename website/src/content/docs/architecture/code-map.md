@@ -129,14 +129,14 @@ load-bearing rather than tidiness.
 
 ```mermaid
 flowchart LR
-    SRC[("source tree<br/>+ version")] -->|build-map| MAP[("Code Map<br/>in Neo4j")]
+    SRC[("source tree<br/>+ version")] -->|build-map| MAP[("Code Map<br/>a dump per version")]
     MAP -->|check-map| V["staleness marks<br/>per junction / version / window"]
     PROD[("production logs<br/>and records")] --> V
     MAP --> USE["analyze / investigate<br/><i>lookup only</i>"]
     V --> USE
 ```
 
-- **Build** — offline, once per source version. Minutes. Writes to the database.
+- **Build** — offline, once per source version. Minutes. Writes a dump.
 - **Validate** — periodic, against production. The map has not changed; only how much of
   it you should trust has. This is a separate cadence *because* those two things move
   independently.

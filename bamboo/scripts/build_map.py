@@ -1,34 +1,27 @@
 """``bamboo build-map`` — extract a Code Map from a target system's source.
 
-An offline build step, deliberately separate from ``analyze``:
+An offline build step, one per release of the target: a build parses the whole
+source tree, and a Code Map's lifetime is tied to that *code version*, not to an
+incident, which is what makes its stamp meaningful.
 
-* the costs differ by orders of magnitude -- a build parses a whole source tree
-  once per release, an analyze run must answer in seconds;
-* a Code Map's lifetime is tied to a *code version*, not to an incident, which
-  is what makes the version stamp meaningful;
-* ``analyze`` runs unattended and read-only, and a build writes.
-
-Consequently ``analyze`` never rebuilds inline: a missing or stale map is
-reported as a degraded run rather than silently repaired.  The cost of that
-separation is that nobody rebuilding leaves the map quietly out of date, which
-is why ``check-map`` is not optional -- the two commands only make sense
-together.
+The map is kept as a dump -- the whole fragment, written to a file -- and not in
+the graph database.  Every reading of it is a lookup by label and property
+(:meth:`~bamboo.codemap.lookup.CodeMap`), which the in-memory backend answers
+from the file as well as Neo4j did; and each case is read against the map of the
+corpus that wrote its log, one file per pin, where the database held one build at
+a time.  Neo4j keeps the incident graph only.
 
 Usage::
 
-    # Build from the installed distribution
+    # Build from the installed distribution, and report
     bamboo build-map
 
-    # Build a specific release from a checkout
-    bamboo build-map --source-root /path/to/panda
-
-    # Inspect without touching the database
-    bamboo build-map --dry-run
+    # Build a specific release from a checkout, and keep it
+    bamboo build-map --source-root /path/to/panda --dump map.json
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections import Counter
 from pathlib import Path
@@ -41,7 +34,6 @@ from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import SCOPE_OF_STOPS, MapFragment
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
-from bamboo.codemap.store import store_fragment
 
 logger = logging.getLogger(__name__)
 
@@ -668,15 +660,14 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
                 click.echo(f"      {entry.split('/')[-1]:<38} {args}")
 
 
-async def _store(fragment: MapFragment) -> dict[str, int]:
-    from bamboo.database.graph_database_client import GraphDatabaseClient
+def write_dump(fragment: MapFragment, path: Path) -> None:
+    """Write *fragment* where a reader -- the querier, or a later build of other code -- can read it back.
 
-    graph_db = GraphDatabaseClient()
-    await graph_db.connect()
-    try:
-        return await store_fragment(fragment, graph_db)
-    finally:
-        await graph_db.close()
+    The whole fragment, not a summary of it: a baseline is only worth having
+    if the comparison it feeds is the same one two live builds would get, and
+    a field left out here reads afterwards as a difference the round made.
+    """
+    path.write_text(fragment.model_dump_json())
 
 
 #: Why reading a statement's terms stopped -- see :func:`sqltext.terms`.
@@ -725,9 +716,12 @@ schema_root_option = click.option(
 )
 @schema_root_option
 @click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Extract and run gates, but write nothing to the database.",
+    "--dump",
+    "dump_to",
+    default=None,
+    metavar="PATH",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write the map there, as the querier reads it (MAP_DUMP).  Without it the build only reports.",
 )
 @click.option(
     "--strict",
@@ -745,12 +739,12 @@ def main(
     map_id: str,
     source_root: Optional[Path],
     schema_root: Optional[Path],
-    dry_run: bool,
+    dump_to: Optional[Path],
     strict: bool,
     top: int,
     verbose: bool,
 ) -> None:
-    """Extract a Code Map and store it under its own labels in the graph DB."""
+    """Extract a Code Map, run its gates, and write it to a dump where asked."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
 
     try:
@@ -904,20 +898,11 @@ def main(
 
     _report_unexplained(fragment, plugin, top)
 
-    if dry_run:
-        click.echo("\n--dry-run: nothing written.")
+    if dump_to is None:
+        click.echo("\nnothing written: pass --dump PATH to keep the map.")
     else:
-        written = asyncio.run(_store(fragment))
-        cleared = written.pop("cleared", 0)
-        # Said separately and first, because it is the only destructive number
-        # in the report: a build replaces the whole map, so a mistyped
-        # ``--map-id`` deletes someone else's.
-        if cleared:
-            click.echo(f"\ncleared: {cleared} node(s) of map {fragment.map_id}")
-        click.echo(
-            "\nstored: "
-            + ", ".join(f"{k}={v}" for k, v in written.items() if v)
-        )
+        write_dump(fragment, dump_to)
+        click.echo(f"\nwrote {dump_to}")
 
     if not all_passed and strict:
         raise SystemExit(1)

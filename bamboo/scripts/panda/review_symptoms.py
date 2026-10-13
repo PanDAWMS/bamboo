@@ -6,10 +6,11 @@ failure that retired the sealed holdout: a procedure a document names and no
 artefact performs.  What it does is small and the point is that it is written
 down.
 
-**The draw is recorded before the report is read.**  That ordering is the whole
+**The draw is recorded before the answers are read.**  That ordering is the whole
 test: a sample looked at first and recorded afterwards can always be called
-unrepresentative once its answers are in.  So ``--report`` requires ``--out``,
-and the file is written before the first report is rendered.
+unrepresentative once its answers are in.  So ``--out`` is written before anything
+about the drawn symptoms is asked.  (It used to ask ``derive-strategy`` itself,
+with ``--report``; that command is gone, and the drawn keys are read by hand.)
 
 **The population is the map's vocabulary** -- the set of questions the map
 claims it can answer -- rather than the values production was seen to hold.
@@ -30,8 +31,6 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -40,22 +39,10 @@ import click
 from bamboo.codemap.lookup import CodeMap
 
 
-def _argv(kind: str, key: str, subject: str, observed: str) -> list[str]:
-    """How ``derive-strategy`` is addressed for a term of this kind.
+async def _vocabulary(map_id: str, dump: Path) -> list[dict]:
+    from bamboo.codemap.store import dump_graph
 
-    A value term names its subject and the value; everything else resolves
-    through the description, which is the interface a reader would use.
-    """
-    if kind == "value" and subject and observed:
-        return ["--subject", subject, "--observed", observed]
-    return ["--describe", key]
-
-
-async def _vocabulary(map_id: str) -> list[dict]:
-    from bamboo.database.graph_database_client import GraphDatabaseClient
-
-    db = GraphDatabaseClient()
-    await db.connect()
+    db = await dump_graph(dump)
     try:
         terms = await CodeMap(db, map_id=map_id).vocabulary()
     finally:
@@ -95,12 +82,11 @@ async def _vocabulary(map_id: str) -> list[dict]:
     help="Write the draw here.  Required by --report, and written before it.",
 )
 @click.option(
-    "--report",
-    is_flag=True,
-    help="After recording the draw, run derive-strategy for each and print it.",
+    "--dump",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="The map whose vocabulary is drawn from, as build-map --dump wrote it.",
 )
-@click.option("--evidence", type=click.Path(path_type=Path), default=None)
-@click.option("--source-root", type=click.Path(path_type=Path), default=None)
 def main(
     seed: int,
     count: int,
@@ -108,16 +94,9 @@ def main(
     kind: Optional[str],
     population: Optional[Path],
     out: Optional[Path],
-    report: bool,
-    evidence: Optional[Path],
-    source_root: Optional[Path],
+    dump: Optional[Path],
 ) -> None:
-    """Draw *count* symptoms with *seed*, record them, then read them."""
-    if report and out is None:
-        raise click.UsageError(
-            "--report needs --out: the draw is recorded before it is read, or a "
-            "sample can be called unrepresentative once its answers are in."
-        )
+    """Draw *count* symptoms with *seed* and record them."""
 
     if population is not None:
         rows = [
@@ -127,7 +106,9 @@ def main(
         ]
         where = str(population)
     else:
-        rows = asyncio.run(_vocabulary(map_id))
+        if dump is None:
+            raise click.UsageError("drawing from the vocabulary reads the map: give --dump, or --population")
+        rows = asyncio.run(_vocabulary(map_id, dump))
         if kind:
             rows = [row for row in rows if row["kind"] == kind]
         where = f"{map_id} vocabulary" + (f" ({kind})" if kind else "")
@@ -148,22 +129,6 @@ def main(
             )
         )
         click.echo(f"\ndraw recorded in {out}")
-
-    if not report:
-        return
-    if population is not None:
-        click.echo("\n(a population file is read by hand -- nothing to derive)")
-        return
-
-    for i, row in enumerate(drawn, 1):
-        click.echo(f"\n{'=' * 24} {i}/{count}  {row['key']} {'=' * 24}")
-        argv = [sys.executable, "-m", "bamboo.cli", "derive-strategy"]
-        argv += _argv(row["kind"], row["key"], row["subject"], row["observed"])
-        if evidence is not None:
-            argv += ["--evidence", str(evidence)]
-        if source_root is not None:
-            argv += ["--source-root", str(source_root)]
-        subprocess.run(argv, check=False)
 
 
 if __name__ == "__main__":

@@ -14,14 +14,15 @@ links to them rather than restating them.
 ## The command
 
 ```bash
-bamboo build-map --dry-run                     # extract, run the offline gates, write nothing
-bamboo build-map                               # …and store it under its own labels
+bamboo build-map                               # extract, run the offline gates, write nothing
+bamboo build-map --dump map.json               # …and keep the map as a dump
 bamboo build-map --source-root ~/panda-server  # map a checkout instead of the installed release
 ```
 
-`--dry-run` is the one to reach for while working on a recognizer: it prints the whole
-report — coverage per slice and file, attribution, promotion, the indexes, the gates —
-without touching the database.
+Without `--dump` it is the one to reach for while working on a recognizer: it prints the
+whole report — coverage per slice and file, attribution, promotion, the indexes, the
+gates — and writes nothing. The map is kept as a dump, one per source version, and not in
+the graph database: see [Two bodies of knowledge](/bamboo/architecture/schema/#two-bodies-of-knowledge).
 
 Every node is stamped with the version it came from. For an installed distribution that
 is its version; for a git checkout it is `git describe --tags --always --dirty`, because
@@ -42,7 +43,7 @@ versions.
 
 ## The slices
 
-Coverage below is from `build-map --dry-run` against `panda-server-source` 1.0.2. It will
+Coverage below is from `build-map` against `panda-server-source` 1.0.2. It will
 move; the command is the authority.
 
 | Slice | What it recognizes | Coverage |

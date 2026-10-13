@@ -1,16 +1,22 @@
-"""Persist a Code Map fragment to the graph database.
+"""Load a Code Map fragment into a graph backend.
 
-The Code Map shares Neo4j with the incident graph but occupies its own labels.
-That separation is load-bearing rather than cosmetic: the Code Map is derived
-and disposable, rebuilt whenever the source version moves, while the incident
-graph holds human-validated knowledge that cannot be regenerated.  Rebuilding
-one must never touch the other, which is why writes go through
-``clear_map`` / ``merge_map_node`` instead of the wholesale ``clear_all``.
+The map is kept as dumps (``build-map --dump``), one per source version, and is
+read through the in-memory backend: every reading is a lookup by label and
+property, which that backend answers from the file.  Neo4j holds the incident
+graph only.  When the map was stored there it shared the database under its own
+labels, and the separation was load-bearing: the Code Map is derived and
+disposable, while the incident graph holds human-validated knowledge that cannot
+be regenerated.  Rebuilding one must never touch the other, which is why writes
+go through ``clear_map`` / ``merge_map_node`` instead of the wholesale
+``clear_all`` -- and why ``clear_map`` is still how a map left in Neo4j is taken
+out.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+from typing import Optional
 
 from bamboo.codemap.models import MAP_NODE_GROUPS, MapFragment
 from bamboo.database.graph_database_client import GraphDatabaseClient
@@ -67,3 +73,34 @@ async def store_fragment(
 
     logger.info("store_fragment: wrote %r", written)
     return written
+
+
+async def dump_graph(
+    path: Path, source_root: Optional[Path] = None
+) -> GraphDatabaseClient:
+    """A connected in-memory graph holding the map ``build-map --dump`` wrote at *path*.
+
+    For a script that reads the map through the graph client: it opens this
+    where it opened ``GraphDatabaseClient()``, and closes it the same way.
+    Where *source_root* is given and the dump names the tree it was built from,
+    a dump of another tree is refused -- the readers walk *source_root* beside
+    the map, and a map of a different corpus answers about lines that are not
+    there.  A build of a git checkout is stamped with its description instead
+    (``git:...``), which says no path to compare, and is taken as it is.
+    """
+    from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
+
+    fragment = MapFragment.model_validate_json(Path(path).read_text())
+    built_on = fragment.derived_from.removeprefix("source-root:")
+    if (
+        source_root is not None
+        and built_on != fragment.derived_from
+        and Path(built_on).resolve() != Path(source_root).resolve()
+    ):
+        raise ValueError(
+            f"the map dump {path} was built on {built_on}, not on {source_root}"
+        )
+    graph_db = InMemoryGraphBackend()
+    await graph_db.connect()
+    await store_fragment(fragment, graph_db)
+    return graph_db

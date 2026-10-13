@@ -5,9 +5,9 @@ title: "Graph Schema"
 The knowledge graph schema used by the incident-analysis pipeline. Node and relationship
 types are defined in `bamboo/models/graph_element.py` (`NodeType` and `RelationType`).
 
-The same Neo4j database holds a second, separate set of labels — the
-[Code Map](/bamboo/architecture/code-map/), machine-derived from source. They share a
-database and nothing else; see [Two namespaces](#two-namespaces) below.
+The [Code Map](/bamboo/architecture/code-map/), machine-derived from source, is not
+stored here: it is kept as a dump, one per source version. See
+[Two bodies of knowledge](#two-bodies-of-knowledge) below.
 
 ## Core schema
 
@@ -54,46 +54,33 @@ Task-level logs from orchestration services (JEDI, Harvester, …) are accepted 
 keyed by source name. Each source is filtered and analysed by the LLM independently; every
 extracted node is tagged with `log_source` in its metadata.
 
-## Two namespaces
+## Two bodies of knowledge
 
-The database holds two bodies of knowledge with opposite lifecycles, and the labels are
-what keep them apart.
+Bamboo holds two bodies of knowledge with opposite lifecycles, and they are kept in
+different places.
 
 | | Incident graph | Code Map |
 |---|---|---|
 | Where it comes from | LLM extraction from incidents, human-validated | Machine-derived from source by `build-map` |
 | If you lose it | Irreplaceable | Rebuild it in a minute |
+| Where it is kept | This Neo4j database | A dump per source version (`build-map --dump`) |
 | Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss`, `LogSite`, `ReadSite`, `FunctionPrints` |
 
-That separation is not tidiness: `clear_all()` drops everything in the database, so
-rebuilding a Code Map would take the incident graph with it. `clear_map(map_id)` exists
-because the Code Map labels are distinct, and it is the only safe way to rebuild one.
+The Code Map was once stored in this database under its own labels. It left because
+nothing about reading it needs a database. Every reading is a lookup by label and
+property equality (`find_map_nodes`), never an edge: `JunctionPoint.subject` holds a
+`Subject.name`, and a `passthrough(...)` chain lives inside `branches` as JSON that the
+reader decodes. The in-memory backend answers those lookups from a dump as Neo4j did.
+And each case has to be read against the map of the source version that wrote its log,
+while the database held one build at a time.
 
-The two join at `Component`: an incident's `Component` node and the Code Map's junctions
-describe the same subsystem from opposite directions, which is what `implemented_by` is
-for. See the [Code Map overview](/bamboo/architecture/code-map/) for what the Code Map
-node kinds mean.
+`clear_map(map_id)` still removes a stored map's labels without touching the incident
+graph. `clear_all()` drops everything.
 
-:::caution[The Code Map is stored as nodes only — no relationships yet]
-`build-map` writes seven node kinds and no edges at all, so the Code Map relationship
-types below are declared and not yet produced by anything. Do not write a query that
-expects them.
-
-Traversal still works, because the references are ordinary string properties rather than
-edges: `JunctionPoint.subject` holds a `Subject.name`, so joining on it answers *which
-code decides this value* today.
-
-```cypher
-MATCH (s:Subject {map_id: 'panda', name: 'JediTaskSpec.status'})
-MATCH (j:JunctionPoint {map_id: 'panda'}) WHERE j.subject = s.name
-RETURN j.owner, j.log_files          // 37 writers, and which log each lands in
-```
-
-The one reference this does not reach is a `passthrough(...)` outcome, which names where
-a value was carried from. Those live inside `branches`, stored as a JSON string, so
-following the chain means decoding it rather than matching a pattern. Real edges get
-materialised when the backward walk needs variable-length paths, and not before.
-:::
+The two would join at `Component`: an incident's `Component` node and the Code Map's
+junctions describe the same subsystem from opposite directions, which is what
+`implemented_by` is for. Nothing produces that join today. See the
+[Code Map overview](/bamboo/architecture/code-map/) for what the Code Map node kinds mean.
 
 ## Extended catalogue
 

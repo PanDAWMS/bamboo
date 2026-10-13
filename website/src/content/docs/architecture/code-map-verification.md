@@ -26,7 +26,7 @@ what the source cannot reveal: version skew, and things that are true of the dep
 rather than of the code.
 
 ```bash
-bamboo build-map --dry-run                    # the (i) gates
+bamboo build-map                              # the (i) gates
 bamboo check-map                              # the (ii) gates, against stored evidence
 bamboo check-map --fetch                      # …after querying production first
 bamboo check-map --strict                     # non-zero exit if something asks for a change

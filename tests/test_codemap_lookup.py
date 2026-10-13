@@ -24,7 +24,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     Symptom,
 )
-from bamboo.codemap.store import store_fragment
+from bamboo.codemap.store import dump_graph, store_fragment
 from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
 
 MAP_ID = "panda"
@@ -626,3 +626,36 @@ async def test_a_statement_leaves_a_value_out_only_where_the_map_says_every_row_
 
     assert [site.anchor.line_start for site in refusing] == [1]
     assert refusing[0].refuses == [f"{flag}=2"]
+
+
+async def test_a_dump_reads_back_as_the_stored_map_did(tmp_path):
+    """The map is kept as dumps: what ``build-map --dump`` writes, ``dump_graph``
+    opens as a graph the same lookups answer from."""
+    original = _junction("a.py::run", Branch(outcome="pending", tier=1))
+    fragment = MapFragment(map_id=MAP_ID, derived_from=f"source-root:{tmp_path}", subjects=[_subject()], junctions=[original])
+    path = tmp_path / "map.json"
+    path.write_text(fragment.model_dump_json())
+
+    graph_db = await dump_graph(path, tmp_path)
+    (read_back,) = await CodeMap(graph_db, map_id=MAP_ID).writers_of("JediTaskSpec.status")
+
+    # Through JSON, so the store's id and stamp are its own and not the original's.
+    assert (read_back.owner, read_back.branches, read_back.entry_points, read_back.anchor) == (
+        original.owner, original.branches, original.entry_points, original.anchor
+    )
+
+
+async def test_a_dump_of_another_tree_is_refused_and_a_git_stamp_is_taken(tmp_path):
+    """A reader walks its tree beside the map, so a map of another tree answers
+    about lines that are not there; a git-described build names no path to
+    compare."""
+    other = tmp_path / "other"
+    other.mkdir()
+    path = tmp_path / "map.json"
+    path.write_text(MapFragment(map_id=MAP_ID, derived_from=f"source-root:{other}").model_dump_json())
+
+    with pytest.raises(ValueError, match="was built on"):
+        await dump_graph(path, tmp_path)
+
+    path.write_text(MapFragment(map_id=MAP_ID, derived_from="git:1.0.4-295-gbf2812ba").model_dump_json())
+    assert await dump_graph(path, tmp_path) is not None

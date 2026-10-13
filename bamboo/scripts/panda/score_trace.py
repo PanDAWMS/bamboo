@@ -212,6 +212,7 @@ async def _draw(
     seed: int,
     per_stratum: int,
     out: Optional[Path],
+    dump: Path,
 ) -> None:
     """Walk every arm, stratify by what the walk had to resolve, and sample.
 
@@ -222,11 +223,10 @@ async def _draw(
     """
     from bamboo.codemap.lookup import CodeMap
     from bamboo.codemap.models import JunctionNode
-    from bamboo.database.graph_database_client import GraphDatabaseClient
+    from bamboo.codemap.store import dump_graph
 
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
-    graph_db = GraphDatabaseClient()
-    await graph_db.connect()
+    graph_db = await dump_graph(dump, source_root)
     try:
         junctions = await CodeMap(graph_db, map_id=map_id)._find(JunctionNode)
     finally:
@@ -323,7 +323,7 @@ async def _draw(
     is_flag=True,
     help=(
         "Ignore the sample and run the whole-population check instead: every "
-        "arm the stored map can locate, asking whether the walk closed a "
+        "arm the map can locate, asking whether the walk closed a "
         "self.<field> while a binding for it was in scope."
     ),
 )
@@ -331,6 +331,12 @@ async def _draw(
 @click.option("--top", default=12, show_default=True, help="Owners listed by the scan.")
 @click.option("--depth", type=int, default=trace_mod.DEFAULT_BUDGET.depth)
 @click.option("--source-root", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--dump",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="The map --draw and --scan read, as build-map --dump wrote it.",
+)
 def main(
     sample: Optional[Path],
     draw: bool,
@@ -344,16 +350,19 @@ def main(
     top: int,
     depth: int,
     source_root: Optional[Path],
+    dump: Optional[Path],
 ) -> None:
+    if (scan or draw) and dump is None:
+        raise click.UsageError("--scan and --draw read the map: give --dump, as build-map --dump wrote it")
     if scan:
-        asyncio.run(_scan(map_id, source_root, trace_mod.Budget(depth=depth), top))
+        asyncio.run(_scan(map_id, source_root, trace_mod.Budget(depth=depth), top, dump))
         return
     if draw:
         if seed is None:
             raise click.UsageError("--draw needs --seed: a draw nobody can repeat is a guess")
         asyncio.run(
             _draw(
-                map_id, source_root, trace_mod.Budget(depth=depth), seed, per_stratum, out
+                map_id, source_root, trace_mod.Budget(depth=depth), seed, per_stratum, out, dump
             )
         )
         return
@@ -636,15 +645,14 @@ def _handovers(junction) -> list:
     )
 
 
-async def _scan(map_id: str, source_root: Optional[Path], budget, top: int) -> None:
+async def _scan(map_id: str, source_root: Optional[Path], budget, top: int, dump: Path) -> None:
     """Walk every arm the map can locate, and count the weaker answers."""
     from bamboo.codemap.lookup import CodeMap
     from bamboo.codemap.models import JunctionNode
-    from bamboo.database.graph_database_client import GraphDatabaseClient
+    from bamboo.codemap.store import dump_graph
 
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
-    graph_db = GraphDatabaseClient()
-    await graph_db.connect()
+    graph_db = await dump_graph(dump, source_root)
     try:
         code_map = CodeMap(graph_db, map_id=map_id)
         junctions = await code_map._find(JunctionNode)

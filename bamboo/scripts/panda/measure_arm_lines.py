@@ -187,12 +187,12 @@ async def _run(
     source_root: Optional[Path],
     out: Optional[Path],
     evidence: Optional[Path] = None,
+    dump: Optional[Path] = None,
 ) -> None:
-    from bamboo.database.graph_database_client import GraphDatabaseClient
+    from bamboo.codemap.store import dump_graph
 
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
-    graph_db = GraphDatabaseClient()
-    await graph_db.connect()
+    graph_db = await dump_graph(dump, source_root)
     try:
         code_map = CodeMap(graph_db, map_id=map_id)
 
@@ -281,16 +281,26 @@ async def _run(
 @click.option("--source-root", type=click.Path(path_type=Path), default=None)
 @click.option("--out", type=click.Path(path_type=Path), default=None)
 @click.option(
+    "--dump",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="The map to read, as build-map --dump wrote it.",
+)
+@click.option(
     "--evidence",
     type=click.Path(path_type=Path, exists=True),
     default=None,
     help="Put the rendered patterns against the log lines this file already holds.",
 )
 def main(
-    map_id: str, source_root: Optional[Path], out: Optional[Path], evidence: Optional[Path]
+    map_id: str,
+    source_root: Optional[Path],
+    out: Optional[Path],
+    dump: Path,
+    evidence: Optional[Path],
 ) -> None:
     """Score the map's arm sentences and the skeleton's lines."""
-    asyncio.run(_run(map_id, source_root, out, evidence))
+    asyncio.run(_run(map_id, source_root, out, evidence, dump))
 
 
 if __name__ == "__main__":

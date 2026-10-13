@@ -42,7 +42,7 @@ import click
 from bamboo.codemap import diff
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import MapFragment
-from bamboo.scripts.build_map import schema_root_option
+from bamboo.scripts.build_map import schema_root_option, write_dump
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +51,6 @@ def _build(map_id: str, source_root: Optional[Path], schema_root: Optional[Path]
     plugin = get_code_map_plugin(map_id)
     plugin.prepare(source_root, schema_root)
     return plugin.run()
-
-
-def _dump(fragment: MapFragment, path: Path) -> None:
-    """Write *fragment* where a later build of other code can read it back.
-
-    The whole fragment, not a summary of it: a baseline is only worth having
-    if the comparison it feeds is the same one two live builds would get, and
-    a field left out here reads afterwards as a difference the round made.
-    """
-    path.write_text(fragment.model_dump_json())
 
 
 def _load(path: Path) -> MapFragment:
@@ -222,7 +212,7 @@ def main(
         raise click.ClickException(str(exc)) from exc
 
     if dump_to is not None:
-        _dump(new, dump_to)
+        write_dump(new, dump_to)
         click.echo(f"wrote {dump_to}")
 
     if old is None:
