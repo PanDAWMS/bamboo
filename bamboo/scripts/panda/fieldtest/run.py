@@ -108,6 +108,8 @@ def load_case(path: Path) -> dict:
         raise FieldTestError(f"{path} lacks {lacking}")
     if case["question"].get("kind") not in KINDS:
         raise FieldTestError(f"{path}: question.kind must be one of {KINDS}")
+    if not ({"rows", "answers"} & set(case["inputs"])):
+        raise FieldTestError(f"{path}: inputs need rows, or answers to build them from")
     return case
 
 
@@ -155,6 +157,19 @@ def load_pair(home: Home, name: str) -> dict:
             f"{dump} is derived from {derived and derived[1]}, not PANDA_PIN={pair['PANDA_PIN']}"
         )
     return pair | {"QUERIER_SHA": querier}
+
+
+def build_rows(answers: Path, pair: dict, out: Path) -> Path:
+    """Lay the fetch record *answers* out as a rows file at *out*, spelled by the pair's pin and dump."""
+    # here, not at the top: rows imports fetch, which imports this module
+    from bamboo.scripts.panda.fieldtest import rows  # noqa: PLC0415
+
+    spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), Path(pair["MAP_DUMP"]))
+    out.write_text(
+        json.dumps(rows.build(json.loads(answers.read_text()), spellings), indent=1)
+        + "\n"
+    )
+    return out
 
 
 def command(home: Home, case: dict, out: Path) -> list[str]:
@@ -235,6 +250,10 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
         )
     where = batch / case["name"]
     where.mkdir(parents=True, exist_ok=True)
+    built = None
+    if "rows" not in case["inputs"]:
+        built = build_rows(Path(case["inputs"]["answers"]), pair, where / "rows.json")
+        case = case | {"inputs": case["inputs"] | {"rows": str(built)}}
     out = where / "out.txt"
     args = command(home, case, out)
     env = {k: pair[k] for k in ("PANDA_PIN", "BAMBOO_TREE", "MAP_DUMP")}
@@ -263,7 +282,11 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
         "argv": args,
         "inputs_sha256": {
             p: sha256(Path(p))
-            for p in [case["inputs"]["rows"], *case["inputs"]["logs"]]
+            for p in [
+                case["inputs"]["rows"],
+                *case["inputs"]["logs"],
+                *([case["inputs"]["answers"]] if built else []),
+            ]
         },
         "score": score(text),
         "map": map_said(text, pair),

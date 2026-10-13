@@ -398,3 +398,54 @@ def test_among_tables_read_equally_often_the_one_that_completes_more_reads_comes
     assert C.ranked(dump, []) == ["A", "C", "B", "D", "E"]
     assert C.whitelist(dump, 2, [])["covered"] == 4
     assert C.ranked(dump, ["C"])[:2] == ["A", "B"]
+
+
+def test_a_case_with_answers_runs_on_the_rows_file_built_from_them(
+    tmp_path, monkeypatch
+):
+    from bamboo.scripts.panda.fieldtest import rows as RB
+
+    home = _home(tmp_path)
+    _querier_tree(_pair(tmp_path, home))
+    _write(home.root / "pairs", "current.json", {"abc-f2": "P"})
+    record = {
+        "question": {
+            "kind": "stuck",
+            "subject": "JediTaskSpec.status",
+            "observed": "finishing",
+            "key": "5",
+        },
+        "key_class": "JediTaskSpec",
+        "server": "https://panda.example/api/v1",
+        "started": "2026-10-13T10:00:00+00:00",
+        "steps": [],
+    }
+    answers = _write(tmp_path, "answers.json", record)
+    monkeypatch.setattr(RB, "column_spellings", lambda pin, dump: {"JediTaskSpec": {}})
+    path = _case(tmp_path)
+    case = json.loads(path.read_text())
+    del case["inputs"]["rows"]
+    case["inputs"]["answers"] = str(answers)
+    path.write_text(json.dumps(case))
+
+    rec = F.run_case(home, path, tmp_path / "batch")
+    built = tmp_path / "batch" / "C1" / "rows.json"
+    assert rec["exit"] == 0 and rec["argv"][rec["argv"].index("--rows") + 1] == str(
+        built
+    )
+    assert set(rec["inputs_sha256"]) == {
+        str(built),
+        case["inputs"]["logs"][0],
+        str(answers),
+    }
+    # nothing was fetched: every section the querier reads is left out, and said
+    assert "Left out: statuslog" in json.loads(built.read_text())["about"]
+
+
+def test_a_case_needs_rows_or_answers(tmp_path):
+    path = _case(tmp_path)
+    case = json.loads(path.read_text())
+    del case["inputs"]["rows"]
+    path.write_text(json.dumps(case))
+    with pytest.raises(F.FieldTestError, match="inputs need rows, or answers"):
+        F.load_case(path)
