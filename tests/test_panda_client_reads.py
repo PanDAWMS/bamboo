@@ -1,10 +1,13 @@
-"""Tests for the status-history, db_read and log calls of bamboo.utils.panda_client.
+"""Tests for the status-history, keyed-row, db_read and log calls of bamboo.utils.panda_client.
 
 A stand-in HttpClient answers by endpoint the way the server's handlers are
 documented to (pandaserver/api/v1/job_api.py get_status_history,
 async_process_api.py get_result): a refusal is ``success`` false with the reason
 in ``data``, a poll carries ``async_meta`` at the top level, and a grep or log
-list is answered per machine (panda-server 67fff963).
+list is answered per machine (panda-server 67fff963).  The keyed rows
+(job/get_datasets_by_name, job/get_description_incl_archive with
+report_errors, task/get_detailed_info with split_rule_raw) follow
+panda-server 5beba10b.
 """
 
 from __future__ import annotations
@@ -400,3 +403,112 @@ async def test_wait_returns_the_pending_answer_when_the_wait_ends_first():
     assert answers["m1"]["result"][0]["name"] == "panda-adder.log" and answers[
         "m2"
     ] == {"status": "no result"}
+
+
+def _datasets_server(budget: int, partitions: int):
+    """job/get_datasets_by_name refusing past budget // partitions, as the handler does."""
+
+    def route(endpoint, data):
+        names = data["names"]
+        if len(names) * partitions > budget:
+            return {
+                "success": False,
+                "message": "over budget",
+                "data": {
+                    "rejected": "probe_budget",
+                    "keys": len(names),
+                    "partitions": partitions,
+                    "budget": budget,
+                },
+            }
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "rows": [
+                    {"name": n, "creationdate": _when("2026-10-07T13:06:45")}
+                    for n in names
+                    if not n.startswith("gone")
+                ],
+                "as_of": _when(f"2026-10-14T10:00:{len(names) % 60:02d}"),
+                "retained_from": _when("2026-07-01T00:00:00"),
+                "partitions": partitions,
+                "budget": budget,
+            },
+        }
+
+    return route
+
+
+async def test_datasets_split_by_the_budget_the_refusal_states_and_ask_a_name_once():
+    ctx, calls = _patched(_datasets_server(budget=1000, partitions=5))
+    names = [f"user.x_sub{i}" for i in range(450)] + ["user.x_sub0", "gone.y_sub1"]
+    with ctx:
+        got = await PC.get_datasets_by_name(names)
+    assert _patched.methods == ["post"] * 4
+    assert [len(d["names"]) for _, d in calls] == [451, 200, 200, 51]
+    assert got["success"] is True and len(got["rows"]) == 450
+    # a name with no row has none; the span is the weakest of the calls
+    assert "gone.y_sub1" not in {r["name"] for r in got["rows"]}
+    assert got["as_of"] == _when("2026-10-14T10:00:20")
+    assert got["retained_from"] == _when("2026-07-01T00:00:00")
+
+
+async def test_jobs_tell_an_error_from_a_job_not_found_and_go_a_few_dozen_at_a_time():
+    def route(endpoint, data):
+        assert endpoint == "job/get_description_incl_archive"
+        assert data["report_errors"] is True
+        out = []
+        for i in data["job_ids"]:
+            if i == 13:
+                out.append({"error": "ORA-01013"})
+            elif i == 14:
+                out.append(None)
+            else:
+                out.append({"PandaID": i, "jobStatus": "failed", "Files": []})
+        return {"success": True, "message": "", "data": out}
+
+    ctx, calls = _patched(route)
+    ids = list(range(1, 41)) + [13]
+    with ctx:
+        got = await PC.get_jobs_incl_archive(ids)
+    assert _patched.methods == ["post"] * 2
+    assert [len(d["job_ids"]) for _, d in calls] == [
+        PC.JOBS_PER_CALL,
+        40 - PC.JOBS_PER_CALL,
+    ]
+    assert got["success"] is True and len(got["jobs"]) == 40
+    assert got["jobs"][13] == {"error": "ORA-01013"} and got["jobs"][14] is None
+    assert got["jobs"][7]["jobStatus"] == "failed"
+    assert len(got["asked_at"]) == len("2026-10-14 10:00:00")
+
+
+async def test_jobs_return_a_refusal_or_a_short_answer_as_it_came():
+    def route(endpoint, data):
+        return {"success": True, "message": "", "data": [None]}
+
+    ctx, _ = _patched(route)
+    with ctx:
+        got = await PC.get_jobs_incl_archive([1, 2])
+    # two asked, one answered: not laid out as if the second were not found
+    assert got["data"] == [None] and "jobs" not in got and len(got["calls"]) == 1
+
+
+async def test_task_detailed_info_keeps_the_whole_response_and_the_raw_split_rule():
+    def route(endpoint, data):
+        assert (endpoint, data) == ("task/get_detailed_info", {"task_id": 40000001})
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "jediTaskID": 40000001,
+                "splitRule": "nGBPerJob=10",
+                "split_rule_raw": "GB=10",
+            },
+        }
+
+    ctx, _ = _patched(route)
+    with ctx:
+        got = await PC.get_task_detailed_info("40000001")
+    assert got["success"] is True and got["data"]["split_rule_raw"] == "GB=10"
+    assert "asked_at" in got
