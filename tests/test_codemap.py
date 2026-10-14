@@ -13476,6 +13476,126 @@ def test_a_logger_handed_in_lands_in_the_file_of_the_caller_that_opened_it(tmp_p
     ]
 
 
+_ADDER_PLUGINS = {
+    "pandaserver/dataservice/adder_plugin_base.py": """\
+        class AdderPluginBase:
+            def __init__(self, job, params):
+                self.job = job
+                self.logger = None
+                for key, value in params.items():
+                    setattr(self, key, value)
+        """,
+    "pandaserver/dataservice/adder_atlas_plugin.py": """\
+        from pandaserver.dataservice.adder_plugin_base import AdderPluginBase
+        class AdderAtlasPlugin(AdderPluginBase):
+            def __init__(self, job, **params):
+                AdderPluginBase.__init__(self, job, params)
+            def execute(self):
+                self.logger.debug("start")
+        """,
+}
+
+
+def _adder_gen(call: str) -> str:
+    return f"""\
+        from pandaserver.config import panda_config
+        _logger = PandaLogger().getLogger("adder")
+        class AdderGen:
+            def __init__(self, job):
+                self.job = job
+                self.logger = LogWrapper(_logger, str(job))
+            def get_plugin_class(self, vo):
+                self.adder_plugin_class = panda_config.getPlugin("adder_plugins", vo)
+                if self.adder_plugin_class is None:
+                    from pandaserver.dataservice.adder_atlas_plugin import AdderAtlasPlugin
+                    self.adder_plugin_class = AdderAtlasPlugin
+                return self.adder_plugin_class
+            def run(self, extra):
+                self.adder_plugin_class = self.get_plugin_class(self.job.VO)
+                self.adder_plugin = {call}
+        """
+
+
+def test_a_plugin_built_from_a_class_getplugin_chose_prints_into_its_builders_file(tmp_path):
+    """``setupper_plugin_class(..., tmp_log, ...)`` builds whatever the
+    configuration names, or ``SetupperAtlasPlugin``: the plugin prints through
+    the ``tmp_log`` handed to its base's constructor, into ``panda-setupper.log``.
+    The call was placed nowhere, so its constructor had no caller and its 110
+    statements no file."""
+    found = _landed(
+        tmp_path,
+        {
+            "pandaserver/dataservice/setupper.py": """\
+                from pandaserver.config import panda_config
+                _logger = PandaLogger().getLogger("setupper")
+                class Setupper:
+                    def run(self, vo):
+                        tmp_log = LogWrapper(_logger, None)
+                        setupper_plugin_class = panda_config.getPlugin("setupper_plugins", vo)
+                        if setupper_plugin_class is None:
+                            from pandaserver.dataservice.setupper_atlas_plugin import SetupperAtlasPlugin
+                            setupper_plugin_class = SetupperAtlasPlugin
+                        setupper_plugin = setupper_plugin_class(self.jobs, tmp_log, resubmit=False)
+                """,
+            "pandaserver/dataservice/setupper_plugin_base.py": """\
+                class SetupperPluginBase:
+                    def __init__(self, jobs, logger, params):
+                        self.jobs = jobs
+                        self.logger = logger
+                        for key, value in params.items():
+                            setattr(self, key, value)
+                """,
+            "pandaserver/dataservice/setupper_atlas_plugin.py": """\
+                from pandaserver.dataservice.setupper_plugin_base import SetupperPluginBase
+                class SetupperAtlasPlugin(SetupperPluginBase):
+                    def __init__(self, jobs, logger, **params):
+                        SetupperPluginBase.__init__(self, jobs, logger, params)
+                    def run(self):
+                        self.logger.debug("start")
+                """,
+        },
+    )
+
+    assert found["pandaserver/dataservice/setupper_atlas_plugin.py::SetupperAtlasPlugin.run"] == [
+        (6, ["panda-setupper.log"], "logger")
+    ]
+
+
+def test_a_field_installed_from_the_constructors_keywords_is_the_keyword_each_builder_passes(tmp_path):
+    """``AdderPluginBase`` sets ``self.logger = None`` and then installs every
+    keyword it was handed as a field, and ``AdderGen`` hands ``logger=``: the
+    adder plugins print into ``panda-adder.log``.  The ``None`` written before
+    the loop prints nothing, so the loop's value is the file."""
+    found = _landed(
+        tmp_path,
+        {
+            **_ADDER_PLUGINS,
+            "pandaserver/dataservice/adder_gen.py": _adder_gen("self.adder_plugin_class(self.job, logger=self.logger)"),
+        },
+    )
+
+    assert found["pandaserver/dataservice/adder_atlas_plugin.py::AdderAtlasPlugin.execute"] == [
+        (6, ["panda-adder.log"], "logger")
+    ]
+
+
+def test_keywords_a_builder_passes_unread_leave_the_installed_field_partly_followed(tmp_path):
+    """``**extra`` may hold a ``logger`` too, so the file found is not the only one."""
+    found = _landed(
+        tmp_path,
+        {
+            **_ADDER_PLUGINS,
+            "pandaserver/dataservice/adder_gen.py": _adder_gen(
+                "self.adder_plugin_class(self.job, logger=self.logger, **extra)"
+            ),
+        },
+    )
+
+    assert found["pandaserver/dataservice/adder_atlas_plugin.py::AdderAtlasPlugin.execute"] == [
+        (6, ["panda-adder.log"], "partly")
+    ]
+
+
 def test_a_helper_handed_its_own_modules_logger_stays_in_that_file(tmp_path):
     """Most loggers handed in are the module's own, given to a helper beside it."""
     found = _landed(

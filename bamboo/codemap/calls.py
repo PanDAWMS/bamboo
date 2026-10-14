@@ -97,9 +97,11 @@ _PARSED: dict[tuple[str, int, int], Optional[tuple[str, ast.Module]]] = {}
 #: ``callers`` index and answers, per set of roots.
 _INDEXES: dict[tuple, dict[str, list["CallSite"]]] = {}
 _CALLERS: dict[tuple, list["CallSite"]] = {}
-#: The other names each name is imported or bound as, and each class's
-#: subclasses, per set of roots -- :meth:`Calls.spellings`.
+#: The other names each name is imported or bound as, the locals and fields
+#: each is bound to, and each class's subclasses, per set of roots --
+#: :meth:`Calls.spellings`.
 _ALIASES: dict[tuple, dict[str, set[str]]] = {}
+_HOLDERS: dict[tuple, dict[str, set[str]]] = {}
 _SUBCLASSES: dict[tuple, dict[tuple[str, int], list[tuple[str, ast.ClassDef]]]] = {}
 #: Where each class is read as a value, per set of roots -- :meth:`Calls.read_as_value`.
 _VALUES: dict[tuple, dict[tuple[str, int], list[str]]] = {}
@@ -371,7 +373,10 @@ class Calls:
     def _place(self, file: str, func: ast.AST, call: ast.Call) -> Placed:
         called = call.func
         if isinstance(called, ast.Name):
-            return self._named(file, func, called.id)
+            named = self._named(file, func, called.id)
+            if named.unplaced == UNPLACED_NAME and func is not None:
+                return self._constructed(file, func, called) or named
+            return named
         if not isinstance(called, ast.Attribute):
             return Placed((), UNPLACED_DYNAMIC)
         receiver = called.value
@@ -382,7 +387,10 @@ class Calls:
             cls = self.types.method_class(file, func)
             if cls is None:
                 return Placed((), UNPLACED_RECEIVER)
-            return self._method_of(cls, called.attr)
+            method = self._method_of(cls, called.attr)
+            if method.unplaced == UNPLACED_NO_METHOD and receiver.id == "self":
+                return self._constructed(file, func, called) or method
+            return method
         if (
             isinstance(receiver, ast.Call)
             and isinstance(receiver.func, ast.Name)
@@ -500,6 +508,48 @@ class Calls:
             if reason in forwarded:
                 return Placed((), reason)
         return Placed((), UNPLACED_NO_METHOD)
+
+    def _constructed(self, file: str, func: ast.AST, holder: ast.expr) -> Optional[Placed]:
+        """Where a call on a local or a ``self.<field>`` holding a class lands: that class's ``__init__``.
+
+        ``setupper_plugin_class(self.task_buffer, self.jobs, tmp_log, ...)``
+        builds whatever ``panda_config.getPlugin`` returned, or
+        ``SetupperAtlasPlugin`` where it returned nothing; ``AdderGen`` keeps
+        its class in ``self.adder_plugin_class``.  Neither is a function or a
+        method, so the call was placed nowhere, and the plugins' constructors
+        had no caller: a logger, a job or a task buffer handed to them could
+        not be followed past them.  The classes are what the holder is bound
+        to (:meth:`Types._values`).
+
+        A binding this cannot read -- ``getPlugin`` returns ``type[Any]`` --
+        leaves the call open beside the classes found, and the corpus's other
+        subclasses of their base are taken as well: a configuration names a
+        plugin of the same family, and those are the ones the corpus has
+        (``trigger.dispatch_fanouts`` reads the same set at the same three
+        sites).  A parameter holding the class is open the same way, assigned
+        or not: ``make(job, cls=None)`` builds whatever class a caller hands
+        it.  ``None`` where the holder names no class with a constructor in
+        the corpus.
+        """
+        classes, opened = self.types._values(file, func, holder, 0, instances=False, seen=frozenset())
+        arguments = getattr(func, "args", None)
+        if isinstance(holder, ast.Name) and arguments is not None:
+            every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+            opened = opened or any(one.arg == holder.id for one in every)
+        built = [
+            (where, cls)
+            for where, name in sorted(classes)
+            if where != BUILTIN and (cls := self.types.class_def(where, name)) is not None
+        ]
+        if not built:
+            return None
+        if opened:
+            for where, cls in list(built):
+                lineage = self.types.lineage(where, cls)
+                if len(lineage) > 1:
+                    built += [one for one in self.subclasses(*lineage[1]) if one not in built]
+        placed = self._method_of_any(built, "__init__", opened)
+        return placed if placed.targets else None
 
     def _named(self, file: str, func: ast.AST, name: str) -> Placed:
         # A function defined inside this one, or inside one that holds it.
@@ -686,8 +736,11 @@ class Calls:
         other name any of those is imported or bound as in the corpus --
         ``from pandaserver.api.v1.http_client import HttpClient as
         HttpClientV1`` built twenty clients no list of ``HttpClient``'s callers
-        held.  A name matching more than the calls landing here costs only
-        their placing: :meth:`callees` keeps the ones that land.
+        held.  Last, for an ``__init__``, each local or field a statement binds
+        a class of its family to: ``setupper_plugin_class(...)`` builds
+        ``SetupperAtlasPlugin`` (:meth:`_constructed`).  A name matching more
+        than the calls landing here costs only their placing: :meth:`callees`
+        keeps the ones that land.
         """
         name = target.func.name  # type: ignore[attr-defined]
         if name == "__init__" and target.cls is not None:
@@ -704,7 +757,54 @@ class Calls:
                     queue.append(other)
         if name == "__init__" and target.cls is not None:
             found.insert(1, "__init__")
+            # A local or a field holding the class, or another of its family,
+            # is called to build it (:meth:`_constructed`).
+            holders = self._holders()
+            for one in self._families(target):
+                found += [other for other in sorted(holders.get(one, ())) if other not in found]
         return found
+
+    def _families(self, target: Target) -> list[str]:
+        """Names of the classes whose construction :meth:`_constructed` may place at *target*, an ``__init__``.
+
+        Its class and the subclasses built through it, and for each the
+        other subclasses of its base -- the plugins one configuration may
+        name in place of another.
+        """
+        assert target.cls is not None
+        through = set(self._built_through(target))
+        classes = [(target.file, target.cls)] + [
+            one for one in self._subclasses().get((target.file, target.cls.lineno), []) if one[1].name in through
+        ]
+        names: list[str] = []
+        for where, cls in classes:
+            lineage = self.types.lineage(where, cls)
+            for _file, one in [(where, cls), *(self.subclasses(*lineage[1]) if len(lineage) > 1 else [])]:
+                if one.name not in names:
+                    names.append(one.name)
+        return names
+
+    def _holders(self) -> dict[str, set[str]]:
+        """``{name: each local or self.<field> a statement binds it to}``, across the corpus -- a candidate list only."""
+        shared = _roots_key(self.types.roots)
+        if shared not in _HOLDERS:
+            found: dict[str, set[str]] = {}
+            for file in self.types.corpus_files():
+                tree = self.types.tree(file)
+                for node in ast.walk(tree) if tree is not None else ():
+                    if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, (ast.Name, ast.Attribute)):
+                        continue
+                    held = node.value.id if isinstance(node.value, ast.Name) else node.value.attr
+                    for one in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                        local = (
+                            one.id if isinstance(one, ast.Name)
+                            else one.attr if isinstance(one, ast.Attribute) and getattr(one.value, "id", "") == "self"
+                            else ""
+                        )
+                        if local and local != held:
+                            found.setdefault(held, set()).add(local)
+            _HOLDERS[shared] = found
+        return _HOLDERS[shared]
 
     def _built_through(self, target: Target) -> list[str]:
         """Names of *target*'s class's subclasses whose construction lands at *target*, an ``__init__``."""

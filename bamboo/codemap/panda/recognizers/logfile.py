@@ -505,8 +505,71 @@ class LoggerFiles:
                 for value in pathcond.attribute_expressions(method, field):
                     found = True
                     self._value(trail, where, method, value, value, inner)
+                for entries in _installed_from(method):
+                    found = True
+                    self._entry(trail, where, method, entries, field, inner)
         if not found:
             trail.open = True
+
+    def _entry(self, trail: _Trail, file: str, func: ast.AST, name: str, key: str, way: _Way) -> None:
+        """The value under *key* in the dict parameter *name* of *func*: what each caller puts there.
+
+        ``AdderPluginBase.__init__(self, job, params)`` installs every entry of
+        ``params`` as a field (:func:`_installed_from`), and
+        ``AdderAtlasPlugin.__init__(self, job, **params)`` hands it the
+        keywords it was called with -- so ``self.logger`` is the ``logger=``
+        that ``AdderGen`` passes.  A ``**`` parameter takes each caller's
+        keyword of that name; any other takes the caller's argument, a dict
+        literal or another ``**`` parameter.  A caller without the key puts
+        nothing there; one passing ``**something`` may, and is not read.
+        """
+        if way.hops >= _HOPS:
+            trail.open = True
+            return
+        held = self.types.method_class(file, func)
+        target = Target(file, func, held[1] if held else None)
+        sites = self._callers_of(target, way.instance)
+        if not sites:
+            trail.open = True
+            return
+        collects = func.args.kwarg is not None and func.args.kwarg.arg == name  # type: ignore[attr-defined]
+        for site, same_object in sites:
+            inner = _Way(way.seen, way.hops + 1, way.instance if same_object else None)
+            caller = None if site.in_module else site.func
+            at = None if site.in_module else site.call
+            if collects:
+                keywords = site.call.keywords
+                if any(one.arg is None for one in keywords):
+                    trail.open = True
+                for one in keywords:
+                    if one.arg == key:
+                        self._value(trail, site.file, caller, one.value, at, inner)
+                continue
+            argument = self.calls.handed(site, target).get(name)
+            if argument is None:
+                trail.open = True
+                continue
+            self._dict_entry(trail, site.file, caller, argument, key, inner)
+
+    def _dict_entry(self, trail: _Trail, file: str, func: Optional[ast.AST], value: ast.expr, key: str, way: _Way) -> None:
+        """The entry under *key* of a dict a caller hands on: a literal, or its own ``**`` parameter."""
+        if isinstance(value, ast.Dict):
+            for one, held in zip(value.keys, value.values, strict=True):
+                if one is None:
+                    trail.open = True
+                elif isinstance(one, ast.Constant) and one.value == key:
+                    self._value(trail, file, func, held, held, way)
+            return
+        if isinstance(value, ast.Name) and func is not None:
+            if _is_parameter(func, value.id, keywords=True):
+                self._entry(trail, file, func, value.id, key, way)
+                return
+            bound = pathcond.assigned_expressions(func).get(value.id, [])  # type: ignore[arg-type]
+            for one in bound:
+                self._dict_entry(trail, file, func, one, key, way)
+            if bound:
+                return
+        trail.open = True
 
     # -- callers ------------------------------------------------------------
 
@@ -649,11 +712,46 @@ def _module_values(tree: ast.Module, name: str) -> list[ast.expr]:
     return found
 
 
-def _is_parameter(func: ast.AST, name: str) -> bool:
+def _installed_from(func: ast.AST) -> list[str]:
+    """The dict parameters *func* installs as fields: ``for key, value in params.items(): setattr(self, key, value)``.
+
+    Every entry becomes a field of that name, so a field read anywhere on the
+    object may be one of them.  Five such loops in the corpus, and the two
+    over a parameter are the plugin bases' (``AdderPluginBase``,
+    ``SetupperPluginBase``), which is how an adder plugin gets its logger.
+    """
+    found: list[str] = []
+    for node in ast.walk(func):
+        if not (
+            isinstance(node, ast.For)
+            and isinstance(node.target, ast.Tuple)
+            and len(node.target.elts) == 2
+            and all(isinstance(one, ast.Name) for one in node.target.elts)
+            and isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Attribute)
+            and node.iter.func.attr == "items"
+            and isinstance(node.iter.func.value, ast.Name)
+            and _is_parameter(func, node.iter.func.value.id, keywords=True)
+            and pathcond.enclosing_function(node) is func
+        ):
+            continue
+        key, value = (one.id for one in node.target.elts)  # type: ignore[attr-defined]
+        if any(
+            isinstance(call, ast.Call)
+            and getattr(call.func, "id", "") == "setattr"
+            and [ast.unparse(one) for one in call.args] == ["self", key, value]
+            for call in ast.walk(node)
+        ):
+            found.append(node.iter.func.value.id)
+    return found
+
+
+def _is_parameter(func: ast.AST, name: str, keywords: bool = False) -> bool:
+    """Whether *name* is a parameter of *func*; with *keywords*, its ``**`` parameter counts too."""
     args = getattr(func, "args", None)
     if args is None:
         return False
-    every = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    every = [*args.posonlyargs, *args.args, *args.kwonlyargs, *([args.kwarg] if keywords and args.kwarg else [])]
     return any(argument.arg == name for argument in every)
 
 

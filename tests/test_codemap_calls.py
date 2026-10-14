@@ -596,12 +596,19 @@ def test_a_call_in_a_modules_own_body_on_an_imported_instance_is_placed_through_
 
 
 def test_a_constructor_no_call_names_is_not_said_reached_from_outside_where_its_class_is_held_as_a_value(tmp_path):
-    """``cls = Plugin`` ... ``cls(job)`` builds one; a class only tested with ``isinstance`` is reached from outside."""
+    """``cls = Plugin`` ... ``cls(job)`` builds one, and is placed there -- open,
+    since a caller may hand ``make`` another class.  A class handed to a function
+    that builds it is read as a value a call may build from.  A class only tested
+    with ``isinstance`` is reached from outside."""
     calls = _calls(
         _tree(
             tmp_path,
             m='''\
 class Plugin:
+    def __init__(self, job):
+        self.job = job
+
+class Handed:
     def __init__(self, job):
         self.job = job
 
@@ -614,14 +621,24 @@ def make(job, cls=None):
         cls = Plugin
     return cls(job)
 
+def build(kind, job):
+    return kind(job)
+
+def hand(job):
+    return build(Handed, job)
+
 def check(x: Tested) -> bool:
     return isinstance(x, Tested)
 ''',
         )
     )
+    plugin = _method(calls, "m", "Plugin", "__init__")
 
-    assert calls.missed(_method(calls, "m", "Plugin", "__init__")) == [
-        "Plugin: no call in the corpus names it; the class is read as a value at pkg/m.py:11, "
+    (site,) = calls.callers(plugin)
+    assert (site.call.lineno, calls.opened(site)) == (16, calls_mod.UNPLACED_OPEN)
+    assert calls.missed(plugin) == []
+    assert calls.missed(_method(calls, "m", "Handed", "__init__")) == [
+        "Handed: no call in the corpus names it; the class is read as a value at pkg/m.py:22, "
         "and a call of that value may build one"
     ]
     assert calls.missed(_method(calls, "m", "Tested", "__init__")) == [
@@ -2690,3 +2707,107 @@ def test_a_list_with_one_element_unsettled_settles_to_no_value_not_to_the_rest(t
     assert sorted(one.value for one in settle(lists["known"], func, "pkg/db.py")) == ["activated", "throttled"]
     assert settle(lists["partly"], func, "pkg/db.py") == []
     assert settle(lists["spread"], func, "pkg/db.py") == []
+
+
+_PLUGINS = {
+    "base": (
+        "class PluginBase:\n"
+        "    def __init__(self, job, logger):\n"
+        "        self.logger = logger\n"
+    ),
+    "atlas": (
+        "from pkg.base import PluginBase\n"
+        "\n"
+        "class AtlasPlugin(PluginBase):\n"
+        "    def __init__(self, job, logger):\n"
+        "        PluginBase.__init__(self, job, logger)\n"
+    ),
+    "dummy": "from pkg.base import PluginBase\n\nclass DummyPlugin(PluginBase):\n    pass\n",
+    "config": "g_map = {}\n\ndef getPlugin(name):\n    return g_map[name]\n",
+}
+
+
+def test_a_call_on_a_local_holding_a_plugin_class_lands_at_the_constructors_of_its_family(tmp_path):
+    """``setupper_plugin_class(...)`` builds what ``getPlugin`` returned, or the
+    default class imported beside it: placed at the default's ``__init__`` and at
+    the other plugins of its base, and open, since the configuration may name a
+    class this reading cannot.  The constructors have that call as a caller."""
+    roots = _tree(
+        tmp_path,
+        **_PLUGINS,
+        m=(
+            "from pkg import config\n"
+            "\n"
+            "def run(job, logger):\n"
+            "    plugin_class = config.getPlugin('x')\n"
+            "    if plugin_class is None:\n"
+            "        from pkg.atlas import AtlasPlugin\n"
+            "        plugin_class = AtlasPlugin\n"
+            "    plugin_class(job, logger)\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    placed = _placed(calls, "m", "run", "plugin_class")
+
+    assert sorted((t.cls.name, t.func.name) for t in placed.targets) == [("AtlasPlugin", "__init__"), ("PluginBase", "__init__")]
+    assert placed.unplaced == calls_mod.UNPLACED_OPEN
+    for cls_name, file in (("AtlasPlugin", "atlas"), ("PluginBase", "base")):
+        assert [site.call.lineno for site in calls.callers(_method(calls, file, cls_name, "__init__")) if site.file == "pkg/m.py"] == [8]
+
+
+def test_a_field_holding_a_plugin_class_is_read_through_the_method_that_returns_it(tmp_path):
+    """``AdderGen`` keeps its class in ``self.adder_plugin_class``, set from
+    ``get_plugin_class()``, which returns that field."""
+    roots = _tree(
+        tmp_path,
+        **_PLUGINS,
+        m=(
+            "from pkg import config\n"
+            "from pkg.atlas import AtlasPlugin\n"
+            "\n"
+            "class Gen:\n"
+            "    def get_plugin_class(self):\n"
+            "        self.plugin_class = config.getPlugin('x')\n"
+            "        if self.plugin_class is None:\n"
+            "            self.plugin_class = AtlasPlugin\n"
+            "        return self.plugin_class\n"
+            "\n"
+            "    def run(self, job):\n"
+            "        self.plugin_class = self.get_plugin_class()\n"
+            "        self.plugin = self.plugin_class(job, self.logger)\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    placed = _placed(calls, "m", "run", "self.plugin_class")
+
+    assert sorted(t.cls.name for t in placed.targets) == ["AtlasPlugin", "PluginBase"]
+    assert placed.unplaced == calls_mod.UNPLACED_OPEN
+
+
+def test_a_local_holding_one_class_only_lands_there_closed_and_one_holding_nothing_readable_stays_unplaced(tmp_path):
+    """The family is taken only beside a binding this cannot read."""
+    roots = _tree(
+        tmp_path,
+        **_PLUGINS,
+        m=(
+            "from pkg import config\n"
+            "from pkg.atlas import AtlasPlugin\n"
+            "\n"
+            "def known(job, logger):\n"
+            "    plugin_class = AtlasPlugin\n"
+            "    plugin_class(job, logger)\n"
+            "\n"
+            "def unknown(job, logger):\n"
+            "    other_class = config.getPlugin('x')\n"
+            "    other_class(job, logger)\n"
+        ),
+    )
+    calls = _calls(roots)
+
+    known = _placed(calls, "m", "known", "plugin_class")
+    unknown = _placed(calls, "m", "unknown", "other_class")
+
+    assert [(t.cls.name, known.unplaced) for t in known.targets] == [("AtlasPlugin", "")]
+    assert (unknown.targets, unknown.unplaced) == ((), calls_mod.UNPLACED_NAME)
