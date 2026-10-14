@@ -779,6 +779,8 @@ async def db_read(
 LOG_SERVICES = ("server", "jedi")
 #: most strings one grep takes (submit_grep_request's fixed_strings)
 GREP_MAX_STRINGS = 1000
+#: most log names one list takes (submit_log_list_request's log_names)
+LIST_MAX_NAMES = 100
 
 
 def _target(service: str | None, machine: str | None) -> dict[str, str]:
@@ -845,6 +847,7 @@ async def list_logs(
     *,
     service: str | None = None,
     machine: str | None = None,
+    log_names: list[str] | None = None,
     poll_seconds: float = 15.0,
     timeout_seconds: float = 600.0,
 ) -> dict[str, Any]:
@@ -852,15 +855,32 @@ async def list_logs(
 
     Each machine's result is a list of ``{"name", "size", "mtime"}`` (mtime in
     UTC, ``YYYY-MM-DD HH:MM:SS``): every regular file under its logdir whose
-    name starts with ``panda-``.  A rotated file's mtime is when it was
-    rotated, so it holds the lines up to then from the previous rotation on.
+    name starts with ``panda-``, in the order of their names, cut at 1 MB
+    (``truncated``).  A rotated file's mtime is its last write before it was
+    rotated, not the rotation: its processes go on writing to it until
+    postrotate stops them (up to 146 s past its mtime on 2026-10-14), and a
+    quiet log's mtime is hours before.  A jedi machine keeps 180 days of
+    about 75 logs: its whole list never fits, so ask for the logs by name.
+
+    Args:
+        log_names: only these logs and their rotated files (a name ``n``
+            matches ``n`` and ``n-*``), up to :data:`LIST_MAX_NAMES`.  A name
+            with no file is not in the list.
 
     Returns:
         As :func:`wait_per_machine`; a refused submit as it came.
     """
+    params = _target(service, machine)
+    if log_names is not None:
+        names = list(dict.fromkeys(log_names))
+        if not 1 <= len(names) <= LIST_MAX_NAMES:
+            raise ValueError(
+                f"a list takes 1 to {LIST_MAX_NAMES} log names, not {len(names)}"
+            )
+        params["log_names"] = names
     return await _per_machine_request(
         "async_process/submit_log_list_request",
-        _target(service, machine),
+        params,
         poll_seconds,
         timeout_seconds,
     )

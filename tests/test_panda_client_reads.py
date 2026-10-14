@@ -405,6 +405,27 @@ async def test_wait_returns_the_pending_answer_when_the_wait_ends_first():
     ] == {"status": "no result"}
 
 
+async def test_a_list_is_asked_for_named_logs_once_each_and_within_the_limit():
+    def route(endpoint, data):
+        return {"success": True, "message": "", "data": {"async_id": "l-2"}}
+
+    ctx, calls = _patched(route)
+    with ctx:
+        await PC.list_logs(
+            service="jedi",
+            log_names=["panda-JediDBProxy.log", "panda-JediDBProxy.log"],
+            poll_seconds=1,
+            timeout_seconds=0,
+        )
+        for wrong in ([], [f"panda-{i}.log" for i in range(PC.LIST_MAX_NAMES + 1)]):
+            with pytest.raises(ValueError, match="log names"):
+                await PC.list_logs(service="jedi", log_names=wrong)
+    assert calls[0] == (
+        "async_process/submit_log_list_request",
+        {"service_name": "jedi", "log_names": ["panda-JediDBProxy.log"]},
+    )
+
+
 def _datasets_server(budget: int, partitions: int):
     """job/get_datasets_by_name refusing past budget // partitions, as the handler does."""
 
