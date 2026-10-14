@@ -262,6 +262,27 @@ async def test_a_tail_that_began_inside_the_file_covers_from_its_first_stamp_and
     assert r["machines"][SERVER[0]]["files"][0]["covers"] is None
 
 
+async def test_an_empty_file_read_from_its_first_byte_covers_from_its_mtime(tmp_path):
+    # aipanda095 lists a panda-JediDBProxy.log of 0 bytes last written 2025-12-19 (2026-10-14)
+    log = "panda-JediDBProxy.log"
+    greps = {(SERVER[1], log): [found(first=None, offset=0)]}
+    panda = FakePanda(
+        lists_with({SERVER[0]: [], SERVER[1]: [entry(log, "2025-12-19 15:30:35", 0)]}),
+        greps,
+    )
+    _, (r,) = await run(
+        tmp_path,
+        panda,
+        [ask(log, ["7358"], ("2026-10-14 10:00:00", "2026-10-14 10:00:00"), SERVER[1])],
+    )
+    (cur,) = r["machines"][SERVER[1]]["files"]
+    assert cur["covers"] == ["2025-12-19 15:30:35", "2026-10-14 11:50:00"]
+    assert cur["covers_from"] == "unstamped"
+    assert cur["status"] == "answered" and cur["error"] is None and cur["records"] == []
+    # nothing more to read: asked once, not again with twice the bytes
+    assert len([c for c in panda.calls if c[0] == "grep"]) == 1
+
+
 async def test_the_oldest_file_has_no_start(tmp_path):
     greps = {(SERVER[0], "panda-adder.log-20261013.gz"): [found()]}
     panda = FakePanda(lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), greps)

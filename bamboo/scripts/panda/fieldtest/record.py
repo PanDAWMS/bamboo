@@ -40,7 +40,9 @@ past the margin (none of the 169 files measured).  The oldest file's
 start is not known.  The current file is read by its tail and covers from
 where the read began (its first stamp; its rotation when the read began at
 its first byte and that line predates the list) to when the grep was asked,
-on this machine's clock, which ran 13-203 ms behind the database's.
+on this machine's clock, which ran 13-203 ms behind the database's.  One read
+from its first byte with no stamped line holds no record and covers from its
+mtime: server machines list an empty ``panda-JediDBProxy.log`` (2026-10-14).
 
 **Greps.**  One request per machine and file, to that machine alone, with the
 strings of every ask reading it.  An answer cut at 1 MB is asked again in
@@ -618,9 +620,10 @@ class Grepper:
             job.fragments.setdefault(r["offset"], r)
 
     def settle_tail(self, job: Job) -> None:
-        """Note a tail that began after the window it was read for (read again once with twice the bytes)."""
-        covers, _ = tail_covers(job, self.listed_at)
-        if covers is None:
+        """Note a tail that began after the window it was read for (read again once with twice the bytes).  A file
+        read from its first byte with no stamped line has no more to read."""
+        covers, covers_from = tail_covers(job, self.listed_at)
+        if covers is None or covers_from == "unstamped":
             return
         need = max(job.since, job.file.start) if job.file.start else job.since
         if stamp(covers[0]) > need:
@@ -631,7 +634,15 @@ def tail_covers(job: Job, listed_at: datetime.datetime) -> tuple[list[str] | Non
     """What the current file's reads covered, and from what: every leaf's, narrowed to what all of them read.
 
     A read that began at the file's first byte with a line older than the list is the file listed, whole: it covers
-    from the rotation before it.  Otherwise it covers from its first stamp; one with no stamp covers nothing."""
+    from the rotation before it.  Reads that all began at the first byte and found no stamped line read a file that
+    holds no record: it covers from its mtime, after which nothing was written to it (an empty file a machine's
+    processes never log to, such as JediDBProxy's on a server machine).  Otherwise it covers from its first stamp;
+    one with no stamp covers nothing."""
+    if job.tails and all(offset == 0 and not first for first, offset, _ in job.tails):
+        return [
+            text(job.file.mtime),
+            text(min(asked for _, _, asked in job.tails)),
+        ], "unstamped"
     starts = []
     whole_all = True
     for first, offset, _ in job.tails:
