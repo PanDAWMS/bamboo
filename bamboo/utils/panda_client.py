@@ -452,3 +452,339 @@ async def get_job_log(
     base_url = os.getenv("PANDA_MONITOR_URL", "https://bigpanda.cern.ch")
     url = f"{base_url}/filebrowser/?pandaid={panda_id}&json&filename={filename}"
     return await async_fetch_log_content(url)
+
+
+# ---------------------------------------------------------------------------
+# Status histories and reads of the database
+# ---------------------------------------------------------------------------
+#
+# job/get_status_history, task/get_status_history and
+# async_process/submit_db_read_request answer with more than ``data``: a refusal
+# says why in ``data`` ({"rejected": rule, ...} or {"error": code}) while
+# ``success`` is false, and a poll says where the request is in a top-level
+# ``async_meta``.  ``_call_api`` keeps neither, so these calls keep the whole
+# response.
+
+#: most job IDs one call of job/get_status_history takes (its max_keys, the
+#: most one Oracle IN list holds)
+STATUS_HISTORY_MAX_JOBS = 1000
+
+
+def _call_api_full(method: str, endpoint: str, data: dict) -> dict[str, Any]:
+    """Call a PanDA REST API endpoint and return the whole response.
+
+    Unlike :func:`_call_api`, a response whose ``success`` is false is returned
+    rather than raised: its ``data`` says why.  Raises ``RuntimeError`` only when
+    there is no response to return.
+    """
+    from pandaserver.api.v1.http_client import HttpClient, api_url_ssl  # noqa: PLC0415
+
+    client = HttpClient()
+    _apply_credentials(client)  # per-user OIDC override when bound (else env default)
+    url = f"{api_url_ssl}/{endpoint}"
+    if method == "get":
+        status, response = client.get(url, data)
+    else:
+        status, response = client.post(url, data)
+    if status != 0:
+        raise RuntimeError(
+            f"PanDA connection error for {endpoint!r}: {response}. "
+            "Check PANDA_API_URL_SSL."
+        )
+    if not isinstance(response, dict):
+        raise RuntimeError(f"PanDA returned no response object for {endpoint!r}: {response!r}")
+    return response
+
+
+async def get_job_status_history(
+    job_ids: list[int],
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, Any]:
+    """The status changes of *job_ids* in jobs_StatusLog, in as many calls as it takes.
+
+    The server refuses a call naming more jobs than its probe budget allows for
+    the window, and says how many partitions the window touches and what the
+    budget is; the jobs are then split into calls of ``budget // partitions``.
+    The IDs go in a JSON body (POST, which the server takes since panda-server
+    79030c84): a GET puts each in the URL, and Apache refuses a request line
+    past 8190 bytes, about 420 IDs, with an HTTP error rather than a refusal.
+
+    Args:
+        job_ids: PanDA IDs; one named twice is asked once.
+        since, until: the window, in UTC (``2026-10-12 14:30:45``); the server
+            widens it to whole days.
+
+    Returns:
+        On success ``{"success": True, "rows", "as_of", "retained_from",
+        "since", "until", "calls"}``: the rows of every call in call order;
+        as_of the earliest call's, since every change committed by then is in
+        rows; retained_from the latest call's, or None when a call could not
+        tell.  Otherwise the first response that failed, as it came, with
+        ``calls`` added.  ``calls`` holds every response, for the record.
+    """
+    ids = list(dict.fromkeys(int(i) for i in job_ids))
+    window = {k: v for k, v in (("since", since), ("until", until)) if v is not None}
+    size = STATUS_HISTORY_MAX_JOBS
+    calls: list[dict[str, Any]] = []
+    done = 0
+    while done < len(ids):
+        chunk = ids[done : done + size]
+        response = await asyncio.to_thread(
+            _call_api_full, "post", "job/get_status_history", {"job_ids": chunk, **window}
+        )
+        calls.append(response)
+        data = response.get("data") or {}
+        if response.get("success"):
+            done += len(chunk)
+            continue
+        fits = None
+        if data.get("rejected") == "probe_budget" and data.get("partitions"):
+            fits = data["budget"] // data["partitions"]
+        elif data.get("rejected") == "too_many_keys":
+            fits = data.get("max_keys")
+        if not fits or fits >= len(chunk):
+            return {**response, "calls": calls}
+        size = fits
+    if not calls:
+        return {"success": False, "message": "no job_ids", "data": {"rejected": "no_keys"}, "calls": calls}
+    answers = [c["data"] for c in calls if c.get("success")]
+    retained = [a.get("retained_from") for a in answers]
+    return {
+        "success": True,
+        "rows": [row for a in answers for row in a["rows"]],
+        "as_of": min((a["as_of"] for a in answers), key=_parse_panda_datetime),
+        "retained_from": None
+        if None in retained
+        else max(retained, key=_parse_panda_datetime),
+        "since": answers[0].get("since"),
+        "until": answers[0].get("until"),
+        "calls": calls,
+    }
+
+
+async def get_task_status_history(task_id: int) -> dict[str, Any]:
+    """The status changes of one task in TASKS_STATUSLOG: the whole response.
+
+    On success ``data`` is ``{"rows", "as_of", "retained_from"}``.
+    """
+    return await asyncio.to_thread(
+        _call_api_full, "get", "task/get_status_history", {"task_id": int(task_id)}
+    )
+
+
+async def db_read(
+    queries: list[dict[str, Any]],
+    poll_seconds: float = 10.0,
+    timeout_seconds: float = 600.0,
+) -> dict[str, Any]:
+    """Submit one batch of db_read queries and wait for its answers.
+
+    The server's daemon takes requests every ~10 seconds and stops a db_read
+    30 seconds before the daemon's own timeout or at 480 seconds, whichever
+    comes first (270 s with the 300-s timeout it runs under).  A request that
+    comes in while the daemon is running a grep waits for the next cycle, up
+    to ~250 seconds, before it starts; hence the defaults.
+
+    Returns:
+        get_result's response once ``async_meta.status`` is ``done`` or
+        ``failed``, with ``async_id`` added.  When done, ``data`` is
+        ``{"as_of", "answers"}``, one answer per query (status done, rejected,
+        deadline or error).  A refused submit comes back as it came.
+
+    Raises:
+        TimeoutError: past *timeout_seconds*; the message names the async_id,
+            whose result can still be fetched.
+    """
+    submitted = await asyncio.to_thread(
+        _call_api_full, "post", "async_process/submit_db_read_request", {"queries": queries}
+    )
+    if not submitted.get("success"):
+        return submitted
+    async_id = submitted["data"]["async_id"]
+    waited = 0.0
+    while True:
+        result = await asyncio.to_thread(
+            _call_api_full, "get", "async_process/get_result", {"async_id": async_id}
+        )
+        meta = result.get("async_meta")
+        if meta is None:
+            # no async_meta: this poll failed (not found, not authorized)
+            return {**result, "async_id": async_id}
+        if meta.get("status") in ("done", "failed"):
+            return {**result, "async_id": async_id}
+        if waited >= timeout_seconds:
+            raise TimeoutError(f"db_read {async_id} still {meta.get('status')} after {waited:.0f} s")
+        await asyncio.sleep(poll_seconds)
+        waited += poll_seconds
+
+
+# ---------------------------------------------------------------------------
+# Log files over the async API (panda-server 67fff963 and later)
+# ---------------------------------------------------------------------------
+#
+# submit_grep_request and submit_log_list_request are answered by every machine
+# of a service, or by one machine: get_result reports one row per machine and
+# says the request is "complete" once every expected machine has answered.
+# A grep for whole records and a log list put JSON in each row's ``result``.
+
+#: the machine groups one PanDA deployment runs as: the async API's service_name
+LOG_SERVICES = ("server", "jedi")
+#: most strings one grep takes (submit_grep_request's fixed_strings)
+GREP_MAX_STRINGS = 1000
+
+
+def _target(service: str | None, machine: str | None) -> dict[str, str]:
+    if (service is None) == (machine is None):
+        raise ValueError("name exactly one of service and machine")
+    return (
+        {"service_name": service} if service is not None else {"machine_name": machine}
+    )
+
+
+async def grep_log(
+    log_filename: str,
+    fixed_strings: list[str],
+    *,
+    service: str | None = None,
+    machine: str | None = None,
+    whole_records: bool = True,
+    tail_bytes: int | None = None,
+    max_matches: int | None = None,
+    poll_seconds: float = 15.0,
+    timeout_seconds: float = 3600.0,
+) -> dict[str, Any]:
+    """Grep one log file for lines holding any of *fixed_strings*, and wait for the machines' answers.
+
+    The strings are matched as they are (no escaping).  With *whole_records*
+    each machine's result is ``{"records": [{"offset", "head", "lines",
+    "cut"}], "window"}``: a matching line with the rest of its record, where
+    ``head`` is false for a match inside a record whose first line did not
+    match.  The daemon runs about one long grep per machine per cycle (300 s),
+    so a wait may span many cycles when requests queue.
+
+    Args:
+        log_filename: a file under the server's logdir, ``panda-*.log`` or a
+            rotated ``panda-*.log-YYYYMMDD.gz``.
+        fixed_strings: 1 to :data:`GREP_MAX_STRINGS`; one named twice is sent once.
+        service, machine: exactly one; a service means every machine alive in it.
+        tail_bytes: search only the end of a plain file; the answer's
+            ``window`` says where the search started.
+
+    Returns:
+        As :func:`wait_per_machine`; a refused submit as it came.
+    """
+    strings = list(dict.fromkeys(fixed_strings))
+    if not 1 <= len(strings) <= GREP_MAX_STRINGS:
+        raise ValueError(
+            f"a grep takes 1 to {GREP_MAX_STRINGS} strings, not {len(strings)}"
+        )
+    params: dict[str, Any] = {
+        "log_filename": log_filename,
+        "fixed_strings": strings,
+        "whole_records": whole_records,
+        **_target(service, machine),
+    }
+    if tail_bytes is not None:
+        params["tail_bytes"] = int(tail_bytes)
+    if max_matches is not None:
+        params["max_matches"] = int(max_matches)
+    return await _per_machine_request(
+        "async_process/submit_grep_request", params, poll_seconds, timeout_seconds
+    )
+
+
+async def list_logs(
+    *,
+    service: str | None = None,
+    machine: str | None = None,
+    poll_seconds: float = 15.0,
+    timeout_seconds: float = 600.0,
+) -> dict[str, Any]:
+    """The log files of every machine of a service, or of one machine, and wait for the answers.
+
+    Each machine's result is a list of ``{"name", "size", "mtime"}`` (mtime in
+    UTC, ``YYYY-MM-DD HH:MM:SS``): every regular file under its logdir whose
+    name starts with ``panda-``.  A rotated file's mtime is when it was
+    rotated, so it holds the lines up to then from the previous rotation on.
+
+    Returns:
+        As :func:`wait_per_machine`; a refused submit as it came.
+    """
+    return await _per_machine_request(
+        "async_process/submit_log_list_request",
+        _target(service, machine),
+        poll_seconds,
+        timeout_seconds,
+    )
+
+
+async def _per_machine_request(
+    endpoint: str, params: dict[str, Any], poll_seconds: float, timeout_seconds: float
+) -> dict[str, Any]:
+    submitted = await asyncio.to_thread(_call_api_full, "post", endpoint, params)
+    if not submitted.get("success"):
+        return submitted
+    return await wait_per_machine(
+        submitted["data"]["async_id"], poll_seconds, timeout_seconds
+    )
+
+
+async def wait_per_machine(
+    async_id: str, poll_seconds: float = 15.0, timeout_seconds: float = 3600.0
+) -> dict[str, Any]:
+    """Poll get_result for a per-machine request until every expected machine has answered.
+
+    Returns:
+        The last poll with ``async_id`` added.  Its ``data.overall_status`` is
+        ``complete``, or ``pending`` when the wait ended first: the request
+        goes on in the server, and this can be called again with the same id.
+        A poll that failed (not found, not authorized) comes back as it came.
+    """
+    waited = 0.0
+    while True:
+        result = await asyncio.to_thread(
+            _call_api_full, "get", "async_process/get_result", {"async_id": async_id}
+        )
+        data = result.get("data") or {}
+        if (
+            not result.get("success")
+            or data.get("overall_status") == "complete"
+            or waited >= timeout_seconds
+        ):
+            return {**result, "async_id": async_id}
+        await asyncio.sleep(poll_seconds)
+        waited += poll_seconds
+
+
+def per_machine(
+    response: dict[str, Any], json_result: bool
+) -> dict[str, dict[str, Any]]:
+    """Each machine's answer in a per-machine response, by machine name.
+
+    Every expected machine has an entry: one that has not answered is
+    ``{"status": "no result"}``, since silence is not "found nothing".  An
+    answer is ``{"status", "truncated", "error", "return_code", "result"}``,
+    with *result* parsed from JSON when *json_result* (a grep for whole
+    records, a log list).  A file that is not there is a ``failed`` status
+    whose error says "No such file or directory".
+    """
+    data = response.get("data") or {}
+    rows = {row.get("machine_name"): row for row in data.get("results") or []}
+    out: dict[str, dict[str, Any]] = {}
+    for machine in dict.fromkeys([*(data.get("expected_machines") or []), *rows]):
+        row = rows.get(machine)
+        if row is None:
+            out[machine] = {"status": "no result"}
+            continue
+        result = row.get("result")
+        if json_result and result:
+            result = json.loads(result)
+        out[machine] = {
+            "status": row.get("status"),
+            "truncated": bool(row.get("truncated")),
+            "error": row.get("error_msg"),
+            "return_code": row.get("return_code"),
+            "result": result,
+        }
+    return out
