@@ -939,8 +939,9 @@ class JunctionNode(BaseNode):
             "``activateJob`` is called only by ``TaskBuffer.activateJobs``, and "
             "what moves a job to ``activated`` is who calls that: the setupper, "
             "the activator, the dataset manager.  Placed by what the receiver "
-            "is declared to be (``calls.Calls.callers``), not by name.  Capped: "
-            "a last entry ``… N more`` says how many were not listed."
+            "is declared to be (``calls.Calls.callers``), not by name.  Every "
+            "chain is listed, so a function found in none does not call the "
+            "owner within these two hops; one further out is not listed."
         ),
     )
     joined_entities: list[str] = Field(

@@ -1386,6 +1386,20 @@ def test_a_function_is_said_to_be_called_through_the_door_that_forwards_to_it(tm
     ]
 
 
+def test_every_chain_into_a_function_is_listed_however_many_there_are(tmp_path):
+    """A function not in the list does not call it within two hops: a list cut short could not say that."""
+    callers = "".join(f"def f{i}():\n    g()\n\ndef h{i}():\n    f{i}()\n\n" for i in range(20))
+    calls = _calls(_tree(tmp_path, m=f"def g():\n    pass\n\n{callers}"))
+    g = calls_mod.Target("pkg/m.py", _function(calls, "m", "g"), None)
+
+    chains = calls.called_from(g)
+
+    assert len(chains) == 20
+    # The last in order, which a list of 16 left out.
+    assert chains[-1] == "pkg/m.py:98 -> pkg/m.py:95"
+    assert not [chain for chain in chains if chain.startswith("…")]
+
+
 def test_an_interface_method_calling_the_far_system_is_an_outbound_boundary(tmp_path, monkeypatch):
     from bamboo.codemap.panda.recognizers import outbound
 

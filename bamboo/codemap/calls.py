@@ -870,13 +870,12 @@ class Calls:
         why = self.opened(site)
         return f"{site.file}:{site.call.lineno}" + (f" (placed open -- {why})" if why else "")
 
-    #: How many chains ``called_from`` lists before it counts the rest.
-    CALLED_FROM = 16
-
     def called_from(self, target: Target) -> list[str]:
         """``file:line`` of each call placed at *target*, and one hop out where its caller is called.
 
-        Sorted, capped at :data:`CALLED_FROM` with a closing ``… N more``.
+        Sorted, and every chain listed: a reader asking whether a function
+        calls *target* within these two hops takes one it does not find as
+        no, which a list cut short cannot say.
         A hop placed open says so after its ``file:line`` (:meth:`opened`).
         A call in a module's body is the end of its chain.
         """
@@ -892,10 +891,7 @@ class Calls:
                 chains.extend(f"{self.hop(one)} -> {at}" for one in outer)
             else:
                 chains.append(at)
-        chains = sorted(set(chains))
-        if len(chains) > self.CALLED_FROM:
-            return [*chains[: self.CALLED_FROM], f"… {len(chains) - self.CALLED_FROM} more"]
-        return chains
+        return sorted(set(chains))
 
     #: How many calls out a constant is looked for.
     CONSTANT_HOPS = 3
