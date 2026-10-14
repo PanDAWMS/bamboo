@@ -2,15 +2,25 @@
 
 No API is called: the same record, pin and dump give the same file.  The
 sections are the ones the querier reads (``rerun.py``): ``classes``,
-``spellings``, ``rows`` and ``after``, ``statuslog``, and for a job ``files`` and
-``collections``, for a task ``job_rows``, ``job_statuslog`` and ``counts``.
+``spellings``, ``rows`` and ``after``, ``statuslog``, and for a job ``files``,
+``collections`` and ``datasets``, for a task ``job_rows``, ``job_statuslog``
+and ``counts``.
 
-**Spelling.**  R answers with lower-case names; the querier reads a row by the
-spec class's attribute (``PandaID``, ``specialHandling``).  The class's column
-list in PanDA's source -- ``_attributes``, or ``attributes`` in JEDI's specs --
-gives the spelling (:func:`column_spellings`), read from the pin with ``ast``.
-A column the list does not have is kept in lower case and counted in
-``about``.
+**Columns.**  The querier reads a row by the spec class's attribute
+(``PandaID``, ``specialHandling``).  The class's column list in PanDA's source
+-- ``_attributes``, or ``attributes`` in JEDI's specs -- gives the columns and
+their spelling (:func:`column_spellings`), read from the pin with ``ast``.  A
+key's row and a job's files are kept to those columns: what else an endpoint
+adds (a task's progress, its parameters) is left out and named in ``about``,
+and a task's ``splitRule`` is the column as stored (``split_rule_raw``), not
+the server's decoding of it.  The task's job rows keep R's lower-case names,
+as the querier reads them.
+
+**When.**  The endpoints that read a row by its key say no time of the
+database's, so each value's source says when it was asked, on this machine's
+clock; R's and H's say ``as_of``, the database's.  A dataset's
+``creationdate`` is on neither: the inserting machine wrote it from its own
+clock.
 
 **Times.**  The querier compares a history's times with log stamps as text
 (``rerun.py`` S5, ``time_extended < when``), so ``time`` is
@@ -38,10 +48,11 @@ from typing import Any
 
 from bamboo.scripts.panda.fieldtest import after as A
 from bamboo.scripts.panda.fieldtest.fetch import (
-    ARCHIVE,
+    FILES,
     KEY,
-    LIVE,
+    job_of,
     rows_of,
+    task_of,
     when,
 )
 
@@ -50,13 +61,23 @@ ENTITY = {"JobSpec": "job", "FileSpec": "file", "JediTaskSpec": "task"}
 SPELLINGS = {"job": ["job", "self.job"], "file": ["file"], "task": []}
 #: the querier's (rerun.py FINAL_STATES): a job leaves its active tables at these
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
-#: the tables a class's row is taken from first: the live ones before the archive
-ORDER = {cls: (*LIVE[cls], *([ARCHIVE[cls]] if cls in ARCHIVE else [])) for cls in LIVE}
+#: the endpoint a key's row comes from
+ENDPOINT = {
+    "JobSpec": "job/get_description_incl_archive",
+    "JediTaskSpec": "task/get_detailed_info",
+}
+#: where task/get_detailed_info holds the splitRule column as stored
+SPLIT_RULE_RAW = "split_rule_raw"
+#: the class of the server's Datasets rows; the querier binds them by name, not as an entity.
+#: An input or output dataset has a row in JEDI_Datasets (JediDatasetSpec) too, made by
+#: another process at another time, so the section says which class its rows are
+DATASET = "DatasetSpec"
+DATASET_TABLE = "ATLAS_PANDA.Datasets"
 DECLARED = re.compile(r"^(?P<cls>\w+) \((?P<path>[^)]+)\)$")
 
 
 def column_spellings(
-    pin: Path, dump: Path, classes: tuple[str, ...] = tuple(ENTITY)
+    pin: Path, dump: Path, classes: tuple[str, ...] = (*ENTITY, DATASET)
 ) -> dict[str, dict[str, str]]:
     """class -> {lower-case column: the class's spelling}, from the column list in each class's source.
 
@@ -97,16 +118,18 @@ def stamp(t: datetime.datetime | None) -> str:
 
 
 class Laid:
-    """The record's answers by role, and why any is incomplete."""
+    """R's answers by role and why any is incomplete, and every other part's response."""
 
     def __init__(self, record: dict) -> None:
         self.rows: dict[str, list[tuple[str, dict]]] = {}
         self.incomplete: dict[str, list[str]] = {}
         self.as_of: dict[str, str] = {}
-        self.histories: dict[str, dict] = {}
+        self.responses: dict[str, dict] = {}
+        self.requests: dict[str, dict] = {}
         for step in record["steps"]:
             if step["part"] != "db_read":
-                self.histories[step["part"]] = step["response"]
+                self.responses[step["part"]] = step["response"]
+                self.requests[step["part"]] = step["request"]
                 continue
             response = step["response"]
             data = response.get("data") if response.get("success") else None
@@ -139,13 +162,29 @@ class Laid:
         return role in self.rows and role not in self.incomplete
 
 
-def spelled(row: dict, spelling: dict[str, str], unknown: set[str]) -> dict:
+def columns(answer: dict, spelling: dict[str, str], other: set[str]) -> dict:
+    """The answer's values of the class's columns, spelled as the class spells them; any other key goes to *other*."""
     out = {}
-    for col, value in row.items():
-        if col not in spelling:
-            unknown.add(col)
-        out[spelling.get(col, col)] = text(value)
+    for key, value in answer.items():
+        if (col := spelling.get(key.lower())) is None:
+            other.add(key)
+        else:
+            out[col] = text(value)
     return out
+
+
+def key_row(laid: Laid, cls: str, key: str) -> tuple[dict | None, str, str]:
+    """The answer for the key's row, as it came, and the source of its values; None and why when there is none."""
+    response = laid.responses.get("jobs" if cls == "JobSpec" else "task")
+    found, why = job_of(response, key) if cls == "JobSpec" else task_of(response)
+    if found is None:
+        return None, "", why
+    if cls == "JediTaskSpec":
+        found = {k: v for k, v in found.items() if k != SPLIT_RULE_RAW} | {
+            "splitRule": found.get(SPLIT_RULE_RAW)
+        }
+    source = f"{ENDPOINT[cls]}, asked at {response['asked_at']} on this machine's clock (UTC)"
+    return found, source, ""
 
 
 def states_of(response: dict, kind: str) -> tuple[list[dict] | None, str]:
@@ -229,11 +268,11 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
     entity = ENTITY[cls]
     laid = Laid(record)
     left_out: list[str] = []
-    unknown: set[str] = set()
+    other: set[str] = set()
     out: dict[str, Any] = {
         "about": (
             f"Built by bamboo.scripts.panda.fieldtest.rows from a fetch record ({record['server']}, {record['started']}) "
-            f"for {cls} {q['key']}.  Every value is the row as it was at the answer's as_of."
+            f"for {cls} {q['key']}.  Every value is as it was at the time its source names."
         ),
         "classes": {"about": "The class each row is.", entity: cls},
         "spellings": {
@@ -248,40 +287,33 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
     # the history of the key, first: the split of the row needs it
     history_part = "job_history" if cls == "JobSpec" else "task_history"
     states, history_source = states_of(
-        laid.histories.get(history_part), "job" if cls == "JobSpec" else "task"
+        laid.responses.get(history_part), "job" if cls == "JobSpec" else "task"
     )
     if states is None:
         left_out.append(f"statuslog: {history_source}")
     else:
         out["statuslog"] = {
             "source": history_source,
-            **bounds_of(laid.histories[history_part]),
+            **bounds_of(laid.responses[history_part]),
             "states": [{k: v for k, v in s.items() if k != "pandaid"} for s in states],
         }
 
-    # the key's row, from the live-most table that has it
-    found = sorted(
-        laid.rows.get("row", []),
-        key=lambda tr: ORDER[cls].index(tr[0]) if tr[0] in ORDER[cls] else 99,
-    )
-    if not laid.complete("row") and not found:
-        left_out.append(f"rows.{entity}: {laid.incomplete.get('row')}")
-    elif not found:
+    raw, source, why = key_row(laid, cls, q["key"])
+    if raw is None:
         left_out.append(
-            f"rows.{entity}: no row of {KEY[cls]}={q['key']} in {list(ORDER[cls])}"
+            f"rows.{entity}{', files' if cls == 'JobSpec' else ''}: {KEY[cls]}={q['key']}: {why}"
         )
     else:
-        table, raw = found[0]
-        row = spelled(raw, spellings[cls], unknown)
-        source = f"R as of {laid.as_of.get('row')}, {table}"
-        key = KEY[cls]
+        row = columns(
+            {k: v for k, v in raw.items() if k != FILES}, spellings[cls], other
+        )
         kept, later, why = A.split(
             row,
-            key,
+            KEY[cls],
             q["kind"],
             q["observed"],
             states or [],
-            when(raw.get("modificationtime")),
+            when(raw.get("modificationTime")),
         )
         out["rows"] = {
             entity: {c: {"value": v, "source": source} for c, v in kept.items()}
@@ -290,27 +322,25 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
             out["after"] = {"source": f"{source}; {why}", **later}
 
     if cls == "JobSpec":
-        if laid.complete("files"):
-            src = f"R as of {laid.as_of.get('files')}"
+        if raw is not None:
             out["files"] = [
                 {
-                    c: {"value": v, "source": f"{src}, {t}"}
-                    for c, v in spelled(r, spellings["FileSpec"], unknown).items()
+                    c: {"value": v, "source": source}
+                    for c, v in columns(f, spellings["FileSpec"], other).items()
                 }
-                for t, r in laid.rows["files"]
+                for f in raw.get(FILES) or []
             ]
             out["collections"] = {
                 "about": "JobSpec.Files holds the job's FileSpec rows (PanDA's schema).",
                 "job.Files": {"rows": "files", "entity": "file"},
             }
-        else:
-            left_out.append(f"files: {laid.incomplete.get('files', 'not asked')}")
+            _datasets_section(out, laid, spellings[DATASET], other, left_out)
     else:
         _task_sections(out, laid, left_out)
 
-    if unknown:
+    if other:
         out["about"] += (
-            f"  {len(unknown)} column(s) not in the class's column list, kept in lower case: {sorted(unknown)}."
+            f"  {len(other)} key(s) of the answers that are not columns of their class, left out: {sorted(other)}."
         )
     if left_out:
         out["about"] += "  Left out: " + "; ".join(left_out) + "."
@@ -318,13 +348,24 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
 
 
 def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
+    # the counts are read apart from the rows, so neither waits on the other
+    if laid.complete("job_counts"):
+        out["counts"] = {
+            "source": f"R as of {laid.as_of.get('job_counts')}, every job of the task by table and jobStatus",
+            "rows": [
+                {"table": t, "jobStatus": r["jobstatus"], "n": r["count(*)"]}
+                for t, r in laid.rows["job_counts"]
+            ],
+        }
+    else:
+        left_out.append(f"counts: {laid.incomplete.get('job_counts', 'not asked')}")
     if not laid.complete("job_rows"):
         left_out.append(
             f"job_rows, job_statuslog: {laid.incomplete.get('job_rows', 'not asked')}"
         )
         return
     states, source = (
-        states_of(laid.histories.get("job_history"), "job")
+        states_of(laid.responses.get("job_history"), "job")
         if laid.rows["job_rows"]
         else ([], "no jobs")
     )
@@ -350,16 +391,45 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
     }
     out["job_statuslog"] = {
         "source": source,
-        **(bounds_of(laid.histories["job_history"]) if laid.rows["job_rows"] else {}),
+        **(bounds_of(laid.responses["job_history"]) if laid.rows["job_rows"] else {}),
         "by_pandaid": by_pandaid,
     }
-    if laid.complete("job_counts"):
-        out["counts"] = {
-            "source": f"R as of {laid.as_of.get('job_counts')}, every job of the task by table and jobStatus",
-            "rows": [
-                {"table": t, "jobStatus": r["jobstatus"], "n": r["count(*)"]}
-                for t, r in laid.rows["job_counts"]
-            ],
-        }
-    else:
-        left_out.append(f"counts: {laid.incomplete.get('job_counts', 'not asked')}")
+
+
+def _datasets_section(
+    out: dict,
+    laid: Laid,
+    spelling: dict[str, str],
+    other: set[str],
+    left_out: list[str],
+) -> None:
+    """The server's rows of every dataset the job's rows name, and the names asked.
+
+    A name asked with no row is not in the table now; one last modified
+    before ``retained_from`` may have been, in a partition since dropped.  The
+    rows are DatasetSpec's only: an input or output dataset's name has a
+    JediDatasetSpec row as well, in JEDI_Datasets, which is not read here.
+    """
+    response = laid.responses.get("datasets")
+    if response is None:
+        left_out.append("datasets: the job's rows name no dataset")
+        return
+    if not response.get("success"):
+        left_out.append(
+            f"datasets: {response.get('message') or response.get('data') or 'no answer'}"
+        )
+        return
+    out["datasets"] = {
+        "source": (
+            "job/get_datasets_by_name: every name in the job's and its files' "
+            "prodDBlock, dispatchDBlock, destinationDBlock and dataset; as_of and "
+            "retained_from (of modificationdate) are the database's clock, but "
+            "creationdate and modificationdate are the clock of the machine that "
+            "inserted the row (insertDataset sets both to naive_utcnow())"
+        ),
+        "class": DATASET,
+        "table": DATASET_TABLE,
+        **bounds_of(response),
+        "asked": laid.requests["datasets"]["names"],
+        "rows": [columns(r, spelling, other) for r in response["rows"]],
+    }

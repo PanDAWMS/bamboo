@@ -1,9 +1,11 @@
 """Field tests -- the rows a case's key leads to, fetched and laid out as the querier's rows file.
 
-A stand-in PanDA answers R and H the way the server documents its answers
-(pandaserver/asyncprocess/db_read_handlers.py, api/v1/job_api.py and
-task_api.py get_status_history): R rows keyed by lower-case names, times as
-``{"__datetime__": iso}``, H rows in the columns' own spelling.
+A stand-in PanDA answers the way the server documents its answers
+(pandaserver/asyncprocess/db_read_handlers.py, api/v1/job_api.py
+get_description_incl_archive, get_datasets_by_name and get_status_history,
+task_api.py get_detailed_info): R rows keyed by lower-case names, times as
+``{"__datetime__": iso}``, a key's row, H rows and dataset rows in the
+columns' own spelling.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from bamboo.scripts.panda.fieldtest import fetch as FE
 from bamboo.scripts.panda.fieldtest import rows as RB
 
 AS_OF = "2026-10-13T10:00:00"
+ASKED = "2026-10-13 10:00:05"
 
 
 def T(text: str) -> dict:
@@ -42,7 +45,7 @@ def _holds(row: dict, cond: list) -> bool:
 
 
 class FakePanda:
-    """Tables of lower-case rows, and status logs, answered as the server would."""
+    """Tables of lower-case rows, rows by key, and status logs, answered as the server would."""
 
     def __init__(
         self,
@@ -50,6 +53,9 @@ class FakePanda:
         job_log: list[dict],
         task_log: list[dict],
         truncate=(),
+        jobs: dict | None = None,
+        task: dict | None = None,
+        datasets: list[dict] = (),
     ):
         self.tables, self.job_log, self.task_log, self.truncate = (
             tables,
@@ -57,14 +63,53 @@ class FakePanda:
             task_log,
             set(truncate),
         )
+        self.jobs, self.task_row, self.dataset_rows = jobs or {}, task, list(datasets)
         self.calls: list[tuple[str, object]] = []
 
     def parts(self) -> FE.Parts:
         return FE.Parts(
             db_read=self.db_read,
+            jobs=self.get_jobs,
+            task=self.get_task,
+            datasets=self.get_datasets,
             job_history=self.job_history,
             task_history=self.task_history,
         )
+
+    async def get_jobs(self, job_ids):
+        self.calls.append(("jobs", job_ids))
+        return {
+            "success": True,
+            "jobs": {i: self.jobs.get(i) for i in job_ids},
+            "asked_at": ASKED,
+            "calls": [],
+        }
+
+    async def get_task(self, task_id):
+        self.calls.append(("task", task_id))
+        if self.task_row is None:
+            return {
+                "success": False,
+                "message": "Task not found or error retrieving task info",
+                "data": None,
+                "asked_at": ASKED,
+            }
+        return {
+            "success": True,
+            "message": "",
+            "data": self.task_row,
+            "asked_at": ASKED,
+        }
+
+    async def get_datasets(self, names):
+        self.calls.append(("datasets", names))
+        return {
+            "success": True,
+            "rows": [r for r in self.dataset_rows if r["name"] in names],
+            "as_of": T(AS_OF),
+            "retained_from": T("2026-08-01T00:00:00"),
+            "calls": [],
+        }
 
     async def db_read(self, queries):
         self.calls.append(("db_read", queries))
@@ -147,35 +192,46 @@ def _job_state(pid, status, at):
 
 
 PID = 7353014619
-JOB_ROW = {
-    "pandaid": PID,
-    "jobstatus": "failed",
-    "specialhandling": "ddm:rucio",
-    "creationtime": T("2026-10-07T13:06:45"),
-    "modificationtime": T("2026-10-07T13:08:03"),
-    "ddmerrorcode": 200,
-    "newcolumn": 1,
+FILES = [
+    {
+        "PandaID": PID,
+        "lfn": "a.log.tgz",
+        "type": "log",
+        "dataset": "user.x.log",
+        "dispatchDBlock": None,
+        "destinationDBlock": "user.x_sub1",
+    },
+    {
+        "PandaID": PID,
+        "lfn": "in.root",
+        "type": "input",
+        "dataset": "data.in",
+        "dispatchDBlock": "panda.dis1",
+        "destinationDBlock": None,
+    },
+]
+#: the job as job/get_description_incl_archive answers it: every column by the class's name, and its files
+JOB = {
+    "PandaID": PID,
+    "jobStatus": "failed",
+    "specialHandling": "ddm:rucio",
+    "creationTime": T("2026-10-07T13:06:45"),
+    "modificationTime": T("2026-10-07T13:08:03"),
+    "ddmErrorCode": 200,
+    "prodDBlock": "data.in",
+    "destinationDBlock": "user.x_sub1",
+    "Files": FILES,
 }
+DATASETS = [
+    {"name": "user.x_sub1", "creationdate": T("2026-10-07T13:06:46"), "subType": "sub"},
+    {"name": "panda.dis1", "creationdate": T("2026-10-07T13:06:47"), "subType": "dis"},
+]
 JOB_LOG = [
     _job_state(PID, "pending", "2026-10-07T13:06:45.443717"),
     _job_state(
         PID, "activated", "2026-10-07T13:06:46"
     ),  # no microseconds: still written with six digits
     _job_state(PID, "failed", "2026-10-07T13:08:03.877599"),
-]
-FILES = [
-    {
-        "pandaid": PID,
-        "lfn": "a.log.tgz",
-        "type": "log",
-        "destinationdblock": "user.x_sub1",
-    },
-    {
-        "pandaid": PID,
-        "lfn": "b.root",
-        "type": "output",
-        "destinationdblock": "user.x_sub1",
-    },
 ]
 SPELLINGS = {
     "JobSpec": {
@@ -185,11 +241,15 @@ SPELLINGS = {
         "creationtime": "creationTime",
         "modificationtime": "modificationTime",
         "ddmerrorcode": "ddmErrorCode",
+        "proddblock": "prodDBlock",
+        "destinationdblock": "destinationDBlock",
     },
     "FileSpec": {
         "pandaid": "PandaID",
         "lfn": "lfn",
         "type": "type",
+        "dataset": "dataset",
+        "dispatchdblock": "dispatchDBlock",
         "destinationdblock": "destinationDBlock",
     },
     "JediTaskSpec": {
@@ -197,6 +257,12 @@ SPELLINGS = {
         "status": "status",
         "creationdate": "creationDate",
         "modificationtime": "modificationTime",
+        "splitrule": "splitRule",
+    },
+    "DatasetSpec": {
+        "name": "name",
+        "creationdate": "creationdate",
+        "subtype": "subType",
     },
 }
 JOB_Q = {
@@ -207,6 +273,10 @@ JOB_Q = {
 }
 
 
+def _job_panda(job: dict | None = JOB) -> FakePanda:
+    return FakePanda({}, JOB_LOG, [], jobs={PID: job}, datasets=DATASETS)
+
+
 async def _fetch(panda: FakePanda, question: dict) -> dict:
     return await FE.fetch(question, panda.parts())
 
@@ -214,42 +284,42 @@ async def _fetch(panda: FakePanda, question: dict) -> dict:
 # ------------------------------------------------------------------ a job's key
 
 
-async def test_a_job_found_live_is_not_asked_of_the_archive_and_its_history_starts_at_its_creation():
-    panda = FakePanda({"jobsArchived4": [JOB_ROW], "filesTable4": FILES}, JOB_LOG, [])
+async def test_a_job_is_asked_by_its_key_then_the_datasets_its_rows_name_then_its_history_from_its_creation():
+    panda = _job_panda()
     rec = await _fetch(panda, JOB_Q)
-    assert [c[0] for c in panda.calls] == ["db_read", "job_history"]
-    first = panda.calls[0][1]
-    assert first[0]["tables"] == ["jobsDefined4", "jobsActive4", "jobsArchived4"]
-    assert first[0]["where"] == [["PandaID", "=", PID]] and isinstance(
-        first[0]["where"][0][2], int
-    )
-    assert first[1]["tables"] == ["filesTable4"]
-    assert panda.calls[1][1] == {"job_ids": [PID], "since": "2026-10-07 13:06:45"}
+    assert [c[0] for c in panda.calls] == ["jobs", "datasets", "job_history"]
+    assert panda.calls[0][1] == [PID] and isinstance(panda.calls[0][1][0], int)
+    # every name the job's row and its files hold, once each; an empty column names none
+    assert panda.calls[1][1] == ["data.in", "panda.dis1", "user.x.log", "user.x_sub1"]
+    assert panda.calls[2][1] == {"job_ids": [PID], "since": "2026-10-07 13:06:45"}
     assert rec["key_class"] == "JobSpec" and [s["part"] for s in rec["steps"]] == [
-        "db_read",
+        "jobs",
+        "datasets",
         "job_history",
     ]
-    assert rec["steps"][0]["roles"] == ["row", "files"]
 
 
-async def test_a_job_only_in_the_archive_is_asked_there_from_100_days_before_as_of():
-    arch_row = JOB_ROW | {"creationtime": T("2026-08-01T00:00:00")}
-    panda = FakePanda(
-        {"jobsArchived": [arch_row], "filesTable_ARCH": FILES}, JOB_LOG, []
-    )
-    await _fetch(panda, JOB_Q)
-    archive = panda.calls[1][1]
-    assert [q["tables"] for q in archive] == [["jobsArchived"], ["filesTable_ARCH"]]
-    assert archive[0]["where"][1] == ["modificationTime", ">=", "2026-07-05T10:00:00"]
-    assert panda.calls[2] == (
-        "job_history",
-        {"job_ids": [PID], "since": "2026-08-01 00:00:00"},
-    )
+async def test_a_job_not_found_or_not_read_is_left_out_with_why_and_its_history_asked_whole():
+    for job, why in (
+        (None, "in no live table, nor in the archive's last 90 days"),
+        ({"error": "ORA-03113"}, "the database failed reading it: ORA-03113"),
+    ):
+        panda = _job_panda(job)
+        out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
+        # no creation time to start the history at, and no file to name a dataset
+        assert [c[0] for c in panda.calls] == ["jobs", "job_history"]
+        assert panda.calls[1][1] == {"job_ids": [PID], "since": None}
+        assert "rows" not in out and "files" not in out and "collections" not in out
+        assert f"rows.job, files: PandaID={PID}: {why}" in out["about"]
+        assert [s["status"] for s in out["statuslog"]["states"]] == [
+            "pending",
+            "activated",
+            "failed",
+        ]
 
 
-async def test_a_jobs_rows_file_spells_its_columns_formats_its_times_and_keeps_only_the_key_before_the_decision():
-    panda = FakePanda({"jobsArchived4": [JOB_ROW], "filesTable4": FILES}, JOB_LOG, [])
-    out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
+async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_keeps_only_the_key_before_the_decision():
+    out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS)
     assert out["classes"]["job"] == "JobSpec" and out["spellings"]["job"] == [
         "job",
         "self.job",
@@ -259,10 +329,14 @@ async def test_a_jobs_rows_file_spells_its_columns_formats_its_times_and_keeps_o
         list(out["rows"]["job"]) == ["PandaID"]
         and out["rows"]["job"]["PandaID"]["value"] == PID
     )
+    source = "job/get_description_incl_archive, asked at 2026-10-13 10:00:05 on this machine's clock (UTC)"
+    assert out["rows"]["job"]["PandaID"]["source"] == source
     assert (
         out["after"]["specialHandling"] == "ddm:rucio"
         and out["after"]["modificationTime"] == "2026-10-07 13:08:03"
     )
+    assert "Files" not in out["after"]
+    assert out["after"]["source"].startswith(source + "; ")
     assert "decision at 2026-10-07 13:08:03.877599" in out["after"]["source"]
     states = out["statuslog"]["states"]
     assert [s["status"] for s in states] == ["pending", "activated", "failed"]
@@ -275,10 +349,84 @@ async def test_a_jobs_rows_file_spells_its_columns_formats_its_times_and_keeps_o
         states[1]["time"] == "2026-10-07 13:06:46"
         and states[1]["time_extended"] == "2026-10-07 13:06:46.000000"
     )
-    assert [f["lfn"]["value"] for f in out["files"]] == ["a.log.tgz", "b.root"]
-    assert out["files"][0]["destinationDBlock"]["value"] == "user.x_sub1"
+    assert [f["lfn"]["value"] for f in out["files"]] == ["a.log.tgz", "in.root"]
+    assert out["files"][0]["destinationDBlock"] == {
+        "value": "user.x_sub1",
+        "source": source,
+    }
     assert out["collections"]["job.Files"] == {"rows": "files", "entity": "file"}
-    assert "newcolumn" in out["about"] and out["after"]["newcolumn"] == 1
+    # every name asked, so that a name with no row reads as not in the table rather than not asked
+    datasets = out["datasets"]
+    # the same name can be a JediDatasetSpec in JEDI_Datasets too: the section says whose rows these are
+    assert (datasets["class"], datasets["table"]) == (
+        "DatasetSpec",
+        "ATLAS_PANDA.Datasets",
+    )
+    assert datasets["asked"] == ["data.in", "panda.dis1", "user.x.log", "user.x_sub1"]
+    assert datasets["rows"] == [
+        {
+            "name": "user.x_sub1",
+            "creationdate": "2026-10-07 13:06:46",
+            "subType": "sub",
+        },
+        {"name": "panda.dis1", "creationdate": "2026-10-07 13:06:47", "subType": "dis"},
+    ]
+    assert (datasets["as_of"], datasets["retained_from"]) == (
+        "2026-10-13 10:00:00",
+        "2026-08-01 00:00:00",
+    )
+    assert "the clock of the machine that inserted the row" in datasets["source"]
+    assert "not columns" not in out["about"] and "datasets:" not in out["about"]
+
+
+async def test_a_refused_dataset_answer_leaves_the_datasets_out_and_says_why():
+    panda = _job_panda()
+
+    async def refused(names):
+        return {
+            "success": False,
+            "message": "",
+            "data": {
+                "rejected": "probe_budget",
+                "keys": 4,
+                "partitions": 5,
+                "budget": 1,
+            },
+            "calls": [],
+        }
+
+    panda_parts = panda.parts()
+    panda_parts.datasets = refused
+    out = RB.build(await FE.fetch(JOB_Q, panda_parts), SPELLINGS)
+    assert "datasets" not in out and "files" in out
+    assert "datasets: {'rejected': 'probe_budget'" in out["about"]
+
+
+async def test_a_jobs_files_hold_only_their_class_columns():
+    job = JOB | {"Files": [FILES[0] | {"modificationTime": T("2026-10-07T13:08:03")}]}
+    out = RB.build(await _fetch(_job_panda(job), JOB_Q), SPELLINGS)
+    assert "modificationTime" not in out["files"][0]
+    assert (
+        "1 key(s) of the answers that are not columns of their class, left out: ['modificationTime']"
+        in out["about"]
+    )
+
+
+async def test_a_failed_history_leaves_the_statuslog_out_rather_than_empty():
+    panda = _job_panda()
+
+    async def refused(job_ids, since=None, until=None):
+        return {
+            "success": False,
+            "message": "over budget",
+            "data": {"rejected": "probe_budget"},
+            "calls": [],
+        }
+
+    panda_parts = panda.parts()
+    panda_parts.job_history = refused
+    out = RB.build(await FE.fetch(JOB_Q, panda_parts), SPELLINGS)
+    assert "statuslog" not in out and "statuslog: over budget" in out["about"]
 
 
 def test_a_historys_span_is_cut_to_seconds_without_claiming_a_second_it_may_not_hold():
@@ -315,35 +463,6 @@ def test_a_historys_span_is_only_what_was_asked():
     assert unknown["retained_from"] is None
 
 
-async def test_a_cut_answer_is_left_out_and_said():
-    panda = FakePanda(
-        {"jobsArchived4": [JOB_ROW], "filesTable4": FILES},
-        JOB_LOG,
-        [],
-        truncate={"filesTable4"},
-    )
-    out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
-    assert "files" not in out and "collections" not in out
-    assert "files: ['truncated']" in out["about"]
-
-
-async def test_a_failed_history_leaves_the_statuslog_out_rather_than_empty():
-    panda = FakePanda({"jobsArchived4": [JOB_ROW], "filesTable4": FILES}, JOB_LOG, [])
-
-    async def refused(job_ids, since=None, until=None):
-        return {
-            "success": False,
-            "message": "over budget",
-            "data": {"rejected": "probe_budget"},
-            "calls": [],
-        }
-
-    panda_parts = panda.parts()
-    panda_parts.job_history = refused
-    out = RB.build(await FE.fetch(JOB_Q, panda_parts), SPELLINGS)
-    assert "statuslog" not in out and "statuslog: over budget" in out["about"]
-
-
 # ------------------------------------------------------------------ a task's key
 
 TID = 52757505
@@ -355,7 +474,20 @@ TASK_Q = {
 }
 
 
-def _task_panda() -> FakePanda:
+#: the task as task/get_detailed_info answers it: its columns, splitRule decoded, and keys that are not columns
+TASK = {
+    "jediTaskID": TID,
+    "status": "finished",
+    "creationDate": T("2026-09-27T06:50:00"),
+    "modificationTime": T("2026-09-29T09:08:56"),
+    "splitRule": "useScout=will_update_requirements,scoutSuccessRate=5",
+    "split_rule_raw": "US=2,SS=5",
+    "nFiles": 2,
+    "raw_task_params": "{}",
+}
+
+
+def _task_panda(task: dict | None = TASK, truncate=()) -> FakePanda:
     job = {
         "jeditaskid": TID,
         "jobsubstatus": None,
@@ -378,14 +510,6 @@ def _task_panda() -> FakePanda:
         "creationtime": T("2026-09-27T07:08:40"),
     }
     tables = {
-        "JEDI_Tasks": [
-            {
-                "jeditaskid": TID,
-                "status": "finished",
-                "creationdate": T("2026-09-27T06:50:00"),
-                "modificationtime": T("2026-09-29T09:08:56"),
-            }
-        ],
         "jobsArchived4": [j1, j2],
         "jobsArchived": [j1 | {"modificationtime": T("2026-10-01T00:00:00")}],
     }
@@ -413,28 +537,55 @@ def _task_panda() -> FakePanda:
             "reason": "soft finish by prodsys",
         },
     ]
-    return FakePanda(tables, job_log, task_log)
+    return FakePanda(tables, job_log, task_log, truncate=truncate, task=task)
 
 
-async def test_a_task_is_asked_its_jobs_in_every_table_and_their_histories_from_the_first_creation():
+async def test_a_task_is_asked_by_its_key_then_its_jobs_in_every_table_in_one_batch_and_their_histories_from_the_first_creation():
     panda = _task_panda()
     await _fetch(panda, TASK_Q)
     kinds = [c[0] for c in panda.calls]
-    assert kinds == ["db_read", "db_read", "task_history", "job_history"]
-    first, archive = panda.calls[0][1], panda.calls[1][1]
-    assert [q["tables"] for q in first] == [["JEDI_Tasks"]] + [
-        ["jobsDefined4", "jobsActive4", "jobsArchived4"]
-    ] * 2
-    assert first[2]["group_by"] == ["jobStatus"] and first[2]["aggregates"] == [
+    assert kinds == ["task", "db_read", "task_history", "job_history"]
+    assert panda.calls[0][1] == TID
+    batch = panda.calls[1][1]
+    live = ["jobsDefined4", "jobsActive4", "jobsArchived4"]
+    assert [q["tables"] for q in batch] == [
+        live,
+        live,
+        ["jobsArchived"],
+        ["jobsArchived"],
+    ]
+    assert batch[1]["group_by"] == ["jobStatus"] and batch[3]["aggregates"] == [
         ["count", "*"]
     ]
     # the archive from the task's creation less a day
-    assert archive[0]["tables"] == ["jobsArchived"] and archive[0]["where"][1] == [
+    assert batch[2]["where"][1] == ["modificationTime", ">=", "2026-09-26T06:50:00"]
+    assert panda.calls[3][1] == {"job_ids": [11, 12], "since": "2026-09-27 07:08:32"}
+
+
+async def test_a_task_not_answered_bounds_the_archive_from_100_days_before_it_was_asked():
+    panda = _task_panda(task=None)
+    out = RB.build(await _fetch(panda, TASK_Q), SPELLINGS)
+    assert panda.calls[1][1][2]["where"][1] == [
         "modificationTime",
         ">=",
-        "2026-09-26T06:50:00",
+        "2026-07-05T10:00:05",
     ]
-    assert panda.calls[3][1] == {"job_ids": [11, 12], "since": "2026-09-27 07:08:32"}
+    assert "rows" not in out and "after" not in out
+    assert (
+        f"rows.task: jediTaskID={TID}: Task not found or error retrieving task info"
+        in out["about"]
+    )
+    # the task's jobs do not depend on its row
+    assert len(out["job_rows"]["rows"]) == 3
+
+
+async def test_a_cut_answer_is_left_out_and_said():
+    out = RB.build(
+        await _fetch(_task_panda(truncate={"jobsArchived"}), TASK_Q), SPELLINGS
+    )
+    assert "job_rows" not in out and "job_statuslog" not in out
+    assert "job_rows, job_statuslog: ['truncated']" in out["about"]
+    assert "counts: ['truncated']" in out["about"]
 
 
 async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
@@ -483,6 +634,16 @@ async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
     assert (
         list(out["rows"]["task"]) == ["jediTaskID"]
         and "no decision time" in out["after"]["source"]
+    )
+    assert out["after"]["source"].startswith(
+        "task/get_detailed_info, asked at 2026-10-13 10:00:05 on this machine's clock (UTC); "
+    )
+    # the column as stored, not the server's decoding; what is not a column is named, not kept
+    assert out["after"]["splitRule"] == "US=2,SS=5"
+    assert "split_rule_raw" not in out["after"] and "nFiles" not in out["after"]
+    assert (
+        "2 key(s) of the answers that are not columns of their class, left out: ['nFiles', 'raw_task_params']"
+        in out["about"]
     )
 
 
@@ -587,19 +748,16 @@ def test_a_key_of_a_class_with_no_plan_yet_is_refused():
 
 
 def test_the_fetch_record_holds_every_request_and_response(tmp_path):
-    rec = FE.asyncio.run(
-        FE.fetch(
-            JOB_Q,
-            FakePanda(
-                {"jobsArchived4": [JOB_ROW], "filesTable4": FILES}, JOB_LOG, []
-            ).parts(),
-        )
-    )
+    rec = FE.asyncio.run(FE.fetch(JOB_Q, _job_panda().parts()))
     path = tmp_path / "answers.json"
     path.write_text(json.dumps(rec))
     again = json.loads(Path(path).read_text())
+    # JSON spells the job's ID as a string; the rows file is the same
+    assert list(again["steps"][0]["response"]["jobs"]) == [str(PID)]
     assert RB.build(again, SPELLINGS) == RB.build(rec, SPELLINGS)
-    assert again["steps"][0]["request"]["queries"][0]["where"] == [
-        ["PandaID", "=", PID]
+    assert again["steps"][0]["request"] == {"job_ids": [PID]}
+    assert [r["name"] for r in again["steps"][1]["response"]["rows"]] == [
+        "user.x_sub1",
+        "panda.dis1",
     ]
-    assert again["steps"][1]["response"]["rows"][0]["jobStatus"] == "pending"
+    assert again["steps"][2]["response"]["rows"][0]["jobStatus"] == "pending"
