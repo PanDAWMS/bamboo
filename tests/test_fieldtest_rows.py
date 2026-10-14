@@ -47,6 +47,9 @@ def _holds(row: dict, cond: list) -> bool:
 class FakePanda:
     """Tables of lower-case rows, rows by key, and status logs, answered as the server would."""
 
+    #: the moment R gives a batch
+    read_as_of = AS_OF
+
     def __init__(
         self,
         tables: dict[str, list[dict]],
@@ -152,7 +155,7 @@ class FakePanda:
         return {
             "success": True,
             "message": "",
-            "data": {"as_of": T(AS_OF), "answers": answers},
+            "data": {"as_of": T(self.read_as_of), "answers": answers},
             "async_meta": {"status": "done"},
         }
 
@@ -589,7 +592,11 @@ async def test_a_cut_answer_is_left_out_and_said():
 
 
 async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
-    out = RB.build(await _fetch(_task_panda(), TASK_Q), SPELLINGS)
+    panda = _task_panda()
+    panda.read_as_of = "2026-10-13T10:00:00.900000"
+    out = RB.build(await _fetch(panda, TASK_Q), SPELLINGS)
+    # the moment R read the counts and the rows, cut down to its second
+    assert out["counts"]["as_of"] == out["job_rows"]["as_of"] == "2026-10-13 10:00:00"
     assert out["classes"]["task"] == "JediTaskSpec" and out["spellings"] == {
         "about": out["spellings"]["about"],
         "task": [],

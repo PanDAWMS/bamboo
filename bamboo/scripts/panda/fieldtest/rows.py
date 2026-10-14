@@ -28,6 +28,9 @@ clock.
 microseconds.  All are UTC, as the database gives them.  A history also says
 the span it is whole for, ``as_of`` and ``retained_from`` (:func:`bounds_of`),
 on the clock of its own times, so the querier can compare them as text too.
+A task's ``counts`` and ``job_rows`` say the moment R read them as ``as_of``,
+cut down to its second: R runs a batch's queries in one read-only transaction
+and gives its moment, on the database's clock in UTC (``db_read_handlers``).
 
 **What is left out.**  A section whose answer is not complete -- rejected,
 failed, past its deadline, truncated -- is left out, and ``about`` says why: a
@@ -111,6 +114,11 @@ def text(value: Any) -> Any:
     if t is None:
         return value
     return f"{t:%Y-%m-%d %H:%M:%S.%f}" if t.microsecond else f"{t:%Y-%m-%d %H:%M:%S}"
+
+
+def down_to_second(value: str | None) -> str | None:
+    """A time as :func:`text` writes it, cut down to its second: a moment claims no second it may not hold."""
+    return value[:19] if value else None
 
 
 def stamp(t: datetime.datetime | None) -> str:
@@ -352,6 +360,7 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
     if laid.complete("job_counts"):
         out["counts"] = {
             "source": f"R as of {laid.as_of.get('job_counts')}, every job of the task by table and jobStatus",
+            "as_of": down_to_second(laid.as_of.get("job_counts")),
             "rows": [
                 {"table": t, "jobStatus": r["jobstatus"], "n": r["count(*)"]}
                 for t, r in laid.rows["job_counts"]
@@ -387,6 +396,7 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
     out["job_rows"] = {
         "source": f"R as of {laid.as_of.get('job_rows')}, the jobs of the task in {sorted({t for t, _ in laid.rows['job_rows']})}; "
         "a PandaID in two tables is two rows",
+        "as_of": down_to_second(laid.as_of.get("job_rows")),
         "rows": rows,
     }
     out["job_statuslog"] = {
