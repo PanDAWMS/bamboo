@@ -18,9 +18,12 @@ as the querier reads them.
 
 **When.**  The endpoints that read a row by its key say no time of the
 database's, so each value's source says when it was asked, on this machine's
-clock; R's and H's say ``as_of``, the database's.  A dataset's
-``creationdate`` is on neither: the inserting machine wrote it from its own
-clock.
+clock, and its ``as_of`` is that moment cut down to its second: the row was
+read after it.  R's and H's ``as_of`` are the database's.  Every ``as_of``
+names its clock beside it, ``clock`` :data:`CLIENT` or :data:`DATABASE`, since
+the two differ and a value read by key is not read at a history's ``as_of``.
+A dataset's ``creationdate`` is on neither: the inserting machine wrote it from
+its own clock.
 
 **Times.**  The querier compares a history's times with log stamps as text
 (``rerun.py`` S5, ``time_extended < when``), so ``time`` is
@@ -64,6 +67,9 @@ ENTITY = {"JobSpec": "job", "FileSpec": "file", "JediTaskSpec": "task"}
 SPELLINGS = {"job": ["job", "self.job"], "file": ["file"], "task": []}
 #: the querier's (rerun.py FINAL_STATES): a job leaves its active tables at these
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
+#: the clock an ``as_of`` is on: the machine that called the API, or the database's
+CLIENT = "client"
+DATABASE = "database"
 #: the endpoint a key's row comes from
 ENDPOINT = {
     "JobSpec": "job/get_description_incl_archive",
@@ -181,18 +187,23 @@ def columns(answer: dict, spelling: dict[str, str], other: set[str]) -> dict:
     return out
 
 
-def key_row(laid: Laid, cls: str, key: str) -> tuple[dict | None, str, str]:
-    """The answer for the key's row, as it came, and the source of its values; None and why when there is none."""
+def key_row(laid: Laid, cls: str, key: str) -> tuple[dict | None, dict, str]:
+    """The answer for the key's row, as it came, and when its values were read (``source``, ``as_of``, ``clock``); None and why when there is none."""
     response = laid.responses.get("jobs" if cls == "JobSpec" else "task")
     found, why = job_of(response, key) if cls == "JobSpec" else task_of(response)
     if found is None:
-        return None, "", why
+        return None, {}, why
     if cls == "JediTaskSpec":
         found = {k: v for k, v in found.items() if k != SPLIT_RULE_RAW} | {
             "splitRule": found.get(SPLIT_RULE_RAW)
         }
     source = f"{ENDPOINT[cls]}, asked at {response['asked_at']} on this machine's clock (UTC)"
-    return found, source, ""
+    read = {
+        "source": source,
+        "as_of": down_to_second(response["asked_at"]),
+        "clock": CLIENT,
+    }
+    return found, read, ""
 
 
 def states_of(response: dict, kind: str) -> tuple[list[dict] | None, str]:
@@ -266,6 +277,7 @@ def bounds_of(response: dict) -> dict[str, str | None]:
         lower = lower.replace(microsecond=0) + datetime.timedelta(seconds=1)
     return {
         "as_of": f"{upper:%Y-%m-%d %H:%M:%S}",
+        "clock": DATABASE,
         "retained_from": f"{lower:%Y-%m-%d %H:%M:%S}" if lower else None,
     }
 
@@ -306,7 +318,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
             "states": [{k: v for k, v in s.items() if k != "pandaid"} for s in states],
         }
 
-    raw, source, why = key_row(laid, cls, q["key"])
+    raw, read, why = key_row(laid, cls, q["key"])
     if raw is None:
         left_out.append(
             f"rows.{entity}{', files' if cls == 'JobSpec' else ''}: {KEY[cls]}={q['key']}: {why}"
@@ -323,17 +335,15 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
             states or [],
             when(raw.get("modificationTime")),
         )
-        out["rows"] = {
-            entity: {c: {"value": v, "source": source} for c, v in kept.items()}
-        }
+        out["rows"] = {entity: {c: {"value": v, **read} for c, v in kept.items()}}
         if later:
-            out["after"] = {"source": f"{source}; {why}", **later}
+            out["after"] = {**read, "source": f"{read['source']}; {why}", **later}
 
     if cls == "JobSpec":
         if raw is not None:
             out["files"] = [
                 {
-                    c: {"value": v, "source": source}
+                    c: {"value": v, **read}
                     for c, v in columns(f, spellings["FileSpec"], other).items()
                 }
                 for f in raw.get(FILES) or []
@@ -361,6 +371,7 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
         out["counts"] = {
             "source": f"R as of {laid.as_of.get('job_counts')}, every job of the task by table and jobStatus",
             "as_of": down_to_second(laid.as_of.get("job_counts")),
+            "clock": DATABASE,
             "rows": [
                 {"table": t, "jobStatus": r["jobstatus"], "n": r["count(*)"]}
                 for t, r in laid.rows["job_counts"]
@@ -397,6 +408,7 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
         "source": f"R as of {laid.as_of.get('job_rows')}, the jobs of the task in {sorted({t for t, _ in laid.rows['job_rows']})}; "
         "a PandaID in two tables is two rows",
         "as_of": down_to_second(laid.as_of.get("job_rows")),
+        "clock": DATABASE,
         "rows": rows,
     }
     out["job_statuslog"] = {

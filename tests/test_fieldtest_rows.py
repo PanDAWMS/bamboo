@@ -333,7 +333,9 @@ async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_ke
         and out["rows"]["job"]["PandaID"]["value"] == PID
     )
     source = "job/get_description_incl_archive, asked at 2026-10-13 10:00:05 on this machine's clock (UTC)"
-    assert out["rows"]["job"]["PandaID"]["source"] == source
+    # read by key, the values hold when they were asked, on this machine's clock: not at the history's as_of
+    read = {"source": source, "as_of": "2026-10-13 10:00:05", "clock": "client"}
+    assert out["rows"]["job"]["PandaID"] == {"value": PID, **read}
     assert (
         out["after"]["specialHandling"] == "ddm:rucio"
         and out["after"]["modificationTime"] == "2026-10-07 13:08:03"
@@ -341,6 +343,10 @@ async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_ke
     assert "Files" not in out["after"]
     assert out["after"]["source"].startswith(source + "; ")
     assert "decision at 2026-10-07 13:08:03.877599" in out["after"]["source"]
+    assert (out["after"]["as_of"], out["after"]["clock"]) == (
+        "2026-10-13 10:00:05",
+        "client",
+    )
     states = out["statuslog"]["states"]
     assert [s["status"] for s in states] == ["pending", "activated", "failed"]
     # whole from where it was asked, since the partitions go back further
@@ -348,15 +354,13 @@ async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_ke
         "2026-10-13 10:00:00",
         "2026-10-07 13:06:45",
     )
+    assert out["statuslog"]["clock"] == "database"
     assert (
         states[1]["time"] == "2026-10-07 13:06:46"
         and states[1]["time_extended"] == "2026-10-07 13:06:46.000000"
     )
     assert [f["lfn"]["value"] for f in out["files"]] == ["a.log.tgz", "in.root"]
-    assert out["files"][0]["destinationDBlock"] == {
-        "value": "user.x_sub1",
-        "source": source,
-    }
+    assert out["files"][0]["destinationDBlock"] == {"value": "user.x_sub1", **read}
     assert out["collections"]["job.Files"] == {"rows": "files", "entity": "file"}
     # every name asked, so that a name with no row reads as not in the table rather than not asked
     datasets = out["datasets"]
@@ -374,8 +378,9 @@ async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_ke
         },
         {"name": "panda.dis1", "creationdate": "2026-10-07 13:06:47", "subType": "dis"},
     ]
-    assert (datasets["as_of"], datasets["retained_from"]) == (
+    assert (datasets["as_of"], datasets["clock"], datasets["retained_from"]) == (
         "2026-10-13 10:00:00",
+        "database",
         "2026-08-01 00:00:00",
     )
     assert "the clock of the machine that inserted the row" in datasets["source"]
@@ -441,6 +446,7 @@ def test_a_historys_span_is_cut_to_seconds_without_claiming_a_second_it_may_not_
     )
     assert bounds == {
         "as_of": "2026-10-13 10:00:00",
+        "clock": "database",
         "retained_from": "2026-07-12 00:00:01",
     }
 
@@ -457,6 +463,7 @@ def test_a_historys_span_is_only_what_was_asked():
     # until is exclusive: the last second held is the one before it
     assert bounds == {
         "as_of": "2026-09-30 23:59:59",
+        "clock": "database",
         "retained_from": "2026-09-28 00:00:00",
     }
     # a since does not make a history whole where the server cannot tell
@@ -597,6 +604,7 @@ async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
     out = RB.build(await _fetch(panda, TASK_Q), SPELLINGS)
     # the moment R read the counts and the rows, cut down to its second
     assert out["counts"]["as_of"] == out["job_rows"]["as_of"] == "2026-10-13 10:00:00"
+    assert out["counts"]["clock"] == out["job_rows"]["clock"] == "database"
     assert out["classes"]["task"] == "JediTaskSpec" and out["spellings"] == {
         "about": out["spellings"]["about"],
         "task": [],
@@ -645,6 +653,12 @@ async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
     assert out["after"]["source"].startswith(
         "task/get_detailed_info, asked at 2026-10-13 10:00:05 on this machine's clock (UTC); "
     )
+    # the task's row was asked apart from R's batch: its moment and clock are its own
+    assert (out["after"]["as_of"], out["after"]["clock"]) == (
+        "2026-10-13 10:00:05",
+        "client",
+    )
+    assert out["rows"]["task"]["jediTaskID"]["as_of"] == "2026-10-13 10:00:05"
     # the column as stored, not the server's decoding; what is not a column is named, not kept
     assert out["after"]["splitRule"] == "US=2,SS=5"
     assert "split_rule_raw" not in out["after"] and "nFiles" not in out["after"]
