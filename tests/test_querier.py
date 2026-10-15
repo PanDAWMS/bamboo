@@ -1238,3 +1238,30 @@ def test_the_result_says_the_outcome_with_its_code_and_a_run_that_does_not_finis
     )
     assert done.returncode != 0 and "MAP_DUMP" in done.stderr
     assert not [n for n in ("o.txt", "o.txt.asks.jsonl", "o.txt.result.json") if (tmp_path / n).exists()]
+
+
+def test_the_tree_hash_moves_with_the_code_only(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from pathlib import Path
+            from bamboo.querier import rerun
+
+            root = Path("tree")
+            (root / "bamboo/codemap/__pycache__").mkdir(parents=True)
+            (root / "bamboo/codemap/trace.py").write_text("x = 1\\n")
+            (root / "bamboo/a.py").write_text("y = 2\\n")
+            seen = [rerun._tree_sha256(root)]
+            (root / "bamboo/codemap/__pycache__/trace.cpython-311.pyc").write_bytes(b"\\0")
+            (root / "bamboo/codemap/notes.txt").write_text("not code")
+            seen.append(rerun._tree_sha256(root))
+            (root / "bamboo/codemap/trace.py").write_text("x = 2\\n")
+            seen.append(rerun._tree_sha256(root))
+            print(json.dumps(seen))
+            """,
+        )
+    )
+    first, unmoved, moved = json.loads(out.splitlines()[-1])
+    assert len(first) == 64 and first == unmoved and moved != first

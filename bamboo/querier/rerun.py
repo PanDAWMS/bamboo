@@ -713,6 +713,14 @@ def _sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _tree_sha256(root: Path) -> str:
+    """One hash of the code a run imports from its tree: the sha256 of what ``shasum -a 256`` prints for every ``*.py``
+    under *root*/bamboo, by path (``__pycache__`` left out) -- the map's code the querier calls is there, not in
+    bamboo/querier/."""
+    files = sorted(str(f.relative_to(root)) for f in (root / "bamboo").rglob("*.py") if "__pycache__" not in f.parts)
+    return hashlib.sha256("".join(f"{_sha256(root / f)}  {f}\n" for f in files).encode()).hexdigest()
+
+
 def _write(path: str, text: str) -> None:
     """*text* to *path* through a file renamed over it: a reader finds the whole file or none."""
     tmp = Path(f"{path}.tmp")
@@ -941,7 +949,9 @@ class Rerun:
     def _stop_unanswered(self, unanswered: list) -> None:
         if unanswered:
             self.unanswered += [(self.hop, ask, why) for ask, why in unanswered]
-            raise Stop(f"{self.hop}: {len(unanswered)} ask(s) of the logs not in the records (written to {self.args.asks})", "asks")
+            # each ask once, as the asks file holds it: movers that share a log ask it alike
+            n = len({ask.key for ask, _ in unanswered})
+            raise Stop(f"{self.hop}: {n} ask(s) of the logs not in the records (written to {self.args.asks})", "asks")
 
     def window(self, asking: W.Asking) -> Window | None:
         """*asking*'s window; where it has none, a stop if the door needs one (the door over files reads none)."""
@@ -991,6 +1001,8 @@ class Rerun:
             "steps": self.opened,
             "inputs": {
                 "querier": {"tree": str(BAMBOO), "stamps": self.stamps,
+                            "label": (BAMBOO / "QUERIER").read_text().strip() if (BAMBOO / "QUERIER").exists() else None,
+                            "bamboo_py_sha256": _tree_sha256(BAMBOO),
                             "files": {f.name: _sha256(f) for f in sorted(Path(__file__).resolve().parent.glob("*.py"))}},
                 "map_dump": {"path": dump["path"], "sha256": dump["sha256"]} if dump else None,
                 "rows": {"path": a.rows, "sha256": _sha256(a.rows)},
