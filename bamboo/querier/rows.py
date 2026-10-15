@@ -667,7 +667,9 @@ class Row:
         return best
 
     def capture(self, record: Record) -> dict[str, str]:
-        """Hole values in *record*, keyed by the expression each hole prints."""
+        """Hole values in *record*, keyed by the expression each hole prints; none from a record the search cut."""
+        if record.cut:
+            return {}
         for shape in sorted(self.capture_shapes, key=literal_of, reverse=True):
             if not usable(shape):
                 continue

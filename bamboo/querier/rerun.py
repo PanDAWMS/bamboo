@@ -1,7 +1,7 @@
 """A case run as one loop, with no one choosing between the steps.
 
     python -m bamboo.querier.rerun --subject JobSpec.jobStatus --observed failed --key <PandaID> \
-        --log panda-adder.log --log panda-setupper.log \
+        (--log panda-adder.log --log panda-setupper.log | --records answers.jsonl [--asks asks.jsonl]) \
         --rows rows.json [--hand hand.json] [--patterns map|outside] [--decide positive|strict]
 
 Every step takes its arguments from the symptom, the logs, the rows, or the
@@ -10,6 +10,12 @@ where a step cannot find what the next one needs, it looks in ``--hand`` and
 prints ``HAND``, and without an entry there it prints ``STOP`` and ends.  Run
 with no hand file, the steps before the first ``STOP`` are the ones that ran
 with no judgement.
+
+The logs come through one door (``records.Logs``): the files handed in (``--log``), each read whole, or the
+recording step's answers (``--records``, :mod:`bamboo.querier.recorded`), asked by window and machine.  Each step that
+reads the logs makes its window from the rows (:mod:`bamboo.querier.windows`).  Through the recorded answers, an ask
+they do not hold is written to ``--asks`` with every other ask of its step, and the run stops; it is run again once the
+recording step has fetched them.
 
 **The loop**.  Each step answers one
 question and returns the next; which question comes next is decided by what
@@ -53,7 +59,9 @@ A value that does not move (``--stuck``):
                                         the pass's values leave (``E.taken``); a stop -> its question
 ``Rows``       S5  what the call returned  a call that returns rows by a key: the call, its
                                         arguments, the tables it reads at its constants
-                                        (``proxy_reading``), and the counts the passes printed
+                                        (``proxy_reading``), and the counts the passes printed against
+                                        the jobs not yet final at each pass (the job histories); the
+                                        tables at one moment (the counts) check that assumption
 """
 from __future__ import annotations
 
@@ -90,13 +98,16 @@ from bamboo.querier import raised as X
 from bamboo.querier import reproduce as P
 from bamboo.querier import rows as R
 from bamboo.querier import value_diff as V
-from bamboo.querier.records import CORPUS, FileLogs, Logs, Window, runs_for
+from bamboo.querier import windows as W
+from bamboo.querier.recorded import RecordedLogs
+from bamboo.querier.records import CORPUS, FileLogs, Logs, Unrecorded, Window, runs_for
 from bamboo.querier.which_ran import Candidate, class_of, judge, stable_holes
 from bamboo.scripts.derive_strategy import _investigate
 
 BAMBOO = Path(R.BAMBOO_TREE)
 #: where the assumption of reading 2 in S5 puts a job out of the active tables -- PanDA's,
-#: written here because the map does not say which rows a table holds
+#: written here because the map does not say which rows a table holds.  It holds for one class of call only
+#: (KNOWN_ISSUES.md K1, K2)
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
 #: the tables that assumption is about: a job sits in one of them until it reaches FINAL_STATES -- PanDA's too
 ACTIVE_TABLES = ("jobsDefined4", "jobsActive4")
@@ -192,6 +203,52 @@ def stop_reading(detail: str) -> tuple[list[str], list[str]]:
     said = re.search(r" -- reads (.+?)(?: by :|; what |$)", detail or "")
     unread = re.search(r"; what (.+?) runs? is not read", detail or "")
     return (said[1].split(", ") if said else []), (unread[1].split(", ") if unread else [])
+
+
+def at_one_moment(counts: list[dict], tables: list[str]) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """The rows file's counts (``table``, ``jobStatus``, ``n``, all of one moment) against reading 2's assumption in
+    S5: what *tables* hold, the jobs among them in FINAL_STATES, and the jobs not yet final outside them -- each as
+    ``table/jobStatus`` -> n.  The assumption holds at that moment when the last two are empty."""
+    read = {t.lower() for t in tables}
+    held, final_in, open_out = {}, {}, {}
+    for r in counts:
+        inside, final = r["table"].lower() in read, r["jobStatus"] in FINAL_STATES
+        for into, kept in ((held, inside), (final_in, inside and final), (open_out, not inside and not final)):
+            if kept:
+                into[f"{r['table']}/{r['jobStatus']}"] = into.get(f"{r['table']}/{r['jobStatus']}", 0) + r["n"]
+    return held, final_in, open_out
+
+
+def through_calls(rel: str, spans: list[tuple[int, int]], writers: list, observed: str) -> tuple[list[str], list[str]]:
+    """``(reached, cut)``: the writers of another value than *observed* that the function at *rel* (its defs' line
+    *spans*) calls into by the map's ``JunctionNode.called_from`` -- a call placed in it, or one hop out of it -- and
+    those whose list the map cut (``… N more``), which it may call into unlisted.  Two hops only (KNOWN_ISSUES.md K14)."""
+    reached, cut = [], []
+    for w in writers:
+        if not any(b.line is not None and b.outcome != observed for b in w.branches):
+            continue
+        name = w.owner.split("::")[-1]
+        places = [(f, int(n)) for entry in w.called_from for f, n in re.findall(r"([\w./-]+\.py):(\d+)", entry)]
+        if any(f == rel and lo <= n <= hi for f, n in places for lo, hi in spans):
+            reached.append(name)
+        elif any(entry.startswith("…") for entry in w.called_from):
+            cut.append(name)
+    return sorted(set(reached)), sorted(set(cut))
+
+
+def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bool, gapped: bool) -> list[str]:
+    """Why S1 keeps a mover with no arm of its own: it moves the value, if at all, through what it calls or the rows it
+    hands on.  None is dropped: ``called_from`` holds two hops, so a write further down is not seen, and "not listed"
+    is not "does not reach" (bamboo-85; tmaeno, 2026-10-14).  A drop waits for the map's answer to what a function
+    reaches, with its holes (KNOWN_ISSUES.md K14)."""
+    return [why for why, holds in (
+        ("its def is not found", not found),
+        (f"it calls into {reached}", reached),
+        (f"it may call into {cut}, whose callers the map lists only in part", cut),
+        ("it hands its rows on", hands),
+        ("the map could not read all of it", gapped),
+    ) if holds] or ["no call it makes reaches a writer of another value within the two hops the map lists, "
+                    "and a write further down is not seen (KNOWN_ISSUES.md K14)"]
 
 
 def argument_said(param: str | None, arg: ast.expr, value: object) -> str:
@@ -324,12 +381,21 @@ class Arm:
 
 @dataclass
 class Passes:
-    """Which way each pass of a mover went."""
+    """Which way each pass of a mover went: its runs of the key in *logs*, over *asking*'s window."""
 
     owner: str
-    log: str
+    logs: list[str]
     arms: list[Arm]
     key: str
+    asking: W.Asking
+
+
+@dataclass
+class Fork:
+    """Questions that each go on alone, from the same point: every mover that ran in the window (S1)."""
+
+    branches: list
+    labels: list[str]
 
 
 @dataclass
@@ -508,6 +574,20 @@ def _when(text: str) -> datetime.datetime:
     return datetime.datetime.fromisoformat(text.replace(",", "."))
 
 
+def _overlaps(run, window: Window) -> bool:
+    return run.first[:19] <= window[1] and run.last[:19] >= window[0]
+
+
+def _of_mover(run, owner: str) -> bool:
+    """Whether *run* can be a run of the mover *owner*: a mark that names a method (a DB proxy's tagged logger,
+    ``getJobs < SITE 2026-01-01T00:00:00 >``) is one call of that method, so it is the mover's only when the method is
+    the mover's function -- a DB proxy's log holds every method's calls of the key (S1's rule, tmaeno 2026-10-13).  A
+    mark that names none (``< jediTaskID=1 >``, the adder's PandaID) may be any function's of the worker.  The name is
+    the tag's, which the method writes in its own comment: a comment copied from another method hides its runs."""
+    m = re.match(r"([A-Za-z_]\w*) <", run.token)
+    return m is None or m[1] == owner.split("::")[-1]
+
+
 def _number(value):
     try:
         return float(value)
@@ -549,7 +629,7 @@ class Rerun:
         self.data = json.loads(Path(args.rows).read_text())
         self.hand = json.loads(Path(args.hand).read_text()) if args.hand else {}
         self.hand_used: list[str] = []
-        self.logs: Logs = FileLogs(args.log)
+        self.logs: Logs = RecordedLogs(args.records) if args.records else FileLogs(args.log)
         self.lines: list[str] = []
         self.hop = ""
         self.touched: list[tuple[R.Function, object]] = []  # (function, run) this investigation read
@@ -557,6 +637,9 @@ class Rerun:
         #: printed at one time and used for a decision at another says so in its source
         self.row_facts: dict[str, tuple[str, str]] = {}
         self.question = None  # the run the symptom's value changed in
+        #: (hop, ask, why) of every ask of the logs the door had no answer for; written to --asks at the end
+        self.unanswered: list[tuple[str, object, str]] = []
+        self.windows_said: set = set()
 
     # ------------------------------------------------------------ plumbing
     def say(self, text: str = "") -> None:
@@ -609,6 +692,7 @@ class Rerun:
             self.say(f"WARNING: {owner.split('::')[-1]}'s rows land in different files {split}; read in one, the others' read as missing")
 
     def base_env(self, file_row: dict | None = None) -> E.Env:
+        # the rows file's "after" is not read (KNOWN_ISSUES.md K10)
         sp = self.data["spellings"]
         env = E.Env(rows={s: entity for entity, spellings in sp.items() if entity != "about" for s in spellings})
         for entity, row in self.data.get("rows", {}).items():
@@ -629,8 +713,47 @@ class Rerun:
             if key not in before and "<" in key:
                 self.row_facts[expr] = (printed, env.values[key].source)
 
-    def runs(self, key: str, window: Window | None = None) -> dict[str, list]:
-        return {name: runs_for(self.logs.log(name, key, window), key) for name in self.logs.names()}
+    def runs(self, key: str, names: list[str], asking: W.Asking) -> dict[str, list]:
+        """The key's runs in each of the logs *names* the door can be asked for, over *asking*'s window and machine.
+
+        Every log is asked before a stop, so that a door short of answers names all the step's asks at once.
+        """
+        out, unanswered, _ = self._ask(key, names, asking)
+        self._stop_unanswered(unanswered)
+        return out
+
+    def _ask(self, key: str, names: list[str], asking: W.Asking) -> tuple[dict[str, list], list, dict[str, list[str]]]:
+        """``runs()`` without the stop: the runs found, the asks the door had no answer for, and what of the window each
+        log was not searched for (``Log.holes``)."""
+        window = self.window(asking)
+        out, unanswered, holes = {}, [], {}
+        for name in self.logs.names(names):
+            try:
+                log = self.logs.log(name, key, window, machine=asking.machine)
+            except Unrecorded as e:
+                unanswered += [(ask, why or asking.why) for ask, why in e.asks]
+                continue
+            for note in log.notes + [f"not searched: {h}" for h in log.holes]:
+                self.say(f"  {name}: {note}")
+            if log.holes:
+                holes[name] = log.holes
+            out[name] = runs_for(log, key)
+        return out, unanswered, holes
+
+    def _stop_unanswered(self, unanswered: list) -> None:
+        if unanswered:
+            self.unanswered += [(self.hop, ask, why) for ask, why in unanswered]
+            raise Stop(f"{self.hop}: {len(unanswered)} ask(s) of the logs not in the records (written to {self.args.asks})")
+
+    def window(self, asking: W.Asking) -> Window | None:
+        """*asking*'s window; where it has none, a stop if the door needs one (the door over files reads none)."""
+        if not self.logs.needs_window:
+            return asking.window
+        window = self.need(f"a window to ask the logs over: {asking.why}", asking.window)
+        if (self.hop, window) not in self.windows_said:
+            self.windows_said.add((self.hop, window))
+            self.say(f"window: {window[0]} .. {window[1]}, {asking.why}")
+        return window
 
     def frames_of(self, run) -> dict[str, set[int]]:
         out: dict[str, set[int]] = {}
@@ -694,8 +817,28 @@ class Rerun:
             q = Late(a.subject, a.observed, a.key)
         else:
             q = Stuck(a.subject, a.observed, a.key) if a.stuck else Asked(a.subject, a.observed, a.key)
+        self.steps = steps
         while q is not None:
-            q = steps[type(q)](q)
+            q = self.fork(q) if isinstance(q, Fork) else steps[type(q)](q)
+
+    def fork(self, q: Fork):
+        """Each branch to its end or its stop, each from the state the fork was reached in; a stop of any is the run's."""
+        stops = []
+        kept = (list(self.touched), dict(self.row_facts), self.question)
+        for n, (branch, label) in enumerate(zip(q.branches, q.labels, strict=True), 1):
+            self.touched, self.row_facts, self.question = list(kept[0]), dict(kept[1]), kept[2]
+            self.say()
+            self.say(f"==== {n} of {len(q.branches)}: {label}")
+            try:
+                b = branch
+                while b is not None:
+                    b = self.fork(b) if isinstance(b, Fork) else self.steps[type(b)](b)
+                self.say(f"==== {n}: reached the end")
+            except Stop as stop:
+                self.say(f"==== {n}: STOP {stop}")
+                stops.append(f"{n} ({stop})")
+        if stops:
+            raise Stop(f"{len(stops)} of {len(q.branches)} branch(es) stopped: {'; '.join(stops)}")
 
     # ------------------------------------------------------------ Asked: who wrote the value
     def asked(self, q: Asked):
@@ -733,10 +876,12 @@ class Rerun:
         method = self.need("a method the guard reads through", methods[0][0] if methods else None)
         return SetBy(method, reading, question, guard_record, env)
 
-    def _which_wrote(self, subject: str, value: str, key: str, when: str | None = None) -> Wrote:
-        """H1 and H2: the map's writers of ``subject=value``, and which of them the run of the key at *when* shows ran.
+    def _which_wrote(self, subject: str, value: str, key: str, state: dict | None = None) -> Wrote:
+        """H1 and H2: the map's writers of ``subject=value``, and which of them the run of the key at the statuslog
+        row *state* shows ran.
 
-        *when* is the statuslog time of *value* unless given: ``--late`` asks it at the row after the observed one.
+        *state* is the statuslog row of *value* unless given: ``--late`` asks it at the row after the observed one.
+        Every candidate's logs are asked, at the row's time, on the machine that wrote the row.
         """
         # H1
         self.start("H1", "candidates")
@@ -749,24 +894,32 @@ class Rerun:
 
         # H2
         self.start("H2", "which ran")
-        if when is None:
+        if state is None:
             states = self.data["statuslog"]["states"]
-            when = self.need(f"a statuslog time for {value}", next((s["time"] for s in states if s["status"] == value), None))
-        runs = self.runs(key, (when, when))
-        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= when <= r.last[:19]])}
-        if len(at) > 1:
-            # the first would be the first log asked, and that order is the asker's, not the case's
-            name = self.need(f"one log with a run of {key} at {when}, not {len(at)}: {', '.join(at)}", None)
-            at = {name: at.get(name, [])}
-        question = self.need(f"a run of {key} at {when}", next((r for rs in at.values() for r in rs), None))
-        self.say(f"the run: {question.describe()}")
-        self.question = question
+            state = self.need(f"a statuslog time for {value}", next((s for s in states if s["status"] == value), None))
+            if isinstance(state, str):  # a time from --hand
+                state = {"status": value, "time": state}
+        when = state["time"]
         cands = [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
+        runs = self.runs(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), W.at_transition(state))
+        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= when <= r.last[:19]])}
+        self.need(f"a run of {key} at {when}", at)
+        if len(at) > 1:
+            # the row's second holds runs in more than one log, and the machines' clocks are not known finer than a
+            # second against the database's: no run is the question's until the judge picks the candidate that ran
+            # (Fr1, 2026-10-14).  Taking the first would take the asker's order of the logs, not the case's
+            question = None
+            self.say(f"runs of {key} at {when} in {len(at)} logs ({', '.join(at)}): each candidate is judged on its own run")
+        else:
+            (question, *_), = at.values()
+            self.say(f"the run: {question.describe()}")
+        at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
         for r, c in zip(readings, cands, strict=False):
-            if question.log.name in c.log_files:
+            if any(name in c.log_files for name in at):
                 self.warn_split(r.owner, r.lines)
         env = self.base_env()
-        seens = [R.seen(R.function(c.rel, c.func, c.lines), question, self.mode) for c in cands if question.log.name in c.log_files]
+        seens = [R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
+                 for c in cands for run in at_hand if run.log.name in c.log_files]
         stable_holes(seens, env)
         j = judge(
             cands, runs, mode=self.mode, decide=self.decide, window=(when, when),
@@ -774,6 +927,10 @@ class Rerun:
         )
         self.say(j.report(question))
         chosen = self.pick("which candidate ran", j)
+        if question is None:
+            question = self.need(f"the run of {chosen.candidate.func} at {when}", j.runs.get(chosen.candidate.owner))
+            self.say(f"the run: {question.describe()}")
+        self.question = question
         return Wrote(readings, question, cands, env, chosen)
 
     # ------------------------------------------------------------ SetBy: which call set it
@@ -798,6 +955,7 @@ class Rerun:
             self.touched.append((R.function(s.rel, s.func, s.lines), question))
         self.learn([(f, q2) for f, q2 in self.touched if q2 is question])
         self.say(f"row facts kept for later hops: { {k: v[0] for k, v in self.row_facts.items()} }")
+        # the one way on, whether or not the call failed by an exception (KNOWN_ISSUES.md K11)
         return Raised(R.function(chosen.candidate.rel, chosen.candidate.func, within=chosen.candidate.lines), question)
 
     # ------------------------------------------------------------ Raised: what it was handed
@@ -809,6 +967,8 @@ class Rerun:
             if any(f.rel == fn.rel and f.func == fn.name for f in ch.frames)
         ]
         record = self.need(f"a traceback through {fn.name} in the run", chains[0][0] if chains else None)
+        if record.cut:
+            self.need(f"the whole traceback of {record.span} (the search cut it after 200 lines)", None)
         boundary = None
         for ch in record.chains():
             for inner, outer in zip(ch.frames, ch.frames[1:], strict=False):
@@ -849,7 +1009,16 @@ class Rerun:
         receiver = self.need(f"the client {inner.rel} builds", receivers[0] if receivers else None)
         calls = [x for x in O.calls_through(receiver) if x.verb == "make"]
         self.say(f"{receiver}: {len(calls)} make call(s)")
-        obj_runs = self.runs(obj)
+        # the window is the Datasets row's creationdate, which only the server's setupper inserts: a make call in
+        # JEDI's code is not anchored by it (KNOWN_ISSUES.md K6)
+        jedi =[f"{Path(x.rel).name}:{x.line}" for x in calls if x.rel.startswith("pandajedi/")]
+        asking = (
+            W.Asking(None, None, f"the make call(s) {jedi} run in JEDI, which inserts no Datasets row to time them by")
+            if jedi
+            else W.around_creation(self.data.get("datasets"), obj, states[0]["time"] if states else "")
+        )
+        logs = list(dict.fromkeys(f for x in calls for f in self.files_of(f"{x.rel}::{x.func}", [], [x.line])))
+        obj_runs = self.runs(obj, logs, asking)
         makers = []
         for x in calls:
             f2 = R.function(x.rel, x.func, [x.line])
@@ -1200,7 +1369,9 @@ class Rerun:
         gaps = {**follow.reader_gaps, **{g.owner: g.gaps for g in follow.guarded_by if g.gaps}}
         self.say(f"where the map could not read them: {gaps or 'nowhere'}" + (f" ({follow.gaps_note})" if follow.gaps_note else ""))
         writers = asyncio.run(self._writers_of(q.subject))
-        chosen = []
+        asking = W.stuck(self.data.get("statuslog", {}), q.observed)
+        handers = {rs.owner for rs in follow.reader_statements if rs.crosses_to}
+        ran, unanswered, unsearched = [], [], []
         for owner in movers:
             arms: dict[int, Arm] = {}
             files: list[str] = []
@@ -1214,16 +1385,44 @@ class Rerun:
                         continue
                     arm = arms.setdefault(b.line, Arm(b.line, [], list(b.path_condition)))
                     arm.outcomes.append(b.outcome)
+            if not arms:
+                # with no arm of its own, a mover moves the value, if at all, through what it calls or the rows it hands
+                # on: kept, and said why
+                rel, func = owner.split("::", 1)
+                defs = R.functions(rel, func)
+                reached, cut = through_calls(rel, [(f.lineno, f.end_lineno) for f in defs], writers, q.observed)
+                kept = kept_without_arms(bool(defs), reached, cut, owner in handers, owner in gaps)
+                self.say(f"  {func}: no arm of its own, kept: {'; '.join(kept)}")
             files = self.files_of(owner, list(dict.fromkeys(files or follow.reader_log_files)), list(arms))
-            to_hand = [f for f in files if f in self.logs.names()]
+            to_hand = self.logs.names(files)
             if to_hand:
                 self.warn_split(owner, list(arms))
             self.say(f"  {owner.split('::')[-1]}: {len(arms)} arm(s) that write another value "
                      f"{[(a.line, a.outcomes) for a in arms.values()]}; logs {files} ({'to hand: ' + str(to_hand) if to_hand else 'none to hand'})")
-            if to_hand and any(runs_for(self.logs.log(f, q.key), q.key) for f in to_hand):
-                chosen.append(Passes(owner, to_hand[0], list(arms.values()), q.key))
-        self.need("one mover with a run of the key in a log to hand", len(chosen) == 1)
-        return chosen[0]
+            if not to_hand:
+                continue
+            found, missed, holes = self._ask(q.key, to_hand, asking)
+            unanswered += missed
+            window = asking.window if self.logs.needs_window else None
+            if logs := [name for name, rs in found.items() if any((window is None or _overlaps(r, window)) and _of_mover(r, owner) for r in rs)]:
+                ran.append(Passes(owner, logs, list(arms.values()), q.key, asking))
+            elif holes:
+                # not found is not "did not run" where the search did not reach
+                unsearched.append(owner.split("::")[-1])
+                self.say(f"  {owner.split('::')[-1]}: no run of its own found, but {', '.join(holes)} were not searched all the window: it may have run there")
+        self._stop_unanswered(unanswered)
+        # every mover that ran and left the value is part of the answer: each goes on alone (tmaeno, 2026-10-13)
+        self.need(
+            "a mover with a run of the key in a log to hand"
+            + (f" ({asking.why})" if self.logs.needs_window else "")
+            + (f"; not searched all the window for {unsearched}" if unsearched else ""),
+            ran,
+        )
+        if unsearched:
+            self.say(f"movers that may have run where the search did not reach: {unsearched}")
+        if len(ran) == 1:
+            return ran[0]
+        return Fork(ran, [f"mover {p.owner}" for p in ran])
 
     async def _writers_of(self, subject: str) -> list:
         from bamboo.database.graph_database_client import GraphDatabaseClient
@@ -1241,21 +1440,43 @@ class Rerun:
     def passes(self, q: Passes):
         self.start("S2", "which way each pass went")
         rel, func = q.owner.split("::", 1)
+        # the arms S2 and S3 judge are the mover's own; a mover that writes through what it calls has none here
+        self.need(f"an arm of {func}'s own that writes another value (S2 reads no arm of what it calls: KNOWN_ISSUES.md K14)", q.arms)
         fn = R.function(rel, func, [a.line for a in q.arms])
-        log = self.logs.log(q.log, q.key)
+        runs = self.runs(q.key, q.logs, q.asking)
         found = []
-        for run in runs_for(log, q.key):
-            parts, how = R.passes(fn, run, self.mode)
-            self.say(f"{run.describe()}: {how}")
-            found += parts
+        for name in q.logs:
+            for run in runs.get(name, []):
+                if not _of_mover(run, q.owner):
+                    continue
+                parts, how = R.passes(fn, run, self.mode)
+                self.say(f"{run.describe()}: {how}")
+                found += parts
+        # the runs come machine by machine; the passes are read, and the first and the last taken, in time
+        found.sort(key=lambda p: p.first)
         states = self.data.get("statuslog", {}).get("states", [])
-        since = next((s["time"] for s in states if s["status"] == self.args.observed), None)
+        # the stint the value is stuck in began at its last row
+        since = next((s["time"] for s in reversed(states) if s["status"] == self.args.observed), None)
         if since is None:
-            first, last = log.covers
-            self.say(f"window: the log's coverage {first} .. {last} (the statuslog has no row for {self.args.observed!r})")
+            # a log's coverage stands in for the window only in a file handed in: a door that searches has no other
+            self.need(f"a statuslog row for {self.args.observed!r} to start the window at", not self.logs.needs_window)
+            for name in q.logs:
+                first, last = self.logs.log(name, q.key).covers
+                self.say(f"window: the log's coverage {first} .. {last} (the statuslog has no row for {self.args.observed!r})")
         else:
-            self.say(f"window: from {since}, when the statuslog shows {self.args.observed!r}")
+            if self.logs.needs_window and q.asking.window[0] > since:
+                since = q.asking.window[0]
+                self.say(f"window: from {since} ({q.asking.why})")
+            else:
+                self.say(f"window: from {since}, when the statuslog shows {self.args.observed!r}")
             found = [p for p in found if p.last[:19] >= since]
+        if self.logs.needs_window:
+            # a search returns its files' records whatever the window; the statuslog says nothing after its as_of
+            # (the file door keeps them: KNOWN_ISSUES.md K4)
+            later = [p for p in found if p.first[:19] > q.asking.window[1]]
+            if later:
+                found = [p for p in found if p.first[:19] <= q.asking.window[1]]
+                self.say(f"{len(later)} pass(es) after {q.asking.window[1]}, the end of the window, not read")
         self.need("a pass of the mover in the window", found)
         exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
         lines = sorted({a.line for a in q.arms} | set(exits))
@@ -1265,7 +1486,7 @@ class Rerun:
             env = self.base_env()
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
             self.say(f"-- pass {n}: {p.first} .. {p.last}, {len(p.records)} record(s); printed {self._printed(env)}")
-            j = judge([Candidate(rel, func, lines, run=p)], {log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
+            j = judge([Candidate(rel, func, lines, run=p)], {p.log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
             self.say(j.report(p))
             chosen.append(self.pick(f"which way pass {n} went", j))
             envs.append(env)
@@ -1405,28 +1626,23 @@ class Rerun:
         history = self.data.get("job_statuslog", {}).get("by_pandaid")
         self.need(f"the rows {callee} returned in each pass (the rows file has none)", jobs and history)
         self.say(f"rows: {self.data['job_rows']['source']}")
+        counts = self.need("the tables' rows of the key by table and jobStatus at one moment (the rows file has no counts)",
+                           self.data.get("counts", {}).get("rows"))
+        moment = self.data["counts"].get("source", "the rows file's counts")
         ids = sorted({str(r["pandaid"]) for r in jobs})
         finals = {pid: min((r["t_final"] for r in jobs if str(r["pandaid"]) == pid and r.get("t_final")), default=None) for pid in ids}
-        by_table: dict[str, int] = {}
-        for r in self.data.get("counts", {}).get("rows", []):
-            by_table[r["table"]] = by_table.get(r["table"], 0) + r["n"]
         # reading 1 and 2 are of the tables this call reads (proxy_reading), not of every table the statement can
         read = {t.lower() for t in at_call}
-        in_call = {t: n for t, n in by_table.items() if t.lower() in read}
-        if by_table:
-            at_least = max(in_call.values(), default=None)
-        else:
-            at_least = len(ids) if at_call == statement else None
+        held, final_in, open_out = at_one_moment(counts, at_call)
 
         def state_at(pid: str, when: str) -> str | None:
             before = [h for h in history.get(pid, []) if h["time_extended"] < when]
             return before[-1]["status"] if before else None
 
-        if at_least is not None:
-            self.say(f"reading 1, the map's tables at this call: every job of the key -- at least {at_least} (one table alone, {in_call or 'the job rows'})")
-        else:
-            self.say(f"reading 1, the map's tables at this call: every job of the key -- no bound: the rows file holds no row "
-                     f"of the key in {at_call} ({by_table or 'no counts'})")
+        # the rows file holds the tables at one moment, not at the passes: reading 1 gives no count to set against a
+        # pass (tmaeno, 2026-10-14); reading 2 gives one from the job histories
+        self.say(f"reading 1, the map's tables at this call: every job of the key -- held at one moment only "
+                 f"({held or 'no row'}), not at the passes: no count to set against them")
         uncovered = [t for t in at_call if t.lower() not in {a.lower() for a in ACTIVE_TABLES}]
         if not uncovered:
             self.say(f"reading 2, the call's tables {at_call} hold the jobs not yet in {list(FINAL_STATES)} -- "
@@ -1434,7 +1650,7 @@ class Rerun:
         else:
             self.say(f"reading 2, an assumption about where PanDA keeps a row (not the map's): the jobs not yet in "
                      f"{list(FINAL_STATES)} -- of {list(ACTIVE_TABLES)} only; this call also reads {uncovered}")
-        fits = {1: at_least is not None, 2: not uncovered}
+        fits = not uncovered
         active_by_pass = []
         for n, p in enumerate(q.passes, 1):
             when = p.first.replace(",", ".") + "000"
@@ -1443,13 +1659,16 @@ class Rerun:
             active_by_pass.append((p, when, active, states))
             printed = self._printed_in(fn, p, f"len({q.name})")
             value = int(re.match(r"'(\d+)'", printed[0])[1]) if printed else None
-            fits[1] &= value is not None and at_least is not None and at_least <= value
-            fits[2] &= value == len(active)
+            fits &= value == len(active)
             groups = Counter(states[pid] for pid in active)
-            one = f">= {at_least}" if at_least is not None else "none"
-            self.say(f"  pass {n} at {when}: printed {value}; reading 1 {one}; reading 2 {len(active)} {dict(groups)}")
-        self.say(f"readings that give every printed count: {[k for k, v in fits.items() if v] or 'none'}")
-        self.need("one reading of the tables that gives every count the passes printed", [k for k, v in fits.items() if v] == [2])
+            self.say(f"  pass {n} at {when}: printed {value}; reading 2 {len(active)} {dict(groups)}")
+        self.say(f"reading 2 gives every count the passes printed: {'yes' if fits else 'no'}")
+        self.need("reading 2 to give every count the passes printed", fits)
+        # its assumption, checked where both sides are of one moment: the counts, by table and jobStatus
+        self.say(f"at one moment ({moment}): {at_call} hold {sum(held.values())} row(s){f' {held}' if held else ''}; "
+                 f"final among them: {final_in or 'none'}; not yet final outside them: {open_out or 'none'}")
+        self.need(f"reading 2's assumption at that moment: no final job in {at_call}, and none not yet final outside them",
+                  not final_in and not open_out)
         last_pass, _, active, states = active_by_pass[-1]
         for status, _members in sorted(Counter(states[pid] for pid in active).items()):
             pids = [pid for pid in active if states[pid] == status]
@@ -1457,9 +1676,32 @@ class Rerun:
         # criterion 4: did the value move later, and had the input emptied by then?
         # the arm writes one of its outcomes per command; a row after the last pass is the move
         after = last_pass.first[:19]
-        moved = next((st for st in self.data.get("statuslog", {}).get("states", []) if st["status"] in q.outcomes and st["time"] > after), None)
+        later = [st for st in self.data.get("statuslog", {}).get("states", []) if st["time"] > after]
+        moved = next((st for st in later if st["status"] in q.outcomes), None)
         if moved is None:
-            self.need(f"a statuslog row after {after} with what the kept-off arm writes {q.outcomes}", None)
+            # a row after the pass with another value is a move elsewhere; no row at all, a wait still open
+            self.need(f"a statuslog row after {after} with what the kept-off arm writes {q.outcomes}", not later)
+            as_of = self.need("the time the statuslog was read (its as_of), to say the value had not moved by then",
+                              self.data.get("statuslog", {}).get("as_of"))
+            # the record door drops the passes after as_of (S2), the file door does not: a statuslog read before the
+            # last pass says nothing of the time after it (e1, 2026-10-14)
+            self.need(f"the statuslog read after the last pass ({after}; it was read at {as_of})", as_of > after)
+            # the jobs are named from the tables at the counts' moment: the job rows of that moment, after the last pass
+            tables_at = self.need("the time the counts were read (their as_of), to name the jobs in the tables then",
+                                  self.data["counts"].get("as_of"))
+            rows_at = self.data["job_rows"].get("as_of")
+            self.need(f"the job rows read at the counts' moment ({tables_at}; they were read at {rows_at})", rows_at == tables_at)
+            self.need(f"the tables read after the last pass ({after}; they were read at {tables_at})", tables_at > after)
+            n_held = sum(held.values())
+            self.need(f"a job in {at_call} at {tables_at}, the value not moved by {as_of} (none: the arm kept off was open)", n_held)
+            open_rows = sorted((str(r["pandaid"]), r["jobstatus"]) for r in jobs if (r.get("tbl") or "").lower() in read)
+            self.need(f"the job rows to hold the {n_held} row(s) the counts put in {at_call} (they hold {len(open_rows)})",
+                      len(open_rows) == n_held)
+            named = [f"{pid} {status}" for pid, status in open_rows]
+            self.say(f"END a wait still open: no statuslog row after {after} by {as_of}, and {q.name} would hold the "
+                     f"{len(named)} job(s) in {at_call} at {tables_at}: {named[:6]}{' ...' if len(named) > 6 else ''}; "
+                     f"each is a question of its own (not followed)")
+            return None
         # every job made before the move and not yet final at the first pass, not only the last pass's:
         # a job made after the passes also holds the list open
         created = {pid: min(r["creationtime"] for r in jobs if str(r["pandaid"]) == pid) for pid in ids}
@@ -1497,7 +1739,7 @@ class Rerun:
         # what moved it on is who wrote the next value at the row's time: the question type Asked's H1 and H2.  The
         # mover need not ask on the observed value (the adder takes a job by its key from a report), and a run's
         # mark need not name it (the adder's is the PandaID, one run for every function of a pass)
-        w = self._which_wrote(q.subject, after["status"], q.key, after["time"])
+        w = self._which_wrote(q.subject, after["status"], q.key, after)
         owner = w.reading.owner
         self.say(f"moved on by {owner}:{w.chosen.line}, in {w.question.describe()}")
         return Missed(q.subject, q.observed, after["status"], since, moved, statements, owner, w.question)
@@ -1964,7 +2206,10 @@ def main() -> None:
     ap.add_argument("--subject", required=True)
     ap.add_argument("--observed", required=True)
     ap.add_argument("--key", required=True)
-    ap.add_argument("--log", action="append", required=True)
+    door = ap.add_mutually_exclusive_group(required=True)
+    door.add_argument("--log", action="append", help="a log file handed in (the door over files)")
+    door.add_argument("--records", action="append", help="a file of the recording step's answers (the door over them)")
+    ap.add_argument("--asks", default="", help="where the asks no record answers are written (default: --out + .asks.jsonl)")
     ap.add_argument("--rows", required=True)
     ap.add_argument("--hand", default="")
     ap.add_argument("--patterns", default="outside", choices=R.PATTERN_MODES)
@@ -1973,6 +2218,7 @@ def main() -> None:
     ap.add_argument("--stuck", action="store_true", help="ask why nothing moved the observed value on")
     ap.add_argument("--late", action="store_true", help="ask why the observed value was moved on so late")
     args = ap.parse_args()
+    args.asks = args.asks or (f"{args.out}.asks.jsonl" if args.out else "asks.jsonl")
     mapdump.install_from_env()
     r = Rerun(args)
     try:
@@ -1985,6 +2231,10 @@ def main() -> None:
     r.stamp("end")
     if args.out:
         Path(args.out).write_text("\n".join(r.lines) + "\n")
+    if r.unanswered:
+        # every ask once, for the recording step to fetch together (analyzer-handover/stage2-record-format.md)
+        asks = {ask.key: {"ask": ask.canonical(), "step": hop, "why": why} for hop, ask, why in r.unanswered}
+        Path(args.asks).write_text("".join(json.dumps(a) + "\n" for a in asks.values()))
 
 
 if __name__ == "__main__":
