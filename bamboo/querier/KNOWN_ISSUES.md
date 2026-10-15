@@ -135,16 +135,32 @@ the writers whose write requires the value (`guarded_by`).  A writer called with
 *Shows:* silent in S1 (such a writer is not asked).
 *Revisit:* build order 2: S1 takes them too, with the absence rule of K15 deciding which of them did not run.
 
-### K17. Stuck reads the movers' statements at as_of only
+### K17. Stuck reads the movers' statements at one moment only
 
-The rows file's `after` holds the row's columns as read at `as_of`, the window's end; a column may have held
-other values earlier in the window.  So S1's readings at as_of (`_read_at_as_of`) drop no mover and remove no ask: a
-mover that rewrites the column it compares refuses the row between its passes -- TaskCommando's
-`getTasksToExecCommand_JEDI@4591` asks `modificationtime < now - 5 min` and runImpl sets modificationtime on each
-pass, so at G's as_of the row is refused, though runImpl took it 70 times (tmaeno, 2026-10-15).
+The rows file's values, `after` among them, are the row's columns as read when the file was built: the rows file
+says when (each value's `as_of` and `after`'s, the client's clock, a lower bound), a moment near the window's end but
+not the statuslog's `as_of`, which is the database's clock and another instant (Fr2: 13:11:50 and 13:11:59; e1,
+2026-10-15).  S1 reads the statements at the moment the values were read; a rows file that does not say is read at the
+statuslog's `as_of`, and the header says so.  A column may have held other values earlier in the window.  So S1's
+readings (`_read_at_as_of`) drop no mover and remove no ask: a mover that rewrites the column it compares refuses the
+row between its passes -- TaskCommando's `getTasksToExecCommand_JEDI@4591` asks `modificationtime < now - 5 min` and
+runImpl sets modificationtime on each pass, so at G's as_of the row is refused, though runImpl took it 70 times
+(tmaeno, 2026-10-15).
 
 *Shows:* said (each reading is marked "a reading, not a drop").
 *Revisit:* with the map's work on which columns are written in a window, and by whom.
+
+### K19. S1 does not follow a mover with no run of its own found
+
+S1 follows a mover only where a log asked for it holds a run of the key in the window asked (`_of_mover`).  One whose
+every ask was answered and none held such a run is not followed -- but not ruled out either: absence needs the rule
+of K15 (the whole window searched, every log its process writes to, runs bound to name the key), and S1 asks
+`STUCK_SPAN`'s last 6 h only (K5).  `JobSpec.jobStatus=running` (Fr2) has five such: `Watcher.run`,
+`copyArchive.main`, `TaskBuffer.killJobs`, `analy_pmerge_jobs_wait_time` and `get_site_strr_stats`.
+
+*Shows:* said ("no run of its own found in [...]: not followed, though not ruled out"); result.json's verdict
+`no-run-found`.
+*Revisit:* build order 2: judgement 3, the absence rule, replaces it.
 
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 

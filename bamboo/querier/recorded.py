@@ -229,6 +229,8 @@ class RecordedLogs:
     def __init__(self, paths: list[str]) -> None:
         self._records: dict[str, dict] = {}
         files = [f for p in paths for f in (sorted(Path(p).glob("records-r*.jsonl")) if Path(p).is_dir() else [Path(p)])]
+        #: the files read, a directory's records-r*.jsonl in order (result.json's inputs)
+        self.files: list[Path] = files
         for path in files:
             for n, line in enumerate(path.read_text().splitlines(), 1):
                 if not line.strip():

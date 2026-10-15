@@ -548,6 +548,7 @@ def test_a_fork_runs_each_branch_from_the_same_state_and_a_stop_of_any_is_the_ru
 
             r = object.__new__(rerun.Rerun)
             r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
+            r.opened, r.ends, r.branches = [], [], []
             r.touched, r.row_facts, r.question = [], {"kept": ("1", "before the fork")}, None
             seen = []
 
@@ -560,17 +561,24 @@ def test_a_fork_runs_each_branch_from_the_same_state_and_a_stop_of_any_is_the_ru
                 return None
 
             r.steps = {Go: go}
+            r.hop = "S1"
             try:
                 r.fork(rerun.Fork([Go("first", False), Go("second", True)], ["mover a", "mover b"]))
                 stopped = ""
             except rerun.Stop as e:
                 stopped = str(e)
-            print(json.dumps([seen, stopped, [x for x in r.lines if x.startswith("====")]]))
+            print(json.dumps([seen, stopped, [x for x in r.lines if x.startswith("====")], r.branches, r.hop]))
             """,
         )
     )
     # say() prints each line as it goes: the answer is the last
-    seen, stopped, marks = json.loads(out.splitlines()[-1])
+    seen, stopped, marks, branches, hop = json.loads(out.splitlines()[-1])
+    # result.json's outcome.branches: each branch's end; the fork's stop is the fork's step
+    assert branches == [
+        {"label": "mover a", "kind": "end", "step": "S2", "text": None},
+        {"label": "mover b", "kind": "stop", "step": "S2", "text": "STOP S2: something only the second lacks", "code": None},
+    ]
+    assert hop == "S1"
     # the second branch starts from the state the fork was reached in, not from what the first learned
     assert [names for names, _ in seen] == ["first", "second"]
     assert all(sorted(facts) == ["kept"] for _, facts in seen)
@@ -830,6 +838,7 @@ _M2_SETUP = """
 
     r = object.__new__(rerun.Rerun)
     r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
+    r.result = {}
     r.data = {
         "classes": {"job": "JobSpec"},
         "rows": {"job": {"PandaID": {"value": 1}, "creationTime": {"value": "2026-01-01 00:00:00"},
@@ -927,7 +936,8 @@ def test_l2_says_each_movers_verdict(tmp_path):
             tmp_path,
             _M2_SETUP + """
     def st(owner, line, trees=()):
-        return N(owner=owner, line=line, keys=[], restricts=["JobSpec.jobStatus=activated"], refuses=[],
+        return N(owner=owner, line=line, keys=[], selects=["JobSpec.jobStatus=activated"], excludes=[],
+                 restricts=["JobSpec.jobStatus=activated"], refuses=[],
                  condition_trees=[N(entry="e", tree=t) for t in trees], call_readings=[])
 
     def writer(owner, outcome, pre=()):
@@ -943,11 +953,28 @@ def test_l2_says_each_movers_verdict(tmp_path):
                  writer("p/w.py::refusing", "sent", ["jobStatus='defined'"])]
     verdicts = r._movers_in_window(q, {("d/a.py::main", 10): "refused", ("d/a.py::main", 20): "not settled",
                                       ("d/a.py::main", 30): "not settled"})
-    print(json.dumps([verdicts, r.lines[-1]]))
+    print(json.dumps([verdicts, r.lines[-1], r.result["movers"]]))
     """,
         )
     )
-    verdicts, last = json.loads(out.splitlines()[-1])
+    verdicts, last, movers = json.loads(out.splitlines()[-1])
+    # result.json's movers: the same verdicts, and a class for each reason one is left
+    by_owner = {m["owner"]: m for m in movers}
+    assert {o: m["verdict"] for o, m in by_owner.items()} == {o: v.replace(" ", "-") for o, v in map(tuple, verdicts)}
+    left = [m for m in movers if m["verdict"] not in ("moved-it", "write-refuses", "refused")]
+    assert last == f"not ruled out: {len(left)} mover(s)"
+    assert {o: [r["code"] for r in m["reasons"]] for o, m in by_owner.items()} == {
+        "d/a.py::gone": ["refused"],
+        "d/a.py::open": ["K14"],
+        "d/a.py::dark": ["K14", "after-only"],  # late: modificationTime is the value after the move
+        "p/w.py::armed": ["K15"],
+        "p/w.py::moved": [],
+        "p/w.py::keyed": ["K15"],
+        "p/w.py::refusing": ["write-refuses"],
+    }
+    assert by_owner["d/a.py::dark"]["reasons"][1]["text"].startswith("main@30: JobSpec.modificationTime not compared (written at")
+    assert [(m["reached"], m["statements"]) for m in movers[:5]] == [
+        ("select", ["main@10"]), ("select", ["main@20"]), ("select", ["main@30"]), ("select", ["main@10"]), ("guard", [])]
     assert dict(map(tuple, verdicts)) == {
         "d/a.py::gone": "refused",  # no arm of its own, and its one statement refuses the row
         "d/a.py::open": "could have",  # its statement holds for the row all the window
@@ -976,6 +1003,40 @@ def test_the_window_end_reads_after_only_at_as_of(tmp_path):
     late, stuck, source, late_why, stuck_why = json.loads(out.splitlines()[-1])
     assert late == [False, None] and stuck == [True, "2026-01-03 00:00:00"] and source == [False, None]
     assert late_why == "written at the move or later; its row here holds only the value after" and stuck_why is None
+
+
+def test_stuck_reads_at_the_moment_the_rows_file_says_its_values_were_read(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    said = []
+    r.data["statuslog"] = {"as_of": "2026-01-03 00:00:09", "clock": "database", "states": []}
+    said.append(r._reading_moment("JobSpec.jobStatus", "2026-01-03 00:00:09"))  # the file says nothing
+    r.data["after"] |= {"as_of": "2026-01-03 00:00:00", "clock": "client"}
+    for v in r.data["rows"]["job"].values():
+        v |= {"as_of": "2026-01-03 00:00:00", "clock": "client"}
+    said.append(r._reading_moment("JobSpec.jobStatus", "2026-01-03 00:00:09"))  # one time
+    said.append(r._reading_moment("JobSpec.jobStatus", "2026-01-02 23:59:59"))  # after the statuslog's as_of
+    r.data["after"]["as_of"] = "2026-01-03 00:00:01"
+    said.append(r._reading_moment("JobSpec.jobStatus", "2026-01-03 00:00:09"))  # two times
+    print(json.dumps([[str(at), words, header] for at, words, header in said] + [r.result["readings_at"],
+                      r._held("JobSpec.as_of", rerun.Missed("JobSpec.jobStatus", "activated", "", t0, t0, [], "", None, at_end=True))]))
+    """,
+        )
+    )
+    *said, readings_at, held = json.loads(out.splitlines()[-1])
+    assert said[0] == ["2026-01-03 00:00:09", "the statuslog was read", "the movers' statements at the statuslog's as_of "
+                       "2026-01-03 00:00:09; the rows file does not say when its values were read (a reading, not a drop: "
+                       "KNOWN_ISSUES.md K17):"]
+    assert said[1] == ["2026-01-03 00:00:00", "the row's values were read", "the movers' statements at 2026-01-03 00:00:00 "
+                       "(client clock), when the rows file's values were read (the statuslog's as_of is 2026-01-03 00:00:09; "
+                       "a reading, not a drop: KNOWN_ISSUES.md K17):"]
+    assert "the statuslog's as_of is 2026-01-02 23:59:59; after it, so the value may have moved by then;" in said[2][2]
+    assert said[3][0] == "2026-01-03 00:00:09" and "not at one time" in said[3][2]
+    assert readings_at == {"at": "2026-01-03T00:00:09Z", "clock": "database", "from": "statuslog"}
+    # when the file was read is not a column of the row
+    assert held == [False, None]
 
 
 def test_a_column_holding_null_fails_every_comparison_but_is_null(tmp_path):
@@ -1047,6 +1108,7 @@ def test_s2_stops_on_a_mover_with_no_arm_of_its_own(tmp_path):
 
             r = object.__new__(rerun.Rerun)
             r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
+            r.opened, r.ends, r.branches = [], [], []
             try:
                 r.passes(rerun.Passes("p/tb.py::killJobs", ["panda-TaskBuffer.log"], [], "1", None))
                 stopped = ""
@@ -1111,3 +1173,68 @@ def test_a_pass_inside_a_mark_that_spans_the_search_is_whole_and_one_at_its_end_
     assert whole_run is False and first_pass is False
     # the passes inside are judged by their own records
     assert inner_pass is True
+
+
+def test_the_result_says_the_outcome_with_its_code_and_a_run_that_does_not_finish_leaves_no_file(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from pathlib import Path
+            from bamboo.querier import rerun
+
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
+            r.opened, r.ends, r.branches = [], [], []
+            r.start("L2", "why the others passed it over")
+            r.end("lost on order: here")
+            try:
+                r.need("why it moved it only then", None, "K15")
+            except rerun.Stop as e:
+                stop = [str(e), e.code]
+            rerun._write(str(Path("result.json")), "{}")
+            times = [rerun._iso("2026-10-14 11:25:12,437"), rerun._iso("2026-10-10 15:26:10.014958"), rerun._iso(None)]
+            data = {
+                "statuslog": {"as_of": "2026-10-14 13:11:59", "clock": "database", "states": []},
+                "after": {"source": "s", "as_of": "2026-10-14 13:11:50", "clock": "client", "modificationTime": "x"},
+                "rows": {"job": {"PandaID": {"value": 1, "source": "s", "as_of": "2026-10-14 13:11:50", "clock": "client"},
+                                 "jobStatus": {"value": "running", "source": "s"}}},
+                "files": [{"lfn": {"value": "a", "source": "s", "as_of": "2026-10-14 13:11:51", "clock": "client"}}],
+                "classes": {"job": "JobSpec"},
+            }
+            print(json.dumps([r.opened, r.ends, stop, sorted(p.name for p in Path().iterdir()), times,
+                              rerun._read_at(data), rerun._read_at({"rows": {"job": {"x": {"value": 1, "source": "s"}}}})]))
+            """,
+        )
+    )
+    opened, ends, stop, files, times, read_at, none = json.loads(out.splitlines()[-1])
+    assert opened == ["L2"]
+    assert ends == [["L2", "END lost on order: here"]]
+    assert stop == ["L2: why it moved it only then", "K15"]
+    # written whole, through a file renamed over it
+    assert "result.json" in files and "result.json.tmp" not in files
+    assert times == ["2026-10-14T11:25:12.437Z", "2026-10-10T15:26:10.014958Z", None]
+    assert read_at == [
+        {"section": "statuslog", "at": "2026-10-14T13:11:59Z", "clock": "database"},
+        {"section": "after", "at": "2026-10-14T13:11:50Z", "clock": "client"},
+        {"section": "rows.job", "at": "2026-10-14T13:11:50Z", "clock": "client"},
+        {"section": "files", "at": "2026-10-14T13:11:51Z", "clock": "client"},
+    ]
+    assert none is None
+    # a run that stops before its end leaves none of an earlier run's files behind
+    for name in ("o.txt", "o.txt.asks.jsonl", "o.txt.result.json"):
+        (tmp_path / name).write_text("an earlier run's")
+    done = _run(
+        tmp_path,
+        """
+        import sys
+        from bamboo.querier import rerun
+        sys.argv = ["rerun", "--subject", "JobSpec.jobStatus", "--observed", "running", "--key", "1", "--log", "x.log",
+                    "--rows", "rows.json", "--out", "o.txt"]
+        rerun.main()
+        """,
+        MAP_DUMP=None,
+    )
+    assert done.returncode != 0 and "MAP_DUMP" in done.stderr
+    assert not [n for n in ("o.txt", "o.txt.asks.jsonl", "o.txt.result.json") if (tmp_path / n).exists()]

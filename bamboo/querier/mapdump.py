@@ -75,6 +75,11 @@ def require(what: str) -> None:
         raise RuntimeError(f"{what} reads the map, and no map dump is installed: install_from_env() first (MAP_DUMP)")
 
 
+def installed() -> dict[str, str]:
+    """The installed dump's ``path`` and ``sha256`` (all 64 digits), or ``{}`` before any install."""
+    return dict(_INSTALLED)
+
+
 def described() -> str:
     """``dump <path> (sha256 <16>)`` or ``the one stored in Neo4j`` -- for an output's header.
 
