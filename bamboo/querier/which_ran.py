@@ -1,8 +1,5 @@
 """Step 2 of the loop: which of the candidate sites ran, from one run's records.
 
-    python -m bamboo.querier.which_ran --key KEY --log PATH [--log PATH ...] --site FILE::FUNC:LINE[,LINE] ...
-                        [--subject ATTR --observed VALUE] [--patterns map|outside] [--decide positive|strict]
-
 Every candidate comes out as one of four, with the rule that put it there:
 
 * **excluded** --
@@ -32,7 +29,6 @@ rules is wrong there -- and one no path fits as ``P inconsistent``.
 """
 from __future__ import annotations
 
-import argparse
 import ast
 import os
 import re
@@ -41,10 +37,9 @@ from pathlib import Path
 
 from bamboo.codemap.panda import pathcond  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
-from bamboo.querier import mapdump  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
-from bamboo.querier.records import FileLogs, Run, runs_for  # noqa: E402
+from bamboo.querier.records import Run  # noqa: E402
 
 #: ``WHICH_RUN_BY_ROWS=0``: a candidate with no run of its own takes the key's first run in the window, whatever
 #: function it is.  With several runs there -- a DB proxy log, whose token is the method --
@@ -528,29 +523,3 @@ def judge(
         how = f"{len(left)} left: " + ", ".join(sorted({f"{v.candidate.func}:{v.line}" for v in left if v.kind != 'unexamined'}))
     return Judgement(verdicts, chosen, how, bracket, [f"MAP: {m}" for m in sorted(map_findings)] + p_notes)
 
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--key", required=True)
-    ap.add_argument("--log", action="append", default=[])
-    ap.add_argument("--site", action="append", default=[])
-    ap.add_argument("--subject", default="")
-    ap.add_argument("--observed", default="")
-    ap.add_argument("--patterns", default="outside", choices=R.PATTERN_MODES)
-    ap.add_argument("--decide", default="positive", choices=("positive", "strict"))
-    args = ap.parse_args()
-    mapdump.install_from_env()
-    files = FileLogs(args.log)
-    logs = {name: runs_for(files.log(name, args.key), args.key) for name in files.names()}
-    question = next(iter(logs.values()))[0]
-    cands = []
-    for site in args.site:
-        owner, lines = site.rsplit(":", 1)
-        rel, func = owner.split("::")
-        cands.append(Candidate(rel, func, [int(x) for x in lines.split(",")], run=question))
-    j = judge(cands, logs, mode=args.patterns, decide=args.decide, subject=args.subject, observed=args.observed, question_run=question)
-    print(j.report(question))
-
-
-if __name__ == "__main__":
-    main()

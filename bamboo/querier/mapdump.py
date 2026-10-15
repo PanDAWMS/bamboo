@@ -8,9 +8,9 @@ Each case is read against the map built from the corpus that wrote its log: its 
 that pin.  The swap is per process: a process started with ``spawn`` would have to call ``install_from_env()`` itself.  None needs to
 today -- census_p's ``--jobs`` workers read no map store at all (census_p.py says how that was checked).
 
-The entries that read the map (``rerun`` and ``which_ran``) call ``install_from_env()`` first thing in ``main``, so
-``MAP_DUMP`` means the same run with or without a driver that installed it before them; ``described()`` says what was
-installed, not what the environment asks for.
+The entry that reads the map (``rerun``) calls ``install_from_env()`` first thing in ``main``, so ``MAP_DUMP`` means
+the same run with or without a driver that installed it before it; ``described()`` says what was installed, not what
+the environment asks for.
 
 There is no map but a dump (2026-10-13: Neo4j keeps only the incident graph).  A run without ``MAP_DUMP`` stops, and
 so does a reader in the package that would open a graph client with no dump installed (``require``): the client it
