@@ -637,29 +637,60 @@ def test_a_mover_reaches_a_writer_by_the_calls_the_map_placed_into_it(tmp_path):
             from types import SimpleNamespace as N
             from bamboo.querier.rerun import through_calls
 
-            def writer(owner, outcomes, called_from):
-                return N(owner=owner, branches=[N(line=10, outcome=o) for o in outcomes], called_from=called_from)
+            def writer(owner, outcomes, called_from, pre=()):
+                return N(owner=owner, called_from=called_from,
+                         branches=[N(line=10, outcome=o, path_condition=[], row_precondition=list(pre)) for o in outcomes])
 
             writers = [
                 writer("p/proxy.py::killJob", ["closed"], ["d/cmd.py:7 -> p/tb.py:55"]),
                 writer("p/proxy.py::archiveJob", ["failed"], ["p/tb.py:48", "… 7 more"]),
                 writer("p/proxy.py::touch", ["running"], ["p/tb.py:50"]),
                 writer("p/proxy.py::other", ["failed"], ["q/elsewhere.py:52"]),
+                writer("p/proxy.py::getJobs", ["sent"], ["p/tb.py:45"], ["jobStatus='activated'"]),
             ]
             print(json.dumps([
-                through_calls("p/tb.py", [(40, 60)], writers, "running"),
-                through_calls("d/cmd.py", [(1, 9)], writers, "running"),
-                through_calls("p/tb.py", [(100, 120)], writers, "running"),
+                through_calls("p/tb.py", [(40, 60)], writers, "JobSpec.jobStatus", "running"),
+                through_calls("d/cmd.py", [(1, 9)], writers, "JobSpec.jobStatus", "running"),
+                through_calls("p/tb.py", [(100, 120)], writers, "JobSpec.jobStatus", "running"),
             ]))
             """,
         )
     )
     in_tb, one_out, elsewhere = json.loads(out.splitlines()[-1])
-    # placed in the function: killJob's inner hop and archiveJob's own line; touch writes only the value observed
+    # placed in the function: killJob's inner hop and archiveJob's own line; touch writes only the value observed, and
+    # getJobs writes only rows holding another status
     assert in_tb == [["archiveJob", "killJob"], []]
     # one hop out: cmd.py calls tb.py, which calls killJob; archiveJob's list is cut, so it may be among the unlisted
     assert one_out == [["killJob"], ["archiveJob"]]
     assert elsewhere == [[], ["archiveJob"]]
+
+
+def test_a_mover_is_the_def_its_statement_is_in(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "metrics.py").write_text(textwrap.dedent("""\
+        def count(cur):
+            return cur.execute("SELECT 1")
+
+
+        class FetchData:
+            def count(self, cur):
+                cur.execute("SELECT jobStatus FROM jobsActive4")
+                return cur.fetchall()
+        """))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.rerun import defs_holding
+
+            print(json.dumps([[(f.lineno, f.end_lineno) for f in defs_holding("pandaserver/metrics.py", "count", lines)]
+                              for lines in ([7], [], [3])]))
+            """,
+        )
+    )
+    # the statement at 7 is FetchData.count's; with no statement every def of the name; a line between defs, none
+    assert json.loads(out.splitlines()[-1]) == [[[6, 8]], [[1, 2], [6, 8]], []]
 
 
 def test_s1_keeps_a_mover_with_no_arm_of_its_own_and_says_why(tmp_path):
@@ -684,6 +715,326 @@ def test_s1_keeps_a_mover_with_no_arm_of_its_own_and_says_why(tmp_path):
     assert every == ["its def is not found", "it calls into ['killJob']",
                      "it may call into ['archiveJob'], whose callers the map lists only in part",
                      "it hands its rows on", "the map could not read all of it"]
+
+
+_MOVERS_MAP = """
+    import json
+    from types import SimpleNamespace as N
+    from bamboo.querier.rerun import arms_of, movers_of
+
+    def branch(line, outcome, pre=()):
+        return N(line=line, outcome=outcome, path_condition=[], row_precondition=list(pre))
+
+    def writer(owner, *branches):
+        return N(owner=owner, branches=list(branches), log_files=[])
+
+    def stmt(owner, line, selects, region, crosses_to=()):
+        return N(owner=owner, line=line, selects=selects, region=region, crosses_to=list(crosses_to))
+
+    writers = [
+        writer("p/jobs.py::getJobs", branch(242, "sent", ["jobStatus='activated'"])),
+        writer("p/jobs.py::killJob", branch(30, "cancelled"), branch(31, "running")),
+        writer("p/cmd.py::execCommand", branch(459, "aborting"), branch(462, "ready", ["jobStatus IN (:a,:b)"])),
+        writer("p/jobs.py::unThrottle", branch(84, "activated", ["jobStatus='throttled'"]), branch(None, "failed")),
+        writer("p/jobs.py::touch", branch(12, "failed", ["status='finished'"])),
+    ]
+"""
+
+
+def test_an_arm_moves_the_value_unless_its_write_requires_another(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    print(json.dumps({w.owner.split("::")[-1]: {line: a.outcomes for line, a in arms_of(writers, w.owner,
+                      "JobSpec.jobStatus", "running").items()} for w in writers}))
+    """,
+        )
+    )
+    arms = json.loads(out.splitlines()[-1])
+    # getJobs and unThrottle write only rows holding another status; writing the value observed is no move (killJob's
+    # 31); a bind no one settled keeps execCommand's 462; touch's precondition is of another column
+    assert arms == {"getJobs": {}, "killJob": {"30": ["cancelled"]}, "execCommand": {"459": ["aborting"], "462": ["ready"]},
+                    "unThrottle": {}, "touch": {"12": ["failed"]}}
+
+
+def test_a_statement_hands_its_rows_to_its_owner_only_where_the_owner_writes_them(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    follow = N(guarded_by=[N(owner="p/jobs.py::killJob")], reader_statements=[
+        # an arm of execCommand's lies in the region: its own rows; recordStatus writes nothing, killJob does
+        stmt("p/cmd.py::execCommand", 450, ["JobSpec.jobStatus=running"], [440, 470],
+             ["p/log.py::recordStatus", "p/jobs.py::killJob"]),
+        # no arm of execCommand's in this region (orphans picked up for runImpl): to what it calls there
+        stmt("p/cmd.py::execCommand", 591, ["JobSpec.jobStatus=running"], [573, 603], ["d/cmd.py::runImpl"]),
+    ])
+    print(json.dumps(movers_of(follow, writers, "JobSpec.jobStatus", "running")))
+    """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == {
+        "p/cmd.py::execCommand": "execCommand@450 selects the value",
+        "p/jobs.py::killJob": "execCommand@450 hands the rows it selects to it",
+        "d/cmd.py::runImpl": "execCommand@591 hands the rows it selects to it",
+    }
+
+
+def test_only_a_statement_that_selects_the_value_gives_movers(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    follow = N(guarded_by=[N(owner="p/jobs.py::getJobs")], reader_statements=[
+        # the map keeps an UPDATE-only owner's statements of other values: they give no mover
+        stmt("p/jobs.py::unThrottle", 80, [], [78, 90]),
+        stmt("p/cmd.py::execCommand", 368, ["PRODSYS_COMM.comm_owner=DEFT"], [362, 378], ["d/cmd.py::runImpl"]),
+        stmt("d/metrics.py::count", 109, ["JobSpec.jobStatus=running", "JobSpec.VO=atlas"], [100, 120]),
+    ])
+    print(json.dumps(movers_of(follow, writers, "JobSpec.jobStatus", "running")))
+    """,
+        )
+    )
+    # a counting statement keeps its rows (a mover with no arm of its own); the guarded writer comes last
+    assert json.loads(out.splitlines()[-1]) == {
+        "d/metrics.py::count": "count@109 selects the value",
+        "p/jobs.py::getJobs": "its write requires the value",
+    }
+
+
+def test_a_statement_whose_owner_writes_none_hands_its_rows_to_all_it_calls(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    follow = N(guarded_by=[], reader_statements=[
+        # main writes nothing: Watcher.run and killJobs take its rows, a writer or not
+        stmt("d/archive.py::main", 309, ["JobSpec.jobStatus=running"], [299, 321], ["d/watcher.py::run", "p/tb.py::killJobs"]),
+    ])
+    print(json.dumps(movers_of(follow, writers, "JobSpec.jobStatus", "running")))
+    """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == {
+        "d/watcher.py::run": "main@309 hands the rows it selects to it",
+        "p/tb.py::killJobs": "main@309 hands the rows it selects to it",
+    }
+
+
+_M2_SETUP = """
+    import datetime
+    import json
+    from types import SimpleNamespace as N
+    from bamboo.querier import rerun
+
+    r = object.__new__(rerun.Rerun)
+    r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
+    r.data = {
+        "classes": {"job": "JobSpec"},
+        "rows": {"job": {"PandaID": {"value": 1}, "creationTime": {"value": "2026-01-01 00:00:00"},
+                         "gshare": {"value": "Express"}, "VO": {"value": None}}},
+        "after": {"source": "job/get_description", "modificationTime": "2026-01-03 00:00:00"},
+        "statuslog": {"states": []},
+    }
+    t0, t1 = datetime.datetime(2026, 1, 1, 12), datetime.datetime(2026, 1, 5)
+    q = rerun.Missed("JobSpec.jobStatus", "activated", "sent", t0, t1, [], "", None)
+
+    def val(constant="", base="", offset=None):
+        return N(kind="bind", text=":v", constant=constant, base=base, offset_seconds=offset, needs=[], said="")
+
+    def term(node, subject, op, values, settled=True):
+        return N(node=node, items=[], subject=subject, op=op, values=values, settled=settled, text=f"{subject} {op}")
+
+    def group(node, *items):
+        return N(node=node, items=list(items))
+
+    def spans(found):
+        return [[str(a), str(b)] for a, b in found]
+
+    status = term("equal", "JobSpec.jobStatus", "IN", [val("defined"), val("activated")])
+    # creationTime < now - 2 d: true from creationTime + 2 d on
+    old = term("compare", "JobSpec.creationTime", "<", [val(base="naive_utcnow", offset=-2 * 86400)])
+    share = term("equal", "JobSpec.gshare", "=", [val("User")])
+    touched = term("compare", "JobSpec.modificationTime", "<", [val(base="naive_utcnow", offset=-3600)])
+
+    def stmt(keys=(), restricts=("JobSpec.jobStatus=activated",), refuses=(), trees=(), routes=()):
+        return N(keys=list(keys), restricts=list(restricts), refuses=list(refuses),
+                 condition_trees=[N(entry="e", tree=t) for t in trees], call_readings=list(routes))
+
+    def route(trees=(), not_run=False, as_statement=False):
+        return N(not_run=not_run, as_statement=as_statement, restricts=[], refuses=[],
+                 condition_trees=[N(entry="e", tree=t) for t in trees])
+"""
+
+
+def test_a_tree_is_surely_true_only_where_every_term_it_needs_is_known_true(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    at = datetime.datetime(2026, 1, 3, 12)
+    stuck = rerun.Missed("JobSpec.jobStatus", "activated", "", at, at, [], "", None, at_end=True)
+    print(json.dumps({
+        "status": spans(r._true_spans(status, q)),
+        "old": spans(r._true_spans(old, q)),
+        "all": spans(r._true_spans(group("all", status, old), q)),
+        "any": spans(r._true_spans(group("any", share, old), q)),
+        "share": spans(r._true_spans(share, q)),
+        "unsettled": spans(r._true_spans(term("equal", "JobSpec.gshare", "=", [val("Express")], settled=False), q)),
+        "null": spans(r._true_spans(term("equal", "JobSpec.VO", "IN", [val("atlas")]), q)),
+        "after, late": spans(r._true_spans(touched, q)),
+        "after, at as_of": spans(r._true_spans(touched, stuck)),
+    }))
+    """,
+        )
+    )
+    found = json.loads(out.splitlines()[-1])
+    whole, turned = [["2026-01-01 12:00:00", "2026-01-05 00:00:00"]], [["2026-01-03 00:00:00", "2026-01-05 00:00:00"]]
+    assert found["status"] == whole and found["old"] == turned and found["all"] == turned and found["any"] == turned
+    # false, unsettled, a NULL (the NULL rule is not here), and late's after (read after the window): never true
+    assert found["share"] == found["unsettled"] == found["null"] == found["after, late"] == []
+    # at as_of, after holds the value then: modificationTime + 1 h is before as_of
+    assert found["after, at as_of"] == [["2026-01-03 12:00:00", "2026-01-03 12:00:00"]]
+
+
+def test_a_statement_is_surely_true_only_without_a_run_time_key_and_on_a_running_route(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    print(json.dumps({
+        "plain": spans(r._statement_true(stmt(trees=[old]), q)),
+        "keyed": spans(r._statement_true(stmt(keys=["JobSpec.jediTaskID"], trees=[old]), q)),
+        "restricted away": spans(r._statement_true(stmt(restricts=["JobSpec.jobStatus=defined"]), q)),
+        "refused": spans(r._statement_true(stmt(refuses=["JobSpec.gshare=Express"]), q)),
+        "no route runs": spans(r._statement_true(stmt(routes=[route(not_run=True)]), q)),
+        "one route": spans(r._statement_true(stmt(trees=[old], routes=[route([share]), route(as_statement=True)]), q)),
+        "a false route": spans(r._statement_true(stmt(routes=[route([share])]), q)),
+    }))
+    """,
+        )
+    )
+    found = json.loads(out.splitlines()[-1])
+    turned = [["2026-01-03 00:00:00", "2026-01-05 00:00:00"]]
+    assert found["plain"] == turned and found["one route"] == turned
+    assert found["keyed"] == found["restricted away"] == found["refused"] == found["no route runs"] == found["a false route"] == []
+
+
+def test_l2_says_each_movers_verdict(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    def st(owner, line, trees=()):
+        return N(owner=owner, line=line, keys=[], restricts=["JobSpec.jobStatus=activated"], refuses=[],
+                 condition_trees=[N(entry="e", tree=t) for t in trees], call_readings=[])
+
+    def writer(owner, outcome, pre=()):
+        return N(owner=owner, log_files=[], branches=[N(line=5, outcome=outcome, path_condition=[], row_precondition=list(pre))])
+
+    a, b, c = st("d/a.py::main", 10, [share]), st("d/a.py::main", 20, [status]), st("d/a.py::main", 30, [touched])
+    q.movers = {"d/a.py::gone": "main@10 hands the rows it selects to it", "d/a.py::open": "main@20 hands the rows it selects to it",
+                "d/a.py::dark": "main@30 hands the rows it selects to it", "p/w.py::armed": "main@10 hands the rows it selects to it",
+                "p/w.py::moved": "its write requires the value"}
+    q.paths = {"d/a.py::gone": [a], "d/a.py::open": [b], "d/a.py::dark": [c], "p/w.py::armed": [a], "p/w.py::moved": []}
+    q.by_key, q.refusing, q.mover = ["p/w.py::keyed"], ["p/w.py::refusing"], "p/w.py::moved"
+    q.writers = [writer("p/w.py::armed", "failed"), writer("p/w.py::keyed", "closed"), writer("p/w.py::moved", "sent"),
+                 writer("p/w.py::refusing", "sent", ["jobStatus='defined'"])]
+    verdicts = r._movers_in_window(q, {("d/a.py::main", 10): "refused", ("d/a.py::main", 20): "not settled",
+                                      ("d/a.py::main", 30): "not settled"})
+    print(json.dumps([verdicts, r.lines[-1]]))
+    """,
+        )
+    )
+    verdicts, last = json.loads(out.splitlines()[-1])
+    assert dict(map(tuple, verdicts)) == {
+        "d/a.py::gone": "refused",  # no arm of its own, and its one statement refuses the row
+        "d/a.py::open": "could have",  # its statement holds for the row all the window
+        "d/a.py::dark": "undecided",  # modificationTime is after the window in late
+        "p/w.py::armed": "by key",  # a writer: refused by its statement, not by its key
+        "p/w.py::moved": "moved it",
+        "p/w.py::keyed": "by key",
+        "p/w.py::refusing": "write refuses",
+    }
+    assert last == "not ruled out: 4 mover(s)"
+
+
+def test_the_window_end_reads_after_only_at_as_of(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    at = datetime.datetime(2026, 1, 3, 12)
+    stuck = rerun.Missed("JobSpec.jobStatus", "activated", "", at, at, [], "", None, at_end=True)
+    print(json.dumps([r._held("JobSpec.modificationTime", q), r._held("JobSpec.modificationTime", stuck),
+                      r._held("JobSpec.source", stuck), r._unanswered("JobSpec.modificationTime", q),
+                      r._unanswered("JobSpec.modificationTime", stuck)]))
+    """,
+        )
+    )
+    late, stuck, source, late_why, stuck_why = json.loads(out.splitlines()[-1])
+    assert late == [False, None] and stuck == [True, "2026-01-03 00:00:00"] and source == [False, None]
+    assert late_why == "written at the move or later; its row here holds only the value after" and stuck_why is None
+
+
+def test_a_column_holding_null_fails_every_comparison_but_is_null(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    unsettled = N(kind="bind", text=":es", constant="", base="", offset_seconds=None, needs=["a caller"], said="")
+    print(json.dumps({
+        "in, unsettled": r._leaf(term("equal", "JobSpec.VO", "IN", [unsettled], settled=False), q),
+        "not in": r._leaf(term("unequal", "JobSpec.VO", "NOT IN", [val("atlas")]), q),
+        "compare": r._leaf(term("compare", "JobSpec.VO", ">", [val("1")]), q),
+        "is null": r._leaf(term("null", "JobSpec.VO", "", []), q),
+        "is not null": r._leaf(term("not_null", "JobSpec.VO", "", []), q),
+        "other": r._leaf(N(node="other", items=[], subject="JobSpec.VO", op="", values=[], settled=False, text="NVL(VO,'x')='x'"), q),
+        "a pair": r._pair_fails("JobSpec.VO", {"atlas"}, q),
+        "true": r._true_spans(term("equal", "JobSpec.VO", "IN", [val("atlas")]), q),
+    }))
+    """,
+        )
+    )
+    found = json.loads(out.splitlines()[-1])
+    null = "the row holds NULL, which no comparison but IS NULL takes"
+    assert found["in, unsettled"] == found["not in"] == found["compare"] == found["a pair"] == null
+    # IS NULL takes it, IS NOT NULL says what the row holds, as before; an unread term is not read; never true
+    assert found["is null"] is None and found["is not null"] == "the row holds None"
+    assert found["other"] is None and found["true"] == []
+
+
+def test_l2_stops_on_a_late_mover_it_cannot_read_yet_and_sends_one_lost_on_order_to_l3(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    r.hop = "L2"
+
+    def st(line, order=False):
+        return N(owner="p/w.py::moved", line=line, keys=[], restricts=["JobSpec.jobStatus=activated"], refuses=[],
+                 condition_trees=[N(entry="e", tree=status)], call_readings=[], order_by=["x"] if order else [],
+                 limits=["<= :n"] if order else [])
+
+    q.mover, said = "p/w.py::moved", []
+    for statements, ordered in (([], []), ([st(10)], []), ([st(10, True)], [st(10, True)])):
+        q.statements = statements
+        try:
+            r._why_late(q, ordered)
+            said.append("on to L3")
+        except rerun.Stop as e:
+            said.append(str(e))
+    print(json.dumps(said))
+    """,
+        )
+    )
+    by_key, unordered, ordered = json.loads(out.splitlines()[-1])
+    assert by_key == ("L2: why w.py::moved moved it only at 2026-01-05 00:00:00: it takes the row by its key, and its runs "
+                      "in the window are read pass by pass (S2-S4 over the window; build order 2, KNOWN_ISSUES.md K15)")
+    assert unordered == ("L2: why w.py::moved took it only at 2026-01-05 00:00:00: moved@10 held for the row all the window, "
+                         "and it returns no first rows of an order (not read)")
+    assert ordered == "on to L3"
 
 
 def test_s2_stops_on_a_mover_with_no_arm_of_its_own(tmp_path):

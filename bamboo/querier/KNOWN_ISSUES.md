@@ -28,7 +28,8 @@ differs from a printed one, or where the counts break the assumption at their mo
 (`at_one_moment`).
 *Why not now:* the cases that reach S5 all call one method (`getPandaIDsWithTask_JEDI(jediTaskID,
 True)` in TaskCommando); a general rule shaped on them would fit them only.
-*Revisit:* when other calls reach S5.  First count, from the map, the calls an S4 stop at the database
+*Revisit:* build order 2 (tmaeno, 2026-10-15: no longer "when other calls reach S5"), with the evaluator L2 and S1
+read statements by (`_true_spans`).  First count, from the map, the calls an S4 stop at the database
 can name, by class (the tables, the kinds of condition, whether the method returns the rows it
 fetched).  The general form would be parts: the map's tables and conditions of the call; the rows at a
 time, per row kind, from its status history and the tables it moves through; the conditions evaluated
@@ -123,6 +124,50 @@ S1 counts a mover's arms in its own function only; `TaskBuffer.killJobs` writes 
 *Revisit:* following a mover's calls to their arms (S2 per callee); the map's answer to what a function
 reaches -- the writes and the holes on the way (an open call, a call not placed, one outside the corpus,
 a hand-off to a thread, queue or plugin) -- dropping a mover only where it reaches none and has no hole.
+
+### K16. S1 lists no writer that takes a row by its key alone
+
+S1's movers are the statements' (`movers_of`): the functions the rows of a statement selecting the value reach, and
+the writers whose write requires the value (`guarded_by`).  A writer called with the key -- the pilot's report into
+`updateJobStatus`, a kill command into `killJob` -- is in neither for `JobSpec.jobStatus=running`, whose
+`guarded_by` is empty.  L2 lists them (`by key`, K15).
+
+*Shows:* silent in S1 (such a writer is not asked).
+*Revisit:* build order 2: S1 takes them too, with the absence rule of K15 deciding which of them did not run.
+
+### K17. Stuck reads the movers' statements at as_of only
+
+The rows file's `after` holds the row's columns as read at `as_of`, the window's end; a column may have held
+other values earlier in the window.  So S1's readings at as_of (`_read_at_as_of`) drop no mover and remove no ask: a
+mover that rewrites the column it compares refuses the row between its passes -- TaskCommando's
+`getTasksToExecCommand_JEDI@4591` asks `modificationtime < now - 5 min` and runImpl sets modificationtime on each
+pass, so at G's as_of the row is refused, though runImpl took it 70 times (tmaeno, 2026-10-15).
+
+*Shows:* said (each reading is marked "a reading, not a drop").
+*Revisit:* with the map's work on which columns are written in a window, and by whom.
+
+## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
+
+### K15. A writer that takes a row by its key is not ruled out
+
+Every writer with an arm that can move the value (`arms_of`) is listed `by key`: whether it ran on the key in the
+window is read from its runs there, which L2 does not ask.  Ruling one out needs more than finding no run: the whole
+window searched in every log its process writes to (a DB proxy method writes `panda-DBProxy.log` or
+`panda-JediDBProxy.log` by the process that called it), and its runs bound to name the key.
+
+*Shows:* said (`by key`, counted among "not ruled out").
+*Revisit:* build order 2: the absence rule, the logs narrowed by the callers' processes (the map's upward union; two
+hops of `called_from` until then), the window's asks, and S2-S4 over the window for a writer that ran.
+
+### K18. "Could have" needs every term known true
+
+`_statement_true` takes a statement as surely returning the row only where each term is known true; never for a
+statement that asks rows by a run-time value (the map's `keys`) or a term on a status history.  (A column holding
+NULL is never true either -- SQL's NULL fails every comparison but `IS NULL` -- and `_leaf` says so: that is a
+refusal, not a limit.)
+
+*Shows:* said: such a mover is `undecided` or `by key`, not `could have`.
+*Revisit:* status-history terms with the column values over the window (the map's (b)).
 
 ## H steps
 
