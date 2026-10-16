@@ -431,6 +431,75 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
     assert "  mover: no run of its own from 2026-10-13 14:00:00: asking the rest of the window" in lines
 
 
+def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import windows as W
+
+    r.data["statuslog"] = {"as_of": "2026-10-13 20:00:00", "states": [{"status": "finishing", "time": "2026-10-13 01:00:00"}]}
+    first, rest = W.stuck(r.data["statuslog"], "finishing"), W.rest(r.data["statuslog"], "finishing")
+    s = rerun.Stuck("JobSpec.jobStatus", "finishing", "1")
+    held = lambda p: [p["held"], p["why"]]
+    got = {}
+    r.logs = N(needs_window=True)
+    for name, searched, missed, holes, to_hand in [
+        ("whole", rest, [], {}, ["a.log"]),
+        ("last part only", first, [], {}, ["a.log"]),
+        ("holes", rest, [], {"a.log": ["m1: 2026-10-13 02:00:00 .. 2026-10-13 03:00:00"]}, ["a.log"]),
+        ("unanswered", rest, [("an ask", "why")], {}, ["a.log"]),
+        ("holes and unanswered", first, [("an ask", "why")], {"a.log": ["m1: 2026-10-13 15:00:00 .. 2026-10-13 16:00:00"]}, ["a.log", "b.log"]),
+        ("no log", first, [], {}, []),
+    ]:
+        got[name] = held(r._searched_whole(s, to_hand, first, searched, missed, holes))
+    # a window that starts at the row is whole in its last part
+    r.data["statuslog"]["as_of"] = "2026-10-13 05:00:00"
+    short = W.stuck(r.data["statuslog"], "finishing")
+    got["short"] = held(r._searched_whole(s, ["a.log"], short, short, [], {}))
+    r.logs = N(needs_window=False)
+    got["files"] = held(r._searched_whole(s, ["a.log"], first, first, [], {}))
+
+    # the map's prints, by owner
+    p = lambda basis, *files: N(log_files_basis=basis, log_files=list(files))
+    prints = {"logger": [p("logger", "a.log"), p("logger", "a.log", "b.log")], "module": [p("logger", "a.log"), p("module", "c.log")],
+              "none": [], "nowhere": [p("logger")]}
+    rerun.R._prints_of = lambda owner, lines: N(statements=prints[owner.split("::")[1]]) if owner.split("::")[1] in prints else None
+    logs = {name: held(rerun.every_log_asked(f"x.py::{name}", [], asked)) for name, asked in [
+        ("logger", ["a.log", "b.log"]), ("module", ["a.log", "c.log"]), ("none", ["a.log"]), ("nowhere", ["a.log"]),
+        ("missing", ["a.log"])]}
+    logs["one not asked"] = held(rerun.every_log_asked("x.py::logger", [], ["a.log"]))
+    rerun.R.ROWS_FROM = "walk"
+    logs["walk"] = held(rerun.every_log_asked("x.py::logger", [], ["a.log", "b.log"]))
+    rerun.R.ROWS_FROM = "graph"
+    r.logs = N(needs_window=True)
+    premises = r._premises(s, "x.py::logger", [], ["a.log", "b.log"], short, short, [], {})
+    print(json.dumps([got, logs, premises]))
+    """,
+        )
+    )
+    got, logs, premises = json.loads(out.splitlines()[-1])
+    # the whole window: the rest asked, or a last part that starts at the row, every ask answered, nothing unsearched
+    assert got["whole"] == [True, "2026-10-13 00:50:00 .. 2026-10-13 20:00:00 searched in ['a.log'], none of it unsearched"]
+    assert got["short"] == [True, "2026-10-13 00:50:00 .. 2026-10-13 05:00:00 searched in ['a.log'], none of it unsearched"]
+    assert got["last part only"] == [False, "searched from 2026-10-13 14:00:00 only"]
+    assert got["holes"] == got["holes and unanswered"] == [False, "a.log not searched all the window"]
+    assert got["no log"] == [False, "no log was asked"]
+    # not known yet: an ask not answered, or a file handed in, which does not say what of the window it holds
+    assert got["unanswered"] == [None, "1 ask(s) not answered yet"]
+    assert got["files"][0] is None
+    # every file the map places the prints in, by their logger, asked
+    assert logs["logger"] == [True, "every file the map places its prints in was asked: ['a.log', 'b.log']"]
+    assert logs["one not asked"] == [False, "not asked: ['b.log']"]
+    assert logs["module"][0] is False and "['module']" in logs["module"][1]
+    assert logs["none"] == logs["missing"] == [False, "the map has no prints of its own for it"]
+    assert logs["nowhere"] == [False, "the map places its prints in no file"]
+    assert logs["walk"][0] is None
+    # the third is the map's to say: never known yet
+    assert list(premises) == ["window", "logs", "prints"]
+    assert premises["window"]["held"] is True and premises["logs"]["held"] is True and premises["prints"]["held"] is None
+
+
 _RECORDED = """
     import json
     from pathlib import Path

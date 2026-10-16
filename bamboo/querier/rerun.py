@@ -260,6 +260,31 @@ def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bo
                     "and a write further down is not seen (KNOWN_ISSUES.md K14)"]
 
 
+#: judgement 3's third premise, which nothing the querier reads says yet (KNOWN_ISSUES.md K19)
+PRINTS_NOT_KNOWN = ("not known yet: the prints every path to an arm passes are the map's to say (asked 2026-10-16), and the "
+                    "asks search by the question's key, which a run need not print (KNOWN_ISSUES.md K19)")
+
+
+def every_log_asked(owner: str, lines, asked: list[str]) -> dict:
+    """Judgement 3's second premise for *owner*: every log a run of it prints to was asked -- each file the map places
+    its prints in by the logger they are made on (``PrintStatement.log_files``; a DB proxy method's are the server's and
+    JEDI's both, as the process that called it chooses).  ``{"held": True | False | None, "why": ...}``, None where the
+    files are the map's reading's, not where it places the prints (``rows.own_log_files``)."""
+    if not R.OWN_FILES or R.ROWS_FROM != "graph":
+        return {"held": None, "why": "the logs are the map's reading's, not where it places the prints (ROWS_OWN_FILES, ROWS_FROM)"}
+    found = R._prints_of(owner, lines)
+    if found is None or not found.statements:
+        return {"held": False, "why": "the map has no prints of its own for it"}
+    if bases := sorted({s.log_files_basis for s in found.statements} - {"logger"}):
+        return {"held": False, "why": f"the map places some of its prints by {bases}, not by their logger: where they land is not known whole"}
+    files = sorted({f for s in found.statements for f in s.log_files})
+    if not files:
+        return {"held": False, "why": "the map places its prints in no file"}
+    if missing := [f for f in files if f not in asked]:
+        return {"held": False, "why": f"not asked: {missing}"}
+    return {"held": True, "why": f"every file the map places its prints in was asked: {files}"}
+
+
 def arms_of(writers: list, owner: str, subject: str, observed: str) -> dict[int, Arm]:
     """*owner*'s arms that can move *subject* on from *observed*, by line: not one that can only write the observed
     value, nor one whose write requires the row to hold other values of the subject's column -- its
@@ -990,7 +1015,8 @@ class Rerun:
     def result_of(self, outcome: dict, asks: dict) -> dict:
         """result.json, version 1 (agreed with the live-case harness, 2026-10-15): the outcome, the question, the steps
         opened in order, every input with its sha256, the asks file, and what the steps found -- the window, the mover
-        that moved the value (late), every mover with its verdict -- with times in UTC, ISO 8601 with ``Z``."""
+        that moved the value (late), every mover with its verdict and, in S1, judgement 3's premises (``_premises``, added
+        in build order 2a) -- with times in UTC, ISO 8601 with ``Z``."""
         a = self.args
         dump = mapdump.installed()
         return {
@@ -1630,7 +1656,7 @@ class Rerun:
             mine = [(s, v) for o, s, v in readings if o == owner]
             entry = {"owner": owner, "reached": "guard" if movers[owner] == GUARDED else "select",
                      "statements": [s for s, _ in mine if s], "verdict": None, "reasons": [],
-                     "readings": [{"statement": s or None, "verdict": v} for s, v in mine]}
+                     "readings": [{"statement": s or None, "verdict": v} for s, v in mine], "premises": None}
             entries.append(entry)
             if any(v == "refused" for _, v in mine):
                 entry["reasons"].append({"code": "K17", "text": "refused at the moment read, one moment of the window: not dropped"})
@@ -1653,6 +1679,7 @@ class Rerun:
                      f"{[(a.line, a.outcomes) for a in arms.values()]}; logs {files} ({'to hand: ' + str(to_hand) if to_hand else 'none to hand'})")
             if not to_hand:
                 entry["verdict"] = "no-log"
+                entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, asking, [], {})
                 continue
             found, missed, holes, searched = self._ask_mover(q, owner, to_hand, asking)
             unanswered += missed
@@ -1673,6 +1700,8 @@ class Rerun:
                 self.say(f"  {owner.split('::')[-1]}: {said}")
                 entry["verdict"] = "no-run-found"
                 entry["reasons"].append({"code": "K19", "text": said})
+            if entry["verdict"] != "ran":
+                entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, searched, missed, holes)
         self.result["movers"] = entries
         self._stop_unanswered(unanswered)
         # every mover that ran and left the value is part of the answer: each goes on alone (tmaeno, 2026-10-13)
@@ -1708,6 +1737,37 @@ class Rerun:
         """The logs among *found* holding a run of *owner* in *asking*'s window (any run, for the door over files)."""
         window = asking.window if self.logs.needs_window else None
         return [name for name, rs in found.items() if any((window is None or _overlaps(r, window)) and _of_mover(r, owner) for r in rs)]
+
+    def _premises(self, q: Stuck, owner: str, lines, to_hand: list[str], asking: W.Asking, searched: W.Asking,
+                  missed: list, holes: dict) -> dict:
+        """Judgement 3's premises for a mover with no run of its own found: absence rules it out only where all three
+        hold (build order 2a; KNOWN_ISSUES.md K19).  ``window``: the whole window was searched; ``logs``: every log its
+        runs print to was asked (``every_log_asked``); ``prints``: every run that reaches an arm prints a string the asks
+        search by.  Each is ``{"held": True | False | None, "why": ...}``, None where it is not known yet.
+
+        *asking* is the window's last part (``W.stuck``), *searched* the part ``_ask_mover`` asked last, and *missed*
+        and *holes* what that ask returned."""
+        return {"window": self._searched_whole(q, to_hand, asking, searched, missed, holes),
+                "logs": every_log_asked(owner, lines, to_hand),
+                "prints": {"held": None, "why": PRINTS_NOT_KNOWN}}
+
+    def _searched_whole(self, q: Stuck, to_hand: list[str], asking: W.Asking, searched: W.Asking, missed: list,
+                        holes: dict) -> dict:
+        """Judgement 3's first premise: the logs were searched over the whole stuck window, from the value's row less
+        SLACK to ``as_of``, every ask answered and nothing of it left unsearched (``Log.holes``).  Not known through
+        the door over files: a file handed in does not say what of the window it holds."""
+        if not to_hand:
+            return {"held": False, "why": "no log was asked"}
+        if not self.logs.needs_window:
+            return {"held": None, "why": "the door over files does not say what of the window a file holds"}
+        # a hole first: asking again does not search better what a log's answer did not reach
+        if holes:
+            return {"held": False, "why": f"{', '.join(holes)} not searched all the window"}
+        if missed:
+            return {"held": None, "why": f"{len(missed)} ask(s) not answered yet"}
+        if searched is asking and W.rest(self.data.get("statuslog", {}), q.observed) is not None:
+            return {"held": False, "why": f"searched from {asking.window[0]} only"}
+        return {"held": True, "why": f"{searched.window[0]} .. {asking.window[1]} searched in {to_hand}, none of it unsearched"}
 
     async def _writers_of(self, subject: str) -> list:
         from bamboo.database.graph_database_client import GraphDatabaseClient

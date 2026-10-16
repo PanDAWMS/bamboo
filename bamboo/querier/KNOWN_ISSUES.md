@@ -158,12 +158,14 @@ every ask was answered and none held such a run is not followed -- but not ruled
 of K15 (the whole window searched, every log its process writes to, and every run that reaches the arm bound to
 print a string the asks search by).  Since build order 2a S1 searches the whole window for such a mover (K5); the
 third premise needs the map's prints that every path to an arm passes (asked 2026-10-16), and the asks search by the
-question's key, which a mover's runs need not print (the setupper names datasets, not PandaIDs).
+question's key, which a mover's runs need not print (the setupper names datasets, not PandaIDs).  result.json says, for
+each mover with no run found, which of the three hold (`premises`: `window`, `logs`, `prints`); `prints` is never known
+yet, so none is ruled out.
 `JobSpec.jobStatus=running` (Fr2) had five such over the last 6 h: `Watcher.run`, `copyArchive.main`,
 `TaskBuffer.killJobs`, `analy_pmerge_jobs_wait_time` and `get_site_strr_stats`.
 
 *Shows:* said ("no run of its own found in [...] over the whole window: not followed, though not ruled out");
-result.json's verdict `no-run-found`.
+result.json's verdict `no-run-found`, with its `premises`.
 *Revisit:* build order 2a: judgement 3, the absence rule, replaces it once the map answers.
 
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
