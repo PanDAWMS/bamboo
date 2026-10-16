@@ -242,6 +242,7 @@ def test_a_run_says_whether_it_read_what_it_was_handed():
     handed = {
         "rows": {"path": "/r/rows.json", "sha256": "01" * 32},
         "logs": [{"path": "/l/panda-x.log", "sha256": "02" * 32}],
+        "records": None,
     }
     inputs = {
         "querier": {
@@ -252,6 +253,7 @@ def test_a_run_says_whether_it_read_what_it_was_handed():
         "map_dump": {"path": "/d/map.json", "sha256": "ab" * 32},
         "rows": handed["rows"],
         "logs": handed["logs"],
+        "records": None,
     }
     result = {"version": 1, "inputs": inputs}
     assert F.read_as_handed(result, pair, handed) == {
@@ -297,20 +299,32 @@ FAKE_QUERIER = textwrap.dedent(
     with open(arg("--out"), "w") as f:
         f.write("# start: tree " + tree + "\\n")
         f.write("== S1 what moves it on\\nEND a legitimate wait\\n== reached the end; HAND used 0 time(s) []\\n")
+    # through the records door: stop on one ask until a round's records are there, then end
+    records = arg("--records") if "--records" in sys.argv else None
+    files = sorted(Path(records).glob("records-r*.jsonl")) if records else []
+    asking = records is not None and not files
+    if asking:
+        Path(arg("--asks")).write_text(json.dumps({"ask": {"name": "panda-x.log"}}) + "\\n")
     if not os.environ.get("FAKE_NO_RESULT"):
+        outcome = (
+            {"kind": "stop", "step": "S1", "text": "STOP S1: 1 ask(s)", "code": "asks"}
+            if asking
+            else {"kind": "end", "step": "S1", "text": "END a legitimate wait", "code": None}
+        )
         result = {
             "version": 1,
-            "outcome": {"kind": "end", "step": "S1", "text": "END a legitimate wait", "code": None,
-                        "hand_used": [], "branches": None},
+            "outcome": outcome | {"hand_used": [], "branches": None},
             "steps": ["S1"],
             "inputs": {
                 "querier": {"tree": tree, "label": Path(tree, "QUERIER").read_text().strip(),
                             "bamboo_py_sha256": "0" * 64},
                 "map_dump": {"path": dump, "sha256": sha(dump)},
                 "rows": {"path": arg("--rows"), "sha256": sha(arg("--rows"))},
+                "records": {"given": [records], "files": [{"path": str(f), "sha256": sha(f)} for f in files]}
+                if records else None,
                 "logs": [{"path": p, "sha256": sha(p)} for p in logs] or None,
             },
-            "asks": None,
+            "asks": {"path": arg("--asks"), "count": 1} if asking else None,
         }
         Path(arg("--result")).write_text(json.dumps(result))
     print(__name__, bamboo.__file__.startswith(tree), os.environ["NEO4J_URI"])
@@ -346,13 +360,17 @@ def test_a_case_runs_the_querier_of_its_pair_and_is_scored(tmp_path):
         and rec["baseline"]["lines_differ"] == 0
     )
     assert rec["read"]["ok"] and "NOT READ AS HANDED" not in F.line(rec)
-    assert rec["result"]["path"] == str(tmp_path / "batch" / "C1" / "result.json")
+    assert rec["result"]["path"] == str(
+        tmp_path / "batch" / "C1" / "r1" / "result.json"
+    )
     assert (
         rec["querier_sha"] == "beefcafe0"
         and rec["env"]["PYTHONPATH"] == rec["env"]["BAMBOO_TREE"]
     )
-    assert rec["argv"][1:3] == ["-m", "bamboo.querier.rerun"]
-    stdout = (tmp_path / "batch" / "C1" / "stdout.log").read_text()
+    assert len(rec["rounds"]) == 1 and rec["ended"] == "one round (no --record)"
+    assert rec["rounds"][0]["argv"][1:3] == ["-m", "bamboo.querier.rerun"]
+    assert rec["pin_settled"] and "rounds" not in F.line(rec)
+    stdout = (tmp_path / "batch" / "C1" / "r1" / "stdout.log").read_text()
     assert stdout.split() == ["__main__", "True", F.NO_GRAPH["NEO4J_URI"]]
     assert (
         json.loads((tmp_path / "batch" / "C1" / "run.json").read_text())["name"] == "C1"
@@ -387,6 +405,123 @@ def test_a_case_of_another_pin_does_not_run(tmp_path):
     _pair(tmp_path, home)
     with pytest.raises(F.FieldTestError, match="was written by pin-other"):
         F.run_case(home, _case(tmp_path, pin="other"), tmp_path / "batch", "P")
+
+
+def test_a_case_whose_pin_is_unsettled_runs_only_on_a_pair_named_for_it(tmp_path):
+    home = _home(tmp_path)
+    _querier_tree(_pair(tmp_path, home))
+    _write(home.root / "pairs", "current.json", {"abc-f2": "P"})
+    case_path = _case(tmp_path, pin="unsettled: the version is not known")
+    with pytest.raises(F.FieldTestError, match="name the pair it runs on with --pair"):
+        F.run_case(home, case_path, tmp_path / "batch")
+    rec = F.run_case(home, case_path, tmp_path / "batch", "P")
+    assert rec["pair"] == "P" and not rec["pin_settled"] and rec["read"]["ok"]
+    assert "pin unsettled" in F.line(rec)
+
+
+def _records_case(tmp_path: Path) -> Path:
+    records = tmp_path / "records"
+    records.mkdir()
+    return _case(
+        tmp_path,
+        inputs={
+            "rows": str(_write(tmp_path, "rows.json", "{}")),
+            "logs": [],
+            "records": str(records),
+        },
+    )
+
+
+#: a stand-in for the recording step: FAKE_RECORD says what it does -- "write" a round, write "nothing", or exit 3
+#: as one that did not settle
+FAKE_RECORD = textwrap.dedent(
+    """
+    import os, sys
+    from pathlib import Path
+    asks, records = sys.argv[1], Path(sys.argv[2])
+    assert Path(asks).read_text()
+    how = os.environ["FAKE_RECORD"]
+    if how == "write":
+        n = len(list(records.glob("records-r*.jsonl"))) + 1
+        (records / f"records-r{n}.jsonl").write_text('{"ask": {"name": "panda-x.log"}}\\n')
+    sys.exit(3 if how == "unsettled" else 0)
+    """
+)
+
+
+@pytest.fixture
+def recording(tmp_path, monkeypatch):
+    """A home whose querier asks through a records directory, and a recording step stood in for."""
+    home = _home(tmp_path)
+    _querier_tree(_pair(tmp_path, home))
+    _write(home.root / "pairs", "current.json", {"abc-f2": "P"})
+    script = _write(tmp_path, "fake_record.py", FAKE_RECORD)
+    monkeypatch.setattr(
+        F,
+        "record_command",
+        lambda home, asks, records: [home.python, str(script), str(asks), str(records)],
+    )
+    return home
+
+
+def test_a_recorded_run_answers_the_asks_and_runs_the_querier_again(
+    tmp_path, recording, monkeypatch
+):
+    monkeypatch.setenv("FAKE_RECORD", "write")
+    rec = F.run_case(
+        recording, _records_case(tmp_path), tmp_path / "batch", record=True
+    )
+    first, second = rec["rounds"]
+    assert first["score"]["code"] == "asks" and first["record"]["exit"] == 0
+    assert first["record"]["written"] == [
+        str(tmp_path / "records" / "records-r1.jsonl")
+    ]
+    assert rec["ended"] == "the querier asks nothing more" and "record" not in second
+    assert (
+        rec["score"]["terminal"] == "END" and rec["read"]["ok"] and first["read"]["ok"]
+    )
+    assert "rounds 2: the querier asks nothing more" in F.line(rec)
+
+
+def test_a_recorded_run_stops_where_the_recording_step_does_not_settle(
+    tmp_path, recording, monkeypatch
+):
+    monkeypatch.setenv("FAKE_RECORD", "unsettled")
+    rec = F.run_case(
+        recording, _records_case(tmp_path), tmp_path / "batch", record=True
+    )
+    assert len(rec["rounds"]) == 1 and rec["ended"] == "the recording step exited 3"
+    assert (
+        rec["score"]["code"] == "asks" and rec["rounds"][0]["record"]["written"] == []
+    )
+
+
+def test_a_recorded_run_stops_after_its_rounds(tmp_path, recording, monkeypatch):
+    monkeypatch.setenv("FAKE_RECORD", "nothing")
+    rec = F.run_case(
+        recording, _records_case(tmp_path), tmp_path / "batch", record=True, rounds=2
+    )
+    assert len(rec["rounds"]) == 2 and rec["ended"] == "still asking after 2 round(s)"
+
+
+def test_without_record_a_run_that_asks_is_one_round(tmp_path, recording):
+    rec = F.run_case(recording, _records_case(tmp_path), tmp_path / "batch")
+    assert len(rec["rounds"]) == 1 and rec["score"]["code"] == "asks"
+    assert rec["read"]["ok"] and rec["rounds"][0]["argv"].count("--records") == 1
+
+
+def test_a_case_hands_logs_or_records_and_records_to_record_into(tmp_path):
+    home = _home(tmp_path)
+    _pair(tmp_path, home)
+    _write(home.root / "pairs", "current.json", {"abc-f2": "P"})
+    rows = str(_write(tmp_path, "rows.json", "{}"))
+    both = _case(
+        tmp_path, inputs={"rows": rows, "logs": [rows], "records": str(tmp_path)}
+    )
+    with pytest.raises(F.FieldTestError, match="not both"):
+        F.load_case(both)
+    with pytest.raises(F.FieldTestError, match="--record needs inputs.records"):
+        F.run_case(home, _case(tmp_path), tmp_path / "batch", record=True)
 
 
 # ------------------------------------------------------------------ census
@@ -522,9 +657,8 @@ def test_a_case_with_answers_runs_on_the_rows_file_built_from_them(
 
     rec = F.run_case(home, path, tmp_path / "batch")
     built = tmp_path / "batch" / "C1" / "rows.json"
-    assert rec["exit"] == 0 and rec["argv"][rec["argv"].index("--rows") + 1] == str(
-        built
-    )
+    argv = rec["rounds"][0]["argv"]
+    assert rec["exit"] == 0 and argv[argv.index("--rows") + 1] == str(built)
     assert set(rec["inputs_sha256"]) == {
         str(built),
         case["inputs"]["logs"][0],

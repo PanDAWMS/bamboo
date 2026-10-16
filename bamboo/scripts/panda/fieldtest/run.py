@@ -1,18 +1,29 @@
 """Run the querier on cases held as data, and record how far each run got with no one choosing.
 
     python -m bamboo.scripts.panda.fieldtest.run --home <dir> run <case.json>... [--jobs N] [--pair NAME] [--batch DIR]
+        [--record [--rounds N]]
     python -m bamboo.scripts.panda.fieldtest.run --home <dir> summary <batch dir>
 
 A case is a JSON file (:func:`load_case`): the question (kind, subject, observed
-value, key), its inputs (a rows file and log files), the querier's modes, the
-pin whose code wrote the logs, and, for a replayed case, the output it must
-reproduce.  Nothing here knows a case: every step reads its arguments from the
-case file.
+value, key), its inputs (a rows file, or the answers to build one from, and log
+files or a records directory), the querier's modes, the pin whose code wrote the
+logs, and, for a replayed case, the output it must reproduce.  Nothing here
+knows a case: every step reads its arguments from the case file.
+
+**Rounds.**  A run is one round of the querier in ``<case>/r1/``.  With
+``--record``, a round that stops on asks (``code`` ``asks``) is followed by the
+recording step, which answers them from production into the case's records
+directory, and the querier runs again in ``r<n+1>/``, until it asks nothing,
+the recording step fails or does not settle, or ``--rounds`` are done.  The
+recording step runs from the tree this module is in, where PanDA's credentials
+load (the home's ``cwd``).
 
 **Which code runs.**  A case names its pin, not a map: the map moves on that
 pin as the map session lands, and a case should not be edited for it.
 ``pairs/current.json`` names the pair each pin runs on now; ``--pair`` names
-another, to compare with the map before.  A pair is ``PANDA_PIN`` (the corpus),
+another, to compare with the map before.  A case whose pin is ``unsettled``
+(the code that wrote its logs is not known) runs only on a pair ``--pair``
+names, and its run says so.  A pair is ``PANDA_PIN`` (the corpus),
 ``BAMBOO_TREE`` (a run tree: the map's tree with ``bamboo.querier`` laid over
 it, whose ``QUERIER`` file names the querier's sha) and ``MAP_DUMP`` with its
 sha256.  :func:`load_pair` checks a pair the way the querier's
@@ -57,6 +68,15 @@ from pathlib import Path
 
 QUERIER_MODULE = "bamboo.querier.rerun"
 KINDS = ("default", "late", "stuck")
+
+#: how a case's pin starts when the code that wrote its logs is not known: it runs only on a pair named for the run
+UNSETTLED = "unsettled"
+#: the tree this module is in, which the recording step runs from (bamboo/scripts/panda/fieldtest/run.py)
+HERE = Path(__file__).resolve().parents[4]
+#: rounds of querier and recording step a run with --record takes at most, by default
+ROUNDS = 3
+#: the files of a case's records directory the querier reads, in this order
+RECORDS_GLOB = "records-r*.jsonl"
 
 DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
 
@@ -113,6 +133,10 @@ def load_case(path: Path) -> dict:
         raise FieldTestError(f"{path}: question.kind must be one of {KINDS}")
     if not ({"rows", "answers"} & set(case["inputs"])):
         raise FieldTestError(f"{path}: inputs need rows, or answers to build them from")
+    if case["inputs"].get("records") and case["inputs"]["logs"]:
+        raise FieldTestError(
+            f"{path}: inputs hand logs or a records directory, not both (the querier reads one door)"
+        )
     return case
 
 
@@ -190,6 +214,8 @@ def command(home: Home, case: dict, out: Path) -> list[str]:
         "--key",
         str(q["key"]),
     ]
+    if i.get("records"):
+        args += ["--records", i["records"]]
     for log in i["logs"]:
         args += ["--log", log]
     args += [
@@ -261,8 +287,8 @@ def _real(path: str) -> str:
 
 def read_as_handed(result: dict | None, pair: dict, handed: dict) -> dict:
     """Whether the run read what it was handed, by its result.json: the pair's dump (path and whole sha256), run tree
-    and ``QUERIER`` label, and *handed*'s rows and logs (path and sha256 each).  ``differ`` names each that does not
-    match."""
+    and ``QUERIER`` label, and *handed*'s rows, logs and record files (path and sha256 each).  ``differ`` names each
+    that does not match."""
     if result is None or result.get("version") != RESULT_VERSION:
         return {"ok": False, "differ": [RESULT], "bamboo_py_sha256": None}
     i, q = result["inputs"], result["inputs"]["querier"]
@@ -276,13 +302,19 @@ def read_as_handed(result: dict | None, pair: dict, handed: dict) -> dict:
         "label": pair["QUERIER_SHA"],
         "rows": handed["rows"],
         "logs": handed["logs"] or None,
+        "records": handed["records"],
     }
+    records = i["records"]
     got = {
         "map_dump": dump and {"path": _real(dump["path"]), "sha256": dump["sha256"]},
         "tree": _real(q["tree"]),
         "label": q.get("label"),
         "rows": i["rows"],
         "logs": i["logs"],
+        "records": records
+        and [
+            {"path": _real(f["path"]), "sha256": f["sha256"]} for f in records["files"]
+        ],
     }
     differ = [k for k in want if want[k] != got[k]]
     return {
@@ -292,28 +324,31 @@ def read_as_handed(result: dict | None, pair: dict, handed: dict) -> dict:
     }
 
 
-def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
-    case = load_case(path)
-    name = pair_name(home, case, override)
-    pair = load_pair(home, name)
-    if Path(pair["PANDA_PIN"]).name != f"pin-{case['pin']}":
-        raise FieldTestError(
-            f"pair {name} runs {pair['PANDA_PIN']}, case {case['name']} was written by pin-{case['pin']}"
-        )
-    where = batch / case["name"]
+def handed_of(case: dict) -> dict:
+    """What a round hands the querier, with each file's sha256: the rows, the logs, and the record files its records
+    directory holds now (None for a case without one)."""
+    i = case["inputs"]
+    records = i.get("records")
+    return {
+        "rows": {"path": i["rows"], "sha256": sha256(Path(i["rows"]))},
+        "logs": [{"path": p, "sha256": sha256(Path(p))} for p in i["logs"]],
+        "records": records
+        and [
+            {"path": _real(str(f)), "sha256": sha256(f)}
+            for f in sorted(Path(records).glob(RECORDS_GLOB))
+        ],
+    }
+
+
+def run_round(home: Home, case: dict, pair: dict, env: dict, where: Path) -> dict:
+    """One run of the querier into *where*, scored from its result.json."""
     where.mkdir(parents=True, exist_ok=True)
-    built = None
-    if "rows" not in case["inputs"]:
-        built = build_rows(Path(case["inputs"]["answers"]), pair, where / "rows.json")
-        case = case | {"inputs": case["inputs"] | {"rows": str(built)}}
     out = where / "out.txt"
     # a run that does not finish is not scored from an earlier run's files in the same place
     for f in (out, out.with_name(RESULT), out.with_name(ASKS)):
         f.unlink(missing_ok=True)
     args = command(home, case, out)
-    env = {k: pair[k] for k in ("PANDA_PIN", "BAMBOO_TREE", "MAP_DUMP")}
-    env |= {"PYTHONPATH": pair["BAMBOO_TREE"], "PYTHONDONTWRITEBYTECODE": "1"}
-    env |= NO_GRAPH
+    handed = handed_of(case)
     t0 = time.time()
     with (where / "stdout.log").open("w") as log:
         rc = subprocess.run(
@@ -323,37 +358,13 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
             stdout=log,
             stderr=subprocess.STDOUT,
         ).returncode
-    text = out.read_text() if out.exists() else ""
     result_file = out.with_name(RESULT)
     result = json.loads(result_file.read_text()) if result_file.exists() else None
-    handed = {
-        "rows": {
-            "path": case["inputs"]["rows"],
-            "sha256": sha256(Path(case["inputs"]["rows"])),
-        },
-        "logs": [
-            {"path": p, "sha256": sha256(Path(p))} for p in case["inputs"]["logs"]
-        ],
-    }
-    record = {
-        "case": str(path),
-        "case_sha256": sha256(path),
-        "name": case["name"],
+    return {
         "exit": rc,
         "seconds": round(time.time() - t0, 2),
-        "pair": name,
-        "querier_sha": pair["QUERIER_SHA"],
-        "env": env,
-        "cwd": str(home.cwd),
         "argv": args,
-        "inputs_sha256": {
-            p: sha256(Path(p))
-            for p in [
-                case["inputs"]["rows"],
-                *case["inputs"]["logs"],
-                *([case["inputs"]["answers"]] if built else []),
-            ]
-        },
+        "out": str(out),
         "result": (
             {"path": str(result_file), "sha256": sha256(result_file)}
             if result
@@ -362,14 +373,145 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
         "score": score(result),
         "read": read_as_handed(result, pair, handed),
     }
+
+
+def record_command(home: Home, asks: Path, records: Path) -> list[str]:
+    """The recording step's command: run by the home's python from the tree this module is in, which it asserts."""
+    code = (
+        "import sys, bamboo; assert bamboo.__file__.startswith(sys.argv[1]), bamboo.__file__; "
+        "from bamboo.scripts.panda.fieldtest import record; sys.exit(record.main(sys.argv[2:]))"
+    )
+    return [
+        home.python,
+        "-c",
+        code,
+        str(HERE),
+        "--asks",
+        str(asks),
+        "--records",
+        str(records),
+    ]
+
+
+def record_round(home: Home, asks: Path, records: Path, where: Path) -> dict:
+    """Answer a round's *asks* from production into *records*, where PanDA's credentials load (the home's cwd)."""
+    before = set(records.glob(RECORDS_GLOB))
+    args = record_command(home, asks, records)
+    env = {"PYTHONPATH": str(HERE), "PYTHONDONTWRITEBYTECODE": "1"}
+    t0 = time.time()
+    with (where / "record.log").open("w") as log:
+        rc = subprocess.run(
+            args,
+            cwd=home.cwd,
+            env=os.environ | env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        ).returncode
+    return {
+        "exit": rc,
+        "seconds": round(time.time() - t0, 2),
+        "argv": args,
+        "written": sorted(str(f) for f in set(records.glob(RECORDS_GLOB)) - before),
+    }
+
+
+def run_case(
+    home: Home,
+    path: Path,
+    batch: Path,
+    override: str = "",
+    record: bool = False,
+    rounds: int = ROUNDS,
+) -> dict:
+    """Run *path*'s case into *batch*: one round, or with *record* up to *rounds* of the querier, each but the last
+    followed by the recording step answering its asks from production, until the querier asks nothing.
+
+    A case whose pin is unsettled runs only on the pair *override* names."""
+    case = load_case(path)
+    settled = not case["pin"].startswith(UNSETTLED)
+    if not settled and not override:
+        raise FieldTestError(
+            f"case {case['name']}: its pin is {case['pin']!r}; name the pair it runs on with --pair"
+        )
+    name = pair_name(home, case, override)
+    pair = load_pair(home, name)
+    if settled and Path(pair["PANDA_PIN"]).name != f"pin-{case['pin']}":
+        raise FieldTestError(
+            f"pair {name} runs {pair['PANDA_PIN']}, case {case['name']} was written by pin-{case['pin']}"
+        )
+    records = case["inputs"].get("records")
+    if record and not records:
+        raise FieldTestError(
+            f"case {case['name']}: --record needs inputs.records, the directory its records go to"
+        )
+    where = batch / case["name"]
+    where.mkdir(parents=True, exist_ok=True)
+    built = None
+    if "rows" not in case["inputs"]:
+        built = build_rows(Path(case["inputs"]["answers"]), pair, where / "rows.json")
+        case = case | {"inputs": case["inputs"] | {"rows": str(built)}}
+    env = {k: pair[k] for k in ("PANDA_PIN", "BAMBOO_TREE", "MAP_DUMP")}
+    env |= {"PYTHONPATH": pair["BAMBOO_TREE"], "PYTHONDONTWRITEBYTECODE": "1"}
+    env |= NO_GRAPH
+    done: list[dict] = []
+    ended = "one round (no --record)"
+    for n in range(1, (rounds if record else 1) + 1):
+        one = run_round(home, case, pair, env, where / f"r{n}")
+        done.append(one)
+        if not record:
+            break
+        if one["score"]["code"] != "asks":
+            ended = "the querier asks nothing more"
+            break
+        if n == rounds:
+            ended = f"still asking after {rounds} round(s)"
+            break
+        one["record"] = record_round(
+            home, Path(one["score"]["asks"]["path"]), Path(records), where / f"r{n}"
+        )
+        if one["record"]["exit"] != 0:
+            ended = f"the recording step exited {one['record']['exit']}"
+            break
+    last = done[-1]
+    run = {
+        "case": str(path),
+        "case_sha256": sha256(path),
+        "name": case["name"],
+        "pin": case["pin"],
+        "pin_settled": settled,
+        "pair": name,
+        "querier_sha": pair["QUERIER_SHA"],
+        "env": env,
+        "cwd": str(home.cwd),
+        "inputs_sha256": {
+            p: sha256(Path(p))
+            for p in [
+                case["inputs"]["rows"],
+                *case["inputs"]["logs"],
+                *([case["inputs"]["answers"]] if built else []),
+            ]
+        },
+        "rounds": done,
+        "ended": ended,
+        "exit": last["exit"],
+        "seconds": round(
+            sum(r["seconds"] + r.get("record", {}).get("seconds", 0) for r in done), 2
+        ),
+        "result": last["result"],
+        "score": last["score"],
+        "read": last["read"],
+    }
     if base := case.get("baseline"):
-        record["baseline"] = {
+        out = Path(last["out"])
+        run["baseline"] = {
             "path": base,
             "sha256": sha256(Path(base)),
-            "lines_differ": lines_differ(Path(base).read_text(), text),
+            "lines_differ": lines_differ(
+                Path(base).read_text(), out.read_text() if out.exists() else ""
+            ),
         }
-    (where / "run.json").write_text(json.dumps(record, indent=1) + "\n")
-    return record
+    (where / "run.json").write_text(json.dumps(run, indent=1) + "\n")
+    return run
 
 
 def line(r: dict) -> str:
@@ -387,6 +529,10 @@ def line(r: dict) -> str:
         extra += f"  baseline diff {r['baseline']['lines_differ']}"
     if not r["read"]["ok"]:
         extra += f"  NOT READ AS HANDED: {', '.join(r['read']['differ'])}"
+    if not r.get("pin_settled", True):
+        extra += "  pin unsettled"
+    if r.get("rounds") and r["ended"] != "one round (no --record)":
+        extra += f"  rounds {len(r['rounds'])}: {r['ended']}"
     last = s["steps"][-1] if s["steps"] else None
     return (
         f"{r['name']:<8} {r['pair']} q{r.get('querier_sha', '?')[:7]}  exit {r['exit']}  {r['seconds']:>6}s  "
@@ -416,8 +562,14 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument(
         "--pair",
         default="",
-        help="a pair under pairs/ instead of the one pairs/current.json names",
+        help="a pair under pairs/ instead of the one pairs/current.json names (needed for a case whose pin is unsettled)",
     )
+    r.add_argument(
+        "--record",
+        action="store_true",
+        help="answer the querier's asks from production and run it again, up to --rounds",
+    )
+    r.add_argument("--rounds", type=int, default=ROUNDS)
     s = sub.add_parser("summary", help="one line per run of a batch")
     s.add_argument("batch")
     a = ap.parse_args(argv)
@@ -433,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"# batch {batch}", flush=True)
         with ThreadPoolExecutor(a.jobs) as pool:
             for rec in pool.map(
-                lambda p: run_case(home, Path(p), batch, a.pair),
+                lambda p: run_case(home, Path(p), batch, a.pair, a.record, a.rounds),
                 a.cases,
             ):
                 print(line(rec), flush=True)
