@@ -14,7 +14,8 @@ needs a window (``Logs.needs_window``), so the cases run on files go on as befor
   job's dataset's: no window.
 * S1, S2 (``stuck``): from the observed value's statuslog row less SLACK, but no earlier than ``as_of`` less
   :data:`STUCK_SPAN`, to ``as_of``, when the statuslog was read.  A mover retries every few hours (tmaeno,
-  2026-10-13), so a mover with no pass in six hours did not run.
+  2026-10-13), so the last six hours are asked first; but no pass in six hours is not no pass in the window, so S1
+  asks the rest of it (``rest``) for a mover with no run of its own there (build order 2a; tmaeno, 2026-10-16).
 
 SLACK is the margin the server's statuslog rows were measured to need against their runs' log times (a second;
 e1, to-querier-3), widened; JEDI's clocks were measured on five machines of nine (to-querier-13).
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from bamboo.querier.records import Window
 
 SLACK = datetime.timedelta(minutes=10)
-#: an account of how often a mover retries, not a measurement (KNOWN_ISSUES.md K5)
+#: the part of a stuck window asked first: an account of how often a mover retries, not a measurement (KNOWN_ISSUES.md K5)
 STUCK_SPAN = datetime.timedelta(hours=6)
 
 
@@ -102,6 +103,24 @@ def stuck(statuslog: dict, observed: str) -> Asking:
         None,
         f"{observed!r} since {rows[-1]['time']}; from {bound} {_minutes(SLACK if bound == 'its row less' else STUCK_SPAN)} "
         f"to the statuslog's as_of {as_of}",
+    )
+
+
+def rest(statuslog: dict, observed: str) -> Asking | None:
+    """S1: the stuck window before :func:`stuck`'s, from the observed value's row less SLACK to ``as_of`` less
+    STUCK_SPAN; None where :func:`stuck`'s window already starts at the row, or there is none."""
+    first = stuck(statuslog, observed)
+    if first.window is None:
+        return None
+    since = [s for s in statuslog["states"] if s["status"] == observed][-1]["time"]
+    start = when(since) - SLACK
+    if start >= when(statuslog["as_of"]) - STUCK_SPAN:
+        return None
+    return Asking(
+        (_down(start), first.window[0]),
+        None,
+        f"{observed!r} since {since}; the rest of the window, from its row less {_minutes(SLACK)} to the last "
+        f"{_minutes(STUCK_SPAN)}, for a mover with no run of its own in those",
     )
 
 

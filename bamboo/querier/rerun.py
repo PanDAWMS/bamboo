@@ -1654,11 +1654,10 @@ class Rerun:
             if not to_hand:
                 entry["verdict"] = "no-log"
                 continue
-            found, missed, holes = self._ask(q.key, to_hand, asking)
+            found, missed, holes, searched = self._ask_mover(q, owner, to_hand, asking)
             unanswered += missed
-            window = asking.window if self.logs.needs_window else None
-            if logs := [name for name, rs in found.items() if any((window is None or _overlaps(r, window)) and _of_mover(r, owner) for r in rs)]:
-                ran.append(Passes(owner, logs, list(arms.values()), q.key, asking))
+            if logs := self._runs_of(found, owner, searched):
+                ran.append(Passes(owner, logs, list(arms.values()), q.key, searched))
                 entry["verdict"] = "ran"
             elif holes:
                 # not found is not "did not run" where the search did not reach
@@ -1669,7 +1668,8 @@ class Rerun:
                 entry["verdict"] = "asks-unanswered"
             else:
                 # not followed, and not ruled out either: absence is judgement 3's, with its rule (build order 2)
-                said = f"no run of its own found in {to_hand}: not followed, though not ruled out (KNOWN_ISSUES.md K19)"
+                over = " over the whole window" if searched is not asking else ""
+                said = f"no run of its own found in {to_hand}{over}: not followed, though not ruled out (KNOWN_ISSUES.md K19)"
                 self.say(f"  {owner.split('::')[-1]}: {said}")
                 entry["verdict"] = "no-run-found"
                 entry["reasons"].append({"code": "K19", "text": said})
@@ -1687,6 +1687,27 @@ class Rerun:
         if len(ran) == 1:
             return ran[0]
         return Fork(ran, [f"mover {p.owner}" for p in ran])
+
+    def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking):
+        """S1's asks for one mover: the window's last part first (*asking*, ``STUCK_SPAN``), and the rest of the window
+        (``W.rest``) only where every ask of the last part was answered whole and held no run of its own -- no pass in
+        six hours is not no pass in the window, and a mover that ran and stopped is the one a stuck value most needs
+        named (build order 2a; tmaeno, 2026-10-16).  The door over files reads each file whole and asks once.
+
+        Returns what ``_ask`` does, and the asking the runs were looked for over."""
+        found, missed, holes = self._ask(q.key, to_hand, asking)
+        if missed or holes or not self.logs.needs_window or self._runs_of(found, owner, asking):
+            return found, missed, holes, asking
+        rest = W.rest(self.data.get("statuslog", {}), q.observed)
+        if rest is None:
+            return found, missed, holes, asking
+        self.say(f"  {owner.split('::')[-1]}: no run of its own from {asking.window[0]}: asking the rest of the window")
+        return *self._ask(q.key, to_hand, rest), rest
+
+    def _runs_of(self, found: dict[str, list], owner: str, asking: W.Asking) -> list[str]:
+        """The logs among *found* holding a run of *owner* in *asking*'s window (any run, for the door over files)."""
+        window = asking.window if self.logs.needs_window else None
+        return [name for name, rs in found.items() if any((window is None or _overlaps(r, window)) and _of_mover(r, owner) for r in rs)]
 
     async def _writers_of(self, subject: str) -> list:
         from bamboo.database.graph_database_client import GraphDatabaseClient

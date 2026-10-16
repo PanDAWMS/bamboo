@@ -367,6 +367,70 @@ def test_the_windows_come_from_the_rows_or_say_why_not(tmp_path):
     assert no_row[0] is None and "no row for 'ready'" in no_row[2]
 
 
+def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last_part(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import windows as W
+
+    r.data["statuslog"] = {"as_of": "2026-10-13 20:00:00", "states": [{"status": "finishing", "time": "2026-10-13 01:00:00"}]}
+    first = W.stuck(r.data["statuslog"], "finishing")
+    asked = []
+
+    def run(at, token=""):
+        return N(first=at, last=at, token=token)
+
+    # what each log holds of the key, per window asked: the last part, then the rest
+    held = {
+        "ran-late": {first.window: [run("2026-10-13 19:00:00")]},
+        "ran-early": {first.window: [], ("2026-10-13 00:50:00", "2026-10-13 14:00:00"): [run("2026-10-13 03:00:00")]},
+        "another's": {first.window: [run("2026-10-13 19:00:00", "otherMethod < PandaID=1 >")]},
+    }
+
+    def ask(key, names, asking):
+        asked.append((names[0], asking.window))
+        if names[0] == "holes":
+            return {}, [], {"holes": ["2026-10-13 15:00:00 .. 2026-10-13 16:00:00"]}
+        if names[0] == "unanswered":
+            return {}, [("an ask", "why")], {}
+        return {names[0]: held.get(names[0], {}).get(asking.window, [])}, [], {}
+
+    r._ask = ask
+    s = rerun.Stuck("JobSpec.jobStatus", "finishing", "1")
+    got = {}
+    r.logs = N(needs_window=True)
+    for name in ["ran-late", "ran-early", "silent", "holes", "unanswered", "another's"]:
+        found, missed, holes, searched = r._ask_mover(s, "a.py::mover", [name], first)
+        got[name] = [searched.window, r._runs_of(found, "a.py::mover", searched)]
+    # a window that starts at the row has no rest
+    r.data["statuslog"]["as_of"] = "2026-10-13 05:00:00"
+    short = W.stuck(r.data["statuslog"], "finishing")
+    got["short"] = [r._ask_mover(s, "a.py::mover", ["silent"], short)[3].window, W.rest(r.data["statuslog"], "finishing")]
+    # the door over files reads each file whole: one ask
+    r.logs = N(needs_window=False)
+    got["files"] = [r._ask_mover(s, "a.py::mover", ["silent"], first)[3].window]
+    print(json.dumps([got, asked, r.lines]))
+    """,
+        )
+    )
+    got, asked, lines = json.loads(out.splitlines()[-1])
+    last, rest = ["2026-10-13 14:00:00", "2026-10-13 20:00:00"], ["2026-10-13 00:50:00", "2026-10-13 14:00:00"]
+    # a run in the last six hours: the rest is not asked
+    assert got["ran-late"] == [last, ["ran-late"]]
+    # none there: the rest of the window, from the row less 10 min, and the run there is found
+    assert got["ran-early"] == [rest, ["ran-early"]]
+    assert got["silent"] == [rest, []]
+    # another method's run is not the mover's: the rest is asked
+    assert got["another's"] == [rest, []]
+    # not searched whole, or not answered: no rest yet
+    assert got["holes"][0] == got["unanswered"][0] == last
+    assert got["short"] == [["2026-10-13 00:50:00", "2026-10-13 05:00:00"], None]
+    assert got["files"] == [last]
+    assert [w for n, w in asked if n == "silent"] == [last, rest, ["2026-10-13 00:50:00", "2026-10-13 05:00:00"], last]
+    assert "  mover: no run of its own from 2026-10-13 14:00:00: asking the rest of the window" in lines
+
+
 _RECORDED = """
     import json
     from pathlib import Path
