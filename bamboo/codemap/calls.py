@@ -407,6 +407,44 @@ class Calls:
             self._placed[key] = self._place(file, func, call, bound if bound and _reads_self(call) else ())
         return self._placed[key]
 
+    def named_callables(
+        self, file: str, func: ast.AST, value: ast.expr, bound: tuple[tuple[str, ast.ClassDef], ...] = ()
+    ) -> tuple[Target, ...]:
+        """The definitions *value* names, handed to a call rather than called: ``Thread(target=self.run)``, ``submit(fn)``.
+
+        What a call of *value* would land at, where *value* names a function,
+        a method or a class -- read as :meth:`callees` reads the callee, for
+        the classes ``self`` can be (*bound*).  Most arguments name data, and
+        nothing is called where one is handed, so nothing is read further for
+        them: not what a local or a field holds (:meth:`_constructed`), and
+        not what an undeclared object can be (:meth:`Types.candidates`).
+        Empty where *value* names no definition this reads.
+        """
+        if isinstance(value, ast.Name):
+            return self._named(file, func, value.id).targets
+        if not isinstance(value, ast.Attribute):
+            return ()
+        receiver = value.value
+        if isinstance(receiver, ast.Name) and receiver.id in ("self", "cls"):
+            cls = self.types.method_class(file, func)
+            if cls is None:
+                return ()
+            return self._method_of_any(list(bound) or self.objects_of(cls), value.attr).targets
+        if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name) and receiver.func.id == "super":
+            cls = self.types.method_class(file, func)
+            return self._after(cls, value.attr, bound).targets if cls is not None else ()
+        module = self.types.module_named(file, receiver)
+        if module is not None:
+            return self._module_member(module, value.attr).targets
+        named = self.types.class_named(file, receiver)
+        if named is not None:
+            return tuple(one._replace(bound=()) for one in self._method_of(named, value.attr).targets)
+        declared = self.types.declared(file, func, receiver)
+        if declared is not None:
+            classes = list(dict.fromkeys(one for each in sorted(declared, key=_class_key) for one in self.objects_of(each)))
+            return self._method_of_any(classes, value.attr).targets
+        return ()
+
     def objects_of(self, declared: tuple[str, ast.ClassDef]) -> list[tuple[str, ast.ClassDef]]:
         """The classes an object declared as *declared* can be: it and each of its subclasses in the corpus.
 

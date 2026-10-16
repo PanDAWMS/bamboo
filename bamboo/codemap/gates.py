@@ -1284,6 +1284,90 @@ def prints_are_counted(fragment: MapFragment) -> GateResult:
     )
 
 
+def reach_records_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every edge of the reach record goes into a row of it, as a class that row can run as, and every write has a row.
+
+    The answer is a closure over the rows (:class:`reach.ReachGraph`): an
+    edge into no row is a way on it drops, and a junction no row is found
+    for makes every answer about its subject unknown.  ``self.runImpl()``
+    recorded for a class ``WorkerThread.run``'s ``self`` cannot be would
+    enter a runImpl that object never runs.
+    """
+    from bamboo.codemap import reach
+
+    rows = {row.owner: row for row in fragment.reach_graph}
+    failures: list[str] = []
+    for row in fragment.reach_graph:
+        for call in row.calls:
+            entered = rows.get(call.to)
+            if entered is None:
+                failures.append(f"{row.owner}:{call.line} goes into {call.to}, no row of the record")
+                continue
+            if row.classes and not set(call.for_classes) <= set(row.classes):
+                failures.append(f"{row.owner}:{call.line} holds for {call.for_classes}, not among its classes")
+            if entered.classes and not set(call.runs_as) <= set(entered.classes):
+                failures.append(f"{row.owner}:{call.line} enters {call.to} as {call.runs_as}, not among its classes")
+    record = reach.ReachGraph(fragment.reach_graph)
+    unmatched = reach.every_write(fragment.junctions, record).unmatched
+    # A module's own body runs at import, and the record holds functions
+    # only: such a write is known to have no row, and every answer about its
+    # subject says so (``Destination.unmatched``).  Any other is a defect.
+    at_import = [owner for owner in unmatched if owner.endswith("::<module>")]
+    failures.extend(
+        f"{owner}: a junction no function of the record holds" for owner in unmatched if owner not in at_import
+    )
+    return GateResult(
+        gate="reach-records-resolve",
+        passed=not failures,
+        checked=len(fragment.reach_graph) + len(fragment.junctions),
+        unit="functions and junctions",
+        question="does every edge of the reach record go into a row of it, and every write have one?",
+        finding="an edge or a write the reach record cannot follow",
+        failures=failures[:50],
+        note=(
+            "A dropped edge or write reads as a closure that reaches less than it does.  "
+            f"Writes in a module's own body, which no function holds: {at_import}."
+        ),
+    )
+
+
+def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
+    """(i) No dunder Python runs unasked -- ``__enter__``, ``__iter__``, ``__setstate__`` -- reaches a write.
+
+    The premise every reach answer rests on (``reach.PREMISES``'s
+    ``outside_calls_back_only_handed``): no edge says when ``with`` or
+    ``for`` runs one, so a closure through one is not taken, and that is
+    only safe while none of them reaches a write.  One that does needs its
+    edges.  One whose closure has a hole is not known either way, and is
+    counted in the note, not failed.
+    """
+    from bamboo.codemap import reach
+
+    record = reach.ReachGraph(fragment.reach_graph)
+    anywhere = reach.every_write(fragment.junctions, record)
+    failures: list[str] = []
+    checked = undecided = 0
+    for row in fragment.reach_graph:
+        if row.function not in reach.IMPLICIT_DUNDERS:
+            continue
+        checked += 1
+        answer = record.reach([row.owner], reach.Destination(anywhere.arms, []))
+        if answer.writes:
+            failures.append(f"{row.owner} reaches {[write.function for write in answer.writes][:4]}")
+        elif answer.writes is None:
+            undecided += 1
+    return GateResult(
+        gate="implicit-dunders-reach-no-write",
+        passed=not failures,
+        checked=checked,
+        unit="implicit dunders",
+        question="does any dunder Python runs unasked reach a write?",
+        finding="a dunder no edge enters reaches a write, so closures through it miss the write",
+        failures=failures,
+        note=f"{undecided} of them have a hole in their closure and are not known either way.",
+    )
+
+
 def carried_from_outside(fragment: MapFragment) -> list[tuple[str, str]]:
     """Subjects whose value is copied from a field the map does not explain.
 
@@ -2294,6 +2378,9 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(annotations_are_read(fragment))
     if fragment.function_prints or fragment.print_calls:
         results.append(prints_are_counted(fragment))
+    if fragment.reach_graph:
+        results.append(reach_records_resolve(fragment))
+        results.append(implicit_dunders_reach_no_write(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 
