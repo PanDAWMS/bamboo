@@ -196,11 +196,25 @@ refusal, not a limit.)
 ### K10. H7 stops on rows files whose job row holds only the key
 
 The rows builder puts the job's other columns under `after`, which the steps' environment does not
-read (`Rerun.base_env`).
+read (`Rerun.base_env`).  One column is read from `after` whatever the time: the row's creation time,
+which H2 bounds a value with (`Rerun._created`), set once as the row is made.
 
 *Shows:* a stop at H7 at a branch whose guard reads a job column.
 *Revisit:* with the map's work on which values hold at the time of a decision, and the shape of the
 rows file's `rows` and `after` with the builder.
+
+### K20. H2 asks a value the history's rows hold over a window, on every machine
+
+For a subject the status history's rows hold beside the status (`JobSpec.computingSite`), H2 asks the
+logs from the row before the last stretch of rows holding the value (or the row's creation) to the
+stretch's first row (`windows.value_held`).  A row holding the value says it was there by then, not
+which run wrote it, so no machine is named; the pairs of a writer and the history row its run writes,
+which would name the row's time and host, are the map's to say (build2-design.md 7, the second stage).
+A value written after the last row has no row to close the window, and a task's creation time is not
+checked (`parts.History.created`): both stop.  A subject no history holds stops as before.
+
+*Shows:* a stop at H2 naming the column, the last row or the creation time; asks of every machine.
+*Revisit:* when the map says which history row a writer's run writes.
 
 ### K11. After H4 the next question is always H5, the traceback
 

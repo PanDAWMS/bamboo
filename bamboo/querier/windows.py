@@ -8,6 +8,10 @@ needs a window (``Logs.needs_window``), so the cases run on files go on as befor
 * H2 (``at_transition``): the point the statuslog row was written, on the machine it names.  The row's
   ``modificationHost`` is the machine whose process wrote the row (``socket.getfqdn()``; the only INSERTs into the
   status histories are base_module.py:604 and :849), so the run that wrote it is on that machine and no other.
+* H2 (``value_held``), for a subject the history's rows hold beside the status (``parts.history_holding``): from the
+  row before the last stretch of rows holding the value (or the row's creation) to the stretch's first row, on every
+  machine.  A row holding the value says it was there by then, not which run wrote it: the history row is written by
+  whichever run moves the status, and the run that wrote the value need not be that one (h2-value-time-design.md).
 * H6 (``around_creation``): the Datasets row's ``creationdate`` +- :data:`SLACK`.  The row is inserted by the run
   that registers the dataset (setupper_atlas_plugin's insertDatasets calls, in the function of the make call), on
   that machine's clock.  A creationdate before the job was created (its first statuslog row) less SLACK is not this
@@ -60,6 +64,36 @@ def at_transition(state: dict) -> Asking:
     host = state.get("host") or None
     where = f"on {host}, the row's host" if host else "on every machine (the row names no host)"
     return Asking((t, t), host, f"the statuslog's {state['status']!r} at {t}, {where}")
+
+
+def value_held(states: list[dict], column: str, value: str, created: str | None) -> Asking:
+    """H2 for a value the statuslog's rows hold in *column* beside the status: the write is after the last row holding
+    another (a second after it: the row's time is the second it was written in) and by the first row of the last
+    stretch holding *value*; a stretch from the first row, from the row's creation *created* (None where not known).
+    No machine.  No window where no row carries the column, where the last row holds another value (written after it:
+    no row closes the window), or where the stretch starts at the first row and *created* is not known."""
+    if not any(column in s for s in states):
+        return Asking(None, None, f"the statuslog rows carry no {column}")
+    if states[-1].get(column) != value:
+        last = states[-1]
+        return Asking(None, None, f"the last statuslog row ({last['status']!r} at {last['time']}) holds {column}="
+                                  f"{last.get(column)!r}: written after it, and no row closes the window")
+    k = len(states) - 1
+    while k > 0 and states[k - 1].get(column) == value:
+        k -= 1
+    first = states[k]
+    if k:
+        before = states[k - 1]
+        lo = _down(when(before["time"]) + datetime.timedelta(seconds=1))
+        since = f"after the statuslog's {before['status']!r} at {before['time']} ({column}={before.get(column)!r})"
+    elif created:
+        lo = min(_down(when(created)), first["time"])
+        since = f"from the row's creation at {created}"
+    else:
+        return Asking(None, None, f"the first statuslog row ({first['status']!r} at {first['time']}) holds {column}="
+                                  f"{value!r} and the row's creation time is not known")
+    return Asking((lo, first["time"]), None, f"{column}={value!r} {since} to the statuslog's {first['status']!r} at "
+                                             f"{first['time']}, on every machine (no row says which run wrote it)")
 
 
 def around_creation(datasets: dict | None, name: str, created: str) -> Asking:

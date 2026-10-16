@@ -367,6 +367,76 @@ def test_the_windows_come_from_the_rows_or_say_why_not(tmp_path):
     assert no_row[0] is None and "no row for 'ready'" in no_row[2]
 
 
+def test_h2_bounds_a_value_the_history_holds_by_the_rows_holding_it(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import parts as PT
+            from bamboo.querier import windows as W
+
+            def w(a):
+                return [a.window, a.machine, a.why]
+
+            def rows(*sites):
+                times = ["2026-10-16 02:32:18", "2026-10-16 02:32:23", "2026-10-16 02:32:46"]
+                return [{"status": s, "time": t, "computingSite": v}
+                        for s, t, v in zip(["pending", "defined", "assigned"], times, sites)]
+
+            made = "2026-10-16 02:32:04"
+            print(json.dumps([
+                w(W.value_held(rows("X", "AU", "AU"), "computingSite", "AU", made)),
+                w(W.value_held(rows("AU", "X", "AU"), "computingSite", "AU", made)),
+                w(W.value_held(rows("AU", "AU", "AU"), "computingSite", "AU", made)),
+                w(W.value_held(rows("AU", "AU", "AU"), "computingSite", "AU", "2026-10-16 02:32:30.5")),
+                w(W.value_held(rows("AU", "AU", "AU"), "computingSite", "AU", None)),
+                w(W.value_held(rows("AU", "AU", "X"), "computingSite", "AU", made)),
+                w(W.value_held([{"status": "pending", "time": "2026-10-16 02:32:18", "site": "AU"}], "computingSite", "AU", made)),
+                [[h.subject, h.created] if (h := PT.history_holding(s)) else None
+                 for s in ("JobSpec.computingSite", "JobSpec.jobStatus", "JobSpec.attemptNr", "JediTaskSpec.reason")],
+            ]))
+            """,
+        )
+    )
+    later, again, first, early_clock, no_creation, after_last, no_column, holding = json.loads(out)
+    # after the last row holding another value (a second on: the row's second), to the first of the last stretch
+    assert later[:2] == [["2026-10-16 02:32:19", "2026-10-16 02:32:23"], None]
+    assert "after the statuslog's 'pending'" in later[2] and "on every machine" in later[2]
+    assert again[0] == ["2026-10-16 02:32:24", "2026-10-16 02:32:46"]
+    # a stretch from the first row: from the row's creation, never after the first row
+    assert first[0] == ["2026-10-16 02:32:04", "2026-10-16 02:32:18"] and "from the row's creation" in first[2]
+    assert early_clock[0] == ["2026-10-16 02:32:18", "2026-10-16 02:32:18"]
+    assert no_creation[0] is None and "creation time is not known" in no_creation[2]
+    # no row closes the window; no row carries the column under its own name
+    assert after_last[0] is None and "written after it" in after_last[2]
+    assert no_column[0] is None and "carry no computingSite" in no_column[2]
+    # the job's history holds computingSite beside the status, and knows when the row was made; a status is not held
+    assert holding == [["JobSpec.jobStatus", "creationTime"], None, None, ["JediTaskSpec.status", ""]]
+
+
+def test_h2_reads_the_rows_creation_from_its_row_or_after_whatever_the_time(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import parts as PT
+    job, task = PT.history_holding("JobSpec.computingSite"), PT.history_holding("JediTaskSpec.reason")
+    said = [r._created(job)]
+    del r.data["rows"]["job"]["creationTime"]
+    said.append(r._created(job))
+    r.data["after"]["creationTime"] = "2026-01-01 00:00:05"
+    said.append(r._created(job))
+    r.data["after"]["creationTime"] = {"value": "2026-01-01 00:00:06", "as_of": "2026-01-03 00:00:00"}
+    said.append(r._created(job))
+    said.append(r._created(task))
+    print(json.dumps(said))
+    """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == ["2026-01-01 00:00:00", None, "2026-01-01 00:00:05", "2026-01-01 00:00:06", None]
+
+
 def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last_part(tmp_path):
     out = _ok(
         _run(

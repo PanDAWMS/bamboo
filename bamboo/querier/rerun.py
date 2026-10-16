@@ -1157,7 +1157,9 @@ class Rerun:
         row *state* shows ran.
 
         *state* is the statuslog row of *value* unless given: ``--late`` asks it at the row after the observed one.
-        Every candidate's logs are asked, at the row's time, on the machine that wrote the row.
+        Every candidate's logs are asked, at the row's time, on the machine that wrote the row.  A *subject* the
+        statuslog's rows hold beside the status (``JobSpec.computingSite``) is asked over the window they bound, on
+        every machine (``W.value_held``).
         """
         # H1
         self.start("H1", "candidates")
@@ -1170,15 +1172,25 @@ class Rerun:
 
         # H2
         self.start("H2", "which ran")
-        if state is None:
-            states = self.data["statuslog"]["states"]
-            state = self.need(f"a statuslog time for {value}", next((s for s in states if s["status"] == value), None))
-            if isinstance(state, str):  # a time from --hand
-                state = {"status": value, "time": state}
-        when = state["time"]
+        holding = PT.history_holding(subject) if state is None else None
+        if holding is not None:
+            # a value the history's rows hold beside the status: they say by when it was there, not which run wrote it
+            asking = W.value_held(self.data["statuslog"]["states"], attr, value, self._created(holding))
+            found = self.need(f"a statuslog time for {value}: {asking.why}", asking.window)
+            if isinstance(found, str):  # a time from --hand
+                asking = W.Asking((found, found), None, f"the time handed for {value}, on every machine")
+        else:
+            if state is None:
+                states = self.data["statuslog"]["states"]
+                state = self.need(f"a statuslog time for {value}", next((s for s in states if s["status"] == value), None))
+                if isinstance(state, str):  # a time from --hand
+                    state = {"status": value, "time": state}
+            asking = W.at_transition(state)
+        lo, hi = asking.window
+        when = hi if lo == hi else f"{lo}..{hi}"
         cands = [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
-        runs = self.runs(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), W.at_transition(state))
-        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= when <= r.last[:19]])}
+        runs = self.runs(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
         self.need(f"a run of {key} at {when}", at)
         if len(at) > 1:
             # the row's second holds runs in more than one log, and the machines' clocks are not known finer than a
@@ -1186,6 +1198,10 @@ class Rerun:
             # (Fr1, 2026-10-14).  Taking the first would take the asker's order of the logs, not the case's
             question = None
             self.say(f"runs of {key} at {when} in {len(at)} logs ({', '.join(at)}): each candidate is judged on its own run")
+        elif lo != hi and len(only := next(iter(at.values()))) > 1:
+            # a window, not the row's second, can hold several passes of the key in one log: the same holds
+            question = None
+            self.say(f"{len(only)} runs of {key} at {when} in {next(iter(at))}: each candidate is judged on its own run")
         else:
             (question, *_), = at.values()
             self.say(f"the run: {question.describe()}")
@@ -1198,7 +1214,7 @@ class Rerun:
                  for c in cands for run in at_hand if run.log.name in c.log_files]
         stable_holes(seens, env)
         j = judge(
-            cands, runs, mode=self.mode, decide=self.decide, window=(when, when),
+            cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi),
             subject=attr, observed=value, question_run=question, env=env,
         )
         self.say(j.report(question))
@@ -2284,6 +2300,19 @@ class Rerun:
         """The rows file's row of the class: the one its ``classes`` says is of it (A1 answers a row of a class)."""
         entity = next((e for e, c in self.data.get("classes", {}).items() if c == cls), None)
         return self.data.get("rows", {}).get(entity, {}) if entity else {}
+
+    def _created(self, found: PT.History) -> str | None:
+        """When the asked row was made (*found*'s ``created``), from the rows file's row or its ``after``: the column is
+        set once, as the row is made, so the value read at any time is the one it had -- the one column of ``after``
+        read whatever the time (KNOWN_ISSUES.md K10).  None where the history names none or the rows file lacks it."""
+        if not found.created:
+            return None
+        cls = found.subject.partition(".")[0]
+        value = self._row_of(cls).get(found.created, {}).get("value")
+        if value is None:
+            value = self.data.get("after", {}).get(found.created)
+            value = value.get("value") if isinstance(value, dict) else value
+        return str(value) if value else None
 
     def _row_value(self, subject: str, q: Missed | None = None):
         """The rows file's value of ``Class.attr`` for this instance, or None; under *q* at the window's end, its

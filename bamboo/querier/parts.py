@@ -35,14 +35,17 @@ class History:
 
     subject: str  # ``Class.attr`` whose moves it records
     held: frozenset[str]  # the other columns of the row it holds, lower case: what a question may filter on
+    created: str = ""  # the class's attribute set once, as its row is made: the earliest the first row's values came
 
 
 #: the stand-in's knowledge of where each history is kept (base_module.py recordStatusChange and
 #: record_task_status_change) and what orders its rows: the job's modificationTime is CURRENT_DATE, to the second,
-#: so modiftime_extended (CURRENT_TIMESTAMP) breaks ties; the value column is spelled as the subject's attribute
+#: so modiftime_extended (CURRENT_TIMESTAMP) breaks ties; the value column is spelled as the subject's attribute.
+#: A job's creationTime is set only just before its INSERT (job_complex_module.py:3034, 4172, 5490,
+#: task_event_module.py:4493) and no statement updates it; the task's is not checked
 _HISTORIES = {
     "JobSpec.jobStatus": (
-        History("JobSpec.jobStatus", frozenset({"computingsite", "prodsourcelabel", "cloud"})),
+        History("JobSpec.jobStatus", frozenset({"computingsite", "prodsourcelabel", "cloud"}), "creationTime"),
         "ATLAS_PANDA.jobs_StatusLog",
         "modificationTime, modiftime_extended",
     ),
@@ -69,6 +72,16 @@ def history(subject: str) -> History | None:
     """Part H's shape for ``Class.attr``; None when no history records the subject."""
     found = _HISTORIES.get(subject)
     return found[0] if found else None
+
+
+def history_holding(subject: str) -> History | None:
+    """The history whose rows hold ``Class.attr`` beside the status they record (``JobSpec.computingSite`` in the
+    job's); None for a status itself and for a subject no history holds."""
+    cls, _, attr = subject.partition(".")
+    for found, _, _ in _HISTORIES.values():
+        if found.subject.partition(".")[0] == cls and attr.lower() in found.held:
+            return found
+    return None
 
 
 def history_by_table(name: str) -> History | None:
