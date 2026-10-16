@@ -18,19 +18,33 @@ import pytest
 from bamboo.scripts.panda.fieldtest import census as C
 from bamboo.scripts.panda.fieldtest import run as F
 
-STOPPED = """\
-# rerun: patterns=outside, decide=positive, hand=none
-== H1 candidates
-== H2 which ran
-STOP H2: a run of 7 at 2026-10-01 00:00:00; HAND used 0 time(s) []
-"""
-ENDED = """\
-# start: bamboo /x
-== S1 what moves it on
-== S5 what the call returned
-END a legitimate wait: emptied at 09:04:17
-== reached the end; HAND used 0 time(s) []
-"""
+#: result.json as the querier writes it (version 1), the parts the runner reads
+STOPPED = {
+    "version": 1,
+    "outcome": {
+        "kind": "stop",
+        "step": "H2",
+        "text": "STOP H2: 2 ask(s) of the logs not in the records; HAND used 0 time(s) []",
+        "code": "asks",
+        "hand_used": [],
+        "branches": None,
+    },
+    "steps": ["H1", "H2"],
+    "asks": {"path": "/b/C1/asks.jsonl", "count": 2},
+}
+ENDED = {
+    "version": 1,
+    "outcome": {
+        "kind": "end",
+        "step": "S5",
+        "text": "END a legitimate wait: emptied at 09:04:17",
+        "code": None,
+        "hand_used": ["S2", "S2"],
+        "branches": None,
+    },
+    "steps": ["S1", "S2", "S5"],
+    "asks": None,
+}
 
 
 def _sha(path: Path) -> str:
@@ -42,29 +56,24 @@ def _sha(path: Path) -> str:
 
 def test_score_reads_a_stop():
     s = F.score(STOPPED)
-    assert s["hops"] == ["H1", "H2"] and s["last_hop"] == "H2"
-    assert s["terminal"] == "STOP" and s["stop"] == {
-        "hop": "H2",
-        "need": "a run of 7 at 2026-10-01 00:00:00",
-    }
-    assert s["hand"] == 0 and s["end"] is None
+    assert s["steps"] == ["H1", "H2"] and s["terminal"] == "STOP" and s["step"] == "H2"
+    assert s["code"] == "asks" and s["text"].startswith("STOP H2: 2 ask(s)")
+    assert s["hand"] == 0 and s["asks"]["count"] == 2 and s["why"] is None
 
 
-def test_score_reads_an_end():
+def test_score_reads_an_end_and_counts_each_hand_used():
     s = F.score(ENDED)
-    assert (
-        s["terminal"] == "END"
-        and s["end"].startswith("a legitimate wait")
-        and s["hand"] == 0
-    )
-    assert s["hops"] == ["S1", "S5"]
+    assert s["terminal"] == "END" and s["step"] == "S5" and s["code"] is None
+    assert s["text"].startswith("END a legitimate wait") and s["asks"] is None
+    assert s["hand"] == 2 and s["hand_used"] == ["S2", "S2"]
 
 
-def test_score_without_a_terminal_line():
-    assert (
-        F.score("== H1 candidates\nTraceback (most recent call last):\n")["terminal"]
-        == "NONE"
-    )
+def test_a_run_without_a_result_of_this_version_is_not_scored():
+    assert F.score(None)["terminal"] == "NONE"
+    assert "did not finish" in F.score(None)["why"]
+    s = F.score(STOPPED | {"version": 2})
+    assert s["terminal"] == "NONE" and s["why"] == "result.json version 2, this reads 1"
+    assert s["steps"] == [] and s["hand"] is None
 
 
 def test_lines_differ_leaves_out_comment_lines():
@@ -208,45 +217,103 @@ def test_a_case_runs_on_the_pair_current_names_for_its_pin(tmp_path):
 def test_the_command_carries_the_question(tmp_path):
     home = _home(tmp_path)
     case = F.load_case(_case(tmp_path))
-    args = F.command(home, case, Path("/out.txt"))
+    args = F.command(home, case, Path("/b/C1/out.txt"))
     assert args[1:4] == ["-m", "bamboo.querier.rerun", "--stuck"]
-    assert args[args.index("--key") + 1] == "5" and args[-2:] == ["--out", "/out.txt"]
+    assert args[args.index("--key") + 1] == "5"
+    assert args[-6:] == [
+        "--out",
+        "/b/C1/out.txt",
+        "--result",
+        "/b/C1/result.json",
+        "--asks",
+        "/b/C1/asks.jsonl",
+    ]
     case["question"]["kind"] = "default"
     assert "--stuck" not in F.command(home, case, Path("/out.txt"))
 
 
-def test_a_run_says_whether_it_read_the_pairs_dump():
-    pair = {"MAP_DUMP": "/d/map.json", "MAP_DUMP_SHA256": "ab" * 32}
-    assert F.map_said(
-        f"# x\n# map: dump /d/map.json (sha256 {'ab' * 8})\n== H1\n", pair
-    ) == {
-        "said": f"dump /d/map.json (sha256 {'ab' * 8})",
-        "ok": True,
+def test_a_run_says_whether_it_read_what_it_was_handed():
+    pair = {
+        "MAP_DUMP": "/d/map.json",
+        "MAP_DUMP_SHA256": "ab" * 32,
+        "BAMBOO_TREE": "/t/tree-1234abc-qbeefcaf",
+        "QUERIER_SHA": "beefcafe0",
     }
-    assert not F.map_said("# map: the one stored in Neo4j\n", pair)["ok"]
-    assert not F.map_said(f"# map: dump /d/map.json (sha256 {'cd' * 8})\n", pair)["ok"]
-    assert F.map_said("Traceback (most recent call last):\n", pair) == {
-        "said": None,
+    handed = {
+        "rows": {"path": "/r/rows.json", "sha256": "01" * 32},
+        "logs": [{"path": "/l/panda-x.log", "sha256": "02" * 32}],
+    }
+    inputs = {
+        "querier": {
+            "tree": "/t/tree-1234abc-qbeefcaf",
+            "label": "beefcafe0",
+            "bamboo_py_sha256": "03" * 32,
+        },
+        "map_dump": {"path": "/d/map.json", "sha256": "ab" * 32},
+        "rows": handed["rows"],
+        "logs": handed["logs"],
+    }
+    result = {"version": 1, "inputs": inputs}
+    assert F.read_as_handed(result, pair, handed) == {
+        "ok": True,
+        "differ": [],
+        "bamboo_py_sha256": "03" * 32,
+    }
+    other_dump = inputs | {"map_dump": {"path": "/d/map.json", "sha256": "cd" * 32}}
+    other_label = inputs | {"querier": inputs["querier"] | {"label": "0123456"}}
+    no_logs = inputs | {"logs": None}
+    for bent, differ in (
+        (other_dump, ["map_dump"]),
+        (inputs | {"map_dump": None}, ["map_dump"]),
+        (other_label, ["label"]),
+        (no_logs, ["logs"]),
+    ):
+        assert (
+            F.read_as_handed({"version": 1, "inputs": bent}, pair, handed)["differ"]
+            == differ
+        )
+    assert F.read_as_handed(None, pair, handed) == {
         "ok": False,
+        "differ": ["result.json"],
+        "bamboo_py_sha256": None,
     }
 
 
 # ------------------------------------------------------------------ a run, of a stand-in querier
 
-#: a stand-in for bamboo.querier.rerun: writes a querier-shaped output naming the dump it was handed, and says
-#: where it was imported from and which Neo4j it was given
+#: a stand-in for bamboo.querier.rerun: writes a querier-shaped output and a result.json naming what it was handed
+#: (none where FAKE_NO_RESULT is set), and says where it was imported from and which Neo4j it was given
 FAKE_QUERIER = textwrap.dedent(
     """
-    import hashlib, os, sys
+    import hashlib, json, os, sys
+    from pathlib import Path
     import bamboo
-    out = sys.argv[sys.argv.index("--out") + 1]
-    dump = os.environ["MAP_DUMP"]
-    sha = hashlib.sha256(open(dump, "rb").read()).hexdigest()[:16]
-    with open(out, "w") as f:
-        f.write("# start: tree " + os.environ["BAMBOO_TREE"] + "\\n")
-        f.write(f"# map: dump {dump} (sha256 {sha})\\n")
+    def arg(name):
+        return sys.argv[sys.argv.index(name) + 1]
+    def sha(p):
+        return hashlib.sha256(open(p, "rb").read()).hexdigest()
+    logs = [sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == "--log"]
+    tree, dump = os.environ["BAMBOO_TREE"], os.environ["MAP_DUMP"]
+    with open(arg("--out"), "w") as f:
+        f.write("# start: tree " + tree + "\\n")
         f.write("== S1 what moves it on\\nEND a legitimate wait\\n== reached the end; HAND used 0 time(s) []\\n")
-    print(__name__, bamboo.__file__.startswith(os.environ["BAMBOO_TREE"]), os.environ["NEO4J_URI"])
+    if not os.environ.get("FAKE_NO_RESULT"):
+        result = {
+            "version": 1,
+            "outcome": {"kind": "end", "step": "S1", "text": "END a legitimate wait", "code": None,
+                        "hand_used": [], "branches": None},
+            "steps": ["S1"],
+            "inputs": {
+                "querier": {"tree": tree, "label": Path(tree, "QUERIER").read_text().strip(),
+                            "bamboo_py_sha256": "0" * 64},
+                "map_dump": {"path": dump, "sha256": sha(dump)},
+                "rows": {"path": arg("--rows"), "sha256": sha(arg("--rows"))},
+                "logs": [{"path": p, "sha256": sha(p)} for p in logs] or None,
+            },
+            "asks": None,
+        }
+        Path(arg("--result")).write_text(json.dumps(result))
+    print(__name__, bamboo.__file__.startswith(tree), os.environ["NEO4J_URI"])
     """
 )
 
@@ -275,9 +342,11 @@ def test_a_case_runs_the_querier_of_its_pair_and_is_scored(tmp_path):
     assert (
         rec["exit"] == 0
         and rec["score"]["terminal"] == "END"
+        and rec["score"]["hand"] == 0
         and rec["baseline"]["lines_differ"] == 0
     )
-    assert rec["map"]["ok"] and "MAP NOT" not in F.line(rec)
+    assert rec["read"]["ok"] and "NOT READ AS HANDED" not in F.line(rec)
+    assert rec["result"]["path"] == str(tmp_path / "batch" / "C1" / "result.json")
     assert (
         rec["querier_sha"] == "beefcafe0"
         and rec["env"]["PYTHONPATH"] == rec["env"]["BAMBOO_TREE"]
@@ -288,6 +357,29 @@ def test_a_case_runs_the_querier_of_its_pair_and_is_scored(tmp_path):
     assert (
         json.loads((tmp_path / "batch" / "C1" / "run.json").read_text())["name"] == "C1"
     )
+
+
+def test_a_run_that_writes_no_result_is_not_scored_from_an_earlier_one(
+    tmp_path, monkeypatch
+):
+    home = _home(tmp_path)
+    _querier_tree(_pair(tmp_path, home))
+    _write(home.root / "pairs", "current.json", {"abc-f2": "P"})
+    case_path = _case(tmp_path)
+    first = F.run_case(home, case_path, tmp_path / "batch")
+    assert first["score"]["terminal"] == "END"
+
+    monkeypatch.setenv("FAKE_NO_RESULT", "1")
+    rec = F.run_case(home, case_path, tmp_path / "batch")
+    assert rec["result"] is None and rec["score"]["terminal"] == "NONE"
+    assert rec["read"] == {
+        "ok": False,
+        "differ": ["result.json"],
+        "bamboo_py_sha256": None,
+    }
+    assert "did not finish" in F.line(
+        rec
+    ) and "NOT READ AS HANDED: result.json" in F.line(rec)
 
 
 def test_a_case_of_another_pin_does_not_run(tmp_path):

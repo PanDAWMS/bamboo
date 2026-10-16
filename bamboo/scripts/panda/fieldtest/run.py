@@ -21,17 +21,22 @@ bamboo sha, and the dump's ``derived_from`` naming the pin.  The pair is written
 into every command, never taken from the querier's defaults.
 
 The querier runs as ``python -m bamboo.querier.rerun`` from the run tree.  It
-installs ``MAP_DUMP`` itself and says in its ``# map:`` line which dump it
-installed (since the querier's e2a9fff); each run checks that line against the
-pair.  A run is never given a Neo4j it can reach (:data:`NO_GRAPH`), so a
-querier that reads the map store instead of the dump -- one older than e2a9fff,
-or an entry that does not install -- fails rather than answering from whatever
-map the store holds at the time.
+installs ``MAP_DUMP`` itself, and writes how the run ended and what it read to
+``result.json`` (version 1, since the querier's b02b589): the dump it installed
+with its whole sha256, the run tree and the ``QUERIER`` label in it, the rows
+and the logs with theirs.  Each run checks these against what it handed
+(:func:`read_as_handed`).  A run is never given a Neo4j it can reach
+(:data:`NO_GRAPH`), so a querier that reads the map store instead of the dump
+-- one older than e2a9fff, or an entry that does not install -- fails rather
+than answering from whatever map the store holds at the time.
 
 **What is scored.**  No ``--hand``: the steps before the first ``STOP`` are the
-ones that ran with no judgement.  :func:`score` reads the hops the run opened,
-its ``STOP`` or ``END``, and how many times it used a hand; a case with a
-baseline also gets the number of lines (``#`` lines aside) that differ from it.
+ones that ran with no judgement.  :func:`score` reads from ``result.json`` the
+steps the run opened, how it ended (``STOP`` or ``END``, at which step, and the
+``code`` that names the class of what a stop needs) and the hands it used.  The
+querier writes ``result.json`` last and :func:`run_case` removes an earlier one
+first, so a run without one did not finish.  A case with a baseline also gets
+the number of lines (``#`` lines aside) its ``out.txt`` differs from it.
 """
 
 from __future__ import annotations
@@ -53,14 +58,12 @@ from pathlib import Path
 QUERIER_MODULE = "bamboo.querier.rerun"
 KINDS = ("default", "late", "stuck")
 
-HOP = re.compile(r"^== (?P<hop>[A-Z]\d+) ")
-STOP = re.compile(
-    r"^STOP (?P<hop>[A-Z]\d+): (?P<need>.*?); HAND used (?P<hand>\d+) time"
-)
-END = re.compile(r"^END (?P<what>.*)")
-REACHED = re.compile(r"^== reached the end; HAND used (?P<hand>\d+) time")
 DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
-MAP = re.compile(r"^# map: (?P<map>.*)$", re.M)
+
+#: the shape of result.json read here (agreed with the querier, 2026-10-15)
+RESULT_VERSION = 1
+#: the files a run writes beside its out.txt
+RESULT, ASKS = "result.json", "asks.jsonl"
 
 #: where a run's Neo4j is: a closed port (bamboo's settings take the environment over .env)
 NO_GRAPH = {"NEO4J_URI": "bolt://127.0.0.1:1"}
@@ -173,6 +176,8 @@ def build_rows(answers: Path, pair: dict, out: Path) -> Path:
 
 
 def command(home: Home, case: dict, out: Path) -> list[str]:
+    """The querier's command for *case*: the output *out*, and the result and the asks beside it, named here rather
+    than left to the querier's defaults."""
     q, i, m = case["question"], case["inputs"], case["modes"]
     args = [home.python, "-m", QUERIER_MODULE]
     if q["kind"] != "default":
@@ -196,32 +201,50 @@ def command(home: Home, case: dict, out: Path) -> list[str]:
         m["decide"],
         "--out",
         str(out),
+        "--result",
+        str(out.with_name(RESULT)),
+        "--asks",
+        str(out.with_name(ASKS)),
     ]
     return args
 
 
-def score(text: str) -> dict:
-    """How far a run got: the hops it opened, where it ended, and how many times it used a hand."""
-    lines = text.splitlines()
-    hops = [m["hop"] for line in lines if (m := HOP.match(line))]
+def score(result: dict | None) -> dict:
+    """How far a run got, from its result.json: the steps it opened, how it ended, and the hands it used.
+
+    ``terminal`` is ``STOP`` or ``END``; ``code`` names the class of what a stop
+    needs (``asks``, a KNOWN_ISSUES number, or None where none is named yet);
+    ``text`` is the ``STOP`` line or the ``END`` lines.  A run with no result,
+    or one of another version, is ``NONE`` and ``why`` says which.
+    """
     got: dict = {
-        "hops": hops,
-        "last_hop": hops[-1] if hops else None,
-        "end": None,
-        "stop": None,
+        "terminal": "NONE",
+        "why": None,
+        "step": None,
+        "code": None,
+        "text": None,
+        "steps": [],
         "hand": None,
+        "hand_used": None,
+        "asks": None,
     }
-    for line in lines:
-        if m := STOP.match(line):
-            got.update(stop={"hop": m["hop"], "need": m["need"]}, hand=int(m["hand"]))
-        elif m := END.match(line):
-            got["end"] = m["what"]
-        elif m := REACHED.match(line):
-            got["hand"] = int(m["hand"])
-    got["terminal"] = (
-        "STOP" if got["stop"] else "END" if got["end"] is not None else "NONE"
-    )
-    return got
+    if result is None:
+        return got | {"why": "no result.json: the run did not finish"}
+    if result.get("version") != RESULT_VERSION:
+        return got | {
+            "why": f"result.json version {result.get('version')}, this reads {RESULT_VERSION}"
+        }
+    o = result["outcome"]
+    return got | {
+        "terminal": o["kind"].upper(),
+        "step": o["step"],
+        "code": o["code"],
+        "text": o["text"],
+        "steps": result["steps"],
+        "hand": len(o["hand_used"]),
+        "hand_used": o["hand_used"],
+        "asks": result["asks"],
+    }
 
 
 def lines_differ(baseline: str, text: str) -> int:
@@ -232,12 +255,41 @@ def lines_differ(baseline: str, text: str) -> int:
     return sum(1 for x in difflib.ndiff(a, b) if x[:2] in ("- ", "+ "))
 
 
-def map_said(text: str, pair: dict) -> dict:
-    """The run's ``# map:`` line, and whether it names the pair's dump and its sha256."""
-    m = MAP.search(text)
-    said = m["map"] if m else None
-    want = f"dump {pair['MAP_DUMP']} (sha256 {pair['MAP_DUMP_SHA256'][:16]})"
-    return {"said": said, "ok": said == want}
+def _real(path: str) -> str:
+    return str(Path(path).resolve())
+
+
+def read_as_handed(result: dict | None, pair: dict, handed: dict) -> dict:
+    """Whether the run read what it was handed, by its result.json: the pair's dump (path and whole sha256), run tree
+    and ``QUERIER`` label, and *handed*'s rows and logs (path and sha256 each).  ``differ`` names each that does not
+    match."""
+    if result is None or result.get("version") != RESULT_VERSION:
+        return {"ok": False, "differ": [RESULT], "bamboo_py_sha256": None}
+    i, q = result["inputs"], result["inputs"]["querier"]
+    dump = i["map_dump"]
+    want = {
+        "map_dump": {
+            "path": _real(pair["MAP_DUMP"]),
+            "sha256": pair["MAP_DUMP_SHA256"],
+        },
+        "tree": _real(pair["BAMBOO_TREE"]),
+        "label": pair["QUERIER_SHA"],
+        "rows": handed["rows"],
+        "logs": handed["logs"] or None,
+    }
+    got = {
+        "map_dump": dump and {"path": _real(dump["path"]), "sha256": dump["sha256"]},
+        "tree": _real(q["tree"]),
+        "label": q.get("label"),
+        "rows": i["rows"],
+        "logs": i["logs"],
+    }
+    differ = [k for k in want if want[k] != got[k]]
+    return {
+        "ok": not differ,
+        "differ": differ,
+        "bamboo_py_sha256": q.get("bamboo_py_sha256"),
+    }
 
 
 def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
@@ -255,6 +307,9 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
         built = build_rows(Path(case["inputs"]["answers"]), pair, where / "rows.json")
         case = case | {"inputs": case["inputs"] | {"rows": str(built)}}
     out = where / "out.txt"
+    # a run that does not finish is not scored from an earlier run's files in the same place
+    for f in (out, out.with_name(RESULT), out.with_name(ASKS)):
+        f.unlink(missing_ok=True)
     args = command(home, case, out)
     env = {k: pair[k] for k in ("PANDA_PIN", "BAMBOO_TREE", "MAP_DUMP")}
     env |= {"PYTHONPATH": pair["BAMBOO_TREE"], "PYTHONDONTWRITEBYTECODE": "1"}
@@ -269,6 +324,17 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
             stderr=subprocess.STDOUT,
         ).returncode
     text = out.read_text() if out.exists() else ""
+    result_file = out.with_name(RESULT)
+    result = json.loads(result_file.read_text()) if result_file.exists() else None
+    handed = {
+        "rows": {
+            "path": case["inputs"]["rows"],
+            "sha256": sha256(Path(case["inputs"]["rows"])),
+        },
+        "logs": [
+            {"path": p, "sha256": sha256(Path(p))} for p in case["inputs"]["logs"]
+        ],
+    }
     record = {
         "case": str(path),
         "case_sha256": sha256(path),
@@ -288,8 +354,13 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
                 *([case["inputs"]["answers"]] if built else []),
             ]
         },
-        "score": score(text),
-        "map": map_said(text, pair),
+        "result": (
+            {"path": str(result_file), "sha256": sha256(result_file)}
+            if result
+            else None
+        ),
+        "score": score(result),
+        "read": read_as_handed(result, pair, handed),
     }
     if base := case.get("baseline"):
         record["baseline"] = {
@@ -303,19 +374,23 @@ def run_case(home: Home, path: Path, batch: Path, override: str = "") -> dict:
 
 def line(r: dict) -> str:
     """One line per run, for the terminal."""
+    if "read" not in r:
+        return f"{r['name']:<8} {r['pair']}  scored from out.txt, before result.json: see its run.json"
     s = r["score"]
-    if s["terminal"] == "END":
-        where = f"END {s['end'][:70]}"
-    elif s["stop"]:
-        where = f"STOP {s['stop']['hop']}: {s['stop']['need'][:70]}"
+    if s["terminal"] == "NONE":
+        where = s["why"]
     else:
-        where = "no terminal line"
-    base = f"  baseline diff {r['baseline']['lines_differ']}" if "baseline" in r else ""
-    if not r.get("map", {"ok": True})["ok"]:
-        base += f"  MAP NOT THE PAIR'S: {r['map']['said']}"
+        said = s["text"] or f"{s['terminal']} {s['step']} (no END line)"
+        where = said.splitlines()[-1][:80] + (f"  [{s['code']}]" if s["code"] else "")
+    extra = f"  asks {s['asks']['count']}" if s["asks"] else ""
+    if "baseline" in r:
+        extra += f"  baseline diff {r['baseline']['lines_differ']}"
+    if not r["read"]["ok"]:
+        extra += f"  NOT READ AS HANDED: {', '.join(r['read']['differ'])}"
+    last = s["steps"][-1] if s["steps"] else None
     return (
         f"{r['name']:<8} {r['pair']} q{r.get('querier_sha', '?')[:7]}  exit {r['exit']}  {r['seconds']:>6}s  "
-        f"hops {len(s['hops']):>2} (last {s['last_hop']})  hand {s['hand']}  {where}{base}"
+        f"steps {len(s['steps']):>2} (last {last})  hand {s['hand']}  {where}{extra}"
     )
 
 
