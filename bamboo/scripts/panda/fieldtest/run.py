@@ -14,9 +14,12 @@ knows a case: every step reads its arguments from the case file.
 ``--record``, a round that stops on asks (``code`` ``asks``) is followed by the
 recording step, which answers them from production into the case's records
 directory, and the querier runs again in ``r<n+1>/``, until it asks nothing,
-the recording step fails or does not settle, or ``--rounds`` are done.  The
+the recording step exits other than 0 (3: a day file still being compressed;
+4: every ask deferred, a grep or a list having failed), or ``--rounds`` are
+done.  An ask the recording step defers is asked again by the next round.  The
 recording step runs from the tree this module is in, where PanDA's credentials
-load (the home's ``cwd``).
+load (the home's ``cwd``).  Each case runs into ``<batch>/<name>/``, so the
+cases of a batch have distinct names.
 
 **Which code runs.**  A case names its pin, not a map: the map moves on that
 pin as the map session lands, and a case should not be edited for it.
@@ -138,6 +141,20 @@ def load_case(path: Path) -> dict:
             f"{path}: inputs hand logs or a records directory, not both (the querier reads one door)"
         )
     return case
+
+
+def distinct_names(paths: list[Path]) -> list[str]:
+    """The cases' names, each its run's directory in the batch: two cases of one name would write into one."""
+    names: dict[str, list[str]] = {}
+    for p in paths:
+        names.setdefault(load_case(p)["name"], []).append(str(p))
+    shared = {n: ps for n, ps in names.items() if len(ps) > 1}
+    if shared:
+        raise FieldTestError(
+            "cases of one name would run into one directory: "
+            + "; ".join(f"{n}: {', '.join(ps)}" for n, ps in sorted(shared.items()))
+        )
+    return list(names)
 
 
 def pair_name(home: Home, case: dict, override: str = "") -> str:
@@ -579,6 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         home = Home.load(a.home)
+        distinct_names([Path(p) for p in a.cases])
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         batch = Path(a.batch) if a.batch else home.root / "runs" / stamp
         batch.mkdir(parents=True, exist_ok=True)

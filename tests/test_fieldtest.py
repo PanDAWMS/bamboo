@@ -675,3 +675,17 @@ def test_a_case_needs_rows_or_answers(tmp_path):
     path.write_text(json.dumps(case))
     with pytest.raises(F.FieldTestError, match="inputs need rows, or answers"):
         F.load_case(path)
+
+
+def test_cases_of_one_name_do_not_run_into_one_directory(tmp_path):
+    one = _case(tmp_path)
+    (tmp_path / "other").mkdir()
+    two = _case(tmp_path / "other")
+    assert F.distinct_names([one]) == ["C1"]
+    with pytest.raises(F.FieldTestError, match="C1: .*case.json, .*other/case.json"):
+        F.distinct_names([one, two])
+    home = tmp_path / "home"
+    (home / "pairs").mkdir(parents=True)
+    (home / "fieldtest.json").write_text("{}")
+    assert F.main(["--home", str(home), "run", str(one), str(two)]) == 2
+    assert not (home / "runs").exists()

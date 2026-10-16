@@ -130,10 +130,17 @@ def ask(
     }
 
 
-async def run(tmp_path, panda: FakePanda, asks: list[dict], max_wait=3600):
+async def run_round(tmp_path, panda: FakePanda, asks: list[dict], max_wait=3600):
     return await R.record_round(
         asks, tmp_path, panda.parts(), datetime.timedelta(seconds=max_wait)
     )
+
+
+async def run(tmp_path, panda: FakePanda, asks: list[dict], max_wait=3600):
+    """A round none of whose asks is deferred: the file written and its records."""
+    path, records, deferred = await run_round(tmp_path, panda, asks, max_wait)
+    assert deferred == []
+    return path, records
 
 
 ADDER = "panda-adder.log"
@@ -520,3 +527,65 @@ def test_an_ask_not_in_its_canonical_form_is_refused(tmp_path):
     path.write_text(json.dumps(bad) + "\n")
     with pytest.raises(FieldTestError, match="sorted"):
         R.read_asks(path)
+
+
+# ------------------------------------------------------------------ deferred asks
+
+
+def _adder_on(machine: str) -> dict:
+    return ask(ADDER, ["7339"], ("2026-10-14 06:00:00", "2026-10-14 06:00:00"), machine)
+
+
+async def test_an_ask_a_grep_failed_for_is_deferred_and_answered_in_a_later_round(
+    tmp_path,
+):
+    day = "panda-adder.log-20261014.gz"
+    greps = {
+        (SERVER[0], day): [
+            {"status": "failed", "error": "timed out"},
+            found(rec(1, "2026-10-14 06:00:00,1 a 7339")),
+        ],
+        (SERVER[1], day): [found(rec(2, "2026-10-14 06:00:00,2 b 7339"))],
+    }
+    lists = lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: ADDER_FILES})
+    panda = FakePanda(lists, greps)
+    failing, fine = _adder_on(SERVER[0]), _adder_on(SERVER[1])
+
+    p1, records, deferred = await run_round(tmp_path, panda, [failing, fine])
+    assert p1.name == "records-r1.jsonl" and [r["ask"] for r in records] == [
+        fine["ask"]
+    ]
+    (d,) = deferred
+    assert d["ask"] == failing["ask"] and d["why"] == [
+        f"{SERVER[0]} {day}: failed: timed out"
+    ]
+    (kept,) = tmp_path.glob("answers-r1-*/deferred.jsonl")
+    assert [json.loads(x)["ask"] for x in kept.read_text().splitlines()] == [
+        failing["ask"]
+    ]
+
+    p2, (r,) = await run(tmp_path, panda, [failing])
+    assert p2.name == "records-r2.jsonl" and r["ask"] == failing["ask"]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["status"] == "answered" and [x["offset"] for x in f["records"]] == [1]
+
+
+async def test_a_round_whose_every_ask_is_deferred_writes_no_records(tmp_path):
+    greps = {
+        (SERVER[0], "panda-adder.log-20261014.gz"): [
+            {"status": "failed", "error": "timed out"}
+        ]
+    }
+    panda = FakePanda(lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), greps)
+    path, records, (d,) = await run_round(tmp_path, panda, [_adder_on(SERVER[0])])
+    assert path is None and records == [] and "failed: timed out" in d["why"][0]
+    assert not list(tmp_path.glob("records-r*.jsonl"))
+    assert list(tmp_path.glob("answers-r1-*/leaves.jsonl"))
+
+
+async def test_an_ask_whose_machine_list_failed_is_deferred(tmp_path):
+    lists = lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []})
+    lists["server"][SERVER[0]] = {"status": "failed", "error": "no answer"}
+    panda = FakePanda(lists, {})
+    path, records, (d,) = await run_round(tmp_path, panda, [_adder_on(SERVER[0])])
+    assert path is None and d["why"] == [f"{SERVER[0]}: list failed: no answer"]

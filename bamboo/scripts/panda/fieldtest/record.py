@@ -55,6 +55,16 @@ answer for the same machine and file is read again when it held every string.
 **A record.**  Each ask's record copies the ask and lists, for every machine
 it asks, every file whose span meets the window, read or not, with the records
 whose lines hold one of the ask's strings: not cut to the window.
+
+**A deferred ask.**  The querier never asks again what a record answers, so a
+file a record says ``failed`` would stay unsearched though the failure passed
+(a grep cut by a server's timeout, 2026-10-14).  An ask any of whose greps or
+lists failed gets no record: it is written to the round's
+``answers-r<n>-<time>/deferred.jsonl`` with why, and the querier asks it again.
+The next round reads the rotated files this one answered from this round's
+answers.  ``unreadable``, ``truncated``, ``list cut``, ``not listed`` and ``no
+such log`` say what a file or a list is, and are recorded.  A round whose every
+ask is deferred writes no records file, and exits 4.
 """
 
 from __future__ import annotations
@@ -734,8 +744,9 @@ def file_entry(
 
 async def record_round(
     asks: list[dict], directory: Path, parts: Parts, max_wait: datetime.timedelta
-) -> tuple[Path, list[dict]]:
-    """Answer *asks* and write them as the next round in *directory*; the file written and its records."""
+) -> tuple[Path | None, list[dict], list[dict]]:
+    """Answer *asks* and write them as the next round in *directory*: the file written (None where every ask was
+    deferred), its records, and the asks deferred with why."""
     last, keys = recorded_keys(directory)
     again = [a["ask"] for a in asks if key_of(a["ask"]) in keys]
     if again:
@@ -867,14 +878,43 @@ async def record_round(
                 "requests": requests,
             }
         )
-    leaves = directory / answers.name / "leaves.jsonl"
-    leaves.parent.mkdir(parents=True, exist_ok=True)
-    leaves.write_text("".join(json.dumps(leaf) + "\n" for leaf in grepper.leaves))
+    # an ask a list or a grep failed for is asked again rather than recorded with a hole no round would fill
+    deferred = [
+        {"ask": r["ask"], "why": why}
+        for r in records
+        if (why := failures(r["machines"]))
+    ]
+    records = [r for r in records if not failures(r["machines"])]
+    kept_dir = directory / answers.name
+    kept_dir.mkdir(parents=True, exist_ok=True)
+    (kept_dir / "leaves.jsonl").write_text(
+        "".join(json.dumps(leaf) + "\n" for leaf in grepper.leaves)
+    )
+    if deferred:
+        (kept_dir / "deferred.jsonl").write_text(
+            "".join(json.dumps(d) + "\n" for d in deferred)
+        )
+    if not records:
+        return None, [], deferred
     path = directory / f"records-r{n}.jsonl"
     tmp = path.with_suffix(".jsonl.tmp")
     tmp.write_text("".join(json.dumps(r) + "\n" for r in records))
     tmp.rename(path)
-    return path, records
+    return path, records, deferred
+
+
+def failures(machines: dict) -> list[str]:
+    """What a later round may still read: each machine of a record whose list failed, each file whose grep failed."""
+    out = []
+    for name, m in machines.items():
+        if m["status"] == "list failed":
+            out.append(f"{name}: list failed: {m['error']}")
+        out.extend(
+            f"{name} {f['file']}: failed: {f['error']}"
+            for f in m["files"]
+            if f["status"] == "failed"
+        )
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -900,7 +940,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{a.asks}: no asks")
         return 0
     try:
-        path, records = asyncio.run(
+        path, records, deferred = asyncio.run(
             record_round(
                 asks, directory, Parts(), datetime.timedelta(seconds=a.max_wait)
             )
@@ -908,7 +948,15 @@ def main(argv: list[str] | None = None) -> int:
     except NotSettled as e:
         print(f"not settled, nothing written: {e}", file=sys.stderr)
         return 3
-    print(f"{path}: {len(records)} record(s)")
+    for d in deferred:
+        print(f"deferred {key_of(d['ask'])}: {'; '.join(d['why'])}")
+    if path is None:
+        print(
+            f"nothing written: every one of {len(deferred)} ask(s) deferred",
+            file=sys.stderr,
+        )
+        return 4
+    print(f"{path}: {len(records)} record(s), {len(deferred)} ask(s) deferred")
     return 0
 
 
