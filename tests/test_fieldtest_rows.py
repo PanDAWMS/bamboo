@@ -359,6 +359,13 @@ async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_ke
         states[1]["time"] == "2026-10-07 13:06:46"
         and states[1]["time_extended"] == "2026-10-07 13:06:46.000000"
     )
+    # a job's history row holds the columns it copies from the job, spelt as the attributes
+    assert (
+        states[0]["computingSite"],
+        states[0]["prodSourceLabel"],
+        states[0]["cloud"],
+    ) == ("SITE_A", "user", "WORLD")
+    assert "site" not in states[0]
     assert [f["lfn"]["value"] for f in out["files"]] == ["a.log.tgz", "in.root"]
     assert out["files"][0]["destinationDBlock"] == {"value": "user.x_sub1", **read}
     assert out["collections"]["job.Files"] == {"rows": "files", "entity": "file"}
@@ -645,6 +652,8 @@ async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
     assert (
         out["statuslog"]["states"][0]["time_extended"] == "2026-09-27 06:55:15.975402"
     )
+    # a task's jobs' histories hold their columns too
+    assert out["job_statuslog"]["by_pandaid"]["12"][1]["computingSite"] == "SITE_A"
     # no 'finishing' row: the decision time cannot be taken, so all but the key is after
     assert (
         list(out["rows"]["task"]) == ["jediTaskID"]

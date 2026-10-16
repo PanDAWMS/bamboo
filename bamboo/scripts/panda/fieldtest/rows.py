@@ -70,6 +70,9 @@ FINAL_STATES = ("finished", "failed", "cancelled", "closed")
 #: the clock an ``as_of`` is on: the machine that called the API, or the database's
 CLIENT = "client"
 DATABASE = "database"
+#: the columns of a job's history row besides its status, times and host, spelt as the job's
+#: attributes they copy: recordStatusChange copies them from the job (base_module.py:589-591)
+JOB_HISTORY_COLUMNS = ("prodSourceLabel", "cloud", "computingSite")
 #: the endpoint a key's row comes from
 ENDPOINT = {
     "JobSpec": "job/get_description_incl_archive",
@@ -224,8 +227,8 @@ def states_of(response: dict, kind: str) -> tuple[list[dict] | None, str]:
                     "status": r["jobStatus"],
                     "time": f"{t:%Y-%m-%d %H:%M:%S}",
                     "time_extended": stamp(tx),
-                    "site": r["computingSite"],
                     "host": r["modificationHost"],
+                    **{c: r[c] for c in JOB_HISTORY_COLUMNS},
                 }
             )
         else:
