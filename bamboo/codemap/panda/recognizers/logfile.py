@@ -380,7 +380,7 @@ class LoggerFiles:
         placed = self.calls.callees(file, func, call) if func is not None and name not in _OPENERS else None
         # One definition, placed closed: a call placed open may return
         # another function's file.
-        if placed is None or len(placed.targets) != 1 or placed.unplaced:
+        if placed is None or len(placed.targets) != 1 or placed.unplaced or placed.thread:
             trail.open = True
             return
         (target,) = placed.targets

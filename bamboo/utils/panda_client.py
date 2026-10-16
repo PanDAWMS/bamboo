@@ -25,7 +25,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from bamboo.utils.narrator import say, thinking
 
@@ -525,13 +525,40 @@ async def get_job_status_history(
     """
     ids = list(dict.fromkeys(int(i) for i in job_ids))
     window = {k: v for k, v in (("since", since), ("until", until)) if v is not None}
-    size = STATUS_HISTORY_MAX_JOBS
+    answers, calls = await _keyed_in_calls(
+        "job/get_status_history", "job_ids", ids, window, STATUS_HISTORY_MAX_JOBS
+    )
+    if answers is None:
+        return _failed(calls, "job_ids")
+    return {
+        "success": True,
+        **_whole_span(answers),
+        "since": answers[0].get("since"),
+        "until": answers[0].get("until"),
+        "calls": calls,
+    }
+
+
+async def _keyed_in_calls(
+    endpoint: str, field: str, keys: list, extra: dict[str, Any], size: int
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]]]:
+    """Ask *endpoint* for *keys* in as many calls as its probe budget allows.
+
+    The keyed reads (job/get_status_history, job/get_datasets_by_name) refuse a
+    call naming more keys than ``budget // partitions`` of the table they read,
+    and say both numbers; the keys are then split into calls of that size.
+
+    Returns:
+        ``(answers, calls)``: the ``data`` of every call in call order and
+        every response as it came; answers is None when a call failed for
+        another reason or not even one key fits, or when there was no key.
+    """
     calls: list[dict[str, Any]] = []
     done = 0
-    while done < len(ids):
-        chunk = ids[done : done + size]
+    while done < len(keys):
+        chunk = keys[done : done + size]
         response = await asyncio.to_thread(
-            _call_api_full, "post", "job/get_status_history", {"job_ids": chunk, **window}
+            _call_api_full, "post", endpoint, {field: chunk, **extra}
         )
         calls.append(response)
         data = response.get("data") or {}
@@ -544,22 +571,38 @@ async def get_job_status_history(
         elif data.get("rejected") == "too_many_keys":
             fits = data.get("max_keys")
         if not fits or fits >= len(chunk):
-            return {**response, "calls": calls}
+            return None, calls
         size = fits
     if not calls:
-        return {"success": False, "message": "no job_ids", "data": {"rejected": "no_keys"}, "calls": calls}
-    answers = [c["data"] for c in calls if c.get("success")]
+        return None, calls
+    return [c["data"] for c in calls if c.get("success")], calls
+
+
+def _failed(calls: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    """The response that ended a keyed read, as it came, with ``calls`` added."""
+    if not calls:
+        return {
+            "success": False,
+            "message": f"no {field}",
+            "data": {"rejected": "no_keys"},
+            "calls": calls,
+        }
+    return {**calls[-1], "calls": calls}
+
+
+def _whole_span(answers: list[dict[str, Any]]) -> dict[str, Any]:
+    """The rows of every call, and the span all of them are whole for.
+
+    as_of is the earliest call's, since every change committed by then is in
+    rows; retained_from the latest call's, or None when a call could not tell.
+    """
     retained = [a.get("retained_from") for a in answers]
     return {
-        "success": True,
         "rows": [row for a in answers for row in a["rows"]],
         "as_of": min((a["as_of"] for a in answers), key=_parse_panda_datetime),
         "retained_from": None
         if None in retained
         else max(retained, key=_parse_panda_datetime),
-        "since": answers[0].get("since"),
-        "until": answers[0].get("until"),
-        "calls": calls,
     }
 
 
@@ -571,6 +614,110 @@ async def get_task_status_history(task_id: int) -> dict[str, Any]:
     return await asyncio.to_thread(
         _call_api_full, "get", "task/get_status_history", {"task_id": int(task_id)}
     )
+
+
+# ---------------------------------------------------------------------------
+# Rows read by key, without the async daemon
+# ---------------------------------------------------------------------------
+#
+# A read by key goes through a plain endpoint rather than db_read, which waits
+# behind the daemon's greps (up to ~250 s).  db_read keeps the aggregates and
+# the reads by a time range.
+
+#: most dataset names one call of job/get_datasets_by_name takes (its max_keys);
+#: a refusal then says how many fit the probe budget
+DATASETS_MAX_NAMES = 1000
+#: job IDs per call of job/get_description_incl_archive.  It has no cost bound,
+#: and a job in jobsArchived4 costs about 160 index lookups (panda-server,
+#: 2026-10-14), so a call is kept to a few dozen
+JOBS_PER_CALL = 30
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def get_datasets_by_name(names: list[str]) -> dict[str, Any]:
+    """The rows of the server's datasets (ATLAS_PANDA.Datasets) named *names*.
+
+    The table is partitioned by modificationdate, so each name is looked up in
+    every partition; a call takes ``budget // partitions`` names, and the
+    names are split into as many calls as that takes.  JEDI_Datasets is not
+    read.
+
+    Returns:
+        On success ``{"success": True, "rows", "as_of", "retained_from",
+        "calls"}``: every column of each row by its DatasetSpec name; a name
+        with no row has none.  retained_from speaks of modificationdate: a
+        dataset last modified before it may have been in the table and be
+        gone.  Otherwise the response that failed, as it came, with ``calls``
+        added.
+    """
+    keys = list(dict.fromkeys(str(n) for n in names))
+    answers, calls = await _keyed_in_calls(
+        "job/get_datasets_by_name", "names", keys, {}, DATASETS_MAX_NAMES
+    )
+    if answers is None:
+        return _failed(calls, "names")
+    return {"success": True, **_whole_span(answers), "calls": calls}
+
+
+async def get_jobs_incl_archive(job_ids: list[int]) -> dict[str, Any]:
+    """Each job's row and files: the live tables first, then the archive's last 90 days.
+
+    job/get_description_incl_archive with ``report_errors``, so that a
+    database error is told from a job not found.  The answer has no as_of: the
+    server reads the tables in separate transactions.  ``asked_at`` is when the
+    first call went, on this machine's clock (UTC).
+
+    Returns:
+        On success ``{"success": True, "jobs", "asked_at", "calls"}``: jobs maps
+        each PanDA ID to the job's dict (every column by its JobSpec name, and
+        ``Files``), to None when no live table has it and the archive's last 90
+        days do not either, or to ``{"error": code}`` when the database failed
+        for it (not retried).  Otherwise the response that failed, as it came,
+        with ``asked_at`` and ``calls`` added.
+    """
+    ids = list(dict.fromkeys(int(i) for i in job_ids))
+    asked_at = _utc_now()
+    calls: list[dict[str, Any]] = []
+    jobs: dict[int, Any] = {}
+    for start in range(0, len(ids), JOBS_PER_CALL):
+        chunk = ids[start : start + JOBS_PER_CALL]
+        response = await asyncio.to_thread(
+            _call_api_full,
+            "post",
+            "job/get_description_incl_archive",
+            {"job_ids": chunk, "report_errors": True},
+        )
+        calls.append(response)
+        data = response.get("data")
+        if (
+            not response.get("success")
+            or not isinstance(data, list)
+            or len(data) != len(chunk)
+        ):
+            return {**response, "asked_at": asked_at, "calls": calls}
+        jobs.update(zip(chunk, data, strict=True))
+    return {"success": True, "jobs": jobs, "asked_at": asked_at, "calls": calls}
+
+
+async def get_task_detailed_info(task_id: int) -> dict[str, Any]:
+    """One task's row and parameters: the whole response of task/get_detailed_info.
+
+    ``data`` holds every JediTaskSpec column, with ``splitRule`` decoded, and
+    keys that are not columns: ``split_rule_raw`` (the column as stored),
+    ``job_execution_params``, ``task_creation_arguments``,
+    ``raw_task_params`` and the input files' progress (``nFiles`` to
+    ``pctFailed``).  The server answers alike for a task it has no row of and
+    one it failed to read.  It has no as_of; ``asked_at`` is when the call
+    went, on this machine's clock (UTC).
+    """
+    asked_at = _utc_now()
+    response = await asyncio.to_thread(
+        _call_api_full, "get", "task/get_detailed_info", {"task_id": int(task_id)}
+    )
+    return {**response, "asked_at": asked_at}
 
 
 async def db_read(
@@ -632,6 +779,8 @@ async def db_read(
 LOG_SERVICES = ("server", "jedi")
 #: most strings one grep takes (submit_grep_request's fixed_strings)
 GREP_MAX_STRINGS = 1000
+#: most log names one list takes (submit_log_list_request's log_names)
+LIST_MAX_NAMES = 100
 
 
 def _target(service: str | None, machine: str | None) -> dict[str, str]:
@@ -698,6 +847,7 @@ async def list_logs(
     *,
     service: str | None = None,
     machine: str | None = None,
+    log_names: list[str] | None = None,
     poll_seconds: float = 15.0,
     timeout_seconds: float = 600.0,
 ) -> dict[str, Any]:
@@ -705,15 +855,32 @@ async def list_logs(
 
     Each machine's result is a list of ``{"name", "size", "mtime"}`` (mtime in
     UTC, ``YYYY-MM-DD HH:MM:SS``): every regular file under its logdir whose
-    name starts with ``panda-``.  A rotated file's mtime is when it was
-    rotated, so it holds the lines up to then from the previous rotation on.
+    name starts with ``panda-``, in the order of their names, cut at 1 MB
+    (``truncated``).  A rotated file's mtime is its last write before it was
+    rotated, not the rotation: its processes go on writing to it until
+    postrotate stops them (up to 146 s past its mtime on 2026-10-14), and a
+    quiet log's mtime is hours before.  A jedi machine keeps 180 days of
+    about 75 logs: its whole list never fits, so ask for the logs by name.
+
+    Args:
+        log_names: only these logs and their rotated files (a name ``n``
+            matches ``n`` and ``n-*``), up to :data:`LIST_MAX_NAMES`.  A name
+            with no file is not in the list.
 
     Returns:
         As :func:`wait_per_machine`; a refused submit as it came.
     """
+    params = _target(service, machine)
+    if log_names is not None:
+        names = list(dict.fromkeys(log_names))
+        if not 1 <= len(names) <= LIST_MAX_NAMES:
+            raise ValueError(
+                f"a list takes 1 to {LIST_MAX_NAMES} log names, not {len(names)}"
+            )
+        params["log_names"] = names
     return await _per_machine_request(
         "async_process/submit_log_list_request",
-        _target(service, machine),
+        params,
         poll_seconds,
         timeout_seconds,
     )

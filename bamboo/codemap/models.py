@@ -2262,6 +2262,7 @@ class MapFragment(BaseModel):
     log_sites: list[LogSiteNode] = Field(default_factory=list)
     read_sites: list["ReadSiteNode"] = Field(default_factory=list)
     function_prints: list["FunctionPrintsNode"] = Field(default_factory=list)
+    reach_graph: list["ReachNode"] = Field(default_factory=list)
     print_calls: dict[str, list[int]] = Field(
         default_factory=dict,
         description=(
@@ -2363,6 +2364,7 @@ MAP_NODE_GROUPS: tuple[str, ...] = (
     "log_sites",
     "read_sites",
     "function_prints",
+    "reach_graph",
 )
 
 
@@ -3948,6 +3950,160 @@ class FunctionPrintsNode(BaseNode):
     @staticmethod
     def make_name(map_id: str, owner: str) -> str:
         return f"{map_id}:{owner}"
+
+
+class ReachCall(BaseModel):
+    """One way a function goes on into another: a call, or a function handed to one.
+
+    ``for_classes`` and ``runs_as`` are what a method found by inheritance
+    needs (:attr:`calls.Target.bound`).  ``self.runImpl()`` in
+    ``WorkerThread.run`` is placed once for each class ``self`` can be there,
+    and lands at ``JobGeneratorThread.runImpl`` only for a
+    ``JobGeneratorThread``: that edge is ``for_classes`` = ``runs_as`` =
+    ``[JobGeneratorThread]``.  A call that does not read ``self`` holds for
+    every class (``for_classes`` empty), and a function entered with no class
+    said (``runs_as`` empty) runs as each class its ``self`` can be.
+    """
+
+    line: int
+    callee: str = Field(..., description="The called or handed expression, as source, cut at 80 characters.")
+    to: str = Field(..., description="The :attr:`ReachNode.owner` it goes into.")
+    how: str = Field(
+        default="call",
+        description=(
+            "``call``; ``handed``, a function or method passed as an argument "
+            "-- ``Thread(target=self.run)``, ``executor.submit(fn)`` -- taken "
+            "as called; ``lambda``, a call in a lambda's body, taken as made "
+            "by the function holding the lambda."
+        ),
+    )
+    for_classes: list[str] = Field(
+        default_factory=list,
+        description="The classes ``self`` is, in this function, for which the call goes here; empty for every class.",
+    )
+    runs_as: list[str] = Field(
+        default_factory=list,
+        description="The classes ``self`` is in :attr:`to` when it is entered this way; empty for every class it can be.",
+    )
+    thread: bool = Field(
+        default=False,
+        description="``thr.start()`` running ``run`` on another thread or process (:attr:`calls.Placed.thread`).",
+    )
+
+
+class ReachHole(BaseModel):
+    """A call whose way on this reading cannot close: it may go somewhere no edge says.
+
+    A reach answer with a hole in its closure and no write reached is no
+    answer (``None``), not "reaches none" -- the hole may be the way to it.
+    """
+
+    line: int
+    callee: str = Field(..., description="The called expression, as source, cut at 80 characters.")
+    why: str
+    for_classes: list[str] = Field(
+        default_factory=list,
+        description="As :attr:`ReachCall.for_classes`: the classes of ``self`` it is a hole for; empty for every class.",
+    )
+
+
+class ReachNode(BaseNode):
+    """Where one function can go on to, for every function in the corpus: the record ``reach`` is answered from.
+
+    The question is bamboo-8f's (10-14): does a function that moves a
+    subject off a value reach, through calls and hand-offs, a write that
+    moves it off again.  Its answer is a closure over every function below
+    the one asked, and the facts per function do not depend on the subject
+    or the value -- only where the closure ends does, and the junctions say
+    that.  So the facts are recorded once per build and the question is
+    answered from the record (:func:`bamboo.codemap.reach.reach`), not by
+    placing every call again for each of the hundreds of movers one run asks
+    about.
+
+    Every call the function makes is one of four things.  It goes on into a
+    function of the corpus (:attr:`calls`); it is the database
+    (:attr:`database` -- a statement the map reads, or the driver -- whose
+    writes are read where it runs, so the closure goes no further); it is
+    closed by a rule (outside the corpus, a builtin's method) and counted in
+    :attr:`settled` where the rule is an assumption a reader must be able
+    to name; or it is a :attr:`holes` entry.  A call recorded nowhere was
+    closed by one of the premises every answer shares
+    (:data:`bamboo.codemap.reach.PREMISES`).
+
+    ``owner`` spells the nesting as :attr:`FunctionPrintsNode.owner` does,
+    and a second definition of one name in a file -- a property's setter
+    beside its getter -- is told apart by ``#2``.
+    """
+
+    node_type: NodeType = NodeType.REACH
+    map_id: str
+    derived_from: str
+    owner: str = Field(..., description="``file::qualified.name``, ``#n`` after a repeated one.")
+    cls: str = Field(default="", description="``file::Class`` holding the method; empty for a function.")
+    function: str = Field(..., description="The function's own name.")
+    classes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every class ``self`` can be here: the class and each of its "
+            "subclasses in the corpus (:meth:`calls.Calls.objects_of`).  "
+            "Empty for a function."
+        ),
+    )
+    calls: list[ReachCall] = Field(default_factory=list)
+    database: list[int] = Field(
+        default_factory=list,
+        description="The lines of the calls that are the database: a statement the map reads at that call, or the driver.",
+    )
+    holes: list[ReachHole] = Field(default_factory=list)
+    settled: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "How many calls each assumption closed here, by its name in "
+            ":data:`bamboo.codemap.reach.ASSUMPTIONS`.  An answer lists the "
+            "ones its closure relied on, so a reader dropping a mover can "
+            "say what that rests on."
+        ),
+    )
+    anchor: Optional[Anchor] = None
+
+    @staticmethod
+    def make_name(map_id: str, owner: str) -> str:
+        return f"{map_id}:{owner}"
+
+
+class ReachWrite(BaseModel):
+    """A function in the closure holding arms the question is about, and how it is reached."""
+
+    function: str = Field(..., description="The :attr:`ReachNode.owner`.")
+    arms: list[str] = Field(default_factory=list, description="``outcome@line`` of each arm.")
+    chain: list[str] = Field(
+        default_factory=list,
+        description="``file:line`` of each call from the start to it, the first call first; empty for the start itself.",
+    )
+
+
+class Reach(BaseModel):
+    """What :func:`bamboo.codemap.reach.reach` answers for one start.
+
+    Computed at use time from :class:`ReachNode` rows; not stored.
+
+    ``writes`` is ``None`` where no write was reached and the closure has a
+    hole -- the answer is not known -- and ``[]`` where no write was reached
+    and there is no hole.  Those two must not be read alike: only ``[]``
+    says the start cannot move the subject, and it says so under the
+    premises every answer shares and the :attr:`assumptions` listed.
+    """
+
+    writes: Optional[list[ReachWrite]] = None
+    holes: list[str] = Field(
+        default_factory=list,
+        description="``owner:line callee -- why`` for each hole in the closure.",
+    )
+    assumptions: dict[str, int] = Field(
+        default_factory=dict,
+        description="Each assumption the closure relied on, with how many calls it closed there.",
+    )
+    closure: int = Field(default=0, description="How many functions the closure holds, the start included.")
 
 
 class TraceStep(BaseModel):

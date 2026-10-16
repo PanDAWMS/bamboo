@@ -64,7 +64,7 @@ different places.
 | Where it comes from | LLM extraction from incidents, human-validated | Machine-derived from source by `build-map` |
 | If you lose it | Irreplaceable | Rebuild it in a minute |
 | Where it is kept | This Neo4j database | A dump per source version (`build-map --dump`) |
-| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss`, `LogSite`, `ReadSite`, `FunctionPrints` |
+| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss`, `LogSite`, `ReadSite`, `FunctionPrints`, `Reach` |
 
 The Code Map was once stored in this database under its own labels. It left because
 nothing about reading it needs a database. Every reading is a lookup by label and
@@ -84,11 +84,11 @@ junctions describe the same subsystem from opposite directions, which is what
 
 ## Extended catalogue
 
-The model defines a larger set of node and relationship types — **29 node types** and
+The model defines a larger set of node and relationship types — **30 node types** and
 **23 relationship types** in total — available for future extraction strategies beyond the core
 incident-analysis pipeline.
 
-### Node types (29)
+### Node types (30)
 
 ```
 - Symptom: Symptom messages and failures
@@ -122,6 +122,7 @@ Code Map types (machine-derived from source, separate namespace):
 - LogSite: Where one function's diagnostics land, for a function that decides nothing
 - ReadSite: One statement that asks the database for rows by a value
 - FunctionPrints: Every line one function can print, for every function in the corpus that prints
+- Reach: Where one function can go on to -- its calls, its database calls and the calls it cannot follow -- for every function in the corpus
 ```
 
 ### Relationship types (23)

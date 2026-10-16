@@ -47,6 +47,7 @@ from bamboo.codemap.models import (
     LogSiteNode,
     LoopCutNode,
     MapTerm,
+    ReachNode,
     ReadSiteNode,
     SubjectNode,
     Symptom,
@@ -73,6 +74,7 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
     BoundaryNode: NodeType.BOUNDARY,
     ValueEnumNode: NodeType.VALUE_ENUM,
     FunctionPrintsNode: NodeType.FUNCTION_PRINTS,
+    ReachNode: NodeType.REACH,
 }
 
 

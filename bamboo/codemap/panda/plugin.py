@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reading, trace
+from bamboo.codemap import reach, reading, trace
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
@@ -608,6 +608,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if self._calls is not None:
             _attach_called_from(fragment.junctions, self._calls)
             fragment.calls_considered, fragment.call_stops, fragment.open_calls = _call_stops(self._calls, self._modules)
+            # Where every function can go on to, for the reach a mover is
+            # answered from (:mod:`bamboo.codemap.reach`): its own record,
+            # because a run asks it of hundreds of movers.
+            fragment.reach_graph.extend(
+                reach.graph(
+                    self._calls,
+                    self.map_id,
+                    self._version,
+                    _DatabaseLeaves(),
+                    {module.rel_path: module.blob_sha for module in self._modules},
+                )
+            )
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the
@@ -995,6 +1007,75 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 #: A logger's methods.  What a log call lands in says nothing about a value,
 #: and counting them would make a third of the calls the stops are drawn from.
 _LOG_CALLS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
+
+
+#: The classes PanDA's proxies talk to the database through.
+_DRIVER_CLASSES = frozenset({"WrappedCursor", "WrappedOracleConn", "WrappedPostgresConn"})
+#: The names a cursor or a connection is held under, a field or a local --
+#: ``provenance.DATABASE_INTERFACES`` names ``cur`` the same way.
+_DRIVER_NAMES = frozenset({"cur", "conn"})
+
+
+class _DatabaseLeaves:
+    """Which calls are PanDA's database, for :func:`reach.graph` (:data:`reach.Leaves`).
+
+    A statement the map reads is read at the call that runs it
+    (:func:`sql.executions`), and a write's arms are in the function making
+    that call: the call is the database, and the closure goes no further.
+    A runner call it read nothing out of may be a write, and is a hole.  A
+    call on the driver -- a cursor or a connection, ``fetchall``,
+    ``commit`` -- goes only to the database; but a runner call on it whose
+    statement nobody read is no leaf, because what it runs is read nowhere.
+    """
+
+    def __init__(self) -> None:
+        self._read: dict[int, tuple[ast.AST, set[int], dict[int, str]]] = {}
+
+    def __call__(self, file: str, func: ast.AST, call: ast.Call, placed) -> Optional[tuple[str, str]]:
+        called = call.func
+        if isinstance(called, ast.Attribute) and called.attr in sql.RUNNERS:
+            executed, skipped = self._of(func)
+            if id(call) in executed:
+                return "database", "runner_runs_only_sql"
+            if call.lineno in skipped:
+                return "hole", f"the statement is not read: {skipped[call.lineno]}"
+            if _on_driver(call, placed):
+                return "hole", "the statement this runs is read nowhere"
+            return None
+        if _on_driver(call, placed):
+            return "database", "driver_talks_only_to_db"
+        return None
+
+    def _of(self, func: ast.AST) -> tuple[set[int], dict[int, str]]:
+        held = self._read.get(id(func))
+        if held is None or held[0] is not func:
+            skipped: list = []
+            executed: set[int] = set()
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                try:
+                    executed = {id(one.call) for one in sql.executions(func, skipped)}
+                except Exception as error:  # noqa: BLE001 -- every runner call here is then a hole
+                    logger.warning("reach: executions failed in %s: %s", getattr(func, "name", "?"), error)
+            held = (func, executed, {skip.line: skip.reason for skip in skipped})
+            self._read[id(func)] = held
+        return held[1], held[2]
+
+
+def _on_driver(call: ast.Call, placed) -> bool:
+    """Whether *call* is made on a cursor or a connection: held as ``cur`` / ``conn``, or placed at a driver class's method."""
+    root = call.func.value if isinstance(call.func, ast.Attribute) else None
+    while isinstance(root, (ast.Attribute, ast.Subscript, ast.Call)):
+        if (
+            isinstance(root, ast.Attribute)
+            and root.attr in _DRIVER_NAMES
+            and isinstance(root.value, ast.Name)
+            and root.value.id in ("self", "cls")
+        ):
+            return True
+        root = root.func if isinstance(root, ast.Call) else root.value
+    if isinstance(root, ast.Name) and root.id in _DRIVER_NAMES:
+        return True
+    return any(target.cls is not None and target.cls.name in _DRIVER_CLASSES for target in placed.targets)
 
 
 def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop], list[CallStop]]:

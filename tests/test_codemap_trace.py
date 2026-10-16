@@ -4433,3 +4433,26 @@ class Commando:
         "inserted": "insertOnly",
         "finished": "finish -- reads datasetsTable by :taskID",
     }
+
+
+def test_what_start_returns_is_not_what_run_returns(tmp_path):
+    """``thr.start()`` hands ``run`` to another thread and returns ``None``; the walk does not answer it from ``run``."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+import threading
+
+class Worker(threading.Thread):
+    def run(self):
+        return "from run"
+
+def go(spec):
+    thr = Worker()
+    started = thr.start()
+    spec.status = started
+''',
+    )
+
+    said = _said(_walked_in(roots, "m", "go", [10]))
+
+    assert not [one for one in said if one[2] == "run"]

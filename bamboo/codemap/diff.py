@@ -183,6 +183,17 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "statements",
         "log_files",
     ),
+    # ``calls``, ``database`` and ``holes`` hold lines, as ``statements`` does
+    # above: between two builds of one tree they do not move.
+    NodeType.REACH.value: (
+        "cls",
+        "function",
+        "classes",
+        "calls",
+        "database",
+        "holes",
+        "settled",
+    ),
 }
 
 _IDENTITY = "identity: the node's signature or part of it, so equal on both sides"
@@ -235,6 +246,7 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
         "anchor": _POSITION,
     },
     NodeType.FUNCTION_PRINTS.value: {"owner": _IDENTITY, "anchor": _POSITION},
+    NodeType.REACH.value: {"owner": _IDENTITY, "anchor": _POSITION},
 }
 
 #: What a branch says, compared between two branches of one outcome.  ``tags``
