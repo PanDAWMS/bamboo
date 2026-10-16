@@ -928,6 +928,96 @@ def test_s1_keeps_a_mover_with_no_arm_of_its_own_and_says_why(tmp_path):
                      "it hands its rows on", "the map could not read all of it"]
 
 
+def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_nothing_open(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.rerun import reach_said
+
+            def reach(writes, holes=0, own=()):
+                return {"starts": ["p/m.py::f"], "writes": writes, "holes": holes, "first_holes": ["p/m.py::f:3 x.y -- why"][:holes],
+                        "assumptions": {"runner_runs_only_sql": 2}, "closure": 4, "own_arms": list(own)}
+
+            w = [{"function": "p/w.py::W.killJob", "arms": ["failed@3"], "chain": ["p/m.py:7"]}]
+            print(json.dumps([reach_said(None, False), reach_said(reach([]), False), reach_said(reach(None, 1), False),
+                              reach_said(reach(w), False), reach_said(reach([]), True), reach_said(reach([], own=["p/m.py::f"]), False)]))
+            """,
+        )
+    )
+    unasked, nothing, holed, writes, gapped, own = json.loads(out.splitlines()[-1])
+    assert unasked == [False, None]
+    # only the map's [] drops: no write reached and no call left open
+    assert nothing == [True, "no arm of its own, and reaches no write of another value with nothing left open (closure 4; "
+                             "assuming ['runner_runs_only_sql']): dropped"]
+    # None is not []: a call left open may go on into a write
+    assert holed == [False, "reach: reaches no write of another value, but 1 call(s) on the way are left open, e.g. "
+                            "['p/m.py::f:3 x.y -- why']"]
+    assert writes == [False, "reach: reaches 1 writer(s) of another value: ['killJob']"]
+    # a gap in the map's reading may hide a write the reach has no junction for (R1)
+    assert gapped[0] is False and "could not read all of it" in gapped[1]
+    # an arm the junctions place in its own def, though S1 counts none: the two disagree, so it is kept
+    assert own[0] is False and "though S1 counts none" in own[1]
+
+
+def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap import reach as RE
+            from bamboo.codemap.models import Anchor, ReachCall, ReachHole, ReachNode
+            from bamboo.querier import mapdump, rerun
+
+            def node(owner, start, end, **k):
+                return ReachNode(name=owner, map_id="m", derived_from="d", owner=owner, function=owner.rsplit(".", 1)[-1].split("::")[-1],
+                                 anchor=Anchor(package="p", file=owner.split("::")[0], line_start=start, line_end=end), **k)
+
+            rows = [node("p/m.py::count", 1, 2),
+                    node("p/m.py::FetchData.count", 6, 8, calls=[ReachCall(line=7, callee="write()", to="p/w.py::write")]),
+                    node("p/w.py::write", 1, 5),
+                    node("p/h.py::h", 1, 4, holes=[ReachHole(line=3, callee="d[k].append", why="an element of a dict")])]
+            asked = []
+            RE.moving_off = lambda junctions, graph, subject, value: asked.append((subject, value)) or RE.Destination({"p/w.py::write": ["failed@3"]}, [])
+            q = rerun.Stuck("JobSpec.jobStatus", "running", "1")
+
+            def fresh(reach_graph):
+                mapdump._FRAGMENT[:] = [N(reach_graph=reach_graph, junctions=[])]
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.result, r._reach = [], {}, None
+                return r
+
+            r = fresh(rows)
+            got = {name: r._reach_of(q, owner, lines) for name, owner, lines in [
+                ("own statement", "p/m.py::count", [7]), ("rows handed", "p/m.py::count", []), ("nothing", "p/m.py::count", [1]),
+                ("hole", "p/h.py::h", [2]), ("own arm", "p/w.py::write", [2]), ("none holds", "p/x.py::x", [3])]}
+            bare = fresh([])
+            print(json.dumps([got, r.lines, r.result["reach"]["functions"], asked,
+                              [bare._reach_of(q, "p/m.py::count", [7]), bare._reach_of(q, "p/m.py::count", [1])], bare.lines, bare.result]))
+            """,
+        )
+    )
+    got, lines, functions, asked, bare, bare_lines, bare_result = json.loads(out.splitlines()[-1])
+    # the def the statement is in, not every def of the name; every def where the mover takes rows another selects
+    assert got["own statement"]["starts"] == ["p/m.py::FetchData.count"]
+    assert [w["function"] for w in got["own statement"]["writes"]] == ["p/w.py::write"]
+    assert got["own statement"]["writes"][0]["chain"] == ["p/m.py:7"]
+    assert got["rows handed"]["starts"] == ["p/m.py::count", "p/m.py::FetchData.count"]
+    assert got["nothing"]["writes"] == [] and got["nothing"]["closure"] == 1
+    assert got["hole"]["writes"] is None and got["hole"]["holes"] == 1
+    assert got["own arm"]["own_arms"] == ["p/w.py::write"]
+    assert got["none holds"]["writes"] is None and got["none holds"]["starts"] == []
+    # the record is read once, and the ends once per question
+    assert len(lines) == 1 and lines[0].startswith("  reach: the dump's reach_graph, 4 function(s); every answer rests on [")
+    assert functions == 4 and asked == [["JobSpec.jobStatus", "running"]]
+    # a dump with no reach: nothing asked, said once
+    assert bare == [None, None] and bare_result == {"reach": {"present": False}}
+    assert bare_lines == ["  reach: the dump has no reach_graph: a mover with no arm of its own is kept (KNOWN_ISSUES.md K14)"]
+
+
 _MOVERS_MAP = """
     import json
     from types import SimpleNamespace as N

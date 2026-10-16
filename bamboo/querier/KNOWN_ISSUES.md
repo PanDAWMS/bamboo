@@ -113,18 +113,19 @@ S1 counts a mover's arms in its own function only; `TaskBuffer.killJobs` writes 
 `killJob`, `archiveJob` and `retryJob`, and counts none.
 
 - Such a mover that ran stops at S2: S2 and S3 judge the mover's own arms, and read none of what it calls.
-- S1 drops no mover with no arm of its own (`kept_without_arms`).  It says why each is kept: the map's
-  `JunctionNode.called_from` shows a call from it into a writer of another value, such a writer's list
-  is cut, it hands its rows on, or the map has a gap for it (`through_calls`); failing all of these, that
-  `called_from` holds two hops, so a write three or more calls down is not seen.  "Not listed" is not
-  "does not reach" (bamboo-85, 2026-10-14).  So movers that cannot move the value stay in, and their
-  logs are asked: `JobSpec.jobStatus=running` keeps 7 such, 5 of them statements read by hand as only
-  counting.
+- S1 asks the map's reach of each mover with no arm of its own (`Rerun._reach_of`, `reach_said`): from the def holding
+  its statement -- every def of its name where it takes rows another selects -- does any function it can go on into
+  hold an arm moving the value off?  It drops the mover (`reaches-no-write`) only where the answer is `[]`: no write
+  reached and no call on the way left open.  It keeps one whose own defs hold an arm the junctions place there though
+  S1 counts none, and one the map could not read all of (a gap may hide a write the reach has no junction for).  A kept
+  mover says why as before (`kept_without_arms`) and what the reach found: the writers reached, or the calls left open.
+  A dump with no `reach_graph` keeps them all, and says so once.
+- Kept for a call left open is not "can move it": the answer is `None`, not a write.
 
-*Shows:* a stop at S2 for a mover that writes through its calls; each kept mover's reason in S1's output.
-*Revisit:* following a mover's calls to their arms (S2 per callee); the map's answer to what a function
-reaches -- the writes and the holes on the way (an open call, a call not placed, one outside the corpus,
-a hand-off to a thread, queue or plugin) -- dropping a mover only where it reaches none and has no hole.
+*Shows:* a stop at S2 for a mover that writes through its calls; each kept mover's reasons and reach in S1's output; a
+dropped one's line, and its `reach` in result.json.
+*Revisit:* following a mover's calls to their arms (S2 per callee).  The map closing holes (its precision items after
+reach v1) moves movers from kept to dropped with no change here.
 
 ### K16. S1 lists no writer that takes a row by its key alone
 

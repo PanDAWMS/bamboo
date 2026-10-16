@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 
 _INSTALLED: dict[str, str] = {}
+_FRAGMENT: list = []  # the MapFragment installed, for the readers that take a section of it whole (``fragment``)
 
 
 def install(path: str) -> None:
@@ -59,6 +60,7 @@ def install(path: str) -> None:
     graph_database_client.GraphDatabaseClient = _FromDump
     _INSTALLED["path"] = path
     _INSTALLED["sha256"] = hashlib.sha256(data).hexdigest()
+    _FRAGMENT[:] = [fragment]
 
 
 def install_from_env() -> None:
@@ -78,6 +80,12 @@ def require(what: str) -> None:
 def installed() -> dict[str, str]:
     """The installed dump's ``path`` and ``sha256`` (all 64 digits), or ``{}`` before any install."""
     return dict(_INSTALLED)
+
+
+def fragment():
+    """The installed dump as its ``MapFragment``, or ``None`` before any install: for a reader that takes a section whole
+    rather than asking the graph client (``rerun._reach_of`` reads ``reach_graph`` and ``junctions``)."""
+    return _FRAGMENT[0] if _FRAGMENT else None
 
 
 def described() -> str:

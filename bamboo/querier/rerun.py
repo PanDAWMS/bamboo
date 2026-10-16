@@ -248,8 +248,8 @@ def defs_holding(rel: str, func: str, lines: list[int]) -> list[ast.FunctionDef 
 def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bool, gapped: bool) -> list[str]:
     """Why S1 keeps a mover with no arm of its own: it moves the value, if at all, through what it calls or the rows it
     hands on.  None is dropped: ``called_from`` holds two hops, so a write further down is not seen, and "not listed"
-    is not "does not reach" (bamboo-85; tmaeno, 2026-10-14).  A drop waits for the map's answer to what a function
-    reaches, with its holes (KNOWN_ISSUES.md K14)."""
+    is not "does not reach" (bamboo-85; tmaeno, 2026-10-14).  Dropping one is the map's reach's to say, with its holes
+    (``reach_said``); these are the reasons of a mover it keeps, or where the dump has no reach (KNOWN_ISSUES.md K14)."""
     return [why for why, holds in (
         ("its def is not found", not found),
         (f"it calls into {reached}", reached),
@@ -258,6 +258,30 @@ def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bo
         ("the map could not read all of it", gapped),
     ) if holds] or ["no call it makes reaches a writer of another value within the two hops the map lists, "
                     "and a write further down is not seen (KNOWN_ISSUES.md K14)"]
+
+
+def reach_said(reach: dict | None, gapped: bool) -> tuple[bool, str | None]:
+    """``(dropped, line)``: whether S1 drops a mover with no arm of its own by what the map's reach says of it
+    (``Rerun._reach_of``), and the line saying so.  Dropped only where it reaches no write of another value and leaves
+    no call on the way open (the map's ``[]``, never its ``None``), its own defs hold no arm the junctions place there,
+    and the map read all of it -- a gap may hide a write the reach has no junction for (build2-design.md 6, R1).  No
+    line where the map was not asked."""
+    if reach is None:
+        return False, None
+    if reach["own_arms"]:
+        return False, (f"reach: its def holds an arm moving it off by the map's junctions {reach['own_arms']}, though S1 "
+                       "counts none: kept")
+    writes = reach["writes"]
+    if writes:
+        names = sorted({w["function"].split("::")[-1].split(".")[-1] for w in writes})
+        return False, f"reach: reaches {len(writes)} writer(s) of another value: {names}"
+    if writes is None:
+        return False, (f"reach: reaches no write of another value, but {reach['holes']} call(s) on the way are left "
+                       f"open, e.g. {reach['first_holes']}")
+    if gapped:
+        return False, "reach: reaches no write of another value and leaves nothing open, but the map could not read all of it: kept"
+    return True, (f"no arm of its own, and reaches no write of another value with nothing left open (closure "
+                  f"{reach['closure']}; assuming {sorted(reach['assumptions'])}): dropped")
 
 
 #: judgement 3's third premise, which nothing the querier reads says yet (KNOWN_ISSUES.md K19)
@@ -865,6 +889,8 @@ class Rerun:
         self.branches: list[dict] = []
         self.stamps: dict[str, dict] = {}
         self.result: dict = {}
+        #: the map's reach, read from the dump at its first ask (``_reach_of``): None before, False with none in the dump
+        self._reach = None
 
     # ------------------------------------------------------------ plumbing
     def say(self, text: str = "") -> None:
@@ -1038,6 +1064,7 @@ class Rerun:
                 "hand": {"path": a.hand, "sha256": _sha256(a.hand)} if a.hand else None,
                 "patterns": a.patterns,
                 "decide": a.decide,
+                "reach": self.result.get("reach"),
             },
             "asks": {"path": a.asks, "count": len(asks)} if asks else None,
             "window": self.result.get("window"),
@@ -1680,11 +1707,24 @@ class Rerun:
                 # with no arm of its own, a mover moves the value, if at all, through what it calls or the rows it hands
                 # on: kept, and said why
                 rel, func = owner.split("::", 1)
-                defs = defs_holding(rel, func, [rs.line for rs in follow.reader_statements if rs.owner == owner and asked in rs.selects])
+                lines = [rs.line for rs in follow.reader_statements if rs.owner == owner and asked in rs.selects]
+                defs = defs_holding(rel, func, lines)
                 reached, cut = through_calls(rel, [(f.lineno, f.end_lineno) for f in defs], writers, q.subject, q.observed)
                 kept = kept_without_arms(bool(defs), reached, cut, owner in handers, owner in gaps)
+                # the map's reach decides, where it can say for certain that nothing it goes on into moves the value
+                reach = self._reach_of(q, owner, lines) if defs else None
+                dropped, said = reach_said(reach, owner in gaps)
+                if reach is not None:
+                    entry["reach"] = reach
+                if dropped:
+                    self.say(f"  {func}: {said}")
+                    entry["verdict"] = "reaches-no-write"
+                    entry["reasons"].append({"code": "reach", "text": said})
+                    continue
                 self.say(f"  {func}: no arm of its own, kept: {'; '.join(kept)}")
                 entry["reasons"].append({"code": "K14", "text": f"no arm of its own, kept: {'; '.join(kept)}"})
+                if said:
+                    self.say(f"  {func}: {said}")
             if gaps.get(owner):
                 entry["reasons"].append({"code": "map-gap", "text": f"the map could not read all of it ({'; '.join(gaps[owner])})"})
             files = self.files_of(owner, list(dict.fromkeys(files or follow.reader_log_files)), list(arms))
@@ -1732,6 +1772,45 @@ class Rerun:
         if len(ran) == 1:
             return ran[0]
         return Fork(ran, [f"mover {p.owner}" for p in ran])
+
+    def _reach_of(self, q: Stuck, owner: str, lines: list[int]) -> dict | None:
+        """What the map's reach says of a mover with no arm of its own: from the defs holding its statements at *lines*
+        -- every def of its name where it has none, as it takes rows another selects -- does any function it can go on
+        into hold an arm moving *q.subject* off *q.observed* (``reach.moving_off``)?  The writes reached (``[]`` for none
+        with nothing left open, ``None`` for none with calls left open), the holes, the assumptions the answer relied
+        on and the closure's size; ``own_arms`` names a start the junctions give an arm S1 does not count.  ``None``
+        where the dump has no ``reach_graph``: said once, as the first ask is (build2-design.md 6)."""
+        if self._reach is None:
+            fragment = mapdump.fragment()
+            rows = getattr(fragment, "reach_graph", None)
+            if rows:
+                from bamboo.codemap import reach as RE
+
+                self._reach = (RE, RE.ReachGraph(rows), {})
+                self.result["reach"] = {"present": True, "functions": len(rows), "premises": sorted(RE.PREMISES)}
+                self.say(f"  reach: the dump's reach_graph, {len(rows)} function(s); every answer rests on {sorted(RE.PREMISES)}")
+            else:
+                self._reach = False
+                self.result["reach"] = {"present": False}
+                self.say("  reach: the dump has no reach_graph: a mover with no arm of its own is kept (KNOWN_ISSUES.md K14)")
+        if not self._reach:
+            return None
+        RE, graph, ends = self._reach
+        if (q.subject, q.observed) not in ends:
+            ends[q.subject, q.observed] = RE.moving_off(mapdump.fragment().junctions, graph, q.subject, q.observed)
+        destination = ends[q.subject, q.observed]
+        rel = owner.split("::", 1)[0]
+        starts = [graph.function_at(rel, n) for n in lines] if lines else graph.named(owner)
+        starts = list(dict.fromkeys(s for s in starts if s))
+        if not starts:
+            return {"starts": [], "writes": None, "holes": 1, "first_holes": [f"{owner} -- no function of the reach_graph holds it"],
+                    "assumptions": {}, "closure": 0, "own_arms": []}
+        answer = graph.reach(starts, destination)
+        return {"starts": starts,
+                "writes": None if answer.writes is None else [{"function": w.function, "arms": w.arms, "chain": w.chain}
+                                                              for w in answer.writes],
+                "holes": len(answer.holes), "first_holes": answer.holes[:3], "assumptions": answer.assumptions,
+                "closure": answer.closure, "own_arms": [s for s in starts if s in destination.arms]}
 
     def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking):
         """S1's asks for one mover: the window's last part first (*asking*, ``STUCK_SPAN``), and the rest of the window
