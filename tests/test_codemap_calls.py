@@ -232,8 +232,12 @@ def test_an_alias_of_any_and_an_optional_any_are_any(tmp_path):
     calls = _calls(roots)
 
     for func, call in (("run", "tbuf.update"), ("handle", "tb.update"), ("other", "tb.update")):
-        (target,) = _placed(calls, "run", func, call).targets
-        assert (target.cls.name, target.func.name) == ("TaskBuffer", "update")
+        # A TaskBuffer handed in can be a JediTaskBuffer, which has its own update.
+        landed = [
+            (one.cls.name, one.func.name, [cls.name for _file, cls in one.bound])
+            for one in _placed(calls, "run", func, call).targets
+        ]
+        assert landed == [("TaskBuffer", "update", ["TaskBuffer"]), ("JediTaskBuffer", "update", ["JediTaskBuffer"])]
 
 
 def test_a_module_instance_is_what_the_module_constructs(tmp_path):
@@ -2825,3 +2829,112 @@ def test_a_local_holding_one_class_only_lands_there_closed_and_one_holding_nothi
 
     assert [(t.cls.name, known.unplaced) for t in known.targets] == [("AtlasPlugin", "")]
     assert (unknown.targets, unknown.unplaced) == ((), calls_mod.UNPLACED_NAME)
+
+
+# -- the class a method is looked up for --------------------------------------
+
+_WORKERS = {
+    "threads": (
+        "import threading\n\n"
+        "class WorkerThread(threading.Thread):\n"
+        "    def runImpl(self):\n"
+        "        raise NotImplementedError\n\n"
+        "    def run(self):\n"
+        "        self.runImpl()\n"
+    ),
+    "gen": (
+        "from pkg.threads import WorkerThread\n\n"
+        "class JobGeneratorThread(WorkerThread):\n"
+        "    def runImpl(self):\n"
+        "        return 'gen'\n\n"
+        "def generate():\n"
+        "    thr = JobGeneratorThread()\n"
+        "    thr.start()\n"
+    ),
+    "cmd": (
+        "from pkg.threads import WorkerThread\n\n"
+        "class TaskCommandoThread(WorkerThread):\n"
+        "    def runImpl(self):\n"
+        "        return 'cmd'\n\n"
+        "def command():\n"
+        "    thr = TaskCommandoThread()\n"
+        "    thr.start()\n"
+    ),
+}
+
+
+def _class(calls, file, name):
+    tree = calls.types.tree(f"{PACKAGE}/{file}.py")
+    return f"{PACKAGE}/{file}.py", next(node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == name)
+
+
+def _landed(placed):
+    return sorted((one.cls.name, one.func.name, [cls.name for _file, cls in one.bound]) for one in placed.targets)
+
+
+def test_a_call_on_self_lands_at_the_definition_each_class_the_object_can_be_finds(tmp_path):
+    """``self.runImpl()`` in ``WorkerThread.run`` runs the subclass's ``runImpl`` on a subclass's object, not the stub."""
+    calls = _calls(_tree(tmp_path, **_WORKERS))
+
+    placed = _placed(calls, "threads", "run", "self.runImpl")
+
+    assert _landed(placed) == [
+        ("JobGeneratorThread", "runImpl", ["JobGeneratorThread"]),
+        ("TaskCommandoThread", "runImpl", ["TaskCommandoThread"]),
+        ("WorkerThread", "runImpl", ["WorkerThread"]),
+    ]
+    assert placed.unplaced == ""
+
+
+def test_a_method_found_by_inheritance_runs_as_the_class_it_was_looked_up_for(tmp_path):
+    """Entered as JobGeneratorThread's ``run``, ``self.runImpl()`` is JobGeneratorThread's alone."""
+    calls = _calls(_tree(tmp_path, **_WORKERS))
+    func = _function(calls, "threads", "run")
+    call = _call_in(func, "self.runImpl")
+
+    placed = calls.callees("pkg/threads.py", func, call, (_class(calls, "gen", "JobGeneratorThread"),))
+
+    assert _landed(placed) == [("JobGeneratorThread", "runImpl", ["JobGeneratorThread"])]
+
+
+def test_start_on_a_thread_runs_its_run_on_another_thread_as_its_own_class(tmp_path):
+    """``thr.start()`` is ``WorkerThread.run`` run as JobGeneratorThread's, and nothing ``run`` returns comes back."""
+    calls = _calls(_tree(tmp_path, **_WORKERS))
+
+    placed = _placed(calls, "gen", "generate", "thr.start")
+
+    assert _landed(placed) == [("WorkerThread", "run", ["JobGeneratorThread"])]
+    assert placed.thread
+    (run,) = placed.targets
+    assert "start" in calls.spellings(run)
+    # Called by the start() of a JobGeneratorThread, not of a TaskCommandoThread.
+    assert [site.owner for site in calls.callers(run)] == ["pkg/gen.py::generate"]
+    assert sorted(site.owner for site in calls.callers(run._replace(bound=()))) == ["pkg/cmd.py::command", "pkg/gen.py::generate"]
+
+
+def test_called_from_takes_the_hop_out_on_the_class_the_first_hop_lands_for(tmp_path):
+    """JobGeneratorThread.runImpl is reached from WorkerThread.run, and that from JobGeneratorThread's start() only."""
+    calls = _calls(_tree(tmp_path, **_WORKERS))
+    where, cls = _class(calls, "gen", "JobGeneratorThread")
+    runimpl = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "runImpl")
+
+    assert calls.called_from(calls_mod.Target(where, runimpl, cls)) == ["pkg/gen.py:9 -> pkg/threads.py:8"]
+
+
+def test_a_call_on_self_in_a_mixin_lands_at_the_sibling_base_that_defines_it(tmp_path):
+    """``self.fetch()`` in mixin A runs B's on a P(A, B) -- found by P's method resolution order."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m=(
+                "class A:\n    def go(self):\n        return self.fetch()\n\n"
+                "class B:\n    def fetch(self):\n        return 1\n\n"
+                "class P(A, B):\n    pass\n"
+            ),
+        )
+    )
+
+    placed = _placed(calls, "m", "go", "self.fetch")
+
+    assert _landed(placed) == [("B", "fetch", ["P"])]
+    assert placed.unplaced == ""

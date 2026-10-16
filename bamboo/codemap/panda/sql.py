@@ -389,7 +389,7 @@ def _called(
     if file is None:
         return []
     placed = _CALLS.callees(file, func, call)
-    if placed.unplaced:
+    if placed.unplaced or placed.thread:
         return []
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
     for callee in placed.targets:
@@ -471,7 +471,7 @@ def every_return(
     if file is None:
         return None
     placed = _CALLS.callees(file, func, call)
-    if not placed.targets or placed.unplaced:
+    if not placed.targets or placed.unplaced or placed.thread:
         return None
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
     for target in placed.targets:

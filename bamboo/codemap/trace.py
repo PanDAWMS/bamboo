@@ -3392,6 +3392,9 @@ class _Walk:
             # declaration is read, and that resolution is gone into.
             return
         placed = self.calls.callees(frame.file, frame.func, call)
+        if placed.thread:
+            # ``thr.start()`` returns at once; what ``run`` returns is not its value.
+            return
         if not placed.targets:
             if placed.unplaced and step is not None and not step.terminal:
                 step.detail = f"not entered: {placed.unplaced}"

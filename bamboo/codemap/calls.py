@@ -11,10 +11,11 @@ end of those shapes, and each case found the next one.
 This module is the one place a call is read, three ways:
 
 * :meth:`Calls.callees` -- which function definitions a call can land in,
-  read the way a type checker reads it: ``self.m`` through the class and its
-  bases, ``obj.m`` through what ``obj`` is declared to be, a bare name through
+  read the way Python finds them: ``self.m`` and ``obj.m`` through the method
+  resolution order of each class the object can be -- the method's class or
+  what ``obj`` is declared to be, and their subclasses -- a bare name through
   the enclosing function, the module and its imports, ``Class(...)`` as its
-  ``__init__``.  Never by the method's name alone -- a crossing that matched
+  ``__init__``, ``thread.start()`` as its ``run``.  Never by the method's name alone -- a crossing that matched
   callees by bare name gave 222 read sites the same two false leads -- so a
   call it cannot place comes back with the reason, not a guess.
 * :meth:`Calls.bind` -- which expression at the call each parameter holds.
@@ -87,6 +88,12 @@ _LIBRARY_CONTAINERS = {
     ("collections", "deque"),
     ("collections", "Counter"),
 }
+#: The library classes whose ``start()`` runs the object's ``run`` on another
+#: thread or process -- Python's rule, as ``C(...)`` runs ``C.__init__``.  A
+#: class built on one that defines ``run`` in the corpus has its ``start()``
+#: placed there (:attr:`Placed.thread`).  ``pandacommon``'s ``GenericThread``
+#: is one too, but outside the corpus nothing says so.
+_STARTERS = {("threading", "Thread"), ("multiprocessing", "Process")}
 
 
 #: Parsed modules shared by every reading of the same files.  A walk is made
@@ -159,11 +166,23 @@ def _roots_key(roots: dict[str, Path]) -> tuple:
 
 
 class Target(NamedTuple):
-    """One function definition a call can land in."""
+    """One function definition a call can land in, and the classes its object can be when it runs there.
+
+    *cls* is the class that defines the method.  *bound* is each class the
+    object can be when the call runs this definition -- the class the method
+    was looked up for, not the one it was found in.  ``thr.start()`` on a
+    ``JobGeneratorThread`` runs ``WorkerThread.run`` as JobGeneratorThread's,
+    so ``self.runImpl()`` in it is JobGeneratorThread's: inheritance is read
+    to find the definition, and the object stays what it was.  Empty where the
+    call does not say -- a function, a method read off its class on an object
+    other than ``self`` -- and then a call on ``self`` in it is placed for
+    every class ``self`` can be there (:meth:`Calls.objects_of`).
+    """
 
     file: str
     func: ast.AST
     cls: Optional[ast.ClassDef]
+    bound: tuple[tuple[str, ast.ClassDef], ...] = ()
 
     @property
     def owner(self) -> str:
@@ -176,11 +195,18 @@ class Placed(NamedTuple):
     *on_class*: the call reads its method off a class --
     ``JobBrokerBase.__init__(self, ...)`` -- so a method that takes the
     object is handed it as the call's first argument (:func:`bind`).
+
+    *thread*: the call starts the definitions on another thread or process
+    -- ``thr.start()`` on a ``threading.Thread`` runs the object's ``run``
+    there (:data:`_STARTERS`).  It returns at once, and nothing a definition
+    returns comes back through it: a reader of what a call returns takes
+    nothing from these.
     """
 
     targets: tuple[Target, ...] = ()
     unplaced: str = ""
     on_class: bool = False
+    thread: bool = False
 
 
 #: The owner of a call in a module's own body -- the walk's spelling of the
@@ -353,7 +379,8 @@ class Calls:
 
     def __init__(self, types: Types) -> None:
         self.types = types
-        self._placed: dict[int, Placed] = {}
+        #: By the call, and by the classes ``self`` is bound to where the call reads it.
+        self._placed: dict[object, Placed] = {}
         self._by_name: Optional[dict[str, list[CallSite]]] = None
         self._callers: dict[tuple[str, int], list[CallSite]] = {}
         self._missed: dict[tuple[str, int], list[str]] = {}
@@ -364,13 +391,33 @@ class Calls:
 
     # -- where a call lands -------------------------------------------------
 
-    def callees(self, file: str, func: ast.AST, call: ast.Call) -> Placed:
-        key = id(call)
+    def callees(
+        self, file: str, func: ast.AST, call: ast.Call, bound: tuple[tuple[str, ast.ClassDef], ...] = ()
+    ) -> Placed:
+        """Where *call*, made in *func* of *file*, lands.
+
+        *bound*: the classes ``self`` can be in *func* -- the :attr:`Target.bound`
+        a reader entered *func* with.  Without it, every class ``self`` can be
+        there (:meth:`objects_of`).  Only a call that reads ``self`` -- on
+        ``self`` or ``cls``, through ``super()``, or handing ``self`` to a
+        method read off its class -- is placed differently for it.
+        """
+        key: object = (id(call), _bound_key(bound)) if bound and _reads_self(call) else id(call)
         if key not in self._placed:
-            self._placed[key] = self._place(file, func, call)
+            self._placed[key] = self._place(file, func, call, bound if bound and _reads_self(call) else ())
         return self._placed[key]
 
-    def _place(self, file: str, func: ast.AST, call: ast.Call) -> Placed:
+    def objects_of(self, declared: tuple[str, ast.ClassDef]) -> list[tuple[str, ast.ClassDef]]:
+        """The classes an object declared as *declared* can be: it and each of its subclasses in the corpus.
+
+        ``self`` in a method of a class, and a value declared as one.  A
+        class outside the corpus built on it is not among them.
+        """
+        return [declared, *self.subclasses(*declared)]
+
+    def _place(
+        self, file: str, func: ast.AST, call: ast.Call, bound: tuple[tuple[str, ast.ClassDef], ...] = ()
+    ) -> Placed:
         called = call.func
         if isinstance(called, ast.Name):
             named = self._named(file, func, called.id)
@@ -387,9 +434,14 @@ class Calls:
             cls = self.types.method_class(file, func)
             if cls is None:
                 return Placed((), UNPLACED_RECEIVER)
-            method = self._method_of(cls, called.attr)
-            if method.unplaced == UNPLACED_NO_METHOD and receiver.id == "self":
-                return self._constructed(file, func, called) or method
+            classes = list(bound) or self.objects_of(cls)
+            method = self._method_of_any(classes, called.attr)
+            if method.unplaced == UNPLACED_NO_METHOD:
+                started = self._started(classes, called.attr)
+                if started is not None:
+                    return started
+                if receiver.id == "self":
+                    return self._constructed(file, func, called) or method
             return method
         if (
             isinstance(receiver, ast.Call)
@@ -399,19 +451,25 @@ class Calls:
             cls = self.types.method_class(file, func)
             if cls is None:
                 return Placed((), UNPLACED_RECEIVER)
-            return self._after(cls, called.attr)
+            return self._after(cls, called.attr, bound)
         module = self.types.module_named(file, receiver)
         if module is not None:
             return self._module_member(module, called.attr)
         # ``JobBrokerBase.__init__(self, ...)``: a method read off its class.
         named = self.types.class_named(file, receiver)
         if named is not None:
-            return self._method_of(named, called.attr)._replace(on_class=True)
+            placed = self._method_of(named, called.attr)._replace(on_class=True)
+            return placed._replace(targets=tuple(one._replace(bound=self._handed_self(file, func, call, bound)) for one in placed.targets))
         declared = self.types.declared(file, func, receiver)
         if declared is not None:
             # ``self.conn: WrappedOracleConn | WrappedPostgresConn`` -- each
-            # class it is declared as, as for the values below.
-            return self._method_of_any(sorted(declared, key=_class_key), called.attr)
+            # class it is declared as, as for the values below, and each
+            # class an object declared so can be.
+            classes = list(dict.fromkeys(one for each in sorted(declared, key=_class_key) for one in self.objects_of(each)))
+            placed = self._method_of_any(classes, called.attr)
+            if placed.unplaced == UNPLACED_NO_METHOD:
+                return self._started(classes, called.attr) or placed
+            return placed
         # Nothing declares it -- or it is declared ``Any`` -- so read what it
         # was built from.  Every class it can be is a target; where some way
         # of building it cannot be read, that is said beside them.
@@ -433,12 +491,27 @@ class Calls:
         placed = self._method_of_any(built, called.attr, opened)
         if placed.targets or placed.unplaced in _FORWARDING:
             return placed
+        started = self._started(built, called.attr)
+        if started is not None:
+            return started._replace(unplaced=UNPLACED_OPEN) if opened else started
         root = receiver
         while isinstance(root, ast.Attribute):
             root = root.value
         if isinstance(root, ast.Name) and self.types.imported_from_outside(file, root.id):
             return Placed((), UNPLACED_OUTSIDE)
         return Placed((), UNPLACED_RECEIVER)
+
+    def _handed_self(
+        self, file: str, func: ast.AST, call: ast.Call, bound: tuple[tuple[str, ast.ClassDef], ...]
+    ) -> tuple[tuple[str, ast.ClassDef], ...]:
+        """The classes of the object ``Base.m(self, ...)`` hands its method: ``self``'s, where the call hands it ``self``."""
+        first = call.args[0] if call.args else None
+        if not (isinstance(first, ast.Name) and first.id == "self"):
+            return ()
+        owned = self.types.method_class(file, func)
+        if owned is None:
+            return ()
+        return tuple(sorted(bound or self.objects_of(owned), key=_class_key))
 
     def _declared_in(self, file: str, cls: ast.ClassDef, name: str) -> Optional[Target]:
         for node in cls.body:
@@ -447,46 +520,52 @@ class Calls:
         return None
 
     def _method_of(self, declared: tuple[str, ast.ClassDef], name: str) -> Placed:
+        """Where *name* lands on an object whose class is *declared* itself: the first definition in its method resolution order."""
         file, cls = declared
-        lineage = self.types.lineage(file, cls)
-        for where, holder in lineage:
+        order = self.types.mro(file, cls)
+        for where, holder in order:
             found = self._declared_in(where, holder, name)
             if found is not None:
-                return Placed((found,))
+                return Placed((found._replace(bound=(declared,)),))
         for hook, reason in (("__getattr__", UNPLACED_FORWARDED), ("__getattribute__", UNPLACED_GETATTRIBUTE)):
-            if any(self._declared_in(where, holder, hook) is not None for where, holder in lineage):
+            if any(self._declared_in(where, holder, hook) is not None for where, holder in order):
                 return Placed((), reason)
         return Placed((), UNPLACED_NO_METHOD)
 
-    def _after(self, owned: tuple[str, ast.ClassDef], name: str) -> Placed:
+    def _after(
+        self, owned: tuple[str, ast.ClassDef], name: str, bound: tuple[tuple[str, ast.ClassDef], ...] = ()
+    ) -> Placed:
         """Where ``super().<name>(...)`` in a method of *owned* lands.
 
         At the next class after *owned* in the method resolution order of
         the object's class (:meth:`Types.mro`) that defines *name* -- for an
-        object of *owned* itself and of each of its subclasses in the corpus,
-        so a mixin's ``super().__init__(log_stream)`` lands at the base it
-        names and, on an ``OraDBProxy.DBProxy``, at the next mixin, whose
-        constructor no other call reaches.  *owned*'s own order first.
+        object of each class it can be: *bound*, or else *owned* itself and
+        each of its subclasses in the corpus, so a mixin's
+        ``super().__init__(log_stream)`` lands at the base it names and, on
+        an ``OraDBProxy.DBProxy``, at the next mixin, whose constructor no
+        other call reaches.  *owned*'s own order first.
         """
         file, cls = owned
-        targets: list[Target] = []
-        for where, holder in [owned, *self.subclasses(file, cls)]:
+        found_for: list[tuple[Target, tuple[str, ast.ClassDef]]] = []
+        for where, holder in list(bound) or self.objects_of(owned):
             order = self.types.mro(where, holder)
             at = next((index for index, (_file, one) in enumerate(order) if one is cls), None)
             for place, base in order[at + 1:] if at is not None else ():
                 found = self._declared_in(place, base, name)
                 if found is not None:
-                    if found not in targets:
-                        targets.append(found)
+                    found_for.append((found, (where, holder)))
                     break
-        return Placed(tuple(targets)) if targets else Placed((), UNPLACED_NO_METHOD)
+        targets = _grouped(found_for)
+        return Placed(targets) if targets else Placed((), UNPLACED_NO_METHOD)
 
     def _method_of_any(
         self, classes: list[tuple[str, ast.ClassDef]], name: str, opened: bool = False
     ) -> Placed:
         """Where a call of *name* lands on an object that is one of *classes*.
 
-        At the method of each class that has one.  A class that supplies the
+        At the method each class finds first in its method resolution order,
+        once per definition, with the classes that find it as its
+        :attr:`Target.bound`.  A class that supplies the
         name only by forwarding it -- ``JediTaskBufferInterface``'s
         ``__getattr__``, ``WrappedOracleConn``'s ``__getattribute__`` -- adds
         no definition: what runs is somewhere this reading does not follow, so
@@ -495,19 +574,46 @@ class Calls:
         forwards, else that none has it.  *opened* is the caller's own reason
         to say so: some way the object is built cannot be read.
         """
-        targets: list[Target] = []
+        found_for: list[tuple[Target, tuple[str, ast.ClassDef]]] = []
         forwarded: set[str] = set()
         for one in classes:
             placed = self._method_of(one, name)
-            targets.extend(target for target in placed.targets if target not in targets)
+            found_for.extend((target, one) for target in placed.targets)
             if not placed.targets and placed.unplaced in _FORWARDING:
                 forwarded.add(placed.unplaced)
+        targets = _grouped(found_for)
         if targets:
-            return Placed(tuple(targets), UNPLACED_OPEN if opened or forwarded else "")
+            return Placed(targets, UNPLACED_OPEN if opened or forwarded else "")
         for reason in _FORWARDING:
             if reason in forwarded:
                 return Placed((), reason)
         return Placed((), UNPLACED_NO_METHOD)
+
+    def _started(self, classes: list[tuple[str, ast.ClassDef]], name: str) -> Optional[Placed]:
+        """``thr.start()`` on an object built on ``threading.Thread`` or ``multiprocessing.Process``: its ``run``, elsewhere.
+
+        Python's rule (:data:`_STARTERS`): ``start()`` has the object's
+        ``run`` called on a new thread, or in a new process, and returns.  A
+        class that defines ``start`` itself is placed there before this is
+        asked.  ``None`` where no class is built on one, or none has a ``run``
+        in the corpus -- ``Thread(target=f)`` runs the ``f`` it was handed,
+        which is not a call this reads.
+        """
+        if name != "start":
+            return None
+        starting = [one for one in classes if self.starts_run(one)]
+        placed = self._method_of_any(starting, "run") if starting else None
+        if placed is None or not placed.targets:
+            return None
+        return placed._replace(thread=True)
+
+    def starts_run(self, declared: tuple[str, ast.ClassDef]) -> bool:
+        """Whether *declared* is built on a library class whose ``start()`` runs ``run`` (:data:`_STARTERS`)."""
+        for where, holder in self.types.mro(*declared):
+            for base in holder.bases:
+                if self.types.library_class(where, base) in _STARTERS:
+                    return True
+        return False
 
     def _constructed(self, file: str, func: ast.AST, holder: ast.expr) -> Optional[Placed]:
         """Where a call on a local or a ``self.<field>`` holding a class lands: that class's ``__init__``.
@@ -655,7 +761,28 @@ class Calls:
         the calls spelled with any of :meth:`spellings`; the target's own
         name comes first, so a list that was whole under that name alone
         keeps its order.
+
+        A *target* bound to classes (:attr:`Target.bound`) is called by the
+        calls that run it on an object of one of them: ``WorkerThread.run``
+        bound to ``JobGeneratorThread`` by the ``start()`` of a
+        JobGeneratorThread, not of a TaskCommandoThread.  A call placed with
+        nothing said of its object may run it on any.
         """
+        every = self._callers_of(target)
+        if not target.bound:
+            return every
+        wanted = set(_bound_key(target.bound))
+        return [
+            site
+            for site in every
+            if any(
+                one.func is target.func and (not one.bound or wanted & set(_bound_key(one.bound)))
+                for one in self.callees(site.file, site.func, site.call).targets
+            )
+        ]
+
+    def _callers_of(self, target: Target) -> list[CallSite]:
+        """:meth:`callers` of *target*'s definition, whatever its object."""
         key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
         if key in self._callers:
             return self._callers[key]
@@ -745,6 +872,11 @@ class Calls:
         name = target.func.name  # type: ignore[attr-defined]
         if name == "__init__" and target.cls is not None:
             seeds = [target.cls.name, *self._built_through(target)]
+        elif name == "run" and target.cls is not None and any(
+            self.starts_run(one) for one in self.objects_of((target.file, target.cls))
+        ):
+            # ``thr.start()`` runs it (:meth:`_started`).
+            seeds = [name, "start"]
         else:
             seeds = [name]
         aliases = self._aliases()
@@ -877,7 +1009,11 @@ class Calls:
         calls *target* within these two hops takes one it does not find as
         no, which a list cut short cannot say.
         A hop placed open says so after its ``file:line`` (:meth:`opened`).
-        A call in a module's body is the end of its chain.
+        A call in a module's body is the end of its chain.  The hop out is
+        taken on the objects the first one lands at *target* for
+        (:meth:`landing`): ``self.runImpl()`` in ``WorkerThread.run`` lands at
+        ``JobGeneratorThread.runImpl`` only on a JobGeneratorThread, so the
+        hop out is that class's ``start()``, not every worker's.
         """
         chains: list[str] = []
         for site in self.callers(target):
@@ -886,12 +1022,32 @@ class Calls:
                 chains.append(at)
                 continue
             owned = self.types.method_class(site.file, site.func)
-            outer = self.callers(Target(site.file, site.func, owned[1] if owned else None))
+            outer = self.callers(Target(site.file, site.func, owned[1] if owned else None, self.landing(site, target)))
             if outer:
                 chains.extend(f"{self.hop(one)} -> {at}" for one in outer)
             else:
                 chains.append(at)
         return sorted(set(chains))
+
+    def landing(self, site: CallSite, target: Target) -> tuple[tuple[str, ast.ClassDef], ...]:
+        """The classes ``self`` can be in *site*'s function for its call to land at *target*; ``()`` where any of them.
+
+        Only a call reading ``self`` (:func:`_reads_self`) depends on it.
+        """
+        owned = self.types.method_class(site.file, site.func) if not site.in_module else None
+        if owned is None or not _reads_self(site.call):
+            return ()
+        every = self.objects_of(owned)
+        wanted = set(_bound_key(target.bound))
+        found = [
+            one
+            for one in every
+            if any(
+                placed.func is target.func and (not wanted or not placed.bound or wanted & set(_bound_key(placed.bound)))
+                for placed in self.callees(site.file, site.func, site.call, (one,)).targets
+            )
+        ]
+        return tuple(found) if len(found) < len(every) else ()
 
     #: How many calls out a constant is looked for.
     CONSTANT_HOPS = 3
@@ -1131,7 +1287,8 @@ class Calls:
                     and depth < 3
                     and target.cls is not None
                 ):
-                    for inner in self._method_of((target.file, target.cls), node.func.attr).targets:
+                    classes = list(target.bound) or self.objects_of((target.file, target.cls))
+                    for inner in self._method_of_any(classes, node.func.attr).targets:
                         found.extend(self.writes(inner, depth + 1))
         return found
 
@@ -1292,6 +1449,43 @@ def _one(classes: Optional[Classes]) -> Optional[tuple[str, ast.ClassDef]]:
 
 def _class_key(one: tuple[str, ast.ClassDef]) -> tuple[str, str, int]:
     return one[0], one[1].name, one[1].lineno
+
+
+def _bound_key(bound: tuple[tuple[str, ast.ClassDef], ...]) -> tuple[tuple[str, int], ...]:
+    return tuple((file, cls.lineno) for file, cls in bound)
+
+
+def _reads_self(call: ast.Call) -> bool:
+    """Whether where *call* lands can depend on the class of ``self``.
+
+    A call on ``self`` or ``cls``, through ``super()``, or handing ``self``
+    to a method read off its class (``Base.m(self, ...)``).
+    """
+    called = call.func
+    if not isinstance(called, ast.Attribute):
+        return False
+    receiver = called.value
+    if isinstance(receiver, ast.Name) and receiver.id in ("self", "cls"):
+        return True
+    if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name) and receiver.func.id == "super":
+        return True
+    return bool(call.args) and isinstance(call.args[0], ast.Name) and call.args[0].id == "self"
+
+
+def _grouped(found_for: list[tuple[Target, tuple[str, ast.ClassDef]]]) -> tuple[Target, ...]:
+    """One target per definition, in the order first found, bound to every class found to run it."""
+    order: list[tuple[str, int]] = []
+    held: dict[tuple[str, int], tuple[Target, list[tuple[str, ast.ClassDef]]]] = {}
+    for target, one in found_for:
+        key = (target.file, id(target.func))
+        if key not in held:
+            held[key] = (target, [])
+            order.append(key)
+        classes = held[key][1]
+        for each in target.bound or (one,):
+            if each not in classes:
+                classes.append(each)
+    return tuple(held[key][0]._replace(bound=tuple(sorted(held[key][1], key=_class_key))) for key in order)
 
 
 def _union_members(annotation: ast.expr) -> Optional[list[ast.expr]]:
@@ -1510,6 +1704,22 @@ class Types:
                     found[alias.asname or alias.name] = (module, alias.name)
         self._imports[file] = found
         return found
+
+    def library_class(self, file: str, expression: ast.expr) -> Optional[tuple[str, str]]:
+        """``(module, name)`` of the imported class *expression* names in *file*, or ``None``.
+
+        ``threading.Thread`` under ``import threading``, ``Thread`` under
+        ``from threading import Thread``: read through the imports alone, so
+        a name bound any other way is ``None``.
+        """
+        if isinstance(expression, ast.Name):
+            held = self.imports(file).get(expression.id)
+            return held if held is not None and held[1] else None
+        if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+            held = self.imports(file).get(expression.value.id)
+            if held is not None and not held[1]:
+                return held[0], expression.attr
+        return None
 
     # -- classes -----------------------------------------------------------
 
