@@ -400,25 +400,28 @@ def judge(
             to_hand = [f for f in c.log_files if f in logs]
             if not to_hand:
                 why_not[c.owner] = f"no log to hand ({', '.join(c.log_files) or 'none recorded'})"
-            # each log's reason replaces the one before (KNOWN_ISSUES.md K12)
+            # every log handed says why it holds no run of the candidate, in the candidate's order of its logs
+            reasons: list[str] = []
             for name in to_hand:
                 found = [r for r in logs[name] if window is None or (r.first[:19] <= window[1] and r.last[:19] >= window[0])]
                 if found:
                     run = run_holding(c, found, mode)
                     if run is not None:
                         break
-                    why_not[c.owner] = f"none of the key's {len(found)} runs in {name} at {window[0] if window else 'any time'} holds a row of it"
+                    reasons.append(f"none of the key's {len(found)} runs in {name} at {window[0] if window else 'any time'} holds a row of it")
                     continue
                 covering = logs[name][0].log if logs[name] else None
                 if covering is not None and covering.records[0].machine:
                     # a recorded search says what it searched by machine (Log.holes), not by its first and last record
-                    why_not[c.owner] = f"{name}: no run of the key at {window}" + (f"; not searched: {'; '.join(covering.holes)}" if covering.holes else "")
+                    reasons.append(f"{name}: no run of the key at {window}" + (f"; not searched: {'; '.join(covering.holes)}" if covering.holes else ""))
                 elif covering is not None and window is not None and not (
                     covering.covers[0][:19] <= window[1] and covering.covers[1][:19] >= window[0]
                 ):
-                    why_not[c.owner] = f"{name} covers {covering.covers[0]}..{covering.covers[1]}, not {window[0]}..{window[1]}"
+                    reasons.append(f"{name} covers {covering.covers[0]}..{covering.covers[1]}, not {window[0]}..{window[1]}")
                 else:
-                    why_not[c.owner] = f"{name}: no run of the key at {window}"
+                    reasons.append(f"{name}: no run of the key at {window}")
+            if run is None and reasons:
+                why_not[c.owner] = "; ".join(reasons)
         runs_of[c.owner] = run
         if run is not None:
             seens[c.owner] = R.seen(R.function(c.rel, c.func, c.lines), run, mode)

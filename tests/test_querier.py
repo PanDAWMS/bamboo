@@ -863,6 +863,34 @@ def test_a_run_of_another_log_is_inside_a_call_only_between_the_prints_around_th
     assert elsewhere is None
 
 
+def test_a_candidate_with_no_run_says_why_for_every_log_it_was_looked_for_in(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier.which_ran import Candidate, judge
+
+            later = N(first="2026-01-01 01:00:00,000", last="2026-01-01 01:00:01,000",
+                      log=N(covers=("2026-01-01 01:00:00,000", "2026-01-01 01:00:01,000"), records=[N(machine="")], holes=[]))
+            logs = {"a.log": [], "b.log": [later]}
+            both = Candidate("pandaserver/a.py", "f", [3], ["a.log", "b.log", "c.log"])
+            none = Candidate("pandaserver/a.py", "g", [5], ["c.log"])
+            j = judge([both, none], logs, window=("2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+            print(json.dumps([v.reasons for v in j.verdicts]))
+            """,
+        )
+    )
+    both, none = json.loads(out.splitlines()[-1])
+    # each log handed says its own reason, in the candidate's order; the one not handed is not asked
+    assert both == [
+        "a.log: no run of the key at ('2026-01-01 00:00:00', '2026-01-01 00:00:00'); "
+        "b.log covers 2026-01-01 01:00:00,000..2026-01-01 01:00:01,000, not 2026-01-01 00:00:00..2026-01-01 00:00:00"
+    ]
+    assert none == ["no log to hand (c.log)"]
+
+
 def test_rule_6_asks_whether_the_guard_needs_the_value_whatever_value_a_hole_gave_it(tmp_path):
     corpus = _corpus(tmp_path)
     (corpus / "pandaserver" / "a.py").write_text(

@@ -227,12 +227,6 @@ way on.
 
 ## `which_ran`
 
-### K12. A candidate whose several logs hold none of its runs is given the last log's reason only
-
-`judge` writes the reason per log, each over the one before.
-
-*Shows:* said, incompletely.
-
 ### K21. Runs of the key in several logs are one run only where one ran inside a call the other made
 
 H2 reads a run of another log as a part of the question's run (`which_ran.inside_call`) where both name the same
