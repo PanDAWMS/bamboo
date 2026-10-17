@@ -341,18 +341,29 @@ def other_elements(fn: R.Function, stmt: ast.stmt, row: R.Row, sn: R.Seen, env: 
     return ""
 
 
+#: why rule 6 solves a guard with ``<x>.<attr>`` unknown
+ASKED = "the value the question is about: whether the guard needs it is asked, not read"
+
+
 def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.Env) -> str:
-    """Why *stmt* can only be reached once ``<x>.<attr>`` already is *observed*, or ''."""
+    """Why *stmt* can only be reached once ``<x>.<attr>`` already is *observed*, or ''.
+
+    Each guard is solved with ``<x>.<attr>`` unknown: whether the guard needs the value is the question, and a value
+    *env* holds for it -- a hole another run printed after the move (DBProxy's archiveJob ``start status=failed``
+    inside the adder's call) -- would decide the term before the guard could, so it would never be settled.
+    """
     guards = [(g, f"{fn.name}:{stmt.lineno}") for g in pathcond.path_condition(stmt)] + callers_guards(fn)
     for guard, where in guards:
+        asked = set(re.findall(rf"(?<![\w.])[\w.]+\.{re.escape(attr)}(?!\w)", guard))
+        hidden = E.Env(dict(env.values), dict(env.rows), env.table, {**env.stale, **{s: ASKED for x in asked for s in (x, env.canonical(x))}})
         try:
-            solved = E.solve(guard, True, env)
+            solved = E.solve(guard, True, hidden)
         except SyntaxError:
             continue
         for atom, truth in solved.settled.items():
             m = re.fullmatch(rf"([\w.]+\.{re.escape(attr)}) (==|!=) ['\"]{re.escape(observed)}['\"]", atom)
             if m and ((m[2] == "==" and truth) or (m[2] == "!=" and not truth)):
-                used = {k: v for k, v in env.used.items() if k in guard}
+                used = {k: v for k, v in {**env.used, **hidden.used}.items() if k in guard and k not in asked}
                 return f"rule 6: reached only when {m[1]} is already {observed!r} (guard {guard!r} at {where}; {used})"
     return ""
 

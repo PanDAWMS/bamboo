@@ -863,6 +863,52 @@ def test_a_run_of_another_log_is_inside_a_call_only_between_the_prints_around_th
     assert elsewhere is None
 
 
+def test_rule_6_asks_whether_the_guard_needs_the_value_whatever_value_a_hole_gave_it(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            class A:
+                def finalize(self):
+                    if self.job.jobStatus == "failed" or self.job_status == "failed":
+                        self.handle()
+
+                def handle(self):
+                    self.job.jobStatus = "failed"
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E, rows as R
+            from bamboo.querier.which_ran import rewriter
+
+            node = R.functions("pandaserver/a.py", "handle")[0]
+            fn = N(rel="pandaserver/a.py", name="handle", node=node)
+            stmt = node.body[0]
+            def env(**held):
+                return E.Env({k: E.Value(v, "hole") for k, v in held.items()}, {"self.job": "job"})
+            print(json.dumps([
+                rewriter(fn, stmt, "jobStatus", "failed", env(**{"self.job_status": "finished"})),
+                rewriter(fn, stmt, "jobStatus", "failed", env(**{"self.job_status": "finished", "<job>.jobStatus": "failed"})),
+                rewriter(fn, stmt, "jobStatus", "failed", env()),
+            ]))
+            """,
+        )
+    )
+    bare, held, open_ = json.loads(out.splitlines()[-1])
+    # the other term is false, so the guard needs the job already failed
+    assert bare.startswith("rule 6: reached only when self.job.jobStatus is already 'failed'")
+    # a hole that printed the job failed does not answer for the guard: it is still asked, and not shown as used
+    assert held == bare
+    # with the other term unknown, the guard does not need it
+    assert open_ == ""
+
+
 def test_the_tables_at_one_moment_check_where_reading_2_puts_a_job(tmp_path):
     out = _ok(
         _run(
