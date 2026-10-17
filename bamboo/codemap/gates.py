@@ -1291,7 +1291,9 @@ def reach_records_resolve(fragment: MapFragment) -> GateResult:
     edge into no row is a way on it drops, and a junction no row is found
     for makes every answer about its subject unknown.  ``self.runImpl()``
     recorded for a class ``WorkerThread.run``'s ``self`` cannot be would
-    enter a runImpl that object never runs.
+    enter a runImpl that object never runs.  An edge's ``line`` is one of
+    its ``lines``, in order: a reader placing the calls in the function's
+    flow reads every one of them.
     """
     from bamboo.codemap import reach
 
@@ -1307,6 +1309,8 @@ def reach_records_resolve(fragment: MapFragment) -> GateResult:
                 failures.append(f"{row.owner}:{call.line} holds for {call.for_classes}, not among its classes")
             if entered.classes and not set(call.runs_as) <= set(entered.classes):
                 failures.append(f"{row.owner}:{call.line} enters {call.to} as {call.runs_as}, not among its classes")
+            if call.line not in call.lines or call.lines != sorted(set(call.lines)):
+                failures.append(f"{row.owner}:{call.line} goes into {call.to} from lines {call.lines}, not holding it in order")
     record = reach.ReachGraph(fragment.reach_graph)
     unmatched = reach.every_write(fragment.junctions, record).unmatched
     # A module's own body runs at import, and the record holds functions

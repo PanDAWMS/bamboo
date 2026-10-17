@@ -762,7 +762,7 @@ def _reads_self(value: ast.expr) -> bool:
 
 
 class _Row:
-    """One function's record while it is read: calls deduplicated, holes deduplicated, assumptions per call."""
+    """One function's record while it is read: one row per way a call goes, with every line; holes deduplicated, assumptions per call."""
 
     def __init__(self) -> None:
         self.calls: dict[tuple, ReachCall] = {}
@@ -781,9 +781,11 @@ class _Row:
         thread: bool,
     ) -> None:
         key = (to, how, tuple(for_classes), tuple(runs_as), thread)
-        if key not in self.calls:
+        held = self.calls.get(key)
+        if held is None:
             self.calls[key] = ReachCall(
                 line=call.lineno,
+                lines=[call.lineno],
                 callee=_cut(callee),
                 to=to,
                 how=how,
@@ -791,6 +793,9 @@ class _Row:
                 runs_as=runs_as,
                 thread=thread,
             )
+        elif call.lineno not in held.lines:
+            held.lines.append(call.lineno)
+            held.lines.sort()
 
     def hole(self, call: ast.Call, why: str, for_classes: list[str]) -> None:
         key = (call.lineno, _cut(call.func), why, tuple(for_classes))

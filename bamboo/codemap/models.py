@@ -4053,9 +4053,30 @@ class ReachCall(BaseModel):
     ``[JobGeneratorThread]``.  A call that does not read ``self`` holds for
     every class (``for_classes`` empty), and a function entered with no class
     said (``runs_as`` empty) runs as each class its ``self`` can be.
+
+    One row stands for every call of the function that goes the same way
+    -- same :attr:`to`, :attr:`how`, classes and :attr:`thread` -- and
+    :attr:`lines` holds each of their lines.  Where the closure can go
+    does not depend on which of them ran, but a reader placing a call in
+    the function's flow does: ``insertNewJob`` calls ``recordStatusChange``
+    at 3615, inside a ``try``, and at 3620, on the other branch.
     """
 
-    line: int
+    line: int = Field(
+        ...,
+        description=(
+            "One of :attr:`lines`: the first call met reading the function "
+            "depth first from its last statement back, so mostly the last in "
+            "the source, not the first."
+        ),
+    )
+    lines: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The line of every call going this way, in source order; :attr:`line` among them.  "
+            "Empty in a dump built before they were recorded, where :attr:`line` is one of the calls only."
+        ),
+    )
     callee: str = Field(..., description="The called or handed expression, as source, cut at 80 characters.")
     to: str = Field(..., description="The :attr:`ReachNode.owner` it goes into.")
     how: str = Field(
@@ -4168,7 +4189,10 @@ class ReachWrite(BaseModel):
     arms: list[str] = Field(default_factory=list, description="``outcome@line`` of each arm.")
     chain: list[str] = Field(
         default_factory=list,
-        description="``file:line`` of each call from the start to it, the first call first; empty for the start itself.",
+        description=(
+            "``file:line`` of each call from the start to it, the first call first; empty for the start itself.  "
+            "A hop's line is its :attr:`ReachCall.line`; the other calls going that way are in :attr:`ReachCall.lines`."
+        ),
     )
 
 

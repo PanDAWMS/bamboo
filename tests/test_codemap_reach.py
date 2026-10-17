@@ -109,6 +109,45 @@ def test_a_call_on_self_is_recorded_once_for_each_class_self_can_be(tmp_path):
     assert start.thread and start.runs_as == ["pkg/gen.py::JobGeneratorThread"]
 
 
+def test_calls_going_one_way_are_one_row_holding_every_line(tmp_path):
+    """``insertNewJob`` calls ``recordStatusChange`` in a ``try`` and after it: one row, both lines, as each class's."""
+    record = _record(
+        tmp_path,
+        jobs=(
+            "def record(job):\n"
+            "    pass\n"
+            "def insert(job):\n"
+            "    try:\n"
+            "        record(job)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    record(job)\n"
+        ),
+        steps=(
+            "class Base:\n"
+            "    def step(self):\n"
+            "        pass\n"
+            "    def run(self, again):\n"
+            "        if again:\n"
+            "            self.step()\n"
+            "        self.step()\n"
+            "class Child(Base):\n"
+            "    def step(self):\n"
+            "        pass\n"
+        ),
+    )
+
+    (call,) = record.rows["pkg/jobs.py::insert"].calls
+    assert (call.to, call.lines, call.line) == ("pkg/jobs.py::record", [5, 8], 8)
+    (write,) = record.reach(
+        ["pkg/jobs.py::insert"], _writing("pkg/jobs.py::record")
+    ).writes
+    assert write.chain == ["pkg/jobs.py:8"]
+    assert sorted(
+        (call.to, call.lines) for call in record.rows["pkg/steps.py::Base.run"].calls
+    ) == [("pkg/steps.py::Base.step", [6, 7]), ("pkg/steps.py::Child.step", [6, 7])]
+
+
 def test_a_method_entered_with_no_class_said_runs_as_every_class_self_can_be(tmp_path):
     """Asked from ``WorkerThread.run`` itself, the object may be any worker: every override is in the closure."""
     record = _record(tmp_path, **_WORKERS)
@@ -606,6 +645,10 @@ def test_the_record_s_edges_and_writes_resolve_and_a_dropped_one_fails_the_gate(
     record.rows["pkg/cmd.py::command"].calls.append(
         ReachCall(line=9, callee="gone", to="pkg/cmd.py::gone")
     )
+    # A row whose line is not among its lines hides where the call is.
+    record.rows["pkg/cmd.py::command"].calls.append(
+        ReachCall(line=7, lines=[5], callee="w", to="pkg/cmd.py::write_status")
+    )
     stray = _junction("pkg/gone.py::vanished", 3, [("failed", [])])
     at_import = _junction("pkg/cmd.py::<module>", 1, [("default", [])])
     result = gates.reach_records_resolve(
@@ -615,6 +658,8 @@ def test_the_record_s_edges_and_writes_resolve_and_a_dropped_one_fails_the_gate(
     assert not result.passed
     assert result.failures == [
         "pkg/cmd.py::command:9 goes into pkg/cmd.py::gone, no row of the record",
+        "pkg/cmd.py::command:7 goes into pkg/cmd.py::write_status from lines [5],"
+        " not holding it in order",
         "pkg/gone.py::vanished: a junction no function of the record holds",
     ]
     # A write in a module's own body has no row, and is said, not failed.
