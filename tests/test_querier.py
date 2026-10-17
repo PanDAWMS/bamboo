@@ -812,6 +812,57 @@ def test_a_db_proxy_run_is_a_movers_only_when_its_mark_names_the_movers_method(t
     assert json.loads(out.splitlines()[-1]) == [True, False, True, True]
 
 
+def test_a_run_of_another_log_is_inside_a_call_only_between_the_prints_around_that_pass(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def f(self, jobs):
+                self.logger.debug("start")
+                for job in jobs:
+                    self.logger.debug("updating DB")
+                    done = self.taskBuffer.updateJobs([job])
+                    self.logger.debug("retU")
+                self.logger.debug("end")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows as R
+            from bamboo.querier.which_ran import inside_call
+
+            node = R.functions("pandaserver/a.py", "f")[0]
+            fn = N(rel="pandaserver/a.py", node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            stamps = ["00", "01", "02", "03", "04", "05"]  # start, updating DB, retU, updating DB, retU, end
+            run = N(records=[N(stamp=f"2026-01-01 00:00:{s},000") for s in stamps])
+            caller = N(fn=fn, run=run, unambiguous={3: [0], 5: [1, 3], 7: [2, 4], 8: [5]})
+            inner = lambda a, b: N(first=f"2026-01-01 00:00:{a}", last=f"2026-01-01 00:00:{b}")
+            print(json.dumps([
+                inside_call(caller, inner("01,200", "01,800"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("03,200", "03,900"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("00,500", "01,500"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("01,500", "02,500"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("01,200", "01,800"), "pandaserver/b.py:6"),
+            ]))
+            """,
+        )
+    )
+    first, second, early, late, elsewhere = json.loads(out.splitlines()[-1])
+    # each pass through the call is the last print before it and the first after it
+    assert first == [1, 2]
+    assert second == [3, 4]
+    # a run that starts before the pass or ends after it was not inside the call
+    assert early is None
+    assert late is None
+    # the call is the caller's own
+    assert elsewhere is None
+
+
 def test_the_tables_at_one_moment_check_where_reading_2_puts_a_job(tmp_path):
     out = _ok(
         _run(
@@ -987,7 +1038,7 @@ def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_
             def fresh(reach_graph):
                 mapdump._FRAGMENT[:] = [N(reach_graph=reach_graph, junctions=[])]
                 r = object.__new__(rerun.Rerun)
-                r.lines, r.result, r._reach = [], {}, None
+                r.lines, r.result, r._reach, r._graph_read = [], {}, None, None
                 return r
 
             r = fresh(rows)

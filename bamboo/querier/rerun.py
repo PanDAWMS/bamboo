@@ -891,6 +891,8 @@ class Rerun:
         self.result: dict = {}
         #: the map's reach, read from the dump at its first ask (``_reach_of``): None before, False with none in the dump
         self._reach = None
+        #: the dump's reach_graph as read (``_graph``): (the reach module, its ReachGraph, its rows); False with none
+        self._graph_read = None
 
     # ------------------------------------------------------------ plumbing
     def say(self, text: str = "") -> None:
@@ -1242,7 +1244,7 @@ class Rerun:
         stable_holes(seens, env)
         j = judge(
             cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi),
-            subject=attr, observed=value, question_run=question, env=env,
+            subject=attr, observed=value, question_run=question, env=env, called_at=self._called_at,
         )
         self.say(j.report(question))
         chosen = self.pick("which candidate ran", j)
@@ -1773,6 +1775,35 @@ class Rerun:
             return ran[0]
         return Fork(ran, [f"mover {p.owner}" for p in ran])
 
+    def _graph(self):
+        """The dump's ``reach_graph`` read once: ``(the reach module, its ReachGraph, its rows)``, or None where the dump
+        has none."""
+        if self._graph_read is None:
+            rows = getattr(mapdump.fragment(), "reach_graph", None)
+            if rows:
+                from bamboo.codemap import reach as RE
+
+                self._graph_read = (RE, RE.ReachGraph(rows), rows)
+            else:
+                self._graph_read = False
+        return self._graph_read or None
+
+    def _called_at(self, caller: R.Function, callee: Candidate) -> str | None:
+        """Where *caller* calls on into *callee*'s function, by the map's reach: the ``file:line`` of the first call on
+        the way (``ReachWrite.chain``), or None -- for H2 to read a run inside that call as a part of the caller's
+        (``which_ran.inside_call``).  One way is found, not each: a call it misses leaves the runs apart."""
+        graph = self._graph()
+        if graph is None or not caller.node.body or not callee.lines:
+            return None
+        RE, record, _ = graph
+        start = record.function_at(caller.rel, caller.node.body[0].lineno)
+        end = record.function_at(callee.rel, callee.lines[0])
+        if start is None or end is None or start == end:
+            return None
+        reached = record.reach([start], RE.Destination({end: ["called"]}, []))
+        write = next((w for w in reached.writes or [] if w.function == end), None)
+        return write.chain[0] if write is not None and write.chain else None
+
     def _reach_of(self, q: Stuck, owner: str, lines: list[int]) -> dict | None:
         """What the map's reach says of a mover with no arm of its own: from the defs holding its statements at *lines*
         -- every def of its name where it has none, as it takes rows another selects -- does any function it can go on
@@ -1781,12 +1812,10 @@ class Rerun:
         on and the closure's size; ``own_arms`` names a start the junctions give an arm S1 does not count.  ``None``
         where the dump has no ``reach_graph``: said once, as the first ask is (build2-design.md 6)."""
         if self._reach is None:
-            fragment = mapdump.fragment()
-            rows = getattr(fragment, "reach_graph", None)
-            if rows:
-                from bamboo.codemap import reach as RE
-
-                self._reach = (RE, RE.ReachGraph(rows), {})
+            graph = self._graph()
+            if graph is not None:
+                RE, record, rows = graph
+                self._reach = (RE, record, {})
                 self.result["reach"] = {"present": True, "functions": len(rows), "premises": sorted(RE.PREMISES)}
                 self.say(f"  reach: the dump's reach_graph, {len(rows)} function(s); every answer rests on {sorted(RE.PREMISES)}")
             else:

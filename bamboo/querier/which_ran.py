@@ -8,7 +8,9 @@ Every candidate comes out as one of four, with the rule that put it there:
   a row that path can no longer reach after its ``return`` is in the run;
   a printed row's ``arms`` leave the site out (outside a shared loop);
   the site sits after the record that already showed the observed value, or
-  before the one that still showed the old value (rule 3);
+  before the one that still showed the old value (rule 3) -- for a run of
+  another log that ran inside a call the question's run made, where that
+  call sits (:func:`inside_call`);
   the site is reached only when the value is already the observed one
   (rule 6, solved from the guards on the way to it, the caller's included);
 * **positive** -- every row that must print does, one of them says enough to
@@ -32,6 +34,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,6 +52,9 @@ RUN_BY_ROWS = os.environ.get("WHICH_RUN_BY_ROWS", "1") != "0"
 #: On, a row printed once whose path ends at a return/raise rules out
 #: every site below that exit -- the arms (path conditions) do not read the jump
 ROW_EXIT = os.environ.get("WHICH_RUN_ROW_EXIT", "1") != "0"
+#: ``WHICH_RUN_JOIN_CALLS=0``: runs of the key in several logs stay several runs, and none is the question's
+#: (2026-10-14), even where one ran inside a call the other made (the adder's updateJobs and DBProxy's archiveJob)
+JOIN_CALLS = os.environ.get("WHICH_RUN_JOIN_CALLS", "1") != "0"
 
 
 def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
@@ -96,12 +102,15 @@ class Judgement:
     notes: list[str] = field(default_factory=list)
     #: each candidate's run, by owner, as the verdicts read it (None where it had none)
     runs: dict[str, Run | None] = field(default_factory=dict)
+    #: the run the value changed in where the judgement found it (:func:`inside_call`), not the caller
+    question: Run | None = None
 
     def count(self, kind: str) -> int:
         return sum(1 for v in self.verdicts if v.kind == kind)
 
     def report(self, run: Run | None = None) -> str:
         out = []
+        run = run if run is not None else self.question
         if self.bracket and run is not None:
             a, b = self.bracket
             out.append(f"bracket: {run.records[a].span} -> {run.records[b].span}")
@@ -182,6 +191,35 @@ def bracket_of(values: list[tuple[int, str, str]], observed: str) -> tuple[int, 
     """The last record still showing another value, and the first after it showing *observed*."""
     for (i, v, _), (j, w, _) in zip(values, values[1:], strict=False):
         if v != observed and w == observed:
+            return i, j
+    return None
+
+
+def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None:
+    """``(i, j)``: the records of *caller*'s run printed just before and just after the call at *site* (``file:line``)
+    whose times hold every record of *inner*, or None.
+
+    The records are the call's ``must_rows`` in the caller, so each pair is one pass through the call: the last
+    record before it, and the first after.  A log line names no process, so this says only that *inner* ran while
+    the caller was inside that call, on the machine both name -- the caller of :func:`judge` checks that the call
+    can reach *inner*'s function.
+    """
+    rel, _, line = site.rpartition(":")
+    if rel != caller.fn.rel or not line.isdigit():
+        return None
+    stmt = R.statement_at(caller.fn.node, int(line))
+    if stmt is None:
+        return None
+    before, after = R.must_rows(caller.fn.node, stmt)
+
+    def printed(stmts: list[ast.stmt]) -> list[int]:
+        return sorted(i for s in stmts if (row := caller.fn.row_at(s)) is not None for i in caller.unambiguous.get(row.line, ()))
+
+    starts, ends = printed(before), printed(after)
+    records = caller.run.records
+    for j in ends:
+        i = max((x for x in starts if x < j), default=None)
+        if i is not None and records[i].stamp <= inner.first and inner.last <= records[j].stamp:
             return i, j
     return None
 
@@ -332,7 +370,12 @@ def judge(
     raised_at: dict[str, set[int]] | None = None,
     env: E.Env | None = None,
     complete: bool = True,
+    called_at: Callable[[R.Function, Candidate], str | None] | None = None,
 ) -> Judgement:
+    """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of the
+    first call on the way, or None.  Given it, and no *question_run*, runs of the key in several logs are read as
+    one where every run but one ran inside a call that one made (:func:`inside_call`, on the machine both name), and
+    that one is the question's run."""
     raised_at = raised_at or {}
     verdicts: list[Verdict] = []
     map_findings: set[str] = set()
@@ -370,6 +413,42 @@ def judge(
             seens[c.owner] = R.seen(R.function(c.rel, c.func, c.lines), run, mode)
     # a record counts as printed only by the rows that read it best (rows.claim)
     seens = dict(zip(seens, R.claim(list(seens.values())), strict=False))
+
+    # a run inside a call another run made is a part of that run: (outer run, record before, record after, call)
+    joined: dict[int, tuple[Run, int, int, str]] = {}
+    join_notes: list[str] = []
+    if question_run is None and called_at is not None and JOIN_CALLS and subject and observed:
+        runs = list({id(r): r for r in runs_of.values() if r is not None}.values())
+        for inner in runs:
+            for outer in runs:
+                if outer is inner or outer.log.name == inner.log.name or not outer.machine or outer.machine != inner.machine:
+                    continue
+                found = next(
+                    (
+                        (outer, *at, site)
+                        for c in candidates
+                        if runs_of.get(c.owner) is inner
+                        for sn in seens.values()
+                        if sn.run is outer
+                        if (site := called_at(sn.fn, c)) and (at := inside_call(sn, inner, site))
+                    ),
+                    None,
+                )
+                if found is not None:
+                    joined[id(inner)] = found
+                    break
+        roots = [r for r in runs if id(r) not in joined]
+        if joined and len(roots) == 1 and all(outer is roots[0] for outer, *_ in joined.values()):
+            question_run = roots[0]
+            for inner in runs:
+                if id(inner) in joined:
+                    outer, i, j, site = joined[id(inner)]
+                    join_notes.append(
+                        f"one run: {inner.log.name} {inner.first}..{inner.last} ran inside the call at {site} of the run in "
+                        f"{outer.log.name} (between {outer.records[i].span} and {outer.records[j].span}), on {inner.machine}"
+                    )
+        else:
+            joined = {}
 
     bracket = None
     if subject and observed and question_run is not None:
@@ -460,6 +539,15 @@ def judge(
                     if hi is not None and hi <= bracket[0]:
                         v.kind = "excluded"
                         v.reasons.append(f"rule 3: runs before {run.records[hi].span}, when {subject} still showed another value")
+            # a run inside a call sits where that one pass through the call does, however often it printed a row
+            if bracket is not None and (part := joined.get(id(run))) is not None:
+                outer, lo, hi, site = part
+                if lo >= bracket[1]:
+                    v.kind = "excluded"
+                    v.reasons.append(f"rule 3: runs inside the call at {site}, after {outer.records[lo].span}, when {subject} already showed {observed!r}")
+                if hi <= bracket[0]:
+                    v.kind = "excluded"
+                    v.reasons.append(f"rule 3: runs inside the call at {site}, before {outer.records[hi].span}, when {subject} still showed another value")
             if subject and observed and env is not None:
                 own = E.Env(dict(env.values), dict(env.rows), env.table, dict(env.stale))
                 stable_holes([x for x in seens.values() if x.run is run], own, class_of(fn))
@@ -511,7 +599,12 @@ def judge(
     positives = [v for v in verdicts if v.kind == "positive"]
     left = [v for v in verdicts if v.kind in ("positive", "kept", "unexamined")]
     unexamined = [v for v in verdicts if v.kind == "unexamined"]
-    in_run = [v for v in verdicts if v.kind in ("positive", "kept") and runs_of[v.candidate.owner] is question_run]
+    in_run = [
+        v
+        for v in verdicts
+        if v.kind in ("positive", "kept")
+        and ((r := runs_of[v.candidate.owner]) is question_run or (r is not None and id(r) in joined))
+    ]
     chosen, how = None, "undecided"
     if len(positives) == 1 and (decide != "strict" or not unexamined):
         chosen, how = positives[0], "positive evidence"
@@ -527,5 +620,6 @@ def judge(
         how = f"elimination within the run the value changed in; {others} function(s) never placed in it are not excluded"
     elif left:
         how = f"{len(left)} left: " + ", ".join(sorted({f"{v.candidate.func}:{v.line}" for v in left if v.kind != 'unexamined'}))
-    return Judgement(verdicts, chosen, how, bracket, [f"MAP: {m}" for m in sorted(map_findings)] + p_notes, runs_of)
+    notes = join_notes + [f"MAP: {m}" for m in sorted(map_findings)] + p_notes
+    return Judgement(verdicts, chosen, how, bracket, notes, runs_of, question_run if joined else None)
 
