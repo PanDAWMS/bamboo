@@ -950,6 +950,8 @@ def _record(
         if held is not None:
             held.value_frames = pooled_frames(held.value_frames, list(frames))
             held.row_precondition = [term for term in held.row_precondition if term in guards]
+            if decided_at.lineno != held.line and decided_at.lineno not in held.other_lines:
+                held.other_lines = sorted([*held.other_lines, decided_at.lineno])
             if carriers is not None:
                 carriers[id(held)][1].append(carrier)
             continue

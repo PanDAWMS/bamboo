@@ -387,6 +387,41 @@ class ConditionalGuard(BaseModel):
     )
 
 
+#: :attr:`MustName.row` for a hole holding a column of the row the arm writes.
+MUST_ROW_WRITTEN = "written"
+
+
+class MustName(BaseModel):
+    """A hole of a must print that holds a column of the row the arm writes.
+
+    ``tmp_log.debug(f"PandaID={job.PandaID} ...")`` on every path to
+    ``job.jobStatus = "failed"``: the line that says ``PandaID=123`` names the
+    row the arm wrote, so finding it among a run's lines says that run is the
+    one that wrote it.  The hole has to be read off the object the arm writes
+    to, and the same spelling is not the same object: ``job`` rebound between
+    the print and the arm -- a loop's next item, ``job = self.job`` on one
+    path -- prints one job and writes another.  So a name is said only where,
+    on every path into the arm, the print ran after the object and the
+    attribute were last bound, and no call between was made on it or handed
+    it.  The value is the column as it was when printed: for the column the
+    arm writes, the value before the write.  A hole that spells the written
+    object's attribute and is not known to hold it is kept, with why, so that
+    its absence from the names is not read as a print that names nothing.
+    """
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    expression: str = Field(description="What fills the hole, as :attr:`SkeletonHole.expression` spells it.")
+    column: str = Field(description="The column it holds, as the entity's class spells it: ``JobSpec.PandaID``.")
+    row: str = Field(
+        default="",
+        description=(
+            f"{MUST_ROW_WRITTEN!r}: the row the arm writes.  Empty when the "
+            "hole is not known to hold it, with ``why``."
+        ),
+    )
+    why: str = Field(default="", description="Why the hole is not known to hold the written row's column.")
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -474,6 +509,19 @@ class Branch(BaseModel):
             "moves whenever anything above it is edited."
         ),
     )
+    other_lines: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where else this branch's value is written.  Two writes of one "
+            "outcome under one path condition are one branch, and ``line`` is "
+            "the first of them: ``increaseAttemptNrPanda`` binds "
+            "``maxAttempt`` on lines 846, 851 and 856 under the same tests, and "
+            "the two ``run`` s of ``datasetManager.py`` that delete a dataset "
+            "are one junction's.  A fact read at ``line`` alone -- which "
+            "prints come before it -- holds for this branch only if it holds "
+            "at these too."
+        ),
+    )
     emits: list[Emit] = Field(
         default_factory=list,
         description=(
@@ -515,6 +563,32 @@ class Branch(BaseModel):
             "none of them rules the arm out.  Not ``messages``, which is what "
             "the block records about the decision rather than what it writes."
         ),
+    )
+    must_prints: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "The lines of the owner's print statements that run before the "
+            "statement at ``line`` on every path from the function's entry, "
+            "exceptions included -- see :mod:`bamboo.codemap.panda.mustprints`.  "
+            "A run without one of these lines did not reach the arm.  The "
+            "level, files and rows are the owner's :class:`FunctionPrintsNode` "
+            "statement at the line.  ``None`` when not read, with "
+            "``must_hole``; ``[]`` when read and none is."
+        ),
+    )
+    must_names: Optional[list[MustName]] = Field(
+        default=None,
+        description=(
+            "The holes of the must prints that read an attribute of the object "
+            "the arm writes, each saying whether it holds the written row's "
+            "column.  ``None`` when not read, with ``must_hole``: the names of "
+            "an arm that does not write the subject as an object's attribute "
+            "-- an SQL statement's binds -- are not read yet."
+        ),
+    )
+    must_hole: str = Field(
+        default="",
+        description="Why ``must_prints`` or ``must_names`` is ``None``.",
     )
 
 
