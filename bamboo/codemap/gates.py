@@ -1291,7 +1291,9 @@ def reach_records_resolve(fragment: MapFragment) -> GateResult:
     edge into no row is a way on it drops, and a junction no row is found
     for makes every answer about its subject unknown.  ``self.runImpl()``
     recorded for a class ``WorkerThread.run``'s ``self`` cannot be would
-    enter a runImpl that object never runs.
+    enter a runImpl that object never runs.  An edge's ``line`` is one of
+    its ``lines``, in order: a reader placing the calls in the function's
+    flow reads every one of them.
     """
     from bamboo.codemap import reach
 
@@ -1307,6 +1309,8 @@ def reach_records_resolve(fragment: MapFragment) -> GateResult:
                 failures.append(f"{row.owner}:{call.line} holds for {call.for_classes}, not among its classes")
             if entered.classes and not set(call.runs_as) <= set(entered.classes):
                 failures.append(f"{row.owner}:{call.line} enters {call.to} as {call.runs_as}, not among its classes")
+            if call.line not in call.lines or call.lines != sorted(set(call.lines)):
+                failures.append(f"{row.owner}:{call.line} goes into {call.to} from lines {call.lines}, not holding it in order")
     record = reach.ReachGraph(fragment.reach_graph)
     unmatched = reach.every_write(fragment.junctions, record).unmatched
     # A module's own body runs at import, and the record holds functions
@@ -1328,6 +1332,49 @@ def reach_records_resolve(fragment: MapFragment) -> GateResult:
             "A dropped edge or write reads as a closure that reaches less than it does.  "
             f"Writes in a module's own body, which no function holds: {at_import}."
         ),
+    )
+
+
+def must_prints_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every branch's must prints are print statements a dump-only reader finds, and every unread one says why.
+
+    :func:`mustprints.must_prints` joins a line to the owner's
+    :class:`FunctionPrintsNode` by position, since a junction's owner need not
+    spell the nesting the prints' owner does: a line it cannot find there is a
+    must print no reader can use.  A name is a hole of one of the lines, and
+    a branch left unread with no reason reads as one with no must print.
+    """
+    from bamboo.codemap.panda import mustprints
+
+    failures: list[str] = []
+    holes: Counter = Counter()
+    read = 0
+    for junction in fragment.junctions:
+        for branch in junction.branches:
+            where = f"{junction.owner}:{branch.line} {branch.outcome}"
+            if branch.must_prints is None:
+                holes[branch.must_hole.split(":")[0] or "(no reason)"] += 1
+                if not branch.must_hole:
+                    failures.append(f"{where}: not read, and no reason given")
+                continue
+            read += 1
+            answer = mustprints.must_prints(fragment.function_prints, junction, branch)
+            if answer.prints is None:
+                failures.append(f"{where}: {answer.why}")
+            for name in branch.must_names or []:
+                if name.line not in branch.must_prints:
+                    failures.append(f"{where}: name {name.expression} on line {name.line}, no must print")
+            if branch.must_names is None:
+                holes[branch.must_hole.split(":")[0] or "(no reason)"] += 1
+    return GateResult(
+        gate="must-prints-resolve",
+        passed=not failures,
+        checked=read,
+        unit="branches",
+        question="is every must print a statement of the arm's function a dump-only reader finds?",
+        finding="a must print no reader can join to its statement, or a branch unread with no reason",
+        failures=failures[:50],
+        note=f"Unread, by reason: {dict(sorted(holes.items()))}.",
     )
 
 
@@ -2378,6 +2425,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(annotations_are_read(fragment))
     if fragment.function_prints or fragment.print_calls:
         results.append(prints_are_counted(fragment))
+    if any(branch.must_prints is not None or branch.must_hole for junction in fragment.junctions for branch in junction.branches):
+        results.append(must_prints_resolve(fragment))
     if fragment.reach_graph:
         results.append(reach_records_resolve(fragment))
         results.append(implicit_dunders_reach_no_write(fragment))

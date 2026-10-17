@@ -387,6 +387,41 @@ class ConditionalGuard(BaseModel):
     )
 
 
+#: :attr:`MustName.row` for a hole holding a column of the row the arm writes.
+MUST_ROW_WRITTEN = "written"
+
+
+class MustName(BaseModel):
+    """A hole of a must print that holds a column of the row the arm writes.
+
+    ``tmp_log.debug(f"PandaID={job.PandaID} ...")`` on every path to
+    ``job.jobStatus = "failed"``: the line that says ``PandaID=123`` names the
+    row the arm wrote, so finding it among a run's lines says that run is the
+    one that wrote it.  The hole has to be read off the object the arm writes
+    to, and the same spelling is not the same object: ``job`` rebound between
+    the print and the arm -- a loop's next item, ``job = self.job`` on one
+    path -- prints one job and writes another.  So a name is said only where,
+    on every path into the arm, the print ran after the object and the
+    attribute were last bound, and no call between was made on it or handed
+    it.  The value is the column as it was when printed: for the column the
+    arm writes, the value before the write.  A hole that spells the written
+    object's attribute and is not known to hold it is kept, with why, so that
+    its absence from the names is not read as a print that names nothing.
+    """
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    expression: str = Field(description="What fills the hole, as :attr:`SkeletonHole.expression` spells it.")
+    column: str = Field(description="The column it holds, as the entity's class spells it: ``JobSpec.PandaID``.")
+    row: str = Field(
+        default="",
+        description=(
+            f"{MUST_ROW_WRITTEN!r}: the row the arm writes.  Empty when the "
+            "hole is not known to hold it, with ``why``."
+        ),
+    )
+    why: str = Field(default="", description="Why the hole is not known to hold the written row's column.")
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -474,6 +509,19 @@ class Branch(BaseModel):
             "moves whenever anything above it is edited."
         ),
     )
+    other_lines: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where else this branch's value is written.  Two writes of one "
+            "outcome under one path condition are one branch, and ``line`` is "
+            "the first of them: ``increaseAttemptNrPanda`` binds "
+            "``maxAttempt`` on lines 846, 851 and 856 under the same tests, and "
+            "the two ``run`` s of ``datasetManager.py`` that delete a dataset "
+            "are one junction's.  A fact read at ``line`` alone -- which "
+            "prints come before it -- holds for this branch only if it holds "
+            "at these too."
+        ),
+    )
     emits: list[Emit] = Field(
         default_factory=list,
         description=(
@@ -515,6 +563,32 @@ class Branch(BaseModel):
             "none of them rules the arm out.  Not ``messages``, which is what "
             "the block records about the decision rather than what it writes."
         ),
+    )
+    must_prints: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "The lines of the owner's print statements that run before the "
+            "statement at ``line`` on every path from the function's entry, "
+            "exceptions included -- see :mod:`bamboo.codemap.panda.mustprints`.  "
+            "A run without one of these lines did not reach the arm.  The "
+            "level, files and rows are the owner's :class:`FunctionPrintsNode` "
+            "statement at the line.  ``None`` when not read, with "
+            "``must_hole``; ``[]`` when read and none is."
+        ),
+    )
+    must_names: Optional[list[MustName]] = Field(
+        default=None,
+        description=(
+            "The holes of the must prints that read an attribute of the object "
+            "the arm writes, each saying whether it holds the written row's "
+            "column.  ``None`` when not read, with ``must_hole``: the names of "
+            "an arm that does not write the subject as an object's attribute "
+            "-- an SQL statement's binds -- are not read yet."
+        ),
+    )
+    must_hole: str = Field(
+        default="",
+        description="Why ``must_prints`` or ``must_names`` is ``None``.",
     )
 
 
@@ -3793,8 +3867,23 @@ class SkeletonLine(BaseModel):
             "for a proxy method's ``create_tagged_logger``.  Apart from "
             "``pattern`` because the line holds it before the message, and it "
             "names the writer where the message alone -- ``start``, ``done`` "
-            "-- is shared by many.  Empty where the logger is built outside "
-            "this function."
+            "-- is shared by many.  Empty where none is read, and then "
+            "``prefix_hole`` says why when the logger may write one."
+        ),
+    )
+    prefix_hole: str = Field(
+        default="",
+        description=(
+            "Why ``prefix`` is empty where the logger may write one: the "
+            "row has no pattern, or the logger is not a local this function "
+            "builds by a ``LogWrapper`` whose prefix folds -- ``self.logger`` "
+            "built in ``__init__``, a parameter, the module's logger, a "
+            "``MsgWrapper``, a prefix of ``None`` (a time stamp).  Empty "
+            "where ``prefix`` is the whole reading: said, or a "
+            "``LogWrapper`` built here with none.  Apart from ``prefix``, "
+            "which a reader narrows records by and reads empty as not "
+            "narrowing: an empty ``prefix`` alone does not say the line "
+            "starts with the message."
         ),
     )
     arms: list[int] = Field(
@@ -3832,6 +3921,7 @@ class PrintRow(BaseModel):
         default_factory=list, description="As :attr:`SkeletonLine.holes`."
     )
     prefix: str = Field(default="", description="As :attr:`SkeletonLine.prefix`.")
+    prefix_hole: str = Field(default="", description="As :attr:`SkeletonLine.prefix_hole`.")
 
 
 #: How a print statement's ``log_files`` was found -- see
@@ -3963,9 +4053,30 @@ class ReachCall(BaseModel):
     ``[JobGeneratorThread]``.  A call that does not read ``self`` holds for
     every class (``for_classes`` empty), and a function entered with no class
     said (``runs_as`` empty) runs as each class its ``self`` can be.
+
+    One row stands for every call of the function that goes the same way
+    -- same :attr:`to`, :attr:`how`, classes and :attr:`thread` -- and
+    :attr:`lines` holds each of their lines.  Where the closure can go
+    does not depend on which of them ran, but a reader placing a call in
+    the function's flow does: ``insertNewJob`` calls ``recordStatusChange``
+    at 3615, inside a ``try``, and at 3620, on the other branch.
     """
 
-    line: int
+    line: int = Field(
+        ...,
+        description=(
+            "One of :attr:`lines`: the first call met reading the function "
+            "depth first from its last statement back, so mostly the last in "
+            "the source, not the first."
+        ),
+    )
+    lines: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The line of every call going this way, in source order; :attr:`line` among them.  "
+            "Empty in a dump built before they were recorded, where :attr:`line` is one of the calls only."
+        ),
+    )
     callee: str = Field(..., description="The called or handed expression, as source, cut at 80 characters.")
     to: str = Field(..., description="The :attr:`ReachNode.owner` it goes into.")
     how: str = Field(
@@ -4078,7 +4189,10 @@ class ReachWrite(BaseModel):
     arms: list[str] = Field(default_factory=list, description="``outcome@line`` of each arm.")
     chain: list[str] = Field(
         default_factory=list,
-        description="``file:line`` of each call from the start to it, the first call first; empty for the start itself.",
+        description=(
+            "``file:line`` of each call from the start to it, the first call first; empty for the start itself.  "
+            "A hop's line is its :attr:`ReachCall.line`; the other calls going that way are in :attr:`ReachCall.lines`."
+        ),
     )
 
 

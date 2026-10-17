@@ -39,7 +39,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     pooled_frames,
 )
-from bamboo.codemap.panda import promotion, sql, sqltext
+from bamboo.codemap.panda import mustprints, promotion, sql, sqltext
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
@@ -144,6 +144,10 @@ def _merge_junctions(junctions: list[JunctionNode]) -> list[JunctionNode]:
             held = known.get((branch.outcome, tuple(branch.path_condition)))
             if held is not None:
                 held.value_frames = pooled_frames(held.value_frames, branch.value_frames)
+                held.other_lines = sorted(
+                    {*held.other_lines, *[line for line in (branch.line, *branch.other_lines) if line is not None]}
+                    - {held.line}
+                )
                 continue
             branch.order = len(existing.branches)
             existing.branches.append(branch)
@@ -327,6 +331,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # The SQL slice needs an attributor that already knows the table map,
         # which is learned from the whole corpus rather than from one module.
         declarations = progress.spec_attributes(self._modules)
+        self._declarations = declarations
         # Every declaring class and how many columns came back, so that a form
         # this reader does not understand fails a gate instead of vanishing into
         # `unresolved`.  Counted per class rather than per assignment: the four
@@ -654,6 +659,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # code cannot print.
         fragment.function_prints.extend(self._function_prints())
         fragment.print_calls = _print_calls(self._modules)
+        # Which of those prints every path to an arm passes, and which of their
+        # holes hold a column of the row the arm writes: what tells the run that
+        # wrote a value from the runs that only printed the same lines.
+        self._must_prints = mustprints.attach(
+            fragment.junctions, fragment.function_prints, self._modules, self._declarations
+        )
+        logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
 
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "

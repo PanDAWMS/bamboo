@@ -263,6 +263,12 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "tags",
     "messages",
     "value_frames",
+    # Lines, as a FunctionPrints node's statements are: between two builds of
+    # one tree they do not move.
+    "other_lines",
+    "must_prints",
+    "must_names",
+    "must_hole",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",

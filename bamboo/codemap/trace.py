@@ -933,6 +933,20 @@ class _Unknown(NamedTuple):
 #: Methods of ``str`` a constant can be folded through.
 _FOLDABLE = frozenset({"strip", "lstrip", "rstrip", "lower", "upper"})
 
+# Why a print row's prefix is empty where its logger may write one
+# (:attr:`SkeletonLine.prefix_hole`).  ``{logger}`` is the receiver as spelled.
+PREFIX_REFUSED = "the row has no pattern, and a refused row's prefix is not read"
+PREFIX_NOT_A_NAME = "the logger {logger} is not a local name: where it is built is not read"
+PREFIX_PARAMETER = "the logger {logger} is a parameter: built by the caller"
+PREFIX_NOT_BOUND = "the logger {logger} is not bound in this function: the module's, a class's or an enclosing function's"
+PREFIX_REBOUND = "the logger {logger} is bound more than once in this function"
+PREFIX_BOUND_BY = "the logger {logger} is bound by a {kind}, to no value this reading spells"
+PREFIX_NOT_BUILT = "the logger {logger} is bound to {value}, not built by a call here"
+PREFIX_NOT_FOLLOWED = "the logger {logger} is built by {call}(...), which is not followed to a LogWrapper's prefix"
+PREFIX_STAMP = "the logger {logger} is a LogWrapper with prefix None, which writes a time stamp"
+PREFIX_NOT_FOLDED = "the logger {logger}'s prefix {prefix} is not a string this reading folds"
+PREFIX_KEYWORD = "the logger {logger}'s prefix is given by keyword, which is not read"
+
 
 def _fold(expression: Optional[ast.expr], env: dict[str, list], depth: int = 0) -> Optional[list]:
     """*expression* as a string: literal text, and ``_Unknown`` holes; ``None`` if it is not one.
@@ -1017,6 +1031,45 @@ def _folded_pattern(pieces: list) -> str:
         else:
             out += re.escape(piece)
     return out
+
+
+def _wrapper_prefix(built: ast.Call, env: dict[str, list]) -> tuple[Optional[list], str]:
+    """The folded prefix ``LogWrapper(logger, prefix)`` *built* writes, ``[]`` for none; or ``None`` and why.
+
+    ``LogWrapper(logger)`` writes the message alone; a prefix of ``None`` is a
+    time stamp taken when the logger is made, which no pattern here spells.
+    """
+    if len(built.args) >= 2:
+        given = built.args[1]
+    elif any(keyword.arg == "prefix" for keyword in built.keywords):
+        return None, PREFIX_KEYWORD
+    else:
+        return [], ""
+    if isinstance(given, ast.Constant) and given.value is None:
+        return None, PREFIX_STAMP
+    pieces = _fold(given, env)
+    if pieces is None:
+        return None, PREFIX_NOT_FOLDED.replace("{prefix}", _text(given))
+    return pieces, ""
+
+
+def _unbuilt(func: ast.AST, name: str, bound: Optional[ast.expr]) -> str:
+    """Why the logger *name* is not one *func* builds by a call (:attr:`SkeletonLine.prefix_hole`)."""
+    if bound is not None:
+        return PREFIX_NOT_BUILT.format(logger=name, value=_text(bound))
+    own = [binding for binding in pathcond.bindings(func, name) if not binding.nested]
+    if len(own) > 1 or len(pathcond.assigned_expressions(func).get(name, ())) > 1:
+        return PREFIX_REBOUND.format(logger=name)
+    if own:
+        return PREFIX_BOUND_BY.format(logger=name, kind=own[0].kind)
+    arguments = getattr(func, "args", None)
+    if arguments is not None and any(
+        held.arg == name
+        for held in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg)
+        if held is not None
+    ):
+        return PREFIX_PARAMETER.format(logger=name)
+    return PREFIX_NOT_BOUND.format(logger=name)
 
 
 def _dominates(site: ast.AST, target: ast.AST) -> bool:
@@ -1718,7 +1771,7 @@ class _Walk:
         #: hundred logging calls asks for the same local a hundred times.
         self._sites: dict[tuple[int, str], tuple] = {}
         self._asked: dict[tuple[str, str], str] = {}
-        self._prefixes: dict[tuple[str, str, str], str] = {}
+        self._prefixes: dict[tuple[str, str, str], tuple[str, str]] = {}
         #: The role the name being explained was asked in -- see
         #: ``TraceStep.role`` -- and the role each queued asking carries.
         self._role = ""
@@ -2409,46 +2462,52 @@ class _Walk:
             return [[_hole(expr)]], []
         return ways, refused
 
-    def prefix_of(self, frame: _Frame, argument: ast.expr) -> str:
-        """The pattern a logging call's logger writes before *argument*, or ``""``.
+    def prefix_of(self, frame: _Frame, argument: ast.expr) -> tuple[str, str]:
+        """The pattern a logging call's logger writes before *argument*, and why it is ``""`` if it may not be.
 
         ``LogWrapper(logger, prefix)`` writes ``prefix + " " + message``.  A
         logger built here says its prefix; one built by a call -- the proxy's
         ``create_tagged_logger(comment, tag)`` -- says it in the function it
         is built in, read with the call's arguments folded in.  Nothing else
         is guessed at: a logger built outside the function has a prefix this
-        call site does not state.
+        call site does not state, and the second value says which way it is
+        outside (:attr:`SkeletonLine.prefix_hole`).  ``("", "")`` is a logger
+        built here with no prefix.
         """
         call = getattr(argument, "parent", None)
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
-            return ""
+            return "", PREFIX_NOT_A_NAME.format(logger=_text(call) if call is not None else "")
         receiver = call.func.value
         if not isinstance(receiver, ast.Name):
-            return ""
+            return "", PREFIX_NOT_A_NAME.format(logger=_text(receiver))
         key = (frame.file, frame.owner, receiver.id)
         if key in self._prefixes:
             return self._prefixes[key]
-        said = ""
         bound = pathcond.single_definition(frame.func, receiver.id)
         if isinstance(bound, ast.Call):
-            pieces = self._logger_prefix(frame, bound)
-            if pieces:
-                said = _folded_pattern(pieces) + r"\ "
+            pieces, why = self._logger_prefix(frame, bound)
+            said = (_folded_pattern(pieces) + r"\ " if pieces else "", "" if pieces is not None else why.replace("{logger}", receiver.id))
+        else:
+            said = ("", _unbuilt(frame.func, receiver.id, bound))
         self._prefixes[key] = said
         return said
 
-    def _logger_prefix(self, frame: _Frame, built: ast.Call, depth: int = 0) -> Optional[list]:
-        """The folded prefix of the ``LogWrapper`` *built* makes, directly or by returning one."""
+    def _logger_prefix(self, frame: _Frame, built: ast.Call, depth: int = 0) -> tuple[Optional[list], str]:
+        """The folded prefix of the ``LogWrapper`` *built* makes, directly or by returning one; or ``None`` and why.
+
+        The why is a ``PREFIX_*`` text with ``{logger}`` left for the caller.
+        """
         env = self._constant_env(frame.func)
-        if _called_name(built) == "LogWrapper" and len(built.args) >= 2:
-            return _fold(built.args[1], env)
+        if _called_name(built) == "LogWrapper":
+            return _wrapper_prefix(built, env)
+        unfollowed = PREFIX_NOT_FOLLOWED.replace("{call}", _called_name(built) or _text(built.func))
         if depth > 1:
-            return None
+            return None, unfollowed
         placed = self.calls.callees(frame.file, frame.func, built)
         # One definition, placed closed: placed open, the logger may be
         # built by a function this reading cannot name.
         if len(placed.targets) != 1 or placed.unplaced:
-            return None
+            return None, unfollowed
         (target,) = placed.targets
         bound = calls_mod.bind(built, target, placed.on_class)
         callee_env = {
@@ -2456,12 +2515,12 @@ class _Walk:
             for name, value in bound.items()
         }
         callee_env = {name: value for name, value in callee_env.items() if value is not None}
-        loggers: dict[str, Optional[list]] = {}
+        loggers: dict[str, tuple[Optional[list], str]] = {}
         for statement in target.func.body:  # type: ignore[attr-defined]
             if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
                 value = statement.value
-                if isinstance(value, ast.Call) and _called_name(value) == "LogWrapper" and len(value.args) >= 2:
-                    loggers[statement.targets[0].id] = _fold(value.args[1], callee_env)
+                if isinstance(value, ast.Call) and _called_name(value) == "LogWrapper":
+                    loggers[statement.targets[0].id] = _wrapper_prefix(value, callee_env)
                     continue
                 folded = _fold(value, callee_env)
                 callee_env[statement.targets[0].id] = folded if folded is not None else [_Unknown(statement.targets[0].id)]
@@ -2479,11 +2538,11 @@ class _Walk:
             elif isinstance(statement, ast.Return):
                 returned = statement.value
                 if isinstance(returned, ast.Name):
-                    return loggers.get(returned.id)
-                if isinstance(returned, ast.Call) and _called_name(returned) == "LogWrapper" and len(returned.args) >= 2:
-                    return _fold(returned.args[1], callee_env)
-                return None
-        return None
+                    return loggers.get(returned.id, (None, unfollowed))
+                if isinstance(returned, ast.Call) and _called_name(returned) == "LogWrapper":
+                    return _wrapper_prefix(returned, callee_env)
+                return None, unfollowed
+        return None, unfollowed
 
     def _constant_env(self, func: ast.AST) -> dict[str, list]:
         """Locals bound once, to a string this reading can fold."""
@@ -2661,6 +2720,7 @@ class _Walk:
                             depth=depth,
                             text=_text(written.expr),
                             refused=written.refused,
+                            prefix_hole=PREFIX_REFUSED,
                             arms=sorted(arms),
                         )
                     )
@@ -2675,6 +2735,7 @@ class _Walk:
                     pattern = _constant_pattern(message)
                     value, hole, because = "", "", ""
                 refused = "" if pattern else _refusal(message)
+                prefix, prefix_hole = self.prefix_of(frame, argument) if pattern else ("", PREFIX_REFUSED)
                 # Deduped on what the row would *say*, refusals included: one
                 # call can resolve to several messages that render the same,
                 # and three identical refusals on one line tell a reader
@@ -2693,7 +2754,8 @@ class _Walk:
                         refused=refused,
                         keyed=bool(pattern) and keyed(message),
                         holes=_holes_of(message),
-                        prefix=self.prefix_of(frame, argument) if pattern else "",
+                        prefix=prefix,
+                        prefix_hole=prefix_hole,
                         arms=sorted(arms),
                         value=value,
                         hole=hole,
@@ -4869,6 +4931,7 @@ def function_prints(roots: dict[str, Path], files: Sequence[str]) -> Iterator[Fu
                         keyed=row.keyed,
                         holes=row.holes,
                         prefix=row.prefix,
+                        prefix_hole=row.prefix_hole,
                     )
                 )
             cls = pathcond.class_of(tree, func)
