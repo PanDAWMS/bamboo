@@ -445,7 +445,11 @@ def must_prints(
     A line's files are said only where they were followed to the logger
     (:data:`LOG_FILES_FOLLOWED`); otherwise they are the module's, a logger
     handed in from outside or a plugin's, and the line is held with that as a
-    hole.  ``None`` when the branch's prints were not read, with why.
+    hole.  So is a row whose prefix is empty and may not be
+    (:attr:`PrintRow.prefix_hole`): ``self.logger`` built in ``__init__``
+    writes its mark before every message though the row says none, and a
+    reader looking for the run by its mark has to know the mark was not read.
+    ``None`` when the branch's prints were not read, with why.
     """
     if branch.must_prints is None:
         return MustPrints(
@@ -478,6 +482,12 @@ def must_prints(
         )
         held.extend(
             f"row refused: {row.refused}" for row in statement.rows if row.refused
+        )
+        held.extend(
+            f"prefix not read: {why}"
+            for why in dict.fromkeys(
+                row.prefix_hole for row in statement.rows if row.prefix_hole
+            )
         )
         prints.append(
             MustPrint(

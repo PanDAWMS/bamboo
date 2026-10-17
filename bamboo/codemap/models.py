@@ -3867,8 +3867,23 @@ class SkeletonLine(BaseModel):
             "for a proxy method's ``create_tagged_logger``.  Apart from "
             "``pattern`` because the line holds it before the message, and it "
             "names the writer where the message alone -- ``start``, ``done`` "
-            "-- is shared by many.  Empty where the logger is built outside "
-            "this function."
+            "-- is shared by many.  Empty where none is read, and then "
+            "``prefix_hole`` says why when the logger may write one."
+        ),
+    )
+    prefix_hole: str = Field(
+        default="",
+        description=(
+            "Why ``prefix`` is empty where the logger may write one: the "
+            "row has no pattern, or the logger is not a local this function "
+            "builds by a ``LogWrapper`` whose prefix folds -- ``self.logger`` "
+            "built in ``__init__``, a parameter, the module's logger, a "
+            "``MsgWrapper``, a prefix of ``None`` (a time stamp).  Empty "
+            "where ``prefix`` is the whole reading: said, or a "
+            "``LogWrapper`` built here with none.  Apart from ``prefix``, "
+            "which a reader narrows records by and reads empty as not "
+            "narrowing: an empty ``prefix`` alone does not say the line "
+            "starts with the message."
         ),
     )
     arms: list[int] = Field(
@@ -3906,6 +3921,7 @@ class PrintRow(BaseModel):
         default_factory=list, description="As :attr:`SkeletonLine.holes`."
     )
     prefix: str = Field(default="", description="As :attr:`SkeletonLine.prefix`.")
+    prefix_hole: str = Field(default="", description="As :attr:`SkeletonLine.prefix_hole`.")
 
 
 #: How a print statement's ``log_files`` was found -- see

@@ -3412,6 +3412,62 @@ def f(self, job):
     assert row.prefix == r"<setup_destination>\ "
 
 
+def test_an_empty_prefix_says_why_where_the_logger_may_write_one(tmp_path):
+    """``self.logger = LogWrapper(_logger, str(pandaID))`` in ``__init__``
+    writes the PandaID before every message ``run`` prints; a row saying no
+    prefix there read as a run with no mark (Watcher.run, the adder).  The
+    prefix itself is read no further: only why it is not."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+_logger = PandaLogger().getLogger("m")
+
+
+class Watcher:
+    def __init__(self, pandaID):
+        self.logger = LogWrapper(_logger, str(pandaID))
+
+    def run(self, job, handed):
+        self.logger.debug("start")
+        handed.debug("handed in")
+        _logger.debug("the module's")
+        stamped = LogWrapper(_logger, None)
+        stamped.debug("stamped")
+        plain = LogWrapper(_logger)
+        plain.debug("plain")
+        wrapped = MsgWrapper(_logger, "token")
+        wrapped.debug("wrapped")
+        twice = LogWrapper(_logger, "<a>")
+        if job:
+            twice = LogWrapper(_logger, "<b>")
+        twice.debug("twice")
+        keyed = LogWrapper(_logger, prefix="<k>")
+        keyed.debug("keyed")
+        said = LogWrapper(_logger, f"<run {job.PandaID}>")
+        said.debug("said")
+        said.debug(f"{job.name}")
+''',
+    )
+
+    (found,) = [
+        one for one in trace_mod.function_prints(roots, [f"{PACKAGE}/m"]) if one.owner.endswith("Watcher.run")
+    ]
+    rows = {row.text: (row.prefix, row.prefix_hole) for statement in found.statements for row in statement.rows}
+
+    assert rows == {
+        "'start'": ("", trace_mod.PREFIX_NOT_A_NAME.format(logger="self.logger")),
+        "'handed in'": ("", trace_mod.PREFIX_PARAMETER.format(logger="handed")),
+        '"the module\'s"': ("", trace_mod.PREFIX_NOT_BOUND.format(logger="_logger")),
+        "'stamped'": ("", trace_mod.PREFIX_STAMP.format(logger="stamped")),
+        "'plain'": ("", ""),
+        "'wrapped'": ("", trace_mod.PREFIX_NOT_FOLLOWED.format(logger="wrapped", call="MsgWrapper")),
+        "'twice'": ("", trace_mod.PREFIX_REBOUND.format(logger="twice")),
+        "'keyed'": ("", trace_mod.PREFIX_KEYWORD.format(logger="keyed")),
+        "'said'": (r"<run\ .*?>\ ", ""),
+        "f'{job.name}'": ("", trace_mod.PREFIX_REFUSED),
+    }
+
+
 def test_the_rows_a_loop_is_on_are_told_apart_from_how_a_value_was_worked_out(tmp_path):
     roots = _tree(
         tmp_path,
