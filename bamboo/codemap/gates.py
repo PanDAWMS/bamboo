@@ -1378,6 +1378,71 @@ def must_prints_resolve(fragment: MapFragment) -> GateResult:
     )
 
 
+def history_pairs_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every history pair names writes and runs a dump-only reader finds, and every branch unread says why.
+
+    A pair's ``writes`` are looked up on the writing function's
+    :class:`ReachNode` (:attr:`ReachNode.history`, where the values are), its
+    ``runs`` in the caller's :class:`FunctionPrintsNode`, and a print
+    statement's ``runs`` in its own node: a line found in none of them is a
+    pair or a print no reader can place in a run.  A branch left unread with
+    no reason reads as one no history row is written beside.
+    """
+    rows = {row.owner: row for row in fragment.reach_graph}
+    prints = {node.owner: node for node in fragment.function_prints}
+    failures: list[str] = []
+    holes: Counter = Counter()
+    for node in fragment.function_prints:
+        lines = [run.line for run in node.runs]
+        if len(set(lines)) != len(lines):
+            failures.append(f"{node.owner}: two runs start on one line, so a line names neither")
+        for statement in node.statements:
+            for line in statement.runs:
+                if line not in lines:
+                    failures.append(f"{node.owner}:{statement.line}: run {line} is not one of the function's runs")
+    read = 0
+    for junction in fragment.junctions:
+        for branch in junction.branches:
+            where = f"{junction.owner}:{branch.line} {branch.outcome}"
+            if branch.history is None:
+                holes[branch.history_hole.split(":")[0] or "(no reason)"] += 1
+                if not branch.history_hole:
+                    failures.append(f"{where}: not read, and no reason given")
+                continue
+            read += 1
+            for pair in branch.history:
+                at = f"{where}: pair {pair.caller}:{pair.call}"
+                row = rows.get(pair.caller)
+                if row is None or not any(pair.call in (call.lines or [call.line]) for call in row.calls):
+                    failures.append(f"{at}: not a call the caller's reach row records")
+                if not pair.writes:
+                    failures.append(f"{at}: leads to no history write")
+                for write in pair.writes:
+                    owner, _sep, line = write.rpartition(":")
+                    target = rows.get(owner)
+                    if target is None or not any(str(held.line) == line for held in target.history):
+                        failures.append(f"{at}: write {write} is no history call of a reach row")
+                node = prints.get(pair.caller)
+                started = [run.line for run in node.runs] if node is not None else []
+                for line in pair.runs:
+                    if line not in started:
+                        failures.append(f"{at}: run {line} is not one of the caller's runs")
+                if not pair.runs and not pair.run_hole:
+                    failures.append(f"{at}: no run, and no reason given")
+                if not pair.row and not pair.row_why:
+                    failures.append(f"{at}: row not read, and no reason given")
+    return GateResult(
+        gate="history-pairs-resolve",
+        passed=not failures,
+        checked=read,
+        unit="branches",
+        question="does every history pair name writes and runs a dump-only reader finds?",
+        finding="a pair or a print whose history write or run is in no record, or a branch unread with no reason",
+        failures=failures[:50],
+        note=f"Unread, by reason: {dict(sorted(holes.items()))}.",
+    )
+
+
 def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     """(i) No dunder Python runs unasked -- ``__enter__``, ``__iter__``, ``__setstate__`` -- reaches a write.
 
@@ -2427,6 +2492,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(prints_are_counted(fragment))
     if any(branch.must_prints is not None or branch.must_hole for junction in fragment.junctions for branch in junction.branches):
         results.append(must_prints_resolve(fragment))
+    if any(branch.history is not None or branch.history_hole for junction in fragment.junctions for branch in junction.branches):
+        results.append(history_pairs_resolve(fragment))
     if fragment.reach_graph:
         results.append(reach_records_resolve(fragment))
         results.append(implicit_dunders_reach_no_write(fragment))

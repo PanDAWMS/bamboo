@@ -1,0 +1,890 @@
+"""Where a function's runs start, and the history rows written in the same pass as an arm.
+
+bamboo-68's questions 1 and 2 (h2-value-time-design.md §3-§4): for each arm of
+a job's or a task's junction, which calls write a history row in the same
+pass, and which run -- a logger bound with a key -- that pass is in.  A value
+the map sees set has no time of its own; a history row written in the same
+pass gives it one, and the run's mark says which lines of the log are that
+pass's.  Three records answer it, each read once, at build time:
+
+- :attr:`FunctionPrintsNode.runs`: where a run starts -- a logger bound by one
+  of PanDA's factories (:data:`BUILDERS`), its mark, and the column each hole
+  of the mark holds where a declaration says (:class:`RunStart`).  Each print
+  statement says which of them its logger can be (:attr:`PrintStatement.runs`).
+- :attr:`ReachNode.history`: each call of a history writer, and the values
+  the row it writes can record (:class:`HistoryCall`).  A history writer is a
+  function whose SQL inserts into a history table (:data:`HISTORY_TABLES`),
+  found by the map's reading of its statements, not by its name.
+- :attr:`Branch.history`: the pairs (:class:`HistoryPair`).
+
+**One pass.**  A call H and a point S of one function are in one pass when
+one reaches the other -- ``reaching(H, [S])`` or ``reaching(S, [H])`` -- with
+every logger the function binds by a factory and the header of every loop
+holding both as killers: a new run, or the next turn of a loop over jobs, is
+another row's pass.  H is a call whose closure writes a history row, followed
+through plain calls only.  A function handed on (``Thread(target=...)``,
+``submit``), a lambda's body and a thread's ``run`` are not followed, since
+what they write is not written in this pass; a function handed to one that
+calls it at once is left out with them.
+
+**Up from the arm.**  Level 0 is the arm's own function, the point its
+statement; level n+1 is each caller of a level-n function, the point each line
+it calls it from.  Callers are read off the reach record, plain calls only,
+classes ignored.  A way up stops at the first level with a pair, at a function
+nothing calls (the top of its pass: an entry, or a thread's ``run``), at depth
+:data:`MAX_DEPTH`, or once :data:`MAX_FUNCTIONS` functions are seen for the
+arm; the last two are said (:attr:`Branch.history_hole`).
+
+**Read in place only.**  Whether a history row is the arm's own
+(:attr:`HistoryPair.row`) is read where both are in one function: the writer
+handed an attribute of the object the arm writes, the object not bound again
+between the two.  An object followed through calls -- ``doGenerate``'s jobs
+handed back to ``runImpl`` and on to ``storeJobs`` -- is not read, nor the row
+an SQL arm lands on; each says why.
+"""
+
+from __future__ import annotations
+
+import ast
+import string
+from collections import defaultdict, deque
+from typing import Iterator, NamedTuple, Optional, Union
+
+from bamboo.codemap import calls as C
+from bamboo.codemap import reach
+from bamboo.codemap.models import (
+    HISTORY_AFTER,
+    HISTORY_BEFORE,
+    HISTORY_EITHER,
+    HISTORY_ROW_SAME,
+    RUN_KEY_TIME,
+    Branch,
+    HistoryCall,
+    HistoryPair,
+    JunctionNode,
+    MapFragment,
+    ReachCall,
+    RunKey,
+    RunStart,
+    SourceModule,
+)
+from bamboo.codemap.panda import mustprints, pathcond, sql, sqltext
+from bamboo.codemap.panda.reaching import reaching
+
+#: The tables PanDA keeps a subject's past values in, lower-cased, each with
+#: the subject it records: one row per change, stamped when it is written.
+HISTORY_TABLES: dict[str, str] = {
+    "jobs_statuslog": "JobSpec.jobStatus",
+    "tasks_statuslog": "JediTaskSpec.status",
+}
+
+
+class Builder(NamedTuple):
+    """Where a logger factory takes its mark from, and what it marks lines with when given none."""
+
+    #: The mark's position among the call's arguments.
+    position: int
+    keyword: str
+    #: For no argument: :data:`RUN_KEY_TIME` for a time stamp, ``""`` for no mark.
+    absent: str
+    #: For ``None`` given.
+    none: str
+
+
+#: PanDA's logger factories: a logger bound to one of these starts a run.
+BUILDERS: dict[str, Builder] = {
+    # pandacommon LogWrapper(log, prefix="", ...): a prefix of None is the time.
+    "LogWrapper": Builder(1, "prefix", "", RUN_KEY_TIME),
+    # pandajedi MsgWrapper(logger, token=None, ...): "<time>" for none.
+    "MsgWrapper": Builder(1, "token", RUN_KEY_TIME, RUN_KEY_TIME),
+    # DBProxy.create_tagged_logger(comment, tag=None): "method < tag >", the time for none.
+    "create_tagged_logger": Builder(1, "tag", RUN_KEY_TIME, RUN_KEY_TIME),
+    # pandacommon make_logger(tmp_log, token=None, ...): "method <token>", "method :" for none.
+    "make_logger": Builder(1, "token", "", ""),
+}
+
+MAX_DEPTH = 6
+MAX_FUNCTIONS = 400
+
+HISTORY_NOT_RECORDED = "not read: no history table records {cls}"
+HISTORY_NO_FUNCTION = "the arm's function is not a row of the reach record"
+HISTORY_DEPTH = f"a way up reached depth {MAX_DEPTH} with no pair"
+HISTORY_WIDE = f"the walk up met {MAX_FUNCTIONS} functions and went no further"
+
+ROW_ARM_BELOW = "the arm is in a function this one calls: its object is not followed out of the call"
+ROW_WRITER_BELOW = (
+    "the history row is written in a function this one calls:"
+    " the object is not followed into it"
+)
+ROW_NOT_ATTRIBUTE = (
+    "the arm does not write the subject as an attribute of an object:"
+    " the row an SQL statement lands on is not read"
+)
+ROW_NO_KEY = "the writer is handed no key this reading finds"
+ROW_NOT_A_NAME = "the object or the key is not a name or attributes on one"
+ROW_REBOUND = "the object can be bound again between the arm and the call"
+
+RUN_NO_PRINTS = "the function prints nothing, so its runs are not recorded"
+RUN_NONE = (
+    "no logger a factory builds here holds the point, and the class binds none to self"
+)
+RUN_OBJECT_REBOUND = (
+    "the logger {logger} its class binds in __init__ is bound again in {where}"
+)
+
+KEY_PARAMETER = "a parameter: what the caller passes is not followed"
+KEY_LOCAL = "a local name: what it is bound to is not followed"
+KEY_NOT_ATTRIBUTE = "not an attribute of a name"
+KEY_UNDECLARED = "the class of {name} is not declared"
+KEY_SEVERAL = "{name} is declared as several classes: {classes}"
+KEY_FAILED = "reading the declaration of {name} failed: {error}"
+
+VALUES_NO_STATEMENT = "no statement of the function holds the call's line"
+
+_LOOPS = (ast.For, ast.AsyncFor, ast.While)
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+#: Calls that hand a value on unchanged as far as a key is concerned: ``str(pandaID)``.
+_CONVERSIONS = frozenset({"str", "int", "repr"})
+
+_Piece = Union[str, ast.expr]
+
+
+class _Bound(NamedTuple):
+    """A statement binding a name or ``self.<attr>`` to a logger a factory builds."""
+
+    statement: ast.stmt
+    target: ast.expr
+    call: ast.Call
+    builder: str
+
+
+def attach(
+    fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
+) -> tuple[int, int, int]:
+    """Read the runs, the history calls and the pairs into *fragment*'s nodes and branches.
+
+    Returns how many functions have a run, how many history calls there are,
+    and how many branches have a pair.
+    """
+    reader = _Reader(fragment, modules, calls)
+    return reader.attach_runs(), reader.attach_history_calls(), reader.attach_pairs()
+
+
+def history_writers(functions: list[tuple[str, ast.AST, str]]) -> dict[str, str]:
+    """``owner -> subject`` for every function whose SQL inserts a row into a history table."""
+    found: dict[str, str] = {}
+    for _file, func, owner in functions:
+        for run in sql.executions(func):  # type: ignore[arg-type]
+            for table in sqltext.creates(run.reading):
+                subject = HISTORY_TABLES.get(table.rpartition(".")[2].lower())
+                if subject is not None:
+                    found[owner] = subject
+    return found
+
+
+class _Reader:
+    def __init__(
+        self, fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
+    ):
+        self.fragment = fragment
+        self.calls = calls
+        self.types = calls.types
+        self.trees = {module.rel_path: module.tree for module in modules}
+        self.names = reach._Names(calls.types)
+        self.funcs: dict[str, tuple[str, ast.AST]] = {
+            owner: (file, func) for file, func, owner in self.names.functions
+        }
+        self.rows = {row.owner: row for row in fragment.reach_graph}
+        self.prints = {node.owner: node for node in fragment.function_prints}
+        self.writers = history_writers(self.names.functions)
+        self._built: dict[int, list[_Bound]] = {}
+        self._objects: dict[int, tuple[list[RunStart], str]] = {}
+        self._runs: dict[str, list[RunStart]] = {}
+        self._kills: dict[int, list[ast.stmt]] = {}
+        # Plain calls only, as one pass follows them.
+        self.callers: dict[str, dict[str, list[int]]] = defaultdict(dict)
+        for row in fragment.reach_graph:
+            for call in row.calls:
+                if call.how == "call" and not call.thread:
+                    lines = self.callers[call.to].setdefault(row.owner, [])
+                    for line in call.lines or [call.line]:
+                        if line not in lines:
+                            lines.append(line)
+        self.below: dict[str, set[str]] = {}
+        self.subject_of: dict[str, str] = {}
+
+    # -- runs ----------------------------------------------------------------- #
+
+    def attach_runs(self) -> int:
+        """Every printing function's runs, and each print statement's."""
+        found = 0
+        for node in self.fragment.function_prints:
+            node.runs = []
+            for statement in node.statements:
+                statement.runs = []
+            held = self.funcs.get(node.owner)
+            if held is None:
+                continue
+            file, func = held
+            node.runs = self.runs_of(node.owner)
+            found += bool(node.runs)
+            for statement in node.statements:
+                site = mustprints._statement_at(func, statement.line)
+                if site is not None:
+                    statement.runs = self._printed_through(
+                        file, func, site, statement.level, node.runs
+                    )
+        return found
+
+    def runs_of(self, owner: str) -> list[RunStart]:
+        """The runs *owner*'s lines can be in: its own, then its object's."""
+        if owner not in self._runs:
+            file, func = self.funcs[owner]
+            own = [
+                self._run_start(bound, owner, file, func, False)
+                for bound in self.built(func)
+                if isinstance(bound.target, ast.Name)
+            ]
+            self._runs[owner] = own + self._object_runs(file, func)[0]
+        return self._runs[owner]
+
+    def built(self, func: ast.AST) -> list[_Bound]:
+        """Every statement of *func* itself binding one target to a factory's logger, in source order."""
+        key = id(func)
+        if key not in self._built:
+            found = []
+            for node in _own_nodes(func):
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    target, value = node.targets[0], node.value
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    target, value = node.target, node.value
+                else:
+                    continue
+                if (
+                    isinstance(value, ast.Call)
+                    and _called(value) in BUILDERS
+                    and (isinstance(target, ast.Name) or _on_self(target))
+                ):
+                    found.append(_Bound(node, target, value, _called(value)))
+            self._built[key] = sorted(found, key=lambda one: one.statement.lineno)
+        return self._built[key]
+
+    def _object_runs(self, file: str, func: ast.AST) -> tuple[list[RunStart], str]:
+        """The loggers *func*'s class binds to ``self`` in its ``__init__``, and why one is left out."""
+        owned = self.types.method_class(file, func)
+        if owned is None:
+            return [], ""
+        key = id(owned[1])
+        if key not in self._objects:
+            runs: list[RunStart] = []
+            why = ""
+            found = self.types.method(owned[0], owned[1], "__init__")
+            if found is not None:
+                where, init = found
+                for bound in self.built(init):
+                    if not _on_self(bound.target):
+                        continue
+                    attribute = bound.target.attr  # type: ignore[attr-defined]
+                    again = self._bound_again(owned, attribute, bound.statement)
+                    if again:
+                        why = RUN_OBJECT_REBOUND.format(
+                            logger=f"self.{attribute}", where=again
+                        )
+                        continue
+                    runs.append(
+                        self._run_start(
+                            bound, self.names.of(init) or "", where, init, True
+                        )
+                    )
+            self._objects[key] = (runs, why)
+        return self._objects[key]
+
+    def _bound_again(
+        self, owned: tuple[str, ast.ClassDef], attribute: str, kept: ast.stmt
+    ) -> str:
+        """Where else ``self.<attribute>`` is stored, in any class ``self`` can be or a base of one; ``""`` for nowhere."""
+        seen: set[int] = set()
+        for one in self.calls.objects_of(owned):
+            for where, holder in self.types.lineage(one[0], one[1]):
+                if id(holder) in seen:
+                    continue
+                seen.add(id(holder))
+                for node in ast.walk(holder):
+                    if (
+                        isinstance(node, ast.Attribute)
+                        and isinstance(node.ctx, ast.Store)
+                        and node.attr == attribute
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == "self"
+                        and mustprints._statement_of(node) is not kept
+                    ):
+                        method = _enclosing_function(node)
+                        return f"{where}::{holder.name}.{getattr(method, 'name', '?')}"
+        return ""
+
+    def _run_start(
+        self, bound: _Bound, at: str, file: str, func: ast.AST, is_object: bool
+    ) -> RunStart:
+        spec = BUILDERS[bound.builder]
+        given, expression = _given(bound.call, spec)
+        common = {
+            "line": bound.statement.lineno,
+            "at": at,
+            "logger": ast.unparse(bound.target),
+            "builder": bound.builder,
+            "object": is_object,
+        }
+        if not given or (
+            isinstance(expression, ast.Constant) and expression.value is None
+        ):
+            stamp = spec.none if given else spec.absent
+            key = [RunKey(expression="", column=RUN_KEY_TIME)] if stamp else []
+            return RunStart(**common, mark="", key=key)
+        pieces = _pieces(expression, func)  # type: ignore[arg-type]
+        mark = "".join(piece if isinstance(piece, str) else "{}" for piece in pieces)
+        key = [
+            self._key(piece, file, func)
+            for piece in pieces
+            if not isinstance(piece, str)
+        ]
+        return RunStart(**common, mark=mark, key=key)
+
+    def _key(self, expression: ast.expr, file: str, func: ast.AST) -> RunKey:
+        """The column one hole of a mark holds: ``JediTaskSpec.jediTaskID`` for ``taskSpec.jediTaskID`` declared so."""
+        spelled = ast.unparse(expression)
+        inner = expression
+        while (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id in _CONVERSIONS
+            and len(inner.args) == 1
+            and not inner.keywords
+        ):
+            inner = inner.args[0]
+        if isinstance(inner, ast.Name):
+            why = KEY_PARAMETER if _is_parameter(func, inner.id) else KEY_LOCAL
+            return RunKey(expression=spelled, why=why)
+        if not isinstance(inner, ast.Attribute):
+            return RunKey(expression=spelled, why=KEY_NOT_ATTRIBUTE)
+        owner = inner.value
+        name = ast.unparse(owner)
+        try:
+            if isinstance(owner, ast.Name) and owner.id == "self":
+                held = self.types.method_class(file, func)
+                declared = frozenset({held}) if held is not None else None
+            else:
+                declared = self.types.declared(file, func, owner)
+        except Exception as error:  # noqa: BLE001 -- a key unread, not the build's end
+            return RunKey(
+                expression=spelled,
+                why=KEY_FAILED.format(name=name, error=type(error).__name__),
+            )
+        if not declared:
+            return RunKey(expression=spelled, why=KEY_UNDECLARED.format(name=name))
+        classes = sorted({cls.name for _where, cls in declared})
+        if len(classes) > 1:
+            return RunKey(
+                expression=spelled,
+                why=KEY_SEVERAL.format(name=name, classes=", ".join(classes)),
+            )
+        return RunKey(expression=spelled, column=f"{classes[0]}.{inner.attr}")
+
+    def _printed_through(
+        self, file: str, func: ast.AST, site: ast.stmt, level: str, runs: list[RunStart]
+    ) -> list[int]:
+        """The lines of *runs* whose logger the logging call at *site* can be made on."""
+        call = next(
+            (
+                node
+                for node in ast.walk(site)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == level
+            ),
+            None,
+        )
+        if call is None:
+            return []
+        receiver = call.func.value  # type: ignore[attr-defined]
+        if _on_self(receiver):
+            spelled = ast.unparse(receiver)
+            return [run.line for run in runs if run.object and run.logger == spelled]
+        if not isinstance(receiver, ast.Name):
+            return []
+        return self._holding(func, site, receiver.id)
+
+    def _holding(
+        self, func: ast.AST, site: ast.AST, name: Optional[str] = None
+    ) -> list[int]:
+        """The lines of *func*'s own runs (of the logger *name*, else of every one) whose binding reaches *site*."""
+        by_name: dict[str, list[ast.stmt]] = defaultdict(list)
+        for bound in self.built(func):
+            if isinstance(bound.target, ast.Name) and (
+                name is None or bound.target.id == name
+            ):
+                by_name[bound.target.id].append(bound.statement)
+        lines: list[int] = []
+        for held, sites in by_name.items():
+            killers = [
+                one
+                for binding in pathcond.bindings(func, held)
+                if not binding.nested
+                and (one := _site_statement(binding.site)) is not None
+                and not any(one is site_ for site_ in sites)
+            ]
+            lines.extend(found.lineno for found in reaching(site, sites, killers))  # type: ignore[attr-defined]
+        return sorted(set(lines))
+
+    # -- history calls -------------------------------------------------------- #
+
+    def attach_history_calls(self) -> int:
+        """Each call of a history writer, on the caller's reach row, with the values its row can record."""
+        arms: dict[tuple[str, str], list[tuple[ast.stmt, str]]] = defaultdict(list)
+        for junction in self.fragment.junctions:
+            if junction.subject not in HISTORY_TABLES.values():
+                continue
+            for branch in junction.branches:
+                sites = mustprints._sites(junction, branch, self.trees)
+                if isinstance(sites, str):
+                    continue
+                for site in sites:
+                    owner = self.names.of(site.func)
+                    if owner is not None:
+                        arms[(owner, junction.subject)].append(
+                            (site.statement, branch.outcome)
+                        )
+        count = 0
+        for row in self.fragment.reach_graph:
+            row.history = []
+            lines: dict[int, str] = {}
+            for call in row.calls:
+                if call.how == "call" and not call.thread and call.to in self.writers:
+                    for line in call.lines or [call.line]:
+                        lines.setdefault(line, self.writers[call.to])
+            if not lines or row.owner not in self.funcs:
+                continue
+            _file, func = self.funcs[row.owner]
+            for line, subject in sorted(lines.items()):
+                row.history.append(
+                    self._values(
+                        func, line, subject, arms.get((row.owner, subject), [])
+                    )
+                )
+                self.subject_of[f"{row.owner}:{line}"] = subject
+            count += len(row.history)
+        # What each function's closure can write, through plain calls: its own
+        # history calls and every one below.
+        below: dict[str, set[str]] = defaultdict(set)
+        pending: deque[str] = deque()
+        for row in self.fragment.reach_graph:
+            if row.history:
+                below[row.owner] = {f"{row.owner}:{held.line}" for held in row.history}
+                pending.append(row.owner)
+        while pending:
+            owner = pending.popleft()
+            for caller in self.callers.get(owner, {}):
+                if not below[owner] <= below[caller]:
+                    below[caller] |= below[owner]
+                    pending.append(caller)
+        self.below = dict(below)
+        return count
+
+    def _values(
+        self, func: ast.AST, line: int, subject: str, arms: list[tuple[ast.stmt, str]]
+    ) -> HistoryCall:
+        site = mustprints._statement_at(func, line)
+        if site is None:
+            return HistoryCall(line=line, subject=subject, hole=VALUES_NO_STATEMENT)
+        statements: list[ast.stmt] = []
+        for statement, _outcome in arms:
+            if not any(statement is held for held in statements):
+                statements.append(statement)
+        entry = func.args  # type: ignore[attr-defined]
+        reached = reaching(site, [*statements, entry])
+        values = sorted(
+            {
+                outcome
+                for statement, outcome in arms
+                if any(statement is one for one in reached)
+            }
+        )
+        return HistoryCall(
+            line=line,
+            subject=subject,
+            values=values,
+            passed=any(one is entry for one in reached),
+        )
+
+    # -- pairs ---------------------------------------------------------------- #
+
+    def attach_pairs(self) -> int:
+        """Every branch's history pairs, or why it has none."""
+        recorded = sorted(
+            {subject.rpartition(".")[0] for subject in HISTORY_TABLES.values()}
+        )
+        found = 0
+        for junction in self.fragment.junctions:
+            cls = junction.subject.rpartition(".")[0]
+            for branch in junction.branches:
+                branch.history = None
+                branch.history_hole = ""
+                if cls not in recorded:
+                    branch.history_hole = HISTORY_NOT_RECORDED.format(cls=cls)
+                    continue
+                self._pair(junction, branch)
+                found += bool(branch.history)
+        return found
+
+    def _pair(self, junction: JunctionNode, branch: Branch) -> None:
+        sites = mustprints._sites(junction, branch, self.trees)
+        if isinstance(sites, str):
+            branch.history_hole = sites
+            return
+        pairs: dict[tuple[int, str, int, int], HistoryPair] = {}
+        holes: list[str] = []
+        for site in sites:
+            owner = self.names.of(site.func)
+            if owner is None or owner not in self.rows:
+                branch.history_hole = HISTORY_NO_FUNCTION
+                return
+            written = mustprints._written_object(site.statement, junction.subject)
+            seen = {owner}
+            frontier: deque[tuple[str, ast.AST, ast.stmt, int]] = deque(
+                [(owner, site.func, site.statement, 0)]
+            )
+            while frontier:
+                here, func, point, level = frontier.popleft()
+                found = self._pairs_at(
+                    here, func, point, level, junction.subject, written
+                )
+                if found:
+                    for pair in found:
+                        pairs.setdefault(
+                            (pair.level, pair.caller, pair.point, pair.call), pair
+                        )
+                    continue
+                if level >= MAX_DEPTH:
+                    if HISTORY_DEPTH not in holes:
+                        holes.append(HISTORY_DEPTH)
+                    continue
+                for caller, lines in self.callers.get(here, {}).items():
+                    if caller in seen:
+                        continue
+                    if len(seen) >= MAX_FUNCTIONS:
+                        if HISTORY_WIDE not in holes:
+                            holes.append(HISTORY_WIDE)
+                        continue
+                    seen.add(caller)
+                    held = self.funcs.get(caller)
+                    if held is None:
+                        continue
+                    for line in lines:
+                        up = mustprints._statement_at(held[1], line)
+                        if up is not None:
+                            frontier.append((caller, held[1], up, level + 1))
+        branch.history = sorted(
+            pairs.values(), key=lambda one: (one.level, one.caller, one.point, one.call)
+        )
+        branch.history_hole = "; ".join(holes)
+
+    def _pairs_at(
+        self,
+        owner: str,
+        func: ast.AST,
+        point: ast.stmt,
+        level: int,
+        subject: str,
+        written: Optional[ast.expr],
+    ) -> list[HistoryPair]:
+        """The calls of *owner* that lead to a history row in one pass with *point*."""
+        row = self.rows.get(owner)
+        if row is None:
+            return []
+        candidates: dict[int, list[ReachCall]] = {}
+        for call in row.calls:
+            if call.how != "call" or call.thread:
+                continue
+            if call.to in self.writers or self.below.get(call.to):
+                for line in call.lines or [call.line]:
+                    candidates.setdefault(line, []).append(call)
+        if not candidates:
+            return []
+        if id(func) not in self._kills:
+            self._kills[id(func)] = [bound.statement for bound in self.built(func)]
+        kills = self._kills[id(func)]
+        around = _loops(point, func)
+        pairs: list[HistoryPair] = []
+        for line, through in sorted(candidates.items()):
+            site = mustprints._statement_at(func, line)
+            if site is None or site is point:
+                continue
+            both = [
+                loop
+                for loop in _loops(site, func)
+                if any(loop is one for one in around)
+            ]
+            killers = [*kills, *both]
+            after = bool(reaching(site, [point], killers))
+            before = bool(reaching(point, [site], killers))
+            if not (after or before):
+                continue
+            writes: set[str] = set()
+            for call in through:
+                writes |= (
+                    {f"{owner}:{line}"}
+                    if call.to in self.writers
+                    else self.below.get(call.to, set())
+                )
+            row_said, row_why = self._row(
+                level, func, point, site, line, through, subject, written
+            )
+            runs, run_hole = self._runs_at(owner, func, point)
+            pairs.append(
+                HistoryPair(
+                    level=level,
+                    caller=owner,
+                    point=point.lineno,
+                    call=line,
+                    callee=through[0].callee,
+                    order=HISTORY_EITHER
+                    if after and before
+                    else HISTORY_AFTER
+                    if after
+                    else HISTORY_BEFORE,
+                    history=sorted(
+                        {
+                            self.subject_of[write]
+                            for write in writes
+                            if write in self.subject_of
+                        }
+                    ),
+                    writes=sorted(writes),
+                    row=row_said,
+                    row_why=row_why,
+                    runs=runs,
+                    run_hole=run_hole,
+                )
+            )
+        return pairs
+
+    def _row(
+        self,
+        level: int,
+        func: ast.AST,
+        point: ast.stmt,
+        site: ast.stmt,
+        line: int,
+        through: list[ReachCall],
+        subject: str,
+        written: Optional[ast.expr],
+    ) -> tuple[str, str]:
+        """Whether the history row is the arm's row, read in place: ``(row, why)``."""
+        if level > 0:
+            return "", ROW_ARM_BELOW
+        direct = [call for call in through if call.to in self.writers]
+        if not direct:
+            return "", ROW_WRITER_BELOW
+        if written is None:
+            return "", ROW_NOT_ATTRIBUTE
+        named = self.rows[direct[0].to].function if direct[0].to in self.rows else ""
+        call = next(
+            (
+                node
+                for node in ast.walk(site)
+                if isinstance(node, ast.Call)
+                and node.lineno == line
+                and _called(node) == named
+            ),
+            None,
+        )
+        first = call.args[0] if call is not None and call.args else None
+        if first is None or isinstance(first, ast.Starred):
+            return "", ROW_NO_KEY
+        root, base = _root(written), _root(first)
+        if not (isinstance(root, ast.Name) and isinstance(base, ast.Name)):
+            return "", ROW_NOT_A_NAME
+        recorded = self.writers[direct[0].to].rpartition(".")[0]
+        if root.id != base.id or recorded != subject.rpartition(".")[0]:
+            return f"another: {ast.unparse(first)}", ""
+        sites: list[ast.AST] = [func.args]  # type: ignore[attr-defined]
+        for binding in pathcond.bindings(func, root.id):
+            if (
+                not binding.nested
+                and (one := _site_statement(binding.site)) is not None
+            ):
+                sites.append(one)
+        if reaching(point, sites) == reaching(site, sites):
+            return HISTORY_ROW_SAME, ""
+        return "", ROW_REBOUND
+
+    def _runs_at(
+        self, owner: str, func: ast.AST, point: ast.stmt
+    ) -> tuple[list[int], str]:
+        """The caller's runs the point is in: its own loggers holding it, else its object's."""
+        if owner not in self.prints:
+            return [], RUN_NO_PRINTS
+        held = self._holding(func, point)
+        if held:
+            return held, ""
+        file = self.funcs[owner][0]
+        objects, why = self._object_runs(file, func)
+        if objects:
+            return sorted(run.line for run in objects), ""
+        return [], why or RUN_NONE
+
+
+# -- syntax ------------------------------------------------------------------- #
+
+
+def _called(call: ast.Call) -> str:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return ""
+
+
+def _on_self(node: ast.expr) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    )
+
+
+def _own_nodes(func: ast.AST) -> Iterator[ast.AST]:
+    """The nodes of *func* outside the functions, lambdas and classes it holds."""
+    pending = list(ast.iter_child_nodes(func))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, _SCOPES):
+            continue
+        yield node
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def _enclosing_function(node: ast.AST) -> Optional[ast.AST]:
+    for held in pathcond.ancestors(node):
+        if isinstance(held, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return held
+    return None
+
+
+def _site_statement(site: ast.AST) -> Optional[ast.AST]:
+    """A binding's site as :func:`reaching` takes it: a statement, or an ``except ... as``."""
+    if isinstance(site, (ast.stmt, ast.ExceptHandler)):
+        return site
+    return mustprints._statement_of(site)
+
+
+def _loops(node: ast.AST, func: ast.AST) -> list[ast.AST]:
+    """The loops of *func* holding *node*."""
+    held = []
+    for one in pathcond.ancestors(node):
+        if one is func:
+            break
+        if isinstance(one, _LOOPS):
+            held.append(one)
+    return held
+
+
+def _root(node: ast.expr) -> ast.expr:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node
+
+
+def _is_parameter(func: ast.AST, name: str) -> bool:
+    arguments = getattr(func, "args", None)
+    if arguments is None:
+        return False
+    held = [
+        *arguments.posonlyargs,
+        *arguments.args,
+        *arguments.kwonlyargs,
+        arguments.vararg,
+        arguments.kwarg,
+    ]
+    return any(one is not None and one.arg == name for one in held)
+
+
+def _given(call: ast.Call, spec: Builder) -> tuple[bool, Optional[ast.expr]]:
+    """Whether the factory call is given its mark, and the expression it is given."""
+    for keyword in call.keywords:
+        if keyword.arg == spec.keyword:
+            return True, keyword.value
+    leading = call.args[: spec.position + 1]
+    if len(call.args) > spec.position and not any(
+        isinstance(one, ast.Starred) for one in leading
+    ):
+        return True, call.args[spec.position]
+    return False, None
+
+
+def _pieces(expression: ast.expr, func: ast.AST, depth: int = 0) -> list[_Piece]:
+    """*expression* as text and holes: literal parts as strings, every other part as its expression.
+
+    Read through an f-string, ``+``, ``"...".format(...)`` and a local bound
+    once; any other expression is one hole.
+    """
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return [expression.value]
+    if isinstance(expression, ast.JoinedStr):
+        out: list[_Piece] = []
+        for part in expression.values:
+            if isinstance(part, ast.Constant):
+                out.append(str(part.value))
+            elif isinstance(part, ast.FormattedValue):
+                out.append(part.value)
+        return out
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+        return _pieces(expression.left, func, depth) + _pieces(
+            expression.right, func, depth
+        )
+    if (
+        isinstance(expression, ast.Call)
+        and isinstance(expression.func, ast.Attribute)
+        and expression.func.attr == "format"
+        and isinstance(expression.func.value, ast.Constant)
+        and isinstance(expression.func.value.value, str)
+        and not expression.keywords
+        and not any(isinstance(one, ast.Starred) for one in expression.args)
+    ):
+        formatted = _formatted(expression.func.value.value, expression.args)
+        if formatted is not None:
+            return formatted
+    if (
+        isinstance(expression, ast.Name)
+        and depth < 2
+        and isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ):
+        bound = pathcond.single_definition(func, expression.id)
+        if bound is not None and not _is_parameter(func, expression.id):
+            return _pieces(bound, func, depth + 1)
+    return [expression]
+
+
+def _formatted(template: str, args: list[ast.expr]) -> Optional[list[_Piece]]:
+    """``"<jediTaskID={0}>".format(x)`` as pieces; ``None`` for a field this reading does not place."""
+    out: list[_Piece] = []
+    automatic = 0
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError:
+        return None
+    for literal, field, _spec, _conversion in parsed:
+        if literal:
+            out.append(literal)
+        if field is None:
+            continue
+        if field == "":
+            index = automatic
+            automatic += 1
+        elif field.isdigit():
+            index = int(field)
+        else:
+            return None
+        if index >= len(args):
+            return None
+        out.append(args[index])
+    return out

@@ -182,9 +182,10 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "count",
         "statements",
         "log_files",
+        "runs",
     ),
-    # ``calls``, ``database`` and ``holes`` hold lines, as ``statements`` does
-    # above: between two builds of one tree they do not move.
+    # ``calls``, ``database``, ``holes`` and ``history`` hold lines, as
+    # ``statements`` does above: between two builds of one tree they do not move.
     NodeType.REACH.value: (
         "cls",
         "function",
@@ -193,6 +194,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "database",
         "holes",
         "settled",
+        "history",
     ),
 }
 
@@ -269,6 +271,8 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "must_prints",
     "must_names",
     "must_hole",
+    "history",
+    "history_hole",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",

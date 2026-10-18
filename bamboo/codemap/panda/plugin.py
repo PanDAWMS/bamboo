@@ -39,7 +39,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     pooled_frames,
 )
-from bamboo.codemap.panda import mustprints, promotion, sql, sqltext
+from bamboo.codemap.panda import mustprints, promotion, runs, sql, sqltext
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
@@ -666,6 +666,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             fragment.junctions, fragment.function_prints, self._modules, self._declarations
         )
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
+        # Where each function's runs start, what each call of a history writer
+        # can record, and the calls that write a history row in the same pass
+        # as an arm: what gives a value the map sees set a time, and the log
+        # lines of the run it was set in.
+        if self._calls is not None:
+            started, recorded, paired = runs.attach(fragment, self._modules, self._calls)
+            logger.info(
+                "PandaCodeMapPlugin: %d function(s) start a run, %d history call(s), %d branch(es) with a history pair",
+                started,
+                recorded,
+                paired,
+            )
 
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "

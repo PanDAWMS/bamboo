@@ -422,6 +422,90 @@ class MustName(BaseModel):
     why: str = Field(default="", description="Why the hole is not known to hold the written row's column.")
 
 
+#: :attr:`HistoryPair.row` where the history row is the arm's row: the writer
+#: is handed an attribute of the object the arm writes, bound alike at both.
+HISTORY_ROW_SAME = "same"
+#: :attr:`HistoryPair.order`: where the history call runs from the point.
+HISTORY_AFTER = "after"
+HISTORY_BEFORE = "before"
+HISTORY_EITHER = "either"
+
+
+class HistoryPair(BaseModel):
+    """A call that writes a history row in the same pass of a function as an arm.
+
+    The question is bamboo-68's (h2-value-time-design.md §3): a value the map
+    sees set has no time of its own, and PanDA keeps a job's and a task's
+    past statuses in tables of their own -- ``jobs_StatusLog``,
+    ``TASKS_STATUSLOG``, one row per change, stamped when it was written.  A
+    history row written in the same pass as the arm gives the arm a time,
+    and the run that pass is in -- a logger bound with a key -- says which
+    lines of the log are that pass's.
+
+    ``level`` 0 is the arm's own function and ``point`` the arm's line; level
+    n+1 is a caller of a level-n function and ``point`` the line of its call
+    on the way to the arm.  The call at ``call`` is in one pass with the
+    point: one runs after the other with no run started between them and no
+    turn of a loop holding both, read by
+    :func:`~bamboo.codemap.panda.reaching.reaching`.  The walk up stops on
+    each way at the first level with a pair.
+
+    **Reachable, not taken.**  A call made on some paths only --
+    ``updateTask_JEDI`` records a task's status only when it changed -- pairs
+    as if made on every path, and a function running one of several actions
+    per pass pairs each action's arms with the others' history calls.
+    ``writes`` names every history write the call can lead to, not the one it
+    made.  Whether the row is the arm's own is read in place only (``row``):
+    where the history row is written through calls, or the arm is an SQL
+    statement, it is not read, with why.
+    """
+
+    level: int = Field(description="0 for the arm's own function; n+1 for a caller of a level-n one.")
+    caller: str = Field(description="The function the point and the call are in: a :attr:`ReachNode.owner`.")
+    point: int = Field(description="The arm's line at level 0; else the line of the call on the way to the arm.")
+    call: int = Field(description="The line of the call that leads to a history row.")
+    callee: str = Field(description="The called expression, as source, cut at 80 characters.")
+    order: str = Field(
+        description=(
+            f"{HISTORY_AFTER!r}, {HISTORY_BEFORE!r} or {HISTORY_EITHER!r}: "
+            "whether the call runs after the point, before it, or either, in the pass."
+        )
+    )
+    history: list[str] = Field(
+        default_factory=list,
+        description="The subjects whose history the call can write: ``JobSpec.jobStatus``, ``JediTaskSpec.status``.",
+    )
+    writes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``owner:line`` of each history write the call can lead to: a "
+            ":class:`HistoryCall` on that owner's :class:`ReachNode`, which "
+            "holds the values its row can record.  The call itself where it "
+            "is the writer's."
+        ),
+    )
+    row: str = Field(
+        default="",
+        description=(
+            f"{HISTORY_ROW_SAME!r}; ``another: <expression>`` where the writer "
+            "is handed its key as another expression than the arm's object -- "
+            "``tmpJob.PandaID`` where the arm writes ``job``, or a job's "
+            "``job.jediTaskID`` for the task's history -- whose row is not "
+            "read: ``archiveJob`` appends ``job`` to the list ``tmpJob`` runs "
+            "over, so that row can be the arm's.  Empty with ``row_why``."
+        ),
+    )
+    row_why: str = Field(default="", description="Why ``row`` is empty.")
+    runs: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the caller's runs (:attr:`FunctionPrintsNode.runs`) "
+            "the point is in.  Empty with ``run_hole``."
+        ),
+    )
+    run_hole: str = Field(default="", description="Why ``runs`` is empty.")
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -589,6 +673,23 @@ class Branch(BaseModel):
     must_hole: str = Field(
         default="",
         description="Why ``must_prints`` or ``must_names`` is ``None``.",
+    )
+    history: Optional[list[HistoryPair]] = Field(
+        default=None,
+        description=(
+            "The calls that write a history row in the same pass as this "
+            "branch's write, at its function or at the first caller on each "
+            "way up that has one -- see :mod:`bamboo.codemap.panda.runs`.  "
+            "``[]`` when read and none is; ``None`` when not read, with "
+            "``history_hole``: a subject no history table records."
+        ),
+    )
+    history_hole: str = Field(
+        default="",
+        description=(
+            "Why ``history`` is ``None``; beside a list, where the walk up "
+            "stopped short of an end, so the list may hold less than every pair."
+        ),
     )
 
 
@@ -3963,6 +4064,68 @@ class PrintStatement(BaseModel):
             f"{LOG_FILES_PARTLY!r} or {LOG_FILES_OF_MODULE!r}."
         ),
     )
+    runs: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the owner's runs (:attr:`FunctionPrintsNode.runs`) "
+            "whose logger this call can print through.  Empty where its "
+            "logger is none of them -- a parameter, the module's logger -- "
+            "and then the rows' ``prefix_hole`` says how it is bound."
+        ),
+    )
+
+
+#: :attr:`RunKey.column` for a mark the logger stamps with the time it was made.
+RUN_KEY_TIME = "time"
+
+
+class RunKey(BaseModel):
+    """One hole of a run's mark, and the column it holds where a declaration says."""
+
+    expression: str = Field(description="What fills the hole, as source; empty for a time stamp.")
+    column: str = Field(
+        default="",
+        description=(
+            "``Class.attribute`` where the expression is an attribute of a "
+            f"name declared as one class; {RUN_KEY_TIME!r} for a time stamp; "
+            "else empty with ``why``."
+        ),
+    )
+    why: str = Field(default="", description="Why ``column`` is empty.")
+
+
+class RunStart(BaseModel):
+    """Where a run starts: a logger bound with the mark every line printed through it carries.
+
+    ``tmpLog = MsgWrapper(logger, f"<jediTaskID={taskSpec.jediTaskID}>")``
+    starts one.  The lines printed through ``tmpLog`` until it is bound again
+    are that run's, and the mark says which task they are about -- the key a
+    reader picks one run's lines out of a log by.  The builders, and which
+    argument each takes its mark from, are PanDA's logger factories
+    (:data:`bamboo.codemap.panda.runs.BUILDERS`).  An object's run is a
+    logger the class's ``__init__`` binds to ``self`` -- ``Watcher`` and
+    ``AdderGen`` keep one per job -- and holds the lines of every method.
+    """
+
+    line: int = Field(description="The line of the statement that binds the logger.")
+    at: str = Field(
+        description=(
+            "The function that statement is in: the owner itself, or the "
+            "class's ``__init__`` for an object's run."
+        )
+    )
+    logger: str = Field(description="The name bound: ``tmpLog``, ``self.logger``.")
+    builder: str = Field(description="The factory called: ``LogWrapper``, ``MsgWrapper``, ``create_tagged_logger``, ``make_logger``.")
+    mark: str = Field(
+        default="",
+        description=(
+            "The argument the mark is made from, holes as ``{}``: "
+            "``<jediTaskID={}>``, ``PandaID={}``.  Empty for none and for a "
+            "time stamp."
+        ),
+    )
+    key: list[RunKey] = Field(default_factory=list, description="One per hole of the mark, in order; a time stamp's one.")
+    object: bool = Field(default=False, description="Whether it is an object's run, bound to ``self`` in ``__init__``.")
 
 
 class FunctionPrintsNode(BaseNode):
@@ -4033,6 +4196,13 @@ class FunctionPrintsNode(BaseNode):
         description=(
             "Every file one of the function's statements lands in: the union "
             "of the statements' ``log_files``."
+        ),
+    )
+    runs: list[RunStart] = Field(
+        default_factory=list,
+        description=(
+            "The runs the function's lines can be in: each logger it binds by "
+            "a factory, and its object's run -- see :class:`RunStart`."
         ),
     )
     anchor: Optional[Anchor] = None
@@ -4118,6 +4288,26 @@ class ReachHole(BaseModel):
     )
 
 
+class HistoryCall(BaseModel):
+    """A call of a history writer, and the values the row it writes can record.
+
+    Read once per call: every :class:`HistoryPair` whose call can lead here
+    names it in ``writes``.  ``values`` are the outcomes of the function's
+    arms of ``subject`` whose write can reach the call; ``passed`` is a way
+    to the call on which no such arm writes, so the row can record the value
+    the object came in with or was given elsewhere.  ``TASKS_STATUSLOG``
+    copies the task row's status as it stands (``INSERT ... SELECT``), and a
+    task arm written by SQL has the line of the statement that decides it,
+    not of the execute: there the values are as near as the arms' lines are.
+    """
+
+    line: int = Field(description="The call's line.")
+    subject: str = Field(description="The subject whose history the writer records: ``JobSpec.jobStatus``.")
+    values: list[str] = Field(default_factory=list, description="The outcomes of the arms that reach the call, sorted.")
+    passed: bool = Field(default=False, description="Whether a way to the call passes no arm of the subject.")
+    hole: str = Field(default="", description="Why ``values`` is not read; empty where it is.")
+
+
 class ReachNode(BaseNode):
     """Where one function can go on to, for every function in the corpus: the record ``reach`` is answered from.
 
@@ -4173,6 +4363,15 @@ class ReachNode(BaseNode):
             ":data:`bamboo.codemap.reach.ASSUMPTIONS`.  An answer lists the "
             "ones its closure relied on, so a reader dropping a mover can "
             "say what that rests on."
+        ),
+    )
+    history: list[HistoryCall] = Field(
+        default_factory=list,
+        description=(
+            "The calls it makes of a function that writes a history row, each "
+            "with the values the row can record -- see "
+            ":mod:`bamboo.codemap.panda.runs`.  Not where the closure goes: "
+            "the calls are in :attr:`calls` too."
         ),
     )
     anchor: Optional[Anchor] = None
