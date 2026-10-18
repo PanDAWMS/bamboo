@@ -92,6 +92,7 @@ from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
 from bamboo.querier import census as C
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
+from bamboo.querier import held as HD
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
@@ -950,11 +951,13 @@ class Rerun:
         if split := R.split_files(owner, lines):
             self.say(f"WARNING: {owner.split('::')[-1]}'s rows land in different files {split}; read in one, the others' read as missing")
 
-    def base_env(self, file_row: dict | None = None) -> E.Env:
-        # the rows file's "after" is not read (KNOWN_ISSUES.md K10)
+    def base_env(self, file_row: dict | None = None, at: str | None = None) -> E.Env:
+        """The row values a step reads, for a run that began *at*: a value read at another time than the run's is not
+        among them, and ``Env.unread`` says why (``held.at_run``, KNOWN_ISSUES.md K22)."""
         sp = self.data["spellings"]
         env = E.Env(rows={s: entity for entity, spellings in sp.items() if entity != "about" for s in spellings})
-        for entity, row in self.data.get("rows", {}).items():
+        rows, env.unread = HD.at_run(self.data, self.args.subject.partition(".")[0], self.args.key, at)
+        for entity, row in rows.items():
             env.table[entity] = {k: E.Value(v["value"], v["source"]) for k, v in row.items()}
         if file_row is not None:
             env.table["file"] = {k: E.Value(v["value"], v["source"]) for k, v in file_row.items()}
@@ -1238,7 +1241,7 @@ class Rerun:
         for r, c in zip(readings, cands, strict=False):
             if any(name in c.log_files for name in at):
                 self.warn_split(r.owner, r.lines)
-        env = self.base_env()
+        env = self.base_env(at=state["time"] if state else None)
         seens = [R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
                  for c in cands for run in at_hand if run.log.name in c.log_files]
         stable_holes(seens, env)
@@ -1383,7 +1386,7 @@ class Rerun:
                     implicit.append(anc)
             previous = anc
         file_row = next((f for f in self.data["files"] if f["destinationDBlock"]["value"] == obj), None)
-        env7 = self.base_env(file_row)
+        env7 = self.base_env(file_row, at=r2.first)
         env7.put(make.first_arg, obj, "the object's name, bound by the loop over names")
         seens7 = [R.seen(fn7, r2, self.mode)]
         stable_holes(seens7, env7)
@@ -1392,6 +1395,7 @@ class Rerun:
         for i in implicit:
             value = E.evaluate(ast.unparse(i.test), env7)
             used = {k: v for k, v in env7.used.items() if k in ast.unparse(i.test)}
+            used |= {k: f"unknown: {why}" for k, why in env7.unread_in(ast.unparse(i.test)).items()}
             self.say(f"  implicit else of {i.lineno}: test {ast.unparse(i.test)!r} is {value!r} {used}" + (" -> it did not run" if value is True else ""))
             if value is not True:
                 self.need(f"the implicit else of {i.lineno}", None)
@@ -1450,7 +1454,7 @@ class Rerun:
         self.start("H9", "the same test elsewhere")
         fn7, exit7 = q.fn, q.exit
         question = self.question
-        other_env = self.base_env()
+        other_env = self.base_env(at=question.first if question is not None else None)
         stable_holes([R.seen(f, q2, self.mode) for f, q2 in self.touched if q2 is question], other_env)
         pairs = []
         for atom, truth in q.settled.items():
@@ -1522,7 +1526,7 @@ class Rerun:
 
         # R2
         self.start("R2", "what the operands held")
-        env = self.base_env()
+        env = self.base_env(at=question.first if question is not None else None)
         cls = class_of(fn)
         # a plugin's own attributes (``self.add_to_top_only``) printed by its other methods in the run
         stable_holes([R.seen(f, q2, self.mode) for f, q2 in self.touched if q2 is question and class_of(f) == cls], env, cls)
@@ -1643,7 +1647,8 @@ class Rerun:
         what = f"{m[1]}.{m[2]}" if m else q.expr
         self.say(f"next question: {what} for this instance ({q.why})")
         value = q.env.lookup(q.expr)
-        found = self.need(f"the value of {what} (a field of the {m[1] if m else '?'} row: the rows file does not have it)",
+        why = next(iter(q.env.unread_in(q.expr).values()), "the rows file does not have it")
+        found = self.need(f"the value of {what} (a field of the {m[1] if m else '?'} row: {why})",
                           None if value is E.UNKNOWN else repr(value))
         self.end(f"{what} = {found}")
         if q.computed and q.method and m:
@@ -1952,7 +1957,7 @@ class Rerun:
         self.say(f"candidates: arms {[a.line for a in q.arms]}, exits {exits}")
         chosen, envs = [], []
         for n, p in enumerate(found, 1):
-            env = self.base_env()
+            env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
             self.say(f"-- pass {n}: {p.first} .. {p.last}, {len(p.records)} record(s); printed {self._printed(env)}")
             j = judge([Candidate(rel, func, lines, run=p)], {p.log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
@@ -2297,7 +2302,7 @@ class Rerun:
         read, or else the statuslog's *as_of* -- with the words for it, the header that says it, and result.json's
         ``readings_at``."""
         row = self._row_of(subject.split(".")[0])
-        after = self.data.get("after", {})
+        after = self._read()[1]
         times = {(v["as_of"], v.get("clock")) for v in row.values() if isinstance(v, dict) and v.get("as_of")}
         times |= {(after["as_of"], after.get("clock"))} if after.get("as_of") else set()
         if len(times) == 1:
@@ -2407,18 +2412,24 @@ class Rerun:
     def _row_of(self, cls: str) -> dict:
         """The rows file's row of the class: the one its ``classes`` says is of it (A1 answers a row of a class)."""
         entity = next((e for e, c in self.data.get("classes", {}).items() if c == cls), None)
-        return self.data.get("rows", {}).get(entity, {}) if entity else {}
+        return self._read()[0].get(entity, {}) if entity else {}
+
+    def _read(self) -> tuple[dict, dict]:
+        """The rows file's ``rows`` and ``after`` as the steps read them: a value the builder read at ``as_of``, other
+        than the row's key, is the row as it was then, and is read as ``after`` is (``held.split``, KNOWN_ISSUES.md
+        K22)."""
+        return HD.split(self.data, self.args.subject.partition(".")[0], self.args.key)
 
     def _created(self, found: PT.History) -> str | None:
         """When the asked row was made (*found*'s ``created``), from the rows file's row or its ``after``: the column is
         set once, as the row is made, so the value read at any time is the one it had -- the one column of ``after``
-        read whatever the time (KNOWN_ISSUES.md K10).  None where the history names none or the rows file lacks it."""
+        read whatever the time (KNOWN_ISSUES.md K22).  None where the history names none or the rows file lacks it."""
         if not found.created:
             return None
         cls = found.subject.partition(".")[0]
         value = self._row_of(cls).get(found.created, {}).get("value")
         if value is None:
-            value = self.data.get("after", {}).get(found.created)
+            value = self._read()[1].get(found.created)
             value = value.get("value") if isinstance(value, dict) else value
         return str(value) if value else None
 
@@ -2442,7 +2453,7 @@ class Rerun:
         ``after`` was read after the window and answers nothing.  ``source``, ``as_of`` and ``clock`` say where and
         when, and are no column."""
         cls, _, attr = subject.partition(".")
-        after = self.data.get("after", {})
+        after = self._read()[1]
         if not q.at_end or cls != q.subject.partition(".")[0] or attr in ("source", "as_of", "clock") or attr not in after:
             return False, None
         return True, after[attr]
@@ -2495,7 +2506,7 @@ class Rerun:
         if row:
             if attr in row or self._after(subject, q)[0]:
                 return None
-            if owner == q.subject.partition(".")[0] and attr in self.data.get("after", {}):
+            if owner == q.subject.partition(".")[0] and attr in self._read()[1]:
                 return "after-only", "written at the move or later; its row here holds only the value after"
             return "rows-no-column", f"its row here holds no {attr}"
         found = PT.history_by_table(owner)

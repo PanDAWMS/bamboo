@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "mapdump", "outbound", "parts",
+    "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
 ]
 
@@ -1257,6 +1257,7 @@ _M2_SETUP = """
     r = object.__new__(rerun.Rerun)
     r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
     r.result = {}
+    r.args = N(subject="JobSpec.jobStatus", key="1")
     r.data = {
         "classes": {"job": "JobSpec"},
         "rows": {"job": {"PandaID": {"value": 1}, "creationTime": {"value": "2026-01-01 00:00:00"},
@@ -1421,6 +1422,75 @@ def test_the_window_end_reads_after_only_at_as_of(tmp_path):
     late, stuck, source, late_why, stuck_why = json.loads(out.splitlines()[-1])
     assert late == [False, None] and stuck == [True, "2026-01-03 00:00:00"] and source == [False, None]
     assert late_why == "written at the move or later; its row here holds only the value after" and stuck_why is None
+
+
+def test_a_value_the_builder_read_at_as_of_is_read_as_after_is_and_not_as_the_runs(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+    import json
+    from bamboo.querier import held
+    read = {"as_of": "2026-01-10 00:00:00", "clock": "client", "source": "job/get_description"}
+    data = {
+        "classes": {"job": "JobSpec", "task": "JediTaskSpec"},
+        "rows": {"job": {"PandaID": {"value": 1, **read}, "gshare": {"value": "Express", **read},
+                         "VO": {"value": None, "source": "tmaeno SQL"}},
+                 "task": {"jediTaskID": {"value": 5, **read}}},
+        "after": {"source": "job/get_description", "destinationSE": "X"},
+        "statuslog": {"states": [{"status": "activated", "time": "2026-01-01 00:00:10"},
+                                 {"status": "running", "time": "2026-01-01 00:00:20"},
+                                 {"status": "failed", "time": "2026-01-11 00:00:00"}]},
+    }
+    rows, after = held.split(data, "JobSpec", "1")
+    kept, unread = held.at_run(data, "JobSpec", "1", "2026-01-01 00:00:15,000")
+    _, untimed = held.at_run(data, "JobSpec", "1", None)
+    print(json.dumps([{e: sorted(r) for e, r in rows.items()}, after, kept == rows, unread, untimed["<job>.gshare"]]))
+    """,
+        )
+    )
+    rows, after, same, unread, untimed = json.loads(out.splitlines()[-1])
+    # the hand's value and the row's key stay; the subject's other value goes to after, with its time; another row's
+    # value is read by neither
+    assert rows == {"job": ["PandaID", "VO"], "task": []}
+    assert after == {"source": "job/get_description", "destinationSE": "X", "gshare": "Express",
+                     "as_of": "2026-01-10 00:00:00", "clock": "client"}
+    assert same
+    tail = "and which writes between can change it is not known yet (KNOWN_ISSUES.md K22)"
+    between = f"read at 2026-01-10 00:00:00 (client clock); 1 statuslog row(s) after the run's 2026-01-01 00:00:15,000, {tail}"
+    assert unread == {"<job>.gshare": between, "<task>.jediTaskID": between, "<job>.destinationSE": between}
+    assert untimed.startswith("read at 2026-01-10 00:00:00 (client clock), not at the step's run;")
+
+
+def test_a_step_says_why_a_row_value_it_needs_is_not_its_runs(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import evaluate as E
+    r.data["spellings"] = {"job": ["job", "self.job"]}
+    for v in r.data["rows"]["job"].values():
+        v.setdefault("source", "tmaeno SQL")
+    r.data["rows"]["job"]["gshare"] |= {"as_of": "2026-01-03 00:00:00", "clock": "client"}
+    r.row_facts = {}
+    env = r.base_env(at="2026-01-01 00:00:01,000")
+    test = "self.job.gshare != 'Express' and job.VO is None"
+    said = [E.evaluate(test, env) is E.UNKNOWN, env.unread_in(test), "gshare" in env.table["job"],
+            r._held("JobSpec.gshare", q), r._unanswered("JobSpec.gshare", q)]
+    env.put("job.gshare", "Express", "printed by the run")
+    said += [E.evaluate(test, env), env.unread_in(test)]
+    print(json.dumps(said))
+    """,
+        )
+    )
+    unknown, why, in_table, held, late_why, printed, after_print = json.loads(out.splitlines()[-1])
+    assert unknown and not in_table
+    assert list(why) == ["self.job.gshare"] and why["self.job.gshare"].startswith(
+        "read at 2026-01-03 00:00:00 (client clock); 0 statuslog row(s) after the run's 2026-01-01 00:00:01,000")
+    # late reads it as it reads after: not over the window
+    assert held == [False, None] and late_why == "written at the move or later; its row here holds only the value after"
+    # what the run printed is the run's, and says nothing is missing
+    assert printed is False and after_print == {}
 
 
 def test_stuck_reads_at_the_moment_the_rows_file_says_its_values_were_read(tmp_path):

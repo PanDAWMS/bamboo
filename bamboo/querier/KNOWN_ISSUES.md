@@ -192,17 +192,30 @@ refusal, not a limit.)
 *Shows:* said: such a mover is `undecided` or `by key`, not `could have`.
 *Revisit:* status-history terms with the column values over the window (the map's (b)).
 
+## Row values at a step's time (`held.py`)
+
+### K22. A row value read at another time than the step's run is not read
+
+The rows file holds the row as it was read (`as_of`, days after the case), and a step reads the row as it was
+when its run read it (`held.at_run`, through `Rerun.base_env` with the run's start).  A value the builder read
+is taken for the run only where it is the row's key (`--key`); every other one, and every column of the rows
+file's `after`, is left unread and says why: when it was read and how many statuslog rows lie between.  Which
+writes between can change a column -- the run each statuslog row was written by, the writes that leave no row,
+and the attributes and SET columns each run can change on the object -- is the map's to say
+(rows-at-time-design.md §4).  Two readings stay as before: the hand's values (no `as_of`) are read whatever the
+time, and so are a job's file rows (`files`), though the builder read them at `as_of` too: their writes are the
+job's runs, and they wait for the same facts (tmaeno, 2026-10-18).  The row's creation time is read from `after`
+whatever the time, as set once when the row is made (`Rerun._created`, H2's bounds): a premise the map does not
+state yet.
+
+*Shows:* a stop where a step needs such a value (on the record door, H7's implicit else at 785 for A, R5's
+`job.jobMetrics` for K), saying when the value was read; silent for the file rows and the creation time.
+*Revisit:* with the map's facts: the run each history row was written by; the attributes a run can set on an
+object and the columns a SET fills with another value than the one at hand; the writes that leave no row, with
+the select and the caller each is reached from, which can set a writer aside with no log asked
+(updateJobMetrics_JEDI takes only jobs a select found finished).
+
 ## H steps
-
-### K10. H7 stops on rows files whose job row holds only the key
-
-The rows builder puts the job's other columns under `after`, which the steps' environment does not
-read (`Rerun.base_env`).  One column is read from `after` whatever the time: the row's creation time,
-which H2 bounds a value with (`Rerun._created`), set once as the row is made.
-
-*Shows:* a stop at H7 at a branch whose guard reads a job column.
-*Revisit:* with the map's work on which values hold at the time of a decision, and the shape of the
-rows file's `rows` and `after` with the builder.
 
 ### K20. H2 asks a value the history's rows hold over a window, on every machine
 

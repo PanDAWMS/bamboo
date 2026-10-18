@@ -81,6 +81,9 @@ class Env:
     #: expressions known not to hold what the guard saw, with the reason
     stale: dict[str, str] = field(default_factory=dict)
     used: dict[str, str] = field(default_factory=dict)
+    #: row fields the rows file holds as read at another time than the step's, so not in ``table``, with why
+    #: (``held.at_run``): "<job>.destinationSE" -> why
+    unread: dict[str, str] = field(default_factory=dict)
 
     def canonical(self, text: str) -> str:
         """*text* with every spelling of a row variable replaced by the row's name.
@@ -129,6 +132,18 @@ class Env:
                 self.used[text] = row[m[2]].source
                 return row[m[2]].value
         return UNKNOWN
+
+    def unread_in(self, text: str) -> dict[str, str]:
+        """The row fields *text* reads that nothing here holds and the rows file holds at another time, with why."""
+        out = {}
+        for term in re.findall(r"(?<![\w.])[A-Za-z_][\w.]*\.\w+", text):
+            key = self.canonical(term)
+            m = re.fullmatch(r"<(\w+)>\.(\w+)", key)
+            if not m or key not in self.unread or key in self.values or term in self.stale or key in self.stale:
+                continue
+            if m[2] not in self.table.get(m[1], {}):
+                out[term] = self.unread[key]
+        return out
 
 
 def strip_annotation(text: str) -> str:
