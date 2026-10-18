@@ -39,7 +39,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     pooled_frames,
 )
-from bamboo.codemap.panda import mustprints, promotion, runs, sql, sqltext
+from bamboo.codemap.panda import mustprints, objects, promotion, runs, sql, sqltext
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
@@ -677,6 +677,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 started,
                 recorded,
                 paired,
+            )
+            # Where each function puts the objects it names and which of their
+            # columns it assigns: what bamboo.codemap.objects.follow answers from.
+            assigned, bound, handed, written = objects.attach(fragment, self._modules, self._calls)
+            logger.info(
+                "PandaCodeMapPlugin: %d assign(s), %d binding(s), %d call binding(s) of objects, %d write(s)",
+                assigned,
+                bound,
+                handed,
+                written,
             )
 
         logger.info(

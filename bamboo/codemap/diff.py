@@ -184,8 +184,9 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "log_files",
         "runs",
     ),
-    # ``calls``, ``database``, ``holes`` and ``history`` hold lines, as
-    # ``statements`` does above: between two builds of one tree they do not move.
+    # ``calls``, ``database``, ``holes``, ``history`` and the object records
+    # hold lines, as ``statements`` does above: between two builds of one tree
+    # they do not move.
     NodeType.REACH.value: (
         "cls",
         "function",
@@ -195,6 +196,10 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "holes",
         "settled",
         "history",
+        "assigns",
+        "bindings",
+        "call_bindings",
+        "writes",
     ),
 }
 

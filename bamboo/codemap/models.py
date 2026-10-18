@@ -4308,6 +4308,117 @@ class HistoryCall(BaseModel):
     hole: str = Field(default="", description="Why ``values`` is not read; empty where it is.")
 
 
+#: How :class:`PathBinding` ties a name to a path: ``x = p`` (or ``self.f = p``), ``for x in p``,
+#: ``x.append(p)``, ``x = f(...)`` and ``return p``.
+BIND_ALIAS = "alias"
+BIND_ELEMENT = "element"
+BIND_FILL = "fill"
+BIND_RESULT = "result"
+BIND_RETURN = "return"
+
+
+class PathAssign(BaseModel):
+    """An attribute assigned on an object a function names by a path -- read by :mod:`bamboo.codemap.objects`.
+
+    A path is a name of the function -- a parameter, ``self`` or a local --
+    then attributes and ``[]`` for any element: ``self.job``, ``jobs[]``.
+    Only an attribute some spec declares a column of is kept (``attrs``),
+    and a write whose name is computed -- ``setattr(job, name, v)``, a
+    spec's own ``pack`` -- carries the role :mod:`bamboo.codemap.panda.specwrites`
+    gives it.
+    """
+
+    line: int
+    path: str = Field(description="The object assigned on, in this function's names.")
+    attrs: list[str] = Field(description="The attributes it can set; ``*`` for any the class declares.")
+    how: str = Field(
+        description=(
+            "``=`` or ``+=``; for a computed name the specwrites role -- ``row_read`` sets the row's own "
+            "values, ``construct`` a new object's first ones."
+        )
+    )
+
+
+class PathBinding(BaseModel):
+    """A name of a function that holds what a path holds, or an element of it."""
+
+    line: int
+    name: str = Field(
+        description=(
+            "The name bound: a local, or a path written to (``self.job`` in ``self.job = job``); "
+            "``<return>`` for what the function returns."
+        )
+    )
+    path: str = Field(
+        description="The path it holds; for :data:`BIND_RESULT` empty, or ``[]`` where name is an element of what the call returns."
+    )
+    how: str = Field(
+        description=(
+            ":data:`BIND_ALIAS` -- name and path hold one object; :data:`BIND_ELEMENT` -- name is an element "
+            "of path; :data:`BIND_FILL` -- path is an element of name; :data:`BIND_RESULT` -- name is what the "
+            "call at the line returns; :data:`BIND_RETURN` -- the function returns path."
+        )
+    )
+
+
+class CallBinding(BaseModel):
+    """A path a call hands on, and the parameter of the function it lands in that takes it."""
+
+    line: int
+    to: str = Field(description="The :attr:`ReachNode.owner` the call lands in; empty where it is a hole.")
+    parameter: str = Field(
+        description="``self`` for the receiver; empty where the call does not say which parameter takes it (``*args``)."
+    )
+    path: str
+    element: bool = Field(default=False, description="The path is an element of a list or tuple literal handed.")
+    why: str = Field(default="", description="Why a hole is one, where :attr:`ReachNode.holes` does not say.")
+
+
+class WrittenValue(BaseModel):
+    """Where one column a statement writes takes its value from, or one key it picks its row by."""
+
+    column: str
+    path: str = Field(
+        default="",
+        description="The value as a path of the function -- ``job.jobStatus``, ``pandaID`` -- where it is one.",
+    )
+    value: str = Field(
+        default="",
+        description="Otherwise the value as the code or the statement spells it: ``literal:'failed'``, ``expression:CURRENT_DATE``.",
+    )
+    why: str = Field(default="", description="Why neither is read; empty where one is.")
+
+
+class DbWrite(BaseModel):
+    """A statement a function runs that writes rows: the columns it writes from what, and the row it picks.
+
+    The record :func:`bamboo.codemap.objects.may_change` reads beside the
+    objects': a write takes its values from an object the function holds --
+    the whole row of one (``job.valuesMap()``), its changed attributes
+    (``onlyChanged=True``), one attribute bound by name -- or from another
+    value, and lands on the row its keys name.
+    """
+
+    lines: list[int] = Field(description="The lines of the calls that run it.")
+    table: str
+    kind: str = Field(description="``insert`` or ``update``.")
+    columns: list[WrittenValue] = Field(default_factory=list, description="Each column it writes by name, a bind read once per value.")
+    whole: str = Field(
+        default="",
+        description="The path whose ``valuesMap()`` is the bind map: every column of the row comes from that object.",
+    )
+    changed: bool = Field(default=False, description="The map holds only the attributes changed since the object was read.")
+    unread: bool = Field(
+        default=False, description="It names a column at run time that is not read, so it can write any column."
+    )
+    keys: list[WrittenValue] = Field(
+        default_factory=list, description="The ``WHERE`` terms that name its row: ``PandaID=:PandaID``."
+    )
+    new_row: bool = Field(
+        default=False, description="An ``INSERT`` whose row is new: its key comes from a sequence (``useSeq=True``)."
+    )
+
+
 class ReachNode(BaseNode):
     """Where one function can go on to, for every function in the corpus: the record ``reach`` is answered from.
 
@@ -4373,6 +4484,25 @@ class ReachNode(BaseNode):
             ":mod:`bamboo.codemap.panda.runs`.  Not where the closure goes: "
             "the calls are in :attr:`calls` too."
         ),
+    )
+    assigns: list[PathAssign] = Field(
+        default_factory=list,
+        description="The columns it assigns on an object it names by a path (:mod:`bamboo.codemap.objects`).",
+    )
+    bindings: list[PathBinding] = Field(
+        default_factory=list, description="Its names that hold what a path holds."
+    )
+    call_bindings: list[CallBinding] = Field(
+        default_factory=list,
+        description=(
+            "The paths its calls hand on, receivers included, and the parameter each lands in.  "
+            "A call into code outside the corpus is not here: that code assigns no attribute of what it is handed "
+            "(:data:`bamboo.codemap.objects.PREMISES`)."
+        ),
+    )
+    writes: list[DbWrite] = Field(
+        default_factory=list,
+        description="The statements it runs that write rows, with where each value and key comes from.",
     )
     anchor: Optional[Anchor] = None
 

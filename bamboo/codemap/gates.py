@@ -1443,6 +1443,69 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     )
 
 
+def object_records_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every object record names a path, a line of its function, and a call a dump-only reader finds.
+
+    :func:`bamboo.codemap.objects.follow` answers from these records alone, so
+    a call binding into no reach row is an object followed into nothing, and
+    a hole with no reason -- neither its own nor a hole of the row on its line
+    -- is one a reader cannot say why it stopped at.  A record outside its
+    function's lines, or a path that is not a name and its parts, is one no
+    reader can place.
+    """
+    rows = {row.owner: row for row in fragment.reach_graph}
+    failures: list[str] = []
+    checked = 0
+    holes = 0
+    for row in fragment.reach_graph:
+        anchor = row.anchor
+        first = anchor.line_start if anchor is not None else None
+        last = (anchor.line_end or anchor.line_start) if anchor is not None else None
+        hole_lines = {hole.line for hole in row.holes}
+        for record in [*row.assigns, *row.bindings, *row.call_bindings]:
+            checked += 1
+            where = f"{row.owner}:{record.line}"
+            if first is not None and not first <= record.line <= (last or first):
+                failures.append(f"{where}: outside its function's lines {first}-{last}")
+            paths = [record.path] if not hasattr(record, "name") else [record.name, record.path]
+            for path in paths:
+                if path and not _OBJECT_PATH.fullmatch(path):
+                    failures.append(f"{where}: {path!r} is not a name and its parts")
+        for write in row.writes:
+            checked += 1
+            where = f"{row.owner}:{write.lines[0] if write.lines else 0}"
+            if not write.lines or (first is not None and not all(first <= line <= (last or first) for line in write.lines)):
+                failures.append(f"{where}: a write with no line of its function")
+            for value in [*write.columns, *write.keys]:
+                if not (value.path or value.value or value.why):
+                    failures.append(f"{where}: {value.column} has no value and no reason")
+                if value.path and not _OBJECT_PATH.fullmatch(value.path):
+                    failures.append(f"{where}: {value.path!r} is not a name and its parts")
+            if write.whole and not _OBJECT_PATH.fullmatch(write.whole):
+                failures.append(f"{where}: whole row of {write.whole!r}, which is not a name and its parts")
+        for call in row.call_bindings:
+            if call.to and call.to not in rows:
+                failures.append(f"{row.owner}:{call.line}: lands in {call.to}, which has no reach row")
+            if not call.to:
+                holes += 1
+                if not call.why and call.line not in hole_lines:
+                    failures.append(f"{row.owner}:{call.line}: a hole with no reason, and no hole of the row on its line")
+    return GateResult(
+        gate="object-records-resolve",
+        passed=not failures,
+        checked=checked,
+        unit="records",
+        question="does every object record name a path, a line of its function and a call a dump-only reader finds?",
+        finding="a record outside its function, a path that is not one, or a call binding into nothing",
+        failures=failures[:50],
+        note=f"{holes} call binding(s) are holes.",
+    )
+
+
+#: A path of :mod:`bamboo.codemap.objects`: a name, then ``.attr`` and ``[]`` parts.
+_OBJECT_PATH = re.compile(r"(<return>|[A-Za-z_][A-Za-z_0-9]*)(\.[A-Za-z_][A-Za-z_0-9]*|\[\])*|\[\]")
+
+
 def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     """(i) No dunder Python runs unasked -- ``__enter__``, ``__iter__``, ``__setstate__`` -- reaches a write.
 
@@ -2497,6 +2560,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
     if fragment.reach_graph:
         results.append(reach_records_resolve(fragment))
         results.append(implicit_dunders_reach_no_write(fragment))
+    if any(row.assigns or row.bindings or row.call_bindings or row.writes for row in fragment.reach_graph):
+        results.append(object_records_resolve(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 
