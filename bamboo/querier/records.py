@@ -235,6 +235,9 @@ class Log:
     #: a recorded search's test of a run or a pass, ``(machine, first stamp, last stamp) -> bool``: false where it may
     #: go on past what was searched, and rule 8 reads no row missing from it (None in a file handed in)
     whole: Callable[[str, str, str], bool] | None = None
+    #: why a run ``whole`` is false for may go on past what was searched, ``(machine, first stamp, last stamp) -> str``,
+    #: empty where it is whole: said on the run's line (:meth:`Run.describe`; None in a file handed in)
+    edges: Callable[[str, str, str], str] | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -411,10 +414,13 @@ class Run:
         return Run(self.log, self.token, kept, [r for r in self.found_by if r in kept])
 
     def describe(self) -> str:
+        """The run's line: where, its mark, its records' count and stamps; and, for a run a recorded search may have
+        cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
         where = f"{self.log.name}@{self.machine.split('.')[0]}" if self.machine else self.log.name
+        cut = self.log.edges(self.machine, self.first, self.last) if self.log.edges is not None and self.machine else ""
         return (
             f"{where} token={self.token} {len(self.records)} record(s) "
-            f"{self.first} .. {self.last} (key on {len(self.found_by)})"
+            f"{self.first} .. {self.last} (key on {len(self.found_by)}{'; read as cut: ' + cut if cut else ''})"
         )
 
 

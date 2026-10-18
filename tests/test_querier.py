@@ -685,6 +685,48 @@ def test_the_record_door_widens_once_past_an_end_and_reads_a_run_still_there_as_
     assert unlisted[0][0]["machine"] is None and "not in list_logs" in unlisted[0][1]
 
 
+def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_near_and_why(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            TOK, LATE, EARLY = "PandaID=12345", ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), ("2026-09-28 06:30:00", "2026-09-28 06:45:00")
+            run = [{**line("08:31:10", "start 12345", TOK), "offset": 10}, {**line("08:31:14", "end", TOK), "offset": 20}]
+            early = [{**line("06:42:00", "start 12345", TOK), "offset": 10}, {**line("06:46:00", "end", TOK), "offset": 20}]
+            oldest = {**BEFORE, "covers": [None, "2026-09-28 06:50:00"], "records": []}
+
+            def described(window, *files):
+                log, asks = ask_of([record(Ask("panda-x.log", ("12345",), window, M1), {M1: answered(*files)})],
+                                   "panda-x.log", "12345", window, M1)
+                return asks or runs_for(log, "12345")[0].describe()
+
+            # widened once past the file's start, and no older file there
+            AT, WIDER = ("2026-09-28 06:45:00", "2026-09-28 06:45:00"), ("2026-09-28 06:39:59", "2026-09-28 06:45:00")
+            log, _ = ask_of([record(Ask("panda-x.log", ("12345",), AT, M1), {M1: answered({**TODAY, "records": early})}),
+                             record(Ask("panda-x.log", ("12345",), WIDER, M1), {M1: answered({**TODAY, "records": []})})],
+                            "panda-x.log", "12345", AT, M1)
+            print(json.dumps([
+                described(LATE, {**TODAY, "truncated": True, "records": run}),
+                described(LATE, {**TODAY, "margin_s": 0, "covers": ["2026-09-28 06:40:00", "2026-09-28 08:35:00"], "records": run}),
+                described(EARLY, oldest, {**TODAY, "records": early}),
+                runs_for(log, "12345")[0].describe(),
+                described(LATE, {**TODAY, "records": run}),
+            ]))
+            """),
+        )
+    )
+    cut, asked_then, oldest_first, nothing_before, whole = json.loads(out)
+    assert cut.endswith("(key on 2; read as cut: what was searched on aipanda093 ends at 2026-09-28 08:31:14: the answer of "
+                        "panda-x.log-20260929.gz was cut at 1 MB after its last record)")
+    assert asked_then.endswith("ends at 2026-09-28 08:34:59: panda-x.log-20260929.gz was read to the time it was asked)")
+    assert oldest_first.endswith("begins at 2026-09-28 06:40:00: panda-x.log-20260928.gz is the oldest kept, its start not "
+                                 "known)")
+    assert nothing_before.endswith("begins at 2026-09-28 06:40:00: no file read covers what comes before)")
+    # a run far from every end says nothing more
+    assert whole.endswith("(key on 2)")
+
+
 def test_the_record_door_says_what_of_the_window_it_did_not_search(tmp_path):
     out = _ok(
         _run(

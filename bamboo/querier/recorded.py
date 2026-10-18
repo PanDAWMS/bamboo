@@ -106,6 +106,9 @@ class _File:
     start: datetime.datetime | None
     end: datetime.datetime
     read_to: datetime.datetime | None
+    name: str = ""
+    #: why it was read only to ``read_to``, for a run's line (``_edges_in``); empty for a rotated file read whole
+    stop: str = ""
 
     def covers(self, t: datetime.datetime) -> bool:
         return (self.start is None or self.start <= t) and t <= self.end
@@ -155,15 +158,17 @@ class _Gathered:
                 start, end = f["covers"]
                 end = _t(end)
                 self.rank[(machine, f["file"])] = end
+                name = Path(f["file"]).name
                 if f.get("status") != "answered":
-                    read_to = None
+                    read_to, stop = None, f"{name} was {f.get('status') or 'not read'}"
                 elif f.get("truncated"):
-                    read_to = _t(last) if last else None
+                    read_to, stop = _t(last) if last else None, f"the answer of {name} was cut at 1 MB after its last record"
                 else:
                     read_to = end if f.get("margin_s") else end - _SECOND
+                    stop = "" if f.get("margin_s") else f"{name} was read to the time it was asked"
                     if f.get("margin_s"):
                         self.rotated_ends.add((machine, end))
-                self.files.append(_File(machine, _t(start) if start else None, end, read_to))
+                self.files.append(_File(machine, _t(start) if start else None, end, read_to, name, stop))
 
     def log(self, name: str) -> Log:
         order = sorted(self.records.values(), key=lambda r: (r.machine, self.rank.get((r.machine, r.file), datetime.datetime.max), r.offset))
@@ -296,6 +301,7 @@ class RecordedLogs:
         log = got.log(name)
         log.holes = got.holes(window)
         log.whole = _whole_in(got)
+        log.edges = _edges_in(got)
         if not got.asked:
             notes.append("no machine lists it: the log is on none")
         if got.without:
@@ -347,6 +353,43 @@ def _whole_in(got: _Gathered):
         return lo is not None and lo == _stretch_of(stretches[machine], _t(last)) and _t(first) - lo[0] >= EDGE and lo[1] - _t(last) >= EDGE
 
     return whole
+
+
+def _edges_in(got: _Gathered):
+    """``edges(machine, first, last)``: for records from *first* to *last* that ``_whole_in`` does not read as whole,
+    the ends of what was searched they lie near and why each is there, or a stretch not searched among them; ``""``
+    where they are whole.  An end is where a file was read only so far (cut at 1 MB, read to the time it was asked,
+    not answered), where the oldest file kept starts with no known start, or where no file read covers what lies past
+    it (the window asked)."""
+    whole = _whole_in(got)
+
+    def why(machine: str, t: datetime.datetime, side: str) -> str:
+        covering = [f for f in got.files if f.machine == machine and f.covers(t)]
+        if not covering:
+            return f"no file read covers what comes {side}"
+        said = [f.stop or f"{f.name} was not read through it" for f in covering if f.read_to is None or t > f.read_to]
+        said += [f"{f.name} is the oldest kept, its start not known" for f in covering if f.start is None]
+        return "; ".join(dict.fromkeys(said)) or "it was not searched"
+
+    def edges(machine: str, first: str, last: str) -> str:
+        if whole(machine, first, last):
+            return ""
+        a, b = _t(first), _t(last)
+        stretches = got.stretches(machine)
+        lo, hi = _stretch_of(stretches, a), _stretch_of(stretches, b)
+        short = machine.split(".")[0]
+        if lo is None or hi is None:
+            return f"its records lie outside what was searched on {short}"
+        said = []
+        if lo != hi:
+            said.append(f"what was searched on {short} stops at {_text(lo[1])} inside it: {why(machine, lo[1] + _SECOND, 'after')}")
+        if a - lo[0] < EDGE:
+            said.append(f"what was searched on {short} begins at {_text(lo[0])}: {why(machine, lo[0] - _SECOND, 'before')}")
+        if hi[1] - b < EDGE:
+            said.append(f"what was searched on {short} ends at {_text(hi[1])}: {why(machine, hi[1] + _SECOND, 'after')}")
+        return "; ".join(said)
+
+    return edges
 
 
 def _stretch_of(stretches: list, at: datetime.datetime) -> tuple | None:
