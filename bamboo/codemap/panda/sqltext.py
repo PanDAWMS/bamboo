@@ -722,8 +722,14 @@ def _supplied(node: exp.Expression, spelled: str, insert: bool) -> ColumnValue:
     return value
 
 
-def _update_pairs(node: exp.Update, sql: str, tokens: list) -> Optional[list[tuple[str, int, ColumnValue]]]:
-    """``(column, end offset, value)`` for each ``SET`` item of *node*, or ``None`` where the two readings disagree."""
+def _update_pairs(
+    node: exp.Update, sql: str, tokens: list, passed: Optional[list[tuple[str, str]]] = None
+) -> Optional[list[tuple[str, int, ColumnValue]]]:
+    """``(column, end offset, value)`` for each ``SET`` item of *node*, or ``None`` where the two readings disagree.
+
+    An item it cannot pair goes into *passed*, where given, as ``(the item as
+    the statement spells it, why)`` -- see :func:`unread_columns`.
+    """
     update = _at_depth(tokens, 0, {_T.UPDATE})
     assign = _at_depth(tokens, update + 1, {_T.SET}) if update is not None else None
     if assign is None:
@@ -735,17 +741,30 @@ def _update_pairs(node: exp.Update, sql: str, tokens: list) -> Optional[list[tup
     found: list[tuple[str, int, ColumnValue]] = []
     for (lo, hi), item in zip(spans, node.expressions, strict=True):
         if not isinstance(item, exp.EQ) or not isinstance(item.this, exp.Column):
+            if passed is not None:
+                # ``SET {}`` -- a spec's bindUpdateChangesExpression(): the
+                # assignments themselves are Python's.
+                whole = isinstance(item, exp.Column) and _NAMED_HOLE.search(item.name)
+                passed.append(
+                    ("SET " + _spelled(sql, tokens, lo, hi, written=True), SET_ITEM_IS_A_HOLE if whole else SET_ITEM_NOT_READ)
+                )
             continue
         # ``SET merge{}={}`` -- a column Python names at run time.
         name = item.this.name
         equals = _at_depth(tokens, lo, {_T.EQ}, hi)
         if _NAMED_HOLE.search(name) or equals is None:
+            if passed is not None:
+                passed.append(
+                    ("SET " + _spelled(sql, tokens, lo, hi, written=True), SET_COLUMN_IS_A_HOLE if equals is not None else SET_ITEM_NOT_READ)
+                )
             continue
         found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi, written=True), False)))
     return found
 
 
-def _insert_pairs(node: exp.Insert, sql: str, tokens: list) -> Optional[list[tuple[str, int, ColumnValue]]]:
+def _insert_pairs(
+    node: exp.Insert, sql: str, tokens: list, passed: Optional[list[tuple[str, str]]] = None
+) -> Optional[list[tuple[str, int, ColumnValue]]]:
     """``(column, end offset, value)`` for each column *node* names, or ``None`` where it names none.
 
     Paired by position, the names in one parenthesised run and the values in
@@ -754,11 +773,23 @@ def _insert_pairs(node: exp.Insert, sql: str, tokens: list) -> Optional[list[tup
     is copied from the row selected, which is read when the statement runs.
     ``ppEventServiceJob`` inserts ``:newStatus`` into ``JEDI_Events.status``
     that way.
+
+    A column it cannot pair goes into *passed*, where given: the column list
+    once, with its holes, where Python names a column (``({})``, a spec's
+    ``columnNames()``), and the names past the values where the two lists do
+    not pair -- see :func:`unread_columns`.  The list is said before the
+    values are looked at, since ``INSERT INTO {}.workflows ({}) {}`` takes
+    its values from Python too, and a run of holes is one ``{}``: the reading
+    unrolls ``columnNames()``' loop once or twice, and ``({},{})`` is the
+    same list as ``({})``.
     """
     target = node.this
     if not isinstance(target, exp.Schema):
         return None
     names = [column.name for column in target.expressions]
+    if passed is not None and any(_NAMED_HOLE.search(name) for name in names):
+        listed = "(" + ",".join(_NAMED_HOLE.sub("{}", name) for name in names) + ")"
+        passed.append((_HOLE_RUN.sub("{}", listed), INSERT_COLUMN_IS_A_HOLE))
     insert = _at_depth(tokens, 0, {_T.INSERT})
     source = node.expression
     spans: list[tuple[int, int]] = []
@@ -784,6 +815,11 @@ def _insert_pairs(node: exp.Insert, sql: str, tokens: list) -> Optional[list[tup
         if not _IDENTIFIER.fullmatch(name) or _NAMED_HOLE.search(name):
             continue
         found.append((name, tokens[hi - 1].end + 1, _supplied(value, _spelled(sql, tokens, lo, hi, written=True), True)))
+    if passed is not None:
+        paired = min(len(spans), len(values))
+        unpaired = [name for name in names[paired:] if _IDENTIFIER.fullmatch(name) and not _NAMED_HOLE.search(name)]
+        if unpaired:
+            passed.append((",".join(unpaired), INSERT_VALUE_NOT_PAIRED))
     return found
 
 
@@ -866,6 +902,37 @@ def _guards(
     return preconditions, keys, spans_of
 
 
+#: Why a column a statement writes is not in what :func:`writes` returns.  Each
+#: is said as a stop on the statement (``sql.Execution.unread_columns``): a
+#: column passed over in silence reads as one the statement does not write, and
+#: ``updateJobStatus`` -- the pilot's every update -- wrote ``jobStatus`` alone
+#: in the map while its ``SET`` takes a column for each key of ``param``.
+#:
+#: ``SET {}=:{}`` -- ``updateJobStatus``'s ``param``, ``harvesterIsAlive``'s
+#: ``data``: the column is named from a key at run time.
+SET_COLUMN_IS_A_HOLE = "the SET names its column through an interpolation"
+#: ``SET {}`` -- a spec's ``bindUpdateChangesExpression()``: the columns are
+#: the object's changed attributes, which Python decides.
+SET_ITEM_IS_A_HOLE = "the SET takes whole assignments through an interpolation"
+#: ``SET (endtime, endstatus) = (SELECT ...)`` -- no hole, but not ``column =
+#: value`` either.
+SET_ITEM_NOT_READ = "a SET item is not column = value"
+#: ``INSERT INTO jobsArchived4 ({}) VALUES({})`` -- a spec's ``columnNames()``,
+#: every column of the class in Python's order.
+INSERT_COLUMN_IS_A_HOLE = "the INSERT names its columns through an interpolation"
+#: Columns the ``VALUES`` or ``SELECT`` list has no item for in their place.
+INSERT_VALUE_NOT_PAIRED = "the INSERT's values do not pair with its columns"
+#: What is left: the statement writes a table, by its own target, and no column
+#: of it was read and no item said why -- an ``INSERT`` naming no columns
+#: (``INSERT INTO Metrics VALUES (...)``), one the text reading could not take.
+#: Judged per text here; a run keeps it only where no other build of the same
+#: statement said why (``sql._executions_read``): a ``SET {}``'s build in which
+#: no attribute changed writes nothing the others do not.
+COLUMNS_NOT_READ = "the statement writes a table and no column of it is read"
+#: Holes side by side in a column list, with or without a comma between.
+_HOLE_RUN = re.compile(r"\{\}(?:,?\{\})+")
+
+
 def writes(sql: str) -> list[SqlWrite]:
     """Return the write statements in *sql*, as far as they can be read.
 
@@ -910,6 +977,35 @@ def writes(sql: str) -> list[SqlWrite]:
         return _writes_in_text(plain(sql))
     columns = {name: value for name, _end, value in pairs}
     return [SqlWrite(kind="insert", table=table, columns=columns)] if columns and table is not None else []
+
+
+def unread_columns(sql: str) -> list[tuple[str, str]]:
+    """``(what, why)`` for each column *sql* writes that :func:`writes` does not return, each once.
+
+    Two readings, so that a column cannot drop out in silence.  The items the
+    pairing passes over are said where it passes them (:func:`_update_pairs`,
+    :func:`_insert_pairs`).  Then the tables the statement writes by its own
+    target (:func:`creates`, :func:`updates` -- the reading the entities are
+    made from) are held against the tables :func:`writes` returns columns of:
+    one with none, where no item said why, is :data:`COLUMNS_NOT_READ`, *what*
+    the table.  A ``DELETE`` writes no column; a ``MERGE`` is neither reading's.
+    """
+    found: dict[tuple[str, str], None] = {}
+    read = _statement(sql)
+    if read is not None:
+        node, tokens = read
+        passed: list[tuple[str, str]] = []
+        if isinstance(node, exp.Update):
+            _update_pairs(node, sql, tokens, passed)
+        else:
+            _insert_pairs(node, sql, tokens, passed)
+        found.update(dict.fromkeys(passed))
+    if not found:
+        written = {write.table.lower() for write in writes(sql)}
+        for table in [*creates(sql), *updates(sql)]:
+            if table.lower() not in written:
+                found[(table, COLUMNS_NOT_READ)] = None
+    return list(found)
 
 
 def supplied_at(

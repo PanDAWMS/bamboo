@@ -1775,3 +1775,56 @@ def f(self, task_id):
     assert texts
     for text in texts:
         assert text.count("SELECT") == text.count("UNION ALL") + 1, text
+
+
+def test_a_table_no_build_reads_a_column_of_is_said_only_where_no_build_said_why(tmp_path):
+    """A spec's ``bindUpdateChangesExpression()`` appends a column only for a changed attribute, so one build of the
+    statement sets nothing at all.  That build alone writes the table with no column read; the statement does not --
+    another build of it says its columns are named at run time -- and a stop is on the statement."""
+    text = (
+        "class Spec:\n"
+        "    _attributes = ('a', 'b')\n"
+        "    _changedAttrs = {}\n"
+        "\n"
+        "    def bindUpdateChangesExpression(self):\n"
+        "        ret = ''\n"
+        "        for attr in self._attributes:\n"
+        "            if attr in self._changedAttrs:\n"
+        "                ret += f'{attr}=:{attr},'\n"
+        "        ret = ret[:-1]\n"
+        "        ret += ' '\n"
+        "        return ret\n"
+        "\n"
+        "\n"
+        "class DB:\n"
+        "    def f(self, spec: Spec):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.filesTable4 SET ' + spec.bindUpdateChangesExpression() + 'WHERE row_ID=:row_ID'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    runs = _corpus_executions(tmp_path, text, "f")
+    empty = [run for run in runs if "{}" not in run.sql]
+    named = [run for run in runs if "{}" in run.sql]
+    assert len(empty) == 1 and len(named) == 1
+    assert sqltext.unread_columns(empty[0].reading) == [("filesTable4", sqltext.COLUMNS_NOT_READ)]
+    assert empty[0].unread_columns == ()
+    assert [(stop.source, stop.reason) for stop in named[0].unread_columns] == [("SET {}=:{}", sqltext.SET_COLUMN_IS_A_HOLE)]
+
+
+def test_a_build_that_sets_nothing_beside_builds_that_read_the_columns_is_not_said(tmp_path):
+    """``updateJob``'s ``SET`` is ``nFilesOnHold`` under one test and ``nFilesTobeUsed`` under another, with no
+    ``else``: the build past both writes the table with no column, while the statement's other builds read them."""
+    text = (
+        "class DB:\n"
+        "    def f(self, cType):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.JEDI_Datasets SET '\n"
+        "        if cType == 'hold':\n"
+        "            sql += 'nFilesOnHold=nFilesOnHold+:diffNum '\n"
+        "        elif cType == 'touse':\n"
+        "            sql += 'nFilesTobeUsed=nFilesTobeUsed+:diffNum '\n"
+        "        sql += 'WHERE jediTaskID=:jediTaskID'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    runs = _corpus_executions(tmp_path, text, "f")
+    assert len(runs) == 3
+    assert [sqltext.unread_columns(run.reading) for run in runs].count([("JEDI_Datasets", sqltext.COLUMNS_NOT_READ)]) == 1
+    assert all(run.unread_columns == () for run in runs)

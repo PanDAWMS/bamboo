@@ -708,6 +708,18 @@ class Execution(NamedTuple):
     ELSE {} END)``, filled with one ``WHEN gshare=:leave{} THEN {}`` per share.
     """
 
+    unread_columns: tuple[Stop, ...] = ()
+    """Each column this run writes that :func:`sqltext.writes` does not return, and why (:func:`sqltext.unread_columns`).
+
+    Kept apart from :attr:`unresolved`, which says where reading the rows the
+    statement picks stopped: a read site carries those, and a gate takes a
+    statement with one as read only in part.  A ``SET`` naming its column at
+    run time picks no fewer rows.  Both are stops on the statement
+    (``sqlwrite._run_stops``).  The line is the statement's, *source* the item
+    as the statement spells it -- ``SET {}=:{}``, ``({})`` -- so a reading of
+    one file and the build's say the same.
+    """
+
     @property
     def run_at(self) -> tuple[ast.Call, ...]:
         """The calls to read this run's binds at -- :attr:`calls`, or its own."""
@@ -2658,6 +2670,27 @@ def _fragment_stops(
     return tuple(sorted(found))
 
 
+def _column_stops(reading: str, line: int, unresolved: tuple[Stop, ...]) -> tuple[Stop, ...]:
+    """The columns the statement *reading* writes and :func:`sqltext.writes` does not return (:attr:`Execution.unread_columns`).
+
+    A table no column of which is read (:data:`sqltext.COLUMNS_NOT_READ`) is
+    left out where a fragment of the statement has no text of its own: that
+    stop already says the statement is not all here, and names the expression
+    to open -- ``JobSpec.bindValuesExpression()``, where a reading of one file
+    cannot follow the call into the spec.
+    """
+    unrendered = any(stop.reason == FRAGMENT_NOT_RENDERED for stop in unresolved)
+    return tuple(
+        sorted(
+            {
+                Stop(line, what, why)
+                for what, why in sqltext.unread_columns(reading)
+                if not (unrendered and why == sqltext.COLUMNS_NOT_READ)
+            }
+        )
+    )
+
+
 def _executions_read(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> tuple[list[Execution], list["Skip"]]:
@@ -2707,6 +2740,9 @@ def _executions_read(
         window = binding_window(func, varmap, line) if forwarded and varmap is not None else None
         for one, heads in drawn:
             run = _fragments_out(one, func)
+            read_as = reading_text(run.text, run.holes)
+            # What a stop names is what the code wrote: a repeated part as its passes.
+            unresolved = _fragment_stops(one, func) + _hole_stops(sqltext.unmarked(read_as), line)
             found.append(
                 Execution(
                     sql=run.text,
@@ -2714,14 +2750,37 @@ def _executions_read(
                     variable=held,
                     call=node,
                     window=window,
-                    # What a stop names is what the code wrote: a repeated part as its passes.
-                    unresolved=_fragment_stops(one, func)
-                    + _hole_stops(sqltext.unmarked(reading_text(run.text, run.holes)), line),
+                    unresolved=unresolved,
                     head=heads[0].text if heads else "",
                     pieces=run.pieces,
                     holes=run.holes,
+                    unread_columns=_column_stops(read_as, line, unresolved),
                 )
             )
+    # A stop is on the statement, so a table no column of which one build reads
+    # is said only where no build of that statement read a column of it or said
+    # why: the build of a ``SET {}`` in which no attribute changed, or of
+    # ``updateJob``'s ``if cType == "hold": ... elif cType == "touse": ...``
+    # past both arms, writes nothing the others do not.
+    said: set[int] = set()
+    read: dict[int, set[str]] = {}
+    for run in found:
+        if any(stop.reason != sqltext.COLUMNS_NOT_READ for stop in run.unread_columns):
+            said.add(id(run.call))
+        if any(stop.reason == sqltext.COLUMNS_NOT_READ for stop in run.unread_columns):
+            continue
+        read.setdefault(id(run.call), set()).update(write.table.lower() for write in sqltext.writes(run.reading))
+    found = [
+        run._replace(
+            unread_columns=tuple(
+                stop
+                for stop in run.unread_columns
+                if stop.reason != sqltext.COLUMNS_NOT_READ
+                or not (id(run.call) in said or stop.source.lower() in read.get(id(run.call), set()))
+            )
+        )
+        for run in found
+    ]
     together: dict[tuple, dict[ast.Call, None]] = {}
     for run in found:
         together.setdefault((run.variable, run.sql, run.varmap, run.window), {})[run.call] = None
