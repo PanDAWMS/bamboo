@@ -1559,7 +1559,8 @@ def test_a_value_the_builder_read_at_as_of_is_read_as_after_is_and_not_as_the_ru
     assert after == {"source": "job/get_description", "destinationSE": "X", "gshare": "Express",
                      "as_of": "2026-01-10 00:00:00", "clock": "client"}
     assert same
-    tail = "and which writes between can change it is not known yet (KNOWN_ISSUES.md K22)"
+    tail = ("and writes that leave no such row may lie between too; which writes between can change it is not known yet "
+            "(KNOWN_ISSUES.md K22)")
     between = f"read at 2026-01-10 00:00:00 (client clock); 1 statuslog row(s) after the run's 2026-01-01 00:00:15,000, {tail}"
     assert unread == {"<job>.gshare": between, "<task>.jediTaskID": between, "<job>.destinationSE": between}
     assert untimed.startswith("read at 2026-01-10 00:00:00 (client clock), not at the step's run;")

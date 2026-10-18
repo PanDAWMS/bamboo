@@ -199,7 +199,8 @@ refusal, not a limit.)
 The rows file holds the row as it was read (`as_of`, days after the case), and a step reads the row as it was
 when its run read it (`held.at_run`, through `Rerun.base_env` with the run's start).  A value the builder read
 is taken for the run only where it is the row's key (`--key`); every other one, and every column of the rows
-file's `after`, is left unread and says why: when it was read and how many statuslog rows lie between.  Which
+file's `after`, is left unread and says why: when it was read and how many statuslog rows lie between, a count of
+rows and not of writes, since a write that moves no status leaves none (bamboo-68, 2026-10-18).  Which
 writes between can change a column -- the run each statuslog row was written by, the writes that leave no row,
 and the attributes and SET columns each run can change on the object -- is the map's to say
 (rows-at-time-design.md §4).  Two readings stay as before: the hand's values (no `as_of`) are read whatever the

@@ -6,7 +6,8 @@ later.  A value read then is the run's only where no write between the two can h
 writes those are (the run each statuslog row was written by, and the writes that leave no row), and which columns
 each can change (the attributes a run can set on the object, the SET columns a statement fills with another value
 than the one at hand), are the map's to say, and it says neither yet.  So such a value is not the run's, and the
-step is told why: when it was read and how many statuslog rows lie between.
+step is told why: when it was read and how many statuslog rows lie between -- rows, not writes: a write that moves
+no status leaves none (updateJobMetrics_JEDI's jobMetrics).
 
 * A value with no ``as_of`` is the hand's, read for the case (tmaeno's SQL), and is read as before.
 * The value the row was asked by (``--key``) names the row and is read whatever the time.
@@ -77,5 +78,5 @@ def _why(as_of: str | None, clock: str | None, states: list[dict], at: str | Non
     since = W.when(at)
     n = sum(1 for s in states if W.when(s.get("time_extended") or s["time"]) > since
             and (as_of is None or W.when(s["time"]) <= W.when(as_of)))
-    return (f"{read}; {n} statuslog row(s) after the run's {at}, and which writes between can change it is not "
-            f"known yet (KNOWN_ISSUES.md K22)")
+    return (f"{read}; {n} statuslog row(s) after the run's {at}, and writes that leave no such row may lie between "
+            f"too; which writes between can change it is not known yet (KNOWN_ISSUES.md K22)")
