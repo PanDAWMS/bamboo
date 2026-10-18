@@ -2,7 +2,7 @@
 
 No API is called: the same record, pin and dump give the same file.  The
 sections are the ones the querier reads (``rerun.py``): ``classes``,
-``spellings``, ``rows`` and ``after``, ``statuslog``, and for a job ``files``,
+``spellings``, ``rows``, ``statuslog``, and for a job ``files``,
 ``collections`` and ``datasets``, for a task ``job_rows``, ``job_statuslog``
 and ``counts``.
 
@@ -23,7 +23,10 @@ read after it.  R's and H's ``as_of`` are the database's.  Every ``as_of``
 names its clock beside it, ``clock`` :data:`CLIENT` or :data:`DATABASE`, since
 the two differ and a value read by key is not read at a history's ``as_of``.
 A dataset's ``creationdate`` is on neither: the inserting machine wrote it from
-its own clock.
+its own clock.  A key's row is laid out whole, every column with the moment it
+was read: a column may have been written between the moment a step of the
+querier asks about and that one, and only the querier knows the step's moment
+(``held``).
 
 **Times.**  The querier compares a history's times with log stamps as text
 (``rerun.py`` S5, ``time_extended < when``), so ``time`` is
@@ -52,7 +55,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from bamboo.scripts.panda.fieldtest import after as A
 from bamboo.scripts.panda.fieldtest.fetch import (
     FILES,
     KEY,
@@ -307,7 +309,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
         },
     }
 
-    # the history of the key, first: the split of the row needs it
+    # the history of the key
     history_part = "job_history" if cls == "JobSpec" else "task_history"
     states, history_source = states_of(
         laid.responses.get(history_part), "job" if cls == "JobSpec" else "task"
@@ -330,17 +332,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
         row = columns(
             {k: v for k, v in raw.items() if k != FILES}, spellings[cls], other
         )
-        kept, later, why = A.split(
-            row,
-            KEY[cls],
-            q["kind"],
-            q["observed"],
-            states or [],
-            when(raw.get("modificationTime")),
-        )
-        out["rows"] = {entity: {c: {"value": v, **read} for c, v in kept.items()}}
-        if later:
-            out["after"] = {**read, "source": f"{read['source']}; {why}", **later}
+        out["rows"] = {entity: {c: {"value": v, **read} for c, v in row.items()}}
 
     if cls == "JobSpec":
         if raw is not None:

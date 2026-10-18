@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from bamboo.scripts.panda.fieldtest import after as A
 from bamboo.scripts.panda.fieldtest import fetch as FE
 from bamboo.scripts.panda.fieldtest import rows as RB
 
@@ -321,32 +320,21 @@ async def test_a_job_not_found_or_not_read_is_left_out_with_why_and_its_history_
         ]
 
 
-async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_keeps_only_the_key_before_the_decision():
+async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_says_when_each_was_read():
     out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS)
     assert out["classes"]["job"] == "JobSpec" and out["spellings"]["job"] == [
         "job",
         "self.job",
     ]
-    # every write may have set every column until the map says which: only the key is the decision's
-    assert (
-        list(out["rows"]["job"]) == ["PandaID"]
-        and out["rows"]["job"]["PandaID"]["value"] == PID
-    )
     source = "job/get_description_incl_archive, asked at 2026-10-13 10:00:05 on this machine's clock (UTC)"
     # read by key, the values hold when they were asked, on this machine's clock: not at the history's as_of
     read = {"source": source, "as_of": "2026-10-13 10:00:05", "clock": "client"}
-    assert out["rows"]["job"]["PandaID"] == {"value": PID, **read}
-    assert (
-        out["after"]["specialHandling"] == "ddm:rucio"
-        and out["after"]["modificationTime"] == "2026-10-07 13:08:03"
-    )
-    assert "Files" not in out["after"]
-    assert out["after"]["source"].startswith(source + "; ")
-    assert "decision at 2026-10-07 13:08:03.877599" in out["after"]["source"]
-    assert (out["after"]["as_of"], out["after"]["clock"]) == (
-        "2026-10-13 10:00:05",
-        "client",
-    )
+    job = out["rows"]["job"]
+    assert job["PandaID"] == {"value": PID, **read}
+    # every column is laid out with when it was read: which a later write may have changed is the querier's to say
+    assert job["specialHandling"] == {"value": "ddm:rucio", **read}
+    assert job["modificationTime"] == {"value": "2026-10-07 13:08:03", **read}
+    assert "Files" not in job and "after" not in out
     states = out["statuslog"]["states"]
     assert [s["status"] for s in states] == ["pending", "activated", "failed"]
     # whole from where it was asked, since the partitions go back further
@@ -587,7 +575,7 @@ async def test_a_task_not_answered_bounds_the_archive_from_100_days_before_it_wa
         ">=",
         "2026-07-05T10:00:05",
     ]
-    assert "rows" not in out and "after" not in out
+    assert "rows" not in out
     assert (
         f"rows.task: jediTaskID={TID}: Task not found or error retrieving task info"
         in out["about"]
@@ -654,87 +642,22 @@ async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
     )
     # a task's jobs' histories hold their columns too
     assert out["job_statuslog"]["by_pandaid"]["12"][1]["computingSite"] == "SITE_A"
-    # no 'finishing' row: the decision time cannot be taken, so all but the key is after
-    assert (
-        list(out["rows"]["task"]) == ["jediTaskID"]
-        and "no decision time" in out["after"]["source"]
-    )
-    assert out["after"]["source"].startswith(
-        "task/get_detailed_info, asked at 2026-10-13 10:00:05 on this machine's clock (UTC); "
-    )
-    # the task's row was asked apart from R's batch: its moment and clock are its own
-    assert (out["after"]["as_of"], out["after"]["clock"]) == (
-        "2026-10-13 10:00:05",
-        "client",
-    )
-    assert out["rows"]["task"]["jediTaskID"]["as_of"] == "2026-10-13 10:00:05"
+    # the task's row was asked apart from R's batch: its moment and clock are its own, on every column
+    task = out["rows"]["task"]
+    read = {
+        "source": "task/get_detailed_info, asked at 2026-10-13 10:00:05 on this machine's clock (UTC)",
+        "as_of": "2026-10-13 10:00:05",
+        "clock": "client",
+    }
+    assert task["jediTaskID"] == {"value": TID, **read}
     # the column as stored, not the server's decoding; what is not a column is named, not kept
-    assert out["after"]["splitRule"] == "US=2,SS=5"
-    assert "split_rule_raw" not in out["after"] and "nFiles" not in out["after"]
+    assert task["splitRule"] == {"value": "US=2,SS=5", **read}
+    assert "split_rule_raw" not in task and "nFiles" not in task
+    assert "after" not in out
     assert (
         "2 key(s) of the answers that are not columns of their class, left out: ['nFiles', 'raw_task_params']"
         in out["about"]
     )
-
-
-# ------------------------------------------------------------------ after
-
-
-def _states(*pairs):
-    return [{"status": s, "time": t[:19], "time_extended": t} for s, t in pairs]
-
-
-ROW = {"PandaID": 1, "jobStatus": "failed", "ddmErrorCode": 200, "computingSite": "S"}
-LOG = _states(
-    ("activated", "2026-10-07 13:06:46.000000"),
-    ("sent", "2026-10-07 13:07:00.000000"),
-    ("failed", "2026-10-07 13:08:03.877599"),
-)
-
-
-def test_after_takes_the_decision_by_the_kind_of_question():
-    assert A.decision_time("default", "failed", LOG)[0] == datetime.datetime(
-        2026, 10, 7, 13, 8, 3, 877599
-    )
-    assert A.decision_time("late", "activated", LOG)[0] == datetime.datetime(
-        2026, 10, 7, 13, 7
-    )
-    assert A.decision_time("stuck", "activated", LOG)[0] == datetime.datetime(
-        2026, 10, 7, 13, 6, 46
-    )
-    assert A.decision_time("late", "failed", LOG) == (
-        None,
-        "no history row after 'failed'",
-    )
-
-
-def test_after_keeps_only_what_no_later_write_may_have_set():
-    kept, later, why = A.split(ROW, "PandaID", "late", "activated", LOG, None)
-    assert kept == {"PandaID": 1} and set(later) == {
-        "jobStatus",
-        "ddmErrorCode",
-        "computingSite",
-    }
-    assert "2 write(s)" in why and "2 of them with no stated columns" in why
-
-    def stated(write):
-        return {"sent": {"jobStatus"}, "failed": {"jobStatus", "ddmErrorCode"}}[
-            write.status
-        ]
-
-    kept, later, _ = A.split(ROW, "PandaID", "late", "activated", LOG, None, stated)
-    assert kept == {"PandaID": 1, "computingSite": "S"} and set(later) == {
-        "jobStatus",
-        "ddmErrorCode",
-    }
-
-
-def test_after_counts_a_write_no_history_recorded():
-    modified = datetime.datetime(2026, 10, 8)
-    writes = A.writes_from(
-        datetime.datetime(2026, 10, 7, 13, 8, 3, 877599), LOG, modified
-    )
-    assert writes[-1] == A.Write(modified, None) and len(writes) == 2
 
 
 # ------------------------------------------------------------------ spelling
