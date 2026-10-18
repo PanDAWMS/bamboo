@@ -2892,7 +2892,7 @@ class Rerun:
                         if query.order and _same_order(sqltext.order_items(order), query.order):
                             used.setdefault(order, (r, read, query, binds))
         for order, (r, *_) in used.items():
-            self.say(f"  the call that moved it on ordered by {order!r} ({Path(r.file).name}:{r.lineno}, {r.stamp})")
+            self.say(f"  the call that moved it on ordered by {order!r} ({r.span}, {r.stamp})")
         self.need("one order the call that moved it on used, in its SQL", len(used) == 1)
         (took, (record, read, query, binds)), = used.items()
         others = [order for order in st.order_by if order != took]
