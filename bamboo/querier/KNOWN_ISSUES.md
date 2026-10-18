@@ -244,13 +244,17 @@ way on.
 
 H2 reads a run of another log as a part of the question's run (`which_ran.inside_call`) where both name the same
 machine, the map's reach goes from a function printed in the outer run into the inner run's candidate through a
-first call c, and the inner run's records fall between the outer run's last record before c and its first after
-(c's `must_rows`): DBProxy's archiveJob inside the adder's updateJobs (A, K on the record door).  A log line names no
-process, so this is inferred: another process on that machine calling the same function for the same key while
-the call was open would be joined too.  The reach gives one way in, so a second call site leaves the runs apart;
-so do a call with no print on either side, and the file door, whose files name no machine.  Apart, no run is the
-question's, as before (Fr1, 2026-10-14).  The line before still says each candidate is judged on its own run.
+call c of that function, and the inner run's records fall between the outer run's last record before c and its
+first after (c's `must_rows`): DBProxy's archiveJob inside the adder's updateJobs (A, K on the record door).  Every
+such c is tried, at each of its lines (`ReachCall.lines`), each asked of the map's reach on its own (`rerun._called_at`):
+the adder's process_job_report reaches archiveJob from 400 and 471.  A log line names no process, so this is
+inferred: another process on that machine calling the same function for the same key while the call was open would
+be joined too.  Calls between the same two prints (the two arms of an `if`) cannot be told apart by the records, so
+each whose pass holds the inner run is named.  A call with no print every path runs before it, or none after it
+before the next statement that can leave the block (`must_rows` stops there), leaves the runs apart -- 400 above has
+neither, so only 471 places archiveJob -- and so does the file door, whose files name no machine.  Apart, no run is
+the question's, as before (Fr1, 2026-10-14).  The line before still says each candidate is judged on its own run.
 
-*Shows:* "one run: <log> <first>..<last> ran inside the call at <file:line> of the run in <log> (between <record>
-and <record>), on <machine>", and rule 3 "runs inside the call at ..." for its candidates.
+*Shows:* "one run: <log> <first>..<last> ran inside the call at <file:line>[ or <file:line> ...] of the run in <log>
+(between <record> and <record>), on <machine>", and rule 3 "runs inside the call at ..." for its candidates.
 *Revisit:* when a log line names its process or thread; when the map says which prints precede a statement.

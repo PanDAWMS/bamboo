@@ -863,6 +863,109 @@ def test_a_run_of_another_log_is_inside_a_call_only_between_the_prints_around_th
     assert elsewhere is None
 
 
+def test_a_run_is_inside_only_the_calls_whose_pass_holds_it_and_calls_no_print_parts_are_named_together(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def f(self, job):
+                self.logger.debug("start")
+                self.check(job)
+                self.logger.debug("status after")
+                done = self.taskBuffer.updateJobs([job])
+                self.logger.debug("retU")
+                if job.x:
+                    self.reset(job)
+                else:
+                    self.close(job)
+                self.logger.debug("end")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows as R
+            from bamboo.querier.which_ran import held_in_calls, inside_call
+
+            node = R.functions("pandaserver/a.py", "f")[0]
+            fn = N(rel="pandaserver/a.py", node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            run = N(records=[N(stamp=f"2026-01-01 00:00:{s},000") for s in ["00", "01", "02", "03"]])  # start, status after, retU, end
+            caller = N(fn=fn, run=run, unambiguous={3: [0], 5: [1], 7: [2], 12: [3]})
+            inner = lambda a, b: N(first=f"2026-01-01 00:00:{a}", last=f"2026-01-01 00:00:{b}")
+            at = lambda *lines: (lambda fn, c: [f"pandaserver/a.py:{n}" for n in lines])
+            in_update, in_reset = inner("01,200", "01,800"), inner("02,200", "02,800")
+            print(json.dumps([
+                inside_call(caller, in_update, "pandaserver/a.py:4"),
+                held_in_calls(in_update, [(None, caller)], at(4, 6)),
+                held_in_calls(in_reset, [(None, caller)], at(4, 9, 11)),
+                held_in_calls(in_update, [(None, caller)], at(4)),
+            ]))
+            """,
+        )
+    )
+    in_check, update, reset_or_close, check_only = json.loads(out.splitlines()[-1])
+    # a pass through check ends at the first print after it: the run of updateJobs is not inside check
+    assert in_check is None
+    assert update == [1, 2, "pandaserver/a.py:6"]
+    # reset and close sit between the same two prints: the records hold the run in either, and both are named
+    assert reset_or_close == [2, 3, "pandaserver/a.py:9 or pandaserver/a.py:11"]
+    assert check_only is None
+
+
+def test_every_call_that_goes_on_into_the_candidate_is_tried_at_each_of_its_lines(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap.models import Anchor, ReachCall, ReachNode
+            from bamboo.querier import mapdump, rerun
+
+            def node(owner, start, end, **k):
+                return ReachNode(name=owner, map_id="m", derived_from="d", owner=owner, function=owner.rsplit(".", 1)[-1].split("::")[-1],
+                                 anchor=Anchor(package="p", file=owner.split("::")[0], line_start=start, line_end=end), **k)
+
+            archive = ReachCall(line=5, callee="archiveJob()", to="p/d.py::archiveJob")
+            rows = [node("p/a.py::f", 1, 20, calls=[
+                        ReachCall(line=12, lines=[4, 12], callee="self.taskBuffer.updateJobs()", to="p/t.py::updateJobs"),
+                        ReachCall(line=6, callee="self.check()", to="p/a.py::check"),
+                        ReachCall(line=8, callee="other.run()", to="p/w.py::Base.run", runs_as=["p/w.py::Other"]),
+                        ReachCall(line=14, callee="gen.run()", to="p/w.py::Base.run", runs_as=["p/w.py::Gen"]),
+                        ReachCall(line=10, callee="log()", to="p/l.py::log")]),
+                    node("p/t.py::updateJobs", 1, 9, calls=[archive]),
+                    node("p/a.py::check", 30, 35, calls=[archive]),
+                    node("p/w.py::Base.run", 1, 5, classes=["p/w.py::Gen", "p/w.py::Other"], calls=[
+                        ReachCall(line=3, callee="self.runImpl()", to="p/w.py::Gen.runImpl", for_classes=["p/w.py::Gen"], runs_as=["p/w.py::Gen"])]),
+                    node("p/w.py::Gen.runImpl", 10, 15, classes=["p/w.py::Gen"], calls=[archive]),
+                    node("p/l.py::log", 1, 3),
+                    node("p/d.py::archiveJob", 1, 9)]
+            mapdump._FRAGMENT[:] = [N(reach_graph=rows, junctions=[])]
+            r = object.__new__(rerun.Rerun)
+            r._graph_read, r._calls_into = None, {}
+            caller = N(rel="p/a.py", node=N(body=[N(lineno=2)]))
+            print(json.dumps([
+                r._called_at(caller, N(rel="p/d.py", lines=[3])),
+                r._called_at(caller, N(rel="p/a.py", lines=[3])),
+                r._called_at(caller, N(rel="p/l.py", lines=[2])),
+                sorted(map(list, r._calls_into)),
+            ]))
+            """,
+        )
+    )
+    archive, itself, log, asked = json.loads(out.splitlines()[-1])
+    # both lines of updateJobs, check's, and the worker entered as the class whose runImpl writes -- not the other
+    assert archive == ["p/a.py:4", "p/a.py:6", "p/a.py:12", "p/a.py:14"]
+    assert itself == []
+    assert log == ["p/a.py:10"]
+    # each (caller, callee) asked once
+    assert asked == [["p/a.py::f", "p/d.py::archiveJob"], ["p/a.py::f", "p/l.py::log"]]
+
+
 def test_a_candidate_with_no_run_says_why_for_every_log_it_was_looked_for_in(tmp_path):
     out = _ok(
         _run(

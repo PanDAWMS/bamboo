@@ -894,6 +894,8 @@ class Rerun:
         self._reach = None
         #: the dump's reach_graph as read (``_graph``): (the reach module, its ReachGraph, its rows); False with none
         self._graph_read = None
+        #: ``_called_at``'s answers: (caller, callee) function -> the lines of the calls that go on into it
+        self._calls_into: dict[tuple[str, str], list[str]] = {}
 
     # ------------------------------------------------------------ plumbing
     def say(self, text: str = "") -> None:
@@ -1793,21 +1795,35 @@ class Rerun:
                 self._graph_read = False
         return self._graph_read or None
 
-    def _called_at(self, caller: R.Function, callee: Candidate) -> str | None:
-        """Where *caller* calls on into *callee*'s function, by the map's reach: the ``file:line`` of the first call on
-        the way (``ReachWrite.chain``), or None -- for H2 to read a run inside that call as a part of the caller's
-        (``which_ran.inside_call``).  One way is found, not each: a call it misses leaves the runs apart."""
+    def _called_at(self, caller: R.Function, callee: Candidate) -> list[str]:
+        """Where *caller* calls on into *callee*'s function, by the map's reach: the ``file:line`` of each call of
+        *caller*'s from which the reach goes on into it, every line of the call (``ReachCall.lines``) -- for H2 to read
+        a run inside one of them as a part of the caller's (``which_ran.inside_call``).
+
+        A reach from *caller* gives one way in (``ReachWrite.chain``), and a second call into the same function, or a
+        call into another that goes on there too (the adder's ``process_job_report`` reaches ``archiveJob`` through
+        ``updateJobs`` at 471 and ``check_file_status_in_jedi`` at 400), would be missed.  So each call is asked on its
+        own, as the reach from a copy of *caller*'s row holding that call alone, by the map's own rules (the classes a
+        call holds for and enters as).  A way that comes back into *caller* and on through its other calls counts as
+        inside the call, as it runs there."""
         graph = self._graph()
         if graph is None or not caller.node.body or not callee.lines:
-            return None
-        RE, record, _ = graph
+            return []
+        RE, record, rows = graph
         start = record.function_at(caller.rel, caller.node.body[0].lineno)
         end = record.function_at(callee.rel, callee.lines[0])
         if start is None or end is None or start == end:
-            return None
-        reached = record.reach([start], RE.Destination({end: ["called"]}, []))
-        write = next((w for w in reached.writes or [] if w.function == end), None)
-        return write.chain[0] if write is not None and write.chain else None
+            return []
+        if (start, end) not in self._calls_into:
+            row, file = record.rows[start], start.partition("::")[0]
+            lines: set[int] = set()
+            for n, call in enumerate(row.calls):
+                one = row.model_copy(update={"owner": f"{start}#{n}", "calls": [call]})
+                reached = RE.ReachGraph([*rows, one]).reach([one.owner], RE.Destination({end: ["called"]}, []))
+                if any(w.function == end for w in reached.writes or []):
+                    lines.update(call.lines or [call.line])
+            self._calls_into[(start, end)] = [f"{file}:{line}" for line in sorted(lines)]
+        return self._calls_into[(start, end)]
 
     def _reach_of(self, q: Stuck, owner: str, lines: list[int]) -> dict | None:
         """What the map's reach says of a mover with no arm of its own: from the defs holding its statements at *lines*

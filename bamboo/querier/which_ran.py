@@ -224,6 +224,22 @@ def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None
     return None
 
 
+def held_in_calls(
+    inner: Run, pairs: list[tuple[Candidate, R.Seen]], called_at: Callable[[R.Function, Candidate], list[str]]
+) -> tuple[int, int, str] | None:
+    """``(i, j, calls)``: where *inner* ran inside the calls of an outer run's functions, for each (candidate of
+    *inner*, function seen in the outer run) in *pairs* -- the calls by *called_at*, each placed by :func:`inside_call`
+    -- or None.
+
+    The records cannot tell apart calls between the same two prints (one in each arm of an ``if``), so every call
+    whose pass holds *inner* is named (``"a.py:9 or a.py:11"``), and (i, j) is the span of their passes: *inner* sits
+    somewhere in it."""
+    held = [(site, at) for c, sn in pairs for site in called_at(sn.fn, c) if (at := inside_call(sn, inner, site))]
+    if not held:
+        return None
+    return min(at[0] for _, at in held), max(at[1] for _, at in held), " or ".join(dict.fromkeys(site for site, _ in held))
+
+
 def callers_guards(fn: R.Function) -> list[tuple[str, str]]:
     """``(guard, where)`` on the way to every ``self.<fn>()`` call in the same class."""
     tree = R.tree(fn.rel)
@@ -382,10 +398,10 @@ def judge(
     raised_at: dict[str, set[int]] | None = None,
     env: E.Env | None = None,
     complete: bool = True,
-    called_at: Callable[[R.Function, Candidate], str | None] | None = None,
+    called_at: Callable[[R.Function, Candidate], list[str]] | None = None,
 ) -> Judgement:
-    """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of the
-    first call on the way, or None.  Given it, and no *question_run*, runs of the key in several logs are read as
+    """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of every
+    call from which it goes on there.  Given it, and no *question_run*, runs of the key in several logs are read as
     one where every run but one ran inside a call that one made (:func:`inside_call`, on the machine both name), and
     that one is the question's run."""
     raised_at = raised_at or {}
@@ -429,7 +445,7 @@ def judge(
     # a record counts as printed only by the rows that read it best (rows.claim)
     seens = dict(zip(seens, R.claim(list(seens.values())), strict=False))
 
-    # a run inside a call another run made is a part of that run: (outer run, record before, record after, call)
+    # a run inside a call another run made is a part of that run: (outer run, record before, record after, calls)
     joined: dict[int, tuple[Run, int, int, str]] = {}
     join_notes: list[str] = []
     if question_run is None and called_at is not None and JOIN_CALLS and subject and observed:
@@ -438,19 +454,9 @@ def judge(
             for outer in runs:
                 if outer is inner or outer.log.name == inner.log.name or not outer.machine or outer.machine != inner.machine:
                     continue
-                found = next(
-                    (
-                        (outer, *at, site)
-                        for c in candidates
-                        if runs_of.get(c.owner) is inner
-                        for sn in seens.values()
-                        if sn.run is outer
-                        if (site := called_at(sn.fn, c)) and (at := inside_call(sn, inner, site))
-                    ),
-                    None,
-                )
-                if found is not None:
-                    joined[id(inner)] = found
+                pairs = [(c, sn) for c in candidates if runs_of.get(c.owner) is inner for sn in seens.values() if sn.run is outer]
+                if (found := held_in_calls(inner, pairs, called_at)) is not None:
+                    joined[id(inner)] = (outer, *found)
                     break
         roots = [r for r in runs if id(r) not in joined]
         if joined and len(roots) == 1 and all(outer is roots[0] for outer, *_ in joined.values()):
