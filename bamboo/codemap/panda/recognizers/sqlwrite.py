@@ -264,7 +264,9 @@ def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingSto
     With the tables the statement reads, so a stop can be told apart by
     whether it is in a query at all.  A gap in the ``VALUES`` of an ``INSERT``
     and a gap in a ``SELECT``'s ``WHERE`` are the same reason and different
-    answers to "which rows did this function pick up".
+    answers to "which rows did this function pick up".  The columns a write
+    names that were not read (:attr:`sql.Execution.unread_columns`) are stops
+    too, and a plain ``UPDATE`` reads no table, so they are not about rows.
     """
     read_tables = sorted({table for verb, table in _table_verbs(run.reading) if verb == "read"})
     return [
@@ -277,7 +279,7 @@ def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingSto
             statement=run.call.lineno,
             reads=read_tables,
         )
-        for stop in run.unresolved
+        for stop in (*run.unresolved, *run.unread_columns)
     ]
 
 

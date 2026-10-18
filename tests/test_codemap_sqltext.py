@@ -1264,3 +1264,93 @@ def test_a_term_ends_at_the_subquery_it_closes_and_a_condition_interpolated_whol
     assert [(stop.source, stop.reason) for stop in sql._hole_stops(criteria, 7)] == [("{}", sql.CONDITION_IS_A_HOLE)]
     # A column named through a hole is still the column's.
     assert [stop.reason for stop in sql._hole_stops("SELECT x FROM t WHERE {}=:{}", 7)] == [sql.COLUMN_IS_A_HOLE]
+
+
+def test_a_column_a_write_names_at_run_time_is_said_not_passed_over():
+    """``updateJobStatus`` appends ``,{key}=:{key}`` for each key of the pilot's ``param``: the pairing read the
+    columns it could and passed over the rest with ``continue``, so the pilot's update wrote ``jobStatus`` alone in
+    the map, and nothing said a column was missing.  Each item passed over is said, as the statement spells it."""
+    marked = (
+        f"UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus{_O},{{}}=:{{}},memory_leak=:memory_leak{_C}"
+        ",startTime=CURRENT_DATE WHERE PandaID=:PandaID"
+    )
+    (statement,) = sqltext.writes(marked)
+    assert set(statement.columns) == {"jobStatus", "memory_leak", "startTime"}
+    assert sqltext.unread_columns(marked) == [("SET {}=:{}", sqltext.SET_COLUMN_IS_A_HOLE)]
+    # Read whole, nothing is said.
+    assert sqltext.unread_columns("UPDATE T SET a=:a, b=CURRENT_DATE WHERE id=:id") == []
+
+
+def test_assignments_python_writes_whole_are_said_and_so_is_a_set_with_none():
+    """``SET {}`` is a spec's ``bindUpdateChangesExpression()`` -- the object's changed attributes; a ``SET`` item
+    that is a row of columns from a subquery is no ``column = value``; and the variant where no attribute changed
+    writes the table with no column read at all, which no item can say."""
+    assert sqltext.unread_columns("UPDATE ATLAS_PANDA.filesTable4 SET {} WHERE row_ID=:row_ID") == [
+        ("SET {}", sqltext.SET_ITEM_IS_A_HOLE)
+    ]
+    attempts = (
+        "UPDATE ATLAS_PANDA.TASK_ATTEMPTS SET (endtime, endstatus) = "
+        "(SELECT CURRENT_DATE, status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID) WHERE jediTaskID=:jediTaskID"
+    )
+    assert [why for _what, why in sqltext.unread_columns(attempts)] == [sqltext.SET_ITEM_NOT_READ]
+    assert sqltext.unread_columns("UPDATE ATLAS_PANDA.filesTable4 SET  WHERE row_ID=:row_ID") == [
+        ("filesTable4", sqltext.COLUMNS_NOT_READ)
+    ]
+
+
+def test_an_insert_whose_columns_python_names_is_said_once_with_its_column_list():
+    """``INSERT INTO jobsArchived4 ({}) VALUES({})`` is ``JobSpec.columnNames()``: every column of the class, none
+    of them in the text.  Said once, with the list as the statement holds it; a name the values have no item for is
+    said too, and so is an ``INSERT`` that names no columns."""
+    assert sqltext.unread_columns("INSERT INTO ATLAS_PANDA.jobsArchived4 ({}) VALUES({})") == [
+        ("({})", sqltext.INSERT_COLUMN_IS_A_HOLE)
+    ]
+    # The reading unrolls columnNames()' loop once or twice: one list, said once.
+    for unrolled in ("({},{})", "({}{})"):
+        assert sqltext.unread_columns(f"INSERT INTO ATLAS_PANDA.jobsArchived4 {unrolled} VALUES({{}})") == [
+            ("({})", sqltext.INSERT_COLUMN_IS_A_HOLE)
+        ]
+    # Values from Python too: the list is said, and the table is not said again.
+    assert sqltext.unread_columns("INSERT INTO ATLAS_PANDA.workflows ({}) {}") == [
+        ("({})", sqltext.INSERT_COLUMN_IS_A_HOLE)
+    ]
+    template = "INSERT INTO ATLAS_PANDA.JEDI_Output_Template (outTempID,datasetID,{}) VALUES(:o,:d,{})"
+    assert sqltext.unread_columns(template) == [("(outTempID,datasetID,{})", sqltext.INSERT_COLUMN_IS_A_HOLE)]
+    assert sqltext.unread_columns("INSERT INTO T (a,b,c) VALUES(:a,:b)") == [("c", sqltext.INSERT_VALUE_NOT_PAIRED)]
+    assert sqltext.unread_columns("INSERT INTO ATLAS_PANDA.Metrics VALUES (:site, :metric)") == [
+        ("Metrics", sqltext.COLUMNS_NOT_READ)
+    ]
+    assert sqltext.unread_columns("INSERT INTO T (a,b) VALUES(:a,:b)") == []
+
+
+def test_unread_columns_are_stops_on_the_statement_and_not_on_the_rows_it_picks():
+    """A run keeps them apart from :attr:`sql.Execution.unresolved`, which a read site carries and a gate reads as
+    a statement read only in part; both are stops on the statement, and a plain write reads no table.  Where a
+    fragment has no text of its own that stop says the statement is not all here, and no table is said again."""
+    source = (
+        "def f(self, param):\n"
+        "    sql1 = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus'\n"
+        "    for key in list(param):\n"
+        "        sql1 += ',{0}=:{0}'.format(key)\n"
+        "    sql1 += ' WHERE PandaID=:PandaID'\n"
+        "    self.cur.execute(sql1, varMap)\n"
+        "    sqlA = 'INSERT INTO ATLAS_PANDA.jobsArchived4 ({0}) '.format(JobSpec.columnNames())\n"
+        "    sqlA += JobSpec.bindValuesExpression()\n"
+        "    self.cur.execute(sqlA, job.valuesMap())\n"
+    )
+    tree = ast.parse(source)
+    from bamboo.codemap.panda.pathcond import attach_parents
+
+    attach_parents(tree)
+    func = tree.body[0]
+    runs = sql.executions(func)
+    by_line = {run.call.lineno: run for run in runs}
+    assert {(stop.source, stop.reason) for stop in by_line[6].unread_columns} == {
+        ("SET {}=:{}", sqltext.SET_COLUMN_IS_A_HOLE)
+    }
+    assert by_line[6].unresolved == ()
+    assert {stop.reason for stop in by_line[9].unresolved} == {sql.FRAGMENT_NOT_RENDERED}
+    assert sqltext.COLUMNS_NOT_READ not in {stop.reason for stop in by_line[9].unread_columns}
+    stops = sqlwrite.statement_stops(func, "taskbuffer/db_proxy_mods/job_complex_module.py")
+    said = [stop for stop in stops if stop.reason == sqltext.SET_COLUMN_IS_A_HOLE]
+    assert [(stop.statement, stop.detail, stop.reads) for stop in said] == [(6, "SET {}=:{}", [])]
