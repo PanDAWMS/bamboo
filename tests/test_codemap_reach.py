@@ -266,22 +266,27 @@ def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_
 def test_what_outside_code_returns_from_a_corpus_object_it_was_handed_is_not_taken_as_outside(
     tmp_path,
 ):
-    """``copy.deepcopy(job)`` returns a copy of the corpus object: a call on it is a hole, not an outside call."""
+    """``random.choice(job)`` may return the corpus object it is handed: a call on it is a hole, not an outside call.
+
+    ``copy.copy`` and ``copy.deepcopy`` were the example once; they are read
+    as the class they copy now (``calls._COPIES``), and a call on a copy is
+    placed.
+    """
     record = _record(
         tmp_path,
         mod=(
-            "import copy\n\n"
+            "import random\n\n"
             "class Job:\n"
             "    def flush(self):\n"
             "        pass\n\n"
             "def clone(job: Job):\n"
-            "    copy.deepcopy(job).flush()\n"
+            "    random.choice(job).flush()\n"
         ),
     )
 
     (hole,) = record.rows["pkg/mod.py::clone"].holes
 
-    assert hole.callee == "copy.deepcopy(job).flush"
+    assert hole.callee == "random.choice(job).flush"
     assert "handed job" in hole.why
 
 
