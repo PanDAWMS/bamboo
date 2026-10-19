@@ -171,6 +171,10 @@ def _roots_key(roots: dict[str, Path]) -> tuple:
     return tuple(sorted((package, str(root)) for package, root in roots.items()))
 
 
+#: What :meth:`Calls.route_constant` answers where the route fixes no constant.
+UNSET = object()
+
+
 class Target(NamedTuple):
     """One function definition a call can land in, and the classes its object can be when it runs there.
 
@@ -1140,6 +1144,65 @@ class Calls:
             if not outer and values:
                 found.append(((at,), values))
         return found
+
+    def route_constant(self, name: str, target: Target, sites: tuple) -> object:
+        """The constant the route *sites* hands *target*'s parameter *name*, or :data:`UNSET`.
+
+        *sites* is the call into *target* first, then outward.  Followed out
+        through each forwarder that hands the parameter on unchanged; a call
+        that does not pass it hands the default it states.  A value the
+        route's outermost caller takes as its own parameter is not fixed:
+        that caller's callers are not asked.  Nor is a forwarder's caller
+        asked for a parameter the forwarder may bind again on the route
+        before handing it on (:meth:`bound_again`): ``getTasksToBeProcessed_JEDI``
+        sets ``is_dry_run = True`` whenever ``simTasks`` is given, whatever its
+        caller passed -- on a route that gives it, not on one that leaves it
+        ``None``.
+        """
+        site = sites[0]
+        handed = self.handed(site, target).get(name)
+        if isinstance(handed, ast.Constant):
+            return handed.value
+        if (
+            isinstance(handed, ast.Name)
+            and name in self.filled(site, target)
+            and len(sites) > 1
+            and handed.id in _parameter_names(site.func)
+        ):
+            owned = self.types.method_class(site.file, site.func)
+            outer = Target(site.file, site.func, owned[1] if owned else None)
+            if self.bound_again(handed.id, outer, sites[1:]):
+                return UNSET
+            return self.route_constant(handed.id, outer, sites[1:])
+        return UNSET
+
+    def bound_again(self, name: str, target: Target, sites: tuple) -> bool:
+        """Whether *target*'s function may bind its parameter *name* again when the route *sites* calls it.
+
+        A binding the function's own tests rule out, with the constants the
+        route hands the parameters they test, is not on the route
+        (:func:`pathcond.ruled_out_by`) -- the parameter itself among them:
+        ``maxNumJobs -= ...`` under ``if maxNumJobs is not None`` never runs
+        on a route handing ``None``, and where no binding runs the name holds
+        what it was handed.  A ``del`` always may.
+        """
+        func = target.func
+        if not _rebinds(func, name):
+            return False
+        if any(isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del) for node in ast.walk(func)):
+            return True
+        again = [binding.site for binding in pathcond.bindings(func, name) if not binding.nested]
+        tested = {
+            one.id
+            for site in again
+            for test in pathcond.tests_on(site, func)
+            for one in ast.walk(test)
+            if isinstance(one, ast.Name) and one.id in _parameter_names(func)
+        }
+        constants = {
+            one: value for one in sorted(tested) if (value := self.route_constant(one, target, sites)) is not UNSET
+        }
+        return any(not pathcond.ruled_out_by(site, func, constants) for site in again)
 
     #: How many calls out a route goes, the call into the function counted.
     ROUTE_HOPS = 4

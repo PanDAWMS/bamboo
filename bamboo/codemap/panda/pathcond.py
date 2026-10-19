@@ -775,23 +775,64 @@ def decided(test: ast.expr, values: dict[str, object]) -> object:
 def ruled_out_by(node: ast.AST, func: ast.AST, values: dict[str, object]) -> bool:
     """Whether *func* never runs *node* when its parameters hold *values*.
 
-    Only *func*'s own ``if`` statements are ruled on: a nested function or
-    lambda has parameters of its own, whatever they are called.
+    Two ways a test keeps *node* from running: an ``if`` holding it whose
+    test the values decide against the arm it is in, and an ``if`` before it
+    in a block holding it that leaves the block on the arm the values decide
+    -- ``if forAnal: return None`` above ``job.jobStatus = "unknown"``.  Only
+    *func*'s own statements are ruled on: a nested function or lambda has
+    parameters of its own, whatever they are called.
     """
+    for test, keeps in _tests_on(node, func):
+        result = decided(test, values)
+        if result is not UNDECIDED and result is not keeps:
+            return True
+    return False
+
+
+def tests_on(node: ast.AST, func: ast.AST) -> list[ast.expr]:
+    """The tests :func:`ruled_out_by` reads for *node* in *func*: what its parameters must settle to rule on it."""
+    return [test for test, _keeps in _tests_on(node, func)]
+
+
+def _tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
+    """Each test of *func* that decides whether *node* runs, with the value it runs on.
+
+    Kept on *node*, as its ``parent`` is: a route reading asks it of every
+    node of a function, once per route.
+    """
+    held = getattr(node, "_tests_on", None)
+    if held is not None and held[0] is func:
+        return held[1]
+    found = _read_tests_on(node, func)
+    node._tests_on = (func, found)  # type: ignore[attr-defined]
+    return found
+
+
+def _read_tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
     if enclosing_function(node) is not func:
-        return False
+        return []
+    found: list[tuple[ast.expr, bool]] = []
     child = node
     for ancestor in ancestors(node):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(ancestor, field, None)
+            if not isinstance(block, list) or not any(child is one for one in block):
+                continue
+            for statement in block[: next(i for i, one in enumerate(block) if one is child)]:
+                if isinstance(statement, ast.If):
+                    if _jumps(statement.body):
+                        found.append((statement.test, False))
+                    elif statement.orelse and _jumps(statement.orelse):
+                        found.append((statement.test, True))
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             break
         if isinstance(ancestor, ast.If):
-            result = decided(ancestor.test, values)
-            if result is False and any(child is one for one in ancestor.body):
-                return True
-            if result is True and any(child is one for one in ancestor.orelse):
-                return True
+            if any(child is one for one in ancestor.body):
+                found.append((ancestor.test, True))
+            elif any(child is one for one in ancestor.orelse):
+                found.append((ancestor.test, False))
         child = ancestor
-    return False
+    return found
 
 
 # ---------------------------------------------------------------------------

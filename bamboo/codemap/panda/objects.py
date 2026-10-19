@@ -25,12 +25,17 @@ bindings are read without the order of the statements: a name bound to a
 path anywhere holds it everywhere in the function, which can only say an
 object reaches more than it does.
 
-Not read, and so an object can reach more than this says: a call inside a
-lambda's body, a nested function's use of the names of the one around it,
-and ``setattr(job, "jobStatus", v)`` with the name spelled (an assignment by
-another spelling).  On pin k a search of the source finds none of the three
-handing or setting a JobSpec, JediTaskSpec or FileSpec -- a search, not a
-reading of the map.
+Not read, and so an object can reach more than this says: a value handed on
+in a form other than a path, a list / tuple / set literal's elements or a
+call's result -- a dict literal's values, a tuple target (``a, b = f()``,
+``for a, b in zip(...)``), an if-else or ``or``, a comprehension's result, a
+container method's or builtin's result (``jobs.pop()``, ``list(jobs)``
+outside a loop), a walrus, a ``with``'s target; a call inside a lambda's body,
+a nested function's use of the names of the one around it, and
+``setattr(job, "jobStatus", v)`` with the name spelled.  On pin k (10-19),
+where a follow the history pairs or the adder's ``may_change`` read holds a
+path, 67 dict literals and 11 tuple targets of a call carry it on, and the
+lambdas, nested functions and spelled ``setattr`` none.
 
 :meth:`_Reader.writes` adds the statements that write rows
 (:class:`~bamboo.codemap.models.DbWrite`): each written column's value as a

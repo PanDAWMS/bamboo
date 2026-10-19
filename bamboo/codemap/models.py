@@ -451,7 +451,10 @@ class HistoryPair(BaseModel):
     point: one runs after the other with no run started between them and no
     turn of a loop holding both, read by
     :func:`~bamboo.codemap.panda.reaching.reaching`.  The walk up stops on
-    each way at the first level with a pair.
+    each way at the first level with a pair, and does not take a way the
+    values its calls hand rule out (``setErrDiag(diag)`` leaves ``append``
+    False, so its append arm pairs only with callers handing it True); the
+    caller's own parameters are read as any value.
 
     **Reachable, not taken.**  A call made on some paths only --
     ``updateTask_JEDI`` records a task's status only when it changed -- pairs
@@ -463,8 +466,10 @@ class HistoryPair(BaseModel):
     arm's object -- or its key, for an SQL arm -- is followed from the caller
     into the call (:func:`bamboo.codemap.objects.follow`), and ``can`` says it
     reaches the writer's key: on some way, an element of a list among the
-    others, the bindings read without order -- a row the pass can write, not
-    one it wrote.
+    others, the bindings read without order and without what the calls on the
+    way down hand -- a row the pass can write, not one it wrote.  Where the
+    object is given a new key on the way (``retryJob``'s new ``PandaID``), the
+    row is the new key's while the run's mark holds the old one.
     """
 
     level: int = Field(description="0 for the arm's own function; n+1 for a caller of a level-n one.")
@@ -720,7 +725,9 @@ class Branch(BaseModel):
         default="",
         description=(
             "Why ``history`` is ``None``; beside a list, where the walk up "
-            "stopped short of an end, so the list may hold less than every pair."
+            "stopped short of an end, so the list may hold less than every pair; "
+            "beside an empty list, also a way up it did not take because what "
+            "the calls on it hand rule it out."
         ),
     )
 

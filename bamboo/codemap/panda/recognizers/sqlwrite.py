@@ -54,7 +54,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
-from bamboo.codemap.calls import FILLERS, Calls, Route, Target, Types, _rebinds
+from bamboo.codemap.calls import FILLERS, UNSET, Calls, Route, Target, Types
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     AddedTerm,
@@ -2036,71 +2036,6 @@ def _on_route(via: tuple[str, ...], chain: tuple[str, ...], into: frozenset[str]
     return rest[:shared] == chain[:shared]
 
 
-#: A parameter a route fixes no constant for.
-_UNSET = object()
-
-
-def _route_constant(name: str, target: Target, sites: tuple, calls: Calls) -> object:
-    """The constant the route *sites* hands *target*'s parameter *name*, or :data:`_UNSET`.
-
-    Followed out through each forwarder that hands the parameter on
-    unchanged; a call that does not pass it hands the default it states.  A
-    value the route's outermost caller takes as its own parameter is not
-    fixed: that caller's callers are not asked.  Nor is a forwarder's caller
-    asked for a parameter the forwarder may bind again on the route before
-    handing it on (:func:`_bound_again`): ``getTasksToBeProcessed_JEDI`` sets
-    ``is_dry_run = True`` whenever ``simTasks`` is given, whatever its caller
-    passed -- on a route that gives it, not on one that leaves it ``None``.
-    """
-    site = sites[0]
-    handed = calls.handed(site, target).get(name)
-    if isinstance(handed, ast.Constant):
-        return handed.value
-    if (
-        isinstance(handed, ast.Name)
-        and name in calls.filled(site, target)
-        and len(sites) > 1
-        and handed.id in _parameters(site.func)
-    ):
-        owned = calls.types.method_class(site.file, site.func)
-        outer = Target(site.file, site.func, owned[1] if owned else None)
-        if _bound_again(handed.id, outer, sites[1:], calls):
-            return _UNSET
-        return _route_constant(handed.id, outer, sites[1:], calls)
-    return _UNSET
-
-
-def _bound_again(name: str, target: Target, sites: tuple, calls: Calls) -> bool:
-    """Whether *target*'s function may bind its parameter *name* again when the route *sites* calls it.
-
-    A binding the function's own tests rule out, with the constants the route
-    hands the parameters they test, is not on the route
-    (:func:`pathcond.ruled_out_by`) -- the reading :func:`values.handed` gives
-    a call whose constant rules out a bind.  The parameter itself among them:
-    ``maxNumJobs -= ...`` under ``if maxNumJobs is not None`` never runs on a
-    route handing ``None``, and where no binding runs the name holds what it
-    was handed.  A ``del`` always may.
-    """
-    func = target.func
-    if not _rebinds(func, name):
-        return False
-    if any(isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del) for node in ast.walk(func)):
-        return True
-    again = [binding.site for binding in pathcond.bindings(func, name) if not binding.nested]
-    tested = {
-        one.id
-        for site in again
-        for ancestor in ancestors(site)
-        if isinstance(ancestor, ast.If) and enclosing_function(ancestor) is func
-        for one in ast.walk(ancestor.test)
-        if isinstance(one, ast.Name) and one.id in _parameters(func)
-    }
-    constants = {
-        one: value for one in sorted(tested) if (value := _route_constant(one, target, sites, calls)) is not _UNSET
-    }
-    return any(not pathcond.ruled_out_by(site, func, constants) for site in again)
-
-
 def _route_handed(target: Target, sites: tuple, calls: Calls) -> dict[str, "values.Stated"]:
     """What the route *sites* hands each of *target*'s parameters, read as an amount in the caller (:func:`values.stated`).
 
@@ -2903,7 +2838,7 @@ def read_side(
         records: dict[int, list[CallReading]] = {line: [] for line in lines}
         for route in found:
             constants = {
-                name: value for name in sorted(tested) if (value := _route_constant(name, target, route.sites, calls)) is not _UNSET
+                name: value for name in sorted(tested) if (value := calls.route_constant(name, target, route.sites)) is not UNSET
             }
             routing.update(chain=route.chain, into=into, func=func, handed=_route_handed(target, route.sites, calls))
             try:

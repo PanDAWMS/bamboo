@@ -33,8 +33,14 @@ say which parameter takes it.  A hole the object does not reach is not this
 object's, which is why this answers where the closure's own reach does not.
 
 What it rests on, beyond :data:`bamboo.codemap.reach.PREMISES`, is in
-:data:`PREMISES`; the bindings are read without the statements' order, so an
-object can be said to reach more than it does, not less.
+:data:`PREMISES`.  The bindings are read without the statements' order and
+without what calls hand (a branch a constant rules out is read as run), which
+can only say an object reaches more than it does.  The other way: the record
+reads a value handed on in its own forms only (a path, a list / tuple / set
+literal's elements, a call's result), so one carried by another -- a dict
+literal's values, a tuple target, an if-else or ``or``, a comprehension's
+result, a container method's result (``jobs.pop()``) -- is not followed, and
+the object can reach more than this says.
 """
 
 from __future__ import annotations
@@ -60,6 +66,10 @@ PREMISES: dict[str, str] = {
     ),
     "bindings_without_order": (
         "A name bound to what a path holds anywhere in a function holds it everywhere in the function."
+    ),
+    "handed_values_not_read": (
+        "What a call hands its callee is not read: a statement the values it hands would rule out is read as one "
+        "that runs, with its bindings and assignments."
     ),
 }
 
@@ -539,6 +549,7 @@ def may_change(
     premises = [
         "outside_assigns_nothing",
         "bindings_without_order",
+        "handed_values_not_read",
         "holes_land_by_name",
     ]
     assigned = [

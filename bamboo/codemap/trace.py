@@ -1920,7 +1920,7 @@ class _Walk:
         route of calls into a proxy method passes through it
         (:meth:`Calls.routes`): with the constants each such route hands the
         parameters the method tests, as the build reads a route
-        (``sqlwrite._route_constant``), so ``getPandaIDsWithTask_JEDI(jediTaskID,
+        (:meth:`Calls.route_constant`), so ``getPandaIDsWithTask_JEDI(jediTaskID,
         True)`` reads the two tables ``onlyActive`` leaves, not four.  The
         tables and keys of every route through the call together.  Where no
         route passes through it -- the call is not placed, or the facade does
@@ -1970,8 +1970,8 @@ class _Walk:
                         {
                             name: value
                             for name in flags
-                            if (value := sqlwrite._route_constant(name, target, route.sites, self.calls))
-                            is not sqlwrite._UNSET
+                            if (value := self.calls.route_constant(name, target, route.sites))
+                            is not calls_mod.UNSET
                         }
                         for route in through
                     ]
@@ -2018,8 +2018,8 @@ class _Walk:
                 {
                     name: value
                     for name in flags
-                    if (value := sqlwrite._route_constant(name, facade, route.sites, self.calls))
-                    is not sqlwrite._UNSET
+                    if (value := self.calls.route_constant(name, facade, route.sites))
+                    is not calls_mod.UNSET
                 },
             )
             for route in through

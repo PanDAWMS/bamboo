@@ -177,6 +177,55 @@ class Rebinder:
         proxy.note_change(job.PandaID, job.jobStatus)
 """
 
+FLAGS = """\
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+
+class Flags(DBProxy):
+    def set_diag(self, job: JobSpec, append=False):
+        if append:
+            job.jobStatus = "appended"  # F1
+        else:
+            job.jobStatus = "set"  # F2
+
+    def plain(self, job: JobSpec):
+        self.set_diag(job)
+        self.note_change(job.PandaID, job.jobStatus)  # G1
+
+    def appending(self, job: JobSpec):
+        self.set_diag(job, True)
+        self.note_change(job.PandaID, job.jobStatus)  # G2
+
+    def forward(self, job: JobSpec, flag):
+        self.set_diag(job, append=flag)
+
+    def forwarding(self, job: JobSpec):
+        self.forward(job, False)
+        self.note_change(job.PandaID, job.jobStatus)  # G3
+
+    def via_true(self, job: JobSpec):
+        self.set_diag(job, True)
+
+    def via_plain(self, job: JobSpec):
+        self.set_diag(job)
+
+    def top(self, job: JobSpec):
+        self.via_true(job)
+        self.via_plain(job)
+        self.note_change(job.PandaID, job.jobStatus)  # G4
+
+    def peek_one(self, job: JobSpec, for_anal=False):
+        if for_anal:
+            return None
+        job.jobStatus = "unknown"  # F3
+        return job
+
+    def analysed(self, job: JobSpec):
+        self.peek_one(job, for_anal=True)
+        self.note_change(job.PandaID, job.jobStatus)  # G5
+"""
+
 MARKS = """\
 from pandacommon.pandalogger.LogWrapper import LogWrapper
 from pandacommon.pandalogger.logger_utils import make_logger
@@ -460,6 +509,88 @@ def test_a_function_handed_on_is_not_the_same_pass(tmp_path: Path) -> None:
     fragment = _proxy(tmp_path, ("DBProxy.handed", "A6"))
     branch = _branch(fragment, "A6")
     assert (branch.history, branch.history_hole) == ([], "")
+
+
+def _flags(tmp_path: Path, *markers: str) -> MapFragment:
+    arms = [
+        ("flags", f"Flags.{owner}", marker, "JobSpec.jobStatus")
+        for owner, marker in (
+            ("set_diag", "F1"),
+            ("set_diag", "F2"),
+            ("peek_one", "F3"),
+        )
+        if marker in markers
+    ]
+    return _build(tmp_path, arms, spec=SPEC, proxy=PROXY, flags=FLAGS)
+
+
+def _callers(branch: Branch) -> set[str]:
+    return {pair.caller.rpartition(".")[2] for pair in branch.history or []}
+
+
+def test_a_flag_a_call_hands_rules_out_the_arm_it_tests(tmp_path: Path) -> None:
+    """``setErrDiag(diag)`` leaves ``append`` False: its append arm is not on that caller's pass, and is on the one handing True."""
+    fragment = _flags(tmp_path, "F1", "F2")
+    assert _callers(_branch(fragment, "F1")) == {"appending", "top"}
+    assert _callers(_branch(fragment, "F2")) == {"plain", "forwarding", "top"}
+
+
+def test_a_flag_handed_on_is_read_where_it_is_given(tmp_path: Path) -> None:
+    """``forward(job, flag)`` hands ``flag`` on as ``append``; ``forwarding`` gives it False."""
+    fragment = _flags(tmp_path, "F1")
+    assert "forwarding" not in _callers(_branch(fragment, "F1"))
+
+
+def test_a_way_ruled_out_does_not_stop_another_way_to_the_same_caller(
+    tmp_path: Path,
+) -> None:
+    """``top`` calls ``via_true`` and ``via_plain``: the arm each rules out is still ``top``'s through the other."""
+    fragment = _flags(tmp_path, "F1", "F2")
+    for marker, through in (("F1", "via_true"), ("F2", "via_plain")):
+        (pair,) = [
+            one
+            for one in _branch(fragment, marker).history or []
+            if one.caller.endswith("top")
+        ]
+        assert pair.level == 2
+        assert f"Flags.{through}" not in pair.caller
+
+
+def test_an_early_exit_a_call_decides_rules_out_what_follows_it(
+    tmp_path: Path,
+) -> None:
+    fragment = _flags(tmp_path, "F3")
+    branch = _branch(fragment, "F3")
+    assert branch.history == []
+    assert runs.HISTORY_RULED_OUT in branch.history_hole
+
+
+def test_ruled_out_by_reads_an_early_exit_and_leaves_an_open_one_open() -> None:
+    tree = ast.parse(
+        "def f(a, b, c):\n"
+        "    if a:\n"
+        "        return\n"
+        "    for x in c:\n"
+        "        if b is None:\n"
+        "            continue\n"
+        "        y = 1\n"
+        "    if not a and c:\n"
+        "        raise ValueError\n"
+        "    z = 2\n"
+    )
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    y = func.body[1].body[1]
+    z = func.body[3]
+    assert pathcond.ruled_out_by(y, func, {"a": True})
+    assert pathcond.ruled_out_by(y, func, {"a": False, "b": None})
+    assert not pathcond.ruled_out_by(y, func, {"a": False, "b": 1})
+    assert not pathcond.ruled_out_by(z, func, {"a": False})  # c is open
+    assert pathcond.ruled_out_by(z, func, {"a": True})
+    assert [ast.unparse(one) for one in pathcond.tests_on(z, func)] == [
+        "a",
+        "not a and c",
+    ]
 
 
 def test_a_subject_no_history_table_records_is_not_read(tmp_path: Path) -> None:

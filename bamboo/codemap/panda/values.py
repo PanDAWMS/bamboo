@@ -849,9 +849,8 @@ def handed(resolve, calls: Optional["Calls"]):
         """
         tested = {
             name.id
-            for ancestor in pathcond.ancestors(expression)
-            if isinstance(ancestor, ast.If) and pathcond.enclosing_function(ancestor) is func
-            for name in ast.walk(ancestor.test)
+            for test in pathcond.tests_on(expression, func)
+            for name in ast.walk(test)
             if isinstance(name, ast.Name)
         }
         if expression.id not in tested or calls is None:

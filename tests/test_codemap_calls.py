@@ -2521,8 +2521,6 @@ def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_n
 
 def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path):
     """Renamed and passed by position, it is the caller's; bound again on the route, it is no one's; a literal or a default is the forwarder's."""
-    from bamboo.codemap.panda.recognizers import sqlwrite
-
     roots = _tree(
         tmp_path,
         db="def lock(flag, other=False, more=None):\n    if flag or other or more:\n        return 1\n",
@@ -2551,8 +2549,8 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
 
     def constants(owner):
         (route,) = [one for one in routes if one.sites[0].func.name == owner]
-        found = {name: sqlwrite._route_constant(name, target, route.sites, calls) for name in ("flag", "other", "more")}
-        return {name: value for name, value in found.items() if value is not sqlwrite._UNSET}
+        found = {name: calls.route_constant(name, target, route.sites) for name in ("flag", "other", "more")}
+        return {name: value for name, value in found.items() if value is not calls_mod.UNSET}
 
     assert constants("renamed") == {"flag": False, "other": False, "more": None}
     # ``sim`` is handed on as it came, so the route goes on out to ``run``; ``flag``

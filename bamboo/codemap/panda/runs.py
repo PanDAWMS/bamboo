@@ -35,6 +35,19 @@ nothing calls (the top of its pass: an entry, or a thread's ``run``), at depth
 :data:`MAX_DEPTH`, or once :data:`MAX_FUNCTIONS` functions are seen for the
 arm; the last two are said (:attr:`Branch.history_hole`).
 
+**What the calls on a way hand.**  A way up is the arm's pass only where the
+values its calls hand do not rule out a statement on it
+(:func:`pathcond.ruled_out_by`: an ``if`` holding the statement, or an early
+exit before it, that the values decide against it).  Each function on the
+way reads the constants its route hands the parameters its tests read -- the
+call into it, then outward through each forwarder (:meth:`Calls.route_constant`)
+-- so ``setErrDiag(diag)`` leaves ``append`` False and ``setErrDiag``'s append
+arm is not on that caller's pass, and the adder's ``peekJobs(...,
+forAnal=True)`` keeps ``peekJob`` from its ``job.jobStatus = "unknown"``.  A
+way ruled out neither pairs nor goes on up; a branch with no pair and such a
+way says so.  The pair's caller's own parameters are read as any value: what
+is above the pair is not walked.
+
 **The arm's row.**  Whether a history row is the arm's own
 (:attr:`HistoryPair.row`) is read in place where both are in one function and
 the arm writes an attribute: the writer handed an attribute of the object the
@@ -60,18 +73,22 @@ So ``can`` is a row the pass can write for the arm's object, not the one it
 wrote; ``row_via`` says one way the object goes there.  An object no path the
 caller hands reaches, or that does not reach the writer, says so.
 
-**Not read.**  The values a call is handed: ``killJobs`` calls ``retryJob``
-with ``getNewPandaID=True``, and ``retryJob``'s own arms and history call both
-name ``job.PandaID``, which it binds again to a new id on that way -- read
-without order, it can be the arm's row.  A key the run holds by another name
-than the object's is tied to it only where a binding says so, and one way:
-the adder's ``self.job_id`` reaches ``self.job.PandaID`` through
-``peekJobs([self.job_id])`` and ``peekJob``'s ``job.PandaID = pandaID`` (its
-branch for a job not found -- a row a ``SELECT`` reads by its key is not read
-as holding it), and ``self.job.PandaID`` does not reach ``self.job_id``: what
-a function is handed is not handed back through its parameters.  The values
-of one container are one path (``taskParamMap[]``), so a path into a dict can
-stand for the key it holds among the others.
+**Not read.**  What the calls on the way down to the writer hand: the
+object is followed without the values calls hand
+(:data:`bamboo.codemap.objects.PREMISES` ``handed_values_not_read``), so a
+branch a constant rules out there is read as one that runs.  A key the object
+is given again on the way: ``retryJob``'s ``job.PandaID = int(val)`` after its
+``INSERT ... RETURNING``, ``ppEventServiceJob``'s clone given a new
+``PandaID`` -- the row then is the new key's, the arm's values in it, and
+``can`` holds for that row, while the run's mark carries the old key.  A key
+the run holds by another name than the object's is tied to it only where a
+binding says so, and one way -- what a function is handed is not handed back
+through its parameters: the adder's ``self.job_id`` reaches
+``self.job.PandaID`` through ``peekJob``'s ``job.PandaID = pandaID``, a
+branch the adder's own ``forAnal=True`` rules out, read because follow does
+not read what calls hand; a row a ``SELECT`` reads by its key is not read as
+holding it.  The values of one container are one path (``taskParamMap[]``),
+so a path into a dict can stand for the key it holds among the others.
 """
 
 from __future__ import annotations
@@ -145,6 +162,7 @@ HISTORY_NOT_RECORDED = "not read: no history table records {cls}"
 HISTORY_NO_FUNCTION = "the arm's function is not a row of the reach record"
 HISTORY_DEPTH = f"a way up reached depth {MAX_DEPTH} with no pair"
 HISTORY_WIDE = f"the walk up met {MAX_FUNCTIONS} functions and went no further"
+HISTORY_RULED_OUT = "a way up from the arm is ruled out by what the calls on it hand"
 
 ROW_ANOTHER = "another: "
 ROW_NO_START = (
@@ -202,6 +220,20 @@ class _Arm(NamedTuple):
     keys: frozenset[str]
 
 
+class _Step(NamedTuple):
+    """A function the walk up from an arm has reached, and the way it came by."""
+
+    owner: str
+    func: ast.AST
+    #: the statement of the function on the way: the arm's, or the call into the function below
+    point: ast.stmt
+    level: int
+    #: each function from the arm's out to this one, with its statement on the way
+    way: tuple[tuple[str, ast.stmt], ...]
+    #: the call into each function of *way* but this one, from the next one out; None where none is placed
+    into: tuple[Optional[C.CallSite], ...]
+
+
 class _Bound(NamedTuple):
     """A statement binding a name or ``self.<attr>`` to a logger a factory builds."""
 
@@ -255,6 +287,8 @@ class _Reader:
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
         self._runs: dict[str, list[RunStart]] = {}
         self._kills: dict[int, list[ast.stmt]] = {}
+        self._targets: dict[str, C.Target] = {}
+        self._callers: dict[str, list[C.CallSite]] = {}
         # Plain calls only, as one pass follows them.
         self.callers: dict[str, dict[str, list[int]]] = defaultdict(dict)
         for row in fragment.reach_graph:
@@ -596,6 +630,7 @@ class _Reader:
             return
         pairs: dict[tuple[int, str, int, int], HistoryPair] = {}
         holes: list[str] = []
+        ruled = False
         for site in sites:
             owner = self.names.of(site.func)
             if owner is None or owner not in self.rows:
@@ -604,11 +639,22 @@ class _Reader:
             written = mustprints._written_object(site.statement, junction.subject)
             arm = self._arm(owner, site.func, site.statement, junction.subject)
             seen = {owner}
-            frontier: deque[tuple[str, ast.AST, ast.stmt, int]] = deque(
-                [(owner, site.func, site.statement, 0)]
+            # Each entry carries its way: the functions from the arm's out to this one, each with its statement on
+            # the way, and the call into each but this one (None where the call record places none).
+            frontier: deque[_Step] = deque(
+                [
+                    _Step(
+                        owner,
+                        site.func,
+                        site.statement,
+                        0,
+                        ((owner, site.statement),),
+                        (),
+                    )
+                ]
             )
             while frontier:
-                here, func, point, level = frontier.popleft()
+                here, func, point, level, way, into = frontier.popleft()
                 found = self._pairs_at(
                     here, func, point, level, junction.subject, written, arm
                 )
@@ -629,17 +675,50 @@ class _Reader:
                         if HISTORY_WIDE not in holes:
                             holes.append(HISTORY_WIDE)
                         continue
-                    seen.add(caller)
                     held = self.funcs.get(caller)
                     if held is None:
+                        seen.add(caller)
                         continue
+                    steps: list[tuple[ast.stmt, Optional[C.CallSite]]] = []
+                    out = False
                     for line in lines:
                         up = mustprints._statement_at(held[1], line)
-                        if up is not None:
-                            frontier.append((caller, held[1], up, level + 1))
+                        if up is None:
+                            continue
+                        placed = self._sites_into(here, caller, line)
+                        kept = next(
+                            (
+                                one
+                                for one in placed
+                                if not self._ruled_out(way, (*into, one))
+                            ),
+                            None,
+                        )
+                        if placed and kept is None:
+                            out = True
+                            continue
+                        steps.append((up, kept))
+                    ruled = ruled or out
+                    if out and not steps:
+                        # A way the calls rule out is not this arm's pass; another way may still reach the caller.
+                        continue
+                    seen.add(caller)
+                    for up, kept in steps:
+                        frontier.append(
+                            _Step(
+                                caller,
+                                held[1],
+                                up,
+                                level + 1,
+                                (*way, (caller, up)),
+                                (*into, kept),
+                            )
+                        )
         branch.history = sorted(
             pairs.values(), key=lambda one: (one.level, one.caller, one.point, one.call)
         )
+        if ruled and not pairs:
+            holes.append(HISTORY_RULED_OUT)
         branch.history_hole = "; ".join(holes)
 
     def _pairs_at(
@@ -850,6 +929,72 @@ class _Reader:
                 if value.column.lower() == key.lower() and value.path
             }
         return _Arm(owner, frozenset(), frozenset(keys))
+
+    # -- what the calls on a way up hand ------------------------------------------------------------------------
+
+    def _target(self, owner: str) -> C.Target:
+        if owner not in self._targets:
+            file, func = self.funcs[owner]
+            owned = self.types.method_class(file, func)
+            self._targets[owner] = C.Target(file, func, owned[1] if owned else None)
+        return self._targets[owner]
+
+    def _sites_into(self, owner: str, caller: str, line: int) -> list[C.CallSite]:
+        """The calls of *caller* on *line* that the call record places at *owner*."""
+        if owner not in self._callers:
+            self._callers[owner] = self.calls.callers(self._target(owner))
+        func = self.funcs[caller][1]
+        return [
+            site
+            for site in self._callers[owner]
+            if site.func is func
+            and site.call.lineno <= line <= (site.call.end_lineno or site.call.lineno)
+        ]
+
+    def _ruled_out(
+        self,
+        way: tuple[tuple[str, ast.stmt], ...],
+        into: tuple[Optional[C.CallSite], ...],
+    ) -> bool:
+        """Whether what the calls *into* hand rules out a function's statement on *way* (:func:`pathcond.ruled_out_by`).
+
+        Each function's parameters its tests read take the constant its route
+        hands -- the call into it, then outward through each forwarder, as far
+        as the calls are placed (:meth:`Calls.route_constant`).  A parameter
+        the function binds again is not ruled on: what it was handed may not
+        be what the test reads.
+        """
+        for index, (owner, statement) in enumerate(way[: len(into)]):
+            route: list[C.CallSite] = []
+            for one in into[index:]:
+                if one is None:
+                    break
+                route.append(one)
+            if not route:
+                continue
+            func = self.funcs[owner][1]
+            tested = sorted(
+                {
+                    name.id
+                    for test in pathcond.tests_on(statement, func)
+                    for name in ast.walk(test)
+                    if isinstance(name, ast.Name)
+                    and _is_parameter(func, name.id)
+                    and not C._rebinds(func, name.id)
+                }
+            )
+            if not tested:
+                continue
+            target = self._target(owner)
+            constants = {
+                name: value
+                for name in tested
+                if (value := self.calls.route_constant(name, target, tuple(route)))
+                is not C.UNSET
+            }
+            if constants and pathcond.ruled_out_by(statement, func, constants):
+                return True
+        return False
 
     def _follow(self, owner: str, path: str) -> objects.ObjectReach:
         if (owner, path) not in self._follows:
