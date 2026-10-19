@@ -132,10 +132,13 @@ class _Reader:
                 )
 
         def result(name: Optional[str], value: ast.expr) -> None:
-            """*name* holds what the call *value* returns, or an element of it (``f()[0]``)."""
+            """*name* holds what the call *value* returns, or an element of it (``f()[0]``; ``f()[1:]`` is a part)."""
             call = value.value if isinstance(value, ast.Subscript) else value
             if name is not None and isinstance(call, ast.Call):
-                element = "[]" if call is not value else ""
+                part = isinstance(value, ast.Subscript) and isinstance(
+                    value.slice, ast.Slice
+                )
+                element = "[]" if call is not value and not part else ""
                 bindings.setdefault(
                     (call.lineno, name, element, BIND_RESULT),
                     PathBinding(
@@ -578,10 +581,17 @@ def _local_names(func: ast.AST) -> frozenset[str]:
 
 
 def _path(expr: Optional[ast.expr], names: frozenset[str]) -> Optional[str]:
-    """*expr* as a path rooted at one of *names*; ``None`` where it is not one."""
+    """*expr* as a path rooted at one of *names*; ``None`` where it is not one.
+
+    A slice is the container's part, not an element: ``self.jobs[a:b]`` holds
+    what ``self.jobs`` holds.
+    """
     parts: list[str] = []
     while isinstance(expr, (ast.Attribute, ast.Subscript)):
-        parts.append("." + expr.attr if isinstance(expr, ast.Attribute) else "[]")
+        if isinstance(expr, ast.Attribute):
+            parts.append("." + expr.attr)
+        elif not isinstance(expr.slice, ast.Slice):
+            parts.append("[]")
         expr = expr.value
     if not isinstance(expr, ast.Name) or expr.id not in names or len(parts) > MAX_PARTS:
         return None

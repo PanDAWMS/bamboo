@@ -446,3 +446,43 @@ def test_a_write_of_a_table_of_another_class_is_not_the_objects_row(tmp_path):
         table_classes={"filestable4": "FileSpec"},
     )
     assert not any("touchFiles" in site.owner for site in [*kept.open, *kept.because])
+
+
+def test_a_slice_is_a_part_of_the_container_not_an_element(tmp_path):
+    """setupper's ``jobs_list = self.jobs`` or ``self.jobs[a:b]``: both hold what self.jobs holds, never a job."""
+    batch = """\
+from pkg.spec import JobSpec
+
+
+class Batch:
+    def __init__(self, jobs: list[JobSpec]):
+        self.jobs = jobs
+
+    def run(self, start, n):
+        if n is None:
+            jobs_list = self.jobs
+        else:
+            jobs_list = self.jobs[start : start + n]
+        for job in jobs_list:
+            job.jobStatus = "failed"
+        rest = self.split()[1:]
+        return rest
+
+    def split(self):
+        return [self.jobs]
+"""
+    fragment = _build(tmp_path, spec=SPEC, batch=batch)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = rows["pkg/batch.py::Batch.run"]
+    assert {(b.name, b.path) for b in run.bindings if b.name == "jobs_list"} == {
+        ("jobs_list", "self.jobs")
+    }
+    assert [(b.name, b.path) for b in run.bindings if b.name == "rest"] == [
+        ("rest", "")
+    ]
+    container = objects.follow(rows, "pkg/batch.py::Batch.run", "self.jobs")
+    assert "job" not in container.held["pkg/batch.py::Batch.run"]
+    assert "jobStatus" not in container.assigned
+    element = objects.follow(rows, "pkg/batch.py::Batch.run", "self.jobs[]")
+    assert "job" in element.held["pkg/batch.py::Batch.run"]
+    assert "jobStatus" in element.assigned
