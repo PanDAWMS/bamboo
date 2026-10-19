@@ -1543,7 +1543,7 @@ def object_records_resolve(fragment: MapFragment) -> GateResult:
 #: A path of :mod:`bamboo.codemap.objects`: a name -- a call's own for a result no name takes -- then ``.attr``,
 #: ``[]``, ``[i]`` and ``['k']`` parts; or the parts alone, where in what a call returns a name is bound.
 _PATH_PART = r"(\.[A-Za-z_][A-Za-z_0-9]*|\[\]|\[\d+\]|\['[A-Za-z0-9_:\-]*'\])"
-_OBJECT_PATH = re.compile(rf"(<return>|<result@\d+:\d+>|[A-Za-z_][A-Za-z_0-9]*){_PATH_PART}*|{_PATH_PART}+")
+_OBJECT_PATH = re.compile(rf"(<return>|<result@\d+:\d+>|[A-Za-z_][A-Za-z_0-9]*(@\d+)?){_PATH_PART}*|{_PATH_PART}+")
 
 
 def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:

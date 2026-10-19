@@ -20,9 +20,12 @@ This module records, once per function, what that following reads:
   the parameter that takes it, the receiver as ``self``; a hole's own.
 
 A path is rooted at a name of the function -- a parameter, ``self``, a local
--- so a module's logger or a class read for its methods is not one.  The
-bindings are read without the order of the statements: a name bound to a
-path anywhere holds it everywhere in the function, which can only say an
+-- so a module's logger or a class read for its methods is not one.  A
+local name bound at two or more statements is a name for each, ``res@96``
+and ``res@472`` -- a parameter's entry is one, under its bare name --, and
+a use is the ones that reach it (:class:`_Versions`); a field and what a
+container holds are read without the order of the statements -- bound to a
+path anywhere, held everywhere in the function --, which can only say an
 object reaches more than it does.
 
 **One rule** (:class:`_Values`): a value carries what its parts carry, each
@@ -184,6 +187,7 @@ class _Reader:
     def writes(self, func: ast.AST) -> list[DbWrite]:
         """Each statement *func* runs that writes rows, with where its values and keys come from."""
         names = _local_names(func)
+        versions = _Versions(func, names)
         found: list[DbWrite] = []
         try:
             runs = sql.executions(func)  # type: ignore[arg-type]
@@ -200,7 +204,7 @@ class _Reader:
                 continue
             if not read and not tables:
                 continue
-            whole, changed, sequenced = _whole_row(func, run, names)
+            whole, changed, sequenced = _whole_row(func, run, versions)
             unread = bool(run.unread_columns)
             new_row = sequenced or any(
                 "useSeq=True" in (hole.source or "").replace(" ", "")
@@ -219,7 +223,7 @@ class _Reader:
                             value
                             for column, given in sorted(one.columns.items())
                             for value in self._values(
-                                func, run, column, given, whole, names
+                                func, run, column, given, whole, versions
                             )
                         ],
                         whole=whole,
@@ -229,7 +233,7 @@ class _Reader:
                             value
                             for column, bind in sorted(one.keys.items())
                             for value in self._values(
-                                func, run, column, sqltext.classify(bind), "", names
+                                func, run, column, sqltext.classify(bind), "", versions
                             )
                         ],
                         new_row=new_row
@@ -262,7 +266,7 @@ class _Reader:
         return list(unique.values())
 
     def _values(
-        self, func, run, column: str, given, whole: str, names
+        self, func, run, column: str, given, whole: str, versions: "_Versions"
     ) -> list[WrittenValue]:
         """Where *column*'s value comes from in *run*: a path, another value, or why neither is read."""
         if given.kind != "bind":
@@ -291,9 +295,9 @@ class _Reader:
             return [WrittenValue(column=column, why=_NOT_BOUND_HERE)]
         found = []
         for bind in binds:
-            held = _path(bind.value, names)
-            if held is not None:
-                found.append(WrittenValue(column=column, path=held))
+            held = versions.paths(bind.value)
+            if held:
+                found += [WrittenValue(column=column, path=one) for one in held]
             else:
                 found.append(WrittenValue(column=column, value=_cut(bind.value)))
         # One value read twice -- the same bind for two calls of the run -- is one value.
@@ -322,6 +326,103 @@ class _Carry(NamedTuple):
     below: str = ""
 
 
+class _Versions:
+    """A local name bound at two or more statements, split by the binding that reaches each use.
+
+    ``status, res = taskBuffer.querySQLS(...)`` at line 96 and again at 472
+    are two lists, so the record names them ``res@96`` and ``res@472``: a
+    binding is its statement's, and a use is each one that reaches it
+    (:func:`pathcond.surviving_writes`, as the walk reads ``timeLimit``).  A
+    parameter is bound on entry, by the call, and that binding keeps the bare
+    name -- the one a caller hands the object in by --, so ``if days is None:
+    days = 3`` leaves ``days`` and ``days@N`` after it.  ``self`` and a name
+    bound once keep their name, and so does a name every binding of which is
+    a str or a number by its spelling (:func:`_scalar`: ``sql = "..."``,
+    ``sql += "..."``): it holds no path, and its versions would change no
+    answer.
+    """
+
+    def __init__(self, func: ast.AST, names: frozenset[str]):
+        self.names = names
+        args = func.args  # type: ignore[attr-defined]
+        given = {
+            one.arg
+            for one in [
+                *args.posonlyargs,
+                *args.args,
+                *args.kwonlyargs,
+                args.vararg,
+                args.kwarg,
+            ]
+            if one is not None
+        }
+        self.sites: dict[str, list[ast.AST]] = {}
+        for name in sorted(names - {"self", "cls"}):
+            bound = [one for one in pathcond.bindings(func, name) if not one.nested]
+            sites = {id(one.site): one.site for one in bound}
+            if name in given:
+                # Bound again: the parameter list is its binding on entry (reaching reads it so).
+                if sites:
+                    self.sites[name] = [args, *sites.values()]
+                continue
+            if all(
+                one.kind in _SPELLED and not one.unpacked and _scalar(one.value)
+                for one in bound
+            ):
+                continue
+            if len({getattr(site, "lineno", 0) for site in sites.values()}) >= 2:
+                self.sites[name] = list(sites.values())
+        self._reaching: dict[tuple[str, int], list[str]] = {}
+
+    def paths(self, expr: Optional[ast.expr], store: bool = False) -> list[str]:
+        """*expr* as the paths it is (:func:`_path`), its root split by the bindings that reach it."""
+        held = _path(expr, self.names, store)
+        if held is None:
+            return []
+        base = expr
+        while isinstance(base, (ast.Attribute, ast.Subscript)):
+            base = base.value
+        name = base.id  # type: ignore[union-attr]
+        sites = self.sites.get(name)
+        if not sites:
+            return [held]
+        rest = held[len(name) :]
+        if base is expr and isinstance(base.ctx, ast.Store):  # type: ignore[union-attr]
+            return [f"{name}@{self._site(sites, base)}{rest}"]
+        return [one + rest for one in self.reaching(name, base)]
+
+    def reaching(self, name: str, node: ast.AST) -> list[str]:
+        key = (name, id(node))
+        found = self._reaching.get(key)
+        if found is None:
+            try:
+                kept = pathcond.surviving_writes(self.sites[name], node, as_run=True)
+            except Exception:  # noqa: BLE001 -- not read: any of them
+                kept = self.sites[name]
+            found = sorted(
+                {
+                    name if isinstance(site, ast.arguments) else f"{name}@{site.lineno}"  # type: ignore[attr-defined]
+                    for site in kept
+                }
+            ) or [name]
+            self._reaching[key] = found
+        return found
+
+    @staticmethod
+    def _site(sites: list[ast.AST], node: ast.AST) -> int:
+        """The line of the binding statement *node*, a target, is in: the innermost holding it."""
+        line = getattr(node, "lineno", 0)
+        holding = [
+            site.lineno  # type: ignore[attr-defined]
+            for site in sites
+            if not isinstance(site, ast.arguments)
+            and site.lineno
+            <= line
+            <= (getattr(site, "end_lineno", None) or site.lineno)  # type: ignore[attr-defined]
+        ]
+        return max(holding, default=line)
+
+
 class _Values:
     """One function's object records, read by one rule: a value carries what its parts carry, each at a position
     inside it, and a target takes, at each position, what the value has there (:meth:`carried`, :meth:`take`)."""
@@ -331,6 +432,7 @@ class _Values:
         self.file = file
         self.func = func
         self.names = _local_names(func)
+        self.versions = _Versions(func, self.names)
         self.assigns: dict[tuple, PathAssign] = {}
         self.bindings: dict[tuple, PathBinding] = {}
         self.handed: dict[tuple, CallBinding] = {}
@@ -344,9 +446,9 @@ class _Values:
         """What *expr*'s value holds, each with where in the value."""
         if expr is None:
             return []
-        held = _path(expr, self.names)
-        if held is not None:
-            return [_Carry("", held)]
+        held = self.versions.paths(expr)
+        if held:
+            return [_Carry("", one) for one in held]
         if isinstance(expr, ast.Tuple):
             found: list[_Carry] = []
             known = True  # a position after a starred element is not known
@@ -476,7 +578,9 @@ class _Values:
         elif isinstance(node, ast.AugAssign):
             self._column(node.target, line, "+=")
             if isinstance(node.op, ast.Add):
-                # t += v is t = t + v: t's elements, and v's
+                # t += v is t = t + v, t's elements and v's: v's are put in here, and t's come by the
+                # binding before it, which reaches every use this one does (x += y kills nothing:
+                # pathcond.surviving_writes).
                 elements = _shift(_index(self.carried(node.value), "[]"), "[]")
                 for base in self.target_paths(node.target):
                     self.put(line, base, elements, BIND_FILL)
@@ -585,9 +689,9 @@ class _Values:
 
     def target_paths(self, target: ast.expr) -> list[str]:
         """The paths an assignment to *target* writes: its own, or below what the value it is on holds."""
-        held = _path(target, self.names, store=True)
-        if held is not None:
-            return [held]
+        held = self.versions.paths(target, store=True)
+        if held:
+            return held
         if isinstance(target, ast.Attribute):
             part = "." + target.attr
         elif isinstance(target, ast.Subscript) and not isinstance(
@@ -695,9 +799,10 @@ class _Values:
         reader = self.reader
         for value in reach._handed_values(call):
             # ``Thread(target=self.run)``: the function handed runs with its receiver.
-            if (
-                isinstance(value, ast.Attribute)
-                and (bound := _path(value.value, self.names)) is not None
+            for bound in (
+                self.versions.paths(value.value)
+                if isinstance(value, ast.Attribute)
+                else []
             ):
                 try:
                     landed = reader.calls.named_callables(
@@ -838,7 +943,7 @@ _NO_MAP = "the statement runs with no bind map"
 _NOT_BOUND_HERE = "the bind is not filled in this function (the map is handed in, or filled by a computed key)"
 
 
-def _whole_row(func: ast.AST, run, names: frozenset[str]) -> tuple[str, bool, bool]:
+def _whole_row(func: ast.AST, run, versions: "_Versions") -> tuple[str, bool, bool]:
     """The path whose ``valuesMap()`` the run's bind map is; whether only its changed attributes are in it; whether its key is new.
 
     ``execute(sql, job.valuesMap())`` hands the map in the call, and
@@ -874,7 +979,7 @@ def _whole_row(func: ast.AST, run, names: frozenset[str]) -> tuple[str, bool, bo
             and isinstance(value.func, ast.Attribute)
             and value.func.attr == "valuesMap"
         ):
-            held = _path(value.func.value, names)
+            held = next(iter(versions.paths(value.func.value)), None)
             if held is None:
                 continue
             flags = {
@@ -885,6 +990,31 @@ def _whole_row(func: ast.AST, run, names: frozenset[str]) -> tuple[str, bool, bo
             }
             return held, "onlyChanged" in flags, "useSeq" in flags
     return "", False, False
+
+
+#: How a binding gives its name a value it spells: not a loop's, a ``with``'s or a caught exception's.
+_SPELLED = (
+    pathcond.BIND_ASSIGN,
+    pathcond.BIND_ANNOTATED,
+    pathcond.BIND_AUGMENTED,
+    pathcond.BIND_WALRUS,
+)
+
+
+def _scalar(expr: Optional[ast.expr]) -> bool:
+    """Whether *expr* is a str or a number by its own spelling, which holds no path: a literal (``None`` too), an
+    f-string, a sign or ``not`` on one, a ``+`` with one as a term, ``"..." % x``."""
+    if isinstance(expr, (ast.Constant, ast.JoinedStr)):
+        return True
+    if isinstance(expr, ast.UnaryOp):
+        return isinstance(expr.op, ast.Not) or _scalar(expr.operand)
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        return _scalar(expr.left) or _scalar(expr.right)
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mod):
+        return isinstance(expr.left, ast.JoinedStr) or (
+            isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str)
+        )
+    return False
 
 
 def _cut(node: ast.AST) -> str:

@@ -478,9 +478,10 @@ class Batch:
     fragment = _build(tmp_path, spec=SPEC, batch=batch)
     rows = {row.owner: row for row in fragment.reach_graph}
     run = rows["pkg/batch.py::Batch.run"]
+    # Bound at two statements, the name is two: jobs_list@10 and jobs_list@12.
     assert {
         (b.name, b.path) for b in run.bindings if b.name.startswith("jobs_list")
-    } == {("jobs_list", "self.jobs"), ("jobs_list[]", "self.jobs[]")}
+    } == {("jobs_list@10", "self.jobs"), ("jobs_list@12[]", "self.jobs[]")}
     assert [(b.name, b.path) for b in run.bindings if b.name.startswith("rest")] == [
         ("rest[]", "[]")
     ]
@@ -492,10 +493,15 @@ class Batch:
     assert "jobStatus" in element.assigned
 
 
-def test_a_name_bound_in_two_places_is_read_back_only_by_the_binding_the_object_came_by(
+def test_a_name_bound_in_two_places_is_two_names_and_a_field_is_read_back_only_by_the_binding_the_object_came_by(
     tmp_path,
 ):
-    """setupper's ``tag_job = self.jobs[0]`` / ``tag_job = self.jumbo_jobs[0]``: a job of one list is not one of the other."""
+    """setupper's ``tag_job = self.jobs[0]`` / ``tag_job = self.jumbo_jobs[0]``: a job of one list is not one of the other.
+
+    A local name bound at two statements is a name for each, and a use is
+    the ones that reach it; a field is one name however often it is bound,
+    and is read back only by the binding the object came in by.
+    """
     batch = """\
 from pkg.spec import JobSpec
 
@@ -512,19 +518,36 @@ class Batch:
         else:
             tag_job = self.jumbo_jobs[0]
         tag_job.jobStatus = "failed"
+
+    def mark(self):
+        if self.jobs:
+            self.tag = self.jobs[0]
+        else:
+            self.tag = self.jumbo_jobs[0]
+        self.tag.jobStatus = "failed"
 """
     fragment = _build(tmp_path, spec=SPEC, batch=batch)
     rows = {row.owner: row for row in fragment.reach_graph}
     run = "pkg/batch.py::Batch.run"
     jobs = objects.follow(rows, run, "self.jobs[]")
-    assert "tag_job" in jobs.held[run]
-    assert "self.jumbo_jobs[0]" not in jobs.held[run]
-    either = objects.follow(rows, run, "tag_job")
-    assert {"self.jobs[0]", "self.jumbo_jobs[0]"} <= set(either.held[run])
-    line = next(b.line for b in rows[run].bindings if b.path == "self.jobs[0]")
-    assert objects.steps_to(rows[run], "self.jobs[]", "tag_job") == [
-        (line, "alias", "tag_job")
+    assert set(jobs.held[run]) == {"self.jobs[]", "tag_job@12"}
+    assert "jobStatus" in jobs.assigned
+    jumbo = objects.follow(rows, run, "self.jumbo_jobs[]")
+    assert set(jumbo.held[run]) == {"self.jumbo_jobs[]", "tag_job@14"}
+    # The use at 15 is reached by both, not by tag_job = None (no branch keeps it).
+    assert {(a.path, a.line) for a in rows[run].assigns} == {
+        ("tag_job@12", 15),
+        ("tag_job@14", 15),
+    }
+    assert objects.steps_to(rows[run], "self.jobs[]", "tag_job@12") == [
+        (12, "alias", "tag_job@12")
     ]
+    mark = "pkg/batch.py::Batch.mark"
+    jobs = objects.follow(rows, mark, "self.jobs[]")
+    assert "self.tag" in jobs.held[mark]
+    assert "self.jumbo_jobs[0]" not in jobs.held[mark]
+    either = objects.follow(rows, mark, "self.tag")
+    assert {"self.jobs[0]", "self.jumbo_jobs[0]"} <= set(either.held[mark])
 
 
 def test_a_name_filled_and_bound_again_to_a_calls_result_is_not_followed_into_the_call(
@@ -554,10 +577,11 @@ class Maker:
     rows = {row.owner: row for row in fragment.reach_graph}
     make = "pkg/maker.py::Maker.make"
     old = objects.follow(rows, make, "old.PandaID")
-    assert "var_map[':PandaID']" in old.held[make]
+    assert "var_map@6[':PandaID']" in old.held[make]
+    assert not any(one.startswith("var_map@9") for one in old.held[make])
     assert "new.PandaID" not in old.held[make]
     # The new job's own key still goes into its valuesMap and back.
-    new = objects.follow(rows, make, "var_map[]")
+    new = objects.follow(rows, make, "var_map@9[]")
     assert "new.PandaID" in new.held[make]
 
 
@@ -580,9 +604,78 @@ class Refiner:
     rows = {row.owner: row for row in fragment.reach_graph}
     run = "pkg/refiner.py::Refiner.run"
     key = objects.follow(rows, run, "impl.job.PandaID")
-    assert "spec.PandaID" in key.held[run]
+    assert "spec@10.PandaID" in key.held[run]
+    assert "spec@7.PandaID" not in key.held[run]
     assert "task_id" not in key.held[run]
-    assert "spec.PandaID" in objects.follow(rows, run, "task_id").held[run]
+    assert "spec@7.PandaID" in objects.follow(rows, run, "task_id").held[run]
+
+
+def test_a_name_bound_again_is_split_unless_every_binding_spells_a_str_or_a_number(
+    tmp_path,
+):
+    """``found += more`` keeps what found held and adds more's elements; ``sql``, only ever a str, is not split.
+
+    A use after ``found += more`` is reached by both bindings (``+=`` kills
+    nothing), so the new one holds only what it adds.
+    """
+    batch = """\
+from pkg.spec import JobSpec
+
+
+class Batch:
+    def run(self, jobs: list[JobSpec], more: list[JobSpec]):
+        found = jobs
+        found += more
+        sql = "SELECT PandaID FROM jobs"
+        sql += " WHERE jobStatus=:status"
+        for job in found:
+            job.jobStatus = "failed"
+        return sql
+"""
+    fragment = _build(tmp_path, spec=SPEC, batch=batch)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/batch.py::Batch.run"
+    assert sorted((b.name, b.path, b.how) for b in rows[run].bindings) == [
+        ("<return>", "sql", "return"),
+        ("found@6", "jobs", "alias"),
+        ("found@7[]", "more[]", "fill"),
+        ("job", "found@6[]", "element"),
+        ("job", "found@7[]", "element"),
+    ]
+    assert "jobStatus" in objects.follow(rows, run, "jobs[]").assigned
+    assert "jobStatus" in objects.follow(rows, run, "more[]").assigned
+
+
+def test_a_parameter_bound_again_keeps_its_name_only_where_its_entry_reaches(tmp_path):
+    """``if x: job = other`` then ``job = other``: what a caller hands as ``job`` reaches the first use, not the second."""
+    fixer = """\
+from pkg.spec import JobSpec
+
+
+class Fixer:
+    def fix(self, job: JobSpec, other: JobSpec, x):
+        if x:
+            job = other
+        job.jobStatus = "failed"
+        job = other
+        job.ddmErrorCode = 1
+
+    def run(self, mine: JobSpec, theirs: JobSpec):
+        self.fix(mine, theirs, True)
+"""
+    fragment = _build(tmp_path, spec=SPEC, fixer=fixer)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    fix = "pkg/fixer.py::Fixer.fix"
+    assert {(a.path, a.line) for a in rows[fix].assigns} == {
+        ("job", 8),
+        ("job@7", 8),
+        ("job@9", 10),
+    }
+    handed = objects.follow(rows, "pkg/fixer.py::Fixer.run", "mine")
+    assert "jobStatus" in handed.assigned
+    assert "ddmErrorCode" not in handed.assigned
+    other = objects.follow(rows, "pkg/fixer.py::Fixer.run", "theirs")
+    assert {"jobStatus", "ddmErrorCode"} <= set(other.assigned)
 
 
 FORMS = """\

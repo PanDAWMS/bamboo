@@ -33,9 +33,10 @@ say which parameter takes it.  A hole the object does not reach is not this
 object's, which is why this answers where the closure's own reach does not.
 
 What it rests on, beyond :data:`bamboo.codemap.reach.PREMISES`, is in
-:data:`PREMISES`.  The bindings are read without the statements' order and
-without what calls hand (a branch a constant rules out is read as run), which
-can only say an object reaches more than it does.  The other way: what the
+:data:`PREMISES`.  A local name is read at each use by the bindings that
+reach it, but a field and what a container holds without the statements'
+order, and what calls hand is not read (a branch a constant rules out is
+read as run), which can only say an object reaches more than it does.  The other way: what the
 record does not read (:mod:`bamboo.codemap.panda.objects` lists it) the
 object is not followed through, and it can reach more than this says.
 
@@ -70,7 +71,10 @@ PREMISES: dict[str, str] = {
         "the corpus's own methods -- which it calls only as reach's outside_calls_back_only_handed allows."
     ),
     "bindings_without_order": (
-        "A name bound to what a path holds anywhere in a function holds it everywhere in the function."
+        "A local name bound at two or more statements -- a parameter's entry is one -- is a name for each, and a "
+        "use is read as the ones that reach it (x += y adds to x and kills nothing); a field and what a container "
+        "holds are read without the statements' order: bound to what a path holds anywhere in a function, they "
+        "hold it everywhere in it."
     ),
     "handed_values_not_read": (
         "What a call hands its callee is not read: a statement the values it hands would rule out is read as one "
@@ -135,11 +139,13 @@ class ObjectReach(NamedTuple):
 
 
 class _Link(NamedTuple):
-    """A call that brought the object into a state: the caller's state, the line, and the function called."""
+    """A call that brought the object into a state: the caller's state, the line, the function called, and the
+    caller's path it went in under (a call binding's)."""
 
     caller: _State
     line: int
     to: str
+    via: str = ""
 
 
 def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
@@ -189,6 +195,11 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         functions[at] = None
         steps, spent = _held_steps(row, {start}, extra[state])
         held = set(steps)
+        rooted: dict[str, list[str]] = defaultdict(
+            list
+        )  # held by root, each sorted (_under)
+        for one in sorted(held):
+            rooted[_root(one)].append(one)
         held_in[at] |= held
         if spent:
             cut = cut or HELD_SPENT
@@ -199,7 +210,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         for binding in row.bindings:
             if binding.how != BIND_RESULT:
                 continue
-            for one in sorted(held):
+            for one in rooted.get(_root(binding.name), ()):
                 rest = _under(binding.name, one)
                 if rest is None or _came_forward(steps[one]):
                     # What came into the name by a binding is not what the call bound to it returns.
@@ -215,7 +226,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
                         taken = RETURN + binding.path + rest
                     into((to, taken), _Link(state, binding.line, to), one)
         for call in row.call_bindings:
-            for one in sorted(held):
+            for one in rooted.get(_root(call.path), ()):
                 rest = _under(call.path, one)
                 if rest is None:
                     continue
@@ -227,7 +238,11 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
                     holes[Site(at, call.line, NO_PARAMETER)] = None
                 else:
                     taken = call.parameter + call.at + rest
-                    into((call.to, taken), _Link(state, call.line, call.to), one)
+                    into(
+                        (call.to, taken),
+                        _Link(state, call.line, call.to, call.path),
+                        one,
+                    )
         # Where the object ends up, seen from outside: on self, or returned.  New ends go back to every call
         # that brought it in.
         ends = {
@@ -305,7 +320,11 @@ def _hand_back(
             ]
         else:
             below = end[len("self") :]
-            names = [receiver + below for receiver in _receivers_of(caller, link)]
+            receivers = _receivers_of(caller, link)
+            if link.via in receivers:
+                # It went in as the receiver: what the callee keeps on self comes back to that one.
+                receivers = [link.via]
+            names = [receiver + below for receiver in receivers]
         for name in names:
             if (
                 name != link.caller[1]
@@ -358,7 +377,19 @@ def _held_steps(
     back to the ``jediTaskID`` the other branch gives it.  The others join
     as starts once the bindings are read.
     """
-    held: dict[str, Optional[tuple[str, int, str]]] = dict.fromkeys(sorted(start))
+    held: dict[str, Optional[tuple[str, int, str]]] = {}
+    # held's paths in the order reached, and where each root's are in it: a path is below another only with
+    # its root (_under), so a binding is read against the held paths of its two sides' roots, in that order.
+    order: list[str] = []
+    by_root: dict[str, list[int]] = defaultdict(list)
+
+    def reach(one: str, step: Optional[tuple[str, int, str]]) -> None:
+        held[one] = step
+        by_root[_root(one)].append(len(order))
+        order.append(one)
+
+    for one in sorted(start):
+        reach(one, None)
     pending = sorted(set(returned) - set(start))
     entered: dict[str, set[int]] = defaultdict(
         set
@@ -371,7 +402,10 @@ def _held_steps(
                 continue
             # The name says where it holds the path: ``updatedJobList[]`` for ``updatedJobList.append(job)``.
             target = binding.name
-            for one in list(held):
+            sides = {_root(binding.path), _root(target)}
+            for one in [
+                order[at] for at in sorted(at for root in sides for at in by_root[root])
+            ]:
                 for frm, to, way in (
                     (binding.path, target, _FORWARD),
                     (target, binding.path, _BACK),
@@ -388,12 +422,12 @@ def _held_steps(
                         if len(held) >= MAX_HELD:
                             return held, True
                         how = binding.how if way == _FORWARD else f"{binding.how} back"
-                        held[taken] = (one, binding.line, how)
+                        reach(taken, (one, binding.line, how))
                         changed = True
         if not changed and pending:
             for one in pending:
                 if one not in held:
-                    held[one] = None
+                    reach(one, None)
                     changed = True
             pending = []
     return held, False
@@ -444,6 +478,11 @@ def _under(base: str, path: str) -> Optional[str]:
         ):
             return None
     return "".join(under[len(over) :])
+
+
+def _root(path: str) -> str:
+    """*path*'s root: the part :func:`_under` matches first, so a path is below another only with the same root."""
+    return _tokens(path)[0]
 
 
 def _plain(path: str) -> bool:
