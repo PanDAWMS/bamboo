@@ -28,7 +28,13 @@ from typing import NamedTuple, Optional
 from pydantic import BaseModel, Field
 
 from bamboo.codemap import evidence
-from bamboo.codemap.models import MapFragment, required_values
+from bamboo.codemap.models import (
+    HISTORY_ROW_CAN,
+    HistoryPair,
+    MapFragment,
+    ReachNode,
+    required_values,
+)
 from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 
@@ -1386,7 +1392,10 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     ``runs`` in the caller's :class:`FunctionPrintsNode`, and a print
     statement's ``runs`` in its own node: a line found in none of them is a
     pair or a print no reader can place in a run.  A branch left unread with
-    no reason reads as one no history row is written beside.
+    no reason reads as one no history row is written beside.  A ``can`` row
+    names the caller's path holding the arm's object and a way to one of the
+    pair's writes through calls of reach rows: a reader asks the run of that
+    path, and checks the way.
     """
     rows = {row.owner: row for row in fragment.reach_graph}
     prints = {node.owner: node for node in fragment.function_prints}
@@ -1431,6 +1440,8 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                     failures.append(f"{at}: no run, and no reason given")
                 if not pair.row and not pair.row_why:
                     failures.append(f"{at}: row not read, and no reason given")
+                if pair.row == HISTORY_ROW_CAN:
+                    failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows)]
     return GateResult(
         gate="history-pairs-resolve",
         passed=not failures,
@@ -1441,6 +1452,33 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
         failures=failures[:50],
         note=f"Unread, by reason: {dict(sorted(holes.items()))}.",
     )
+
+
+def _row_via_unresolved(pair: HistoryPair, rows: dict[str, ReachNode]) -> list[str]:
+    """Why a ``can`` pair's object and way are not records a dump-only reader finds; empty where they are."""
+    if not pair.object:
+        return ["can, with no object"]
+    if not pair.row_via:
+        return ["can, with no way to the writer"]
+    whys = []
+    *steps, last = pair.row_via
+    for step in steps:
+        where, arrow, into = step.partition(" -> ")
+        if not arrow:
+            where, arrow, into = step.partition(" <- ")
+        owner, _sep, line = where.split(" ", 1)[0].rpartition(":")
+        row = rows.get(owner)
+        if arrow:
+            if row is None or not any(line == str(held) for call in row.calls for held in (call.lines or [call.line])):
+                whys.append(f"way {step!r}: not a call the caller's reach row records")
+            if into.split(" ", 1)[0] not in rows:
+                whys.append(f"way {step!r}: the callee is no reach row")
+        elif row is None or not any(line == str(binding.line) for binding in row.bindings):
+            whys.append(f"way {step!r}: not a binding the function's reach row records")
+    write = last.split(" ", 1)[0]
+    if write not in pair.writes:
+        whys.append(f"way ends at {write}, not one of the pair's writes")
+    return whys
 
 
 def object_records_resolve(fragment: MapFragment) -> GateResult:

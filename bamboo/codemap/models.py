@@ -425,6 +425,9 @@ class MustName(BaseModel):
 #: :attr:`HistoryPair.row` where the history row is the arm's row: the writer
 #: is handed an attribute of the object the arm writes, bound alike at both.
 HISTORY_ROW_SAME = "same"
+#: :attr:`HistoryPair.row` where the history row can be the arm's row: the
+#: arm's object, or its key, followed into the call reaches the writer's key.
+HISTORY_ROW_CAN = "can"
 #: :attr:`HistoryPair.order`: where the history call runs from the point.
 HISTORY_AFTER = "after"
 HISTORY_BEFORE = "before"
@@ -455,9 +458,13 @@ class HistoryPair(BaseModel):
     as if made on every path, and a function running one of several actions
     per pass pairs each action's arms with the others' history calls.
     ``writes`` names every history write the call can lead to, not the one it
-    made.  Whether the row is the arm's own is read in place only (``row``):
-    where the history row is written through calls, or the arm is an SQL
-    statement, it is not read, with why.
+    made.  Whether the row is the arm's own (``row``) is read in place where
+    both are in one function and the arm writes an attribute; otherwise the
+    arm's object -- or its key, for an SQL arm -- is followed from the caller
+    into the call (:func:`bamboo.codemap.objects.follow`), and ``can`` says it
+    reaches the writer's key: on some way, an element of a list among the
+    others, the bindings read without order -- a row the pass can write, not
+    one it wrote.
     """
 
     level: int = Field(description="0 for the arm's own function; n+1 for a caller of a level-n one.")
@@ -487,15 +494,40 @@ class HistoryPair(BaseModel):
     row: str = Field(
         default="",
         description=(
-            f"{HISTORY_ROW_SAME!r}; ``another: <expression>`` where the writer "
-            "is handed its key as another expression than the arm's object -- "
-            "``tmpJob.PandaID`` where the arm writes ``job``, or a job's "
-            "``job.jediTaskID`` for the task's history -- whose row is not "
-            "read: ``archiveJob`` appends ``job`` to the list ``tmpJob`` runs "
-            "over, so that row can be the arm's.  Empty with ``row_why``."
+            f"{HISTORY_ROW_SAME!r} read in place; {HISTORY_ROW_CAN!r} where the "
+            "arm's object followed into the call reaches the writer's key "
+            "(``object``, ``row_via``); ``another: <expression>`` where the "
+            "writer is handed its key as another expression the object is not "
+            "followed to -- ``other.PandaID``, or a job's ``job.jediTaskID`` "
+            "for the task's history -- whose row is not read.  Empty with "
+            "``row_why``."
         ),
     )
     row_why: str = Field(default="", description="Why ``row`` is empty.")
+    object: str = Field(
+        default="",
+        description=(
+            "The path of the caller holding the arm's object -- ``self.job`` "
+            "in the adder's ``process_job_report`` -- or, for an SQL arm, the "
+            "row's key: what a reader asks of the pass's run (may_change's "
+            "path).  Set with ``same`` and ``can``."
+        ),
+    )
+    row_via: list[str] = Field(
+        default_factory=list,
+        description=(
+            "With ``can``, one way the object goes from the caller's "
+            "``object`` to the writer's key, a step each: ``owner:line how "
+            "path`` for a binding of a function it passes (``element job`` "
+            "for ``for job in jobs``, ``fill updatedJobList[]`` for an "
+            "append, ``... back`` from a name to what is bound to it), "
+            "``caller:line -> callee path`` for a call it is handed into, "
+            "``owner:line <- callee path`` for a call that hands it back "
+            "(kept on the callee's ``self``, or returned), and last "
+            "``owner:line key`` -- the history write and the path it is "
+            "handed as its key."
+        ),
+    )
     runs: list[int] = Field(
         default_factory=list,
         description=(

@@ -11,6 +11,7 @@ from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     HISTORY_AFTER,
     HISTORY_BEFORE,
+    HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
     RUN_KEY_TIME,
     Anchor,
@@ -21,6 +22,7 @@ from bamboo.codemap.models import (
     RunKey,
     SourceModule,
 )
+from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import pathcond, runs, sql
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import sqlwrite
@@ -29,7 +31,10 @@ PACKAGE = "pkg"
 
 SPEC = """\
 class JobSpec:
-    pass
+    _attributes = ("PandaID", "jobStatus")
+
+    def set_failed(self):
+        self.jobStatus = "failed"
 
 
 class JediDatasetSpec:
@@ -88,6 +93,56 @@ class DBProxy:
     def dataset(self, ds):
         ds.status = "done"  # D1
         self.note_change(1, "x")
+
+    def archive_all(self, jobs):
+        done = []
+        for job in jobs:  # B1
+            done.append(job)  # B2
+        for one in done:  # B3
+            self.note_change(one.PandaID, one.jobStatus)  # H6
+
+    def finish(self, job: JobSpec):
+        job.jobStatus = "finished"  # A9
+        self.archive_all([job])  # C4
+
+    def kill(self, panda_id):
+        var_map = {}
+        var_map[":PandaID"] = panda_id
+        var_map[":jobStatus"] = "cancelled"  # A10
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID", var_map)
+        self.note_change(panda_id, "cancelled")  # H7
+
+    def peek(self, panda_id):
+        job = JobSpec()
+        job.jobStatus = "closed"  # A11
+        return 1
+
+    def close(self, job: JobSpec):
+        self.peek(job.PandaID)  # C5
+        self.note_change(job.PandaID, "closed")  # H8
+
+    def hold(self, job: JobSpec):
+        job.set_failed()  # A12
+        self.note_change(job.PandaID, "failed")  # H9
+
+    def lock(self, panda_id):
+        var_map = {}
+        var_map[":PandaID"] = panda_id
+        var_map[":jobStatus"] = "locked"  # A13
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID", var_map)
+
+    def refine(self, panda_id):
+        self.lock(panda_id)  # C6
+        holder = Holder()
+        holder.extract(panda_id)  # X1
+        self.note_change(holder.job.PandaID, "locked")  # H10
+
+
+class Holder:
+    def extract(self, panda_id):
+        job = JobSpec()
+        job.PandaID = panda_id
+        self.job = job
 """
 
 WATCHER = """\
@@ -222,6 +277,7 @@ def _build(
             function_prints=nodes,
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
         )
+        panda_objects.attach(fragment, modules, calls)
         runs.attach(fragment, modules, calls)
     return fragment
 
@@ -302,7 +358,7 @@ def test_the_next_turn_of_a_loop_is_another_pass(tmp_path: Path) -> None:
     assert (pair.call, pair.order) == (_line(PROXY, "H4"), HISTORY_BEFORE)
 
 
-def test_an_arm_in_a_callee_pairs_at_the_caller_and_its_row_is_not_read(
+def test_an_arm_in_a_callee_pairs_at_the_caller_with_its_object_followed_to_the_writer(
     tmp_path: Path,
 ) -> None:
     fragment = _proxy(tmp_path, ("DBProxy.set_status", "A5"))
@@ -313,11 +369,91 @@ def test_an_arm_in_a_callee_pairs_at_the_caller_and_its_row_is_not_read(
         _line(PROXY, "C1"),
         _line(PROXY, "C2"),
     )
-    assert pair.writes == [
-        f"pkg/proxy.py::DBProxy.archive_history:{_line(PROXY, 'H5')}"
+    write = f"pkg/proxy.py::DBProxy.archive_history:{_line(PROXY, 'H5')}"
+    assert pair.writes == [write]
+    assert (pair.row, pair.row_why, pair.object) == (HISTORY_ROW_CAN, "", "job")
+    assert pair.row_via == [
+        f"pkg/proxy.py::DBProxy.run:{_line(PROXY, 'C2')} -> pkg/proxy.py::DBProxy.archive_history job",
+        f"{write} job.PandaID",
     ]
-    assert (pair.row, pair.row_why) == ("", runs.ROW_ARM_BELOW)
     assert pair.runs == [_line(PROXY, "R1")]
+
+
+def test_a_row_written_for_each_element_of_a_list_can_be_the_arms(
+    tmp_path: Path,
+) -> None:
+    """``[job]`` handed on, put in a local list and run over: the row is one of the elements', the arm's among them."""
+    fragment = _proxy(tmp_path, ("DBProxy.finish", "A9"))
+    (pair,) = _branch(fragment, "A9").history or []
+    write = f"pkg/proxy.py::DBProxy.archive_all:{_line(PROXY, 'H6')}"
+    assert (pair.level, pair.call, pair.row, pair.object) == (
+        0,
+        _line(PROXY, "C4"),
+        HISTORY_ROW_CAN,
+        "job",
+    )
+    archive_all = "pkg/proxy.py::DBProxy.archive_all"
+    assert pair.row_via == [
+        f"pkg/proxy.py::DBProxy.finish:{_line(PROXY, 'C4')} -> {archive_all} jobs[]",
+        f"{archive_all}:{_line(PROXY, 'B1')} element job",
+        f"{archive_all}:{_line(PROXY, 'B2')} fill done[]",
+        f"{archive_all}:{_line(PROXY, 'B3')} element one",
+        f"{write} one.PandaID",
+    ]
+
+
+def test_an_sql_arm_is_the_row_its_statement_keys(tmp_path: Path) -> None:
+    fragment = _proxy(tmp_path, ("DBProxy.kill", "A10"))
+    (pair,) = _branch(fragment, "A10").history or []
+    assert (pair.call, pair.row, pair.object) == (
+        _line(PROXY, "H7"),
+        HISTORY_ROW_CAN,
+        "panda_id",
+    )
+
+
+def test_a_method_of_the_class_run_on_the_object_is_an_arm_on_it(
+    tmp_path: Path,
+) -> None:
+    fragment = _proxy(tmp_path, ("DBProxy.hold", "A12"))
+    (pair,) = _branch(fragment, "A12").history or []
+    assert (pair.call, pair.row, pair.object) == (
+        _line(PROXY, "H9"),
+        HISTORY_ROW_CAN,
+        "job",
+    )
+
+
+def test_a_key_a_callee_keeps_on_its_self_comes_back_to_the_caller(
+    tmp_path: Path,
+) -> None:
+    """TaskRefiner: extractCommon keeps jediTaskID on self.taskSpec, and the caller's history call names impl.taskSpec.jediTaskID."""
+    fragment = _proxy(tmp_path, ("DBProxy.lock", "A13"))
+    (pair,) = _branch(fragment, "A13").history or []
+    refine = "pkg/proxy.py::DBProxy.refine"
+    assert (pair.level, pair.caller, pair.point, pair.call) == (
+        1,
+        refine,
+        _line(PROXY, "C6"),
+        _line(PROXY, "H10"),
+    )
+    assert (pair.row, pair.object) == (HISTORY_ROW_CAN, "panda_id")
+    assert pair.row_via == [
+        f"{refine}:{_line(PROXY, 'X1')} <- pkg/proxy.py::Holder.extract holder.job.PandaID",
+        f"{refine}:{_line(PROXY, 'H10')} holder.job.PandaID",
+    ]
+    assert history_pairs_resolve(fragment).passed
+
+
+def test_an_object_the_callee_builds_is_not_the_callers(tmp_path: Path) -> None:
+    fragment = _proxy(tmp_path, ("DBProxy.peek", "A11"))
+    (pair,) = _branch(fragment, "A11").history or []
+    assert (pair.level, pair.caller, pair.call) == (
+        1,
+        "pkg/proxy.py::DBProxy.close",
+        _line(PROXY, "H8"),
+    )
+    assert (pair.row, pair.row_why, pair.object) == ("", runs.ROW_NOT_HANDED, "")
 
 
 def test_a_function_handed_on_is_not_the_same_pass(tmp_path: Path) -> None:
@@ -426,6 +562,17 @@ def test_the_gate_passes_on_the_build_and_fails_on_a_write_no_reader_finds(
         tmp_path, ("DBProxy.archiveJob", "A1"), ("DBProxy.set_status", "A5")
     )
     assert history_pairs_resolve(fragment).passed
+    (followed,) = _branch(fragment, "A5").history or []
+    followed.row_via = [
+        "pkg/proxy.py::DBProxy.run:1 -> pkg/proxy.py::DBProxy.archive_history job",
+        *followed.row_via[1:],
+    ]
+    result = history_pairs_resolve(fragment)
+    assert not result.passed
+    assert any(
+        "not a call the caller's reach row records" in failure
+        for failure in result.failures
+    )
     for row in fragment.reach_graph:
         row.history = []
     result = history_pairs_resolve(fragment)

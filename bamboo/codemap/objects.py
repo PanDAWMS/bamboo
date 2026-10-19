@@ -7,7 +7,8 @@ one function -- ``self.job`` in the adder's ``process_job_report`` -- and goes
 where that object goes:
 
 * within a function, to every name holding it: an alias, a loop over a
-  container holding it, a container it is put in, a field it is stored in;
+  container holding it, a container it is put in, a field it is stored in --
+  and back from a name only by the binding it came in by (:func:`_held_steps`);
 * into a call, as the parameter that takes it (the receiver as ``self``),
   an element of a list or tuple literal handed as that parameter's element;
 * into the call a name holding it was bound from, through what that call
@@ -76,8 +77,8 @@ HELD_SPENT = f"the object is held by more than {MAX_HELD} paths in one function;
 
 RETURN = "<return>"
 
-#: How :func:`_held` steps along a binding: both ways, into a container, or back out of one to what was put in.
-_PLAIN, _PUT, _TAKE_BACK = "plain", "put", "take back"
+#: How :func:`_held_steps` steps along a binding: from what is bound to the name, or back from the name.
+_FORWARD, _BACK = "forward", "back"
 
 _State = tuple[str, str]
 
@@ -105,6 +106,12 @@ class ObjectReach(NamedTuple):
     held: dict[str, list[str]]
     states: int
     cut: str
+    #: owner -> how the object first came into that function: the caller, the line of the call, the path it has
+    #: there, and the caller's path that was handed (:func:`way_to` reads a way back to the start from it)
+    entered: dict[str, tuple[str, int, str, str]]
+    #: owner -> path -> the call that handed the object back to that function as the path: its line and the callee
+    #: (on its ``self``, or returned)
+    returned: dict[str, dict[str, tuple[int, str]]]
 
 
 class _Link(NamedTuple):
@@ -131,14 +138,18 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
     root: _State = (owner, path)
     work: list[_State] = [root]
     cut = ""
+    entered: dict[str, tuple[str, int, str, str]] = {}
+    returned: dict[str, dict[str, tuple[int, str]]] = defaultdict(dict)
 
-    def into(child: _State, link: _Link) -> None:
+    def into(child: _State, link: _Link, handed: str) -> None:
         """Bring the object into *child* by *link*; what *child* already says of it goes back at once."""
         if _parts(child[1]) > MAX_PARTS:
             return
+        if child[0] != owner:
+            entered.setdefault(child[0], (link.caller[0], link.line, child[1], handed))
         if link not in links[child]:
             links[child].add(link)
-            if _hand_back(rows, link, outputs[child], extra):
+            if _hand_back(rows, link, outputs[child], extra, returned):
                 work.append(link.caller)
         if child not in read_with:
             work.append(child)
@@ -156,7 +167,8 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         if row is None:
             continue
         functions[at] = None
-        held, spent = _held(row, {start} | extra[state])
+        steps, spent = _held_steps(row, {start}, extra[state])
+        held = set(steps)
         held_in[at] |= held
         if spent:
             cut = cut or HELD_SPENT
@@ -167,9 +179,10 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         for binding in row.bindings:
             if binding.how != BIND_RESULT:
                 continue
-            for one in held:
+            for one in sorted(held):
                 rest = _under(binding.name, one)
-                if rest is None:
+                if rest is None or _came_forward(steps[one]):
+                    # What came into the name by a binding is not what the call bound to it returns.
                     continue
                 # The object held here came out of the call: in from what it returns.
                 came_from[Site(at, binding.line, binding.name)] = None
@@ -182,9 +195,9 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
                         taken = "self" + rest
                     else:
                         taken = RETURN + binding.path + rest
-                    into((call.to, taken), _Link(state, binding.line, call.to))
+                    into((call.to, taken), _Link(state, binding.line, call.to), one)
         for call in row.call_bindings:
-            for one in held:
+            for one in sorted(held):
                 rest = _under(call.path, one)
                 if rest is None:
                     continue
@@ -196,7 +209,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
                     holes[Site(at, call.line, NO_PARAMETER)] = None
                 else:
                     taken = call.parameter + ("[]" if call.element else "") + rest
-                    into((call.to, taken), _Link(state, call.line, call.to))
+                    into((call.to, taken), _Link(state, call.line, call.to), one)
         # Where the object ends up, seen from outside: on self, or returned.  New ends go back to every call
         # that brought it in.
         ends = {
@@ -206,8 +219,8 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         }
         if not ends <= outputs[state]:
             outputs[state] |= ends
-            for link in links[state]:
-                if _hand_back(rows, link, outputs[state], extra):
+            for link in sorted(links[state]):
+                if _hand_back(rows, link, outputs[state], extra, returned):
                     work.append(link.caller)
     escapes: dict[Site, None] = {}
     for end in sorted(outputs[root]):
@@ -224,7 +237,28 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         held={owner: sorted(paths) for owner, paths in held_in.items()},
         states=len(read_with),
         cut=cut,
+        entered=entered,
+        returned=dict(returned),
     )
+
+
+def way_to(reach: ObjectReach, owner: str) -> list[tuple[str, int, str, str, str]]:
+    """One way the object went from the start to *owner*, in order: per call, ``(caller, line, callee, path in the
+    callee, the caller's path handed)``.
+
+    Each function's first entry is kept, so this is the way :func:`follow`
+    first came in by -- one of the ways, not every one.
+    """
+    way: list[tuple[str, int, str, str, str]] = []
+    seen = {owner}
+    while owner in reach.entered:
+        caller, line, path, handed = reach.entered[owner]
+        way.append((caller, line, owner, path, handed))
+        if caller in seen:
+            break
+        seen.add(caller)
+        owner = caller
+    return list(reversed(way))
 
 
 def _hand_back(
@@ -232,6 +266,7 @@ def _hand_back(
     link: _Link,
     ends: set[str],
     extra: dict[_State, set[str]],
+    returned: dict[str, dict[str, tuple[int, str]]],
 ) -> bool:
     """Put where the object ends up in the callee into the caller's state; whether that added a path."""
     caller = rows.get(link.caller[0])
@@ -239,7 +274,7 @@ def _hand_back(
         return False
     added = False
     held = extra[link.caller]
-    for end in ends:
+    for end in sorted(ends):
         if end.startswith(RETURN):
             back = end[len(RETURN) :]
             names = [
@@ -259,62 +294,118 @@ def _hand_back(
                 and _parts(name) <= MAX_PARTS
             ):
                 held.add(name)
+                returned[link.caller[0]].setdefault(name, (link.line, link.to))
                 added = True
     return added
 
 
 def _held(row: ReachNode, start: set[str]) -> tuple[set[str], bool]:
-    """Every path of *row*'s function that holds what *start* holds, by its bindings.
+    """Every path of *row*'s function that holds what *start* holds, by its bindings; see :func:`_held_steps`."""
+    steps, spent = _held_steps(row, start)
+    return set(steps), spent
 
-    An alias holds the object both ways.  A container the object is put in
-    -- ``updatedJobList.append(job)``, ``varMap[":x"] = v`` -- holds it as an
-    element, but its other elements are other objects: ``archiveJob`` puts
-    ``dJob`` in the same list.  So a container is read back to what was put
-    in it only where the object came in as its element, not where it was put
-    there here.
+
+def _held_steps(
+    row: ReachNode, start: set[str], returned: set[str] = frozenset()
+) -> tuple[dict[str, Optional[tuple[str, int, str]]], bool]:
+    """Every path of *row*'s function that holds what *start* holds, each with the step it was first reached by.
+
+    A step is ``(the path it came from, the binding's line, how)``; a start
+    path has none.  A binding is stepped along both ways: forward, from what
+    is bound to the name -- ``x = p``, ``for x in p``, ``x.append(p)``,
+    ``return p`` -- and back, from the name to what is bound to it.
+
+    **What came into a name by one binding is not read back by another.**  A
+    name bound in several places holds what each binding gives it, and those
+    are different objects: ``tag_job = self.jobs[0]`` and ``tag_job =
+    self.jumbo_jobs[0]`` in two branches, or ``archiveJob``'s
+    ``updatedJobList.append(job)`` and ``.append(dJob)``.  So a path reached
+    forward through one binding of a name is stepped back only through that
+    binding: ``self.jobs[]`` reaches ``tag_job`` and not ``self.jumbo_jobs[]``.
+    A start path, or one reached back, steps back through every binding: it
+    can be what any of them gives.  :func:`follow` keeps the same rule for a
+    name a call's result is bound to: ``makeFakeCoJumbo``'s ``varMap`` holds
+    the old job's ``PandaID`` it was filled with, not what the new job's
+    ``valuesMap()`` returns when the name is bound again.
+
+    *returned* are paths calls handed the object back by (kept on the
+    callee's ``self``, or returned).  One the bindings already reach from
+    *start* keeps how it was reached: ``TaskRefiner``'s
+    ``tmpTaskSpec.jediTaskID``, reached through ``tmpTaskSpec =
+    impl.taskSpec`` and handed to ``tmpTaskSpec.setErrDiag()``, is not read
+    back to the ``jediTaskID`` the other branch gives it.  The others join
+    as starts once the bindings are read.
     """
-    held = set(start)
-    put: set[str] = (
-        set()
-    )  # container elements that hold the object because it was put in them here
+    held: dict[str, Optional[tuple[str, int, str]]] = dict.fromkeys(sorted(start))
+    pending = sorted(set(returned) - set(start))
+    entered: dict[str, set[int]] = defaultdict(
+        set
+    )  # path -> the bindings it was reached forward by
     changed = True
     while changed:
         changed = False
-        for binding in row.bindings:
+        for index, binding in enumerate(row.bindings):
             if binding.how == BIND_FILL or (
                 binding.how == BIND_ALIAS and binding.name.endswith("[]")
             ):
-                element = (
+                # an element of the container: ``updatedJobList.append(job)``, ``varMap[":x"] = v``
+                target = (
                     binding.name if binding.name.endswith("[]") else binding.name + "[]"
                 )
-                steps = [
-                    (binding.path, element, _PUT),
-                    (element, binding.path, _TAKE_BACK),
-                ]
             elif binding.how in (BIND_ALIAS, BIND_ELEMENT, BIND_RETURN):
                 # an element's path is already ``container[]``
-                steps = [
-                    (binding.path, binding.name, _PLAIN),
-                    (binding.name, binding.path, _PLAIN),
-                ]
+                target = binding.name
             else:
                 continue
             for one in list(held):
-                for frm, to, step in steps:
+                for frm, to, way in (
+                    (binding.path, target, _FORWARD),
+                    (target, binding.path, _BACK),
+                ):
                     rest = _under(frm, one)
                     if rest is None:
                         continue
-                    if step == _TAKE_BACK and one in put:
+                    if way == _BACK and entered.get(one) and index not in entered[one]:
                         continue
                     taken = to + rest
+                    if way == _FORWARD and (taken in entered or taken not in held):
+                        entered[taken].add(index)
                     if taken not in held and _parts(taken) <= MAX_PARTS:
                         if len(held) >= MAX_HELD:
                             return held, True
-                        held.add(taken)
-                        if step == _PUT:
-                            put.add(taken)
+                        how = binding.how if way == _FORWARD else f"{binding.how} back"
+                        held[taken] = (one, binding.line, how)
                         changed = True
+        if not changed and pending:
+            for one in pending:
+                if one not in held:
+                    held[one] = None
+                    changed = True
+            pending = []
     return held, False
+
+
+def _came_forward(step: Optional[tuple[str, int, str]]) -> bool:
+    """Whether a path was reached forward through a binding: not a start, and not reached back."""
+    return step is not None and not step[2].endswith(" back")
+
+
+def steps_to(row: ReachNode, start: str, path: str) -> list[tuple[int, str, str]]:
+    """The bindings of *row*'s function that take what *start* holds to *path*: ``(line, how, path)`` each, in order.
+
+    Empty where *path* is *start*, or is not reached from it.
+    """
+    held, _spent = _held_steps(row, {start})
+    way: list[tuple[int, str, str]] = []
+    seen = {path}
+    while (step := held.get(path)) is not None:
+        came, line, how = step
+        way.append((line, how, path))
+        if came in seen:
+            return []
+        seen.add(came)
+        path = came
+    return list(reversed(way)) if path == start else []
 
 
 def _under(base: str, path: str) -> Optional[str]:

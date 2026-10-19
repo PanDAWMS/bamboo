@@ -35,12 +35,43 @@ nothing calls (the top of its pass: an entry, or a thread's ``run``), at depth
 :data:`MAX_DEPTH`, or once :data:`MAX_FUNCTIONS` functions are seen for the
 arm; the last two are said (:attr:`Branch.history_hole`).
 
-**Read in place only.**  Whether a history row is the arm's own
-(:attr:`HistoryPair.row`) is read where both are in one function: the writer
-handed an attribute of the object the arm writes, the object not bound again
-between the two.  An object followed through calls -- ``doGenerate``'s jobs
-handed back to ``runImpl`` and on to ``storeJobs`` -- is not read, nor the row
-an SQL arm lands on; each says why.
+**The arm's row.**  Whether a history row is the arm's own
+(:attr:`HistoryPair.row`) is read in place where both are in one function and
+the arm writes an attribute: the writer handed an attribute of the object the
+arm writes, the object not bound again between the two.  Elsewhere the arm's
+object is followed (:func:`bamboo.codemap.objects.follow`, on the records
+:mod:`bamboo.codemap.panda.objects` keeps) from the pair's caller into the
+pair's call, with its key (:data:`HISTORY_KEYS`), and ``can`` says it reaches
+the key the writer is handed:
+
+- the object is the path the arm assigns on, the receiver of a method of its
+  class it runs (``taskSpec.setOnHold()``), or for an SQL arm the key of the
+  row the statement it fills writes;
+- at a caller of the arm's function, the object is the path of the caller
+  whose follow through the call on the way holds the arm's object there --
+  a path the call is handed, a path below one (``self.job`` for
+  ``self.execute_plugin()``), an element of either, or a name bound to what
+  the call returns;
+- ``archiveJob``'s ``updatedJobList.append(job)`` and ``for tmpJob in
+  updatedJobList`` make the row of ``tmpJob.PandaID`` one the arm's can be:
+  an element among the others, read without the statements' order.
+
+So ``can`` is a row the pass can write for the arm's object, not the one it
+wrote; ``row_via`` says one way the object goes there.  An object no path the
+caller hands reaches, or that does not reach the writer, says so.
+
+**Not read.**  The values a call is handed: ``killJobs`` calls ``retryJob``
+with ``getNewPandaID=True``, and ``retryJob``'s own arms and history call both
+name ``job.PandaID``, which it binds again to a new id on that way -- read
+without order, it can be the arm's row.  A key the run holds by another name
+than the object's is tied to it only where a binding says so, and one way:
+the adder's ``self.job_id`` reaches ``self.job.PandaID`` through
+``peekJobs([self.job_id])`` and ``peekJob``'s ``job.PandaID = pandaID`` (its
+branch for a job not found -- a row a ``SELECT`` reads by its key is not read
+as holding it), and ``self.job.PandaID`` does not reach ``self.job_id``: what
+a function is handed is not handed back through its parameters.  The values
+of one container are one path (``taskParamMap[]``), so a path into a dict can
+stand for the key it holds among the others.
 """
 
 from __future__ import annotations
@@ -51,11 +82,13 @@ from collections import defaultdict, deque
 from typing import Iterator, NamedTuple, Optional, Union
 
 from bamboo.codemap import calls as C
-from bamboo.codemap import reach
+from bamboo.codemap import objects, reach
 from bamboo.codemap.models import (
+    BIND_RESULT,
     HISTORY_AFTER,
     HISTORY_BEFORE,
     HISTORY_EITHER,
+    HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
     RUN_KEY_TIME,
     Branch,
@@ -77,6 +110,8 @@ HISTORY_TABLES: dict[str, str] = {
     "jobs_statuslog": "JobSpec.jobStatus",
     "tasks_statuslog": "JediTaskSpec.status",
 }
+#: The attribute a history row is keyed by, per class: the row of the object's own key.
+HISTORY_KEYS: dict[str, str] = {"JobSpec": "PandaID", "JediTaskSpec": "jediTaskID"}
 
 
 class Builder(NamedTuple):
@@ -111,15 +146,19 @@ HISTORY_NO_FUNCTION = "the arm's function is not a row of the reach record"
 HISTORY_DEPTH = f"a way up reached depth {MAX_DEPTH} with no pair"
 HISTORY_WIDE = f"the walk up met {MAX_FUNCTIONS} functions and went no further"
 
-ROW_ARM_BELOW = "the arm is in a function this one calls: its object is not followed out of the call"
-ROW_WRITER_BELOW = (
-    "the history row is written in a function this one calls:"
-    " the object is not followed into it"
+ROW_ANOTHER = "another: "
+ROW_NO_START = (
+    "the record holds no path of the object the arm writes,"
+    " nor a key of the row its statement writes"
 )
-ROW_NOT_ATTRIBUTE = (
-    "the arm does not write the subject as an attribute of an object:"
-    " the row an SQL statement lands on is not read"
+ROW_NOT_HANDED = (
+    "no path the caller hands into the call on the way to the arm is followed"
+    " to the object the arm writes"
 )
+ROW_NOT_TO_WRITER = (
+    "the record follows the object to no key of a history write through this call"
+)
+ROW_HOLE = "the object reaches a call the record could not follow on the way: {why}"
 ROW_NO_KEY = "the writer is handed no key this reading finds"
 ROW_NOT_A_NAME = "the object or the key is not a name or attributes on one"
 ROW_REBOUND = "the object can be bound again between the arm and the call"
@@ -147,6 +186,20 @@ _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _CONVERSIONS = frozenset({"str", "int", "repr"})
 
 _Piece = Union[str, ast.expr]
+
+
+def _holder(held, path: str) -> Optional[str]:
+    """The held path *path* is, or is below -- ``job`` for ``job.PandaID`` -- the nearest one; ``None`` where none."""
+    found = [one for one in held if objects._under(one, path) is not None]
+    return max(found, key=lambda one: (len(one), one)) if found else None
+
+
+class _Arm(NamedTuple):
+    """What an arm writes, as paths of its function: the object, and the key of its row."""
+
+    owner: str
+    objects: frozenset[str]
+    keys: frozenset[str]
 
 
 class _Bound(NamedTuple):
@@ -198,6 +251,7 @@ class _Reader:
         self.prints = {node.owner: node for node in fragment.function_prints}
         self.writers = history_writers(self.names.functions)
         self._built: dict[int, list[_Bound]] = {}
+        self._follows: dict[tuple[str, str], objects.ObjectReach] = {}
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
         self._runs: dict[str, list[RunStart]] = {}
         self._kills: dict[int, list[ast.stmt]] = {}
@@ -548,6 +602,7 @@ class _Reader:
                 branch.history_hole = HISTORY_NO_FUNCTION
                 return
             written = mustprints._written_object(site.statement, junction.subject)
+            arm = self._arm(owner, site.func, site.statement, junction.subject)
             seen = {owner}
             frontier: deque[tuple[str, ast.AST, ast.stmt, int]] = deque(
                 [(owner, site.func, site.statement, 0)]
@@ -555,7 +610,7 @@ class _Reader:
             while frontier:
                 here, func, point, level = frontier.popleft()
                 found = self._pairs_at(
-                    here, func, point, level, junction.subject, written
+                    here, func, point, level, junction.subject, written, arm
                 )
                 if found:
                     for pair in found:
@@ -595,6 +650,7 @@ class _Reader:
         level: int,
         subject: str,
         written: Optional[ast.expr],
+        arm: "_Arm",
     ) -> list[HistoryPair]:
         """The calls of *owner* that lead to a history row in one pass with *point*."""
         row = self.rows.get(owner)
@@ -635,8 +691,18 @@ class _Reader:
                     if call.to in self.writers
                     else self.below.get(call.to, set())
                 )
-            row_said, row_why = self._row(
-                level, func, point, site, line, through, subject, written
+            row_said, row_why, held, via = self._row(
+                level,
+                owner,
+                func,
+                point,
+                site,
+                line,
+                through,
+                subject,
+                written,
+                arm,
+                writes,
             )
             runs, run_hole = self._runs_at(owner, func, point)
             pairs.append(
@@ -661,6 +727,8 @@ class _Reader:
                     writes=sorted(writes),
                     row=row_said,
                     row_why=row_why,
+                    object=held,
+                    row_via=via,
                     runs=runs,
                     run_hole=run_hole,
                 )
@@ -670,6 +738,7 @@ class _Reader:
     def _row(
         self,
         level: int,
+        owner: str,
         func: ast.AST,
         point: ast.stmt,
         site: ast.stmt,
@@ -677,15 +746,32 @@ class _Reader:
         through: list[ReachCall],
         subject: str,
         written: Optional[ast.expr],
-    ) -> tuple[str, str]:
-        """Whether the history row is the arm's row, read in place: ``(row, why)``."""
-        if level > 0:
-            return "", ROW_ARM_BELOW
+        arm: "_Arm",
+        writes: set[str],
+    ) -> tuple[str, str, str, list[str]]:
+        """Whether the history row is the arm's row: ``(row, why, object, row_via)``."""
         direct = [call for call in through if call.to in self.writers]
-        if not direct:
-            return "", ROW_WRITER_BELOW
-        if written is None:
-            return "", ROW_NOT_ATTRIBUTE
+        if level == 0 and direct and written is not None:
+            row, why = self._in_place(func, point, site, line, direct, subject, written)
+            if row == HISTORY_ROW_SAME:
+                return row, why, ast.unparse(written), []
+            if not row.startswith(ROW_ANOTHER):
+                return row, why, "", []
+            found = self._followed(level, owner, point, line, subject, arm, writes)
+            return found if found[0] == HISTORY_ROW_CAN else (row, why, "", [])
+        return self._followed(level, owner, point, line, subject, arm, writes)
+
+    def _in_place(
+        self,
+        func: ast.AST,
+        point: ast.stmt,
+        site: ast.stmt,
+        line: int,
+        direct: list[ReachCall],
+        subject: str,
+        written: ast.expr,
+    ) -> tuple[str, str]:
+        """The row read where the arm and the writer's call are in one function: ``(row, why)``."""
         named = self.rows[direct[0].to].function if direct[0].to in self.rows else ""
         call = next(
             (
@@ -705,7 +791,7 @@ class _Reader:
             return "", ROW_NOT_A_NAME
         recorded = self.writers[direct[0].to].rpartition(".")[0]
         if root.id != base.id or recorded != subject.rpartition(".")[0]:
-            return f"another: {ast.unparse(first)}", ""
+            return f"{ROW_ANOTHER}{ast.unparse(first)}", ""
         sites: list[ast.AST] = [func.args]  # type: ignore[attr-defined]
         for binding in pathcond.bindings(func, root.id):
             if (
@@ -716,6 +802,296 @@ class _Reader:
         if reaching(point, sites) == reaching(site, sites):
             return HISTORY_ROW_SAME, ""
         return "", ROW_REBOUND
+
+    # -- the arm's object followed into the pair's call ----------------------------------------------------------
+
+    def _arm(
+        self, owner: str, func: ast.AST, statement: ast.stmt, subject: str
+    ) -> "_Arm":
+        """What the arm at *statement* writes, as paths of its function: the object, else the row's key."""
+        row = self.rows.get(owner)
+        cls, _sep, attr = subject.rpartition(".")
+        key = HISTORY_KEYS.get(cls, "")
+        if row is None or not key:
+            return _Arm(owner, frozenset(), frozenset())
+        lines = range(statement.lineno, (statement.end_lineno or statement.lineno) + 1)
+        held = {
+            one.path for one in row.assigns if one.line in lines and attr in one.attrs
+        }
+        if not held:
+            # A method of the object's class run on it: ``taskSpec.setOnHold()``.
+            held = {
+                call.path
+                for call in row.call_bindings
+                if call.line in lines
+                and call.parameter == "self"
+                and (callee := self.rows.get(call.to)) is not None
+                and any(one.rpartition("::")[2] == cls for one in callee.classes)
+            }
+        if held:
+            return _Arm(
+                owner, frozenset(held), frozenset(f"{one}.{key}" for one in held)
+            )
+        # An SQL arm: the key of the row each statement it can fill writes.
+        keys: set[str] = set()
+        for write in row.writes:
+            if not any(value.column.lower() == attr.lower() for value in write.columns):
+                continue
+            ran = [mustprints._statement_at(func, one) for one in write.lines]
+            if not any(
+                one is not None and (one is statement or reaching(one, [statement]))
+                for one in ran
+            ):
+                continue
+            named = [*write.keys, *(write.columns if write.kind == "insert" else [])]
+            keys |= {
+                value.path
+                for value in named
+                if value.column.lower() == key.lower() and value.path
+            }
+        return _Arm(owner, frozenset(), frozenset(keys))
+
+    def _follow(self, owner: str, path: str) -> objects.ObjectReach:
+        if (owner, path) not in self._follows:
+            self._follows[(owner, path)] = objects.follow(self.rows, owner, path)
+        return self._follows[(owner, path)]
+
+    def _key_parameter(self, writer: str) -> str:
+        """The parameter a history writer takes its row's key as: its first after ``self``."""
+        held = self.funcs.get(writer)
+        if held is None:
+            return ""
+        arguments = held[1].args  # type: ignore[attr-defined]
+        names = [one.arg for one in [*arguments.posonlyargs, *arguments.args]]
+        row = self.rows.get(writer)
+        if row is not None and row.cls:
+            names = names[1:]
+        return names[0] if names else ""
+
+    def _handed(
+        self, owner: str, point: ast.stmt, arm: "_Arm"
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        """The caller's paths whose follow through the call at *point* holds the arm's object, and its key.
+
+        Each with 0 where it is a path the call is handed or a name bound to
+        what it returns, 1 where it is below one or an element of one.
+        """
+        here = self.rows[owner]
+        lines = range(point.lineno, (point.end_lineno or point.lineno) + 1)
+        at = [
+            call
+            for call in here.call_bindings
+            if call.line in lines
+            and call.to
+            and call.parameter
+            and not call.parameter.startswith("*")
+        ]
+        handed = {call.path for call in at}
+        recorded = (
+            {one.path for one in here.assigns}
+            | {one.path for one in here.bindings}
+            | {one.name for one in here.bindings}
+            | {one.path for one in here.call_bindings}
+        )
+        below = {
+            one
+            for one in recorded
+            if any(objects._under(path, one) is not None for path in handed)
+        }
+        held_objects: dict[str, int] = {}
+        held_keys: dict[str, int] = {}
+
+        def found(reach: objects.ObjectReach, start: str, rank: int) -> None:
+            for path in reach.held.get(arm.owner, ()):
+                for target, into in (
+                    (arm.objects, held_objects),
+                    (arm.keys, held_keys),
+                ):
+                    for one in target:
+                        rest = objects._under(path, one)
+                        if rest is not None:
+                            into[start + rest] = min(into.get(start + rest, rank), rank)
+
+        for start in sorted(handed | below | {one + "[]" for one in handed | below}):
+            if objects._parts(start) > objects.MAX_PARTS:
+                continue
+            held, _spent = objects._held(here, {start})
+            for call in at:
+                for one in held:
+                    rest = objects._under(call.path, one)
+                    if rest is not None:
+                        found(
+                            self._follow(
+                                call.to,
+                                call.parameter + ("[]" if call.element else "") + rest,
+                            ),
+                            start,
+                            0 if start in handed else 1,
+                        )
+        for binding in here.bindings:
+            if binding.how == BIND_RESULT and binding.line in lines:
+                found(self._follow(owner, binding.name), binding.name, 0)
+        return held_objects, held_keys
+
+    def _followed(
+        self,
+        level: int,
+        owner: str,
+        point: ast.stmt,
+        line: int,
+        subject: str,
+        arm: "_Arm",
+        writes: set[str],
+    ) -> tuple[str, str, str, list[str]]:
+        """The arm's object followed from the caller into the call at *line*: ``(row, why, object, row_via)``."""
+        cls = subject.rpartition(".")[0]
+        key = HISTORY_KEYS.get(cls, "")
+        here = self.rows.get(owner)
+        if here is None or not (arm.objects or arm.keys):
+            return "", ROW_NO_START, "", []
+        if level == 0:
+            held_objects = dict.fromkeys(arm.objects, 0)
+            held_keys = dict.fromkeys(arm.keys, 0)
+        else:
+            held_objects, held_keys = self._handed(owner, point, arm)
+            if not (held_objects or held_keys):
+                return "", ROW_NOT_HANDED, "", []
+
+        def order(held: dict[str, int]) -> list[str]:
+            # The path the call is handed before one below it or an element of it, then the shorter.
+            return sorted(held, key=lambda one: (held[one], objects._parts(one), one))
+
+        starts: dict[str, str] = {}  # a path of the caller -> the object it says
+        for one in order(held_objects):
+            starts[one] = one
+            starts.setdefault(f"{one}.{key}", one)
+        for one in order(held_keys):
+            starts.setdefault(one, one)
+        another = ""
+        hole = ""
+        for start, said in starts.items():
+            # What the caller holds the object by: its own bindings, and what the calls it makes hand back.
+            whole = self._follow(owner, start)
+            held = set(whole.held.get(owner, ())) | {start}
+            for call in here.call_bindings:
+                if call.line != line:
+                    continue
+                if call.to in self.writers and call.parameter == self._key_parameter(
+                    call.to
+                ):
+                    holder = _holder(held, call.path)
+                    if (
+                        holder is not None
+                        and self.writers[call.to].rpartition(".")[0] == cls
+                    ):
+                        return (
+                            HISTORY_ROW_CAN,
+                            "",
+                            said,
+                            [
+                                *self._steps(owner, start, holder, whole),
+                                f"{owner}:{line} {call.path}",
+                            ],
+                        )
+                    another = another or call.path
+                    continue
+                for one in sorted(held):
+                    rest = objects._under(call.path, one)
+                    if rest is None:
+                        continue
+                    if not call.to:
+                        hole = hole or call.why or "a hole"
+                        continue
+                    if not call.parameter or call.parameter.startswith("*"):
+                        hole = hole or objects.NO_PARAMETER
+                        continue
+                    taken = call.parameter + ("[]" if call.element else "") + rest
+                    reach = self._follow(call.to, taken)
+                    hole = hole or (reach.holes[0].how if reach.holes else reach.cut)
+                    for write in sorted(writes):
+                        target, _sep, at = write.rpartition(":")
+                        paths = reach.held.get(target)
+                        if not paths:
+                            continue
+                        for keyed in self.rows[target].call_bindings:
+                            if (
+                                str(keyed.line) != at
+                                or keyed.to not in self.writers
+                                or keyed.parameter != self._key_parameter(keyed.to)
+                            ):
+                                continue
+                            holder = _holder(paths, keyed.path)
+                            if (
+                                holder is not None
+                                and self.writers[keyed.to].rpartition(".")[0] == cls
+                            ):
+                                return (
+                                    HISTORY_ROW_CAN,
+                                    "",
+                                    said,
+                                    self._way(
+                                        owner,
+                                        line,
+                                        start,
+                                        one,
+                                        call.to,
+                                        taken,
+                                        whole,
+                                        reach,
+                                        target,
+                                        holder,
+                                    )
+                                    + [f"{write} {keyed.path}"],
+                                )
+                            another = another or keyed.path
+        if another:
+            return f"{ROW_ANOTHER}{another}", "", "", []
+        if hole:
+            return "", ROW_HOLE.format(why=hole), "", []
+        return "", ROW_NOT_TO_WRITER, "", []
+
+    def _steps(
+        self, owner: str, start: str, path: str, reach: objects.ObjectReach
+    ) -> list[str]:
+        """How *owner* takes *start*'s object to *path*: its bindings (``owner:line how path``), from a call that
+        handed the object back (``owner:line <- callee path``) where the bindings alone do not."""
+        row = self.rows[owner]
+        direct = objects.steps_to(row, start, path)
+        if direct or path == start:
+            return [f"{owner}:{line} {how} {held}" for line, how, held in direct]
+        for back, (at, callee) in sorted(reach.returned.get(owner, {}).items()):
+            tail = objects.steps_to(row, back, path)
+            if back == path or tail:
+                return [
+                    f"{owner}:{at} <- {callee} {back}",
+                    *(f"{owner}:{line} {how} {held}" for line, how, held in tail),
+                ]
+        return []
+
+    def _way(
+        self,
+        owner: str,
+        line: int,
+        start: str,
+        handed: str,
+        callee: str,
+        taken: str,
+        whole: objects.ObjectReach,
+        reach: objects.ObjectReach,
+        target: str,
+        holder: str,
+    ) -> list[str]:
+        """Each step the object takes from the caller's *start* to *holder* in *target*: bindings and calls."""
+        way = [
+            *self._steps(owner, start, handed, whole),
+            f"{owner}:{line} -> {callee} {taken}",
+        ]
+        entry = {callee: taken}
+        for caller, at, into, path, given in objects.way_to(reach, target):
+            way += self._steps(caller, entry.get(caller, ""), given, reach)
+            way.append(f"{caller}:{at} -> {into} {path}")
+            entry[into] = path
+        return way + self._steps(target, entry.get(target, taken), holder, reach)
 
     def _runs_at(
         self, owner: str, func: ast.AST, point: ast.stmt

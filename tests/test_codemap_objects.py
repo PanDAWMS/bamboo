@@ -486,3 +486,96 @@ class Batch:
     element = objects.follow(rows, "pkg/batch.py::Batch.run", "self.jobs[]")
     assert "job" in element.held["pkg/batch.py::Batch.run"]
     assert "jobStatus" in element.assigned
+
+
+def test_a_name_bound_in_two_places_is_read_back_only_by_the_binding_the_object_came_by(
+    tmp_path,
+):
+    """setupper's ``tag_job = self.jobs[0]`` / ``tag_job = self.jumbo_jobs[0]``: a job of one list is not one of the other."""
+    batch = """\
+from pkg.spec import JobSpec
+
+
+class Batch:
+    def __init__(self, jobs: list[JobSpec], jumbo: list[JobSpec]):
+        self.jobs = jobs
+        self.jumbo_jobs = jumbo
+
+    def run(self):
+        tag_job = None
+        if self.jobs:
+            tag_job = self.jobs[0]
+        else:
+            tag_job = self.jumbo_jobs[0]
+        tag_job.jobStatus = "failed"
+"""
+    fragment = _build(tmp_path, spec=SPEC, batch=batch)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/batch.py::Batch.run"
+    jobs = objects.follow(rows, run, "self.jobs[]")
+    assert "tag_job" in jobs.held[run]
+    assert "self.jumbo_jobs[]" not in jobs.held[run]
+    either = objects.follow(rows, run, "tag_job")
+    assert {"self.jobs[]", "self.jumbo_jobs[]"} <= set(either.held[run])
+    line = next(b.line for b in rows[run].bindings if b.path == "self.jobs[]")
+    assert objects.steps_to(rows[run], "self.jobs[]", "tag_job") == [
+        (line, "alias", "tag_job")
+    ]
+
+
+def test_a_name_filled_and_bound_again_to_a_calls_result_is_not_followed_into_the_call(
+    tmp_path,
+):
+    """makeFakeCoJumbo: ``varMap`` filled with the old job's PandaID, then bound to the new job's ``valuesMap()``."""
+    spec = (
+        SPEC
+        + """
+    def valuesMap(self):
+        return [self.PandaID]
+"""
+    )
+    maker = """\
+from pkg.spec import JobSpec
+
+
+class Maker:
+    def make(self, old: JobSpec):
+        var_map = {}
+        var_map[":PandaID"] = old.PandaID
+        new = JobSpec()
+        var_map = new.valuesMap()
+        return new
+"""
+    fragment = _build(tmp_path, spec=spec, maker=maker)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    make = "pkg/maker.py::Maker.make"
+    old = objects.follow(rows, make, "old.PandaID")
+    assert "var_map[]" in old.held[make]
+    assert "new.PandaID" not in old.held[make]
+    # The new job's own key still goes into its valuesMap and back.
+    new = objects.follow(rows, make, "var_map[]")
+    assert "new.PandaID" in new.held[make]
+
+
+def test_a_path_handed_to_a_method_and_back_keeps_how_it_was_reached(tmp_path):
+    """TaskRefiner: ``tmpTaskSpec = impl.taskSpec`` or a new spec given ``jediTaskID``, then ``tmpTaskSpec.setErrDiag()``."""
+    refiner = """\
+from pkg.spec import JobSpec
+
+
+class Refiner:
+    def run(self, impl, task_id):
+        if impl is None:
+            spec = JobSpec()
+            spec.PandaID = task_id
+        else:
+            spec = impl.job
+        spec.setErrDiag("x")
+"""
+    fragment = _build(tmp_path, spec=SPEC, refiner=refiner)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/refiner.py::Refiner.run"
+    key = objects.follow(rows, run, "impl.job.PandaID")
+    assert "spec.PandaID" in key.held[run]
+    assert "task_id" not in key.held[run]
+    assert "spec.PandaID" in objects.follow(rows, run, "task_id").held[run]
