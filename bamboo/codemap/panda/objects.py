@@ -25,17 +25,41 @@ bindings are read without the order of the statements: a name bound to a
 path anywhere holds it everywhere in the function, which can only say an
 object reaches more than it does.
 
-Not read, and so an object can reach more than this says: a value handed on
-in a form other than a path, a list / tuple / set literal's elements or a
-call's result -- a dict literal's values, a tuple target (``a, b = f()``,
-``for a, b in zip(...)``), an if-else or ``or``, a comprehension's result, a
-container method's or builtin's result (``jobs.pop()``, ``list(jobs)``
-outside a loop), a walrus, a ``with``'s target; a call inside a lambda's body,
-a nested function's use of the names of the one around it, and
-``setattr(job, "jobStatus", v)`` with the name spelled.  On pin k (10-19),
-where a follow the history pairs or the adder's ``may_change`` read holds a
-path, 67 dict literals and 11 tuple targets of a call carry it on, and the
-lambdas, nested functions and spelled ``setattr`` none.
+**One rule** (:class:`_Values`): a value carries what its parts carry, each
+at a position inside it, and a target takes, at each position, what the
+value has there.  A position is ``[]`` -- an element, where it is not known
+--, ``[i]`` -- a tuple's i-th --, or ``['k']`` -- the value under a literal
+key.  So ``status, job = self.make(spec)`` binds ``job`` to what is at
+``[1]`` of what ``make`` returns, ``{":PandaID": job.PandaID}`` puts the key
+at ``[':PandaID']``, ``pairs.append((job, n))`` then ``for first, second in
+pairs`` makes ``first`` the job and not ``second``.  The parts read: a
+tuple, list, set or dict literal, a starred element, an if-else, ``or`` /
+``and``, ``+`` (the terms' elements), a comprehension, a slice (the
+container's elements: a slice moves positions), a subscript or an attribute
+of any of them, an await, a walrus, a call's result; the targets of an
+assignment (a tuple target at any depth, ``*rest``), an augmented
+assignment, a loop, a return and a yield, a call's arguments and receiver.
+Only a tuple makes ``[i]`` -- it cannot be reordered, and whatever else puts
+into a container puts at ``[]``, which every position matches -- and a
+literal int written to (``x[0] = v``) is ``[]``.
+
+A call that lands in a function of the corpus is that call: its result is
+bound with the functions it lands in (``PathBinding.to``), not with the
+line, and a result no name takes -- ``self.handle(self.wrap(job))``,
+``self.mapper().pick(job)`` -- is held by a name of the call's own,
+``<result@line:col>``.  A builtin (``list``, ``sorted``, ``enumerate``,
+``zip``, ``dict`` ...) or a builtin container's method (``append``,
+``extend``, ``update``, ``setdefault``, ``pop``, ``get``, ``values``,
+``items`` ...) is read for what it puts in or hands back only where the
+call lands in no function of the corpus: ``self.proxyPool.get()`` runs
+``DBProxyPool.get``.
+
+Not read, and so an object can reach more than this says: a ``with``'s
+target (no item of pin k's is a path), a call inside a lambda's body, a
+nested function's use of the names of the one around it,
+``setattr(job, "jobStatus", v)`` with the name spelled, and the values of
+an outside call (``copy.copy(job)`` is a new object).  Iterating a dict
+gives its keys, but ``for k in d`` is read as d's values (more, not less).
 
 :meth:`_Reader.writes` adds the statements that write rows
 (:class:`~bamboo.codemap.models.DbWrite`): each written column's value as a
@@ -46,7 +70,8 @@ whole of one object (``job.valuesMap()``).
 from __future__ import annotations
 
 import ast
-from typing import Iterator, Optional
+import re
+from typing import NamedTuple, Optional
 
 from bamboo.codemap import calls as C
 from bamboo.codemap import reach
@@ -64,6 +89,7 @@ from bamboo.codemap.models import (
     SourceModule,
     WrittenValue,
 )
+from bamboo.codemap.objects import RETURN, _parts
 from bamboo.codemap.panda import pathcond, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
@@ -74,11 +100,17 @@ COLUMN_CLASSES = ("JobSpec", "JediTaskSpec", "FileSpec")
 #: an object holds, not of the object.
 MAX_PARTS = 5
 
-#: Builtins that hand back the elements of what they are given, in some order.
-_ELEMENTS_OF = {"enumerate", "sorted", "reversed", "list", "tuple", "set"}
-#: A container's own methods that put their argument into it.
+#: Builtins that hand back the elements of what they are given, at positions not known.
+_ELEMENTS_OF = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
+#: Builtins that hand back one element of what they are given, or one of their arguments.
+_ONE_OF = {"next", "max", "min"}
+#: A builtin container's own methods that put their argument into it (``extend``, ``update`` and
+#: ``setdefault`` too, read in :meth:`_Values._fill`).
 _FILLERS = {"append", "insert", "add"}
-_EXTENDERS = {"extend", "update"}
+#: A builtin container's own methods that hand back what is in it.
+_TAKERS = {"pop", "popleft", "get", "setdefault", "values", "copy", "items", "popitem"}
+#: A literal key a path keeps (8,937 of pin k's 8,950); another reads as ``[]``.
+_KEY = re.compile(r"[A-Za-z0-9_:\-]*")
 
 #: Why a hole the reach record does not hold is one.
 HANDED_WITH_A_CALLABLE = "handed to code outside the corpus together with a function of the corpus, which it may call with it"
@@ -121,103 +153,11 @@ class _Reader:
     def read(
         self, file: str, func: ast.AST, row
     ) -> tuple[list[PathAssign], list[PathBinding], list[CallBinding]]:
-        names = _local_names(func)
-        assigns: dict[tuple, PathAssign] = {}
-        bindings: dict[tuple, PathBinding] = {}
-        handed: dict[tuple, CallBinding] = {}
-
-        def path(expr: Optional[ast.expr]) -> Optional[str]:
-            return _path(expr, names)
-
-        def bind(line: int, name: Optional[str], held: Optional[str], how: str) -> None:
-            if name is not None and held is not None and name != held:
-                bindings.setdefault(
-                    (line, name, held, how),
-                    PathBinding(line=line, name=name, path=held, how=how),
-                )
-
-        def result(name: Optional[str], value: ast.expr) -> None:
-            """*name* holds what the call *value* returns, or an element of it (``f()[0]``; ``f()[1:]`` is a part)."""
-            call = value.value if isinstance(value, ast.Subscript) else value
-            if name is not None and isinstance(call, ast.Call):
-                part = isinstance(value, ast.Subscript) and isinstance(
-                    value.slice, ast.Slice
-                )
-                element = "[]" if call is not value and not part else ""
-                bindings.setdefault(
-                    (call.lineno, name, element, BIND_RESULT),
-                    PathBinding(
-                        line=call.lineno, name=name, path=element, how=BIND_RESULT
-                    ),
-                )
-
-        hole_lines = {(hole.line, hole.callee) for hole in row.holes}
-        database = set(row.database)
+        values = _Values(self, file, func, row)
         for node in C.own_nodes(func):
-            line = getattr(node, "lineno", 0)
-            if (
-                isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
-                and node.value is not None
-            ):
-                targets = (
-                    node.targets if isinstance(node, ast.Assign) else [node.target]
-                )
-                for target in targets:
-                    if (
-                        isinstance(target, ast.Attribute)
-                        and target.attr in self.columns
-                    ):
-                        on = path(target.value)
-                        if on is not None:
-                            how = "+=" if isinstance(node, ast.AugAssign) else "="
-                            assigns.setdefault(
-                                (line, on, how, target.attr),
-                                PathAssign(
-                                    line=line, path=on, attrs=[target.attr], how=how
-                                ),
-                            )
-                    if isinstance(node, ast.AugAssign):
-                        if isinstance(node.value, (ast.List, ast.Tuple)):
-                            for element in node.value.elts:
-                                bind(line, path(target), path(element), BIND_FILL)
-                        continue
-                    named = (
-                        path(target)
-                        if isinstance(target, (ast.Name, ast.Attribute, ast.Subscript))
-                        else None
-                    )
-                    value = node.value
-                    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-                        for element in value.elts:
-                            bind(line, named, path(element), BIND_FILL)
-                            result(named + "[]" if named is not None else None, element)
-                    elif _is_result(value):
-                        result(named, value)
-                    else:
-                        bind(line, named, path(value), BIND_ALIAS)
-            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
-                for name, held in _iterated(node.target, node.iter, names):
-                    bind(
-                        getattr(node, "lineno", getattr(node.iter, "lineno", 0)),
-                        name,
-                        held,
-                        BIND_ELEMENT,
-                    )
-            elif isinstance(node, ast.Return) and node.value is not None:
-                if isinstance(node.value, (ast.List, ast.Tuple)):
-                    for element in node.value.elts:
-                        bind(line, "<return>[]", path(element), BIND_RETURN)
-                        result("<return>[]", element)
-                elif _is_result(node.value):
-                    result("<return>", node.value)
-                else:
-                    bind(line, "<return>", path(node.value), BIND_RETURN)
-            elif isinstance(node, ast.Call):
-                self._call(
-                    file, func, node, path, bind, result, handed, hole_lines, database
-                )
+            values.site(node)
         for write in specwrites.writes_in(self.types, file, func):
-            target = _path(_parsed(write.target), names)
+            target = _path(_parsed(write.target), values.names)
             if target is None:
                 continue
             attrs = (
@@ -225,7 +165,7 @@ class _Reader:
             )
             if not attrs:
                 continue
-            assigns.setdefault(
+            values.assigns.setdefault(
                 (write.line, target, write.role, tuple(attrs)),
                 PathAssign(
                     line=write.line,
@@ -236,143 +176,10 @@ class _Reader:
             )
         key = lambda one: (one.line, *(str(v) for v in one.model_dump().values()))  # noqa: E731
         return (
-            sorted(assigns.values(), key=key),
-            sorted(bindings.values(), key=key),
-            sorted(handed.values(), key=key),
+            sorted(values.assigns.values(), key=key),
+            sorted(values.bindings.values(), key=key),
+            sorted(values.handed.values(), key=key),
         )
-
-    def _call(
-        self,
-        file,
-        func,
-        call: ast.Call,
-        path,
-        bind,
-        result,
-        handed,
-        hole_lines,
-        database,
-    ) -> None:
-        line = call.lineno
-        called = call.func
-        if isinstance(called, ast.Attribute):
-            container = path(called.value)
-            if called.attr in _FILLERS and call.args:
-                bind(line, container, path(call.args[-1]), BIND_FILL)
-                # ``found.append(self.proxy.peekJob(one))``: an element is what the call returns.
-                result(
-                    container + "[]" if container is not None else None, call.args[-1]
-                )
-            elif called.attr in _EXTENDERS and call.args:
-                argument = call.args[0]
-                if isinstance(argument, (ast.List, ast.Tuple, ast.Set)):
-                    for element in argument.elts:
-                        bind(line, container, path(element), BIND_FILL)
-                else:
-                    held = path(argument)
-                    bind(
-                        line,
-                        container,
-                        held + "[]" if held is not None else None,
-                        BIND_FILL,
-                    )
-        passed: list[tuple[ast.expr, str, bool]] = []
-        for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
-            value = argument.value if isinstance(argument, ast.Starred) else argument
-            held = path(value)
-            if held is not None:
-                passed.append((argument, held, False))
-            elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-                passed.extend(
-                    (argument, one, True)
-                    for element in value.elts
-                    if (one := path(element)) is not None
-                )
-        receiver = None
-        if isinstance(called, ast.Attribute):
-            receiver = "self" if _is_super(called.value) else path(called.value)
-        for value in reach._handed_values(call):
-            # ``Thread(target=self.run)``: the function handed runs with its receiver.
-            if (
-                isinstance(value, ast.Attribute)
-                and (bound := path(value.value)) is not None
-            ):
-                try:
-                    landed = self.calls.named_callables(file, func, value, ())
-                except Exception:  # noqa: BLE001 -- reach has the hole
-                    landed = []
-                for target in landed:
-                    if (to := self.names.of(target.func)) is not None:
-                        _add(
-                            handed,
-                            CallBinding(line=line, to=to, parameter="self", path=bound),
-                        )
-        if not passed and receiver is None:
-            return
-        if line in database:
-            return  # a statement run: what it writes is read where it runs
-        try:
-            placed = self.calls.callees(file, func, call)
-        except Exception:  # noqa: BLE001 -- reach has the hole
-            placed = C.Placed()
-        if not placed.targets:
-            if (line, reach._cut(called)) in hole_lines:
-                for _argument, held, element in passed:
-                    _add(
-                        handed,
-                        CallBinding(
-                            line=line, to="", parameter="", path=held, element=element
-                        ),
-                    )
-                if receiver is not None:
-                    _add(
-                        handed,
-                        CallBinding(line=line, to="", parameter="self", path=receiver),
-                    )
-            elif passed and self._hands_a_callable(file, func, call):
-                for _argument, held, element in passed:
-                    _add(
-                        handed,
-                        CallBinding(
-                            line=line,
-                            to="",
-                            parameter="",
-                            path=held,
-                            element=element,
-                            why=HANDED_WITH_A_CALLABLE,
-                        ),
-                    )
-            return
-        for target in placed.targets:
-            to = self.names.of(target.func)
-            if to is None:
-                continue
-            given = C.bind(call, target, placed.on_class)
-            for argument, held, element in passed:
-                taken = [name for name, value in given.items() if value is argument]
-                if not taken and isinstance(argument, ast.Starred):
-                    taken = [""]
-                if not taken:
-                    taken = [_rest_parameter(target.func, argument in call.args)]
-                for name in taken:
-                    _add(
-                        handed,
-                        CallBinding(
-                            line=line, to=to, parameter=name, path=held, element=element
-                        ),
-                    )
-            # The receiver is ``self`` only where the method called is the one named: ``self.plugin_class(job)``
-            # builds a new object, which is the call's result, not ``self``.
-            if (
-                receiver is not None
-                and not placed.on_class
-                and isinstance(called, ast.Attribute)
-                and called.attr == getattr(target.func, "name", None)
-            ):
-                _add(
-                    handed,
-                    CallBinding(line=line, to=to, parameter="self", path=receiver),
-                )
 
     def writes(self, func: ast.AST) -> list[DbWrite]:
         """Each statement *func* runs that writes rows, with where its values and keys come from."""
@@ -505,6 +312,523 @@ class _Reader:
         return False
 
 
+class _Carry(NamedTuple):
+    """One thing a value holds: at ``at`` inside the value, what ``path`` holds -- or, for a call's result, what is
+    at ``below`` in what ``call`` returns."""
+
+    at: str
+    path: str = ""
+    call: Optional[ast.Call] = None
+    below: str = ""
+
+
+class _Values:
+    """One function's object records, read by one rule: a value carries what its parts carry, each at a position
+    inside it, and a target takes, at each position, what the value has there (:meth:`carried`, :meth:`take`)."""
+
+    def __init__(self, reader: "_Reader", file: str, func: ast.AST, row):
+        self.reader = reader
+        self.file = file
+        self.func = func
+        self.names = _local_names(func)
+        self.assigns: dict[tuple, PathAssign] = {}
+        self.bindings: dict[tuple, PathBinding] = {}
+        self.handed: dict[tuple, CallBinding] = {}
+        self.hole_lines = {(hole.line, hole.callee) for hole in row.holes}
+        self.database = set(row.database)
+        self._placed: dict[int, C.Placed] = {}
+
+    # -- what a value carries ------------------------------------------------------------------------------------
+
+    def carried(self, expr: Optional[ast.expr]) -> list[_Carry]:
+        """What *expr*'s value holds, each with where in the value."""
+        if expr is None:
+            return []
+        held = _path(expr, self.names)
+        if held is not None:
+            return [_Carry("", held)]
+        if isinstance(expr, ast.Tuple):
+            found: list[_Carry] = []
+            known = True  # a position after a starred element is not known
+            for index, one in enumerate(expr.elts):
+                if isinstance(one, ast.Starred):
+                    known = False
+                    found += _shift(_index(self.carried(one.value), "[]"), "[]")
+                else:
+                    found += _shift(self.carried(one), f"[{index}]" if known else "[]")
+            return found
+        if isinstance(expr, (ast.List, ast.Set)):
+            return [carry for one in expr.elts for carry in self._element(one)]
+        if isinstance(expr, ast.Dict):
+            found = []
+            for key, value in zip(expr.keys, expr.values, strict=True):
+                if key is None:  # {**d}
+                    found += _shift(_index(self.carried(value), "[]"), "[]")
+                else:
+                    found += _shift(self.carried(value), _key(key))
+            return found
+        if isinstance(expr, ast.IfExp):
+            return self.carried(expr.body) + self.carried(expr.orelse)
+        if isinstance(expr, ast.BoolOp):
+            return [carry for one in expr.values for carry in self.carried(one)]
+        if isinstance(expr, (ast.Await, ast.NamedExpr)):
+            return self.carried(expr.value)
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+            # a + b holds the elements of a and of b; of a string or a number nothing is followed.
+            return [
+                carry
+                for one in (expr.left, expr.right)
+                for carry in _shift(_index(self.carried(one), "[]"), "[]")
+            ]
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mult):
+            return [
+                carry
+                for one in (expr.left, expr.right)
+                if isinstance(one, (ast.List, ast.Tuple))
+                for carry in _shift(_index(self.carried(one), "[]"), "[]")
+            ]
+        if isinstance(expr, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return _shift(self.carried(expr.elt), "[]")
+        if isinstance(expr, ast.DictComp):
+            return _shift(self.carried(expr.value), "[]")
+        if isinstance(expr, ast.Subscript):
+            if isinstance(expr.slice, ast.Slice):
+                # a slice moves positions: the container's elements, at positions not known
+                return _shift(_index(self.carried(expr.value), "[]"), "[]")
+            return _index(self.carried(expr.value), _subscript(expr.slice))
+        if isinstance(expr, ast.Attribute):
+            return _attribute(self.carried(expr.value), expr.attr)
+        if isinstance(expr, ast.Call):
+            return self._result(expr)
+        return []
+
+    def _element(self, one: ast.expr) -> list[_Carry]:
+        """What an element of a list or set literal puts at a position not known: ``[a, *b]``."""
+        if isinstance(one, ast.Starred):
+            return _shift(_index(self.carried(one.value), "[]"), "[]")
+        return _shift(self.carried(one), "[]")
+
+    def _result(self, call: ast.Call) -> list[_Carry]:
+        """What a call's value holds: its own result, or for a builtin or a container's method that runs no
+        function of the corpus, what it hands back of what it is given."""
+        if self.placed(call).targets:
+            return [_Carry("", call=call)]
+        called = call.func
+        args = call.args
+        if isinstance(called, ast.Name) and called.id not in self.names:
+            if called.id in _ELEMENTS_OF and args:
+                return _shift(_index(self.carried(args[0]), "[]"), "[]")
+            if called.id in _ONE_OF and args:
+                if len(args) == 1:
+                    return _index(self.carried(args[0]), "[]")
+                return [carry for one in args for carry in self.carried(one)]
+            if called.id == "enumerate" and args:
+                return _shift(_index(self.carried(args[0]), "[]"), "[][1]")
+            if called.id == "zip":
+                return [
+                    carry
+                    for index, one in enumerate(args)
+                    for carry in _shift(_index(self.carried(one), "[]"), f"[][{index}]")
+                ]
+            if called.id == "dict":
+                # a mapping's values, or the second of each pair; and the keywords under their names
+                found = [
+                    carry
+                    for one in args
+                    for elements in (_index(self.carried(one), "[]"),)
+                    for carry in _shift(elements + _index(elements, "[1]"), "[]")
+                ]
+                return found + [
+                    carry
+                    for keyword in call.keywords
+                    if keyword.arg is not None
+                    for carry in _shift(
+                        self.carried(keyword.value), _named(keyword.arg)
+                    )
+                ]
+        elif isinstance(called, ast.Attribute) and called.attr in _TAKERS:
+            receiver = self.carried(called.value)
+            method = called.attr
+            if method in ("pop", "popleft") and not args:
+                return _index(receiver, "[]")
+            if method in ("pop", "get", "setdefault") and args:
+                found = _index(receiver, _subscript(args[0]))
+                return found + [
+                    carry for one in args[1:2] for carry in self.carried(one)
+                ]
+            if method in ("values", "copy") and not args:
+                return _shift(_index(receiver, "[]"), "[]")
+            if method == "items" and not args:
+                return _shift(_index(receiver, "[]"), "[][1]")
+            if method == "popitem" and not args:
+                return _shift(_index(receiver, "[]"), "[1]")
+        return [_Carry("", call=call)]
+
+    # -- where it goes ---------------------------------------------------------------------------------------------
+
+    def site(self, node: ast.AST) -> None:
+        """Read the bindings and assignments one statement or expression of the function makes."""
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                self.assign(target, node.value, line)
+        elif isinstance(node, ast.AugAssign):
+            self._column(node.target, line, "+=")
+            if isinstance(node.op, ast.Add):
+                # t += v is t = t + v: t's elements, and v's
+                elements = _shift(_index(self.carried(node.value), "[]"), "[]")
+                for base in self.target_paths(node.target):
+                    self.put(line, base, elements, BIND_FILL)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            self.take(
+                node.target,
+                _index(self.carried(node.iter), "[]"),
+                getattr(node, "lineno", getattr(node.iter, "lineno", 0)),
+                BIND_ELEMENT,
+            )
+        elif isinstance(node, ast.NamedExpr):
+            self.take(node.target, self.carried(node.value), line, BIND_ALIAS)
+        elif isinstance(node, ast.Return) and node.value is not None:
+            self.put(line, RETURN, self.carried(node.value), BIND_RETURN)
+        elif isinstance(node, ast.Yield) and node.value is not None:
+            self.put(line, RETURN + "[]", self.carried(node.value), BIND_RETURN)
+        elif isinstance(node, ast.YieldFrom):
+            self.put(
+                line, RETURN + "[]", _index(self.carried(node.value), "[]"), BIND_RETURN
+            )
+        elif isinstance(node, ast.Call):
+            self._call(node)
+
+    def assign(self, target: ast.expr, value: ast.expr, line: int) -> None:
+        """``target = value``: a tuple literal into a tuple target of its length element by element, else
+        :meth:`take`."""
+        if (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts)
+            and not any(
+                isinstance(one, ast.Starred) for one in [*target.elts, *value.elts]
+            )
+        ):
+            for one, given in zip(target.elts, value.elts, strict=True):
+                self.assign(one, given, line)
+            return
+        self.take(target, self.carried(value), line, BIND_ALIAS)
+
+    def take(self, target: ast.expr, items: list[_Carry], line: int, how: str) -> None:
+        """*target* takes, at each position, what *items* have there: ``a, b = f()`` takes [0] and [1]."""
+        if isinstance(target, (ast.Tuple, ast.List)):
+            starred = next(
+                (
+                    n
+                    for n, one in enumerate(target.elts)
+                    if isinstance(one, ast.Starred)
+                ),
+                None,
+            )
+            for index, one in enumerate(target.elts):
+                if isinstance(one, ast.Starred):
+                    self.take(one.value, _shift(_index(items, "[]"), "[]"), line, how)
+                else:
+                    known = starred is None or index < starred
+                    self.take(
+                        one, _index(items, f"[{index}]" if known else "[]"), line, how
+                    )
+            return
+        if how == BIND_ALIAS:
+            self._column(target, line, "=")
+        for base in self.target_paths(target):
+            self.put(line, base, items, how)
+
+    def put(self, line: int, base: str, items: list[_Carry], how: str) -> None:
+        """*base*, at each item's position, holds what the item says; an assignment that puts at a position fills."""
+        for item in items:
+            name = base + item.at
+            label = BIND_FILL if how == BIND_ALIAS and item.at else how
+            if item.call is not None:
+                self._bind_result(name, item.call, item.below)
+            else:
+                self._bind(line, name, item.path, label)
+
+    def _bind(self, line: int, name: str, held: str, how: str) -> None:
+        if name == held and "[" not in name:
+            return  # x = x; but x = list(x) says x's elements are at any position
+        if _parts(name) > MAX_PARTS or _parts(held) > MAX_PARTS:
+            return
+        self.bindings.setdefault(
+            (line, name, held, how),
+            PathBinding(line=line, name=name, path=held, how=how),
+        )
+
+    def _bind_result(self, name: str, call: ast.Call, below: str) -> None:
+        if _parts(name) > MAX_PARTS or _parts(below) > MAX_PARTS:
+            return
+        to = self.to_of(call)
+        self.bindings.setdefault(
+            (call.lineno, name, below, BIND_RESULT, tuple(to)),
+            PathBinding(
+                line=call.lineno, name=name, path=below, how=BIND_RESULT, to=to
+            ),
+        )
+
+    def held_by(self, item: _Carry) -> Optional[str]:
+        """The path that holds *item* in the function: its own, or the name of the call whose result it is in --
+        where that call lands in the corpus."""
+        if item.call is None:
+            return item.path
+        if not self.to_of(item.call):
+            return None
+        name = f"<result@{item.call.lineno}:{item.call.col_offset}>"
+        self._bind_result(name, item.call, "")
+        return name + item.below
+
+    def target_paths(self, target: ast.expr) -> list[str]:
+        """The paths an assignment to *target* writes: its own, or below what the value it is on holds."""
+        held = _path(target, self.names, store=True)
+        if held is not None:
+            return [held]
+        if isinstance(target, ast.Attribute):
+            part = "." + target.attr
+        elif isinstance(target, ast.Subscript) and not isinstance(
+            target.slice, ast.Slice
+        ):
+            part = _subscript(target.slice, store=True)
+        else:
+            return []
+        found = []
+        for item in self.carried(target.value):
+            base = self.held_by(item) if not item.at else None
+            if base is not None and _parts(base + part) <= MAX_PARTS:
+                found.append(base + part)
+        return found
+
+    def _column(self, target: ast.expr, line: int, how: str) -> None:
+        if not (
+            isinstance(target, ast.Attribute) and target.attr in self.reader.columns
+        ):
+            return
+        for on in self.target_paths(target.value):
+            self.assigns.setdefault(
+                (line, on, how, target.attr),
+                PathAssign(line=line, path=on, attrs=[target.attr], how=how),
+            )
+
+    # -- calls -----------------------------------------------------------------------------------------------------
+
+    def placed(self, call: ast.Call) -> C.Placed:
+        found = self._placed.get(id(call))
+        if found is None:
+            try:
+                found = self.reader.calls.callees(self.file, self.func, call)
+            except Exception:  # noqa: BLE001 -- reach has the hole
+                found = C.Placed()
+            self._placed[id(call)] = found
+        return found
+
+    def to_of(self, call: ast.Call) -> list[str]:
+        return sorted(
+            {
+                to
+                for target in self.placed(call).targets
+                if (to := self.reader.names.of(target.func)) is not None
+            }
+        )
+
+    def _fill(self, call: ast.Call, line: int) -> None:
+        """A builtin container's own method that puts what it is handed into it."""
+        called = call.func
+        method = called.attr  # type: ignore[attr-defined]
+        args = call.args
+        if method in _FILLERS and args:
+            items = _shift(self.carried(args[-1]), "[]")
+        elif method == "extend" and args:
+            items = _shift(_index(self.carried(args[0]), "[]"), "[]")
+        elif method == "update":
+            items = [
+                carry
+                for one in args[:1]
+                for carry in (
+                    self.carried(one)  # a dict literal's values under their keys
+                    if isinstance(one, ast.Dict)
+                    else _shift(_index(self.carried(one), "[]"), "[]")
+                )
+            ]
+            items += [
+                carry
+                for keyword in call.keywords
+                if keyword.arg is not None
+                for carry in _shift(self.carried(keyword.value), _named(keyword.arg))
+            ]
+        elif method == "setdefault" and len(args) > 1:
+            items = _shift(self.carried(args[1]), _subscript(args[0], store=True))
+        else:
+            return
+        for base in self.target_paths(called.value):  # type: ignore[attr-defined]
+            self.put(line, base, items, BIND_FILL)
+
+    def _call(self, call: ast.Call) -> None:
+        line = call.lineno
+        called = call.func
+        placed = self.placed(call)
+        if isinstance(called, ast.Attribute) and not placed.targets:
+            self._fill(call, line)
+        passed: list[tuple[ast.expr, str, str]] = []
+        for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
+            value = argument.value if isinstance(argument, ast.Starred) else argument
+            for item in self.carried(value):
+                held = self.held_by(item)
+                if held is not None:
+                    passed.append((argument, held, item.at))
+        receivers: list[str] = []
+        if isinstance(called, ast.Attribute):
+            if _is_super(called.value):
+                receivers = ["self"]
+            else:
+                receivers = sorted(
+                    {
+                        held
+                        for item in self.carried(called.value)
+                        if not item.at and (held := self.held_by(item)) is not None
+                    }
+                )
+        reader = self.reader
+        for value in reach._handed_values(call):
+            # ``Thread(target=self.run)``: the function handed runs with its receiver.
+            if (
+                isinstance(value, ast.Attribute)
+                and (bound := _path(value.value, self.names)) is not None
+            ):
+                try:
+                    landed = reader.calls.named_callables(
+                        self.file, self.func, value, ()
+                    )
+                except Exception:  # noqa: BLE001 -- reach has the hole
+                    landed = []
+                for target in landed:
+                    if (to := reader.names.of(target.func)) is not None:
+                        _add(
+                            self.handed,
+                            CallBinding(line=line, to=to, parameter="self", path=bound),
+                        )
+        if not passed and not receivers:
+            return
+        if line in self.database:
+            return  # a statement run: what it writes is read where it runs
+        if not placed.targets:
+            if (line, reach._cut(called)) in self.hole_lines:
+                for _argument, held, at in passed:
+                    _add(
+                        self.handed,
+                        CallBinding(line=line, to="", parameter="", path=held, at=at),
+                    )
+                for receiver in receivers:
+                    _add(
+                        self.handed,
+                        CallBinding(line=line, to="", parameter="self", path=receiver),
+                    )
+            elif passed and reader._hands_a_callable(self.file, self.func, call):
+                for _argument, held, at in passed:
+                    _add(
+                        self.handed,
+                        CallBinding(
+                            line=line,
+                            to="",
+                            parameter="",
+                            path=held,
+                            at=at,
+                            why=HANDED_WITH_A_CALLABLE,
+                        ),
+                    )
+            return
+        for target in placed.targets:
+            to = reader.names.of(target.func)
+            if to is None:
+                continue
+            given = C.bind(call, target, placed.on_class)
+            for argument, held, at in passed:
+                taken = [name for name, value in given.items() if value is argument]
+                if not taken and isinstance(argument, ast.Starred):
+                    taken = [""]
+                if not taken:
+                    taken = [_rest_parameter(target.func, argument in call.args)]
+                for name in taken:
+                    _add(
+                        self.handed,
+                        CallBinding(line=line, to=to, parameter=name, path=held, at=at),
+                    )
+            # The receiver is ``self`` only where the method called is the one named: ``self.plugin_class(job)``
+            # builds a new object, which is the call's result, not ``self``.
+            if (
+                not placed.on_class
+                and isinstance(called, ast.Attribute)
+                and called.attr == getattr(target.func, "name", None)
+            ):
+                for receiver in receivers:
+                    _add(
+                        self.handed,
+                        CallBinding(line=line, to=to, parameter="self", path=receiver),
+                    )
+
+
+def _shift(items: list[_Carry], part: str) -> list[_Carry]:
+    """*items* put at *part* inside a new value: ``[a]`` holds a at ``[]``."""
+    return [one._replace(at=part + one.at) for one in items]
+
+
+def _index(items: list[_Carry], part: str) -> list[_Carry]:
+    """What is at *part* of a value holding *items*: ``[]`` matches every position, a position or key itself."""
+    found = []
+    for one in items:
+        if not one.at:
+            found.append(
+                one._replace(below=one.below + part)
+                if one.call is not None
+                else one._replace(path=one.path + part)
+            )
+            continue
+        first = one.at[: one.at.index("]") + 1]
+        if first == part or first == "[]" or part == "[]":
+            found.append(one._replace(at=one.at[len(first) :]))
+    return found
+
+
+def _attribute(items: list[_Carry], name: str) -> list[_Carry]:
+    """An attribute of a value holding *items*: of what it is, not of what it holds."""
+    return [
+        one._replace(below=one.below + "." + name)
+        if one.call is not None
+        else one._replace(path=one.path + "." + name)
+        for one in items
+        if not one.at
+    ]
+
+
+def _subscript(key: ast.expr, store: bool = False) -> str:
+    """The part a subscript reads: ``['k']`` for a literal str key, ``[i]`` for a literal int read, else ``[]``.
+
+    An int written to (``x[0] = v``) is ``[]``: a list it is written in can
+    be reordered later, and only a tuple, which cannot, keeps its positions.
+    """
+    if isinstance(key, ast.Constant):
+        if isinstance(key.value, str):
+            return _named(key.value)
+        if type(key.value) is int and key.value >= 0 and not store:
+            return f"[{key.value}]"
+    return "[]"
+
+
+def _key(key: ast.expr) -> str:
+    """The part a dict literal puts a value at: its literal str key, else any."""
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return _named(key.value)
+    return "[]"
+
+
+def _named(key: str) -> str:
+    return f"['{key}']" if _KEY.fullmatch(key) else "[]"
+
+
 def _add(handed: dict, binding: CallBinding) -> None:
     handed.setdefault(tuple(binding.model_dump().values()), binding)
 
@@ -585,29 +909,29 @@ def _local_names(func: ast.AST) -> frozenset[str]:
     return frozenset(found | {"self", "cls"})
 
 
-def _path(expr: Optional[ast.expr], names: frozenset[str]) -> Optional[str]:
+def _path(
+    expr: Optional[ast.expr], names: frozenset[str], store: bool = False
+) -> Optional[str]:
     """*expr* as a path rooted at one of *names*; ``None`` where it is not one.
 
-    A slice is the container's part, not an element: ``self.jobs[a:b]`` holds
-    what ``self.jobs`` holds.
+    A subscript is the part :func:`_subscript` reads -- *store* where *expr*
+    is written to.  A slice is not a path: it holds the container's elements,
+    at positions not known (:meth:`_Values.carried`).
     """
     parts: list[str] = []
+    outer = True
     while isinstance(expr, (ast.Attribute, ast.Subscript)):
         if isinstance(expr, ast.Attribute):
             parts.append("." + expr.attr)
-        elif not isinstance(expr.slice, ast.Slice):
-            parts.append("[]")
+        elif isinstance(expr.slice, ast.Slice):
+            return None
+        else:
+            parts.append(_subscript(expr.slice, store=store and outer))
+        outer = False
         expr = expr.value
     if not isinstance(expr, ast.Name) or expr.id not in names or len(parts) > MAX_PARTS:
         return None
     return expr.id + "".join(reversed(parts))
-
-
-def _is_result(value: ast.expr) -> bool:
-    """A call, or an element of what one returns: ``f(...)``, ``f(...)[0]``."""
-    return isinstance(value, ast.Call) or (
-        isinstance(value, ast.Subscript) and isinstance(value.value, ast.Call)
-    )
 
 
 def _is_super(expr: ast.expr) -> bool:
@@ -616,43 +940,6 @@ def _is_super(expr: ast.expr) -> bool:
         and isinstance(expr.func, ast.Name)
         and expr.func.id == "super"
     )
-
-
-def _iterated(
-    target: ast.expr, iterated: ast.expr, names: frozenset[str]
-) -> Iterator[tuple[str, str]]:
-    """``(name, path[])`` for each name a loop binds to an element of a path."""
-    pairs = False
-    if (
-        isinstance(iterated, ast.Call)
-        and isinstance(iterated.func, ast.Name)
-        and iterated.args
-    ):
-        if iterated.func.id == "enumerate":
-            pairs, iterated = True, iterated.args[0]
-        elif iterated.func.id in _ELEMENTS_OF:
-            iterated = iterated.args[0]
-    elif (
-        isinstance(iterated, ast.Call)
-        and isinstance(iterated.func, ast.Attribute)
-        and not iterated.args
-    ):
-        if iterated.func.attr == "values":
-            iterated = iterated.func.value
-        elif iterated.func.attr == "items":
-            pairs, iterated = True, iterated.func.value
-    held = _path(iterated, names)
-    if held is None:
-        return
-    if pairs:
-        if (
-            isinstance(target, ast.Tuple)
-            and len(target.elts) == 2
-            and isinstance(target.elts[1], ast.Name)
-        ):
-            yield target.elts[1].id, held + "[]"
-    elif isinstance(target, ast.Name):
-        yield target.id, held + "[]"
 
 
 def _parsed(text: str) -> Optional[ast.expr]:

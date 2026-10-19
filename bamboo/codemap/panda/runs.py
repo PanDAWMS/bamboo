@@ -1066,10 +1066,7 @@ class _Reader:
                     rest = objects._under(call.path, one)
                     if rest is not None:
                         found(
-                            self._follow(
-                                call.to,
-                                call.parameter + ("[]" if call.element else "") + rest,
-                            ),
+                            self._follow(call.to, call.parameter + call.at + rest),
                             start,
                             0 if start in handed else 1,
                         )
@@ -1103,8 +1100,17 @@ class _Reader:
                 return "", ROW_NOT_HANDED, "", []
 
         def order(held: dict[str, int]) -> list[str]:
-            # The path the call is handed before one below it or an element of it, then the shorter.
-            return sorted(held, key=lambda one: (held[one], objects._parts(one), one))
+            # The path the call is handed before one below it or an element of it, then the shorter, then the
+            # wider: self.jobs[] -- any job -- before self.jobs[0].
+            return sorted(
+                held,
+                key=lambda one: (
+                    held[one],
+                    objects._parts(one),
+                    not objects._plain(one),
+                    one,
+                ),
+            )
 
         starts: dict[str, str] = {}  # a path of the caller -> the object it says
         for one in order(held_objects):
@@ -1150,7 +1156,7 @@ class _Reader:
                     if not call.parameter or call.parameter.startswith("*"):
                         hole = hole or objects.NO_PARAMETER
                         continue
-                    taken = call.parameter + ("[]" if call.element else "") + rest
+                    taken = call.parameter + call.at + rest
                     reach = self._follow(call.to, taken)
                     hole = hole or (reach.holes[0].how if reach.holes else reach.cut)
                     for write in sorted(writes):

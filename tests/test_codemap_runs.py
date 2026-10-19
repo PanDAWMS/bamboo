@@ -709,3 +709,55 @@ def test_the_gate_passes_on_the_build_and_fails_on_a_write_no_reader_finds(
     result = history_pairs_resolve(fragment)
     assert not result.passed
     assert any("is no history call" in failure for failure in result.failures)
+
+
+SETUP = """\
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+
+class Setup:
+    def __init__(self, jobs: list[JobSpec]):
+        self.jobs = jobs
+        self.proxy: DBProxy = DBProxy()
+
+    def run(self):
+        tag = self.jobs[0]
+        for one in self.jobs:
+            pass
+        self.assign()  # S1
+        self.archive()  # S2
+
+    def assign(self):
+        for job in self.jobs + [None]:
+            job.jobStatus = "assigned"  # A20
+
+    def archive(self):
+        for job in self.jobs:
+            self.proxy.note_change(job.PandaID, job.jobStatus)  # H20
+"""
+
+
+def test_a_loop_over_a_sum_runs_over_its_terms_and_the_object_is_any_element(
+    tmp_path: Path,
+) -> None:
+    """setupper: ``for job in self.jobs + [None]``; the caller reads ``self.jobs[0]`` too, but the arm's is any job."""
+    fragment = _build(
+        tmp_path,
+        [("setup", "Setup.assign", "A20", "JobSpec.jobStatus")],
+        spec=SPEC,
+        proxy=PROXY,
+        setup=SETUP,
+    )
+    (pair,) = [
+        one
+        for one in _branch(fragment, "A20").history or []
+        if one.call == _line(SETUP, "S2")
+    ]
+    assert (pair.level, pair.caller, pair.point, pair.row, pair.object) == (
+        1,
+        "pkg/setup.py::Setup.run",
+        _line(SETUP, "S1"),
+        HISTORY_ROW_CAN,
+        "self.jobs[]",
+    )

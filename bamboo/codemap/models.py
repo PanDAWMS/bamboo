@@ -4348,7 +4348,8 @@ class HistoryCall(BaseModel):
 
 
 #: How :class:`PathBinding` ties a name to a path: ``x = p`` (or ``self.f = p``), ``for x in p``,
-#: ``x.append(p)``, ``x = f(...)`` and ``return p``.
+#: ``x.append(p)``, ``x = f(...)`` and ``return p``.  A label of the statement: what the binding means is
+#: in its name and path, which say where each holds the object.
 BIND_ALIAS = "alias"
 BIND_ELEMENT = "element"
 BIND_FILL = "fill"
@@ -4360,7 +4361,11 @@ class PathAssign(BaseModel):
     """An attribute assigned on an object a function names by a path -- read by :mod:`bamboo.codemap.objects`.
 
     A path is a name of the function -- a parameter, ``self`` or a local --
-    then attributes and ``[]`` for any element: ``self.job``, ``jobs[]``.
+    then attributes and subscripts: ``[]`` for an element at a position not
+    known, ``[i]`` for a tuple's i-th, ``['k']`` for the value under a
+    literal key: ``self.job``, ``jobs[]``, ``varMap[':PandaID']``.  What a
+    call returns where no name takes it is named by the call,
+    ``<result@line:col>``.
     Only an attribute some spec declares a column of is kept (``attrs``),
     and a write whose name is computed -- ``setattr(job, name, v)``, a
     spec's own ``pack`` -- carries the role :mod:`bamboo.codemap.panda.specwrites`
@@ -4379,24 +4384,39 @@ class PathAssign(BaseModel):
 
 
 class PathBinding(BaseModel):
-    """A name of a function that holds what a path holds, or an element of it."""
+    """A name of a function that holds what a path holds: ``name`` holds, where it says, what ``path`` holds where it says.
+
+    ``updated = [job]`` is ``updated[]`` holding ``job``; ``for job in jobs``
+    is ``job`` holding ``jobs[]``; ``status, job = f()`` is ``job`` holding
+    what is at ``[1]`` of what ``f`` returns.
+    """
 
     line: int
     name: str = Field(
         description=(
-            "The name bound: a local, or a path written to (``self.job`` in ``self.job = job``); "
+            "The name bound, and where in it: a local, or a path written to (``self.job`` in ``self.job = job``); "
             "``<return>`` for what the function returns."
         )
     )
     path: str = Field(
-        description="The path it holds; for :data:`BIND_RESULT` empty, or ``[]`` where name is an element of what the call returns."
+        description=(
+            "The path it holds; for :data:`BIND_RESULT` where in what the call returns: empty for all of it, "
+            "``[1]``, ``[]``, ``.job``."
+        )
     )
     how: str = Field(
         description=(
-            ":data:`BIND_ALIAS` -- name and path hold one object; :data:`BIND_ELEMENT` -- name is an element "
-            "of path; :data:`BIND_FILL` -- path is an element of name; :data:`BIND_RESULT` -- name is what the "
+            ":data:`BIND_ALIAS` -- an assignment; :data:`BIND_ELEMENT` -- a loop over path; :data:`BIND_FILL` -- "
+            "the statement puts path into name (a literal, ``append``); :data:`BIND_RESULT` -- name is what the "
             "call at the line returns; :data:`BIND_RETURN` -- the function returns path."
         )
+    )
+    to: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For :data:`BIND_RESULT`: the :attr:`ReachNode.owner` of each function the call lands in; empty for "
+            "one outside the corpus."
+        ),
     )
 
 
@@ -4409,7 +4429,13 @@ class CallBinding(BaseModel):
         description="``self`` for the receiver; empty where the call does not say which parameter takes it (``*args``)."
     )
     path: str
-    element: bool = Field(default=False, description="The path is an element of a list or tuple literal handed.")
+    at: str = Field(
+        default="",
+        description=(
+            "Where in what the parameter takes the path is: empty for all of it; ``[]`` for an element of a list "
+            "handed, ``['jediTaskID']`` for a dict's value."
+        ),
+    )
     why: str = Field(default="", description="Why a hole is one, where :attr:`ReachNode.holes` does not say.")
 
 

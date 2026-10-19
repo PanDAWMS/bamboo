@@ -259,9 +259,9 @@ def test_the_records_are_paths_of_the_function(tmp_path):
         for c in process.call_bindings
         if c.to == "pkg/proxy.py::TaskBuffer.updateJobs"
     ]
-    assert {(c.parameter, c.path, c.element) for c in updated} == {
-        ("jobs", "self.job", True),
-        ("self", "self.tb", False),
+    assert {(c.parameter, c.path, c.at) for c in updated} == {
+        ("jobs", "self.job", "[]"),
+        ("self", "self.tb", ""),
     }
     assert not any(c.path.startswith("threading") for c in process.call_bindings)
 
@@ -448,8 +448,12 @@ def test_a_write_of_a_table_of_another_class_is_not_the_objects_row(tmp_path):
     assert not any("touchFiles" in site.owner for site in [*kept.open, *kept.because])
 
 
-def test_a_slice_is_a_part_of_the_container_not_an_element(tmp_path):
-    """setupper's ``jobs_list = self.jobs`` or ``self.jobs[a:b]``: both hold what self.jobs holds, never a job."""
+def test_a_slice_holds_the_containers_elements_not_the_container(tmp_path):
+    """setupper's ``jobs_list = self.jobs`` or ``self.jobs[a:b]``: jobs_list's elements are self.jobs's, never a job.
+
+    A slice is a new list of the container's elements, at positions not
+    known -- ``self.jobs[1:][0]`` is not ``self.jobs[0]``.
+    """
     batch = """\
 from pkg.spec import JobSpec
 
@@ -474,11 +478,11 @@ class Batch:
     fragment = _build(tmp_path, spec=SPEC, batch=batch)
     rows = {row.owner: row for row in fragment.reach_graph}
     run = rows["pkg/batch.py::Batch.run"]
-    assert {(b.name, b.path) for b in run.bindings if b.name == "jobs_list"} == {
-        ("jobs_list", "self.jobs")
-    }
-    assert [(b.name, b.path) for b in run.bindings if b.name == "rest"] == [
-        ("rest", "")
+    assert {
+        (b.name, b.path) for b in run.bindings if b.name.startswith("jobs_list")
+    } == {("jobs_list", "self.jobs"), ("jobs_list[]", "self.jobs[]")}
+    assert [(b.name, b.path) for b in run.bindings if b.name.startswith("rest")] == [
+        ("rest[]", "[]")
     ]
     container = objects.follow(rows, "pkg/batch.py::Batch.run", "self.jobs")
     assert "job" not in container.held["pkg/batch.py::Batch.run"]
@@ -514,10 +518,10 @@ class Batch:
     run = "pkg/batch.py::Batch.run"
     jobs = objects.follow(rows, run, "self.jobs[]")
     assert "tag_job" in jobs.held[run]
-    assert "self.jumbo_jobs[]" not in jobs.held[run]
+    assert "self.jumbo_jobs[0]" not in jobs.held[run]
     either = objects.follow(rows, run, "tag_job")
-    assert {"self.jobs[]", "self.jumbo_jobs[]"} <= set(either.held[run])
-    line = next(b.line for b in rows[run].bindings if b.path == "self.jobs[]")
+    assert {"self.jobs[0]", "self.jumbo_jobs[0]"} <= set(either.held[run])
+    line = next(b.line for b in rows[run].bindings if b.path == "self.jobs[0]")
     assert objects.steps_to(rows[run], "self.jobs[]", "tag_job") == [
         (line, "alias", "tag_job")
     ]
@@ -550,7 +554,7 @@ class Maker:
     rows = {row.owner: row for row in fragment.reach_graph}
     make = "pkg/maker.py::Maker.make"
     old = objects.follow(rows, make, "old.PandaID")
-    assert "var_map[]" in old.held[make]
+    assert "var_map[':PandaID']" in old.held[make]
     assert "new.PandaID" not in old.held[make]
     # The new job's own key still goes into its valuesMap and back.
     new = objects.follow(rows, make, "var_map[]")
@@ -579,3 +583,203 @@ class Refiner:
     assert "spec.PandaID" in key.held[run]
     assert "task_id" not in key.held[run]
     assert "spec.PandaID" in objects.follow(rows, run, "task_id").held[run]
+
+
+FORMS = """\
+from typing import Iterator
+
+from pkg.spec import JobSpec
+
+
+class Store:
+    def get(self, key):
+        return key
+
+
+class Mapper:
+    def pick(self, job: JobSpec) -> JobSpec:
+        return job
+
+
+class Forms:
+    def __init__(self):
+        self.store: Store = Store()
+
+    def make(self, spec: JobSpec) -> tuple[bool, JobSpec]:
+        return True, spec
+
+    def wrap(self, job: JobSpec) -> JobSpec:
+        return job
+
+    def handle(self, job: JobSpec):
+        job.jobStatus = "handled"
+
+    def mapper(self) -> Mapper:
+        return Mapper()
+
+    def each(self, jobs: list[JobSpec]) -> Iterator[JobSpec]:
+        for one in jobs:
+            yield one
+
+    def keys(self, job: JobSpec, other, k):
+        var_map = {":PandaID": job.PandaID, ":status": other}
+        status = var_map[":status"]
+        any_one = var_map[k]
+        return status, any_one
+
+    def unpack(self, spec: JobSpec):
+        status, job = self.make(spec)
+        job.jobMetrics = "made"
+        return status
+
+    def pairs(self, job: JobSpec, n):
+        pairs = []
+        pairs.append((job, n))
+        for first, second in pairs:
+            first.ddmErrorCode = 1
+            second.modificationTime = 2
+
+    def forms(self, job: JobSpec, other: JobSpec, jobs: list[JobSpec], c):
+        either = job or other
+        either.ddmErrorCode = 3
+        maybe = job if c else None
+        found = [one for one in jobs]
+        for one in found:
+            one.jobStatus = "found"
+        last = jobs.pop()
+        stored = self.store.get(1)
+        return maybe, last, stored
+
+    def plus(self, job: JobSpec, extra):
+        for each in job.Files + extra:
+            each.jobStatus = "file"
+
+    def generated(self, jobs: list[JobSpec]):
+        for one in self.each(jobs):
+            one.jobMetrics = "each"
+
+    def nested(self, job: JobSpec):
+        self.handle(self.wrap(job))
+        picked = self.mapper().pick(job)
+        return picked
+
+    def reordered(self, job: JobSpec, other, z):
+        t = (job, other)
+        t = list(t)
+        t.insert(0, z)
+        second = t[1]
+        return second
+
+    def columns(self, job: JobSpec):
+        job.jobStatus, job.PandaID = "x", 1
+"""
+
+_FORMS = "pkg/forms.py::Forms"
+
+
+def _forms(tmp_path: Path) -> tuple[MapFragment, dict]:
+    fragment = _build(tmp_path, spec=SPEC, forms=FORMS)
+    return fragment, {row.owner: row for row in fragment.reach_graph}
+
+
+def _assigned(found: objects.ObjectReach) -> dict[str, set[str]]:
+    return {
+        attr: {site.owner.split("::")[1] for site in sites}
+        for attr, sites in found.assigned.items()
+    }
+
+
+def test_a_dict_literal_keeps_each_value_under_its_key(tmp_path):
+    """``{":PandaID": job.PandaID, ":status": other}``: the key is read at its own key, and at one computed."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.keys"
+    key = objects.follow(rows, owner, "job.PandaID").held[owner]
+    assert "var_map[':PandaID']" in key
+    assert "any_one" in key
+    assert "status" not in key
+    other = objects.follow(rows, owner, "other").held[owner]
+    assert {"status", "any_one"} <= set(other)
+
+
+def test_a_tuple_target_takes_each_position_of_what_a_call_returns(tmp_path):
+    """``status, job = self.make(spec)`` with ``return True, spec``: job is the spec, status is not."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.unpack"
+    results = {
+        (b.name, b.path, tuple(b.to)) for b in rows[owner].bindings if b.how == "result"
+    }
+    assert results == {
+        ("status", "[0]", (f"{_FORMS}.make",)),
+        ("job", "[1]", (f"{_FORMS}.make",)),
+    }
+    found = objects.follow(rows, owner, "spec")
+    assert "job" in found.held[owner]
+    assert "status" not in found.held[owner]
+    assert _assigned(found)["jobMetrics"] == {"Forms.unpack"}
+
+
+def test_a_tuple_put_in_a_list_keeps_its_positions(tmp_path):
+    """``pairs.append((job, n))`` then ``for first, second in pairs``: first is the job, second is not."""
+    _fragment, rows = _forms(tmp_path)
+    found = _assigned(objects.follow(rows, f"{_FORMS}.pairs", "job"))
+    assert "ddmErrorCode" in found
+    assert "modificationTime" not in found
+
+
+def test_or_if_else_a_comprehension_pop_and_plus_carry_what_they_hold(tmp_path):
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.forms"
+    job = objects.follow(rows, owner, "job")
+    assert "ddmErrorCode" in _assigned(job)  # either = job or other
+    assert "maybe" in job.held[owner]  # job if c else None
+    element = objects.follow(rows, owner, "jobs[]")
+    assert "jobStatus" in _assigned(element)  # [one for one in jobs], then a loop
+    assert "last" in element.held[owner]  # jobs.pop()
+    files = objects.follow(rows, f"{_FORMS}.plus", "job.Files[]")
+    assert "jobStatus" in _assigned(files)  # for each in job.Files + extra
+
+
+def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):
+    """``self.store.get(1)`` runs ``Store.get``: its result, not a value of ``self.store`` under a key."""
+    _fragment, rows = _forms(tmp_path)
+    stored = [b for b in rows[f"{_FORMS}.forms"].bindings if b.name == "stored"]
+    assert [(b.how, b.path, b.to) for b in stored] == [
+        ("result", "", ["pkg/forms.py::Store.get"])
+    ]
+
+
+def test_what_a_generator_yields_are_the_elements_of_its_result(tmp_path):
+    _fragment, rows = _forms(tmp_path)
+    found = objects.follow(rows, f"{_FORMS}.generated", "jobs[]")
+    assert _assigned(found)["jobMetrics"] == {"Forms.generated"}
+
+
+def test_a_result_is_its_own_calls_and_one_no_name_takes_is_followed(tmp_path):
+    """``self.handle(self.wrap(job))``: wrap's result goes into handle.  ``self.mapper().pick(job)``: picked is
+    pick's result, not mapper's."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.nested"
+    found = objects.follow(rows, owner, "job")
+    assert _assigned(found)["jobStatus"] == {"Forms.handle"}
+    (picked,) = [b for b in rows[owner].bindings if b.name == "picked"]
+    assert picked.to == ["pkg/forms.py::Mapper.pick"]
+    assert f"{_FORMS}.mapper" not in objects.follow(rows, owner, "picked").functions
+
+
+def test_a_list_made_of_a_tuple_is_read_at_any_position(tmp_path):
+    """``t = list(t)`` then ``t.insert(0, z)``: the job is no longer at [0], so ``t[1]`` can be it."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.reordered"
+    assert "second" in objects.follow(rows, owner, "job").held[owner]
+
+
+def test_a_tuple_targets_columns_are_assigned(tmp_path):
+    _fragment, rows = _forms(tmp_path)
+    assigns = {(a.path, *a.attrs) for a in rows[f"{_FORMS}.columns"].assigns}
+    assert assigns == {("job", "jobStatus"), ("job", "PandaID")}
+
+
+def test_the_gate_reads_keys_positions_and_a_calls_own_result(tmp_path):
+    fragment, _rows = _forms(tmp_path)
+    result = object_records_resolve(fragment)
+    assert result.passed, result.failures

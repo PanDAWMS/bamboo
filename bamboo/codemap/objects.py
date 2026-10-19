@@ -35,17 +35,22 @@ object's, which is why this answers where the closure's own reach does not.
 What it rests on, beyond :data:`bamboo.codemap.reach.PREMISES`, is in
 :data:`PREMISES`.  The bindings are read without the statements' order and
 without what calls hand (a branch a constant rules out is read as run), which
-can only say an object reaches more than it does.  The other way: the record
-reads a value handed on in its own forms only (a path, a list / tuple / set
-literal's elements, a call's result), so one carried by another -- a dict
-literal's values, a tuple target, an if-else or ``or``, a comprehension's
-result, a container method's result (``jobs.pop()``) -- is not followed, and
-the object can reach more than this says.
+can only say an object reaches more than it does.  The other way: what the
+record does not read (:mod:`bamboo.codemap.panda.objects` lists it) the
+object is not followed through, and it can reach more than this says.
+
+A path's parts are matched one by one (:func:`_under`): ``[]``, an element
+at a position not known, matches a tuple's ``[i]`` and a literal key's
+``['k']`` as well as itself, so what was put under ``varMap[':PandaID']``
+is read at ``varMap[':PandaID']`` and ``varMap[]``, not at
+``varMap[':status']``.
 """
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
+from functools import lru_cache
 from typing import NamedTuple, Optional
 
 from bamboo.codemap.models import (
@@ -70,6 +75,11 @@ PREMISES: dict[str, str] = {
     "handed_values_not_read": (
         "What a call hands its callee is not read: a statement the values it hands would rule out is read as one "
         "that runs, with its bindings and assignments."
+    ),
+    "literal_keys_apart": (
+        "A literal str key names one entry of a container: what is put under one key is read under that key, or "
+        "under one not spelled as a literal.  The corpus's classes with their own item access (MapWithLock, "
+        "CachedObject) hand it to a dict."
     ),
 }
 
@@ -183,7 +193,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         if spent:
             cut = cut or HELD_SPENT
         for one in row.assigns:
-            if one.path in held:
+            if _holds(held, one.path):
                 for attr in one.attrs:
                     assigned[attr][Site(at, one.line, one.how)] = None
         for binding in row.bindings:
@@ -196,16 +206,14 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
                     continue
                 # The object held here came out of the call: in from what it returns.
                 came_from[Site(at, binding.line, binding.name)] = None
-                for call in row.calls:
-                    if binding.line not in (call.lines or [call.line]):
-                        continue
-                    if call.to.rsplit(".", 1)[-1] == "__init__":
-                        if binding.path == "[]":
-                            continue  # an element of a new object is not the object
+                for to in binding.to:
+                    if to.rsplit(".", 1)[-1] == "__init__":
+                        if binding.path:
+                            continue  # a part of a new object is not the object
                         taken = "self" + rest
                     else:
                         taken = RETURN + binding.path + rest
-                    into((call.to, taken), _Link(state, binding.line, call.to), one)
+                    into((to, taken), _Link(state, binding.line, to), one)
         for call in row.call_bindings:
             for one in sorted(held):
                 rest = _under(call.path, one)
@@ -218,7 +226,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
                 elif not call.parameter or call.parameter.startswith("*"):
                     holes[Site(at, call.line, NO_PARAMETER)] = None
                 else:
-                    taken = call.parameter + ("[]" if call.element else "") + rest
+                    taken = call.parameter + call.at + rest
                     into((call.to, taken), _Link(state, call.line, call.to), one)
         # Where the object ends up, seen from outside: on self, or returned.  New ends go back to every call
         # that brought it in.
@@ -286,13 +294,14 @@ def _hand_back(
     held = extra[link.caller]
     for end in sorted(ends):
         if end.startswith(RETURN):
-            back = end[len(RETURN) :]
+            # ``x = f()[0]``: x is what is at [0] of what f returns, and the end is below that, or not x's.
             names = [
                 result.name + below
                 for result in caller.bindings
                 if result.how == BIND_RESULT
                 and result.line == link.line
-                and (below := _element_back(result.path, back)) is not None
+                and link.to in result.to
+                and (below := _under(RETURN + result.path, end)) is not None
             ]
         else:
             below = end[len("self") :]
@@ -330,8 +339,11 @@ def _held_steps(
     are different objects: ``tag_job = self.jobs[0]`` and ``tag_job =
     self.jumbo_jobs[0]`` in two branches, or ``archiveJob``'s
     ``updatedJobList.append(job)`` and ``.append(dJob)``.  So a path reached
-    forward through one binding of a name is stepped back only through that
-    binding: ``self.jobs[]`` reaches ``tag_job`` and not ``self.jumbo_jobs[]``.
+    forward is not stepped back: ``self.jobs[]`` reaches ``tag_job`` and not
+    ``self.jumbo_jobs[]``.  Back through the binding it came by it only comes
+    to where it came from -- read part by part, wider: ``any_one =
+    var_map[k]``, reached from ``var_map[':PandaID']``, read back is
+    ``var_map[]``, every key.
     A start path, or one reached back, steps back through every binding: it
     can be what any of them gives.  :func:`follow` keeps the same rule for a
     name a call's result is bound to: ``makeFakeCoJumbo``'s ``varMap`` holds
@@ -355,18 +367,10 @@ def _held_steps(
     while changed:
         changed = False
         for index, binding in enumerate(row.bindings):
-            if binding.how == BIND_FILL or (
-                binding.how == BIND_ALIAS and binding.name.endswith("[]")
-            ):
-                # an element of the container: ``updatedJobList.append(job)``, ``varMap[":x"] = v``
-                target = (
-                    binding.name if binding.name.endswith("[]") else binding.name + "[]"
-                )
-            elif binding.how in (BIND_ALIAS, BIND_ELEMENT, BIND_RETURN):
-                # an element's path is already ``container[]``
-                target = binding.name
-            else:
+            if binding.how not in (BIND_ALIAS, BIND_ELEMENT, BIND_FILL, BIND_RETURN):
                 continue
+            # The name says where it holds the path: ``updatedJobList[]`` for ``updatedJobList.append(job)``.
+            target = binding.name
             for one in list(held):
                 for frm, to, way in (
                     (binding.path, target, _FORWARD),
@@ -375,7 +379,7 @@ def _held_steps(
                     rest = _under(frm, one)
                     if rest is None:
                         continue
-                    if way == _BACK and entered.get(one) and index not in entered[one]:
+                    if way == _BACK and entered.get(one):
                         continue
                     taken = to + rest
                     if way == _FORWARD and (taken in entered or taken not in held):
@@ -419,24 +423,56 @@ def steps_to(row: ReachNode, start: str, path: str) -> list[tuple[int, str, str]
 
 
 def _under(base: str, path: str) -> Optional[str]:
-    """What *path* goes on with below *base* -- ``.job`` for ``self`` and ``self.job`` -- or ``None`` where it is not below it."""
+    """What *path* goes on with below *base* -- ``.job`` for ``self`` and ``self.job`` -- or ``None`` where it is not below it.
+
+    Part by part, where ``[]`` -- an element, at a position not known --
+    matches ``[i]`` and ``['k']`` as well as itself: ``d['a'].x`` is below
+    ``d[]`` and ``d[].x`` below ``d['a']``, and neither is below ``d['b']``.
+    """
     if path == base:
         return ""
-    if path.startswith(base) and path[len(base)] in ".[":
-        return path[len(base) :]
-    return None
+    if _plain(base) and _plain(path):
+        if path.startswith(base) and path[len(base)] in ".[":
+            return path[len(base) :]
+        return None
+    over, under = _tokens(base), _tokens(path)
+    if len(under) < len(over) or over[0] != under[0]:
+        return None
+    for one, other in zip(over[1:], under[1:], strict=False):
+        if one != other and not (
+            (one == "[]" and other[0] == "[") or (other == "[]" and one[0] == "[")
+        ):
+            return None
+    return "".join(under[len(over) :])
+
+
+def _plain(path: str) -> bool:
+    """Whether *path*'s only subscripts are ``[]``, so a string prefix reads it."""
+    return path.count("[") == path.count("[]")
+
+
+@lru_cache(maxsize=None)
+def _tokens(path: str) -> tuple[str, ...]:
+    """*path*'s root, then each of its parts: ``.attr``, ``[]``, ``[i]``, ``['k']``."""
+    cut = min(
+        (at for at in (path.find("."), path.find("[")) if at >= 0), default=len(path)
+    )
+    return (path[:cut], *_PART.findall(path, cut))
+
+
+_PART = re.compile(r"\.[^.\[]+|\[[^\]]*\]")
+
+
+def _holds(held: set[str], path: str) -> bool:
+    """Whether *path* is one of *held*, read part by part (:func:`_under`)."""
+    if path in held:
+        return True
+    keyed = held if not _plain(path) else [one for one in held if not _plain(one)]
+    return any(_under(one, path) == "" for one in keyed)
 
 
 def _parts(path: str) -> int:
-    return path.count(".") + path.count("[]")
-
-
-def _element_back(result: str, back: str) -> Optional[str]:
-    """The path in the caller of what the callee returned, from the binding's ``[]`` and what is below the return."""
-    if result == "[]":
-        # ``x = f()[0]``: x is an element of what f returns.
-        return back[2:] if back.startswith("[]") else None
-    return back
+    return path.count(".") + path.count("[")
 
 
 def _receivers_of(caller: ReachNode, link: _Link) -> list[str]:
@@ -450,7 +486,10 @@ def _receivers_of(caller: ReachNode, link: _Link) -> list[str]:
         found += [
             b.name
             for b in caller.bindings
-            if b.how == BIND_RESULT and b.line == link.line and b.path == ""
+            if b.how == BIND_RESULT
+            and b.line == link.line
+            and b.path == ""
+            and link.to in b.to
         ]
     return sorted(set(found))
 
@@ -550,6 +589,7 @@ def may_change(
         "outside_assigns_nothing",
         "bindings_without_order",
         "handed_values_not_read",
+        "literal_keys_apart",
         "holes_land_by_name",
     ]
     assigned = [
@@ -564,9 +604,11 @@ def may_change(
             if other_class(write):
                 continue
             held = set(paths)
-            takes = write.whole in held or any(
+            attributes = {f"{one}.{column}" for one in held}
+            takes = bool(write.whole and _holds(held, write.whole)) or any(
                 value.column.lower() == lowered
-                and value.path in {f"{one}.{column}" for one in held}
+                and bool(value.path)
+                and _holds(attributes, value.path)
                 for value in write.columns
             )
             if takes:
@@ -592,14 +634,19 @@ def may_change(
     for at in closure:
         row = rows[at]
         own = set(obj.held.get(at, ()))
+        attributes = {f"{o}.{column}" for o in own}
         for write in row.writes:
-            if write.new_row or write.whole in own or other_class(write):
+            if (
+                write.new_row
+                or (write.whole and _holds(own, write.whole))
+                or other_class(write)
+            ):
                 continue
             named = [
                 v
                 for v in write.columns
                 if v.column.lower() == lowered
-                and v.path not in {f"{o}.{column}" for o in own}
+                and not (v.path and _holds(attributes, v.path))
             ]
             if not named and not write.unread and not write.whole:
                 continue
@@ -614,7 +661,10 @@ def may_change(
                 key_values = [
                     (f"{write.whole}.{key_column}", f"{write.whole}.{key_column}")
                 ]
-            if any(held and held in keyed.get(at, ()) for held, _spelled in key_values):
+            if any(
+                held and _holds(keyed.get(at, set()), held)
+                for held, _spelled in key_values
+            ):
                 because[
                     Site(
                         at,
