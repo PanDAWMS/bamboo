@@ -29,14 +29,17 @@ from pydantic import BaseModel, Field
 
 from bamboo.codemap import evidence
 from bamboo.codemap.models import (
+    BIND_RESULT,
     HISTORY_ROW_CAN,
     HistoryPair,
     MapFragment,
     ReachNode,
     required_values,
 )
+from bamboo.codemap.objects import STEPPED, _under
 from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
+from bamboo.codemap.panda.runs import HISTORY_KEYS
 
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
 _PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
@@ -1441,7 +1444,8 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                 if not pair.row and not pair.row_why:
                     failures.append(f"{at}: row not read, and no reason given")
                 if pair.row == HISTORY_ROW_CAN:
-                    failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows)]
+                    key = HISTORY_KEYS.get(junction.subject.rpartition(".")[0], "")
+                    failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows, key)]
     return GateResult(
         gate="history-pairs-resolve",
         passed=not failures,
@@ -1454,31 +1458,90 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     )
 
 
-def _row_via_unresolved(pair: HistoryPair, rows: dict[str, ReachNode]) -> list[str]:
-    """Why a ``can`` pair's object and way are not records a dump-only reader finds; empty where they are."""
+def _row_via_unresolved(pair: HistoryPair, rows: dict[str, ReachNode], key: str) -> list[str]:
+    """Why a ``can`` pair's object and way are not a walk a dump-only reader can make; empty where they are.
+
+    The walk starts in the pair's caller, holding the object or its *key* --
+    the subject's class's (:data:`bamboo.codemap.panda.runs.HISTORY_KEYS`),
+    as runs starts it --, and each step is the
+    record on its line, in the function the walk is in, from a path it
+    holds: a binding of that kind taking the path to the one it names (read
+    back, from its name to its path); a call binding into the callee
+    handing the path as the one the callee takes; a call into the callee,
+    taking a path the walk holds, that hands back the one it names -- a name
+    its result is bound to, or a receiver it keeps the object on; and last,
+    one of the pair's writes, whose call hands a key below a path held.
+    """
     if not pair.object:
         return ["can, with no object"]
     if not pair.row_via:
         return ["can, with no way to the writer"]
-    whys = []
+    here = pair.caller
+    held = {pair.object, f"{pair.object}.{key}"} if key else {pair.object}
     *steps, last = pair.row_via
     for step in steps:
-        where, arrow, into = step.partition(" -> ")
-        if not arrow:
-            where, arrow, into = step.partition(" <- ")
-        owner, _sep, line = where.split(" ", 1)[0].rpartition(":")
-        row = rows.get(owner)
-        if arrow:
-            if row is None or not any(line == str(held) for call in row.calls for held in (call.lines or [call.line])):
-                whys.append(f"way {step!r}: not a call the caller's reach row records")
-            if into.split(" ", 1)[0] not in rows:
-                whys.append(f"way {step!r}: the callee is no reach row")
-        elif row is None or not any(line == str(binding.line) for binding in row.bindings):
-            whys.append(f"way {step!r}: not a binding the function's reach row records")
-    write = last.split(" ", 1)[0]
+        why, here, held = _row_step(step, here, held, rows)
+        if why:
+            return [f"way {step!r}: {why}"]
+    write, _sep, key = last.partition(" ")
+    target, _sep, line = write.rpartition(":")
     if write not in pair.writes:
-        whys.append(f"way ends at {write}, not one of the pair's writes")
-    return whys
+        return [f"way ends at {write}, not one of the pair's writes"]
+    if target != here:
+        return [f"way ends in {target}, not in {here}, where it is"]
+    row = rows.get(target)
+    if row is None or not any(str(call.line) == line and call.path == key for call in row.call_bindings):
+        return [f"way ends at {write}, whose calls hand no {key}"]
+    if not any(_under(one, key) is not None for one in held):
+        return [f"way ends at {write} {key}, below no path it holds"]
+    return []
+
+
+def _row_step(step: str, here: str, held: set[str], rows: dict[str, ReachNode]) -> tuple[str, str, set[str]]:
+    """One step of a way walked in *here*, from the paths it *held*: why it is not a step from them (empty where it is),
+    and the function and paths the walk goes on in."""
+    words = step.split(" ")
+    owner, _sep, line = words[0].rpartition(":")
+    row = rows.get(owner)
+    if owner != here:
+        return f"in {owner}, not in {here}, where the way is", here, held
+    if row is None or not line.isdigit():
+        return "no reach row's line", here, held
+    at = int(line)
+    if len(words) == 4 and words[1] == "->":
+        callee, path = words[2:]
+        calls = [call for call in row.call_bindings if call.line == at and call.to == callee]
+        if not calls:
+            return "no call binding of the line into the callee", here, held
+        if not any(
+            (rest := _under(call.path, one)) is not None and call.parameter + call.at + rest == path
+            for call in calls
+            for one in held
+        ):
+            return "the call hands no path held as the one the callee takes", here, held
+        return "", callee, {path}
+    if len(words) == 4 and words[1] == "<-":
+        callee, back = words[2:]
+        sides = [
+            binding.name
+            for binding in row.bindings
+            if binding.line == at and binding.how == BIND_RESULT and callee in binding.to
+        ] + [call.path for call in row.call_bindings if call.line == at and call.to == callee]
+        if not any(_under(side, back) is not None for side in sides):
+            return "no call of the line into the callee hands it back", here, held
+        if not any(_under(side, one) is not None for side in sides for one in held):
+            return "the call takes no path held", here, held
+        return "", here, {back}
+    how, path = " ".join(words[1:-1]), words[-1]
+    kind, back = how.removesuffix(" back"), how.endswith(" back")
+    bindings = [binding for binding in row.bindings if binding.line == at and binding.how == kind]
+    if kind not in STEPPED or not bindings:
+        return f"no {kind} binding of the line", here, held
+    for binding in bindings:
+        frm, to = (binding.name, binding.path) if back else (binding.path, binding.name)
+        if any((rest := _under(frm, one)) is not None and to + rest == path for one in held):
+            return "", here, {path}
+    return "the binding takes no path held to it", here, held
 
 
 def object_records_resolve(fragment: MapFragment) -> GateResult:

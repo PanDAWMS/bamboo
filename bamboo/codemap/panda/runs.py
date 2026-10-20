@@ -70,8 +70,10 @@ the key the writer is handed:
   an element among the others, read without the statements' order.
 
 So ``can`` is a row the pass can write for the arm's object, not the one it
-wrote; ``row_via`` says one way the object goes there.  An object no path the
-caller hands reaches, or that does not reach the writer, says so.
+wrote; ``row_via`` says one way the object goes there, each step from where
+the one before ends -- a walk a reader can make from the records alone.  An
+object no path the caller hands reaches, or that does not reach the writer,
+says so.
 
 **Not read.**  What the calls on the way down to the writer hand: the
 object is followed without the values calls hand
@@ -1202,19 +1204,24 @@ class _Reader:
     def _steps(
         self, owner: str, start: str, path: str, reach: objects.ObjectReach
     ) -> list[str]:
-        """How *owner* takes *start*'s object to *path*: its bindings (``owner:line how path``), from a call that
-        handed the object back (``owner:line <- callee path``) where the bindings alone do not."""
+        """How *owner*, holding the object by *start*, takes it to *path*: its bindings (``owner:line how path``),
+        and where they alone do not, the bindings to the path that went into a call that handed the object back,
+        the call (``owner:line <- callee path``), and the bindings from what it handed back."""
         row = self.rows[owner]
+
+        def said(steps: list[tuple[int, str, str]]) -> list[str]:
+            return [f"{owner}:{line} {how} {held}" for line, how, held in steps]
+
         direct = objects.steps_to(row, start, path)
         if direct or path == start:
-            return [f"{owner}:{line} {how} {held}" for line, how, held in direct]
-        for back, (at, callee) in sorted(reach.returned.get(owner, {}).items()):
+            return said(direct)
+        for back, (at, callee, went) in sorted(
+            reach.returned.get((owner, start), {}).items()
+        ):
+            into = objects.steps_to(row, start, went)
             tail = objects.steps_to(row, back, path)
-            if back == path or tail:
-                return [
-                    f"{owner}:{at} <- {callee} {back}",
-                    *(f"{owner}:{line} {how} {held}" for line, how, held in tail),
-                ]
+            if (back == path or tail) and (went == start or into):
+                return [*said(into), f"{owner}:{at} <- {callee} {back}", *said(tail)]
         return []
 
     def _way(
@@ -1230,17 +1237,25 @@ class _Reader:
         target: str,
         holder: str,
     ) -> list[str]:
-        """Each step the object takes from the caller's *start* to *holder* in *target*: bindings and calls."""
+        """Each step the object takes from the caller's *start* to *holder* in *target*: bindings and calls, by the
+        states it is in (:func:`bamboo.codemap.objects.way_to`), from the first of *target*'s that reaches *holder*."""
         way = [
             *self._steps(owner, start, handed, whole),
             f"{owner}:{line} -> {callee} {taken}",
         ]
-        entry = {callee: taken}
-        for caller, at, into, path, given in objects.way_to(reach, target):
-            way += self._steps(caller, entry.get(caller, ""), given, reach)
+        states = [one for one in ((callee, taken), *reach.entered) if one[0] == target]
+        state = next(
+            (
+                one
+                for one in states
+                if one[1] == holder or self._steps(target, one[1], holder, reach)
+            ),
+            states[0],
+        )
+        for (caller, entry), at, (into, path), given in objects.way_to(reach, state):
+            way += self._steps(caller, entry, given, reach)
             way.append(f"{caller}:{at} -> {into} {path}")
-            entry[into] = path
-        return way + self._steps(target, entry.get(target, taken), holder, reach)
+        return way + self._steps(target, state[1], holder, reach)
 
     def _runs_at(
         self, owner: str, func: ast.AST, point: ast.stmt

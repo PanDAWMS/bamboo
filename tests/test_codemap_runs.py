@@ -511,6 +511,111 @@ def test_a_function_handed_on_is_not_the_same_pass(tmp_path: Path) -> None:
     assert (branch.history, branch.history_hole) == ([], "")
 
 
+WAYS = """\
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+
+class Ways(DBProxy):
+    def kill_both(self, job: JobSpec):
+        var_map = {}
+        var_map[":PandaID"] = job.PandaID
+        var_map[":jobStatus"] = "cancelled"  # V1
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID", var_map)
+        self.update_both([job])  # V2
+
+    def update_both(self, jobs):
+        for job in jobs:  # V11
+            params = {"PandaID": job.PandaID}  # V12
+            self.archive_both(params, job)  # V13
+
+    def archive_both(self, async_params, job):
+        done = [job]  # V3
+        for one in done:  # V4
+            self.note_change(one.PandaID, one.jobStatus)  # V5
+
+    def peek_job(self, panda_id):
+        job = JobSpec()
+        job.PandaID = panda_id
+        return job
+
+    def kill_ids(self, ids):
+        for one_id in ids:  # V6
+            found = self.peek_job(one_id)  # V7
+            self.note_change(found.PandaID, "killed")  # V8
+
+    def kill_one(self, panda_id):
+        var_map = {}
+        var_map[":PandaID"] = panda_id
+        var_map[":jobStatus"] = "cancelled"  # V9
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID", var_map)
+        self.kill_ids([panda_id])  # V10
+"""
+
+
+def _ways(tmp_path: Path, marker: str) -> MapFragment:
+    owner = {"V1": "Ways.kill_both", "V9": "Ways.kill_one"}[marker]
+    return _build(
+        tmp_path,
+        [("ways", owner, marker, "JobSpec.jobStatus")],
+        spec=SPEC,
+        proxy=PROXY,
+        ways=WAYS,
+    )
+
+
+def test_a_way_goes_by_the_path_that_reaches_the_write_not_the_first_one_in(
+    tmp_path: Path,
+) -> None:
+    """updateJobs: one call hands archiveJob the job and a dict of its PandaID; the dict comes in first, the job's row
+    is written from the job."""
+    fragment = _ways(tmp_path, "V1")
+    (pair,) = _branch(fragment, "V1").history or []
+    update, both = "pkg/ways.py::Ways.update_both", "pkg/ways.py::Ways.archive_both"
+    assert (pair.row, pair.object) == (HISTORY_ROW_CAN, "job.PandaID")
+    assert pair.row_via == [
+        f"pkg/ways.py::Ways.kill_both:{_line(WAYS, 'V2')} -> {update} jobs[].PandaID",
+        f"{update}:{_line(WAYS, 'V11')} element job.PandaID",
+        f"{update}:{_line(WAYS, 'V13')} -> {both} job.PandaID",
+        f"{both}:{_line(WAYS, 'V3')} fill done[].PandaID",
+        f"{both}:{_line(WAYS, 'V4')} element one.PandaID",
+        f"{both}:{_line(WAYS, 'V5')} one.PandaID",
+    ]
+    assert history_pairs_resolve(fragment).passed
+    pair.row_via = [
+        *pair.row_via[:2],
+        f"{update}:{_line(WAYS, 'V12')} fill params['PandaID']",
+        f"{update}:{_line(WAYS, 'V13')} -> {both} async_params['PandaID']",
+        pair.row_via[-1],
+    ]
+    assert any(
+        "below no path it holds" in failure
+        for failure in history_pairs_resolve(fragment).failures
+    )
+
+
+def test_a_way_through_a_call_that_hands_the_object_back_says_how_it_went_in(
+    tmp_path: Path,
+) -> None:
+    """killJobs: each id of the list goes into peekJob, whose job comes back with it as its PandaID."""
+    fragment = _ways(tmp_path, "V9")
+    (pair,) = _branch(fragment, "V9").history or []
+    ways, kill_ids = "pkg/ways.py::Ways", "pkg/ways.py::Ways.kill_ids"
+    assert (pair.row, pair.object) == (HISTORY_ROW_CAN, "panda_id")
+    assert pair.row_via == [
+        f"{ways}.kill_one:{_line(WAYS, 'V10')} -> {kill_ids} ids[]",
+        f"{kill_ids}:{_line(WAYS, 'V6')} element one_id",
+        f"{kill_ids}:{_line(WAYS, 'V7')} <- {ways}.peek_job found.PandaID",
+        f"{kill_ids}:{_line(WAYS, 'V8')} found.PandaID",
+    ]
+    assert history_pairs_resolve(fragment).passed
+    pair.row_via = [pair.row_via[0], *pair.row_via[2:]]
+    assert any(
+        "the call takes no path held" in failure
+        for failure in history_pairs_resolve(fragment).failures
+    )
+
+
 def _flags(tmp_path: Path, *markers: str) -> MapFragment:
     arms = [
         ("flags", f"Flags.{owner}", marker, "JobSpec.jobStatus")
@@ -701,7 +806,16 @@ def test_the_gate_passes_on_the_build_and_fails_on_a_write_no_reader_finds(
     result = history_pairs_resolve(fragment)
     assert not result.passed
     assert any(
-        "not a call the caller's reach row records" in failure
+        "no call binding of the line into the callee" in failure
+        for failure in result.failures
+    )
+    followed.row_via = [
+        f"pkg/proxy.py::DBProxy.run:{_line(PROXY, 'C2')} -> pkg/proxy.py::DBProxy.archive_history other",
+        *followed.row_via[1:],
+    ]
+    result = history_pairs_resolve(fragment)
+    assert any(
+        "the call hands no path held as the one the callee takes" in failure
         for failure in result.failures
     )
     for row in fragment.reach_graph:
