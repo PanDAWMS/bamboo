@@ -75,14 +75,22 @@ the one before ends -- a walk a reader can make from the records alone.  An
 object no path the caller hands reaches, or that does not reach the writer,
 says so.
 
+**A key given again.**  Between the point and the call the walk holds the
+object by a path in each function it passes; an assignment of the class's
+key on it that runs between two steps of the walk, either way round, with
+the path's variable not bound again on the way -- there, or in a call made
+between that is handed the object --, gives the object its key again: ``retryJob``'s ``job.PandaID = int(val)`` after its ``INSERT ...
+RETURNING``, ``ppEventServiceJob``'s clone given a new ``PandaID``,
+``storeJobs``' ``job.PandaID = None`` for a jumbo job with no ready event.
+The row then is the new key's, the arm's values in it, and ``same`` or
+``can`` holds for that row, while the run's mark carries the old key;
+``rekeyed`` says where, with the value where it is a literal.  Only an
+assignment on a path the record follows the object by is seen.
+
 **Not read.**  What the calls on the way down to the writer hand: the
 object is followed without the values calls hand
 (:data:`bamboo.codemap.objects.PREMISES` ``handed_values_not_read``), so a
-branch a constant rules out there is read as one that runs.  A key the object
-is given again on the way: ``retryJob``'s ``job.PandaID = int(val)`` after its
-``INSERT ... RETURNING``, ``ppEventServiceJob``'s clone given a new
-``PandaID`` -- the row then is the new key's, the arm's values in it, and
-``can`` holds for that row, while the run's mark carries the old key.  A key
+branch a constant rules out there is read as one that runs.  A key
 the run holds by another name than the object's is tied to it only where a
 binding says so, and one way -- what a function is handed is not handed back
 through its parameters: the adder's ``self.job_id`` reaches
@@ -96,6 +104,7 @@ so a path into a dict can stand for the key it holds among the others.
 from __future__ import annotations
 
 import ast
+import re
 import string
 from collections import defaultdict, deque
 from typing import Iterator, NamedTuple, Optional, Union
@@ -103,6 +112,7 @@ from typing import Iterator, NamedTuple, Optional, Union
 from bamboo.codemap import calls as C
 from bamboo.codemap import objects, reach
 from bamboo.codemap.models import (
+    BIND_FILL,
     BIND_RESULT,
     HISTORY_AFTER,
     HISTORY_BEFORE,
@@ -113,6 +123,7 @@ from bamboo.codemap.models import (
     Branch,
     HistoryCall,
     HistoryPair,
+    HistoryRekey,
     JunctionNode,
     MapFragment,
     ReachCall,
@@ -214,6 +225,31 @@ def _holder(held, path: str) -> Optional[str]:
     return max(found, key=lambda one: (len(one), one)) if found else None
 
 
+#: :attr:`_WayStep.kind` of a call the object is handed into, of one that hands it back, and of the history write's key.
+_CALL = "->"
+_HANDED_BACK = "<-"
+_KEYED = ""
+
+
+class _WayStep(NamedTuple):
+    """One step of a can pair's way: where it is, what it is -- a binding's how, :data:`_CALL`, :data:`_HANDED_BACK`
+    or :data:`_KEYED` --, the path it leaves the object held by, and the function a call goes into or hands it back from.
+    :attr:`HistoryPair.row_via` is their text; :meth:`_Reader._rekeyed` reads the steps."""
+
+    owner: str
+    line: int
+    kind: str
+    path: str
+    callee: str = ""
+
+    def said(self) -> str:
+        if self.kind in (_CALL, _HANDED_BACK):
+            return f"{self.owner}:{self.line} {self.kind} {self.callee} {self.path}"
+        if self.kind == _KEYED:
+            return f"{self.owner}:{self.line} {self.path}"
+        return f"{self.owner}:{self.line} {self.kind} {self.path}"
+
+
 class _Arm(NamedTuple):
     """What an arm writes, as paths of its function: the object, and the key of its row."""
 
@@ -289,6 +325,13 @@ class _Reader:
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
         self._runs: dict[str, list[RunStart]] = {}
         self._kills: dict[int, list[ast.stmt]] = {}
+        self._held_killers: dict[tuple[str, str], list[ast.AST]] = {}
+        self._handed_rekeys: dict[tuple[str, str, str], list[HistoryRekey]] = {}
+        self._candidates: dict[
+            tuple[str, str, str],
+            tuple[dict[ast.AST, HistoryRekey], dict[ast.AST, tuple[str, str]]],
+        ] = {}
+        self._statements: dict[tuple[int, int], Optional[ast.stmt]] = {}
         self._targets: dict[str, C.Target] = {}
         self._callers: dict[str, list[C.CallSite]] = {}
         # Plain calls only, as one pass follows them.
@@ -772,7 +815,7 @@ class _Reader:
                     if call.to in self.writers
                     else self.below.get(call.to, set())
                 )
-            row_said, row_why, held, via = self._row(
+            row_said, row_why, held, start, steps = self._row(
                 level,
                 owner,
                 func,
@@ -786,6 +829,12 @@ class _Reader:
                 writes,
             )
             runs, run_hole = self._runs_at(owner, func, point)
+            key = HISTORY_KEYS.get(subject.rpartition(".")[0], "")
+            rekeyed = (
+                self._rekeyed(owner, func, point, site, start, steps, key)
+                if row_said in (HISTORY_ROW_SAME, HISTORY_ROW_CAN) and key
+                else []
+            )
             pairs.append(
                 HistoryPair(
                     level=level,
@@ -809,7 +858,8 @@ class _Reader:
                     row=row_said,
                     row_why=row_why,
                     object=held,
-                    row_via=via,
+                    row_via=[step.said() for step in steps],
+                    rekeyed=rekeyed,
                     runs=runs,
                     run_hole=run_hole,
                 )
@@ -829,17 +879,17 @@ class _Reader:
         written: Optional[ast.expr],
         arm: "_Arm",
         writes: set[str],
-    ) -> tuple[str, str, str, list[str]]:
-        """Whether the history row is the arm's row: ``(row, why, object, row_via)``."""
+    ) -> tuple[str, str, str, str, list[_WayStep]]:
+        """Whether the history row is the arm's row: ``(row, why, object, the path the way starts by, its steps)``."""
         direct = [call for call in through if call.to in self.writers]
         if level == 0 and direct and written is not None:
             row, why = self._in_place(func, point, site, line, direct, subject, written)
             if row == HISTORY_ROW_SAME:
-                return row, why, ast.unparse(written), []
+                return row, why, ast.unparse(written), ast.unparse(written), []
             if not row.startswith(ROW_ANOTHER):
-                return row, why, "", []
+                return row, why, "", "", []
             found = self._followed(level, owner, point, line, subject, arm, writes)
-            return found if found[0] == HISTORY_ROW_CAN else (row, why, "", [])
+            return found if found[0] == HISTORY_ROW_CAN else (row, why, "", "", [])
         return self._followed(level, owner, point, line, subject, arm, writes)
 
     def _in_place(
@@ -1084,20 +1134,21 @@ class _Reader:
         subject: str,
         arm: "_Arm",
         writes: set[str],
-    ) -> tuple[str, str, str, list[str]]:
-        """The arm's object followed from the caller into the call at *line*: ``(row, why, object, row_via)``."""
+    ) -> tuple[str, str, str, str, list[_WayStep]]:
+        """The arm's object followed from the caller into the call at *line*: ``(row, why, object, the path the way
+        starts by, its steps)``."""
         cls = subject.rpartition(".")[0]
         key = HISTORY_KEYS.get(cls, "")
         here = self.rows.get(owner)
         if here is None or not (arm.objects or arm.keys):
-            return "", ROW_NO_START, "", []
+            return "", ROW_NO_START, "", "", []
         if level == 0:
             held_objects = dict.fromkeys(arm.objects, 0)
             held_keys = dict.fromkeys(arm.keys, 0)
         else:
             held_objects, held_keys = self._handed(owner, point, arm)
             if not (held_objects or held_keys):
-                return "", ROW_NOT_HANDED, "", []
+                return "", ROW_NOT_HANDED, "", "", []
 
         def order(held: dict[str, int]) -> list[str]:
             # The path the call is handed before one below it or an element of it, then the shorter, then the
@@ -1139,9 +1190,10 @@ class _Reader:
                             HISTORY_ROW_CAN,
                             "",
                             said,
+                            start,
                             [
                                 *self._steps(owner, start, holder, whole),
-                                f"{owner}:{line} {call.path}",
+                                _WayStep(owner, line, _KEYED, call.path),
                             ],
                         )
                     another = another or call.path
@@ -1180,6 +1232,7 @@ class _Reader:
                                     HISTORY_ROW_CAN,
                                     "",
                                     said,
+                                    start,
                                     self._way(
                                         owner,
                                         line,
@@ -1192,25 +1245,27 @@ class _Reader:
                                         target,
                                         holder,
                                     )
-                                    + [f"{write} {keyed.path}"],
+                                    + [
+                                        _WayStep(target, keyed.line, _KEYED, keyed.path)
+                                    ],
                                 )
                             another = another or keyed.path
         if another:
-            return f"{ROW_ANOTHER}{another}", "", "", []
+            return f"{ROW_ANOTHER}{another}", "", "", "", []
         if hole:
-            return "", ROW_HOLE.format(why=hole), "", []
-        return "", ROW_NOT_TO_WRITER, "", []
+            return "", ROW_HOLE.format(why=hole), "", "", []
+        return "", ROW_NOT_TO_WRITER, "", "", []
 
     def _steps(
         self, owner: str, start: str, path: str, reach: objects.ObjectReach
-    ) -> list[str]:
+    ) -> list[_WayStep]:
         """How *owner*, holding the object by *start*, takes it to *path*: its bindings (``owner:line how path``),
         and where they alone do not, the bindings to the path that went into a call that handed the object back,
         the call (``owner:line <- callee path``), and the bindings from what it handed back."""
         row = self.rows[owner]
 
-        def said(steps: list[tuple[int, str, str]]) -> list[str]:
-            return [f"{owner}:{line} {how} {held}" for line, how, held in steps]
+        def said(steps: list[tuple[int, str, str]]) -> list[_WayStep]:
+            return [_WayStep(owner, line, how, held) for line, how, held in steps]
 
         direct = objects.steps_to(row, start, path)
         if direct or path == start:
@@ -1221,7 +1276,11 @@ class _Reader:
             into = objects.steps_to(row, start, went)
             tail = objects.steps_to(row, back, path)
             if (back == path or tail) and (went == start or into):
-                return [*said(into), f"{owner}:{at} <- {callee} {back}", *said(tail)]
+                return [
+                    *said(into),
+                    _WayStep(owner, at, _HANDED_BACK, back, callee),
+                    *said(tail),
+                ]
         return []
 
     def _way(
@@ -1236,12 +1295,12 @@ class _Reader:
         reach: objects.ObjectReach,
         target: str,
         holder: str,
-    ) -> list[str]:
+    ) -> list[_WayStep]:
         """Each step the object takes from the caller's *start* to *holder* in *target*: bindings and calls, by the
         states it is in (:func:`bamboo.codemap.objects.way_to`), from the first of *target*'s that reaches *holder*."""
         way = [
             *self._steps(owner, start, handed, whole),
-            f"{owner}:{line} -> {callee} {taken}",
+            _WayStep(owner, line, _CALL, taken, callee),
         ]
         states = [one for one in ((callee, taken), *reach.entered) if one[0] == target]
         state = next(
@@ -1254,8 +1313,192 @@ class _Reader:
         )
         for (caller, entry), at, (into, path), given in objects.way_to(reach, state):
             way += self._steps(caller, entry, given, reach)
-            way.append(f"{caller}:{at} -> {into} {path}")
+            way.append(_WayStep(caller, at, _CALL, path, into))
         return way + self._steps(target, state[1], holder, reach)
+
+    # -- a key given again between the point and the call -----------------------------------------------------------
+
+    def _rekeyed(
+        self,
+        owner: str,
+        func: ast.AST,
+        point: ast.stmt,
+        site: ast.stmt,
+        start: str,
+        steps: list[_WayStep],
+        key: str,
+    ) -> list[HistoryRekey]:
+        """Each assignment of the object's key between the point and the call (:attr:`HistoryPair.rekeyed`).
+
+        The walk holds the object by a path between two of its events, in the function they are in: the point, a
+        binding step, a call it is handed into and the callee's entry, a call that hands it back, and the call or the
+        history write.  An assignment of the key on that path -- or on the object a key path is the key of -- is one
+        where a way goes from one event to it and from it to the other, either way round, with none of the path's
+        killers on it (:meth:`_killers`); so is one a call made between the two gives where it is handed the object,
+        read the same way from the callee's entry (:meth:`_handed_in`).  A same pair's walk is the point and the call.
+        """
+        segments: list[tuple[str, ast.AST, list[tuple[Optional[ast.AST], str]]]] = [
+            (owner, func, [(point, start)])
+        ]
+        for step in steps:
+            here, at, events = segments[-1]
+            node = self._statement(at, step.line)
+            if step.kind == _CALL:
+                events.append((node, ""))
+                if step.callee not in self.funcs:
+                    break
+                callee = self.funcs[step.callee][1]
+                segments.append((step.callee, callee, [(callee.args, step.path)]))  # type: ignore[attr-defined]
+            else:
+                events.append((node, "" if step.kind == _KEYED else step.path))
+        if not steps:
+            segments[0][2].append((site, ""))
+        found: dict[tuple[str, str], HistoryRekey] = {}
+        for here, at, events in segments:
+            for (first, path), (second, _next) in zip(events, events[1:], strict=False):
+                if first is None or second is None or not path:
+                    continue
+                for one in self._key_assigns(here, at, path, key, first, second):
+                    found.setdefault((one.at, one.path), one)
+        return [found[one] for one in sorted(found)]
+
+    def _key_assigns(
+        self,
+        owner: str,
+        func: ast.AST,
+        path: str,
+        key: str,
+        first: ast.AST,
+        second: ast.AST,
+    ) -> list[HistoryRekey]:
+        """The assignments of *key* on the object *path* holds that run between *first* and *second*: its own, and
+        those of the calls between that are handed the object (:meth:`_handed_in`)."""
+        row = self.rows.get(owner)
+        if row is None:
+            return []
+        held = path[: -len(key) - 1] if path.endswith(f".{key}") else path
+        killers = self._killers(owner, func, held)
+        assigns, calls = self._key_candidates(owner, func, held, key)
+        middles = [*assigns, *calls]
+        if not middles:
+            return []
+        between = {id(one) for one in _between(first, middles, second, killers)}
+        found = [rekey for node, rekey in assigns.items() if id(node) in between]
+        for node, (callee, taken) in calls.items():
+            if id(node) in between:
+                found += self._handed_in(callee, taken, key, set())
+        return found
+
+    def _key_candidates(
+        self, owner: str, func: ast.AST, held: str, key: str
+    ) -> tuple[dict[ast.AST, HistoryRekey], dict[ast.AST, tuple[str, str]]]:
+        """The statements of *owner* that can give the object *held* holds its key: an assignment of it on *held* (by
+        its bare spelling), and a call it is handed into -- *held*, or a path it is below (``self`` for
+        ``self.job``) -- with the callee and the path the callee takes it as."""
+        if (owner, held, key) in self._candidates:
+            return self._candidates[(owner, held, key)]
+        row = self.rows[owner]
+        assigns: dict[ast.AST, HistoryRekey] = {}
+        for one in row.assigns:
+            if not (key in one.attrs or "*" in one.attrs) or not _same_path(
+                _bare(one.path), _bare(held)
+            ):
+                continue
+            node = self._statement(func, one.line)
+            if node is not None and node not in assigns:
+                assigns[node] = HistoryRekey(
+                    at=f"{owner}:{one.line}",
+                    path=f"{one.path}.{key}",
+                    value=_literal(node),
+                )
+        calls: dict[ast.AST, tuple[str, str]] = {}
+        for handed in row.call_bindings:
+            if (
+                not handed.to
+                or not handed.parameter
+                or handed.parameter.startswith("*")
+            ):
+                continue
+            rest = objects._under(handed.path, held)
+            if rest is None:
+                continue
+            node = self._statement(func, handed.line)
+            if node is not None and node not in assigns:
+                calls.setdefault(node, (handed.to, handed.parameter + handed.at + rest))
+        self._candidates[(owner, held, key)] = (assigns, calls)
+        return assigns, calls
+
+    def _statement(self, func: ast.AST, line: int) -> Optional[ast.stmt]:
+        """:func:`mustprints._statement_at`, kept: it walks the whole function, and the walk asks one line many times."""
+        if (id(func), line) not in self._statements:
+            self._statements[(id(func), line)] = mustprints._statement_at(func, line)
+        return self._statements[(id(func), line)]
+
+    def _handed_in(
+        self, owner: str, taken: str, key: str, seen: set[tuple[str, str]]
+    ) -> list[HistoryRekey]:
+        """What a call handed the object as *taken* gives its key: the same reading, from the callee's entry -- its
+        assignments of the key on *taken* that the entry reaches with none of the path's killers on the way, and the
+        calls it hands it on to.  ``clear_key(job)`` setting ``job.PandaID = None``; not a callee binding the path
+        again first (the adder's ``self.job = ...peekJobs(...)[0]`` reloads another object)."""
+        if (owner, taken, key) in self._handed_rekeys:
+            return self._handed_rekeys[(owner, taken, key)]
+        if (owner, taken) in seen or owner not in self.funcs or owner not in self.rows:
+            return []
+        seen = seen | {(owner, taken)}
+        func = self.funcs[owner][1]
+        killers = self._killers(owner, func, taken)
+        assigns, calls = self._key_candidates(owner, func, taken, key)
+        entry = func.args  # type: ignore[attr-defined]
+        found = [
+            rekey for node, rekey in assigns.items() if _flows(entry, node, killers)
+        ]
+        for node, (callee, inner) in calls.items():
+            if _flows(entry, node, killers):
+                found += self._handed_in(callee, inner, key, seen)
+        self._handed_rekeys[(owner, taken, key)] = found
+        return found
+
+    def _killers(self, owner: str, func: ast.AST, held: str) -> list[ast.AST]:
+        """The statements after which *held* no longer holds what it held: a binding of its root variable -- the bare
+        name, which ``name@line`` only splits --, and a binding or an assignment of it or of a field above it."""
+        cache = (owner, held)
+        if cache in self._held_killers:
+            return self._held_killers[cache]
+        parts = objects._tokens(held)
+        root = parts[0].partition("@")[0]
+        found: list[ast.AST] = []
+        if root != "self":
+            for binding in pathcond.bindings(func, root):
+                if binding.nested or binding.kind == pathcond.BIND_AUGMENTED:
+                    continue
+                if (one := _site_statement(binding.site)) is not None:
+                    found.append(one)
+        fields = ["".join(parts[:cut]) for cut in range(2, len(parts) + 1)]
+        row = self.rows[owner]
+        lines = {
+            binding.line
+            for binding in row.bindings
+            if binding.how != BIND_FILL
+            and any(_same_path(binding.name, one) for one in fields)
+        }
+        for one in row.assigns:
+            for attr in one.attrs:
+                if attr == "*":
+                    if any(
+                        objects._under(one.path, field) not in (None, "")
+                        for field in fields
+                    ):
+                        lines.add(one.line)
+                elif any(_same_path(f"{one.path}.{attr}", field) for field in fields):
+                    lines.add(one.line)
+        found += [
+            one
+            for one in (self._statement(func, line) for line in sorted(lines))
+            if one is not None
+        ]
+        self._held_killers[cache] = found
+        return found
 
     def _runs_at(
         self, owner: str, func: ast.AST, point: ast.stmt
@@ -1308,6 +1551,64 @@ def _enclosing_function(node: ast.AST) -> Optional[ast.AST]:
         if isinstance(held, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return held
     return None
+
+
+def _bare(path: str) -> str:
+    """*path* with each ``name@line`` as its name."""
+    return re.sub(r"@\d+", "", path)
+
+
+def _same_path(one: str, other: str) -> bool:
+    """Whether two paths name the same, read part by part (``[]`` is ``[0]`` and ``['k']``)."""
+    return objects._under(one, other) == "" and objects._under(other, one) == ""
+
+
+def _flows(first: ast.AST, second: ast.AST, killers: list[ast.AST]) -> bool:
+    """Whether a way goes from *first* -- a statement, or a function's parameters on entry -- to *second* with none of
+    *killers* on it, and the branches it takes agree (:func:`pathcond.surviving_writes`)."""
+    if first is second:
+        return True
+    if isinstance(second, ast.arguments):
+        return False
+    if isinstance(first, ast.arguments):
+        return bool(reaching(second, [first], killers))
+    return bool(pathcond.surviving_writes([first], second, killers=killers))
+
+
+def _between(
+    first: ast.AST, middles: list[ast.AST], second: ast.AST, killers: list[ast.AST]
+) -> list[ast.AST]:
+    """The *middles* that run between *first* and *second*, either way round, on ways with none of *killers*.
+
+    Asked of all at once: a middle neither kills another nor *first* (they are read as adding to what is there), so
+    the way from each to the other end is one flow, and the way to each from *first* one more."""
+    middles = [one for one in middles if one is not first and one is not second]
+    alone = [one for one in middles if any(one is killer for killer in killers)]
+    together = [one for one in middles if not any(one is held for held in alone)]
+
+    def into(start: ast.AST, end: ast.AST) -> list[ast.AST]:
+        if isinstance(end, ast.arguments):
+            return []
+        reached = (
+            pathcond.surviving_writes(together, end, rereads=together, killers=killers)
+            if together
+            else []
+        )
+        reached = [*reached, *(one for one in alone if _flows(one, end, killers))]
+        return [one for one in reached if _flows(start, one, killers)]
+
+    found = into(first, second) + into(second, first)
+    return [one for one in middles if any(one is held for held in found)]
+
+
+def _literal(statement: Optional[ast.AST]) -> str:
+    """The value an assignment gives, where it is a literal: ``None``; empty otherwise."""
+    value = getattr(statement, "value", None)
+    if isinstance(statement, (ast.Assign, ast.AnnAssign)) and isinstance(
+        value, ast.Constant
+    ):
+        return ast.unparse(value)
+    return ""
 
 
 def _site_statement(site: ast.AST) -> Optional[ast.AST]:

@@ -17,6 +17,7 @@ from bamboo.codemap.models import (
     Anchor,
     Branch,
     FunctionPrintsNode,
+    HistoryRekey,
     JunctionNode,
     MapFragment,
     RunKey,
@@ -614,6 +615,175 @@ def test_a_way_through_a_call_that_hands_the_object_back_says_how_it_went_in(
         "the call takes no path held" in failure
         for failure in history_pairs_resolve(fragment).failures
     )
+
+
+REKEYS = """\
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+
+class Rekeys(DBProxy):
+    def retry(self, job: JobSpec, new_id):
+        job.jobStatus = "retried"  # K1
+        job.PandaID = int(new_id)  # K2
+        self.note_change(job.PandaID, job.jobStatus)  # K3
+
+    def drop(self, job: JobSpec):
+        job.jobStatus = "dropped"  # K4
+        self.clear_key(job)  # K5
+        self.note_change(job.PandaID, job.jobStatus)  # K6
+
+    def clear_key(self, job):
+        job.PandaID = None  # K7
+
+    def store(self, jobs, new_ids):
+        for i, job in enumerate(jobs):  # K8
+            job.PandaID = new_ids[i]  # K9
+            job.jobStatus = "defined"  # K10
+            self.note_change(job.PandaID, job.jobStatus)  # K11
+
+    def renew(self, job: JobSpec):
+        job.jobStatus = "renewed"  # K12
+        self.renew_and_note(job)  # K13
+
+    def renew_and_note(self, job):
+        job.PandaID = int(self.new_id())  # K14
+        self.note_change(job.PandaID, job.jobStatus)  # K15
+
+    def new_id(self):
+        return 1
+
+    def check(self):
+        self.job.jobStatus = "checked"  # K16
+        self.reload_job()  # K17
+        self.note_change(self.job.PandaID, self.job.jobStatus)  # K18
+
+    def reload_job(self):
+        self.job = self.peek_new(self.job_id)  # K19
+
+    def peek_new(self, panda_id):
+        job = JobSpec()
+        job.PandaID = panda_id  # K20
+        return job
+"""
+
+
+def _rekeys(tmp_path: Path, *arms: tuple[str, str]) -> MapFragment:
+    return _build(
+        tmp_path,
+        [
+            ("rekeys", f"Rekeys.{owner}", marker, "JobSpec.jobStatus")
+            for owner, marker in arms
+        ],
+        spec=SPEC,
+        proxy=PROXY,
+        rekeys=REKEYS,
+    )
+
+
+def test_a_key_given_again_between_the_arm_and_the_history_call_is_said(
+    tmp_path: Path,
+) -> None:
+    """retryJob: the job is given the new PandaID after its arms and before its history row, which is the new key's."""
+    fragment = _rekeys(
+        tmp_path,
+        ("retry", "K1"),
+        ("drop", "K4"),
+        ("store", "K10"),
+        ("renew", "K12"),
+        ("check", "K16"),
+    )
+    rekeys = "pkg/rekeys.py::Rekeys"
+    (retried,) = _branch(fragment, "K1").history or []
+    assert (retried.row, retried.call) == (HISTORY_ROW_SAME, _line(REKEYS, "K3"))
+    assert retried.rekeyed == [
+        HistoryRekey(at=f"{rekeys}.retry:{_line(REKEYS, 'K2')}", path="job.PandaID")
+    ]
+    # A call between them that is handed the job and clears its key; the literal is said.
+    (dropped,) = _branch(fragment, "K4").history or []
+    assert dropped.rekeyed == [
+        HistoryRekey(
+            at=f"{rekeys}.clear_key:{_line(REKEYS, 'K7')}",
+            path="job.PandaID",
+            value="None",
+        )
+    ]
+    # The key given before the arm in the same pass is the pass's own; the next pass binds job again.
+    (stored,) = _branch(fragment, "K10").history or []
+    assert (stored.row, stored.rekeyed) == (HISTORY_ROW_SAME, [])
+    # In the function the way goes into.
+    (renewed,) = _branch(fragment, "K12").history or []
+    assert renewed.row == HISTORY_ROW_CAN
+    assert renewed.rekeyed == [
+        HistoryRekey(
+            at=f"{rekeys}.renew_and_note:{_line(REKEYS, 'K14')}", path="job.PandaID"
+        )
+    ]
+    # A call between that binds the path again first: another object is loaded, not this one given a key.
+    (checked,) = _branch(fragment, "K16").history or []
+    assert (checked.row, checked.rekeyed) == (HISTORY_ROW_SAME, [])
+    assert history_pairs_resolve(fragment).passed
+    retried.rekeyed = [
+        HistoryRekey(at=f"{rekeys}.retry:{_line(REKEYS, 'K1')}", path="job.PandaID")
+    ]
+    assert any(
+        "no assignment of it on the line" in failure
+        for failure in history_pairs_resolve(fragment).failures
+    )
+
+
+TASKS = """\
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+
+class JediTaskSpec:
+    _attributes = ("jediTaskID", "status")
+
+
+class Tasks(DBProxy):
+    def note_task(self, task_id, status):
+        sql = "INSERT INTO ATLAS_PANDA.TASKS_STATUSLOG (jediTaskID,status) VALUES (:jediTaskID,:status)"
+        self.cur.execute(sql, {":jediTaskID": task_id, ":status": status})
+
+    def clear(self, spec):
+        spec.jediTaskID = None  # T1
+
+    def job_side(self, job: JobSpec):
+        job.jobStatus = "x"  # T2
+        self.clear(job)  # T3
+        self.note_change(job.PandaID, job.jobStatus)  # T4
+
+    def task_side(self, task: JediTaskSpec):
+        task.status = "y"  # T5
+        self.clear(task)  # T6
+        self.note_task(task.jediTaskID, task.status)  # T7
+"""
+
+
+def test_a_call_between_is_read_for_the_key_of_the_pairs_class(tmp_path: Path) -> None:
+    """One callee, one path, asked for a job's PandaID and then for a task's jediTaskID: each its own answer."""
+    fragment = _build(
+        tmp_path,
+        [
+            ("tasks", "Tasks.job_side", "T2", "JobSpec.jobStatus"),
+            ("tasks", "Tasks.task_side", "T5", "JediTaskSpec.status"),
+        ],
+        spec=SPEC,
+        proxy=PROXY,
+        tasks=TASKS,
+    )
+    (job,) = _branch(fragment, "T2").history or []
+    (task,) = _branch(fragment, "T5").history or []
+    assert (job.row, job.rekeyed) == (HISTORY_ROW_SAME, [])
+    assert task.row == HISTORY_ROW_SAME
+    assert task.rekeyed == [
+        HistoryRekey(
+            at=f"pkg/tasks.py::Tasks.clear:{_line(TASKS, 'T1')}",
+            path="spec.jediTaskID",
+            value="None",
+        )
+    ]
 
 
 def _flags(tmp_path: Path, *markers: str) -> MapFragment:

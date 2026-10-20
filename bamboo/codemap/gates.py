@@ -31,6 +31,7 @@ from bamboo.codemap import evidence
 from bamboo.codemap.models import (
     BIND_RESULT,
     HISTORY_ROW_CAN,
+    HISTORY_ROW_SAME,
     HistoryPair,
     MapFragment,
     ReachNode,
@@ -1443,9 +1444,10 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                     failures.append(f"{at}: no run, and no reason given")
                 if not pair.row and not pair.row_why:
                     failures.append(f"{at}: row not read, and no reason given")
+                key = HISTORY_KEYS.get(junction.subject.rpartition(".")[0], "")
                 if pair.row == HISTORY_ROW_CAN:
-                    key = HISTORY_KEYS.get(junction.subject.rpartition(".")[0], "")
                     failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows, key)]
+                failures += [f"{at}: {why}" for why in _rekeyed_unresolved(pair, rows, key)]
     return GateResult(
         gate="history-pairs-resolve",
         passed=not failures,
@@ -1456,6 +1458,30 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
         failures=failures[:50],
         note=f"Unread, by reason: {dict(sorted(holes.items()))}.",
     )
+
+
+def _rekeyed_unresolved(pair: HistoryPair, rows: dict[str, ReachNode], key: str) -> list[str]:
+    """Why a pair's ``rekeyed`` names an assignment no record holds; empty where each is one.
+
+    Each is an assignment of the class's *key* -- by name, or a computed one -- at its line, on the path it names, in a
+    reach row; and only a ``same`` or ``can`` pair has one.
+    """
+    if pair.rekeyed and pair.row not in (HISTORY_ROW_SAME, HISTORY_ROW_CAN):
+        return [f"rekeyed on a {pair.row or 'unread'} row"]
+    failures = []
+    for one in pair.rekeyed:
+        owner, _sep, line = one.at.rpartition(":")
+        row = rows.get(owner)
+        assigned, dot, attr = one.path.rpartition(".")
+        if row is None or not dot or attr != key:
+            failures.append(f"rekeyed {one.at} {one.path}: not the key {key!r} of a path in a reach row")
+            continue
+        if not any(
+            str(held.line) == line and held.path == assigned and (key in held.attrs or "*" in held.attrs)
+            for held in row.assigns
+        ):
+            failures.append(f"rekeyed {one.at} {one.path}: no assignment of it on the line")
+    return failures
 
 
 def _row_via_unresolved(pair: HistoryPair, rows: dict[str, ReachNode], key: str) -> list[str]:

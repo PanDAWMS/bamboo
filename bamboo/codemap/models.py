@@ -434,6 +434,17 @@ HISTORY_BEFORE = "before"
 HISTORY_EITHER = "either"
 
 
+class HistoryRekey(BaseModel):
+    """Where a pair's object is given its key again between the point and the call (:attr:`HistoryPair.rekeyed`)."""
+
+    at: str = Field(description="``owner:line`` of the assignment: the caller, or a function on the pair's way.")
+    path: str = Field(description="The key assigned, in that function's names: ``job@3917.PandaID``.")
+    value: str = Field(
+        default="",
+        description="What it is given, where that is a literal -- ``None`` --; empty where the value is not read.",
+    )
+
+
 class HistoryPair(BaseModel):
     """A call that writes a history row in the same pass of a function as an arm.
 
@@ -468,8 +479,9 @@ class HistoryPair(BaseModel):
     reaches the writer's key: on some way, an element of a list among the
     others, the bindings read without order and without what the calls on the
     way down hand -- a row the pass can write, not one it wrote.  Where the
-    object is given a new key on the way (``retryJob``'s new ``PandaID``), the
-    row is the new key's while the run's mark holds the old one.
+    object is given a new key between the point and the call (``retryJob``'s
+    new ``PandaID``), the row is the new key's while the run's mark holds the
+    old one: ``rekeyed`` says where.
     """
 
     level: int = Field(description="0 for the arm's own function; n+1 for a caller of a level-n one.")
@@ -531,6 +543,17 @@ class HistoryPair(BaseModel):
             "(kept on the callee's ``self``, or returned), and last "
             "``owner:line key`` -- the history write and the path it is "
             "handed as its key."
+        ),
+    )
+    rekeyed: list[HistoryRekey] = Field(
+        default_factory=list,
+        description=(
+            "With ``same`` and ``can``, each assignment of the object's key "
+            "that runs between the point and the call, either way round, with "
+            "the path the object is held by not bound again on the way: in "
+            "the caller, in each function on ``row_via``, or in a call made "
+            "between that is handed the object.  Only an assignment on a path "
+            "the record follows the object by is seen, as with ``can`` itself."
         ),
     )
     runs: list[int] = Field(
