@@ -38,7 +38,12 @@ reach it, but a field and what a container holds without the statements'
 order, and what calls hand is not read (a branch a constant rules out is
 read as run), which can only say an object reaches more than it does.  The other way: what the
 record does not read (:mod:`bamboo.codemap.panda.objects` lists it) the
-object is not followed through, and it can reach more than this says.
+object is not followed through, and it can reach more than this says.  Nor
+is it followed past its caps -- a path longer than :data:`MAX_PARTS` parts,
+which is what stops a cycle (a job's file's owner is the job), more than
+:data:`MAX_HELD` paths in one function, :data:`MAX_STATES` states --, each
+said where it is met (:attr:`ObjectReach.capped`, :attr:`ObjectReach.cut`);
+:func:`may_change` names ``follow_capped`` where one was.
 
 A path's parts are matched one by one (:func:`_under`): ``[]``, an element
 at a position not known, matches a tuple's ``[i]`` and a literal key's
@@ -65,6 +70,14 @@ from bamboo.codemap.models import (
     ReachNode,
 )
 
+#: How many (function, path) states one answer reads before it stops and says so.
+MAX_STATES = 5000
+#: How many paths one function can hold the object by before the rest are dropped and said.
+MAX_HELD = 200
+#: The longest path followed, in parts after the root (:func:`_tokens`); where one longer is not, the answer says
+#: so (:attr:`ObjectReach.capped`).  The record keeps every path; this is how far one is read.
+MAX_PARTS = 6
+
 PREMISES: dict[str, str] = {
     "outside_assigns_nothing": (
         "Code outside the corpus assigns no attribute of an object of the corpus it is handed, other than through "
@@ -85,19 +98,19 @@ PREMISES: dict[str, str] = {
         "under one not spelled as a literal.  The corpus's classes with their own item access (MapWithLock, "
         "CachedObject) hand it to a dict."
     ),
+    "follow_capped": (
+        f"The object is followed to paths of at most {MAX_PARTS} parts, {MAX_HELD} paths in one function and "
+        f"{MAX_STATES} states, and no further, so it can reach more than it says.  The parts cap is what stops a "
+        "cycle: a job's file's owner is the job (JobSpec.addFile), and job.Files[]._owner.Files[]._owner names it "
+        "again."
+    ),
 }
-
-#: How many (function, path) states one answer reads before it stops and says so.
-MAX_STATES = 5000
-#: How many paths one function can hold the object by before the rest are dropped and said.
-MAX_HELD = 200
-#: The longest path followed, in parts after the root.
-MAX_PARTS = 6
 
 #: Why a hole the record keeps no reason for is one.
 NO_PARAMETER = "the call does not say which parameter takes it (*args, **kwargs)"
 STATES_SPENT = f"stopped after {MAX_STATES} (function, path) states"
 HELD_SPENT = f"the object is held by more than {MAX_HELD} paths in one function; the rest are not followed"
+PARTS_SPENT = f"a path longer than {MAX_PARTS} parts is not followed: {{path}}"
 
 RETURN = "<return>"
 
@@ -129,7 +142,11 @@ class ObjectReach(NamedTuple):
     #: owner -> every path of that function the object is held by
     held: dict[str, list[str]]
     states: int
+    #: why the follow stopped short -- :data:`STATES_SPENT`, :data:`HELD_SPENT` --; empty where it did not
     cut: str
+    #: where a path longer than :data:`MAX_PARTS` is not followed: the line that would hold the object by it, and
+    #: the path (:data:`PARTS_SPENT`)
+    capped: list[Site]
     #: owner -> how the object first came into that function: the caller, the line of the call, the path it has
     #: there, and the caller's path that was handed (:func:`way_to` reads a way back to the start from it)
     entered: dict[str, tuple[str, int, str, str]]
@@ -153,6 +170,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
     assigned: dict[str, dict[Site, None]] = defaultdict(dict)
     holes: dict[Site, None] = {}
     came_from: dict[Site, None] = {}
+    capped: dict[Site, None] = {}
     functions: dict[str, None] = {}
     held_in: dict[str, set[str]] = defaultdict(set)
     extra: dict[_State, set[str]] = defaultdict(set)
@@ -170,12 +188,19 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
     def into(child: _State, link: _Link, handed: str) -> None:
         """Bring the object into *child* by *link*; what *child* already says of it goes back at once."""
         if _parts(child[1]) > MAX_PARTS:
+            capped[
+                Site(
+                    link.caller[0],
+                    link.line,
+                    PARTS_SPENT.format(path=f"{child[1]} in {child[0]}"),
+                )
+            ] = None
             return
         if child[0] != owner:
             entered.setdefault(child[0], (link.caller[0], link.line, child[1], handed))
         if link not in links[child]:
             links[child].add(link)
-            if _hand_back(rows, link, outputs[child], extra, returned):
+            if _hand_back(rows, link, outputs[child], extra, returned, capped):
                 work.append(link.caller)
         if child not in read_with:
             work.append(child)
@@ -193,7 +218,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         if row is None:
             continue
         functions[at] = None
-        steps, spent = _held_steps(row, {start}, extra[state])
+        steps, spent = _held_steps(row, {start}, extra[state], capped)
         held = set(steps)
         rooted: dict[str, list[str]] = defaultdict(
             list
@@ -253,7 +278,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         if not ends <= outputs[state]:
             outputs[state] |= ends
             for link in sorted(links[state]):
-                if _hand_back(rows, link, outputs[state], extra, returned):
+                if _hand_back(rows, link, outputs[state], extra, returned, capped):
                     work.append(link.caller)
     escapes: dict[Site, None] = {}
     for end in sorted(outputs[root]):
@@ -270,6 +295,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         held={owner: sorted(paths) for owner, paths in held_in.items()},
         states=len(read_with),
         cut=cut,
+        capped=list(capped),
         entered=entered,
         returned=dict(returned),
     )
@@ -300,8 +326,10 @@ def _hand_back(
     ends: set[str],
     extra: dict[_State, set[str]],
     returned: dict[str, dict[str, tuple[int, str]]],
+    capped: dict[Site, None],
 ) -> bool:
-    """Put where the object ends up in the callee into the caller's state; whether that added a path."""
+    """Put where the object ends up in the callee into the caller's state; whether that added a path.  A path
+    longer than :data:`MAX_PARTS` is not put, and goes into *capped*."""
     caller = rows.get(link.caller[0])
     if caller is None or not ends:
         return False
@@ -326,14 +354,16 @@ def _hand_back(
                 receivers = [link.via]
             names = [receiver + below for receiver in receivers]
         for name in names:
-            if (
-                name != link.caller[1]
-                and name not in held
-                and _parts(name) <= MAX_PARTS
-            ):
-                held.add(name)
-                returned[link.caller[0]].setdefault(name, (link.line, link.to))
-                added = True
+            if name == link.caller[1] or name in held:
+                continue
+            if _parts(name) > MAX_PARTS:
+                capped[
+                    Site(link.caller[0], link.line, PARTS_SPENT.format(path=name))
+                ] = None
+                continue
+            held.add(name)
+            returned[link.caller[0]].setdefault(name, (link.line, link.to))
+            added = True
     return added
 
 
@@ -344,7 +374,10 @@ def _held(row: ReachNode, start: set[str]) -> tuple[set[str], bool]:
 
 
 def _held_steps(
-    row: ReachNode, start: set[str], returned: set[str] = frozenset()
+    row: ReachNode,
+    start: set[str],
+    returned: set[str] = frozenset(),
+    capped: Optional[dict[Site, None]] = None,
 ) -> tuple[dict[str, Optional[tuple[str, int, str]]], bool]:
     """Every path of *row*'s function that holds what *start* holds, each with the step it was first reached by.
 
@@ -418,12 +451,23 @@ def _held_steps(
                     taken = to + rest
                     if way == _FORWARD and (taken in entered or taken not in held):
                         entered[taken].add(index)
-                    if taken not in held and _parts(taken) <= MAX_PARTS:
-                        if len(held) >= MAX_HELD:
-                            return held, True
-                        how = binding.how if way == _FORWARD else f"{binding.how} back"
-                        reach(taken, (one, binding.line, how))
-                        changed = True
+                    if taken in held:
+                        continue
+                    if _parts(taken) > MAX_PARTS:
+                        if capped is not None:
+                            capped[
+                                Site(
+                                    row.owner,
+                                    binding.line,
+                                    PARTS_SPENT.format(path=taken),
+                                )
+                            ] = None
+                        continue
+                    if len(held) >= MAX_HELD:
+                        return held, True
+                    how = binding.how if way == _FORWARD else f"{binding.how} back"
+                    reach(taken, (one, binding.line, how))
+                    changed = True
         if not changed and pending:
             for one in pending:
                 if one not in held:
@@ -511,7 +555,8 @@ def _holds(held: set[str], path: str) -> bool:
 
 
 def _parts(path: str) -> int:
-    return path.count(".") + path.count("[")
+    """How many parts *path* has after its root, as :func:`_under` reads them (:func:`_tokens`)."""
+    return len(_tokens(path)) - 1
 
 
 def _receivers_of(caller: ReachNode, link: _Link) -> list[str]:
@@ -666,9 +711,14 @@ def may_change(
     # The row's key is followed as an object is: from *keys*, and from the object's own key attribute, which
     # goes on as a value -- ``recordStatusChange(job.PandaID, ...)``.
     keyed: dict[str, set[str]] = defaultdict(set)
+    capped = bool(obj.capped or obj.cut)
     for one in (*keys, f"{path}.{key_column}"):
-        for at, paths in follow(rows, owner, one).held.items():
+        key = follow(rows, owner, one)
+        capped = capped or bool(key.capped or key.cut)
+        for at, paths in key.held.items():
             keyed[at] |= set(paths)
+    if capped:
+        premises.append("follow_capped")
     closure = _closure(rows, owner)
     for at in closure:
         row = rows[at]

@@ -1058,8 +1058,6 @@ class _Reader:
                             into[start + rest] = min(into.get(start + rest, rank), rank)
 
         for start in sorted(handed | below | {one + "[]" for one in handed | below}):
-            if objects._parts(start) > objects.MAX_PARTS:
-                continue
             held, _spent = objects._held(here, {start})
             for call in at:
                 for one in held:

@@ -678,6 +678,73 @@ class Fixer:
     assert {"jobStatus", "ddmErrorCode"} <= set(other.assigned)
 
 
+def test_the_record_keeps_every_path_and_follow_says_where_its_cap_stops_it(
+    tmp_path,
+):
+    """A file's owner is the job (JobSpec.addFile), so ``job.Files[]._owner`` names the job again, and again: the
+    parts cap is what stops the cycle, and follow says where it did; may_change names ``follow_capped``.  The
+    record keeps a path however long -- how far one is read is follow's."""
+    owned = """\
+class FileSpec:
+    def setOwner(self, owner):
+        self._owner = owner
+
+
+class Job:
+    def __init__(self):
+        self.Files = []
+
+    def addFile(self, file: FileSpec):
+        file.setOwner(self)
+        self.Files.append(file)
+
+
+class Runner:
+    def run(self, job: Job, f: FileSpec):
+        job.addFile(f)
+        deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": job}}}}}}}
+        return deep
+
+    def other(self, job: Job):
+        job.jobStatus = "failed"
+"""
+    fragment = _build(tmp_path, spec=SPEC, owned=owned)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/owned.py::Runner.run"
+    deep = "deep['a']['b']['c']['d']['e']['f']['g']"
+    assert (deep, "job") in {(b.name, b.path) for b in rows[run].bindings}
+
+    found = objects.follow(rows, run, "job")
+    assert found.held[run] == [
+        "job",
+        "job.Files[]._owner",
+        "job.Files[]._owner.Files[]._owner",
+    ]
+    spent = objects.PARTS_SPENT.format(path="")
+    assert {
+        (site.owner, site.line, site.how[len(spent) :]) for site in found.capped
+    } == {
+        (run, _line(owned, "deep = "), deep),
+        (run, _line(owned, "deep = "), deep + ".Files[]._owner"),
+        (run, _line(owned, "deep = "), deep + ".Files[]._owner.Files[]._owner"),
+        (
+            "pkg/owned.py::FileSpec.setOwner",
+            _line(owned, "self._owner = owner"),
+            "self._owner.Files[]._owner.Files[]._owner",
+        ),
+    }
+    assert all(
+        objects._parts(path) <= objects.MAX_PARTS
+        for paths in found.held.values()
+        for path in paths
+    )
+    assert "follow_capped" in objects.may_change(rows, run, "job", "jobStatus").premises
+    plain = objects.may_change(rows, "pkg/owned.py::Runner.other", "job", "jobStatus")
+    assert "follow_capped" not in plain.premises
+    # Parts are counted as _under reads them: a literal key is one, whatever it holds.
+    assert objects._parts("varMap[':a.b']") == 1
+
+
 FORMS = """\
 from typing import Iterator
 

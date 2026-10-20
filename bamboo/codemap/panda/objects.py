@@ -20,10 +20,13 @@ This module records, once per function, what that following reads:
   the parameter that takes it, the receiver as ``self``; a hole's own.
 
 A path is rooted at a name of the function -- a parameter, ``self``, a local
--- so a module's logger or a class read for its methods is not one.  A
-local name bound at two or more statements is a name for each, ``res@96``
-and ``res@472`` -- a parameter's entry is one, under its bare name --, and
-a use is the ones that reach it (:class:`_Versions`); a field and what a
+-- so a module's logger or a class read for its methods is not one --, and
+is kept however long it is: a statement's paths are as long as its source,
+and how far an object is followed is follow's to say
+(:data:`bamboo.codemap.objects.MAX_PARTS`).  A local name bound at two or
+more statements is a name for each, ``res@96`` and ``res@472`` -- a
+parameter's entry is one, under its bare name --, and a use is the ones
+that reach it (:class:`_Versions`); a field and what a
 container holds are read without the order of the statements -- bound to a
 path anywhere, held everywhere in the function --, which can only say an
 object reaches more than it does.
@@ -92,16 +95,12 @@ from bamboo.codemap.models import (
     SourceModule,
     WrittenValue,
 )
-from bamboo.codemap.objects import RETURN, _parts
+from bamboo.codemap.objects import RETURN
 from bamboo.codemap.panda import pathcond, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
 #: The classes whose columns an assignment is kept for (tmaeno, 10-18: D1).
 COLUMN_CLASSES = ("JobSpec", "JediTaskSpec", "FileSpec")
-
-#: The longest path kept, in parts after the root: deeper reads are of objects
-#: an object holds, not of the object.
-MAX_PARTS = 5
 
 #: Builtins that hand back the elements of what they are given, at positions not known.
 _ELEMENTS_OF = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
@@ -658,16 +657,12 @@ class _Values:
     def _bind(self, line: int, name: str, held: str, how: str) -> None:
         if name == held and "[" not in name:
             return  # x = x; but x = list(x) says x's elements are at any position
-        if _parts(name) > MAX_PARTS or _parts(held) > MAX_PARTS:
-            return
         self.bindings.setdefault(
             (line, name, held, how),
             PathBinding(line=line, name=name, path=held, how=how),
         )
 
     def _bind_result(self, name: str, call: ast.Call, below: str) -> None:
-        if _parts(name) > MAX_PARTS or _parts(below) > MAX_PARTS:
-            return
         to = self.to_of(call)
         self.bindings.setdefault(
             (call.lineno, name, below, BIND_RESULT, tuple(to)),
@@ -703,7 +698,7 @@ class _Values:
         found = []
         for item in self.carried(target.value):
             base = self.held_by(item) if not item.at else None
-            if base is not None and _parts(base + part) <= MAX_PARTS:
+            if base is not None:
                 found.append(base + part)
         return found
 
@@ -1059,7 +1054,7 @@ def _path(
             parts.append(_subscript(expr.slice, store=store and outer))
         outer = False
         expr = expr.value
-    if not isinstance(expr, ast.Name) or expr.id not in names or len(parts) > MAX_PARTS:
+    if not isinstance(expr, ast.Name) or expr.id not in names:
         return None
     return expr.id + "".join(reversed(parts))
 
