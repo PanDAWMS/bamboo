@@ -786,6 +786,95 @@ def test_a_call_between_is_read_for_the_key_of_the_pairs_class(tmp_path: Path) -
     ]
 
 
+LOOPS = """\
+from pkg.proxy import DBProxy
+
+
+class JediTaskSpec:
+    _attributes = ("jediTaskID", "status")
+
+
+class Loops(DBProxy):
+    def note_task(self, task_id, status):
+        sql = "INSERT INTO ATLAS_PANDA.TASKS_STATUSLOG (jediTaskID,status) VALUES (:jediTaskID,:status)"
+        self.cur.execute(sql, {":jediTaskID": task_id, ":status": status})
+
+    def restart(self, first, second):
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID"
+        for task_id in first:  # L1F
+            var_map = {}
+            var_map[":jediTaskID"] = task_id
+            var_map[":status"] = "defined"  # L1
+            self.cur.execute(sql, var_map)  # L1X
+        for task_id in second:  # L2F
+            var_map = {}
+            var_map[":jediTaskID"] = task_id
+            var_map[":status"] = "ready"  # L2
+            self.cur.execute(sql, var_map)  # L2X
+            self.note_task(task_id, "ready")  # L3
+
+    def retry(self, task_id, done):
+        new_status = None  # L4
+        if done:
+            new_status = "finished"  # L5
+        else:
+            new_status = "ready"
+        var_map = {":jediTaskID": task_id, ":status": new_status}
+        self.cur.execute("UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID", var_map)
+        self.note_task(task_id, new_status)  # L6
+
+    def broken(self, task_id):
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status='broken' "  # L7
+        sql += "WHERE jediTaskID=:jediTaskID"
+        var_map = {":jediTaskID": task_id}
+        self.cur.execute(sql, var_map)  # L7X
+        self.cur.execute(sql, var_map)  # L7Y
+        self.note_task(task_id, "broken")  # L8
+"""
+
+
+def test_an_sql_arm_is_the_row_of_the_calls_it_gives_its_value_to(
+    tmp_path: Path,
+) -> None:
+    """A loop's map bound again is that loop's own; a value through a name, or in the text, is the arm's."""
+    fragment = _build(
+        tmp_path,
+        [
+            ("loops", f"Loops.{owner}", marker, "JediTaskSpec.status")
+            for owner, marker in (
+                ("restart", "L1"),
+                ("restart", "L2"),
+                ("retry", "L4"),
+                ("retry", "L5"),
+                ("broken", "L7"),
+            )
+        ],
+        spec=SPEC,
+        proxy=PROXY,
+        loops=LOOPS,
+    )
+    rows = {row.owner: row for row in fragment.reach_graph}
+    # One statement run in two loops, each with its own map, is two writes; run twice with one map, one.
+    first, second = (f"task_id@{_line(LOOPS, marker)}" for marker in ("L1F", "L2F"))
+    assert [
+        (write.lines, [key.path for key in write.keys])
+        for write in rows["pkg/loops.py::Loops.restart"].writes
+    ] == [([_line(LOOPS, "L1X")], [first]), ([_line(LOOPS, "L2X")], [second])]
+    (twice,) = rows["pkg/loops.py::Loops.broken"].writes
+    assert twice.lines == [_line(LOOPS, "L7X"), _line(LOOPS, "L7Y")]
+
+    def row(marker: str) -> tuple[str, str]:
+        (pair,) = _branch(fragment, marker).history or []
+        return pair.row, pair.row_why
+
+    assert row("L1") == (f"{runs.ROW_ANOTHER}{second}", "")
+    assert row("L2") == (HISTORY_ROW_CAN, "")
+    # None is assigned again on every way to the bind: no call writes it.
+    assert row("L4") == ("", runs.ROW_NO_START)
+    assert row("L5") == (HISTORY_ROW_CAN, "")
+    assert row("L7") == (HISTORY_ROW_CAN, "")
+
+
 def _flags(tmp_path: Path, *markers: str) -> MapFragment:
     arms = [
         ("flags", f"Flags.{owner}", marker, "JobSpec.jobStatus")

@@ -4487,7 +4487,12 @@ class DbWrite(BaseModel):
     value, and lands on the row its keys name.
     """
 
-    lines: list[int] = Field(description="The lines of the calls that run it.")
+    lines: list[int] = Field(
+        description=(
+            "The lines of the calls that run it with these values and keys: a statement run from two places"
+            " with other ones is two writes."
+        )
+    )
     table: str
     kind: str = Field(description="``insert`` or ``update``.")
     columns: list[WrittenValue] = Field(default_factory=list, description="Each column it writes by name, a bind read once per value.")

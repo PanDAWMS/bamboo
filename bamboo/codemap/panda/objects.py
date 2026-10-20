@@ -70,7 +70,8 @@ gives its keys, but ``for k in d`` is read as d's values (more, not less).
 :meth:`_Reader.writes` adds the statements that write rows
 (:class:`~bamboo.codemap.models.DbWrite`): each written column's value as a
 path or another value, the keys of the row, and whether the bind map is the
-whole of one object (``job.valuesMap()``).
+whole of one object (``job.valuesMap()``) -- read at each call that runs the
+statement, the calls with the same values and keys one write.
 """
 
 from __future__ import annotations
@@ -184,7 +185,16 @@ class _Reader:
         )
 
     def writes(self, func: ast.AST) -> list[DbWrite]:
-        """Each statement *func* runs that writes rows, with where its values and keys come from."""
+        """Each statement *func* runs that writes rows, with where its values and keys come from.
+
+        A statement run from two or more places (:attr:`sql.Execution.calls`)
+        is read at each: the calls whose values and keys are the same are one
+        write, with their lines, and the others a write each.  Read at all of
+        them at once, one call's keys stood beside another's values --
+        ``restartTasksForContentsUpdate_JEDI`` runs one ``UPDATE`` in a loop
+        over one query's tasks and again in a loop over another's, and the
+        write named both loops' tasks as the row of each.
+        """
         names = _local_names(func)
         versions = _Versions(func, names)
         found: list[DbWrite] = []
@@ -193,76 +203,94 @@ class _Reader:
         except Exception:  # noqa: BLE001 -- the reach row has the hole
             return found
         for run in runs:
-            text = run.reading
-            try:
-                read = sqltext.writes(text)
-                tables = [(table, "insert") for table in sqltext.creates(text)] + [
-                    (table, "update") for table in sqltext.updates(text)
-                ]
-            except Exception:  # noqa: BLE001
-                continue
-            if not read and not tables:
-                continue
-            whole, changed, sequenced = _whole_row(func, run, versions)
-            unread = bool(run.unread_columns)
-            new_row = sequenced or any(
-                "useSeq=True" in (hole.source or "").replace(" ", "")
-                for _offset, hole in run.holes
-            )
-            lines = sorted({call.lineno for call in run.run_at})
-            seen: set[str] = set()
-            for one in read:
-                seen.add(one.table.lower())
-                found.append(
-                    DbWrite(
-                        lines=lines,
-                        table=one.table,
-                        kind=one.kind,
-                        columns=[
-                            value
-                            for column, given in sorted(one.columns.items())
-                            for value in self._values(
-                                func, run, column, given, whole, versions
-                            )
-                        ],
-                        whole=whole,
-                        changed=changed,
-                        unread=unread,
-                        keys=[
-                            value
-                            for column, bind in sorted(one.keys.items())
-                            for value in self._values(
-                                func, run, column, sqltext.classify(bind), "", versions
-                            )
-                        ],
-                        new_row=new_row
-                        or any(
-                            "nextval" in given.text.lower()
-                            for given in one.columns.values()
-                        ),
-                    )
-                )
-            for table, kind in tables:
-                bare = table.rpartition(".")[2]
-                if bare.lower() not in seen:
-                    # Nothing named, but rows written: a whole row of {}, or a SET only of names made at run time.
-                    seen.add(bare.lower())
-                    found.append(
-                        DbWrite(
-                            lines=lines,
-                            table=bare,
-                            kind=kind,
-                            whole=whole,
-                            changed=changed,
-                            unread=True,
-                            new_row=new_row,
-                        )
-                    )
+            alike: dict[str, DbWrite] = {}
+            for call in run.run_at:
+                for one in self._run_writes(
+                    func, run._replace(calls=(call,)), versions
+                ):
+                    same = one.model_dump_json(exclude={"lines"})
+                    if same in alike:
+                        alike[same].lines = sorted({*alike[same].lines, *one.lines})
+                    else:
+                        alike[same] = one
+            found.extend(alike.values())
         # One statement read in several variants of its text says the same write more than once.
         unique: dict[str, DbWrite] = {}
         for one in found:
             unique.setdefault(one.model_dump_json(), one)
         return list(unique.values())
+
+    def _run_writes(
+        self, func: ast.AST, run: sql.Execution, versions: "_Versions"
+    ) -> list[DbWrite]:
+        """The writes of *run*'s statement, read at its calls."""
+        found: list[DbWrite] = []
+        text = run.reading
+        try:
+            read = sqltext.writes(text)
+            tables = [(table, "insert") for table in sqltext.creates(text)] + [
+                (table, "update") for table in sqltext.updates(text)
+            ]
+        except Exception:  # noqa: BLE001
+            return found
+        if not read and not tables:
+            return found
+        whole, changed, sequenced = _whole_row(func, run, versions)
+        unread = bool(run.unread_columns)
+        new_row = sequenced or any(
+            "useSeq=True" in (hole.source or "").replace(" ", "")
+            for _offset, hole in run.holes
+        )
+        lines = sorted({call.lineno for call in run.run_at})
+        seen: set[str] = set()
+        for one in read:
+            seen.add(one.table.lower())
+            found.append(
+                DbWrite(
+                    lines=lines,
+                    table=one.table,
+                    kind=one.kind,
+                    columns=[
+                        value
+                        for column, given in sorted(one.columns.items())
+                        for value in self._values(
+                            func, run, column, given, whole, versions
+                        )
+                    ],
+                    whole=whole,
+                    changed=changed,
+                    unread=unread,
+                    keys=[
+                        value
+                        for column, bind in sorted(one.keys.items())
+                        for value in self._values(
+                            func, run, column, sqltext.classify(bind), "", versions
+                        )
+                    ],
+                    new_row=new_row
+                    or any(
+                        "nextval" in given.text.lower()
+                        for given in one.columns.values()
+                    ),
+                )
+            )
+        for table, kind in tables:
+            bare = table.rpartition(".")[2]
+            if bare.lower() not in seen:
+                # Nothing named, but rows written: a whole row of {}, or a SET only of names made at run time.
+                seen.add(bare.lower())
+                found.append(
+                    DbWrite(
+                        lines=lines,
+                        table=bare,
+                        kind=kind,
+                        whole=whole,
+                        changed=changed,
+                        unread=True,
+                        new_row=new_row,
+                    )
+                )
+        return found
 
     def _values(
         self, func, run, column: str, given, whole: str, versions: "_Versions"

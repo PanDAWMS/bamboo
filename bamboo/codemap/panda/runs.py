@@ -59,7 +59,8 @@ the key the writer is handed:
 
 - the object is the path the arm assigns on, the receiver of a method of its
   class it runs (``taskSpec.setOnHold()``), or for an SQL arm the key of the
-  row the statement it fills writes;
+  row each call it gives the column's value to writes (:meth:`_Reader._gives`:
+  not every call after it -- a loop's map bound again gives that loop's own);
 - at a caller of the arm's function, the object is the path of the caller
   whose follow through the call on the way holds the arm's object there --
   a path the call is handed, a path below one (``self.job`` for
@@ -332,6 +333,7 @@ class _Reader:
             tuple[dict[ast.AST, HistoryRekey], dict[ast.AST, tuple[str, str]]],
         ] = {}
         self._statements: dict[tuple[int, int], Optional[ast.stmt]] = {}
+        self._executions: dict[int, list[sql.Execution]] = {}
         self._targets: dict[str, C.Target] = {}
         self._callers: dict[str, list[C.CallSite]] = {}
         # Plain calls only, as one pass follows them.
@@ -963,15 +965,13 @@ class _Reader:
             return _Arm(
                 owner, frozenset(held), frozenset(f"{one}.{key}" for one in held)
             )
-        # An SQL arm: the key of the row each statement it can fill writes.
+        # An SQL arm: the key of the row each call it gives the column's value to writes.
         keys: set[str] = set()
         for write in row.writes:
             if not any(value.column.lower() == attr.lower() for value in write.columns):
                 continue
-            ran = [mustprints._statement_at(func, one) for one in write.lines]
             if not any(
-                one is not None and (one is statement or reaching(one, [statement]))
-                for one in ran
+                self._gives(func, statement, line, attr) for line in write.lines
             ):
                 continue
             named = [*write.keys, *(write.columns if write.kind == "insert" else [])]
@@ -1434,6 +1434,44 @@ class _Reader:
             self._statements[(id(func), line)] = mustprints._statement_at(func, line)
         return self._statements[(id(func), line)]
 
+    def _gives(self, func: ast.AST, arm: ast.stmt, line: int, attr: str) -> bool:
+        """Whether the SQL arm *arm* gives the value of *attr* the call on *line* writes.
+
+        It does where it is the call's statement; a step of a piece of the
+        text the call runs (``sqlJ += ",jobExecutionID=0"``: every call of the
+        text writes it); the site of a bind of the column the call runs with;
+        or a statement binding a name the bind's value is read from, followed
+        back through the names each value is read from (``newTaskStatus =
+        "running"`` ... ``varMap[":status"] = newTaskStatus``).  A call that
+        only comes after the arm is not given it:
+        ``restartTasksForContentsUpdate_JEDI`` binds ``:newStatus`` in one
+        loop's map, and the next loop runs the statement with a map of its own.
+        In the arm is by node, not by line: a piece's way can go through a
+        callee.
+        """
+        if self._statement(func, line) is arm:
+            return True
+        if id(func) not in self._executions:
+            try:
+                self._executions[id(func)] = sql.executions(func)  # type: ignore[arg-type]
+            except Exception:  # noqa: BLE001 -- the record keeps no write of it
+                self._executions[id(func)] = []
+        inside = {id(node) for node in ast.walk(arm)}
+        for run in self._executions[id(func)]:
+            for call in run.run_at:
+                if call.lineno != line:
+                    continue
+                if any(
+                    id(at) in inside for _start, _end, way in run.pieces for at in way
+                ):
+                    return True
+                if any(
+                    _read_from(func, bind, inside)
+                    for bind in _column_binds(func, run, call, attr)
+                ):
+                    return True
+        return False
+
     def _handed_in(
         self, owner: str, taken: str, key: str, seen: set[tuple[str, str]]
     ) -> list[HistoryRekey]:
@@ -1609,6 +1647,44 @@ def _literal(statement: Optional[ast.AST]) -> str:
     ):
         return ast.unparse(value)
     return ""
+
+
+def _column_binds(
+    func: ast.AST, run: sql.Execution, call: ast.Call, attr: str
+) -> list[sql.Bind]:
+    """The binds of *attr*'s column that *call* runs *run*'s statement with."""
+    try:
+        read = sqltext.writes(run.reading)
+    except Exception:  # noqa: BLE001 -- the record keeps no write of it
+        return []
+    found: list[sql.Bind] = []
+    for one in read:
+        for column, given in one.columns.items():
+            if column.lower() != attr.lower() or given.kind != "bind":
+                continue
+            if run.varmap:
+                found += sql.bound_values(func, run.varmap, given.text, at=(call,))  # type: ignore[arg-type]
+            else:
+                found += sql.inline_binds(call, given.text)
+    return found
+
+
+def _read_from(func: ast.AST, bind: sql.Bind, inside: set[int]) -> bool:
+    """Whether *bind*'s site, or a statement binding a name its value is read from, followed back, is in *inside*."""
+    todo = [(bind.site, bind.value)]
+    seen: set[int] = set()
+    while todo:
+        site, value = todo.pop()
+        if id(site) in inside:
+            return True
+        for name in sorted(
+            {node.id for node in ast.walk(value) if isinstance(node, ast.Name)}
+        ):
+            for one in pathcond.reaching_definitions(func, name, site):  # type: ignore[arg-type]
+                if id(one) not in seen:
+                    seen.add(id(one))
+                    todo.append((pathcond.site_of(one), one))
+    return False
 
 
 def _site_statement(site: ast.AST) -> Optional[ast.AST]:
