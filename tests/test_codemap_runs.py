@@ -17,6 +17,7 @@ from bamboo.codemap.models import (
     Anchor,
     Branch,
     FunctionPrintsNode,
+    HistoryPair,
     HistoryRekey,
     JunctionNode,
     MapFragment,
@@ -830,6 +831,17 @@ class Loops(DBProxy):
         self.cur.execute(sql, var_map)  # L7X
         self.cur.execute(sql, var_map)  # L7Y
         self.note_task(task_id, "broken")  # L8
+
+    def retry_text(self, task_id, ok):
+        sql_new ="UPDATE ATLAS_PANDA.JEDI_Tasks SET status='ready' WHERE jediTaskID=:jediTaskID"  # R1
+        sql_back = "UPDATE ATLAS_PANDA.JEDI_Tasks SET modificationTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID"
+        var_map = {":jediTaskID": task_id}
+        if ok:
+            self.cur.execute(sql_new, var_map)
+            self.note_task(task_id, "ready")  # R2
+        else:
+            self.cur.execute(sql_back, var_map)
+            self.note_task(task_id, "kept")  # R3
 """
 
 
@@ -873,6 +885,104 @@ def test_an_sql_arm_is_the_row_of_the_calls_it_gives_its_value_to(
     assert row("L4") == ("", runs.ROW_NO_START)
     assert row("L5") == (HISTORY_ROW_CAN, "")
     assert row("L7") == (HISTORY_ROW_CAN, "")
+
+
+ONEPASS = """\
+from pkg.proxy import DBProxy
+
+
+class OnePass(DBProxy):
+    def sort_jobs(self, jobs):
+        activate = []
+        update = []
+        for job in jobs:
+            if job.jobStatus == "failed":
+                continue
+            elif job.dispatchDBlock == "NULL":
+                activate.append(job)  # O1
+            else:
+                update.append(job)  # O2
+        for job in activate:
+            job.jobStatus = "finished"  # O3
+        for other in update:
+            self.record(other)  # O4
+
+    def record(self, job):
+        self.note_change(job.PandaID, job.jobStatus)
+
+    def jumbo(self, jobs):
+        failed = []
+        for job in jobs:
+            if job.jobStatus == "failed":
+                failed.append(job)  # J0
+                continue
+            try:
+                self.register(job)
+            except Exception:
+                job.jobStatus = "failed"  # J1
+                failed.append(job)  # J2
+                continue
+        for one in failed:
+            self.note_change(one.PandaID, one.jobStatus)  # J3
+
+    def check(self, jobs, candidates):
+        for job in jobs:
+            if not candidates:
+                continue
+            job.jobStatus = "checked"  # K1
+            taken = job  # K2
+            candidates = [one for one in candidates if one != job.computingSite]
+            if not candidates:
+                self.note_change(taken.PandaID, taken.jobStatus)  # K3
+"""
+
+
+def test_a_way_is_one_that_runs_in_one_pass(tmp_path: Path) -> None:
+    """The record reads a container's elements without order or branches; a way it gives is checked before ``can``.
+
+    ``Setupper.update_jobs``: a job goes into ``activate`` in the ``elif`` or
+    into ``update`` in the ``else``, so ``activate``'s jobs are not
+    ``update``'s.  ``setup_jumbo_jobs``: a job failed in the ``except`` goes
+    into ``failed`` at J2, not at J0 above it, which a pass that reaches J1 has
+    left by its ``continue``.  ``AtlasProdTaskBroker``: ``if not candidates``
+    tested after ``candidates`` is given a new value does not contradict the
+    early exit above.  An SQL arm in an ``if`` is not the row the ``else``
+    records.
+    """
+    fragment = _build(
+        tmp_path,
+        [
+            ("onepass", "OnePass.sort_jobs", "O3", "JobSpec.jobStatus"),
+            ("onepass", "OnePass.jumbo", "J1", "JobSpec.jobStatus"),
+            ("onepass", "OnePass.check", "K1", "JobSpec.jobStatus"),
+            ("loops", "Loops.retry_text", "R1", "JediTaskSpec.status"),
+        ],
+        spec=SPEC,
+        proxy=PROXY,
+        onepass=ONEPASS,
+        loops=LOOPS,
+    )
+
+    def pairs(marker: str) -> list[HistoryPair]:
+        return _branch(fragment, marker).history or []
+
+    (sorted_out,) = pairs("O3")
+    assert (sorted_out.row, sorted_out.row_why.split(":")[0]) == (
+        "",
+        runs.ROW_NO_WAY.split(":")[0],
+    )
+    assert "OnePass.sort_jobs:" in sorted_out.row_why
+
+    (failed,) = pairs("J1")
+    assert failed.row == HISTORY_ROW_CAN
+    assert any(f":{_line(ONEPASS, 'J2')} " in step for step in failed.row_via)
+    assert not any(f":{_line(ONEPASS, 'J0')} " in step for step in failed.row_via)
+
+    (checked,) = pairs("K1")
+    assert checked.row == HISTORY_ROW_CAN
+
+    rows = {pair.call: pair.row for pair in pairs("R1")}
+    assert rows == {_line(LOOPS, "R2"): HISTORY_ROW_CAN, _line(LOOPS, "R3"): ""}
 
 
 def _flags(tmp_path: Path, *markers: str) -> MapFragment:

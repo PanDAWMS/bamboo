@@ -15771,6 +15771,104 @@ def test_a_new_value_in_an_arm_the_pass_does_not_enter_leaves_two_tests_contradi
     assert pathcond.parted(assigned["new"], assigned["unlock"], exits=False)
 
 
+def test_a_test_and_its_negation_are_matched_as_they_mean_not_as_spelled():
+    """``ppEventServiceJob``: ``if noNewJob:`` and, further down, ``if not noNewJob:`` cannot both hold.
+
+    Their conditions are written ``noNewJob`` and ``not noNewJob``, and only an
+    ``else`` writes ``not (noNewJob)``, so compared as spelled the two read as
+    one run.  A bare name's annotation is left out the same way; a name given a
+    new value between the two tests still parts nothing.
+    """
+    func = _func(
+        "def f(noNewJob):\n"
+        "    if noNewJob:\n"
+        "        a = 1\n"
+        "    if not noNewJob:\n"
+        "        b = 2\n"
+    )
+    first, second = (n for n in ast.walk(func) if isinstance(n, ast.Assign))
+
+    assert pathcond.parted(first, second, exits=False)
+    assert pathcond.exclusive(["noNewJob"], ["not noNewJob"])
+    assert pathcond.exclusive(["done  [done := n > 0]"], ["not (done)  [done := n > 0]"])
+    assert pathcond.negates("x == 1", "not x == 1")
+    assert not pathcond.negates("x == 1", "not x == 2")
+    assert not pathcond.exclusive(["noNewJob"], ["noNewJob"])
+
+    func = _func(
+        "def f(items):\n"
+        "    if not items:\n"
+        "        return\n"
+        "    a = 1\n"
+        "    items = [one for one in items if one]\n"
+        "    if not items:\n"
+        "        b = 2\n"
+    )
+    first, second = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id in "ab")
+
+    assert pathcond.exclusive(pathcond.reachable_when(first), pathcond.reachable_when(second))
+    assert not pathcond.parted(first, second)
+
+
+def test_a_write_reaches_a_read_round_a_loop_whose_arms_one_pass_keeps_apart():
+    """``parse_condition_string``: the ``else`` of ``if not items`` replaces ``s``, and the next pass's ``if`` hands it on.
+
+    One pass runs one arm, so the two arms part within it, and a reader asking
+    what one pass runs still hears that.  The loop binds ``items`` afresh, so
+    the next pass can take the other arm and read the replaced string.  Only
+    the way round counts: where every arm binds the name again before the
+    read, the write the first test chose does not reach the second test's
+    ``else``; and a flag no pass changes keeps every pass in its arm.
+    """
+    func = _func(
+        "def f(start):\n"
+        "    s = start\n"
+        "    while True:\n"
+        "        items = find(s)\n"
+        "        if not items:\n"
+        "            return convert(s)\n"
+        "        else:\n"
+        "            s = s.replace(items[0], 'x')\n"
+    )
+    first, replaced = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "s")
+    use = next(n for n in ast.walk(func) if isinstance(n, ast.Return))
+
+    assert pathcond.surviving_writes([first, replaced], use, as_run=True) == [first, replaced]
+    assert pathcond.parted(replaced, use)
+    assert not pathcond.compatible(replaced, use, current=True)
+
+    func = _func(
+        "def f(specs):\n"
+        "    for spec in specs:\n"
+        "        if spec.isMaster():\n"
+        "            n = 1\n"
+        "        else:\n"
+        "            n = 2\n"
+        "        if spec.isMaster():\n"
+        "            m = 0\n"
+        "        else:\n"
+        "            m = n\n"
+    )
+    one, two = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "n")
+    use = next(n for n in ast.walk(func) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Name))
+
+    assert pathcond.surviving_writes([one, two], use, as_run=True) == [two]
+
+    func = _func(
+        "def f(items, flag):\n"
+        "    a = None\n"
+        "    for item in items:\n"
+        "        if flag:\n"
+        "            a = item\n"
+        "        else:\n"
+        "            b = a\n"
+    )
+    before, inner = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "a")
+    use = next(n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "b")
+
+    assert pathcond.surviving_writes([before, inner], use, as_run=True) == [before]
+
+
 def test_a_call_carrying_its_own_statement_has_no_fragment_to_place():
     """"No fragment reaches this call" and "there is no fragment" are
     different answers.  Thirty pairs in the corpus write the statement into

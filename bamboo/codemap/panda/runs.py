@@ -70,11 +70,26 @@ the key the writer is handed:
   updatedJobList`` make the row of ``tmpJob.PandaID`` one the arm's can be:
   an element among the others, read without the statements' order.
 
+The record reads a container's elements and a field without the
+statements' order or the branches they are in, so a way it gives is checked
+before it says ``can`` (:meth:`_Reader._one_pass`): the object is held by a
+path from each of the way's events to the next -- the point, or each call an
+SQL arm gives its value to; each binding step; a call and the callee's
+entry; a hand-back; the call that writes the row -- with none of the path's
+killers on a way between, either way round, read as the function runs.
+``Setupper.update_jobs`` puts a job into ``activate_jobs`` in an ``elif`` and
+into ``update_jobs`` in the ``else``, and the record takes an element of one
+for an element of the other; ``retryJob`` gives ``job.PandaID`` a new id
+between ``job.parentID = job.PandaID`` and the call that writes
+``job.PandaID``'s row.  Where an interval does not hold, the binding step
+there is left out and the way read again; where none holds, the pair has no
+row, and ``row_why`` names the interval (``ROW_NO_WAY``).
+
 So ``can`` is a row the pass can write for the arm's object, not the one it
-wrote; ``row_via`` says one way the object goes there, each step from where
-the one before ends -- a walk a reader can make from the records alone.  An
-object no path the caller hands reaches, or that does not reach the writer,
-says so.
+wrote; ``row_via`` says one way the object goes there that runs in one pass,
+each step from where the one before ends -- a walk a reader can make from the
+records alone.  An object no path the caller hands reaches, or that does not
+reach the writer, says so.
 
 **A key given again.**  Between the point and the call the walk holds the
 object by a path in each function it passes; an assignment of the class's
@@ -108,7 +123,7 @@ import ast
 import re
 import string
 from collections import defaultdict, deque
-from typing import Iterator, NamedTuple, Optional, Union
+from typing import Callable, Iterator, NamedTuple, Optional, Union
 
 from bamboo.codemap import calls as C
 from bamboo.codemap import objects, reach
@@ -194,6 +209,10 @@ ROW_HOLE = "the object reaches a call the record could not follow on the way: {w
 ROW_NO_KEY = "the writer is handed no key this reading finds"
 ROW_NOT_A_NAME = "the object or the key is not a name or attributes on one"
 ROW_REBOUND = "the object can be bound again between the arm and the call"
+ROW_NO_WAY = (
+    "no way the record follows the object by runs in one pass: {where} cannot both run"
+    " with the object held between"
+)
 
 RUN_NO_PRINTS = "the function prints nothing, so its runs are not recorded"
 RUN_NONE = (
@@ -252,11 +271,13 @@ class _WayStep(NamedTuple):
 
 
 class _Arm(NamedTuple):
-    """What an arm writes, as paths of its function: the object, and the key of its row."""
+    """What an arm writes, as paths of its function: the object, and the key of its row; for an SQL arm, the lines of
+    the calls it gives its value to, where the row is written."""
 
     owner: str
     objects: frozenset[str]
     keys: frozenset[str]
+    at: frozenset[int] = frozenset()
 
 
 class _Step(NamedTuple):
@@ -967,20 +988,25 @@ class _Reader:
             )
         # An SQL arm: the key of the row each call it gives the column's value to writes.
         keys: set[str] = set()
+        at: set[int] = set()
         for write in row.writes:
             if not any(value.column.lower() == attr.lower() for value in write.columns):
                 continue
-            if not any(
-                self._gives(func, statement, line, attr) for line in write.lines
-            ):
+            given = [
+                line for line in write.lines if self._gives(func, statement, line, attr)
+            ]
+            if not given:
                 continue
             named = [*write.keys, *(write.columns if write.kind == "insert" else [])]
-            keys |= {
+            found = {
                 value.path
                 for value in named
                 if value.column.lower() == key.lower() and value.path
             }
-        return _Arm(owner, frozenset(), frozenset(keys))
+            keys |= found
+            if found:
+                at.update(given)
+        return _Arm(owner, frozenset(), frozenset(keys), frozenset(at))
 
     # -- what the calls on a way up hand ------------------------------------------------------------------------
 
@@ -1171,6 +1197,18 @@ class _Reader:
             starts.setdefault(one, one)
         another = ""
         hole = ""
+        broke = ""
+        func = self.funcs[owner][1]
+        # Where the way starts: the point, or for an SQL arm the calls it gives its value to, where the row is written.
+        firsts = [
+            one
+            for one in (
+                [self._statement(func, at) for at in sorted(arm.at)]
+                if level == 0 and not arm.objects and arm.at
+                else [point]
+            )
+            if one is not None
+        ]
         for start, said in starts.items():
             # What the caller holds the object by: its own bindings, and what the calls it makes hand back.
             whole = self._follow(owner, start)
@@ -1186,16 +1224,25 @@ class _Reader:
                         holder is not None
                         and self.writers[call.to].rpartition(".")[0] == cls
                     ):
-                        return (
-                            HISTORY_ROW_CAN,
-                            "",
-                            said,
+                        steps, where = self._one_pass(
+                            owner,
+                            firsts,
                             start,
-                            [
-                                *self._steps(owner, start, holder, whole),
-                                _WayStep(owner, line, _KEYED, call.path),
-                            ],
+                            lambda without, start=start, holder=holder, whole=whole, call=call: (
+                                None
+                                if (
+                                    found := self._reached(
+                                        owner, start, holder, whole, without
+                                    )
+                                )
+                                is None
+                                else [*found, _WayStep(owner, line, _KEYED, call.path)]
+                            ),
                         )
+                        if steps is not None:
+                            return HISTORY_ROW_CAN, "", said, start, steps
+                        broke = broke or where
+                        continue
                     another = another or call.path
                     continue
                 for one in sorted(held):
@@ -1228,28 +1275,44 @@ class _Reader:
                                 holder is not None
                                 and self.writers[keyed.to].rpartition(".")[0] == cls
                             ):
-                                return (
-                                    HISTORY_ROW_CAN,
-                                    "",
-                                    said,
+                                steps, where = self._one_pass(
+                                    owner,
+                                    firsts,
                                     start,
-                                    self._way(
-                                        owner,
-                                        line,
-                                        start,
-                                        one,
-                                        call.to,
-                                        taken,
-                                        whole,
-                                        reach,
-                                        target,
-                                        holder,
-                                    )
-                                    + [
-                                        _WayStep(target, keyed.line, _KEYED, keyed.path)
-                                    ],
+                                    lambda without, start=start, one=one, call=call, taken=taken, whole=whole, reach=reach, target=target, holder=holder, keyed=keyed: (
+                                        None
+                                        if (
+                                            found := self._way(
+                                                owner,
+                                                line,
+                                                start,
+                                                one,
+                                                call.to,
+                                                taken,
+                                                whole,
+                                                reach,
+                                                target,
+                                                holder,
+                                                without,
+                                            )
+                                        )
+                                        is None
+                                        else [
+                                            *found,
+                                            _WayStep(
+                                                target, keyed.line, _KEYED, keyed.path
+                                            ),
+                                        ]
+                                    ),
                                 )
+                                if steps is not None:
+                                    return HISTORY_ROW_CAN, "", said, start, steps
+                                broke = broke or where
+                                continue
                             another = another or keyed.path
+        if broke:
+            # The object reaches the call's key, by no way that runs in one pass: more than another key says.
+            return "", ROW_NO_WAY.format(where=broke), "", "", []
         if another:
             return f"{ROW_ANOTHER}{another}", "", "", "", []
         if hole:
@@ -1262,7 +1325,27 @@ class _Reader:
         """How *owner*, holding the object by *start*, takes it to *path*: its bindings (``owner:line how path``),
         and where they alone do not, the bindings to the path that went into a call that handed the object back,
         the call (``owner:line <- callee path``), and the bindings from what it handed back."""
+        return self._reached(owner, start, path, reach) or []
+
+    def _reached(
+        self,
+        owner: str,
+        start: str,
+        path: str,
+        reach: objects.ObjectReach,
+        without: frozenset[tuple[str, int]] = frozenset(),
+    ) -> Optional[list[_WayStep]]:
+        """:meth:`_steps`, with the bindings on the lines *without* names left out, and ``None`` where *path* is not
+        reached from *start*."""
         row = self.rows[owner]
+        if any(one == owner for one, _line in without):
+            row = row.model_copy(
+                update={
+                    "bindings": [
+                        one for one in row.bindings if (owner, one.line) not in without
+                    ]
+                }
+            )
 
         def said(steps: list[tuple[int, str, str]]) -> list[_WayStep]:
             return [_WayStep(owner, line, how, held) for line, how, held in steps]
@@ -1281,7 +1364,7 @@ class _Reader:
                     _WayStep(owner, at, _HANDED_BACK, back, callee),
                     *said(tail),
                 ]
-        return []
+        return None
 
     def _way(
         self,
@@ -1295,26 +1378,126 @@ class _Reader:
         reach: objects.ObjectReach,
         target: str,
         holder: str,
-    ) -> list[_WayStep]:
+        without: frozenset[tuple[str, int]] = frozenset(),
+    ) -> Optional[list[_WayStep]]:
         """Each step the object takes from the caller's *start* to *holder* in *target*: bindings and calls, by the
-        states it is in (:func:`bamboo.codemap.objects.way_to`), from the first of *target*'s that reaches *holder*."""
-        way = [
-            *self._steps(owner, start, handed, whole),
-            _WayStep(owner, line, _CALL, taken, callee),
-        ]
+        states it is in (:func:`bamboo.codemap.objects.way_to`), from the first of *target*'s that reaches *holder*;
+        ``None`` where, with the bindings *without* names left out, a function on it does not take the object on."""
+        into = self._reached(owner, start, handed, whole, without)
+        if into is None:
+            return None
+        way = [*into, _WayStep(owner, line, _CALL, taken, callee)]
         states = [one for one in ((callee, taken), *reach.entered) if one[0] == target]
         state = next(
             (
                 one
                 for one in states
-                if one[1] == holder or self._steps(target, one[1], holder, reach)
+                if one[1] == holder
+                or self._reached(target, one[1], holder, reach, without)
             ),
             states[0],
         )
-        for (caller, entry), at, (into, path), given in objects.way_to(reach, state):
-            way += self._steps(caller, entry, given, reach)
-            way.append(_WayStep(caller, at, _CALL, path, into))
-        return way + self._steps(target, state[1], holder, reach)
+        for (caller, entry), at, (into_state, path), given in objects.way_to(
+            reach, state
+        ):
+            steps = self._reached(caller, entry, given, reach, without)
+            if steps is None:
+                return None
+            way += steps
+            way.append(_WayStep(caller, at, _CALL, path, into_state))
+        last = self._reached(target, state[1], holder, reach, without)
+        return None if last is None else way + last
+
+    # -- a way that runs in one pass ------------------------------------------------------------------------------
+
+    def _one_pass(
+        self,
+        owner: str,
+        firsts: list[ast.AST],
+        start: str,
+        build: Callable[[frozenset[tuple[str, int]]], Optional[list[_WayStep]]],
+    ) -> tuple[Optional[list[_WayStep]], str]:
+        """A way *build* makes that runs in one pass (:meth:`_breaks`), else ``(None, where it broke)``.
+
+        Where an interval of the way does not hold, the binding step at its end -- else at its start -- is left out
+        and the way made again: ``setup_jumbo_jobs`` puts a failed job into ``ng_jobs`` at 2051 or 2079, and the
+        record's first way in is the append at 2001, which a job failed further down never runs.  A way with no
+        binding step left to leave out does not run in one pass.
+        """
+        without: frozenset[tuple[str, int]] = frozenset()
+        broke = ""
+        while True:
+            steps = build(without)
+            if steps is None:
+                return None, broke
+            where, step = self._breaks(owner, firsts, start, steps)
+            if not where:
+                return steps, ""
+            broke = broke or where
+            if step is None or (step.owner, step.line) in without:
+                return None, broke
+            without = without | {(step.owner, step.line)}
+
+    def _breaks(
+        self, owner: str, firsts: list[ast.AST], start: str, steps: list[_WayStep]
+    ) -> tuple[str, Optional[_WayStep]]:
+        """Where the way does not run in one pass from any of *firsts*: ``owner:line..line`` of the first interval no
+        way holds -- two events the object is held between by a path, with none of the path's killers
+        (:meth:`_killers`) either way round, read as the function runs -- and the binding step to leave out there;
+        ``("", None)`` where it runs from one of them."""
+        broke: tuple[str, Optional[_WayStep]] = ("", None)
+        for first in firsts:
+            found = self._broken(owner, first, start, steps)
+            if not found[0]:
+                return found
+            broke = broke if broke[0] else found
+        return broke
+
+    def _broken(
+        self, owner: str, first: ast.AST, start: str, steps: list[_WayStep]
+    ) -> tuple[str, Optional[_WayStep]]:
+        for here, at, events in self._segments(owner, first, start, steps):
+            for (one, path, made), (other, _path, next_made) in zip(
+                events, events[1:], strict=False
+            ):
+                if one is None or other is None or not path:
+                    continue
+                killers = self._killers(here, at, path)
+                if _flows(one, other, killers) or _flows(other, one, killers):
+                    continue
+                where = f"{here}:{_line_of(one)}..{_line_of(other)}"
+                stepped = [
+                    held
+                    for held in (next_made, made)
+                    if held is not None
+                    and held.kind not in (_CALL, _HANDED_BACK, _KEYED)
+                ]
+                return where, stepped[0] if stepped else None
+        return "", None
+
+    def _segments(
+        self, owner: str, first: ast.AST, start: str, steps: list[_WayStep]
+    ) -> list[
+        tuple[str, ast.AST, list[tuple[Optional[ast.AST], str, Optional[_WayStep]]]]
+    ]:
+        """The way's events, function by function: ``(owner, function, [(statement, the path the object is held by
+        after it, the step it is)])`` -- *first*, each binding step, a call it is handed into and the callee's entry,
+        a call that hands it back, and the call or the history write."""
+        segments: list[
+            tuple[str, ast.AST, list[tuple[Optional[ast.AST], str, Optional[_WayStep]]]]
+        ] = [(owner, self.funcs[owner][1], [(first, start, None)])]
+        for step in steps:
+            _here, at, events = segments[-1]
+            node = self._statement(at, step.line)
+            if step.kind == _CALL:
+                events.append((node, "", step))
+                if step.callee not in self.funcs:
+                    break
+                callee = self.funcs[step.callee][1]
+                segments.append((step.callee, callee, [(callee.args, step.path, step)]))  # type: ignore[attr-defined]
+            else:
+                events.append((node, "" if step.kind == _KEYED else step.path, step))
+        return segments
 
     # -- a key given again between the point and the call -----------------------------------------------------------
 
@@ -1337,25 +1520,14 @@ class _Reader:
         killers on it (:meth:`_killers`); so is one a call made between the two gives where it is handed the object,
         read the same way from the callee's entry (:meth:`_handed_in`).  A same pair's walk is the point and the call.
         """
-        segments: list[tuple[str, ast.AST, list[tuple[Optional[ast.AST], str]]]] = [
-            (owner, func, [(point, start)])
-        ]
-        for step in steps:
-            here, at, events = segments[-1]
-            node = self._statement(at, step.line)
-            if step.kind == _CALL:
-                events.append((node, ""))
-                if step.callee not in self.funcs:
-                    break
-                callee = self.funcs[step.callee][1]
-                segments.append((step.callee, callee, [(callee.args, step.path)]))  # type: ignore[attr-defined]
-            else:
-                events.append((node, "" if step.kind == _KEYED else step.path))
+        segments = self._segments(owner, point, start, steps)
         if not steps:
-            segments[0][2].append((site, ""))
+            segments[0][2].append((site, "", None))
         found: dict[tuple[str, str], HistoryRekey] = {}
         for here, at, events in segments:
-            for (first, path), (second, _next) in zip(events, events[1:], strict=False):
+            for (first, path, _made), (second, _next, _also) in zip(
+                events, events[1:], strict=False
+            ):
                 if first is None or second is None or not path:
                     continue
                 for one in self._key_assigns(here, at, path, key, first, second):
@@ -1603,14 +1775,26 @@ def _same_path(one: str, other: str) -> bool:
 
 def _flows(first: ast.AST, second: ast.AST, killers: list[ast.AST]) -> bool:
     """Whether a way goes from *first* -- a statement, or a function's parameters on entry -- to *second* with none of
-    *killers* on it, and the branches it takes agree (:func:`pathcond.surviving_writes`)."""
+    *killers* on it, and the branches it takes can be on one run, read as the function runs
+    (:func:`pathcond.surviving_writes` *as_run*: a test of a name given a new value between parts nothing)."""
     if first is second:
         return True
     if isinstance(second, ast.arguments):
         return False
     if isinstance(first, ast.arguments):
         return bool(reaching(second, [first], killers))
-    return bool(pathcond.surviving_writes([first], second, killers=killers))
+    return bool(
+        pathcond.surviving_writes([first], second, as_run=True, killers=killers)
+    )
+
+
+def _line_of(node: ast.AST) -> str:
+    """A statement's line, or ``entry`` for a function's parameters."""
+    return (
+        "entry"
+        if isinstance(node, ast.arguments)
+        else str(getattr(node, "lineno", "?"))
+    )
 
 
 def _between(
@@ -1628,7 +1812,9 @@ def _between(
         if isinstance(end, ast.arguments):
             return []
         reached = (
-            pathcond.surviving_writes(together, end, rereads=together, killers=killers)
+            pathcond.surviving_writes(
+                together, end, rereads=together, as_run=True, killers=killers
+            )
             if together
             else []
         )

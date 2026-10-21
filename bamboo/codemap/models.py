@@ -512,8 +512,12 @@ class HistoryPair(BaseModel):
         default="",
         description=(
             f"{HISTORY_ROW_SAME!r} read in place; {HISTORY_ROW_CAN!r} where the "
-            "arm's object followed into the call reaches the writer's key "
-            "(``object``, ``row_via``); ``another: <expression>`` where the "
+            "arm's object followed into the call reaches the writer's key by a "
+            "way that runs in one pass (``object``, ``row_via``) -- each "
+            "interval of it, between two events of the walk, held by a run "
+            "with the path the object is held by not bound again; where the "
+            "object reaches the key by no such way, empty with ``row_why`` "
+            "naming an interval; ``another: <expression>`` where the "
             "writer is handed its key as another expression the object is not "
             "followed to -- ``other.PandaID``, or a job's ``job.jediTaskID`` "
             "for the task's history -- whose row is not read.  Empty with "
@@ -533,7 +537,8 @@ class HistoryPair(BaseModel):
     row_via: list[str] = Field(
         default_factory=list,
         description=(
-            "With ``can``, one way the object goes from the caller's "
+            "With ``can``, one way that runs in one pass, by which the object "
+            "goes from the caller's "
             "``object`` to the writer's key, a step each: ``owner:line how "
             "path`` for a binding of a function it passes (``element job`` "
             "for ``for job in jobs``, ``fill updatedJobList[]`` for an "
