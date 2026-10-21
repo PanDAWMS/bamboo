@@ -564,8 +564,17 @@ class HistoryPair(BaseModel):
     runs: list[int] = Field(
         default_factory=list,
         description=(
-            "The lines of the caller's runs (:attr:`FunctionPrintsNode.runs`) "
-            "the point is in.  Empty with ``run_hole``."
+            "The lines of the runs (:attr:`FunctionPrintsNode.runs`) the point "
+            "is in: the caller's, or ``runs_in``'s.  Empty with ``run_hole``."
+        ),
+    )
+    runs_in: str = Field(
+        default="",
+        description=(
+            "The function whose runs ``runs`` are, where the caller prints "
+            "through a logger it is handed: the one that builds it -- "
+            "``PostProcessorThread.post_process_tasks`` for the ``tmpLog`` "
+            "``doPostProcess`` is handed.  Empty for the caller's own."
         ),
     )
     run_hole: str = Field(default="", description="Why ``runs`` is empty.")
@@ -4142,23 +4151,112 @@ class PrintStatement(BaseModel):
     )
 
 
-#: :attr:`RunKey.column` for a mark the logger stamps with the time it was made.
+#: :attr:`RunKey.columns` for a mark the logger stamps with the time it was made.
 RUN_KEY_TIME = "time"
+
+#: Each :attr:`KeyStop.kind`, and how :meth:`KeyStop.said` says it.  The
+#: wording is here rather than in the dump: a reader gets this module's, and
+#: rewording it rebuilds no map.
+KEY_STOPS: dict[str, str] = {
+    "parameter": "{name} is a parameter of {at}: what the callers hand is not read",
+    "outside": "{name} is bound outside {at}",
+    "bound": "{name} is {what} at {at}",
+    "element": "{name} is an element of {what} at {at}",
+    "value": "it is {what}",
+    "undeclared": "the class of {name} is not declared at {at}",
+    "several": "{name} is declared as several classes at {at}: {what}",
+    "declaration_failed": "reading the declaration of {name} failed: {what}",
+    "no_row": "{name} holds no row",
+    "container": "handed inside a container at {at}",
+    "spread": "handed to *args or **kwargs at {at}",
+    "hole": "handed to a call not placed at {at}",
+    "no_class": "keys {name}, a table no class holds, at {at}",
+    "not_declared": "keys {name}, which {what} does not declare, at {at}",
+    "no_use": "no use of it in {at} or the calls it is handed to names a column",
+    "failed": "reading its uses failed: {what}",
+}
+
+
+class KeyStop(BaseModel):
+    """Where one reading of a run key's value ended without a column of a class holding rows (:attr:`RunKey.stops`).
+
+    ``pandaID`` handed to ``Watcher.__init__`` is a parameter there, and what
+    the callers hand is not read: ``KeyStop(kind="parameter", name="pandaID",
+    at=["Watcher.__init__"])``.  One stop said at several sites is one, with
+    each site.
+    """
+
+    kind: str = Field(description=f"What ended it: one of {', '.join(KEY_STOPS)}.")
+    name: str = Field(
+        default="",
+        description=(
+            "What it is said of: the value read there (``pandaID``, "
+            "``self.masterIndexName``), the class (``AdderGen``), or the "
+            "table's column (``T_TASK.taskID``)."
+        ),
+    )
+    what: str = Field(
+        default="",
+        description=(
+            "What that is there: ``what destination_blocks.items() returns``, "
+            "``a literal``; the classes or the class a column is not declared "
+            "by; an error's name."
+        ),
+    )
+    at: list[str] = Field(
+        default_factory=list,
+        description="``owner:line`` of each site, or the function, in the order met.",
+    )
+
+    def said(self) -> str:
+        return KEY_STOPS[self.kind].format(name=self.name, what=self.what, at=", ".join(self.at))
 
 
 class RunKey(BaseModel):
-    """One hole of a run's mark, and the column it holds where a declaration says."""
+    """One hole of a run's mark, and the columns the value it holds is.
+
+    A reader matching a history row to a run (the querier's F1) asks which
+    column of the row's class the run's key is.  A declaration says it where
+    the hole is an attribute of a name declared as one class.  Elsewhere the
+    value is read where the function uses it -- the key of a row a statement
+    writes, a term a statement picks its rows by, a parameter of a call it is
+    handed whole to, read there in turn -- and where a binding in the
+    function gives it an attribute of a declared name
+    (:mod:`bamboo.codemap.panda.keycolumns`).  ``TaskRefinerThread.runImpl``'s
+    ``jediTaskID`` is the key of the rows ``getTaskParamsWithID_JEDI`` reads;
+    ``killJob``'s ``pandaID`` the key of the job rows it updates.
+
+    **Each column is one use, not every one.**  A column is what the value
+    is at the use it was read at, so the columns can name two attributes of
+    one class -- ``retryTask_JEDI``'s ``jediTaskID`` keys the task and picks
+    its children by ``parent_tid`` -- and a value used nowhere the reading
+    goes may be a column it does not name.  What the callers hand is not
+    read.
+    """
 
     expression: str = Field(description="What fills the hole, as source; empty for a time stamp.")
-    column: str = Field(
-        default="",
+    columns: list[str] = Field(
+        default_factory=list,
         description=(
-            "``Class.attribute`` where the expression is an attribute of a "
-            f"name declared as one class; {RUN_KEY_TIME!r} for a time stamp; "
-            "else empty with ``why``."
+            "``Class.attribute`` for each column the value is read to be, sorted: "
+            "the declared attribute, then those its uses say, spelled as the "
+            "class declares the attribute; a table no class holds gives none.  "
+            f"[{RUN_KEY_TIME!r}] for a time stamp."
         ),
     )
-    why: str = Field(default="", description="Why ``column`` is empty.")
+    stops: list[KeyStop] = Field(
+        default_factory=list,
+        description=(
+            "Where ``columns`` names no column of a class holding rows, where "
+            "each reading stopped: what the value is bound to first, then its "
+            "uses.  Empty wherever one is named, and for a time stamp."
+        ),
+    )
+
+    @property
+    def why(self) -> str:
+        """Why ``columns`` names no column of a class holding rows: ``stops``, said (:data:`KEY_STOPS`)."""
+        return "; ".join(stop.said() for stop in self.stops)
 
 
 class RunStart(BaseModel):

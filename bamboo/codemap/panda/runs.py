@@ -8,8 +8,9 @@ pass gives it one, and the run's mark says which lines of the log are that
 pass's.  Three records answer it, each read once, at build time:
 
 - :attr:`FunctionPrintsNode.runs`: where a run starts -- a logger bound by one
-  of PanDA's factories (:data:`BUILDERS`), its mark, and the column each hole
-  of the mark holds where a declaration says (:class:`RunStart`).  Each print
+  of PanDA's factories (:data:`BUILDERS`), its mark, and the columns each hole
+  of the mark holds, as a declaration or the value's uses say
+  (:class:`RunStart`, :mod:`bamboo.codemap.panda.keycolumns`).  Each print
   statement says which of them its logger can be (:attr:`PrintStatement.runs`).
 - :attr:`ReachNode.history`: each call of a history writer, and the values
   the row it writes can record (:class:`HistoryCall`).  A history writer is a
@@ -26,6 +27,14 @@ through plain calls only.  A function handed on (``Thread(target=...)``,
 ``submit``), a lambda's body and a thread's ``run`` are not followed, since
 what they write is not written in this pass; a function handed to one that
 calls it at once is left out with them.
+
+**The run of a pass.**  The runs a pair's point is in are the caller's own
+loggers whose binding reaches it, else its object's; where it binds neither
+and prints through a logger it is handed, the runs of that logger where it is
+built -- ``doPostProcess`` prints through the ``tmpLog`` that
+``post_process_tasks`` builds for the task (:attr:`HistoryPair.runs_in`).  A
+function printing only through its module's logger has none
+(:data:`RUN_MODULE`).
 
 **Up from the arm.**  Level 0 is the arm's own function, the point its
 statement; level n+1 is each caller of a level-n function, the point each line
@@ -147,7 +156,7 @@ from bamboo.codemap.models import (
     RunStart,
     SourceModule,
 )
-from bamboo.codemap.panda import mustprints, pathcond, sql, sqltext
+from bamboo.codemap.panda import keycolumns, mustprints, pathcond, sql, sqltext
 from bamboo.codemap.panda.reaching import reaching
 
 #: The tables PanDA keeps a subject's past values in, lower-cased, each with
@@ -221,20 +230,20 @@ RUN_NONE = (
 RUN_OBJECT_REBOUND = (
     "the logger {logger} its class binds in __init__ is bound again in {where}"
 )
-
-KEY_PARAMETER = "a parameter: what the caller passes is not followed"
-KEY_LOCAL = "a local name: what it is bound to is not followed"
-KEY_NOT_ATTRIBUTE = "not an attribute of a name"
-KEY_UNDECLARED = "the class of {name} is not declared"
-KEY_SEVERAL = "{name} is declared as several classes: {classes}"
-KEY_FAILED = "reading the declaration of {name} failed: {error}"
+RUN_MODULE = (
+    "the function prints only through its module's logger {logger}, which marks no run"
+)
+RUN_HANDED_NONE = "the function prints through the logger {logger} it is handed, and no call hands it a run: {stops}"
+RUN_HANDED_SEVERAL = "the function prints through the logger {logger} it is handed, a run of each of {functions}"
+HANDED_NO_CALL = "no call of {function} is placed"
+HANDED_NOT = "{at} hands no {name}"
+HANDED_UNPRINTED = "{at} hands {logger}, whose function prints nothing"
+HANDED_OTHER = "{at} hands {logger}, a logger no factory builds there"
 
 VALUES_NO_STATEMENT = "no statement of the function holds the call's line"
 
 _LOOPS = (ast.For, ast.AsyncFor, ast.While)
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
-#: Calls that hand a value on unchanged as far as a key is concerned: ``str(pandaID)``.
-_CONVERSIONS = frozenset({"str", "int", "repr"})
 
 _Piece = Union[str, ast.expr]
 
@@ -342,6 +351,7 @@ class _Reader:
         self.rows = {row.owner: row for row in fragment.reach_graph}
         self.prints = {node.owner: node for node in fragment.function_prints}
         self.writers = history_writers(self.names.functions)
+        self.keys = keycolumns.Reader(fragment, modules, calls, self.names, self.funcs)
         self._built: dict[int, list[_Bound]] = {}
         self._follows: dict[tuple[str, str], objects.ObjectReach] = {}
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
@@ -494,7 +504,7 @@ class _Reader:
             isinstance(expression, ast.Constant) and expression.value is None
         ):
             stamp = spec.none if given else spec.absent
-            key = [RunKey(expression="", column=RUN_KEY_TIME)] if stamp else []
+            key = [RunKey(expression="", columns=[RUN_KEY_TIME])] if stamp else []
             return RunStart(**common, mark="", key=key)
         pieces = _pieces(expression, func)  # type: ignore[arg-type]
         mark = "".join(piece if isinstance(piece, str) else "{}" for piece in pieces)
@@ -506,44 +516,12 @@ class _Reader:
         return RunStart(**common, mark=mark, key=key)
 
     def _key(self, expression: ast.expr, file: str, func: ast.AST) -> RunKey:
-        """The column one hole of a mark holds: ``JediTaskSpec.jediTaskID`` for ``taskSpec.jediTaskID`` declared so."""
-        spelled = ast.unparse(expression)
-        inner = expression
-        while (
-            isinstance(inner, ast.Call)
-            and isinstance(inner.func, ast.Name)
-            and inner.func.id in _CONVERSIONS
-            and len(inner.args) == 1
-            and not inner.keywords
-        ):
-            inner = inner.args[0]
-        if isinstance(inner, ast.Name):
-            why = KEY_PARAMETER if _is_parameter(func, inner.id) else KEY_LOCAL
-            return RunKey(expression=spelled, why=why)
-        if not isinstance(inner, ast.Attribute):
-            return RunKey(expression=spelled, why=KEY_NOT_ATTRIBUTE)
-        owner = inner.value
-        name = ast.unparse(owner)
-        try:
-            if isinstance(owner, ast.Name) and owner.id == "self":
-                held = self.types.method_class(file, func)
-                declared = frozenset({held}) if held is not None else None
-            else:
-                declared = self.types.declared(file, func, owner)
-        except Exception as error:  # noqa: BLE001 -- a key unread, not the build's end
-            return RunKey(
-                expression=spelled,
-                why=KEY_FAILED.format(name=name, error=type(error).__name__),
-            )
-        if not declared:
-            return RunKey(expression=spelled, why=KEY_UNDECLARED.format(name=name))
-        classes = sorted({cls.name for _where, cls in declared})
-        if len(classes) > 1:
-            return RunKey(
-                expression=spelled,
-                why=KEY_SEVERAL.format(name=name, classes=", ".join(classes)),
-            )
-        return RunKey(expression=spelled, column=f"{classes[0]}.{inner.attr}")
+        """The columns one hole of a mark holds: ``JediTaskSpec.jediTaskID`` for ``taskSpec.jediTaskID`` declared so,
+        else what the value's uses and bindings say (:mod:`bamboo.codemap.panda.keycolumns`)."""
+        columns, stops = self.keys.read(file, func, expression)
+        if any(self.keys.holds_rows(one) for one in columns):
+            return RunKey(expression=ast.unparse(expression), columns=columns)
+        return RunKey(expression=ast.unparse(expression), columns=columns, stops=stops)
 
     def _printed_through(
         self, file: str, func: ast.AST, site: ast.stmt, level: str, runs: list[RunStart]
@@ -851,7 +829,7 @@ class _Reader:
                 arm,
                 writes,
             )
-            runs, run_hole = self._runs_at(owner, func, point)
+            runs, runs_in, run_hole = self._runs_at(owner, func, point)
             key = HISTORY_KEYS.get(subject.rpartition(".")[0], "")
             rekeyed = (
                 self._rekeyed(owner, func, point, site, start, steps, key)
@@ -884,6 +862,7 @@ class _Reader:
                     row_via=[step.said() for step in steps],
                     rekeyed=rekeyed,
                     runs=runs,
+                    runs_in=runs_in,
                     run_hole=run_hole,
                 )
             )
@@ -1057,7 +1036,7 @@ class _Reader:
                     for test in pathcond.tests_on(statement, func)
                     for name in ast.walk(test)
                     if isinstance(name, ast.Name)
-                    and _is_parameter(func, name.id)
+                    and keycolumns.is_parameter(func, name.id)
                     and not C._rebinds(func, name.id)
                 }
             )
@@ -1712,18 +1691,154 @@ class _Reader:
 
     def _runs_at(
         self, owner: str, func: ast.AST, point: ast.stmt
-    ) -> tuple[list[int], str]:
-        """The caller's runs the point is in: its own loggers holding it, else its object's."""
+    ) -> tuple[list[int], str, str]:
+        """The runs the point is in, the function they are in where it is not the caller, and why there is none.
+
+        The caller's own loggers holding the point, else its object's, else
+        the runs of the logger it is handed and prints through
+        (:meth:`_handed_runs`).
+        """
         if owner not in self.prints:
-            return [], RUN_NO_PRINTS
+            return [], "", RUN_NO_PRINTS
         held = self._holding(func, point)
         if held:
-            return held, ""
+            return held, "", ""
         file = self.funcs[owner][0]
         objects, why = self._object_runs(file, func)
         if objects:
-            return sorted(run.line for run in objects), ""
-        return [], why or RUN_NONE
+            return sorted(run.line for run in objects), "", ""
+        if why:
+            return [], "", why
+        return self._handed_runs(owner, func)
+
+    def _handed_runs(self, owner: str, func: ast.AST) -> tuple[list[int], str, str]:
+        """The runs of the loggers *owner* is handed and prints through, where it binds none of its own.
+
+        ``doPostProcess(task_spec, tmp_logger)`` prints through the logger
+        ``post_process_tasks`` builds for the task and hands it: the lines are
+        that run's.  Each call placed at *owner* is read for what it hands the
+        parameter -- a logger a factory builds there whose binding reaches the
+        call, the caller's object's logger, or a parameter of the caller,
+        read the same way at its callers.  The runs are one function's; a
+        function printing only through its module's logger has none.
+        """
+        parameters, modules, other = self._printing_through(owner, func)
+        if not parameters:
+            if modules and not other:
+                return [], "", RUN_MODULE.format(logger=", ".join(sorted(modules)))
+            return [], "", RUN_NONE
+        found: dict[str, set[int]] = defaultdict(set)
+        stops: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for name in sorted(parameters):
+            self._handed_logger(owner, name, found, stops, seen)
+        logger = ", ".join(sorted(parameters))
+        if len(found) == 1:
+            ((runs_in, lines),) = found.items()
+            return sorted(lines), runs_in, ""
+        if found:
+            return (
+                [],
+                "",
+                RUN_HANDED_SEVERAL.format(
+                    logger=logger, functions=", ".join(sorted(found))
+                ),
+            )
+        return (
+            [],
+            "",
+            RUN_HANDED_NONE.format(
+                logger=logger, stops="; ".join(dict.fromkeys(stops))
+            ),
+        )
+
+    def _printing_through(
+        self, owner: str, func: ast.AST
+    ) -> tuple[set[str], set[str], bool]:
+        """The loggers *owner*'s prints are made on: its parameters, its module's names, and whether any is something else."""
+        parameters: set[str] = set()
+        modules: set[str] = set()
+        other = False
+        for statement in self.prints[owner].statements:
+            site = self._statement(func, statement.line)
+            call = (
+                next(
+                    (
+                        node
+                        for node in ast.walk(site)
+                        if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == statement.level
+                    ),
+                    None,
+                )
+                if site is not None
+                else None
+            )
+            receiver = call.func.value if call is not None else None  # type: ignore[attr-defined]
+            if isinstance(receiver, ast.Name) and keycolumns.is_parameter(
+                func, receiver.id
+            ):
+                parameters.add(receiver.id)
+            elif isinstance(receiver, ast.Name) and not pathcond.bindings(
+                func, receiver.id
+            ):
+                modules.add(receiver.id)
+            else:
+                other = True
+        return parameters, modules, other
+
+    def _handed_logger(
+        self,
+        owner: str,
+        name: str,
+        found: dict[str, set[int]],
+        stops: list[str],
+        seen: set[tuple[str, str]],
+    ) -> None:
+        """The runs of the logger the calls placed at *owner* hand its parameter *name*, by the function they are in."""
+        if (owner, name) in seen:
+            return
+        seen.add((owner, name))
+        if owner not in self._callers:
+            self._callers[owner] = self.calls.callers(self._target(owner))
+        if not self._callers[owner]:
+            stops.append(HANDED_NO_CALL.format(function=owner))
+        target = self._target(owner)
+        for site in self._callers[owner]:
+            caller = self.names.of(site.func)
+            at = f"{caller or site.owner}:{site.call.lineno}"
+            handed = self.calls.handed(site, target).get(name)
+            if handed is None or caller is None or caller not in self.funcs:
+                stops.append(HANDED_NOT.format(at=at, name=name))
+                continue
+            if isinstance(handed, ast.Name):
+                statement = mustprints._statement_of(site.call)
+                lines = (
+                    self._holding(site.func, statement, handed.id)
+                    if statement is not None
+                    else []
+                )
+                if lines and caller in self.prints:
+                    found[caller].update(lines)
+                elif lines:
+                    stops.append(HANDED_UNPRINTED.format(at=at, logger=handed.id))
+                elif keycolumns.is_parameter(site.func, handed.id):
+                    self._handed_logger(caller, handed.id, found, stops, seen)
+                else:
+                    stops.append(HANDED_OTHER.format(at=at, logger=handed.id))
+            elif _on_self(handed):
+                spelled = ast.unparse(handed)
+                objects, _why = self._object_runs(site.file, site.func)
+                lines = {run.line for run in objects if run.logger == spelled}
+                if lines and caller in self.prints:
+                    found[caller].update(lines)
+                else:
+                    stops.append(HANDED_OTHER.format(at=at, logger=spelled))
+            else:
+                stops.append(
+                    HANDED_OTHER.format(at=at, logger=ast.unparse(handed)[:60])
+                )
 
 
 # -- syntax ------------------------------------------------------------------- #
@@ -1897,20 +2012,6 @@ def _root(node: ast.expr) -> ast.expr:
     return node
 
 
-def _is_parameter(func: ast.AST, name: str) -> bool:
-    arguments = getattr(func, "args", None)
-    if arguments is None:
-        return False
-    held = [
-        *arguments.posonlyargs,
-        *arguments.args,
-        *arguments.kwonlyargs,
-        arguments.vararg,
-        arguments.kwarg,
-    ]
-    return any(one is not None and one.arg == name for one in held)
-
-
 def _given(call: ast.Call, spec: Builder) -> tuple[bool, Optional[ast.expr]]:
     """Whether the factory call is given its mark, and the expression it is given."""
     for keyword in call.keywords:
@@ -1962,7 +2063,7 @@ def _pieces(expression: ast.expr, func: ast.AST, depth: int = 0) -> list[_Piece]
         and isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
     ):
         bound = pathcond.single_definition(func, expression.id)
-        if bound is not None and not _is_parameter(func, expression.id):
+        if bound is not None and not keycolumns.is_parameter(func, expression.id):
             return _pieces(bound, func, depth + 1)
     return [expression]
 

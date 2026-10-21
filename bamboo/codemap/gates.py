@@ -32,6 +32,7 @@ from bamboo.codemap.models import (
     BIND_RESULT,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
+    RUN_KEY_TIME,
     HistoryPair,
     MapFragment,
     ReachNode,
@@ -1393,22 +1394,34 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
 
     A pair's ``writes`` are looked up on the writing function's
     :class:`ReachNode` (:attr:`ReachNode.history`, where the values are), its
-    ``runs`` in the caller's :class:`FunctionPrintsNode`, and a print
-    statement's ``runs`` in its own node: a line found in none of them is a
-    pair or a print no reader can place in a run.  A branch left unread with
-    no reason reads as one no history row is written beside.  A ``can`` row
-    names the caller's path holding the arm's object and a way to one of the
-    pair's writes through calls of reach rows: a reader asks the run of that
-    path, and checks the way.
+    ``runs`` in the :class:`FunctionPrintsNode` of the caller or of
+    ``runs_in``, and a print statement's ``runs`` in its own node: a line
+    found in none of them is a pair or a print no reader can place in a run.
+    A branch left unread with no reason reads as one no history row is
+    written beside.  A ``can`` row names the caller's path holding the arm's
+    object and a way to one of the pair's writes through calls of reach rows:
+    a reader asks the run of that path, and checks the way.  A run's key
+    names a column of a class a table holds (:attr:`EntityNode.spec_class`)
+    or says where each reading stopped (:attr:`RunKey.stops`), never both: a
+    reader matches a history row by it.
     """
     rows = {row.owner: row for row in fragment.reach_graph}
     prints = {node.owner: node for node in fragment.function_prints}
+    holding = {entity.spec_class for entity in fragment.entities if entity.spec_class}
     failures: list[str] = []
     holes: Counter = Counter()
     for node in fragment.function_prints:
         lines = [run.line for run in node.runs]
         if len(set(lines)) != len(lines):
             failures.append(f"{node.owner}: two runs start on one line, so a line names neither")
+        for run in node.runs:
+            for key in run.key:
+                named = key.columns == [RUN_KEY_TIME] or any(one.partition(".")[0] in holding for one in key.columns)
+                if named == bool(key.stops):
+                    failures.append(
+                        f"{node.owner}: run {run.line}'s key {key.expression!r} "
+                        + ("names a row's column and stops" if named else "names no row's column and no stop")
+                    )
         for statement in node.statements:
             for line in statement.runs:
                 if line not in lines:
@@ -1435,11 +1448,11 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                     target = rows.get(owner)
                     if target is None or not any(str(held.line) == line for held in target.history):
                         failures.append(f"{at}: write {write} is no history call of a reach row")
-                node = prints.get(pair.caller)
+                node = prints.get(pair.runs_in or pair.caller)
                 started = [run.line for run in node.runs] if node is not None else []
                 for line in pair.runs:
                     if line not in started:
-                        failures.append(f"{at}: run {line} is not one of the caller's runs")
+                        failures.append(f"{at}: run {line} is not one of {pair.runs_in or 'the caller'}'s runs")
                 if not pair.runs and not pair.run_hole:
                     failures.append(f"{at}: no run, and no reason given")
                 if not pair.row and not pair.row_why:

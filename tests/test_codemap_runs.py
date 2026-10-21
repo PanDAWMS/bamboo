@@ -16,10 +16,12 @@ from bamboo.codemap.models import (
     RUN_KEY_TIME,
     Anchor,
     Branch,
+    EntityNode,
     FunctionPrintsNode,
     HistoryPair,
     HistoryRekey,
     JunctionNode,
+    KeyStop,
     MapFragment,
     RunKey,
     SourceModule,
@@ -242,13 +244,32 @@ def marks(task, n):
     b = make_logger(_logger)
     c = LogWrapper(_logger, None)
     d = LogWrapper(_logger)
-    e = MsgWrapper(_logger, token=f"<jediTaskID={task.jediTaskID} n={n}>")
+    e = MsgWrapper(_logger, token=f"<jediTaskID={task.jediTaskID} n={n}>")  # M0
     a.debug("1")
     b.debug("2")
     c.debug("3")
     d.debug("4")
     e.debug("5")
 """
+
+
+#: The tables the spec classes hold, as the build learns them (EntityNode.spec_class).
+ENTITIES = [
+    EntityNode(
+        name="jobsactive4",
+        map_id="m",
+        derived_from="v",
+        spec_class="JobSpec",
+        tables=["jobsActive4"],
+    ),
+    EntityNode(
+        name="jedi_tasks",
+        map_id="m",
+        derived_from="v",
+        spec_class="JediTaskSpec",
+        tables=["JEDI_Tasks"],
+    ),
+]
 
 
 def _line(text: str, marker: str) -> int:
@@ -324,6 +345,7 @@ def _build(
         fragment = MapFragment(
             map_id="m",
             derived_from="v",
+            entities=[one.model_copy() for one in ENTITIES],
             junctions=junctions,
             function_prints=nodes,
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
@@ -1093,10 +1115,12 @@ def test_a_run_says_its_mark_and_the_column_a_declared_hole_holds(
         "PandaID={}",
         False,
     )
-    assert archive.key == [RunKey(expression="job.PandaID", column="JobSpec.PandaID")]
+    assert archive.key == [
+        RunKey(expression="job.PandaID", columns=["JobSpec.PandaID"])
+    ]
     (run,) = prints["pkg/proxy.py::DBProxy.run"].runs
     assert run.mark == "<PandaID={}>"
-    assert [key.column for key in run.key] == ["JobSpec.PandaID"]
+    assert [key.columns for key in run.key] == [["JobSpec.PandaID"]]
     (statement,) = prints["pkg/proxy.py::DBProxy.archiveJob"].statements
     assert statement.runs == [_line(PROXY, "R0")]
 
@@ -1107,15 +1131,17 @@ def test_a_mark_given_none_is_a_time_stamp_or_nothing_as_its_factory_writes(
     fragment = _build(tmp_path, [], marks=MARKS)
     (node,) = fragment.function_prints
     by_logger = {run.logger: run for run in node.runs}
-    time = [RunKey(expression="", column=RUN_KEY_TIME)]
+    time = [RunKey(expression="", columns=[RUN_KEY_TIME])]
     assert by_logger["a"].key == time
     assert by_logger["b"].key == []
     assert by_logger["c"].key == time
     assert by_logger["d"].key == []
     assert by_logger["e"].mark == "<jediTaskID={} n={}>"
-    assert [(key.column, key.why) for key in by_logger["e"].key] == [
-        ("", runs.KEY_UNDECLARED.format(name="task")),
-        ("", runs.KEY_PARAMETER),
+    line = _line(MARKS, "M0")
+    no_use = KeyStop(kind="no_use", at=["marks"])
+    assert [(key.columns, key.stops) for key in by_logger["e"].key] == [
+        ([], [KeyStop(kind="undeclared", name="task", at=[f"marks:{line}"]), no_use]),
+        ([], [KeyStop(kind="parameter", name="n", at=["marks"]), no_use]),
     ]
     assert [statement.runs for statement in node.statements] == [
         [by_logger[name].line] for name in "abcde"
@@ -1141,7 +1167,15 @@ def test_an_objects_run_is_its_init_logger_unless_bound_again(tmp_path: Path) ->
         "self.logger",
         True,
     )
-    assert run.key == [RunKey(expression="str(pandaID)", why=runs.KEY_PARAMETER)]
+    assert run.key == [
+        RunKey(
+            expression="str(pandaID)",
+            stops=[
+                KeyStop(kind="parameter", name="pandaID", at=["Watcher.__init__"]),
+                KeyStop(kind="no_use", at=["Watcher.__init__"]),
+            ],
+        )
+    ]
     (statement,) = prints["pkg/watcher.py::Watcher.run"].statements
     assert statement.runs == [_line(WATCHER, "W0")]
     (pair,) = _branch(fragment, "A7").history or []
@@ -1243,4 +1277,231 @@ def test_a_loop_over_a_sum_runs_over_its_terms_and_the_object_is_any_element(
         _line(SETUP, "S1"),
         HISTORY_ROW_CAN,
         "self.jobs[]",
+    )
+
+
+KEYS = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+_logger = None
+
+
+class Keys(DBProxy):
+    def kill(self, panda_id):
+        tmp_log = LogWrapper(_logger, f"PandaID={panda_id}")  # K1
+        tmp_log.debug("kill")
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:s WHERE PandaID=:PandaID", {":PandaID": panda_id, ":s": "x"})
+
+    def peek(self, pid):
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K2
+        tmp_log.debug("peek")
+        self.cur.execute("SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE pandaid=:id", {":id": pid})
+
+    def refine(self, job_id):
+        tmp_log = LogWrapper(_logger, f"<job={job_id}>")  # K3
+        tmp_log.debug("refine")
+        self.read_params(job_id)
+
+    def read_params(self, panda_id):
+        self.select_params(panda_id)
+
+    def select_params(self, one):
+        self.cur.execute("SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p", {":p": one})
+
+    def other_table(self, task_id):
+        tmp_log = LogWrapper(_logger, f"<task={task_id}>")  # K4
+        tmp_log.debug("other")
+        self.cur.execute("SELECT taskName FROM ATLAS_PANDA.T_TASK WHERE taskID=:t", {":t": task_id})  # K5
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.T_TASK WHERE taskID=:t", {":t": task_id})  # K5b
+
+    def listed(self, pid):
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K6
+        tmp_log.debug("listed")
+        self.peek_jobs([pid])  # K7
+
+    def peek_jobs(self, ids):
+        pass
+
+    def bound(self, job: JobSpec):
+        tmp_id = job.PandaID
+        tmp_log = LogWrapper(_logger, f"<PandaID={tmp_id}>")  # K8
+        tmp_log.debug("bound")
+
+
+class Closer:
+    def __init__(self, job: JobSpec):
+        self.panda_id = job.PandaID
+        self.logger = LogWrapper(_logger, f"<PandaID={self.panda_id}>")  # K9
+
+    def run(self):
+        self.logger.debug("close")
+
+
+class Adder:
+    def __init__(self, job_id):
+        self.job_id = job_id
+        self.logger = LogWrapper(_logger, str(self.job_id))  # K10
+
+    def run(self):
+        self.logger.debug("add")
+"""
+
+
+def _keys(tmp_path: Path) -> dict[int, RunKey]:
+    """The one key of each run of KEYS, by the line the run starts on."""
+    fragment = _build(tmp_path, [], spec=SPEC, proxy=PROXY, keys=KEYS)
+    found: dict[int, RunKey] = {}
+    for node in fragment.function_prints:
+        for run in node.runs:
+            (found[run.line],) = run.key
+    return found
+
+
+def test_a_key_no_declaration_names_is_the_column_its_function_uses_it_as(
+    tmp_path: Path,
+) -> None:
+    """A key of a row the function writes, a term it reads rows by (spelled as the class declares it), two calls down."""
+    keys = _keys(tmp_path)
+    assert (keys[_line(KEYS, "K1")].columns, keys[_line(KEYS, "K1")].stops) == (
+        ["JobSpec.PandaID"],
+        [],
+    )
+    assert (keys[_line(KEYS, "K2")].columns, keys[_line(KEYS, "K2")].stops) == (
+        ["JobSpec.PandaID"],
+        [],
+    )
+    assert (keys[_line(KEYS, "K3")].columns, keys[_line(KEYS, "K3")].stops) == (
+        ["JobSpec.PandaID"],
+        [],
+    )
+    assert (keys[_line(KEYS, "K8")].columns, keys[_line(KEYS, "K8")].stops) == (
+        ["JobSpec.PandaID"],
+        [],
+    )
+
+
+def test_a_key_its_uses_name_no_rows_column_says_where_the_reading_stopped(
+    tmp_path: Path,
+) -> None:
+    """A table no class holds names no column, its sites said once; a value handed inside a list is not followed."""
+    keys = _keys(tmp_path)
+    sites = [
+        f"Keys.other_table:{_line(KEYS, 'K5')}",
+        f"Keys.other_table:{_line(KEYS, 'K5b')}",
+    ]
+    assert (keys[_line(KEYS, "K4")].columns, keys[_line(KEYS, "K4")].stops) == (
+        [],
+        [
+            KeyStop(kind="parameter", name="task_id", at=["Keys.other_table"]),
+            KeyStop(kind="no_class", name="T_TASK.taskID", at=sites),
+        ],
+    )
+    assert (keys[_line(KEYS, "K6")].columns, keys[_line(KEYS, "K6")].stops) == (
+        [],
+        [
+            KeyStop(kind="parameter", name="pid", at=["Keys.listed"]),
+            KeyStop(kind="container", at=[f"Keys.listed:{_line(KEYS, 'K7')}"]),
+        ],
+    )
+
+
+def test_a_field_of_a_class_holding_no_row_is_read_in_its_class(tmp_path: Path) -> None:
+    """``Closer.panda_id`` is assigned ``job.PandaID``; ``Adder.job_id`` a parameter, its callers not read."""
+    keys = _keys(tmp_path)
+    assert (keys[_line(KEYS, "K9")].columns, keys[_line(KEYS, "K9")].stops) == (
+        ["Closer.panda_id", "JobSpec.PandaID"],
+        [],
+    )
+    adder = keys[_line(KEYS, "K10")]
+    assert adder.columns == ["Adder.job_id"]
+    assert adder.stops == [
+        KeyStop(kind="no_row", name="Adder"),
+        KeyStop(kind="parameter", name="job_id", at=["Adder.__init__"]),
+        KeyStop(kind="no_use", at=["Adder.__init__"]),
+    ]
+
+
+def test_a_keys_why_is_its_stops_said_and_is_not_kept_in_the_dump() -> None:
+    """The wording is the reader's: rewording a stop moves no map."""
+    key = RunKey(
+        expression="task_id",
+        stops=[
+            KeyStop(kind="parameter", name="task_id", at=["Keys.other_table"]),
+            KeyStop(
+                kind="no_class",
+                name="T_TASK.taskID",
+                at=["Keys.other_table:5", "Keys.other_table:6"],
+            ),
+        ],
+    )
+    assert key.why == (
+        "task_id is a parameter of Keys.other_table: what the callers hand is not read; "
+        "keys T_TASK.taskID, a table no class holds, at Keys.other_table:5, Keys.other_table:6"
+    )
+    assert "why" not in key.model_dump()
+    assert RunKey(expression="", columns=[RUN_KEY_TIME]).why == ""
+
+
+HANDED = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+_logger = None
+
+
+class Post(DBProxy):
+    def process(self, job: JobSpec):
+        tmp_log = LogWrapper(_logger, f"<PandaID={job.PandaID}>")  # L0
+        tmp_log.debug("start")
+        self.post(job, tmp_log)
+
+    def post(self, job: JobSpec, log):
+        log.debug("post")
+        job.jobStatus = "done"  # L1
+        self.note_change(job.PandaID, job.jobStatus)
+
+    def quiet(self, job: JobSpec):
+        _logger.debug("quiet")
+        job.jobStatus = "quiet"  # L2
+        self.note_change(job.PandaID, job.jobStatus)
+"""
+
+
+def test_a_pair_printing_through_a_handed_logger_is_in_the_run_of_who_builds_it(
+    tmp_path: Path,
+) -> None:
+    """``doPostProcess(task_spec, tmp_log)``: the runs are the caller's that builds the logger; the module's marks none."""
+    fragment = _build(
+        tmp_path,
+        [
+            ("handed", "Post.post", "L1", "JobSpec.jobStatus"),
+            ("handed", "Post.quiet", "L2", "JobSpec.jobStatus"),
+        ],
+        spec=SPEC,
+        proxy=PROXY,
+        handed=HANDED,
+    )
+    (handed,) = _branch(fragment, "L1").history or []
+    assert (handed.caller, handed.runs, handed.runs_in, handed.run_hole) == (
+        "pkg/handed.py::Post.post",
+        [_line(HANDED, "L0")],
+        "pkg/handed.py::Post.process",
+        "",
+    )
+    (quiet,) = _branch(fragment, "L2").history or []
+    assert (quiet.runs, quiet.runs_in, quiet.run_hole) == (
+        [],
+        "",
+        runs.RUN_MODULE.format(logger="_logger"),
+    )
+    assert history_pairs_resolve(fragment).passed
+    handed.runs_in = ""
+    assert any(
+        "is not one of the caller's runs" in one
+        for one in history_pairs_resolve(fragment).failures
     )

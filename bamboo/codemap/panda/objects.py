@@ -353,6 +353,18 @@ class _Carry(NamedTuple):
     below: str = ""
 
 
+class Paths:
+    """The paths the record names an expression by, in its function: what a reader matches against the record's."""
+
+    def __init__(self) -> None:
+        self._versions: dict[int, _Versions] = {}
+
+    def of(self, func: ast.AST, expr: Optional[ast.expr]) -> frozenset[str]:
+        if id(func) not in self._versions:
+            self._versions[id(func)] = _Versions(func, _local_names(func))
+        return frozenset(self._versions[id(func)].paths(expr))
+
+
 class _Versions:
     """A local name bound at two or more statements, split by the binding that reaches each use.
 
