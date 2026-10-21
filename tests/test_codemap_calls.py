@@ -2987,3 +2987,131 @@ def test_a_copy_is_an_object_of_the_class_it_copies_unless_the_class_copies_itse
     # Where nothing declares the copied value, it is read from the values.
     assert [t.cls.name for t in _placed(calls, "m", "untyped", "clone.run").targets] == ["Job"]
     assert [t.cls.name for t in _placed(calls, "m", "shallow", "clone.run").targets] == ["Job"]
+
+
+_GENERIC_FACTORY = '''\
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+
+class FactoryBase(Generic[T]):
+    def getImpl(self, vo: str) -> T | None:
+        return None
+
+    def requireImpl(self, vo: str) -> T:
+        raise NotImplementedError
+'''
+
+_GENERIC_PLUGINS = '''\
+class PluginBase:
+    def doAction(self):
+        return 1
+
+
+class AtlasPlugin(PluginBase):
+    def doAction(self):
+        return 2
+'''
+
+
+def test_a_generic_class_given_a_class_hands_it_back_where_its_methods_return_the_parameter(tmp_path):
+    """``class WatchDog(JediKnight, FactoryBase[WatchDogBase])`` and ``implFactory:
+    FactoryBase[PostProcessorBase]``: ``getImpl(...) -> T | None`` is the plugin family, as PanDA
+    says ("FactoryBase[WatchDogBase] lets the knight call it").  Read without the parameter, the
+    impl's calls were holes ("declared T, not read")."""
+    roots = _tree(
+        tmp_path,
+        factory=_GENERIC_FACTORY,
+        plugins=_GENERIC_PLUGINS,
+        m='''\
+from pkg.factory import FactoryBase
+from pkg.plugins import PluginBase
+
+
+class Knight(FactoryBase[PluginBase]):
+    def start(self):
+        impl = self.getImpl("atlas")
+        impl.doAction()
+
+
+class Broker(FactoryBase[PluginBase]):
+    pass
+
+
+class Thread:
+    def __init__(self, implFactory: FactoryBase[PluginBase]):
+        self.implFactory = implFactory
+
+    def run(self):
+        impl = self.implFactory.getImpl("atlas")
+        impl.doAction()
+
+
+def build(factory: FactoryBase[PluginBase], broker: Broker):
+    factory.requireImpl("atlas").doAction()
+    broker.requireImpl("atlas").doAction()
+
+
+def unbound(factory: FactoryBase):
+    factory.requireImpl("atlas").doAction()
+''',
+    )
+    calls = _calls(roots)
+
+    def landed(func, text):
+        return sorted(t.cls.name for t in _placed(calls, "m", func, text).targets)
+
+    plugins = ["AtlasPlugin", "PluginBase"]
+    assert landed("start", "impl.doAction") == plugins
+    assert landed("run", "self.implFactory.getImpl") == ["FactoryBase"]
+    assert landed("run", "impl.doAction") == plugins
+    assert landed("build", "factory.requireImpl('atlas').doAction") == plugins
+    assert landed("build", "broker.requireImpl('atlas').doAction") == plugins
+    # A parameter nothing binds names no class, as before.
+    assert landed("unbound", "factory.requireImpl") == ["FactoryBase"]
+    assert landed("unbound", "factory.requireImpl('atlas').doAction") == []
+
+
+def test_a_field_declared_with_a_descriptor_reads_as_what_its_get_returns(tmp_path):
+    """``PandaID: SpecColumn[int]`` (spec_column.py) is an ``int`` or ``"NULL"`` on an instance, not
+    a ``SpecColumn``: a subscripted generic stating its class must not make every spec column one."""
+    roots = _tree(
+        tmp_path,
+        col='''\
+from typing import Generic, Literal, TypeVar
+
+_T = TypeVar("_T")
+Null = Literal["NULL"]
+
+
+class SpecColumn(Generic[_T]):
+    def __get__(self, obj: object, objtype: "type | None" = None) -> "_T | Null":
+        raise NotImplementedError
+''',
+        m='''\
+from pkg.col import SpecColumn
+
+
+class Site:
+    def go(self):
+        return 1
+
+
+class JobSpec:
+    PandaID: SpecColumn[int]
+    site: SpecColumn[Site]
+    plain: Site
+''',
+    )
+    calls = _calls(roots)
+    file = f"{PACKAGE}/m.py"
+    spec = calls.types.class_def(file, "JobSpec")
+
+    def read(field):
+        found = calls.types.of_field(file, spec, field, 0)
+        return sorted(cls.name for _where, cls in found) if found else None
+
+    assert read("PandaID") is None
+    assert read("site") == ["Site"]
+    assert read("plain") == ["Site"]
