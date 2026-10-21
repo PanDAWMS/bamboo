@@ -794,11 +794,11 @@ async def _gaps_answer(tmp_path, source: str = _GET_JOBS_SOURCE, sha: str = ""):
 async def test_the_gaps_are_the_gates_own_judgement(tmp_path):
     """One judgement asked from two places: the answer's reading of the one
     function and the gate's reading of the build must name the same gap."""
+    import ast as ast_mod
+
     from bamboo.codemap import gates
     from bamboo.codemap.panda.pathcond import attach_parents
     from bamboo.codemap.panda.recognizers import sqlwrite
-
-    import ast as ast_mod
 
     strategy = await _gaps_answer(tmp_path)
     tree = ast_mod.parse(_GET_JOBS_SOURCE)

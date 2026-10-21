@@ -2369,11 +2369,13 @@ class Types:
                 declared = self.annotated_all(file, node.annotation)
                 if declared is not None:
                     return declared
+        # ``x: Any = Foo()``: an annotation that declares nothing leaves the value to read, as ``x = Foo()``.
         values = [
             node.value
             for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and node.value is not None
+            and any(isinstance(target, ast.Name) and target.id == name for target in pathcond.targets_of(node))
         ]
         if values:
             found = {self.declared(file, tree, value, depth + 1) for value in values}
@@ -2872,7 +2874,7 @@ class Types:
             for node in tree.body if tree is not None else ():
                 defined = (
                     [node.name] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                    else [one.id for one in getattr(node, "targets", []) if isinstance(one, ast.Name)]
+                    else [one.id for one in pathcond.targets_of(node) if isinstance(one, ast.Name)]
                 )
                 if called.id in defined:
                     return ""

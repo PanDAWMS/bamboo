@@ -54,7 +54,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
-from bamboo.codemap.calls import FILLERS, UNSET, Calls, Route, Target, Types
+from bamboo.codemap.calls import FILLERS, UNSET, Calls, Target, Types
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     AddedTerm,
@@ -97,6 +97,7 @@ from bamboo.codemap.panda.pathcond import (
     reaching_definitions,
     site_of,
     surviving_writes,
+    targets_of,
 )
 
 # The block a decision records about itself reads the same way whichever slice
@@ -585,7 +586,8 @@ def extract(
                             column=column,
                             carriers=carriers,
                             setters=setters,
-                            beside=lambda node, terms=sorted(statement.preconditions.values()): [
+                            # Called by _record before the loop moves on; the defaults keep this pass's run if it ever is not.
+                            beside=lambda node, terms=sorted(statement.preconditions.values()), func=func, run=run: [
                                 sql.settled_precondition(
                                     term, func, run.varmap, run.window, settle, beside=node, at=run.run_at
                                 )[0]
@@ -1754,7 +1756,7 @@ def _folded(
         if window is None and run.varmap:
             window = sql.binding_window(func, run.varmap, line)
         for text in texts:
-            found = list(zip(sqltext.conditions(text), sqltext.condition_twins(text)))
+            found = list(zip(sqltext.conditions(text), sqltext.condition_twins(text), strict=True))
             seeds: dict[str, list[int]] = {}
             for condition, _twin in found:
                 for key in condition.binds:
@@ -1810,7 +1812,7 @@ def _merged_tree(one: Optional[ConditionNode], other: Optional[ConditionNode]) -
         return one
     return one.model_copy(
         update={
-            "items": [_merged_tree(a, b) for a, b in zip(one.items, other.items)],
+            "items": [_merged_tree(a, b) for a, b in zip(one.items, other.items, strict=True)],
             "values": one.values + [value for value in other.values if value not in one.values],
             "settled": one.settled and other.settled,
         }
@@ -2352,23 +2354,24 @@ def _leaves(handler: ast.ExceptHandler) -> bool:
     return any(isinstance(inner, _LEAVES) for inner in ast.walk(handler))
 
 
-def _assigned_names(node: ast.Assign) -> set[str]:
-    return {name for target in node.targets for name, _slot, _unpacked in names_bound_by(target)}
+def _assigned_names(node: ast.AST) -> set[str]:
+    return {name for target in targets_of(node) for name, _slot, _unpacked in names_bound_by(target)}
 
 
 def _rows_written(
     func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
-) -> list[ast.Assign]:
+) -> list[ast.Assign | ast.AnnAssign]:
     """The assignments this statement's rows land in, within the stretch it owns.
 
     The call line first, for the forwarded form that returns them; otherwise
     the first ``fetch*`` under it.  Reading only the call would leave most of
     the corpus with no rows to test an exit against -- see :data:`_FETCH`.
     """
-    named: list[ast.Assign] = []
-    fetched: list[ast.Assign] = []
+    named: list[ast.Assign | ast.AnnAssign] = []
+    fetched: list[ast.Assign | ast.AnnAssign] = []
     for node in ast.walk(func):
-        if not isinstance(node, ast.Assign) or not _assigned_names(node):
+        # ``res: list = self.cur.fetchall()`` lands the rows as ``res = ...`` does.
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not _assigned_names(node):
             continue
         if node.lineno == line:
             named.append(node)
@@ -3083,7 +3086,7 @@ def read_side(
             found = sqltext.conditions(run.reading)
             seeds = _condition_seeds(func, run, line, found)
             own_conditions[id(run)] = [(plain(one), tuple(dict.fromkeys(one.binds))) for one in found]
-            for one, twin in zip(found, sqltext.condition_twins(run.reading)):
+            for one, twin in zip(found, sqltext.condition_twins(run.reading), strict=True):
                 spelled.setdefault(("conditions", plain(one)), _render_condition(one, seeds))
                 key = ("conditions", plain(one))
                 trees[key] = _merged_tree(trees.get(key), tree_of(func, run, file, twin))
@@ -3919,12 +3922,12 @@ def _reached_by(
     reached: set[str] = set()
     built: dict[str, ast.AST] = {}
     for node in ast.walk(caller):
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
             continue
         callee = node.value.func
         made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
         if made in by_class and any(carry.reaches(a, node) for a in node.value.args):
-            for target in node.targets:
+            for target in targets_of(node):
                 if isinstance(target, ast.Name):
                     built[target.id] = made
     for node in ast.walk(caller):
@@ -4089,11 +4092,11 @@ def attach_crossings(
         for node in ast.walk(func):
             if not isinstance(node, ast.stmt) or not first <= node.lineno <= last:
                 continue
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call):
                 callee = node.value.func
                 made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
                 if made in by_class:
-                    for target in node.targets:
+                    for target in targets_of(node):
                         if isinstance(target, ast.Name):
                             built[target.id] = made
             for inner in ast.walk(node):
@@ -4155,7 +4158,7 @@ def _handed_back(
     reached: set[str] = set()
     for _rel, call, caller in _consumers_of(wanted, calls, site.anchor.file, func):
         statement = _enclosing(call, (ast.stmt,))
-        if not isinstance(statement, ast.Assign):
+        if not targets_of(statement):
             # Returned on again, or thrown away.  The first is the proxy shape
             # under another name and the second has no rows to follow.
             continue

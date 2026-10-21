@@ -991,13 +991,13 @@ def _whole_row(func: ast.AST, run, versions: "_Versions") -> tuple[str, bool, bo
     for call, one in given:
         if isinstance(one, ast.Name):
             # ``varMap`` is bound again for each statement: only the binding that reaches this call is its map.
+            # ``varMap: dict[str, Any] = {}`` binds it again as ``varMap = {}`` does (pathcond.targets_of).
             sites = [
                 node
                 for node in C.own_nodes(func)
-                if isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == one.id
+                if len(targets := pathcond.targets_of(node)) == 1
+                and isinstance(targets[0], ast.Name)
+                and targets[0].id == one.id
             ]
             try:
                 live = (

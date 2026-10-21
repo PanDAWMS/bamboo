@@ -1051,7 +1051,7 @@ def _scaled(left: Stated, right: Stated, op: ast.operator, node: ast.AST) -> Sta
 
 def _timedelta(call: ast.Call, func, at: ast.AST, depth: int, handed) -> Stated:
     """``datetime.timedelta(...)`` as seconds, or the parameters its amounts wait for."""
-    amounts = [*zip(_TIMEDELTA_POSITIONS, call.args), *((one.arg, one.value) for one in call.keywords)]
+    amounts = [*zip(_TIMEDELTA_POSITIONS, call.args, strict=False), *((one.arg, one.value) for one in call.keywords)]
     total, needs = 0.0, ()
     for unit, amount in amounts:
         if unit not in TIMEDELTA_UNITS:

@@ -2151,7 +2151,7 @@ def _split(tokens: list, lo: int, hi: int):
         cuts = _cuts(tokens, lo, hi, keyword)
         if cuts:
             bounds = [lo - 1, *cuts, hi]
-            return (kind, [_split(tokens, a + 1, b) for a, b in zip(bounds, bounds[1:])])
+            return (kind, [_split(tokens, a + 1, b) for a, b in zip(bounds, bounds[1:], strict=False)])
     return ("leaf", lo, hi)
 
 
@@ -3362,7 +3362,7 @@ def _printed_map(text: str) -> Optional[dict[object, object]]:
         return None
     if not isinstance(tree.body, ast.Dict) or any(key is None for key in tree.body.keys):
         return None
-    return {_printed_value(key): _printed_value(value) for key, value in zip(tree.body.keys, tree.body.values)}
+    return {_printed_value(key): _printed_value(value) for key, value in zip(tree.body.keys, tree.body.values, strict=True)}
 
 
 def cut(message: str, lead: str = "", gap: str = "") -> Optional[tuple[str, dict[object, object]]]:

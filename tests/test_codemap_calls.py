@@ -1318,7 +1318,6 @@ def test_order_and_limit_are_read_off_the_statement():
 
 
 def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
-    from bamboo.codemap.panda import sql
 
     roots = _tree(
         tmp_path,

@@ -194,10 +194,9 @@ def _write_of(node: ast.AST) -> Optional[_Write]:
             and _is_dict(called.value)
         ):
             return _Write(node, called.value.value, None, None, False)  # type: ignore[attr-defined]
-    if isinstance(node, ast.Assign):
-        for target in node.targets:
-            if isinstance(target, ast.Subscript) and _is_dict(target.value):
-                return _Write(node, target.value.value, target.slice, node.value, False)  # type: ignore[attr-defined]
+    for target in pathcond.targets_of(node):
+        if isinstance(target, ast.Subscript) and _is_dict(target.value):
+            return _Write(node, target.value.value, target.slice, node.value, False)  # type: ignore[attr-defined]
     return None
 
 

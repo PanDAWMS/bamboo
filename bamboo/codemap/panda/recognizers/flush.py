@@ -53,7 +53,13 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
-from bamboo.codemap.models import Emit, JunctionNode, RowKeySource, SourceModule, SubjectNode
+from bamboo.codemap.models import (
+    Emit,
+    JunctionNode,
+    RowKeySource,
+    SourceModule,
+    SubjectNode,
+)
 from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (

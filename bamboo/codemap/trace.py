@@ -1253,14 +1253,15 @@ def _self_fills(method: ast.AST, field: str) -> list[ast.expr]:
     """What *method* puts into ``self.<field>``: ``append``, ``add`` and the like, and ``[k] =``."""
     found: list[ast.expr] = []
     for node in _own_nodes(method):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in pathcond.targets_of(node):
                 if (
                     isinstance(target, ast.Subscript)
                     and isinstance(target.value, ast.Attribute)
                     and isinstance(target.value.value, ast.Name)
                     and target.value.value.id == "self"
                     and target.value.attr == field
+                    and node.value is not None
                 ):
                     found.append(node.value)
         elif (
@@ -1554,12 +1555,13 @@ def _mutated_bindings(func: ast.AST, name: str) -> list[ast.expr]:
     for node in ast.walk(func):
         # ``returnMap["ramCount"] = memVal`` puts a value in as much as
         # ``xmlIDs.add(x)`` does, and it is how the scout's result is built.
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in pathcond.targets_of(node):
                 if (
                     isinstance(target, ast.Subscript)
                     and isinstance(target.value, ast.Name)
                     and target.value.id == name
+                    and node.value is not None
                 ):
                     found.append(node.value)
             continue
@@ -2517,24 +2519,29 @@ class _Walk:
         callee_env = {name: value for name, value in callee_env.items() if value is not None}
         loggers: dict[str, tuple[Optional[list], str]] = {}
         for statement in target.func.body:  # type: ignore[attr-defined]
-            if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
+            targets = pathcond.targets_of(statement)
+            if (
+                isinstance(statement, (ast.Assign, ast.AnnAssign))
+                and statement.value is not None
+                and len(targets) == 1
+                and isinstance(targets[0], ast.Name)
+            ):
                 value = statement.value
                 if isinstance(value, ast.Call) and _called_name(value) == "LogWrapper":
-                    loggers[statement.targets[0].id] = _wrapper_prefix(value, callee_env)
+                    loggers[targets[0].id] = _wrapper_prefix(value, callee_env)
                     continue
                 folded = _fold(value, callee_env)
-                callee_env[statement.targets[0].id] = folded if folded is not None else [_Unknown(statement.targets[0].id)]
+                callee_env[targets[0].id] = folded if folded is not None else [_Unknown(targets[0].id)]
             elif isinstance(statement, ast.AugAssign) and isinstance(statement.target, ast.Name) and isinstance(statement.op, ast.Add):
                 held = callee_env.get(statement.target.id)
                 folded = _fold(statement.value, callee_env)
                 callee_env[statement.target.id] = (held or [_Unknown(statement.target.id)]) + (folded or [_Unknown("...")])
             elif isinstance(statement, ast.If):
-                # Whatever a branch assigns is not known to have run.
+                # Whatever a branch assigns, ``+=`` too, is not known to have run.
                 for node in ast.walk(statement):
-                    if isinstance(node, ast.Assign):
-                        for held in node.targets:
-                            if isinstance(held, ast.Name):
-                                callee_env[held.id] = [_Unknown(held.id)]
+                    for held in [node.target] if isinstance(node, ast.AugAssign) else pathcond.targets_of(node):
+                        if isinstance(held, ast.Name):
+                            callee_env[held.id] = [_Unknown(held.id)]
             elif isinstance(statement, ast.Return):
                 returned = statement.value
                 if isinstance(returned, ast.Name):
@@ -4341,7 +4348,11 @@ class _Walk:
                 answered = True
         if not answered:
             # ``rc_fatal = 2`` in the class body: a constant every instance
-            # reads until one assigns its own, and here none does.
+            # reads until one assigns its own, and here none does.  Not
+            # ``success: bool = False``: in a class body an annotation can
+            # declare a field -- 36 of the corpus's 39 are a ``@dataclass``'s
+            # (DataCarousel's configs, workflow_base's results) -- whose value
+            # the generated ``__init__`` sets from its arguments.
             for holder in [cls, *pathcond.bases_in(tree, cls)]:
                 for node in holder.body:
                     if (

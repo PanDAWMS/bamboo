@@ -46,8 +46,11 @@ from bamboo.codemap.panda.attribution import (
     class_bases,
     spec_annotation_forms,
 )
-from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner, qualified_name
-from bamboo.codemap.panda.recognizers import outbound
+from bamboo.codemap.panda.pathcond import (
+    attach_parents,
+    functions_with_owner,
+    qualified_name,
+)
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -56,6 +59,7 @@ from bamboo.codemap.panda.recognizers import (
     flush,
     logfile,
     loopcut,
+    outbound,
     progress,
     selection,
     sqlwrite,

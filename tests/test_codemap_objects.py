@@ -419,6 +419,33 @@ class Files:
     ]
 
 
+def test_a_map_bound_again_with_an_annotation_is_bound_again(tmp_path):
+    """``varMap: dict = {}`` binds the map again as ``varMap = {}`` does (retryJob): round the loop the file's map does not reach."""
+    proxy = (
+        PROXY
+        + """
+
+class Retry:
+    def retry(self, job: JobSpec, file):
+        for _ in range(3):
+            varMap: dict = {}
+            varMap[":PandaID"] = job.PandaID
+            varMap[":modificationTime"] = job.modificationTime
+            self.cur.execute("UPDATE ATLAS_PANDA.metaTable SET modificationTime=:modificationTime WHERE PandaID=:PandaID", varMap)
+            varMap = file.valuesMap(onlyChanged=True)
+            self.cur.execute("UPDATE ATLAS_PANDA.filesTable4 SET status=:status WHERE row_ID=:row_ID", varMap)
+"""
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=ADDER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    writes = {w.table: w for w in rows["pkg/proxy.py::Retry.retry"].writes}
+    assert writes["filesTable4"].whole == "file"
+    assert writes["metaTable"].whole == ""
+    assert [(v.column, v.path) for v in writes["metaTable"].keys] == [
+        ("PandaID", "job.PandaID")
+    ]
+
+
 def test_a_write_of_a_table_of_another_class_is_not_the_objects_row(tmp_path):
     """A whole row of a file on filesTable4 writes every FileSpec column, and none of the job's."""
     proxy = PROXY.replace(

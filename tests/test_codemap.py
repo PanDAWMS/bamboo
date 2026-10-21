@@ -38,8 +38,8 @@ from bamboo.codemap.models import (
     LoopCutNode,
     MapFragment,
     ReadingStop,
-    RowKeySource,
     ReadSiteNode,
+    RowKeySource,
     SourceModule,
     SubjectNode,
     ValueEnumNode,
@@ -9479,6 +9479,26 @@ def test_rows_given_back_cross_to_what_the_caller_does_with_them():
     nodes, census = _crossed(
         ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")]
     )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["c.py::retryTask"]
+    assert (census.handing_back, census.resolved) == (1, 1)
+
+
+def test_rows_landing_in_an_annotated_name_are_given_back_as_well():
+    """``res_list: list[tuple[Any, ...]] = self.cur.fetchall()`` lands the rows as ``res = ...`` does
+    (``_get_tasks_datasets_with_unprocessed_inputs``)."""
+    caller = (
+        "class Commando:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        self.retryTask(tasks)\n"
+    )
+    annotated = ROWS_HANDED_BACK.replace(
+        "        res = self.cur.fetchall()\n", "        res: list = self.cur.fetchall()\n"
+    )
+    assert annotated != ROWS_HANDED_BACK
+    nodes, census = _crossed(annotated, ["c.py::retryTask"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == ["c.py::retryTask"]

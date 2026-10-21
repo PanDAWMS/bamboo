@@ -730,9 +730,10 @@ def _dispatch_families(
                 and (found := annotated_generic(arg.annotation, bases)) is not None
             }
             for node in ast.walk(func):
-                if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                # ``self.impl: T = impl`` binds as ``self.impl = impl`` does.
+                if len(targets := targets_of(node)) != 1:
                     continue
-                target, value = node.targets[0], node.value
+                target, value = targets[0], written_value(node)
                 if (
                     isinstance(target, ast.Attribute)
                     and isinstance(target.value, ast.Name)
@@ -782,9 +783,10 @@ def _dispatch_families(
                 continue
             bound: dict[str, str] = {}
             for node in ast.walk(func):
-                if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                # ``impl: T = self.getImpl(...)`` binds as ``impl = self.getImpl(...)`` does.
+                if len(targets := targets_of(node)) != 1:
                     continue
-                target, value = node.targets[0], node.value
+                target, value = targets[0], written_value(node)
                 if not (isinstance(target, ast.Name) and isinstance(value, ast.Call)):
                     continue
                 if not isinstance(value.func, ast.Attribute):

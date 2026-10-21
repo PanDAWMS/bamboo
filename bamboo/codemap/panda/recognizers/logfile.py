@@ -675,14 +675,13 @@ class LoggerFiles:
             if tree is None:
                 continue
             for statement in _module_statements(tree):
-                if not isinstance(statement, ast.Assign):
-                    continue
-                for held in statement.targets:
+                value = pathcond.written_value(statement)
+                for held in pathcond.targets_of(statement):
                     if not (isinstance(held, ast.Attribute) and isinstance(held.value, ast.Name)):
                         continue
                     module = self.types.module_named(file, held.value)
-                    if module is not None:
-                        found[(module, held.attr)].append((file, statement.value))
+                    if module is not None and value is not None:
+                        found[(module, held.attr)].append((file, value))
         return dict(found)
 
 

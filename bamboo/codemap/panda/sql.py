@@ -1158,11 +1158,12 @@ def _string_value(
         if hops >= _KEY_HOPS:
             return None
         for other in ast.walk(scope):
-            if isinstance(other, ast.Assign) and any(
+            value = written_value(other)
+            if value is not None and any(
                 isinstance(target, ast.Name) and target.id == node.id
-                for target in other.targets
+                for target in targets_of(other)
             ):
-                return _string_value(other.value, bound, scope, hops + 1)
+                return _string_value(value, bound, scope, hops + 1)
         return None
     if isinstance(node, ast.JoinedStr):
         parts = [
@@ -1378,10 +1379,12 @@ def _run_fragments(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[a
                 inside = [
                     node
                     for node in ast.walk(hole.stmt)
-                    if isinstance(node, (ast.Assign, ast.AugAssign))
+                    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
                     and any(
                         isinstance(t, ast.Name) and t.id == hole.source
-                        for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                        for t in (
+                            [node.target] if isinstance(node, ast.AugAssign) else targets_of(node)
+                        )
                     )
                 ]
             else:
