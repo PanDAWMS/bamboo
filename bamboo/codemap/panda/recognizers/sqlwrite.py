@@ -2292,12 +2292,6 @@ def _assembled_queries(
     }
 
 
-#: Where a statement's rows arrive.  The ``execute`` form binds nothing at the
-#: call -- ``self.cur.execute(sql, varMap)`` and then ``res =
-#: self.cur.fetchall()`` -- so reading the call line alone finds the rows for
-#: 48 of the corpus's 264 statements and misses every exit taken because none
-#: came back.
-_FETCH = ("fetchall", "fetchone", "fetchmany")
 #: ``ExceptHandler`` is not an ``ast.stmt``, which is why it is named rather
 #: than reached through one.
 _EXITS = (ast.Continue, ast.Break, ast.Return, ast.Raise, ast.ExceptHandler)
@@ -2365,7 +2359,7 @@ def _rows_written(
 
     The call line first, for the forwarded form that returns them; otherwise
     the first ``fetch*`` under it.  Reading only the call would leave most of
-    the corpus with no rows to test an exit against -- see :data:`_FETCH`.
+    the corpus with no rows to test an exit against -- see :data:`sql.FETCHES`.
     """
     named: list[ast.Assign | ast.AnnAssign] = []
     fetched: list[ast.Assign | ast.AnnAssign] = []
@@ -2377,7 +2371,7 @@ def _rows_written(
             named.append(node)
         elif line < node.lineno <= last and isinstance(node.value, ast.Call):
             callee = node.value.func
-            if isinstance(callee, ast.Attribute) and callee.attr in _FETCH:
+            if isinstance(callee, ast.Attribute) and callee.attr in sql.FETCHES:
                 fetched.append(node)
     return named or fetched
 
@@ -3306,48 +3300,17 @@ def read_side(
     def place_regions(
         func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
     ) -> None:
-        """Give each of *func*'s statements the stretch of it that it owns.
+        """Give each of *func*'s statements the stretch of it that it owns (:func:`sql.regions`).
 
-        From where this run's binds start being filled to just before the next
-        run's do.  Every run of the function is laid out, not only the stored
-        ones: the statement that ends a region may be one no read site was
-        built from, and stopping at the next *stored* one would hand a reader
-        the following query's logging as well.
-
-        Where two statements share one ``var_map = {}`` the later one's binds
-        start filling *above* the earlier one's call, so the next run's window
-        is no edge at all: it would end a region before the statement it
-        belongs to ran, taking that statement's own ``fetchall`` with it.  A
-        statement's territory cannot close at or before it ran, so where the
-        windows overlap the next *call* is the edge.
-
-        Keyed by the call line because a branchy statement is emitted as
-        several runs at one ``execute``, and a read site is one ``(owner,
-        line)``: without the key the region ends at the statement's own second
-        variant, which is itself.
+        Every run of the function is laid out, not only the stored ones: the
+        statement that ends a region may be one no read site was built from,
+        and stopping at the next *stored* one would hand a reader the
+        following query's logging as well.
         """
-        starts: dict[int, int] = {}
-        for run in executions:
-            line = run.call.lineno
-            window = run.window
-            if window is None and run.varmap:
-                window = sql.binding_window(func, run.varmap, line)
-            begins = window[0] if window else line
-            starts[line] = min(starts.get(line, begins), begins)
-        last = func.end_lineno or func.lineno
-        ordered = sorted(starts.items())
-        for index, (line, begins) in enumerate(ordered):
+        for line, region in sql.regions(func, executions).items():
             kept = statements.get((owner, line))
-            if kept is None:
-                continue
-            if index + 1 < len(ordered):
-                next_line, next_begins = ordered[index + 1]
-                following = next_begins if next_begins > line else next_line
-            else:
-                following = last + 1
-            statements[(owner, line)] = kept._replace(
-                region=(begins, max(line, following - 1))
-            )
+            if kept is not None:
+                statements[(owner, line)] = kept._replace(region=region)
 
     def place_exits(func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str) -> None:
         """Give each statement the ways a row it asked for stops being followed.

@@ -65,6 +65,7 @@ from bamboo.codemap.models import (
     BIND_FILL,
     BIND_RESULT,
     BIND_RETURN,
+    CallBinding,
     DbWrite,
     EntityNode,
     ReachNode,
@@ -97,6 +98,10 @@ PREMISES: dict[str, str] = {
         "A literal str key names one entry of a container: what is put under one key is read under that key, or "
         "under one not spelled as a literal.  The corpus's classes with their own item access (MapWithLock, "
         "CachedObject) hand it to a dict."
+    ),
+    "rows_hold_their_where": (
+        "A row a query returns holds, in each column its own WHERE sets equal to one bind, what the bind was "
+        "filled with; a spec reading the row (pack) holds it there, as if assigned by hand."
     ),
     "follow_capped": (
         f"The object is followed to paths of at most {MAX_PARTS} parts, {MAX_HELD} paths in one function and "
@@ -596,7 +601,9 @@ def _hole_at(row: ReachNode, line: int) -> str:
 
 #: Roles of a computed-name write that set no value of the row's own: the row's values read back, a new
 #: object's first ones, a pickle's, and the mechanism that is its caller's assignment.
-NOT_A_CHANGE = frozenset({"row_read", "construct", "restore", "mechanism"})
+#: How a spec's read of a row (``pack``) assigns its columns: the row's own values.
+READS_ROW = "row_read"
+NOT_A_CHANGE = frozenset({READS_ROW, "construct", "restore", "mechanism"})
 
 #: What a ``may_change`` answer rests on, beyond :data:`PREMISES` and reach's.
 CHANGE_PREMISES: dict[str, str] = {
@@ -617,6 +624,7 @@ NOT_FOLLOWED_KEY = (
     "writes {column} on a row named by {key}, which is not followed to the object's"
 )
 UNREAD_KEY = "writes {column} on a row whose key is not read"
+NOT_READ_HERE = "writes {column} as {object} holds it, which is not followed to where it was read, on a row named by {key}"
 HOLE_NAMED = (
     "a call the record could not place, named {name}, as a function writing {column} is"
 )
@@ -656,6 +664,13 @@ def may_change(
     names, where that key is one of *keys* (paths of *owner* holding the
     row's key, followed as :func:`follow` follows an object) or the object's
     own *key_column*.  A new row (a sequence's key) is not the object's.
+    A write by key of what an object holds -- the whole object, or its own
+    attribute of the column (``varMap[":param"] = job.jobParameters``) --
+    carries the row as that object holds it, the same rule as the object's
+    own: the column changes where an object read from the row that holds it
+    assigns it, and not otherwise (:func:`_carried_objects`,
+    :func:`_row_objects`) -- so asking by the object or by its key answers
+    alike.  Where no such object is found the column is open.
 
     What leaves the answer open is said: a hole the object reaches, a write
     of the column whose row is named by something not followed to the
@@ -664,16 +679,19 @@ def may_change(
 
     *spec_class* and *table_classes* (:func:`table_classes`) keep to the
     tables that hold the object's class: ``filesTable4`` holds FileSpec, and a
-    write of a file's row is not one of the job's.  A table whose class is
-    not learned is kept.
+    write of a file's row is not one of the job's.  A table the build knows
+    holds the class learned for it, or none: ``jobs_StatusLog``'s ``INSERT``
+    names columns no spec declares (``modiftime_extended``), and its row is a
+    log's, not the job's.  A table it does not know -- a name the statement
+    builds at run time -- may be the class's, and is kept.
     """
     lowered = column.lower()
 
     def other_class(write: DbWrite) -> bool:
         if not spec_class or table_classes is None:
             return False
-        held = table_classes.get(write.table.lower())
-        return held is not None and held != spec_class
+        table = write.table.rpartition(".")[2].lower()
+        return table in table_classes and table_classes[table] != spec_class
 
     obj = follow(rows, owner, path)
     because: dict[Site, None] = {}
@@ -683,6 +701,7 @@ def may_change(
         "bindings_without_order",
         "handed_values_not_read",
         "literal_keys_apart",
+        "rows_hold_their_where",
         "holes_land_by_name",
     ]
     assigned = [
@@ -729,6 +748,7 @@ def may_change(
     if capped:
         premises.append("follow_capped")
     closure = _closure(rows, owner)
+    handing: Optional[dict[str, list[tuple[str, CallBinding]]]] = None
     for at in closure:
         row = rows[at]
         own = set(obj.held.get(at, ()))
@@ -759,7 +779,44 @@ def may_change(
                 key_values = [
                     (f"{write.whole}.{key_column}", f"{write.whole}.{key_column}")
                 ]
-            if any(
+            carried = _carried_objects(write, named, column)
+            if carried and any(
+                held and _holds(keyed.get(at, set()), held)
+                for held, _spelled in key_values
+            ):
+                if handing is None:
+                    handing = _handing(rows, closure)
+                # What a row object holds unassigned is the row's own value; an object no way reads from the
+                # row changes the column where it is assigned, and is not known to otherwise.
+                changes: list[Site] = []
+                for one in carried:
+                    found, unread = _row_objects(
+                        rows, handing, keyed, key_column, at, one
+                    )
+                    if found and "written_back_as_read" not in premises:
+                        premises.append("written_back_as_read")
+                    changes += [
+                        site for reach in found for site in _changes(reach, column)
+                    ]
+                    for reach in unread:
+                        assigned_there = _changes(reach, column)
+                        changes += assigned_there
+                        if not assigned_there:
+                            spelled = ", ".join(text for _held, text in key_values)
+                            opened[
+                                Site(
+                                    at,
+                                    site_line,
+                                    NOT_READ_HERE.format(
+                                        column=column, object=one, key=spelled
+                                    ),
+                                )
+                            ] = None
+                for site in changes:
+                    because[site] = None
+                if changes:
+                    because[Site(at, site_line, f"{write.kind} {write.table}")] = None
+            elif any(
                 held and _holds(keyed.get(at, set()), held)
                 for held, _spelled in key_values
             ):
@@ -804,6 +861,114 @@ def may_change(
         premises=premises,
         unwritten=unwritten,
     )
+
+
+def _carried_objects(write: DbWrite, named: list, column: str) -> list[str]:
+    """The objects *write* takes *column*'s value from as they hold it: the whole object written, where every value
+    naming the column is a part of it, or each object whose own attribute of that name a value is
+    (``varMap[":param"] = job.jobParameters``); none where a value is anything else -- another attribute
+    (``:newStatus = taskSpec.oldStatus`` copies one column into another), a constant, a value made of one."""
+    if write.whole and all(
+        v.path and _under(write.whole, v.path) is not None for v in named
+    ):
+        return [write.whole]
+    found: list[str] = []
+    for value in named:
+        base, _, attribute = value.path.rpartition(".")
+        if not base or attribute.lower() != column.lower():
+            return []
+        found.append(base)
+    return sorted(set(found))
+
+
+def _handing(
+    rows: dict[str, ReachNode], closure: list[str]
+) -> dict[str, list[tuple[str, CallBinding]]]:
+    """Each function of *closure* with the calls of *closure* handing it a value: ``(caller, binding)``."""
+    found: dict[str, list[tuple[str, CallBinding]]] = defaultdict(list)
+    for caller in closure:
+        for call in rows[caller].call_bindings:
+            if (
+                call.to
+                and call.path
+                and call.parameter
+                and not call.parameter.startswith("*")
+            ):
+                found[call.to].append((caller, call))
+    return found
+
+
+def _row_objects(
+    rows: dict[str, ReachNode],
+    handing: dict[str, list[tuple[str, CallBinding]]],
+    keyed: dict[str, set[str]],
+    key_column: str,
+    at: str,
+    whole: str,
+) -> tuple[list[ObjectReach], list[ObjectReach]]:
+    """The follows of the objects read from the row that hold *whole* at *at*, one on each way the key comes by,
+    and of the object at the top of each way that reaches none.
+
+    Found up from the write.  *whole*'s own follow reads the row where it
+    reaches a spec's read of one (:data:`READS_ROW`, ``pack``) on the key
+    column -- ``killJob`` packs ``job`` from its select and writes it whole.
+    Otherwise each path it holds as a start, or back through a binding, whose
+    root a call of the closure hands (*handing*) is followed at that caller
+    in turn -- ``archiveJob``'s ``job`` from ``updateJobs``' ``jobs[]``, from
+    the run's ``upJobs[]``, which ``peekJobs`` read --, on the ways where the
+    key's follow (*keyed*) holds the handed object's *key_column*: an object
+    handed with another key is another row's, and ``archiveJob`` writes
+    ``Setupper``'s jobs too.  A path reached forward goes out, not in.  A way
+    ends with no row object where nothing of the closure hands its object in
+    -- a parameter of the run itself (``archiveJob``'s ``job``, asked of
+    ``archiveJob``), a field.
+    """
+    found: list[ObjectReach] = []
+    unread: list[ObjectReach] = []
+    work = [(at, whole)]
+    seen: set[_State] = set()
+    while work:
+        state = work.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        function, path = state
+        reach = follow(rows, function, path)
+        if any(
+            site.how == READS_ROW
+            for site in [
+                *reach.assigned.get(key_column, []),
+                *reach.assigned.get("*", []),
+            ]
+        ):
+            found.append(reach)
+            continue
+        steps, _spent = _held_steps(rows[function], {path})
+        ups: list[_State] = []
+        for held, step in steps.items():
+            if _came_forward(step):
+                continue
+            for caller, call in handing.get(function, ()):
+                rest = _under(call.parameter + call.at, held)
+                if rest is None:
+                    continue
+                handed = call.path + rest
+                if _holds(keyed.get(caller, set()), f"{handed}.{key_column}"):
+                    ups.append((caller, handed))
+        if not ups:
+            unread.append(reach)
+            continue
+        work += ups
+    return found, unread
+
+
+def _changes(reach: ObjectReach, column: str) -> list[Site]:
+    """The assignments of *column* on the object *reach* follows that change it (:data:`NOT_A_CHANGE` aside)."""
+    return [
+        site
+        for site in [*reach.assigned.get(column, []), *reach.assigned.get("*", [])]
+        if site.how not in NOT_A_CHANGE
+    ]
 
 
 def _closure(rows: dict[str, ReachNode], owner: str) -> list[str]:

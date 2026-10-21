@@ -8,7 +8,7 @@ from pathlib import Path
 from bamboo.codemap import objects, reach
 from bamboo.codemap.gates import object_records_resolve
 from bamboo.codemap.gitsource import blob_sha
-from bamboo.codemap.models import CallBinding, MapFragment, SourceModule
+from bamboo.codemap.models import CallBinding, EntityNode, MapFragment, SourceModule
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import pathcond, sql
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
@@ -141,7 +141,7 @@ class Adder:
 """
 
 
-def _build(tmp_path: Path, **files: str) -> MapFragment:
+def _build(tmp_path: Path, entities: tuple = (), **files: str) -> MapFragment:
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
@@ -165,6 +165,7 @@ def _build(tmp_path: Path, **files: str) -> MapFragment:
             map_id="m",
             derived_from="v",
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
+            entities=list(entities),
         )
         panda_objects.attach(fragment, modules, calls)
     return fragment
@@ -970,3 +971,172 @@ def test_the_gate_reads_keys_positions_and_a_calls_own_result(tmp_path):
     fragment, _rows = _forms(tmp_path)
     result = object_records_resolve(fragment)
     assert result.passed, result.failures
+
+
+#: The tables JobSpec is held in, as the build learns them (EntityNode.spec_class).
+JOB_TABLES = (
+    EntityNode(
+        name="jobsactive4",
+        map_id="m",
+        derived_from="v",
+        spec_class="JobSpec",
+        tables=["jobsActive4"],
+    ),
+    EntityNode(
+        name="jobsarchived4",
+        map_id="m",
+        derived_from="v",
+        spec_class="JobSpec",
+        tables=["jobsArchived4"],
+    ),
+    # a table the build knows and learned no class for: a log of the job's states, not the job's row
+    EntityNode(
+        name="jobs_statuslog", map_id="m", derived_from="v", tables=["jobs_StatusLog"]
+    ),
+)
+
+READER = """\
+from pkg.spec import JobSpec
+
+COLUMNS = "PandaID,jobStatus,ddmErrorCode,jobMetrics,modificationTime"
+
+
+class DBProxy:
+    def killJob(self, panda_id):
+        sql = f"SELECT {COLUMNS} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+        res = None
+        self.cur.execute(sql, {":PandaID": panda_id})
+        res = self.cur.fetchall()
+        job = JobSpec()
+        job.pack(res[0])  # killJob's pack
+        job.jobStatus = "cancelled"
+        sql = "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobStatus,jobMetrics) VALUES (:PandaID,:jobStatus,:jobMetrics)"
+        self.cur.execute(sql, job.valuesMap())
+        sql = "INSERT INTO ATLAS_PANDA.jobs_StatusLog (PandaID,modificationTime) VALUES (:PandaID,:modificationTime)"
+        self.cur.execute(sql, {":PandaID": panda_id, ":modificationTime": 1})
+        sql = "INSERT INTO ATLAS_PANDA.jobs_Unknown (PandaID,ddmErrorCode) VALUES (:PandaID,:ddmErrorCode)"
+        self.cur.execute(sql, {":PandaID": panda_id, ":ddmErrorCode": 1})
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus,jobMetrics=:jobMetrics WHERE PandaID=:PandaID"
+        self.cur.execute(sql, {":jobStatus": job.jobStatus, ":jobMetrics": job.jobMetrics, ":PandaID": job.PandaID})
+
+    def peekJobs(self, status):
+        sql = f"SELECT {COLUMNS} FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:status OR PandaID=:PandaID"
+        self.cur.execute(sql, {":status": status, ":PandaID": 1})
+        jobs = []
+        for row in self.cur.fetchall():
+            job = JobSpec()
+            job.pack(row)  # peekJobs' pack
+            jobs.append(job)
+        return jobs
+
+    def archiveJob(self, job: JobSpec):
+        job.jobStatus = "archived"
+        sql = "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobStatus,jobMetrics) VALUES (:PandaID,:jobStatus,:jobMetrics)"
+        self.cur.execute(sql, job.valuesMap())
+
+
+class Runner:
+    def __init__(self):
+        self.proxy = DBProxy()
+
+    def kill(self, panda_id):
+        self.proxy.killJob(panda_id)
+
+    def archive(self, panda_id, job: JobSpec):
+        job.PandaID = panda_id
+        self.proxy.archiveJob(job)
+"""
+
+
+def _reader(tmp_path: Path) -> dict:
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=SPEC, reader=READER)
+    return {row.owner: row for row in fragment.reach_graph}
+
+
+def test_a_spec_read_from_a_row_holds_the_bind_its_where_sets_the_key_to(tmp_path):
+    """killJob's select names the row by ``PandaID=:PandaID``, filled with panda_id: the job it packs holds it as
+    ``job.PandaID``.  The ``res = None`` before holds no row.  peekJobs' ``OR`` holds of no one column."""
+    rows = _reader(tmp_path)
+    kill = rows["pkg/reader.py::DBProxy.killJob"]
+    line = _line(READER, "# killJob's pack")
+    assert [
+        (b.name, b.path, b.how)
+        for b in kill.bindings
+        if b.line == line and b.name == "job.PandaID"
+    ] == [("job.PandaID", "panda_id", "alias")]
+    peek = rows["pkg/reader.py::DBProxy.peekJobs"]
+    line = _line(READER, "# peekJobs' pack")
+    assert not [
+        b for b in peek.bindings if b.line == line and b.name.startswith("job.")
+    ]
+
+
+def test_a_whole_object_written_on_its_row_changes_only_what_is_assigned_on_it(
+    tmp_path,
+):
+    """Asked by the key, killJob's INSERT of the job it read, and its UPDATE of the job's own attributes, write
+    jobStatus, which it assigns, and leave jobMetrics as read -- as asking by the object would say.  archive's job
+    is not read from the row: jobStatus, which archiveJob assigns, changes; jobMetrics is open."""
+    rows = _reader(tmp_path)
+    kill = "pkg/reader.py::Runner.kill"
+    status = objects.may_change(rows, kill, "panda_id", "jobStatus", keys=("panda_id",))
+    assert status.verdict is True
+    assert {(site.owner.split("::")[1], site.how) for site in status.because} == {
+        ("DBProxy.killJob", "="),
+        ("DBProxy.killJob", "insert jobsArchived4"),
+        ("DBProxy.killJob", "update jobsActive4"),
+    }
+    metrics = objects.may_change(
+        rows, kill, "panda_id", "jobMetrics", keys=("panda_id",)
+    )
+    assert metrics.verdict is False
+    assert "written_back_as_read" in metrics.premises
+
+    archive = "pkg/reader.py::Runner.archive"
+    unread = objects.may_change(
+        rows, archive, "panda_id", "jobMetrics", keys=("panda_id",)
+    )
+    assert unread.verdict is None
+    assert [site.how for site in unread.open] == [
+        objects.NOT_READ_HERE.format(
+            column="jobMetrics", object="job", key="job.PandaID"
+        )
+    ]
+    assigned = objects.may_change(
+        rows, archive, "panda_id", "jobStatus", keys=("panda_id",)
+    )
+    assert assigned.verdict is True
+    assert {(site.owner.split("::")[1], site.how) for site in assigned.because} == {
+        ("DBProxy.archiveJob", "="),
+        ("DBProxy.archiveJob", "insert jobsArchived4"),
+    }
+
+
+def test_a_table_known_to_hold_no_spec_is_not_the_objects_row(tmp_path):
+    """killJob's jobs_StatusLog insert -- a table the build knows, holding no spec -- writes a log's row, not the
+    job's; jobs_Unknown, a table it does not know, may be the job's and is kept."""
+    rows = _reader(tmp_path)
+    kill = "pkg/reader.py::Runner.kill"
+    logged = objects.may_change(
+        rows,
+        kill,
+        "panda_id",
+        "modificationTime",
+        keys=("panda_id",),
+        spec_class="JobSpec",
+        table_classes=objects.table_classes(list(JOB_TABLES)),
+    )
+    assert logged.verdict is False
+    unknown = objects.may_change(
+        rows,
+        kill,
+        "panda_id",
+        "ddmErrorCode",
+        keys=("panda_id",),
+        spec_class="JobSpec",
+        table_classes=objects.table_classes(list(JOB_TABLES)),
+    )
+    assert unknown.verdict is True
+    assert [site.how for site in unknown.because] == [
+        "insert jobs_Unknown writes ddmErrorCode on the object's row"
+    ]

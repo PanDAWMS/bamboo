@@ -96,7 +96,7 @@ from bamboo.codemap.models import (
     SourceModule,
     WrittenValue,
 )
-from bamboo.codemap.objects import RETURN
+from bamboo.codemap.objects import RETURN, table_classes
 from bamboo.codemap.panda import pathcond, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
@@ -115,6 +115,38 @@ _TAKERS = {"pop", "popleft", "get", "setdefault", "values", "copy", "items", "po
 #: A literal key a path keeps (8,937 of pin k's 8,950); another reads as ``[]``.
 _KEY = re.compile(r"[A-Za-z0-9_:\-]*")
 
+#: Calls that hand a value on unchanged as far as a key is concerned (keycolumns, and a row's key the record binds): ``str(pandaID)``.
+CONVERSIONS = frozenset({"str", "int", "repr"})
+
+
+def unconverted(node: ast.expr) -> ast.expr:
+    """*node* without the conversions that hand it on unchanged (:data:`CONVERSIONS`)."""
+    while (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in CONVERSIONS
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        node = node.args[0]
+    return node
+
+
+def is_parameter(func: ast.AST, name: str) -> bool:
+    """Whether *name* is one of *func*'s parameters."""
+    arguments = getattr(func, "args", None)
+    if arguments is None:
+        return False
+    held = [
+        *arguments.posonlyargs,
+        *arguments.args,
+        *arguments.kwonlyargs,
+        arguments.vararg,
+        arguments.kwarg,
+    ]
+    return any(one is not None and one.arg == name for one in held)
+
+
 #: Why a hole the reach record does not hold is one.
 HANDED_WITH_A_CALLABLE = "handed to code outside the corpus together with a function of the corpus, which it may call with it"
 
@@ -127,7 +159,7 @@ def attach(
     Inside the build's reading context (:func:`sql.across_calls`), so the
     statements are the ones every slice read.
     """
-    reader = _Reader(modules, calls)
+    reader = _Reader(modules, calls, table_classes(fragment.entities))
     rows = {row.owner: row for row in fragment.reach_graph}
     counts = [0, 0, 0, 0]
     for file, func, owner in reader.names.functions:
@@ -144,7 +176,12 @@ def attach(
 
 
 class _Reader:
-    def __init__(self, modules: list[SourceModule], calls: C.Calls):
+    def __init__(
+        self,
+        modules: list[SourceModule],
+        calls: C.Calls,
+        tables: Optional[dict[str, Optional[str]]] = None,
+    ):
         self.calls = calls
         self.types = calls.types
         self.names = reach._Names(calls.types)
@@ -152,6 +189,13 @@ class _Reader:
         self.columns: frozenset[str] = frozenset().union(
             *(declared.get(name, set()) for name in COLUMN_CLASSES)
         )
+        #: Each table, folded to lower case, and the spec class it holds (:func:`table_classes`).
+        self.tables = tables or {}
+        #: Each spec class's attributes by their lower-case spelling: a statement's column, case aside.
+        self.attributes = {
+            cls: {name.lower(): name for name in names}
+            for cls, names in declared.items()
+        }
 
     def read(
         self, file: str, func: ast.AST, row
@@ -159,6 +203,7 @@ class _Reader:
         values = _Values(self, file, func, row)
         for node in C.own_nodes(func):
             values.site(node)
+        values.row_keys()
         for write in specwrites.writes_in(self.types, file, func):
             target = _path(_parsed(write.target), values.names)
             if target is None:
@@ -604,6 +649,186 @@ class _Values:
             if method == "popitem" and not args:
                 return _shift(_index(receiver, "[]"), "[1]")
         return [_Carry("", call=call)]
+
+    # -- a row's key ---------------------------------------------------------------------------------------------
+
+    def row_keys(self) -> None:
+        """Bind each attribute a spec reads from a row to what the bind the row was asked by holds.
+
+        A row a query returns holds, in each column its own ``WHERE`` sets
+        equal to one bind (:func:`sqltext.row_tests`), what the bind was
+        filled with.  So where ``O.pack(r)`` (:data:`specwrites.ROW_READ`)
+        takes such a row, ``O.PandaID`` holds what ``varMap[":PandaID"]``
+        does: ``peekJob``'s ``job.pack(res[0])`` after ``SELECT ... WHERE
+        PandaID=:PandaID`` is the ``job.PandaID = pandaID`` its not-found
+        branch writes by hand, and is bound as that is.  Without it the key a
+        run is asked by reaches the object read by it only where such a line
+        happens to be written, and a write naming the row by ``job.PandaID``
+        reads as another row's.
+
+        The row is a statement's where the values come, through the bindings,
+        from a ``fetch*`` in the stretch of a run (:func:`sql.regions`) or from
+        a run's own call.  Each variant of the statement that returns rows
+        holds the test, the table aside -- ``peekJob`` runs one statement on
+        ``jobsDefined4``, ``jobsActive4`` and ``jobsArchived4`` in turn --, and
+        one that does not parse ties nothing.  A version of the values that
+        comes from anywhere else (a parameter, a field, another call, a list
+        a branch fills with objects) ties nothing; one only ever given a
+        constant (``res = None`` before the ``try``) holds no row.  A
+        ``fetch*`` on a cursor the corpus does not declare is bound to nothing
+        in the record, and is read off the code.
+        """
+        packs: dict[tuple[int, str], dict[str, list[str]]] = {}
+        for bound in self.handed.values():
+            if (
+                bound.to.rpartition(".")[2] not in specwrites.ROW_READ
+                or not bound.parameter
+                or bound.at
+                or not bound.path
+            ):
+                continue
+            side = "self" if bound.parameter == "self" else "row"
+            packs.setdefault((bound.line, bound.to), {}).setdefault(side, []).append(
+                bound.path
+            )
+        for (line, to), handed in sorted(packs.items()):
+            cls = to.rpartition("::")[2].rpartition(".")[0]
+            attributes = self.reader.attributes.get(cls)
+            if not attributes or "self" not in handed or "row" not in handed:
+                continue
+            ties = self._row_ties(cls, attributes, handed["row"])
+            for obj in handed["self"]:
+                for attribute, path in sorted(ties):
+                    self._bind(line, f"{obj}.{attribute}", path, BIND_ALIAS)
+
+    def _row_ties(
+        self, cls: str, attributes: dict[str, str], rows: list[str]
+    ) -> set[tuple[str, str]]:
+        """``(attribute, path)`` for each column of *cls* every row *rows* can hold is asked by, ``=`` one bind."""
+        executions = sql.executions(self.func)  # type: ignore[arg-type]
+        regions = sql.regions(self.func, executions)  # type: ignore[arg-type]
+        fetched = {
+            node.lineno
+            for node in C.own_nodes(self.func)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in sql.FETCHES
+        }
+        ties: Optional[set[tuple[str, str]]] = None
+        for path in rows:
+            runs = self._runs_holding(path, regions, fetched)
+            if runs is None:
+                return set()
+            for run in executions:
+                if run.call.lineno not in runs:
+                    continue
+                returns = sqltext.returns_rows(run.reading)
+                if returns is None:
+                    return set()
+                if returns:
+                    found = self._tied(cls, attributes, run)
+                    ties = found if ties is None else ties & found
+        return ties or set()
+
+    def _runs_holding(
+        self, path: str, regions: dict[int, tuple[int, int]], fetched: set[int]
+    ) -> Optional[set[int]]:
+        """The call lines of the runs whose rows *path* holds, through the bindings; ``None`` where a way comes
+        from anywhere else."""
+        runs: set[int] = set()
+        work, seen = [path], set()
+        while work:
+            root = _head(work.pop())
+            if root in seen:
+                continue
+            seen.add(root)
+            bound = [one for one in self.bindings.values() if _head(one.name) == root]
+            if not bound:
+                given = self._given_rows(root, regions, fetched)
+                if given is None:
+                    return None
+                runs |= given
+                continue
+            for one in bound:
+                if one.how == BIND_RESULT:
+                    run = _run_at(one.line, regions, fetched)
+                    if run is None:
+                        return None
+                    runs.add(run)
+                elif one.how in (BIND_ALIAS, BIND_ELEMENT, BIND_FILL) and one.path:
+                    work.append(one.path)
+                else:
+                    return None
+        return runs
+
+    def _given_rows(
+        self, root: str, regions: dict[int, tuple[int, int]], fetched: set[int]
+    ) -> Optional[set[int]]:
+        """The runs whose rows the local *root* -- a name, or a name's version ``res@1826`` -- is given where the
+        record binds it to nothing: a ``fetch*`` on a cursor outside the corpus, or a constant, which holds no row;
+        ``None`` for a parameter, a field or anything else."""
+        name, _, at = root.partition("@")
+        if name in ("self", "cls") or (not at and is_parameter(self.func, name)):
+            return None
+        given = [
+            node
+            for node in C.own_nodes(self.func)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and (not at or node.lineno == int(at))
+            and any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in pathcond.targets_of(node)
+            )
+        ]
+        if not given:
+            return None
+        runs: set[int] = set()
+        for node in given:
+            if isinstance(node.value, ast.Constant):
+                continue
+            run = (
+                _run_at(node.value.lineno, regions, fetched)
+                if isinstance(node.value, ast.Call)
+                else None
+            )
+            if run is None:
+                return None
+            runs.add(run)
+        return runs
+
+    def _tied(
+        self, cls: str, attributes: dict[str, str], run: sql.Execution
+    ) -> set[tuple[str, str]]:
+        """``(attribute, path)`` for each test *run*'s rows hold that sets a column of *cls* equal to one bind."""
+        found: set[tuple[str, str]] = set()
+        for test in sqltext.row_tests(run.reading):
+            if test.op != "=" or len(test.sides) != 1:
+                continue
+            side = test.sides[0]
+            if side.kind != "bind" or len(side.binds) != 1:
+                continue
+            if self.reader.tables.get(test.table.rpartition(".")[2].lower()) != cls:
+                continue
+            attribute = attributes.get(test.column.lower())
+            if attribute is None:
+                continue
+            key = side.binds[0]
+            binds = sql.bound_values(
+                self.func,
+                run.varmap or "",
+                key,
+                run.window,
+                across=True,
+                at=run.run_at,  # type: ignore[arg-type]
+            )
+            if not run.varmap:
+                binds = binds + sql.inline_binds(run.call, key)
+            for bind in binds:
+                if pathcond.enclosing_function(bind.value) is not self.func:
+                    continue
+                for path in self.versions.paths(unconverted(bind.value)):
+                    found.add((attribute, path))
+        return found
 
     # -- where it goes ---------------------------------------------------------------------------------------------
 
@@ -1112,3 +1337,18 @@ def _parsed(text: str) -> Optional[ast.expr]:
         return ast.parse(text, mode="eval").body
     except SyntaxError:
         return None
+
+
+def _run_at(
+    line: int, regions: dict[int, tuple[int, int]], fetched: set[int]
+) -> Optional[int]:
+    """The run whose rows a call's result at *line* is: the run's own call, or a ``fetch*`` in its region."""
+    if line in regions:
+        return line
+    held = [at for at, (_first, last) in regions.items() if at <= line <= last]
+    return max(held) if line in fetched and held else None
+
+
+def _head(path: str) -> str:
+    """*path*'s first part, the name it is below: ``res@992`` of ``res@992[0]``, ``self`` of ``self.job``."""
+    return re.split(r"[.\[]", path, maxsplit=1)[0]

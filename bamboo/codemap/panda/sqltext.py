@@ -2662,6 +2662,35 @@ def _required(sql: str, held: bool) -> tuple[Condition, ...]:
     return tuple(read[0] for read in _readings(sql, held))
 
 
+def returns_rows(sql: str) -> Optional[bool]:
+    """Whether *sql* is a query, whose rows a ``fetch*`` reads: ``None`` where it does not parse."""
+    tree = parsed(sql).tree
+    return None if tree is None else isinstance(tree, exp.Query)
+
+
+@functools.lru_cache(maxsize=None)
+def row_tests(sql: str) -> tuple[Test, ...]:
+    """The tests every row *sql* returns holds: each term of an entry of :func:`conjoined` with one branch.
+
+    A row a query returns met its ``WHERE``, so ``PandaID=:PandaID`` holds
+    of each one, and its ``PandaID`` is what the bind was filled with.  An
+    entry of two branches or more, an ``OR``, holds of no one column, and
+    neither does an ``OR`` nested in a term.  A statement that is not a
+    query (:func:`returns_rows`) returns no rows and has none.
+    """
+    if not returns_rows(sql):
+        return ()
+
+    def held(twin: Twin) -> list[Test]:
+        if twin.node == "test":
+            return [twin.test] if twin.test is not None else []
+        if twin.node == "all" or len(twin.items) == 1:
+            return [test for item in twin.items for test in held(item)]
+        return []
+
+    return tuple(test for _condition, twin, _at in _readings(sql, True) for test in held(twin))
+
+
 @functools.lru_cache(maxsize=None)
 def condition_twins(sql: str) -> tuple[Twin, ...]:
     """Each entry of :func:`conditions` as a tree a row can be evaluated against, in the same order.

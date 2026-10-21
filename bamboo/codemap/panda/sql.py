@@ -1856,6 +1856,57 @@ def binding_window(
     return start, line
 
 
+#: Where a statement's rows arrive.  The ``execute`` form binds nothing at the
+#: call -- ``self.cur.execute(sql, varMap)`` and then ``res =
+#: self.cur.fetchall()`` -- so reading the call line alone finds the rows for
+#: 48 of the corpus's 264 statements and misses every exit taken because none
+#: came back.  A fetch reads the rows of the run whose region holds it (:func:`regions`).
+FETCHES = ("fetchall", "fetchone", "fetchmany")
+
+
+def regions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, executions: list[Execution]
+) -> dict[int, tuple[int, int]]:
+    """The stretch of *func* each run owns, by its call's line: ``(first, last)``.
+
+    From where the run's binds start being filled to just before the next
+    run's do, so a ``fetch*`` in it reads this run's rows.  Every run of the
+    function is laid out: the statement that ends a region may be one no
+    reader keeps, and stopping at the next *kept* one would hand a reader the
+    following query's rows as well.
+
+    Where two statements share one ``var_map = {}`` the later one's binds
+    start filling *above* the earlier one's call, so the next run's window
+    is no edge at all: it would end a region before the statement it
+    belongs to ran, taking that statement's own ``fetchall`` with it.  A
+    statement's territory cannot close at or before it ran, so where the
+    windows overlap the next *call* is the edge.
+
+    Keyed by the call line because a branchy statement is several runs at one
+    ``execute``: without the key the region ends at the statement's own second
+    variant, which is itself.
+    """
+    starts: dict[int, int] = {}
+    for run in executions:
+        line = run.call.lineno
+        window = run.window
+        if window is None and run.varmap:
+            window = binding_window(func, run.varmap, line)
+        begins = window[0] if window else line
+        starts[line] = min(starts.get(line, begins), begins)
+    last = func.end_lineno or func.lineno
+    ordered = sorted(starts.items())
+    found: dict[int, tuple[int, int]] = {}
+    for index, (line, begins) in enumerate(ordered):
+        if index + 1 < len(ordered):
+            next_line, next_begins = ordered[index + 1]
+            following = next_begins if next_begins > line else next_line
+        else:
+            following = last + 1
+        found[line] = (begins, max(line, following - 1))
+    return found
+
+
 #: ``jobStatus=:oldJobStatus`` -- the only shape of precondition whose value
 #: is in Python.  ``commandToPilot IS NULL`` and ``nFiles>nFilesUsed`` name no
 #: bind, and there is nothing to settle in them.

@@ -54,37 +54,8 @@ from bamboo.codemap import objects, reach
 from bamboo.codemap.models import KeyStop, MapFragment, SourceModule
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import pathcond, sql, sqltext
+from bamboo.codemap.panda.objects import is_parameter, unconverted
 from bamboo.codemap.panda.recognizers import progress
-
-#: Calls that hand a value on unchanged as far as a key is concerned: ``str(pandaID)``.
-CONVERSIONS = frozenset({"str", "int", "repr"})
-
-
-def unconverted(node: ast.expr) -> ast.expr:
-    """*node* without the conversions that hand it on unchanged (:data:`CONVERSIONS`)."""
-    while (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in CONVERSIONS
-        and len(node.args) == 1
-        and not node.keywords
-    ):
-        node = node.args[0]
-    return node
-
-
-def is_parameter(func: ast.AST, name: str) -> bool:
-    arguments = getattr(func, "args", None)
-    if arguments is None:
-        return False
-    held = [
-        *arguments.posonlyargs,
-        *arguments.args,
-        *arguments.kwonlyargs,
-        arguments.vararg,
-        arguments.kwarg,
-    ]
-    return any(one is not None and one.arg == name for one in held)
 
 
 class Reader:
