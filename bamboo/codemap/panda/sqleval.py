@@ -106,7 +106,19 @@ WHOLE_WORK: Optional[int] = (
     500_000  # the run over every call of a function; past it, each call on its own (was 5 s)
 )
 CALLEE_WORK: Optional[int] = 200_000  # one callee run (was 0.5 s)
+#: The names a call runs a statement by where no corpus is read; a corpus says its own (``sql.runners``), installed
+#: for the reading by :func:`use_runners`.
 RUNNERS = frozenset({"execute", "executemany", "querySQL", "querySQLS"})
+_RUNNERS: frozenset[str] = RUNNERS
+
+
+def use_runners(names: frozenset[str]) -> frozenset[str]:
+    """Read statements at calls by *names* from now on; returns the names read until now."""
+    global _RUNNERS
+    previous, _RUNNERS = _RUNNERS, names
+    return previous
+
+
 _DICT_READS = frozenset(
     {"keys", "items", "values", "get", "copy"}
 )  # methods that read a dict's structure
@@ -984,7 +996,7 @@ def runner_calls(func: ast.AST) -> list[ast.Call]:
         for node in _own_nodes(func)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr in RUNNERS
+        and node.func.attr in _RUNNERS
         and node.args
     ]
 
@@ -2566,7 +2578,7 @@ class Ref:
             for here in _expression_nodes(node)
             if isinstance(here, ast.Call)
             and isinstance(here.func, ast.Attribute)
-            and here.func.attr in RUNNERS
+            and here.func.attr in _RUNNERS
             and here.args
         ]
         for call in calls:
@@ -4499,7 +4511,7 @@ class Ref:
             if isinstance(node.func, ast.Attribute)
             else getattr(node.func, "id", "")
         )
-        if name in RUNNERS or name in _DATABASE_READS:
+        if name in _RUNNERS or name in _DATABASE_READS:
             return [UNK]  # what the database hands back
         held = _PLACED.get(id(node))
         if held is None or held[0] is not node:

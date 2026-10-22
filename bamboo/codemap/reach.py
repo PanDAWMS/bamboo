@@ -83,6 +83,10 @@ ASSUMPTIONS: dict[str, str] = {
         "of the corpus defines lands in no corpus code."
     ),
     "runner_runs_only_sql": "A call the map reads a SQL statement at runs the statement and nothing of the corpus.",
+    "runner_runs_callers_sql": (
+        "A call running the statement its function was handed runs its callers' statement, read where they "
+        "run it, and nothing of the corpus."
+    ),
     "driver_talks_only_to_db": "A call on the database driver -- a cursor, a connection -- goes only to the database.",
 }
 

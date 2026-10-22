@@ -129,10 +129,10 @@ NO_DECIDING_FRAGMENT = "the fragment that wrote this value could not be located"
 
 #: The read side counts statements, not columns, so its reasons are about how
 #: a query is run rather than where a value came from.  ``sql.executions``
-#: accepts ``execute``/``executemany``/``querySQL``/``querySQLS`` with at least
-#: two arguments; each reason below is one of the ways a statement this slice
+#: accepts a call by a runner's name (``sql.runners``: the cursor's
+#: ``execute`` / ``executemany`` and the functions handing their statement on
+#: to one); each reason below is one of the ways a statement this slice
 #: assembled fails to reach it.
-RUN_WITHOUT_VARMAP = "run through an accepted call with no varmap argument"
 RUN_BUT_TEXT_DIFFERS = "run through an accepted call, but the call is never handed this text"
 RUN_THROUGH_OTHER_FORM = "run through a call form the reader does not accept"
 NOT_RUN_HERE = "assembled here and not run here"
@@ -287,29 +287,22 @@ def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingSto
 def _skip_stops(skipped: list[sql.Skip], rel_path: str, owner: str) -> list[ReadingStop]:
     """An execution nothing was read out of, as a stop on the statement it runs.
 
-    Left out where the text is known and names no table: ``ALTER SESSION`` and
-    ``SET`` run through the same cursor and are about no rows.  Where the text
-    is not known at all the tables are not either, and the stop says so rather
-    than reading as a write.
+    Its text is not known, so its tables are not either, and the stop says so
+    rather than reading as a write.
     """
-    found: list[ReadingStop] = []
-    for skip in skipped:
-        verbs = [pair for text in skip.texts for pair in _table_verbs(text)]
-        if skip.texts and not verbs:
-            continue
-        found.append(
-            ReadingStop(
-                reason=skip.reason,
-                detail=skip.detail,
-                file=rel_path,
-                owner=owner,
-                line=skip.line,
-                statement=skip.line,
-                reads=sorted({table for verb, table in verbs if verb == "read"}),
-                reads_known=bool(skip.texts),
-            )
+    return [
+        ReadingStop(
+            reason=skip.reason,
+            detail=skip.detail,
+            file=rel_path,
+            owner=owner,
+            line=skip.line,
+            statement=skip.line,
+            reads=[],
+            reads_known=False,
         )
-    return found
+        for skip in skipped
+    ]
 
 
 def distinct_stops(stops: list[ReadingStop]) -> list[ReadingStop]:
@@ -637,17 +630,16 @@ def extract(
 
 
 def _runs_many(run: sql.Execution) -> bool:
-    """Is this execution ``executemany``, whose varmap argument is a sequence?
+    """Is this execution ``executemany``, or a runner handing its map on to it, whose varmap argument is a sequence?
 
     Asked of the call the reader already paired with the statement, so the
     answer cannot disagree with the pairing.
     """
     call = getattr(run, "call", None)
-    return bool(
-        call is not None
-        and isinstance(getattr(call, "func", None), ast.Attribute)
-        and call.func.attr == "executemany"
-    )
+    if call is None or not isinstance(getattr(call, "func", None), ast.Attribute):
+        return False
+    runner = sql.runners().get(call.func.attr)
+    return bool(runner is not None and runner.many)
 
 
 def _deciding_fragment(
@@ -2277,9 +2269,7 @@ def _why_not_run(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str
         attr = node.func.attr if isinstance(node.func, ast.Attribute) else (
             node.func.id if isinstance(node.func, ast.Name) else "?"
         )
-        if attr in sql.RUNNERS:
-            if len(node.args) < 2:
-                return RUN_WITHOUT_VARMAP
+        if attr in sql.runners():
             # Accepted form, yet no run there holds the text: what the name
             # holds where it is used is not what reaches the call, which is a
             # different finding from an unrecognised call.
@@ -4015,7 +4005,7 @@ def attach_crossings(
         # handed the same two false leads, which is the shape the crossing pass
         # was written to avoid and had been avoiding by accident, because until
         # ``JobSpec.ddmErrorDiag`` was promoted no ``execute`` owned a junction.
-        if name in sql.RUNNERS:
+        if name in sql.CURSOR_RUNNERS:
             continue
         by_func.setdefault(name, set()).add(owner)
     trees = {module.rel_path: module.tree for module in modules}

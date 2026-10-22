@@ -544,9 +544,17 @@ MOVER_OTHER_TERMS = (
     "every statement here that reads these rows was read in full, and asks by other"
     " terms -- the value is the write's own compare-and-set"
 )
+#: ``queryTasksToBePending_JEDI`` runs a ``SELECT`` its caller hands it and
+#: updates the tasks it picks.  The statement is read where the caller runs
+#: it (``sql.SKIP_CALLERS``), so this is an answer that sends a reader there;
+#: a reading with no corpus reads it nowhere, :data:`MOVER_HANDED_IN`.
+MOVER_CALLERS_QUERY = (
+    "a statement here that may read these rows is its callers', read where they"
+    " run it"
+)
 #: The three that used to be one reason, "nothing the map holds here reads these
-#: rows".  That one was an answer, and it held a gap: ``queryTasksToBePending_JEDI``
-#: runs a ``SELECT`` its caller hands it, which is now :data:`MOVER_HANDED_IN`.
+#: rows".  That one was an answer, and it held a gap: the statement a caller
+#: hands in, now :data:`MOVER_CALLERS_QUERY`.
 #: What is left splits on who named the rows the write lands on.
 MOVER_HANDED_ROWS = (
     "no query here reads these rows -- the write lands on rows named by what the"
@@ -570,6 +578,7 @@ MOVER_ORDER = (
     MOVER_PARTIAL,
     MOVER_ASKS_NOTHING,
     MOVER_OTHER_TERMS,
+    MOVER_CALLERS_QUERY,
     MOVER_HANDED_ROWS,
     MOVER_OWN_WHERE,
     MOVER_UNDECIDED,
@@ -759,7 +768,8 @@ def mover_reason(
     ]
     unnoded = [stop for stop in stopped if stop.statement not in noded]
     handed = [stop for stop in unnoded if stop.reason == sql.SKIP_HANDED_IN]
-    unnoded = [stop for stop in unnoded if stop.reason != sql.SKIP_HANDED_IN]
+    callers = [stop for stop in unnoded if stop.reason == sql.SKIP_CALLERS]
+    unnoded = [stop for stop in unnoded if stop.reason not in (sql.SKIP_HANDED_IN, sql.SKIP_CALLERS)]
     # The node's own record of the gap, and the build's -- the same fact
     # twice, so either is enough.
     partial = sorted(
@@ -772,6 +782,8 @@ def mover_reason(
         return MOVER_HANDED_IN, _stops_where(handed)
     if partial:
         return MOVER_PARTIAL, ", ".join(f"@{line}" for line in partial)
+    if callers:
+        return MOVER_CALLERS_QUERY, _stops_where(callers)
     if known:
         reason = (
             MOVER_OTHER_TERMS

@@ -335,10 +335,12 @@ def across_calls(calls: Optional["Calls"]) -> Iterator[None]:
     """
     global _CALLS
     previous, _CALLS = _CALLS, calls
+    held = sqleval.use_runners(frozenset(runners()))
     try:
         yield
     finally:
         _CALLS = previous
+        sqleval.use_runners(held)
 
 
 def _slot(target: ast.expr, name: str) -> Optional[int]:
@@ -1459,7 +1461,12 @@ def executions(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     skipped: Optional[list["Skip"]] = None,
 ) -> list[Execution]:
-    """Return one :class:`Execution` per statement each cursor execution in *func* runs.
+    """Return one :class:`Execution` per statement each runner call in *func* runs (:func:`runners`).
+
+    A call by a runner's name -- the cursor's ``execute``, or a function that
+    runs a statement it is handed, ``getClobObj(sql, varMap)`` -- runs the
+    statement its first argument holds, with the binds its second does; one
+    with no second runs it with none.
 
     The call is what pairs a statement with its binds.  Reading them separately
     -- every statement in the function against every bind in the function --
@@ -1479,7 +1486,8 @@ def executions(
     hands it, and the one function that moves ``ready`` tasks to ``pending``
     looked like one whose write picks its own rows.  Each is a :class:`Skip`
     with the reason, so a consumer can tell "read in full" from "never read"
-    -- see :data:`SKIP_REASONS`.
+    -- see :data:`SKIP_REASONS`; a runner handing on its own statement says so
+    too (:data:`SKIP_CALLERS`): that ``SELECT`` is read where the callers run it.
 
     Kept per reading context (:func:`reading_context`), as the run is.
     """
@@ -1497,45 +1505,36 @@ def executions(
 
 
 class Skip(NamedTuple):
-    """A cursor execution :func:`executions` saw and read no statement out of.
-
-    ``texts`` is whatever text the statement can be read to hold -- the
-    variants of its name, or what it renders to -- so a consumer can still say
-    which tables it touches.  Empty when there is none, and then *which rows it
-    reads* is unknown rather than "none".
-    """
+    """A runner call :func:`executions` saw and read no statement out of: its text is not here, so *which rows it
+    reads* is unknown rather than "none"."""
 
     line: int
     reason: str
     detail: str
-    texts: tuple[str, ...] = ()
 
 
 #: The ways an execution is seen and not read.  Spelled for a reader of the
 #: build's stop list, beside the reasons a statement that *was* read stopped.
-SKIP_NO_VARMAP = (
-    "the statement runs with no bind map, and this build reads a statement only"
-    " with its binds"
-)
+#: A statement handed in is said only by a reading with no corpus: in one,
+#: the function handing it on is a runner (:func:`runners`), and the statement
+#: is read at its callers (:data:`SKIP_CALLERS`).
 SKIP_HANDED_IN = "the statement is handed in by the caller, so its text is not in this function"
 SKIP_UNBOUND = "the statement is a name this function does not bind"
 SKIP_UNREAD_NAME = "the statement is a name bound here to text this build cannot render"
 SKIP_UNRENDERED = "the statement written into the call does not render"
 SKIP_UNREACHED = "no statement this function builds reaches this call"
 SKIP_REASONS = (
-    SKIP_NO_VARMAP,
     SKIP_HANDED_IN,
     SKIP_UNBOUND,
     SKIP_UNREAD_NAME,
     SKIP_UNRENDERED,
     SKIP_UNREACHED,
 )
-
-#: Functions whose own statement parameter this reader reads at their callers
-#: instead: the cursor's own ``execute`` wrapped, and the forwarded form.  The
-#: same names :func:`executions` accepts, so a statement handed to one of them
-#: is read where it is written, and handing it on is not a gap.
-_READ_AT_THE_CALLER = frozenset({"execute", "executemany"}) | frozenset({"querySQL", "querySQLS"})
+#: A runner handing on the statement its function was handed: not read here, and no gap -- the text is the
+#: callers', read where they run it.  Said all the same, so a reader of this function knows a statement runs
+#: here whose rows it does not see: ``queryTasksToBePending_JEDI`` updates the tasks the ``SELECT`` it is handed
+#: picks.
+SKIP_CALLERS = "the statement is its callers', read where they run it"
 
 
 def _unparsed(node: ast.AST) -> str:
@@ -1555,17 +1554,15 @@ def _skip_without_text(
     call: ast.Call,
     head: ast.expr,
 ) -> Optional[Skip]:
-    """Why a call whose statement has no text here was not read, or ``None``.
+    """Why a call whose statement has no text here was not read.
 
-    ``None`` for a function this reader already reads at its callers --
-    ``WrappedCursor.execute(sql, ...)`` hands on a statement every caller
-    wrote, and the callers are where it is read.
+    A runner (:func:`runners`) handing on its own statement --
+    ``WrappedCursor.execute(sql, ...)``, ``getClobObj(sql, varMap)`` -- runs
+    what its callers wrote, and they are where it is read (:data:`SKIP_CALLERS`).
     """
     if isinstance(head, ast.Name):
         if _is_parameter(func, head.id):
-            if func.name in _READ_AT_THE_CALLER:
-                return None
-            return Skip(call.lineno, SKIP_HANDED_IN, head.id)
+            return Skip(call.lineno, SKIP_CALLERS if func.name in runners() else SKIP_HANDED_IN, head.id)
         # ``sql = sql1_0 % (JobSpec.columnNames(), table) + sql1_1`` binds the
         # name to something no rendering here follows -- a different fact from
         # a name that came from nowhere in this function, and a different
@@ -1578,29 +1575,6 @@ def _skip_without_text(
     return Skip(call.lineno, SKIP_UNRENDERED, _clipped(_unparsed(head)))
 
 
-def _skip_without_binds(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    call: ast.Call,
-    texts: tuple[str, ...],
-) -> Optional[Skip]:
-    """The skip for ``execute(sql)``, which names no bind map to pair it with.
-
-    ``None`` on the same terms as :func:`_skip_without_text`: a wrapper of the
-    cursor handing on its caller's statement.  *texts* is what the call runs
-    (:func:`_texts_at`).
-    """
-    statement, _fillers, _spelling = _call_site_fill(func, call.args[0])
-    head = _concatenated(statement)[0]
-    if not texts:
-        # No text either: a statement handed in is handed in whether or not a
-        # map comes with it, and saying so is the more useful of the two.
-        skip = _skip_without_text(func, call, head)
-        if skip is None or skip.reason == SKIP_HANDED_IN:
-            return skip
-    detail = head.id if isinstance(head, ast.Name) else _clipped(texts[0] if texts else _unparsed(head))
-    return Skip(call.lineno, SKIP_NO_VARMAP, detail, texts)
-
-
 def _is_parameter(func: ast.AST, name: str) -> bool:
     args = getattr(func, "args", None)
     if args is None:
@@ -1610,16 +1584,100 @@ def _is_parameter(func: ast.AST, name: str) -> bool:
     return any(argument.arg == name for argument in every)
 
 
-#: How the daemon layer runs a statement.  A second execution form rather than
-#: a second reading: the statement, the binds and the pairing between them are
-#: the same three things, reached through the task buffer instead of a cursor.
-_FORWARDED = frozenset({"querySQL", "querySQLS"})
+class Runner(NamedTuple):
+    """How a call by a runner's name runs its statement (:func:`runners`)."""
 
-#: Every call form :func:`executions` will read a statement out of.  Exposed so
-#: that a reader reporting which form it *declined* names the same set this one
-#: accepts -- a second copy of the list would drift, and the whole point of the
-#: read side's denominator is to catch a form nobody added.
-RUNNERS = frozenset({"execute", "executemany"}) | _FORWARDED
+    #: Its binds are a list of maps, one per row: ``executemany``, and what hands its own on to it.
+    many: bool
+    #: A function of this name runs statements of its own as well as the one it is handed:
+    #: ``queryTasksToBePending_JEDI`` runs the ``SELECT`` its caller hands it and updates the tasks it picks.
+    own: bool
+
+
+#: The cursor's own forms: the driver, which runs the statement and nothing of the corpus.
+_CURSOR = {"execute": Runner(many=False, own=False), "executemany": Runner(many=True, own=False)}
+#: Their names: a call by one lands in the driver, never in a function of the corpus of that name.
+CURSOR_RUNNERS = frozenset(_CURSOR)
+
+#: The runners of a reading with no corpus: the cursor's and the task buffer's (``taskBuffer.querySQLS(sql,
+#: var_map)``, the daemon layer's form).  A corpus says its own (:func:`runners`).
+_NO_CORPUS = {**_CURSOR, "querySQL": Runner(many=False, own=False), "querySQLS": Runner(many=False, own=False)}
+RUNNERS = frozenset(_NO_CORPUS)
+
+#: :func:`runners` of each corpus, by its roots.
+_RUNNERS_OF: dict[tuple, dict[str, Runner]] = {}
+
+
+def runners() -> dict[str, Runner]:
+    """Every name a call runs a statement by, in the corpus read through (:func:`across_calls`).
+
+    The cursor's ``execute`` and ``executemany``, and every function that runs,
+    as its statement, one of its own parameters -- ``getClobObj(sql, varMap)``
+    runs ``self.cur.execute(sql, varMap)``, ``TaskBuffer.querySQLS`` hands its
+    own to the proxy's -- to a fixed point.  A call by one of these names runs
+    the statement its caller writes, and is read there (:func:`executions`);
+    the function handing it on is no gap (:data:`SKIP_CALLERS`).  A function
+    sharing a runner's name is taken to be one, as ``execute`` always was.
+
+    Read from the whole corpus whichever file is read, as :meth:`Calls.every_call`
+    is, so a reading of one file reads the runners the build does.
+    """
+    if _CALLS is None:
+        return _NO_CORPUS
+    types = _CALLS.types
+    key = tuple(sorted((package, str(root)) for package, root in types.roots.items()))
+    if key not in _RUNNERS_OF:
+        _RUNNERS_OF[key] = _corpus_runners(types)
+    return _RUNNERS_OF[key]
+
+
+def _corpus_runners(types) -> dict[str, Runner]:
+    from bamboo.codemap.calls import own_nodes
+
+    # Each function's calls by a name, and whether each runs one of the function's parameters as its statement.
+    calling: list[tuple[str, list[tuple[str, bool]]]] = []
+    for file in types.corpus_files():
+        tree = types.tree(file)
+        if tree is None:
+            continue
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            parameters = {
+                argument.arg
+                for argument in (*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs)
+            }
+            made = []
+            for node in own_nodes(func):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
+                    named = any(isinstance(one, ast.Name) and one.id in parameters for one in ast.walk(node.args[0]))
+                    made.append((node.func.attr, named and _runs_a_parameter(func, node)))
+            if made:
+                calling.append((func.name, made))
+    found = dict(_CURSOR)
+    grown = True
+    while grown:
+        grown = False
+        for name, made in calling:
+            if name in found:
+                continue
+            handed = [called for called, hands in made if hands and called in found]
+            if handed:
+                found[name] = Runner(many=any(found[called].many for called in handed), own=False)
+                grown = True
+    for name, made in calling:
+        if name in found and name not in _CURSOR:
+            ran = [hands for called, hands in made if called in found]
+            if any(ran) and not all(ran):
+                found[name] = found[name]._replace(own=True)
+    return found
+
+
+def _runs_a_parameter(func: ast.AST, call: ast.Call) -> bool:
+    """Whether *call* hands on, as its statement, a parameter of *func* -- the head :func:`executions` reads."""
+    statement, _fillers, _spelling = _call_site_fill(func, call.args[0])  # type: ignore[arg-type]
+    head = _concatenated(statement)[0]
+    return isinstance(head, ast.Name) and _is_parameter(func, head.id)
 
 
 #: ``RETURNING <column> INTO <bind>``, either side a comma list: the binds the
@@ -2923,16 +2981,6 @@ def _every_statement(
     return kept
 
 
-def _texts_at(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, reading: "sqleval.Reading", line: int
-) -> tuple[str, ...]:
-    """What the runner call on *line* runs, as the run read it: nothing where no path reaches it."""
-    if line not in reading.reached:
-        return ()
-    texts = (_fragments_out(one, func).text for one in reading.cover(line)[0])
-    return tuple(text for text in dict.fromkeys(texts) if not _says_nothing(text))
-
-
 def _unrendered(hole: "sqleval.HoleAt", func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """A hole that is a whole ``+=`` fragment with no text of its own (:data:`FRAGMENT_NOT_RENDERED`), appended
     by *func* itself.
@@ -3035,20 +3083,16 @@ def _executions_read(
     reading = _evaluation(func)
     found: list[Execution] = []
     skips: list[Skip] = []
+    names = runners()
     for node in ast.walk(func):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        forwarded = node.func.attr in _FORWARDED
-        if not forwarded and node.func.attr not in {"execute", "executemany"}:
+        if node.func.attr not in names:
             continue
+        forwarded = node.func.attr not in _CURSOR
         if _AT_CALL and ruled_out(node):
             continue
         if not node.args:
-            continue
-        if len(node.args) < 2:
-            skip = _skip_without_binds(func, node, _texts_at(func, reading, node.lineno))
-            if skip is not None:
-                skips.append(skip)
             continue
         # The name the call runs, as written: ``sql_exe = (sql_jt + comment) %
         # table`` is read where ``sql_exe`` runs.
@@ -3073,7 +3117,9 @@ def _executions_read(
             if skip is not None:
                 skips.append(skip)
             continue
-        varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
+        # ``execute(sql)`` runs with no map: a run with no binds, as one whose map is written into the call has
+        # none by a name.
+        varmap = node.args[1].id if len(node.args) > 1 and isinstance(node.args[1], ast.Name) else None
         window = binding_window(func, varmap, line) if forwarded and varmap is not None else None
         for one, heads in drawn:
             run = _fragments_out(one, func)

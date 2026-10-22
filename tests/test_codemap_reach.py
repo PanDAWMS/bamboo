@@ -600,7 +600,8 @@ def _database(tmp_path, text: str) -> reach.ReachGraph:
 def test_a_statement_the_map_reads_is_the_database_and_one_it_cannot_read_is_a_hole(
     tmp_path,
 ):
-    """The read statement and the driver's ``commit`` are leaves; a statement handed in by the caller is not read here."""
+    """The read statement and the driver's ``commit`` are leaves, and so is a statement handed in by the caller,
+    read at the callers; one whose text is nowhere here is a hole."""
     record = _database(
         tmp_path,
         (
@@ -610,20 +611,85 @@ def test_a_statement_the_map_reads_is_the_database_and_one_it_cannot_read_is_a_h
             "        self.cur.execute('UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:status', varMap)\n"
             "        self.conn.commit()\n\n"
             "    def run_any(self, sql, varMap):\n"
-            "        self.cur.execute(sql, varMap)\n"
+            "        self.cur.execute(sql, varMap)\n\n"
+            "    def run_elsewhere(self, varMap):\n"
+            "        self.cur.execute(SQL_FROM_ELSEWHERE, varMap)\n"
         ),
     )
 
     update = record.rows["pkg/db.py::Proxy.update"]
     run_any = record.rows["pkg/db.py::Proxy.run_any"]
+    run_elsewhere = record.rows["pkg/db.py::Proxy.run_elsewhere"]
 
     assert update.database == [4, 5]
     assert update.settled == {"driver_talks_only_to_db": 1, "runner_runs_only_sql": 1}
     assert update.holes == []
+    assert (run_any.database, run_any.settled, run_any.holes) == (
+        [8],
+        {"runner_runs_callers_sql": 1},
+        [],
+    )
     # The driver call is no leaf here: what it runs is read nowhere.
-    assert run_any.database == []
-    assert [hole.line for hole in run_any.holes] == [8]
-    assert run_any.holes[0].why.startswith("the statement is not read")
+    assert run_elsewhere.database == []
+    assert [hole.line for hole in run_elsewhere.holes] == [11]
+    assert run_elsewhere.holes[0].why.startswith("the statement is not read")
+
+
+def test_a_call_handing_a_runner_its_statement_is_the_database_unless_the_runner_runs_its_own(
+    tmp_path,
+):
+    """``getSiteInfo`` hands ``getClobObj`` its ``SELECT``: the statement is read at the call, and the call is the
+    database.  ``queryTasksToBePending_JEDI`` runs the ``SELECT`` it is handed and updates the tasks it picks: the
+    call is followed, and the update stays in the closure."""
+    record = _database(
+        tmp_path,
+        (
+            "class Proxy:\n"
+            "    def getClobObj(self, sql, varMap):\n"
+            "        self.cur.execute(sql, varMap)\n\n"
+            "    def queryTasksToBePending_JEDI(self, sql_query, params_map):\n"
+            "        self.cur.execute(sql_query, params_map)\n"
+            "        self.cur.execute('UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:s', {':s': 'pending'})\n\n"
+            "    def getSiteInfo(self):\n"
+            "        self.getClobObj('SELECT siteid FROM ATLAS_PANDA.schedconfig', {})\n\n"
+            "    def pend(self):\n"
+            "        self.queryTasksToBePending_JEDI('SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks', {})\n\n\n"
+            "class Buffer:\n"
+            "    def __init__(self):\n"
+            "        self.proxy = Proxy()\n\n"
+            "    def queryTasksToBePending_JEDI(self, sql_query, params_map):\n"
+            "        return self.proxy.queryTasksToBePending_JEDI(sql_query, params_map)\n"
+        ),
+    )
+
+    site_info = record.rows["pkg/db.py::Proxy.getSiteInfo"]
+    pend = record.rows["pkg/db.py::Proxy.pend"]
+    handing = record.rows["pkg/db.py::Buffer.queryTasksToBePending_JEDI"]
+
+    assert (
+        site_info.database,
+        site_info.settled,
+        _to(record, "pkg/db.py::Proxy.getSiteInfo"),
+    ) == (
+        [10],
+        {"runner_runs_only_sql": 1},
+        [],
+    )
+    assert (pend.database, _to(record, "pkg/db.py::Proxy.pend")) == (
+        [],
+        ["pkg/db.py::Proxy.queryTasksToBePending_JEDI"],
+    )
+    assert record.rows["pkg/db.py::Proxy.getClobObj"].settled == {
+        "runner_runs_callers_sql": 1
+    }
+    # Handing its caller's statement on to a runner that updates the tasks it picks is followed too.
+    assert (
+        handing.database,
+        _to(record, "pkg/db.py::Buffer.queryTasksToBePending_JEDI"),
+    ) == (
+        [],
+        ["pkg/db.py::Proxy.queryTasksToBePending_JEDI"],
+    )
 
 
 def _fragment(record: reach.ReachGraph, junctions=()):

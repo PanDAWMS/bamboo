@@ -1060,7 +1060,12 @@ class _DatabaseLeaves:
 
     A statement the map reads is read at the call that runs it
     (:func:`sql.executions`), and a write's arms are in the function making
-    that call: the call is the database, and the closure goes no further.
+    that call: the call is the database, and the closure goes no further --
+    unless the runner runs statements of its own as well (:attr:`sql.Runner.own`:
+    ``queryTasksToBePending_JEDI`` updates the tasks the ``SELECT`` it is handed
+    picks), and is followed as any call.  A runner handing on the statement
+    its function was handed is the database too: the statement is its
+    callers', read where they run it (:data:`sql.SKIP_CALLERS`).
     A runner call it read nothing out of may be a write, and is a hole.  A
     call on the driver -- a cursor or a connection, ``fetchall``,
     ``commit`` -- goes only to the database; but a runner call on it whose
@@ -1072,11 +1077,18 @@ class _DatabaseLeaves:
 
     def __call__(self, file: str, func: ast.AST, call: ast.Call, placed) -> Optional[tuple[str, str]]:
         called = call.func
-        if isinstance(called, ast.Attribute) and called.attr in sql.RUNNERS:
+        runners = sql.runners()
+        if isinstance(called, ast.Attribute) and called.attr in runners:
             executed, skipped = self._of(func)
             if id(call) in executed:
+                if runners[called.attr].own:
+                    return None
                 return "database", "runner_runs_only_sql"
             if call.lineno in skipped:
+                if skipped[call.lineno] == sql.SKIP_CALLERS:
+                    # ``JediTaskBuffer.queryTasksToPreassign_JEDI`` hands its caller's statement on to the proxy's,
+                    # which updates the tasks it picks: followed, as a run of it is.
+                    return None if runners[called.attr].own else ("database", "runner_runs_callers_sql")
                 return "hole", f"the statement is not read: {skipped[call.lineno]}"
             if _on_driver(call, placed):
                 return "hole", "the statement this runs is read nowhere"

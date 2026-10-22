@@ -3338,8 +3338,8 @@ def test_a_run_statement_is_held_by_the_name_the_call_runs():
     """Run, ``sql_exe = (sql_jt + comment) % table`` is read where ``sql_exe`` runs, under that name.
 
     The reassembly that came before could not read the ``%`` and looked past ``sql_exe`` to
-    ``sql_jt``; the run reads it.  A call with no bind map is said with what
-    it runs, and the schema an f-string interpolates is a hole of the run.
+    ``sql_jt``; the run reads it.  A call with no bind map is a run with none,
+    and the schema an f-string interpolates is a hole of the run.
     """
     source = (
         "def f(self, table):\n"
@@ -3351,13 +3351,12 @@ def test_a_run_statement_is_held_by_the_name_the_call_runs():
     )
     func = _func(source)
 
-    (run,) = sql.executions(func, skipped := [])
+    run, plain = sql.executions(func, skipped := [])
     interpolated = sql.interpolations(func, "sql_exe")
 
     assert (run.variable, run.head) == ("sql_exe", run.sql)
-    assert [(skip.reason, skip.detail, skip.texts) for skip in skipped] == [
-        (sql.SKIP_NO_VARMAP, "sqlN", ("SELECT c FROM ATLAS_PANDA.jobsActive4",))
-    ]
+    assert (plain.variable, plain.varmap, plain.sql) == ("sqlN", None, "SELECT c FROM ATLAS_PANDA.jobsActive4")
+    assert skipped == []
     assert "panda_config.schemaPANDA" in interpolated
 
 
@@ -10042,6 +10041,30 @@ def test_a_statement_the_caller_hands_in_is_a_gap_and_fails_the_gate():
     assert not result.passed
     assert difference.reason == gates.MOVER_HANDED_IN
     assert difference.where == "@12 sql_query"
+
+
+def test_a_statement_read_at_the_callers_sends_the_reader_there_and_passes_the_gate():
+    """Read through a corpus, ``queryTasksToBePending_JEDI`` is a runner: the ``SELECT`` it is handed is read where
+    its callers run it.  Not a gap, and not "no query here reads these rows" either -- one does, and it is theirs."""
+    fragment = _movers("jobStatus=activated", selects=[], tables=["JEDI_Tasks"])
+    fragment.read_sites.clear()
+    fragment.reading_stops.append(
+        ReadingStop(
+            reason=sql.SKIP_CALLERS,
+            detail="sql_query",
+            file="x.py",
+            owner="x.py::getJobs",
+            line=12,
+            statement=12,
+            reads_known=False,
+        )
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+    (difference,) = gates.mover_differences(fragment)
+
+    assert result.passed
+    assert (difference.reason, difference.where) == (gates.MOVER_CALLERS_QUERY, "@12 sql_query")
 
 
 def test_rows_named_by_what_the_caller_hands_in_send_the_reader_to_the_caller():
@@ -16777,7 +16800,6 @@ def _skips(source: str, name: str) -> list:
     "name, reason, detail",
     [
         ("queryTasksToBePending_JEDI", sql.SKIP_HANDED_IN, "sql_query"),
-        ("getSiteInfo", sql.SKIP_NO_VARMAP, "sql"),
         ("unbound", sql.SKIP_UNBOUND, "SQL_FROM_ELSEWHERE"),
         ("peekJob", sql.SKIP_UNREAD_NAME, "sql"),
     ],
@@ -16790,17 +16812,86 @@ def test_an_execution_nothing_is_read_out_of_is_said_with_its_reason(name, reaso
     assert [(s.reason, s.detail) for s in skipped] == [(reason, detail)]
 
 
-def test_a_wrapper_handing_on_its_callers_statement_is_not_a_skip():
+def test_a_wrapper_handing_on_its_callers_statement_is_said_as_theirs():
     """``WrappedCursor.execute`` runs what every caller wrote, and the callers
-    are where it is read -- handing it on is not a gap."""
+    are where it is read -- handing it on is not a gap, and is said so."""
     runs, skipped = _skips(_WRAPPER, "execute")
 
-    assert runs == [] and skipped == []
+    assert runs == []
+    assert [(s.reason, s.detail) for s in skipped] == [(sql.SKIP_CALLERS, "sql")]
+
+
+_RUNNERS = '''
+class Proxy:
+    def getClobObj(self, sql, varMap):
+        self.cur.execute(sql + comment, varMap)
+
+    def executemanySQL(self, sql, varMaps):
+        self.cur.executemany(sql, varMaps)
+
+    def queryTasksToBePending_JEDI(self, sql_query, params_map):
+        self.cur.execute(sql_query, params_map)
+        self.cur.execute("UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:s", {":s": "pending"})
+
+
+class TaskBuffer:
+    def executemanySQL(self, sql, varMaps):
+        return self.proxy.executemanySQL(sql, varMaps)
+
+    def getSiteInfo(self):
+        sql = "SELECT siteid FROM ATLAS_PANDA.schedconfig"
+        return self.proxy.getClobObj(sql, {})
+
+    def clean(self, maps):
+        self.executemanySQL("DELETE FROM ATLAS_PANDA.Metrics WHERE id=:id", maps)
+'''
+
+
+def test_a_function_running_its_own_parameter_as_the_statement_is_a_runner_read_at_its_callers(tmp_path):
+    """``getClobObj(sql, varMap)`` runs ``self.cur.execute(sql, varMap)``: a call of it runs the statement its caller
+    writes, and is read there, as ``execute`` is; ``TaskBuffer.executemanySQL`` hands its own on to the proxy's, a
+    list of maps as ``executemany`` takes.  A reading with no corpus knows the cursor's and the task buffer's."""
+    from bamboo.codemap.gitsource import blob_sha
+
+    root = tmp_path / "pandaserver"
+    root.mkdir()
+    (root / "db.py").write_text(_RUNNERS)
+    tree = ast.parse(_RUNNERS)
+    pathcond.attach_parents(tree)
+    module = SourceModule(
+        package="pandaserver", rel_path="pandaserver/db.py", tree=tree, source=_RUNNERS, blob_sha=blob_sha(_RUNNERS)
+    )
+    functions = {
+        f"{cls.name}.{func.name}": func
+        for cls in tree.body
+        if isinstance(cls, ast.ClassDef)
+        for func in cls.body
+        if isinstance(func, ast.FunctionDef)
+    }
+
+    assert set(sql.runners()) == {"execute", "executemany", "querySQL", "querySQLS"}
+    with sql.across_calls(sqlwrite.corpus_calls([module], {"pandaserver": root})):
+        runners = sql.runners()
+        (site_info,) = sql.executions(functions["TaskBuffer.getSiteInfo"])
+        (clean,) = sql.executions(functions["TaskBuffer.clean"])
+        sql.executions(functions["Proxy.getClobObj"], handing := [])
+        many = sqlwrite._runs_many(clean)
+
+    assert {name: (one.many, one.own) for name, one in runners.items()} == {
+        "execute": (False, False),
+        "executemany": (True, False),
+        "getClobObj": (False, False),
+        "executemanySQL": (True, False),
+        "queryTasksToBePending_JEDI": (False, True),
+    }
+    assert (site_info.sql, site_info.varmap) == ("SELECT siteid FROM ATLAS_PANDA.schedconfig", None)
+    assert (clean.sql, clean.varmap, many) == ("DELETE FROM ATLAS_PANDA.Metrics WHERE id=:id", "maps", True)
+    assert [(s.reason, s.line) for s in handing] == [(sql.SKIP_CALLERS, 4)]
 
 
 def test_the_skipped_statements_become_stops_with_what_they_read():
-    """A known text keeps its tables; an unknown one says its tables are unknown,
-    and a statement about no rows -- ``ALTER SESSION`` -- is no stop at all."""
+    """A statement not read says its tables are unknown; one run with no bind map
+    is read, and a statement about no rows -- ``ALTER SESSION`` -- is no stop at all."""
     tree = ast.parse(_SKIPPING)
     stops = {
         func.name: sqlwrite.statement_stops(func, "pandaserver/x.py")
@@ -16810,11 +16901,9 @@ def test_the_skipped_statements_become_stops_with_what_they_read():
 
     (handed,) = stops["queryTasksToBePending_JEDI"]
     (unbound,) = stops["unbound"]
-    (plain,) = stops["getSiteInfo"]
     assert (handed.reads, handed.reads_known) == ([], False)
     assert (unbound.reads, unbound.reads_known) == ([], False)
-    assert (plain.reads, plain.reads_known) == (["schedconfig"], True)
-    assert plain.statement == 10 and plain.owner == "pandaserver/x.py::getSiteInfo"
+    assert stops["getSiteInfo"] == []
     assert stops["setSession"] == []
 
 
