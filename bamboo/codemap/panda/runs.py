@@ -351,9 +351,11 @@ class _Reader:
         self.rows = {row.owner: row for row in fragment.reach_graph}
         self.prints = {node.owner: node for node in fragment.function_prints}
         self.writers = history_writers(self.names.functions)
-        self.keys = keycolumns.Reader(fragment, modules, calls, self.names, self.funcs)
-        self._built: dict[int, list[_Bound]] = {}
         self._follows: dict[tuple[str, str], objects.ObjectReach] = {}
+        self.keys = keycolumns.Reader(
+            fragment, modules, calls, self.names, self.funcs, self._follow
+        )
+        self._built: dict[int, list[_Bound]] = {}
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
         self._runs: dict[str, list[RunStart]] = {}
         self._kills: dict[int, list[ast.stmt]] = {}

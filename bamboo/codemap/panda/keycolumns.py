@@ -3,11 +3,15 @@
 A run's mark holds a value -- ``<jediTaskID={jediTaskID}>`` -- and a reader
 matching a history row to the run (the querier's F1) asks which column of
 the row's class the value is.  A declaration says it where the hole is an
-attribute of a name declared as one class; this reads the rest, in the
-function, from the records the build already keeps.
+attribute of a name declared as one class; this reads the rest from the
+records the build already keeps.
 
-**Forward, where the function uses it** -- each use a column of the rows a
-statement writes or reads, so a column is what the value is there:
+**Forward, where it is used** -- each use a column of the rows a statement
+writes or reads, so a column is what the value is there.  The value is
+followed as an object is (:func:`bamboo.codemap.objects.follow`): through
+the names the function gives it, the calls it is handed to -- whole, inside
+a list or a dict, or as a part of an object -- and what a call hands back.
+In each function it is held in, by any path:
 
 - a key of a row a statement of the function writes, or a column of a row
   it inserts (:attr:`ReachNode.writes`): ``killJob``'s ``pandaID`` keys the
@@ -15,13 +19,13 @@ statement writes or reads, so a column is what the value is there:
 - a term a statement it runs picks its rows by, filled from the value -- a
   row's own column compared with ``=`` or ``IN``, not excluding, deciding the
   rows (:func:`sqltext.terms`, :func:`sql.bound_values`, as the read side
-  reads a bind);
-- a parameter of a call it is handed whole to (:attr:`ReachNode.call_bindings`),
-  read there the same way: ``TaskRefinerThread.runImpl``'s ``jediTaskID`` is
-  the key of the rows ``getTaskParamsWithID_JEDI`` reads, two calls down.
+  reads a bind).
 
-A value handed inside a container -- ``peekJobs([self.job_id])``, a dict's
-value -- or to ``*args`` is not followed, and the why says where.
+``TaskRefinerThread.runImpl``'s ``jediTaskID`` is the key of the rows
+``getTaskParamsWithID_JEDI`` reads, two calls down; ``AdderGen``'s
+``peekJobs([self.job_id])`` hands it to ``peekJob``, which selects the job
+by ``PandaID``.  Where the walk stops -- a call not placed, ``*args``, its
+caps -- the stop says where.
 
 **Backward, in the function.**  A binding reaching the hole whose value is
 an attribute of a name declared as one class gives that attribute
@@ -47,7 +51,7 @@ it where nothing else is named.
 from __future__ import annotations
 
 import ast
-from typing import Optional
+from typing import Callable, Optional
 
 from bamboo.codemap import calls as C
 from bamboo.codemap import objects, reach
@@ -68,10 +72,13 @@ class Reader:
         calls: C.Calls,
         names: reach._Names,
         funcs: dict[str, tuple[str, ast.AST]],
+        follow: Callable[[str, str], objects.ObjectReach],
     ):
         self.types = calls.types
         self.names = names
         self.funcs = funcs
+        #: :func:`objects.follow` on the reach record, read once per state by its caller's cache.
+        self.follow = follow
         self.rows = {row.owner: row for row in fragment.reach_graph}
         self.tables = objects.table_classes(fragment.entities)
         #: The classes a table holds: a column of one is a row's.
@@ -109,7 +116,7 @@ class Reader:
             ):
                 return sorted(found), []
             before = {one for one in found if self.holds_rows(one)}
-            self._forward(owner, func, self.paths.of(func, node), found, uses, seen)
+            self._forward(owner, self.paths.of(func, node), found, uses)
             if {one for one in found if self.holds_rows(one)} == before and not uses:
                 uses.append(_stop("no_use", at=_short(owner)))
         except Exception as error:  # noqa: BLE001 -- a key unread, not the build's end
@@ -121,21 +128,50 @@ class Reader:
     def _forward(
         self,
         owner: str,
-        func: ast.AST,
         held: frozenset[str],
         found: set[str],
         stops: list[KeyStop],
-        seen: set[tuple[str, str]],
     ) -> None:
-        """The columns *func* uses the value held by the paths *held* as: its writes' keys, its statements' terms, the calls it hands it to."""
+        """The columns the value *owner* holds by the paths *held* is used as, wherever it is followed from there; where the walk stops short, the stop.
+
+        Read again where a field's reading has read it (:meth:`_field`): the stops go to the list asked for.
+        """
+        for path in sorted(held):
+            reach = self.follow(owner, path)
+            for at, paths in reach.held.items():
+                if at in self.funcs:
+                    self._used(at, self.funcs[at][1], set(paths), found, stops)
+            for site in reach.holes:
+                kind = "spread" if site.how == objects.NO_PARAMETER else "hole"
+                stops.append(_stop(kind, at=f"{_short(site.owner)}:{site.line}"))
+            if reach.cut:
+                stops.append(_stop("cut", what=_CUT[reach.cut], at=_short(owner)))
+            for site in reach.capped:
+                stops.append(
+                    _stop(
+                        "capped",
+                        name=site.how[len(_CAPPED) :],
+                        at=f"{_short(site.owner)}:{site.line}",
+                    )
+                )
+
+    def _used(
+        self,
+        owner: str,
+        func: ast.AST,
+        held: set[str],
+        found: set[str],
+        stops: list[KeyStop],
+    ) -> None:
+        """The columns *func* uses the value held by the paths *held* as -- its writes' keys, its statements' terms -- a path matched part by part (:func:`objects._holds`)."""
         row = self.rows.get(owner)
-        if not held or row is None:
+        if row is None:
             return
         here = _short(owner)
         for write in row.writes:
             named = [*write.keys, *(write.columns if write.kind == "insert" else [])]
             for value in named:
-                if value.path and value.path in held:
+                if value.path and objects._holds(held, value.path):
                     self._column(
                         write.table,
                         value.column,
@@ -160,25 +196,9 @@ class Reader:
                             found,
                             stops,
                         )
-        for bound in row.call_bindings:
-            if bound.path not in held or bound.parameter == "self":
-                continue
-            at = f"{here}:{bound.line}"
-            if not bound.to:
-                stops.append(_stop("hole", at=at))
-            elif bound.at:
-                stops.append(_stop("container", at=at))
-            elif not bound.parameter:
-                stops.append(_stop("spread", at=at))
-            elif (bound.to, bound.parameter) not in seen and bound.to in self.funcs:
-                seen.add((bound.to, bound.parameter))
-                callee = self.funcs[bound.to][1]
-                self._forward(
-                    bound.to, callee, frozenset({bound.parameter}), found, stops, seen
-                )
 
     def _filled(
-        self, func: ast.AST, run: sql.Execution, key: str, held: frozenset[str]
+        self, func: ast.AST, run: sql.Execution, key: str, held: set[str]
     ) -> bool:
         """Whether *run* fills its bind *key* with the value *held* names in *func*."""
         binds = sql.bound_values(
@@ -188,7 +208,10 @@ class Reader:
             binds = binds + sql.inline_binds(run.call, key)
         return any(
             pathcond.enclosing_function(bind.value) is func
-            and self.paths.of(func, unconverted(bind.value)) & held
+            and any(
+                objects._holds(held, path)
+                for path in self.paths.of(func, unconverted(bind.value))
+            )
             for bind in binds
         )
 
@@ -373,9 +396,7 @@ class Reader:
                         stops,
                         seen,
                     )
-                self._forward(
-                    owner, method, frozenset({f"self.{attribute}"}), found, stops, seen
-                )
+                self._forward(owner, frozenset({f"self.{attribute}"}), found, stops)
 
     def _executions_of(self, func: ast.AST) -> list[sql.Execution]:
         if id(func) not in self._executions:
@@ -384,6 +405,12 @@ class Reader:
             except Exception:  # noqa: BLE001 -- the reach row has the hole
                 self._executions[id(func)] = []
         return self._executions[id(func)]
+
+
+#: Which of follow's caps cut the walk short, as a stop's ``what`` says it (:data:`KEY_STOPS`).
+_CUT = {objects.STATES_SPENT: "states", objects.HELD_SPENT: "paths"}
+#: What :attr:`objects.ObjectReach.capped` says before the path not followed.
+_CAPPED = objects.PARTS_SPENT.format(path="")
 
 
 def _stop(kind: str, name: str = "", what: str = "", at: str = "") -> KeyStop:

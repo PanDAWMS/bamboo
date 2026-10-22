@@ -4167,9 +4167,10 @@ KEY_STOPS: dict[str, str] = {
     "several": "{name} is declared as several classes at {at}: {what}",
     "declaration_failed": "reading the declaration of {name} failed: {what}",
     "no_row": "{name} holds no row",
-    "container": "handed inside a container at {at}",
     "spread": "handed to *args or **kwargs at {at}",
     "hole": "handed to a call not placed at {at}",
+    "cut": "following it from {at} stopped at its cap on {what}, so it can be used further than read",
+    "capped": "a path holding it, {name}, has too many parts to be followed, at {at}",
     "no_class": "keys {name}, a table no class holds, at {at}",
     "not_declared": "keys {name}, which {what} does not declare, at {at}",
     "no_use": "no use of it in {at} or the calls it is handed to names a column",
@@ -4218,9 +4219,10 @@ class RunKey(BaseModel):
     A reader matching a history row to a run (the querier's F1) asks which
     column of the row's class the run's key is.  A declaration says it where
     the hole is an attribute of a name declared as one class.  Elsewhere the
-    value is read where the function uses it -- the key of a row a statement
-    writes, a term a statement picks its rows by, a parameter of a call it is
-    handed whole to, read there in turn -- and where a binding in the
+    value is read where it is used -- the key of a row a statement writes, a
+    term a statement picks its rows by, in the function and wherever it is
+    followed from there (:func:`bamboo.codemap.objects.follow`: the calls it
+    is handed to, whole or inside a list) -- and where a binding in the
     function gives it an attribute of a declared name
     (:mod:`bamboo.codemap.panda.keycolumns`).  ``TaskRefinerThread.runImpl``'s
     ``jediTaskID`` is the key of the rows ``getTaskParamsWithID_JEDI`` reads;

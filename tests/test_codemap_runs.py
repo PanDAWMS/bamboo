@@ -1323,7 +1323,49 @@ class Keys(DBProxy):
         self.peek_jobs([pid])  # K7
 
     def peek_jobs(self, ids):
+        for one in ids:
+            self.cur.execute("SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p", {":p": one})
+
+    def aliased(self, panda_id):
+        tmp_log = LogWrapper(_logger, f"<id={panda_id}>")  # K11
+        tmp_log.debug("aliased")
+        tmp_id = panda_id
+        self.cur.execute("SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p", {":p": tmp_id})
+
+    def part(self, task):
+        tmp_log = LogWrapper(_logger, f"<id={task.panda_id}>")  # K12
+        tmp_log.debug("part")
+        self.select_part(task)
+
+    def select_part(self, one):
+        self.cur.execute("SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p", {":p": one.panda_id})
+
+    def made(self, pid):
+        held = self.make(pid)
+        tmp_log = LogWrapper(_logger, f"<id={held.panda_id}>")  # K13
+        tmp_log.debug("made")
+
+    def make(self, one):
+        held = Box()
+        held.panda_id = one
+        self.cur.execute("SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p", {":p": held.panda_id})
+        return held
+
+    def handed_on(self, pid):
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K14
+        tmp_log.debug("handed on")
+        self.many(pid)  # K15
+        senders = {"x": None}
+        senders["x"].send(pid)  # K16
+
+    def many(self, *ids):
         pass
+
+    def deep(self, pid):
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K17
+        tmp_log.debug("deep")
+        box = Box()
+        box.a.b.c.d.e.f.g = pid  # K18
 
     def bound(self, job: JobSpec):
         tmp_id = job.PandaID
@@ -1347,6 +1389,22 @@ class Adder:
 
     def run(self):
         self.logger.debug("add")
+
+
+class Box:
+    def send(self, one):
+        pass
+
+
+class Sender:
+    def __init__(self, pid):
+        self.pid = pid
+        self.logger = LogWrapper(_logger, str(self.pid))  # K19
+        senders = {"x": None}
+        senders["x"].send(self.pid)  # K20
+
+    def run(self):
+        self.logger.debug("send")
 """
 
 
@@ -1383,10 +1441,22 @@ def test_a_key_no_declaration_names_is_the_column_its_function_uses_it_as(
     )
 
 
+def test_a_key_is_the_column_it_is_used_as_wherever_it_is_followed(
+    tmp_path: Path,
+) -> None:
+    """Followed as an object is: inside a list to a callee looping over it, through a name the function gives it, as a part of an object handed whole, and into the call returning the object it is read from."""
+    keys = _keys(tmp_path)
+    for marker in ("K6", "K11", "K12", "K13"):
+        assert (keys[_line(KEYS, marker)].columns, keys[_line(KEYS, marker)].stops) == (
+            ["JobSpec.PandaID"],
+            [],
+        ), marker
+
+
 def test_a_key_its_uses_name_no_rows_column_says_where_the_reading_stopped(
     tmp_path: Path,
 ) -> None:
-    """A table no class holds names no column, its sites said once; a value handed inside a list is not followed."""
+    """A table no class holds names no column, its sites said once; where following it stops, the stop says where."""
     keys = _keys(tmp_path)
     sites = [
         f"Keys.other_table:{_line(KEYS, 'K5')}",
@@ -1399,11 +1469,23 @@ def test_a_key_its_uses_name_no_rows_column_says_where_the_reading_stopped(
             KeyStop(kind="no_class", name="T_TASK.taskID", at=sites),
         ],
     )
-    assert (keys[_line(KEYS, "K6")].columns, keys[_line(KEYS, "K6")].stops) == (
+    assert (keys[_line(KEYS, "K14")].columns, keys[_line(KEYS, "K14")].stops) == (
         [],
         [
-            KeyStop(kind="parameter", name="pid", at=["Keys.listed"]),
-            KeyStop(kind="container", at=[f"Keys.listed:{_line(KEYS, 'K7')}"]),
+            KeyStop(kind="parameter", name="pid", at=["Keys.handed_on"]),
+            KeyStop(kind="spread", at=[f"Keys.handed_on:{_line(KEYS, 'K15')}"]),
+            KeyStop(kind="hole", at=[f"Keys.handed_on:{_line(KEYS, 'K16')}"]),
+        ],
+    )
+    assert (keys[_line(KEYS, "K17")].columns, keys[_line(KEYS, "K17")].stops) == (
+        [],
+        [
+            KeyStop(kind="parameter", name="pid", at=["Keys.deep"]),
+            KeyStop(
+                kind="capped",
+                name="box.a.b.c.d.e.f.g",
+                at=[f"Keys.deep:{_line(KEYS, 'K18')}"],
+            ),
         ],
     )
 
@@ -1421,6 +1503,12 @@ def test_a_field_of_a_class_holding_no_row_is_read_in_its_class(tmp_path: Path) 
         KeyStop(kind="no_row", name="Adder"),
         KeyStop(kind="parameter", name="job_id", at=["Adder.__init__"]),
         KeyStop(kind="no_use", at=["Adder.__init__"]),
+    ]
+    sender = keys[_line(KEYS, "K19")]
+    assert sender.stops == [
+        KeyStop(kind="no_row", name="Sender"),
+        KeyStop(kind="parameter", name="pid", at=["Sender.__init__"]),
+        KeyStop(kind="hole", at=[f"Sender.__init__:{_line(KEYS, 'K20')}"]),
     ]
 
 
@@ -1442,6 +1530,13 @@ def test_a_keys_why_is_its_stops_said_and_is_not_kept_in_the_dump() -> None:
         "keys T_TASK.taskID, a table no class holds, at Keys.other_table:5, Keys.other_table:6"
     )
     assert "why" not in key.model_dump()
+    cut = RunKey(
+        expression="pid",
+        stops=[KeyStop(kind="cut", what="states", at=["Keys.deep"])],
+    )
+    assert cut.why == (
+        "following it from Keys.deep stopped at its cap on states, so it can be used further than read"
+    )
     assert RunKey(expression="", columns=[RUN_KEY_TIME]).why == ""
 
 
