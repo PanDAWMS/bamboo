@@ -15245,6 +15245,94 @@ def test_a_map_kept_across_passes_carries_an_earlier_pass_bind_to_the_text():
     assert _bound_by_text(func, ":a") == [(10, "a=:a", ["item.a"]), (10, "a=:a,b=1", ["item.a"])]
 
 
+def test_a_bind_every_pass_building_the_text_writes_again_is_not_the_texts():
+    """``updateTaskStatusByContFeeder_JEDI`` sets ``:updateTime`` to now and
+    ``:errorDialog`` to None before its ``if``; the two arms building the text
+    without the clause set the time six hours back, and the arm building the
+    one with it sets the task's diagnostic.  Now reaches the call only on the
+    pass building the clause, None only on the passes building none."""
+    source = (
+        "def f(self, taskSpec, cloud):\n"
+        "    sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,modificationTime=:updateTime,errorDialog=:errorDialog'\n"
+        "    if taskSpec is not None:\n"
+        "        sql += ',splitRule=:splitRule'\n"
+        "    sql += ' WHERE jediTaskID=:jediTaskID'\n"
+        "    varMap = {}\n"
+        "    varMap[':jediTaskID'] = 1\n"
+        "    varMap[':updateTime'] = timeNow\n"
+        "    varMap[':errorDialog'] = None\n"
+        "    if taskSpec is not None:\n"
+        "        varMap[':status'] = taskSpec.status\n"
+        "        varMap[':errorDialog'] = taskSpec.errorDialog\n"
+        "        varMap[':splitRule'] = taskSpec.splitRule\n"
+        "    elif cloud is None:\n"
+        "        varMap[':status'] = 'assigning'\n"
+        "        varMap[':updateTime'] = sixHoursAgo\n"
+        "    else:\n"
+        "        varMap[':status'] = 'ready'\n"
+        "        varMap[':updateTime'] = sixHoursAgo\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+    plain = "status=:status,modificationTime=:updateTime,errorDialog=:errorDialog"
+
+    assert _bound_by_text(func, ":updateTime") == [
+        (20, plain, ["sixHoursAgo", "sixHoursAgo"]),
+        (20, plain + ",splitRule=:splitRule", ["timeNow"]),
+    ]
+    assert _bound_by_text(func, ":errorDialog") == [
+        (20, plain, ["None"]),
+        (20, plain + ",splitRule=:splitRule", ["taskSpec.errorDialog"]),
+    ]
+    at_the_call = sql.bound_values(func, "varMap", ":updateTime", at=func.body[-1].value)
+    assert sorted(ast.unparse(b.value) for b in at_the_call) == ["sixHoursAgo", "sixHoursAgo", "timeNow"]
+
+
+def test_a_pass_not_building_the_text_does_not_cut_what_it_carries_to_a_later_pass():
+    """A pass through the arm filling ``:a`` runs on past the fill and builds
+    the other text; the next pass builds this one with the map still holding
+    ``:a``.  The arm's statements are no pass of this text's, but the value
+    goes round the loop."""
+    source = (
+        "def f(self, items):\n"
+        "    varMap = {}\n"
+        "    varMap[':id'] = 1\n"
+        "    for item in items:\n"
+        "        if item.first:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a WHERE id=:id'\n"
+        "            varMap[':a'] = item.a\n"
+        "            self.log(item)\n"
+        "        else:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a,b=1 WHERE id=:id'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":a") == [(11, "a=:a", ["item.a"]), (11, "a=:a,b=1", ["item.a"])]
+
+
+def test_a_bind_from_before_the_loop_every_pass_building_the_text_writes_again_is_not_the_texts():
+    """``:a`` is 0 before the loop; every pass building the first text sets it
+    again, and a pass building the second does not, so the second runs with 0
+    or with what an earlier pass set."""
+    source = (
+        "def f(self, items):\n"
+        "    varMap = {}\n"
+        "    varMap[':id'] = 1\n"
+        "    varMap[':a'] = 0\n"
+        "    for item in items:\n"
+        "        if item.first:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a WHERE id=:id'\n"
+        "            varMap[':a'] = item.a\n"
+        "        else:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a,b=1 WHERE id=:id'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":a") == [(11, "a=:a", ["item.a"]), (11, "a=:a,b=1", ["0", "item.a"])]
+
+
 def test_one_text_run_from_two_arms_keeps_each_call_its_own_binds():
     """``activateJob`` writes the same ``sqlJob`` in each arm and runs it there:
     one run holds both calls, and its pieces name one of the two assignments,

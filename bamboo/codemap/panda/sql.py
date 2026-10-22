@@ -2061,7 +2061,8 @@ def bound_values(
     both call forms.  Given the run, they are also its own branch's: one text
     of the statement is built on some passes and another on others, and a bind
     only a pass building another text fills is not this one's
-    (:func:`_not_its_text`).  Reading every bind of
+    (:func:`_not_its_text`), nor one every pass building this text writes
+    again before the call (:func:`_not_on_its_passes`).  Reading every bind of
     the key instead was once thought safe for ``execute``, on the argument that
     the binds reachable by key are exactly the values that write site can
     produce.  They are not: one function binds ``:status`` for statements on
@@ -2261,6 +2262,7 @@ def scan_binds(
             live |= _live_at(func, varmap, writes, one)
         if run is not None:
             live -= _not_its_text(func, varmap, run, [gate for gate in writes if id(gate) in live], writes)
+            live -= _not_on_its_passes(func, varmap, run, [gate for gate in writes if id(gate) in live], writes)
         for bind, gate in gated:
             if id(gate) in live:
                 found.append(bind)
@@ -2364,16 +2366,24 @@ def _live_at(
         return {id(site) for site in surviving_writes(sites, run, rereads, as_run=True)}
 
     live = surviving(at)
-    for loop in renewals:
-        if (
-            isinstance(loop, (ast.For, ast.AsyncFor))
-            and id(loop) in live
-            and isinstance(loop.iter, ast.Name)
-            and any(ancestor is loop for ancestor in ancestors(at))
-        ):
-            for append in _appended(func, loop.iter.id, varmap):
+    for loop, appends in _listed_maps(func, varmap, renewals, at):
+        if id(loop) in live:
+            for append in appends:
                 live |= surviving(append)
     return live
+
+
+def _listed_maps(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str, renewals: list[ast.stmt], at: ast.AST
+) -> list[tuple[ast.stmt, list[ast.stmt]]]:
+    """Each ``for <varmap> in <list>:`` among *renewals* holding *at*, with the statements appending a map to the list."""
+    return [
+        (loop, _appended(func, loop.iter.id, varmap))
+        for loop in renewals
+        if isinstance(loop, (ast.For, ast.AsyncFor))
+        and isinstance(loop.iter, ast.Name)
+        and any(ancestor is loop for ancestor in ancestors(at))
+    ]
 
 
 def _not_its_text(
@@ -2424,6 +2434,110 @@ def _not_its_text(
         ) or any(held(only_through, write, piece) for piece in added):
             found.add(id(write))
     return found
+
+
+def _not_on_its_passes(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: str,
+    run: Execution,
+    live: list[ast.AST],
+    writes: list[ast.AST],
+) -> set[int]:
+    """The ``id`` of each of *live* that no pass building *run*'s text carries to a call of it.
+
+    :func:`_not_its_text` reads where a bind is written; a pass writing it can
+    build the text and still write the key again before the call.
+    ``updateTaskStatusByContFeeder_JEDI`` sets ``:updateTime`` to now before
+    its ``if``, and the two arms building the text without the ``oldStatus``
+    clause each set it six hours back: the one pass keeping now builds the
+    text with the clause.  So the statements no pass building the text runs
+    (:func:`_not_building`) are cut from the way, as writes that are no
+    answer, and a bind is the text's where it still reaches a call.
+
+    A loop holding the call reads each pass afresh: an earlier pass can be one
+    not building the text and a later one one that does, so what the map
+    carries into a pass is read apart -- kept where it reaches the top of the
+    innermost loop holding the call and a value there reaches the call, cut
+    so.  A ``for`` writes its target at the top of each pass, where
+    :func:`~bamboo.codemap.panda.reaching.reaching` puts it, so the loop
+    stands for that value; a ``while`` has no such write, and what it carries
+    is kept.  A map taken from a list is the one built where it was appended
+    (:func:`_live_at`): its binds are kept where that ``for`` reaches the call.
+    """
+    killers = [one for one in _not_building(func, run) if all(one is not write for write in writes)]
+    if not killers:
+        return set()
+    renewals = _renews(func, varmap)
+    sites = list({id(site): site for site in [*writes, *renewals]}.values())
+    rereads = [write for write in writes if _rereads(write, varmap)]
+
+    def reaching_ids(targets: list[ast.AST], at: ast.AST, cut: list[ast.AST]) -> set[int]:
+        return {id(site) for site in surviving_writes(targets, at, rereads, as_run=True, killers=cut)}
+
+    kept: set[int] = set()
+    for call in (site_of(one) for one in run.run_at):
+        loop = _innermost_loop(func, call)
+        marked = sites
+        if isinstance(loop, (ast.For, ast.AsyncFor)) and all(loop is not site for site in sites):
+            marked = [*sites, loop]
+        reached = reaching_ids(marked, call, killers)
+        kept |= reached
+        if isinstance(loop, ast.While) or (loop is not None and id(loop) in reached):
+            kept |= reaching_ids(sites, loop.body[0], [])
+        for listed, appends in _listed_maps(func, varmap, renewals, call):
+            if id(listed) in reached:
+                for append in appends:
+                    kept |= reaching_ids(sites, append, [])
+    return {id(write) for write in live if enclosing_function(write) is func and id(write) not in kept}
+
+
+def _not_building(func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution) -> list[ast.stmt]:
+    """The simple statements of *func* no pass building *run*'s text runs -- read once per run.
+
+    :func:`_not_its_text`'s two readings, of a statement on the way rather
+    than of a bind: parted from a statement every way of building the text
+    runs, or run only through the arm of a piece another text at its calls
+    adds to all of this one's.
+    """
+    store = _held_on(func, "_sql_not_building")
+    key = (reading_context(), run.sql, tuple(id(call) for call in run.run_at), _piece_ids(run))
+    if key not in store:
+        _calls, mine, added = _text_reading(func, run)
+        held = _pairs_read(func)
+        store[key] = [
+            node
+            for node in (_simple_statements(func) if mine else ())
+            if any(piece is not node and held(parted, piece, node) for piece in mine)
+            or any(held(only_through, node, piece) for piece in added)
+        ]
+    return store[key]
+
+
+def _simple_statements(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
+    """The statements of *func* itself holding no body: each runs whole, where it stands."""
+    store = _held_on(func, "_sql_simple_statements")
+    if not store:
+        store[0] = [
+            node
+            for node in ast.walk(func)
+            if isinstance(node, ast.stmt)
+            and "body" not in node._fields
+            and "cases" not in node._fields
+            and enclosing_function(node) is func
+        ]
+    return store[0]
+
+
+def _innermost_loop(func: ast.AST, node: ast.AST) -> Optional[ast.For | ast.AsyncFor | ast.While]:
+    """The innermost loop of *func* whose body holds *node*; None in none."""
+    previous = node
+    for ancestor in ancestors(node):
+        if ancestor is func:
+            return None
+        if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)) and any(previous is one for one in ancestor.body):
+            return ancestor
+        previous = ancestor
+    return None
 
 
 def _text_reading(
