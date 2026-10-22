@@ -1559,6 +1559,32 @@ class TaskModule:
     assert (junction.anchor.line_start, junction.anchor.line_end) == (10, 12)
 
 
+def test_a_junction_spans_the_arms_of_every_text_a_call_runs():
+    """One call runs two texts of a statement, each with its own branch's
+    status (``sql.bound_values`` pairs a text with its own branch's binds), so
+    the first text read is not every arm: the span is over all of them."""
+    _subjects, junctions, *_rest = _sql_extract('''
+class TaskModule:
+    def setStatus(self, jediTaskID, taskSpec):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET status=:status"
+        if taskSpec is not None:
+            sqlU += ",splitRule=:splitRule"
+        sqlU += " WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        if taskSpec is not None:
+            varMap[":status"] = "pending"
+            varMap[":splitRule"] = taskSpec.splitRule
+        else:
+            varMap[":status"] = "ready"
+        self.cur.execute(sqlU + comment, varMap)
+''')
+
+    (junction,) = [one for one in junctions if one.subject == "JEDI_Tasks.status"]
+    assert sorted((b.outcome, b.line) for b in junction.branches) == [("pending", 11), ("ready", 14)]
+    assert (junction.anchor.line_start, junction.anchor.line_end) == (11, 14)
+
+
 def test_statement_is_read_from_its_concatenation():
     """A statement is built by ``=`` then a run of ``+=``, interleaved with others."""
     module = _module(_SQL_SOURCE, "x.py")
@@ -15114,6 +15140,172 @@ def test_an_execute_run_reads_only_the_binds_its_map_holds():
         "'running'",
     ]
     assert [r.window for r in sql.executions(func)] == [None, None]
+
+
+def _bound_by_text(func, key: str) -> list[tuple[int, str, list[str]]]:
+    """For each run of *func* at each of its calls: the call's line, the text's ``SET``, and the values read for *key*."""
+    return sorted(
+        (
+            call.lineno,
+            run.sql.partition(" SET ")[2].partition(" WHERE ")[0],
+            sorted(
+                ast.unparse(b.value)
+                for b in sql.bound_values(func, run.varmap, key, run.window, at=run._replace(calls=(call,)))
+            ),
+        )
+        for run in sql.executions(func)
+        for call in run.run_at
+    )
+
+
+def test_a_text_reads_only_the_binds_of_the_passes_that_build_it():
+    """``updateTaskStatusByContFeeder_JEDI`` adds ``splitRule`` to its ``UPDATE``
+    only when it is given a task, fills ``:status`` from the task in that case
+    and ``'assigning'`` or ``'ready'`` otherwise, and runs whichever text it
+    built at one call.  Read by the call alone, both texts wrote all three.
+    The text with the clause is built only in the arm adding it; the text
+    without it only where that arm was skipped, so not under the second ``if``
+    testing the same thing."""
+    source = (
+        "def f(self, taskSpec, cloud):\n"
+        "    sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status'\n"
+        "    if taskSpec is not None:\n"
+        "        sql += ',splitRule=:splitRule'\n"
+        "    sql += ' WHERE jediTaskID=:jediTaskID'\n"
+        "    varMap = {}\n"
+        "    varMap[':jediTaskID'] = 1\n"
+        "    if taskSpec is not None:\n"
+        "        varMap[':status'] = taskSpec.status\n"
+        "        varMap[':splitRule'] = taskSpec.splitRule\n"
+        "    elif cloud is None:\n"
+        "        varMap[':status'] = 'assigning'\n"
+        "    else:\n"
+        "        varMap[':status'] = 'ready'\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":status") == [
+        (15, "status=:status", ["'assigning'", "'ready'"]),
+        (15, "status=:status,splitRule=:splitRule", ["taskSpec.status"]),
+    ]
+    at_the_call = sql.bound_values(func, "varMap", ":status", at=func.body[-1].value)
+    assert sorted(ast.unparse(b.value) for b in at_the_call) == ["'assigning'", "'ready'", "taskSpec.status"]
+
+
+def test_a_map_made_afresh_each_pass_carries_no_other_arm_to_the_text():
+    """``insertNewJob`` makes ``varMap`` afresh for each file, sets
+    ``:status`` in the two arms of one test and ``is_waiting`` in the two arms
+    of another testing the same: the other arm's status, of this file or the
+    one before, is in no map the text runs with."""
+    source = (
+        "def f(self, files):\n"
+        "    for file in files:\n"
+        "        varMap = {}\n"
+        "        varMap[':fileID'] = file.fileID\n"
+        "        if file.waiting:\n"
+        "            varMap[':status'] = 'picked'\n"
+        "        else:\n"
+        "            varMap[':status'] = 'running'\n"
+        "        sql = 'UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status'\n"
+        "        if file.waiting:\n"
+        "            sql += ',is_waiting=:is_waiting'\n"
+        "            varMap[':is_waiting'] = 'Y'\n"
+        "        else:\n"
+        "            sql += ',is_waiting=NULL'\n"
+        "        sql += ' WHERE fileID=:fileID'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":status") == [
+        (16, "status=:status,is_waiting=:is_waiting", ["'picked'"]),
+        (16, "status=:status,is_waiting=NULL", ["'running'"]),
+    ]
+
+
+def test_a_map_kept_across_passes_carries_an_earlier_pass_bind_to_the_text():
+    """A map made before the loop keeps what an earlier pass bound: the text
+    the ``else`` builds names ``:a``, which only the other arm fills, and on a
+    pass after one through that arm the map still holds it."""
+    source = (
+        "def f(self, items):\n"
+        "    varMap = {}\n"
+        "    varMap[':id'] = 1\n"
+        "    for item in items:\n"
+        "        if item.first:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a WHERE id=:id'\n"
+        "            varMap[':a'] = item.a\n"
+        "        else:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a,b=1 WHERE id=:id'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":a") == [(10, "a=:a", ["item.a"]), (10, "a=:a,b=1", ["item.a"])]
+
+
+def test_one_text_run_from_two_arms_keeps_each_call_its_own_binds():
+    """``activateJob`` writes the same ``sqlJob`` in each arm and runs it there:
+    one run holds both calls, and its pieces name one of the two assignments,
+    so a piece is read only where it can be on a pass through the call.  And
+    ``archiveJob`` writes ``sqlFMod`` before its loop and the same text again
+    in one arm: a text written twice adds no clause."""
+    source = (
+        "def f(self, job, ok, jobs):\n"
+        "    if ok:\n"
+        "        sqlJob = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.jobParameters\n"
+        "        self.cur.execute(sqlJob, varMap)\n"
+        "    else:\n"
+        "        sqlJob = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.newParameters\n"
+        "        self.cur.execute(sqlJob, varMap)\n"
+        "    sqlF = 'UPDATE ATLAS_PANDA.filesTable4 SET modificationTime=:modificationTime WHERE PandaID=:PandaID'\n"
+        "    for one in jobs:\n"
+        "        if one.failed:\n"
+        "            sqlF = 'UPDATE ATLAS_PANDA.filesTable4 SET modificationTime=:modificationTime WHERE PandaID=:PandaID'\n"
+        "            varMap = {}\n"
+        "            varMap[':PandaID'] = one.PandaID\n"
+        "            varMap[':modificationTime'] = one.modificationTime\n"
+        "            self.cur.execute(sqlF, varMap)\n"
+    )
+    func = _func(source)
+
+    # Each assignment of the text is a run of its own, holding both calls.
+    assert {(line, tuple(values)) for line, _set, values in _bound_by_text(func, ":param") if line != 21} == {
+        (7, ("job.jobParameters",)),
+        (13, ("job.newParameters",)),
+    }
+    in_the_loop = {tuple(values) for line, _set, values in _bound_by_text(func, ":PandaID") if line == 21}
+    assert in_the_loop == {("one.PandaID",)}
+
+
+def test_one_text_built_in_two_arms_for_one_call_keeps_both_arms_binds():
+    """The same text written in each arm and run once after the ``if`` is one
+    run, its pieces naming one arm's assignment: a text is built by every way
+    that renders it, and a statement only some ways run decides nothing."""
+    source = (
+        "def f(self, ok, job):\n"
+        "    if ok:\n"
+        "        sql = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.jobParameters\n"
+        "    else:\n"
+        "        sql = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.newParameters\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":param") == [(12, "jobParameters=:param", ["job.jobParameters", "job.newParameters"])]
 
 
 def test_a_map_rebuilt_in_each_arm_keeps_both_values():

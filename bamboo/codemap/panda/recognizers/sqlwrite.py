@@ -368,7 +368,7 @@ def _row_key_source(
     handed = ""
     if run.varmap is not None:
         for _column, bind in sorted(statement.keys.items()):
-            for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run.run_at):
+            for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run):
                 handed = handed_in(func, filled.value)
                 if handed:
                     break
@@ -473,7 +473,7 @@ def extract(
                     preconditions = []
                     for term in sorted(statement.preconditions.values()):
                         settled, done = sql.settled_precondition(
-                            term, func, run.varmap, run.window, settle, at=run.run_at
+                            term, func, run.varmap, run.window, settle, at=run
                         )
                         preconditions.append(settled)
                         if not done and ":" in term:
@@ -589,7 +589,7 @@ def extract(
                             # Called by _record before the loop moves on; the defaults keep this pass's run if it ever is not.
                             beside=lambda node, terms=sorted(statement.preconditions.values()), func=func, run=run: [
                                 sql.settled_precondition(
-                                    term, func, run.varmap, run.window, settle, beside=node, at=run.run_at
+                                    term, func, run.varmap, run.window, settle, beside=node, at=run
                                 )[0]
                                 for term in terms
                             ],
@@ -748,7 +748,7 @@ def _outcomes(
         if run.varmap is None:
             why.append(NO_VARMAP)
             return []
-        scan = sql.scan_binds(func, run.varmap, supplied.text, run.window, at=run.run_at)
+        scan = sql.scan_binds(func, run.varmap, supplied.text, run.window, at=run)
         found = []
         for bind in scan.binds:
             value, site = bind.value, bind.site
@@ -936,6 +936,15 @@ def _record(
             ),
         )
         junctions[name] = junction
+    else:
+        # And over every statement's: one text of a statement writes only the
+        # outcomes its own branch binds (``sql.bound_values``), so the first
+        # statement read is not every arm.
+        junction.anchor.line_start = min(junction.anchor.line_start, *(found.node.lineno for found in outcomes))
+        junction.anchor.line_end = max(
+            junction.anchor.line_end or junction.anchor.line_start,
+            *(found.node.end_lineno or found.node.lineno for found in outcomes),
+        )
 
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
     for outcome, tier, node, extra, decided_at, frames in outcomes:
@@ -1606,7 +1615,7 @@ def _condition_seeds(
             if key in seeds:
                 continue
             at_lines = sorted(
-                {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window, at=run.run_at)}
+                {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window, at=run)}
             )
             if at_lines:
                 seeds[key] = at_lines
@@ -1708,6 +1717,20 @@ def _render_condition(condition: "sqltext.Condition", seeds: dict[str, list[int]
     return " OR ".join(parts)
 
 
+def _text_run(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution, drawn: "sqleval.Rendered"
+) -> sql.Execution:
+    """*run* holding *drawn*'s text, holes and pieces: one object per text, so what a reader holds by the run is read
+    once -- a site's conditions are folded more than once, and ``bound_sites`` keeps what it read by the run."""
+    store = getattr(func, "_sqlwrite_text_runs", None)
+    if store is None:
+        store = func._sqlwrite_text_runs = {}  # type: ignore[union-attr]
+    held = store.get((id(run), id(drawn)))
+    if held is None or held[0] is not run or held[1] is not drawn:
+        held = store[(id(run), id(drawn))] = (run, drawn, run._replace(sql=drawn.text, holes=drawn.holes, pieces=drawn.pieces))
+    return held[2]
+
+
 def _folded(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     line: int,
@@ -1741,16 +1764,18 @@ def _folded(
     # whose statements are not every way a run can go, so no disjunction of
     # theirs is said.
     open_ended = False
-    # ``(run, its texts)``: a run's binds are read once, whichever of the
-    # call's statements is folded -- they are the call's, not the text's.
+    # ``(run, its texts)``: each statement of the call read as a run of its
+    # own text and pieces, since a bind is the text's (:func:`sql.bound_values`):
+    # ``getJobStatisticsForExtIF`` fills ``:prodSourceLabel1`` with ``user`` for
+    # the analysis text and ``managed`` for the production one.
     texts_of: list[tuple[sql.Execution, list[str]]] = []
     if variants:
-        every = sql.every_statement(func, line)
-        if every is None:
+        drawn = sql.every_rendering(func, line)
+        if drawn is None:
             open_ended = True
             texts_of = [(run, [run.reading]) for run in variants]
         else:
-            texts_of = [(variants[0], every)]
+            texts_of = [(_text_run(func, variants[0], one), [sql.reading_text(one.text, one.holes)]) for one in drawn]
     for run, texts in texts_of:
         window = run.window
         if window is None and run.varmap:
@@ -1765,7 +1790,7 @@ def _folded(
                     at_lines = sorted(
                         {
                             bind.site.lineno
-                            for bind in sql.bound_values(func, run.varmap or "", key, window, at=run.run_at)
+                            for bind in sql.bound_values(func, run.varmap or "", key, window, at=run)
                         }
                     )
                     if at_lines:
@@ -2593,7 +2618,7 @@ def read_side(
         held = settled.get((id(run), key, file))
         if held is None or held[0] is not run:
             found: list[tuple[str, ast.stmt, tuple[str, ...], bool]] = []
-            binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
+            binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run)
             if not run.varmap:
                 binds = binds + sql.inline_binds(run.call, key)
             for bind in binds:
@@ -2663,7 +2688,7 @@ def read_side(
             if not settled_values:
                 return [ConditionValue(kind="bind", text=side.text, said=f"nothing in the map settles {key}")]
             return [ConditionValue(kind="bind", text=side.text, constant=value) for value in settled_values]
-        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run)
         if not run.varmap:
             binds = binds + sql.inline_binds(run.call, key)
         if not binds:
@@ -2782,7 +2807,7 @@ def read_side(
         caller hands, where different calls hand different lists and the
         union is no run's.
         """
-        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run)
         if len(binds) != 1:
             return None
         value = binds[0].value

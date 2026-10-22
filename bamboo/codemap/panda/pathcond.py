@@ -1188,6 +1188,52 @@ def _given_in(func: ast.AST, loop: ast.AST, statements: tuple[ast.stmt, ...]) ->
     return any(_within(site, loop) for name in names for site in rebinds.get(name, ()))
 
 
+def arm_of(node: ast.AST) -> Optional[tuple[ast.If, bool]]:
+    """The innermost ``if`` arm holding *node*: the ``if``, and whether the arm is its body.  None outside any."""
+    previous = node
+    for ancestor in ancestors(node):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+            return None
+        if isinstance(ancestor, ast.If):
+            if any(previous is one for one in ancestor.body):
+                return ancestor, True
+            if any(previous is one for one in ancestor.orelse):
+                return ancestor, False
+        previous = ancestor
+    return None
+
+
+def only_through(site: ast.AST, piece: ast.AST) -> bool:
+    """Whether *site* runs only on a pass through the innermost ``if`` arm holding *piece*.
+
+    On that arm, or under a test meaning the arm's condition -- matched by the
+    AST as :func:`negates` matches, the same way round -- with no name the test
+    reads given a new value between the two, as :func:`parted` reads two
+    statements testing one thing.  ``updateTaskStatusByContFeeder_JEDI`` adds
+    ``,oldStatus=:oldStatus,splitRule=:splitRule`` to its ``UPDATE`` under ``if
+    taskSpec is not None`` and fills ``:status`` from ``taskSpec`` under a
+    second ``if taskSpec is not None`` further down: a pass that built the
+    statement without the clause never ran that fill.
+    """
+    arm = arm_of(piece)
+    if arm is None:
+        return False
+    branch, body = arm
+    if any(_within(site, one) for one in (branch.body if body else branch.orelse)):
+        return True
+    func = enclosing_function(branch)
+    condition = next((text for text, held in _tested_by(piece, False) if held is branch), None)
+    if func is None or condition is None:
+        return False
+    for text, held in _tested_by(site, False):
+        if held is None or held is branch or not negates(text, f"not ({_unannotated(condition)})"):
+            continue
+        earlier, later = sorted((branch, held), key=lambda one: one.lineno)
+        if not _given_between(func, earlier, later, (piece, site)):
+            return True
+    return False
+
+
 def compatible(one: ast.AST, other: ast.AST, current: bool = False) -> bool:
     """Whether both nodes can be on one run through the function.
 
@@ -1303,23 +1349,43 @@ def _round_a_loop(
     sites: Sequence[ast.AST],
     killers: Sequence[ast.AST],
     rereads: Sequence[ast.AST],
+    beside: Optional[ast.AST] = None,
 ) -> bool:
     """Whether *site* reaches *target* from one pass of a loop holding both to a later pass.
 
     The conditions do not part them across the passes (:func:`parted`
     *around* the loop), *site* is live at the top of the next pass, and a
     write at the top of a pass -- the loop itself, as a site, is one -- reaches
-    *target* with nothing overwriting it.
+    *target* with nothing overwriting it.  With *beside*, the loop holds it too
+    and does not part it from *site* either: the later pass runs it.
     """
     theirs = {id(loop) for loop in _loops_holding(target)}
+    if beside is not None:
+        theirs &= {id(loop) for loop in _loops_holding(beside)}
     for loop in _loops_holding(site):
         if id(loop) not in theirs or parted(site, target, around=loop):
+            continue
+        if beside is not None and parted(beside, site, around=loop):
             continue
         if not any(site is one for one in reaching(loop.body[0], sites, killers, rereads)):
             continue
         if any(loop is one for one in reaching(target, [*sites, loop], killers, rereads)):
             return True
     return False
+
+
+def carried_round(
+    site: ast.AST, target: ast.AST, beside: ast.AST, sites: Sequence[ast.AST], rereads: Sequence[ast.AST] = ()
+) -> bool:
+    """Whether *site*, parted from *beside* on one pass, is still what *target* reads on a pass running *beside*.
+
+    It is where a loop holds all three and carries *site* to *target* from
+    one pass to a later one that runs *beside* (:func:`_round_a_loop`), the
+    map's renewals among *sites*.  A map made afresh in the loop carries
+    nothing: ``insertNewJob`` makes ``varMap = {}`` for each file, so the
+    other arm's ``:status`` of the file before is gone.
+    """
+    return _round_a_loop(site, target, sites, (), rereads, beside)
 
 
 def literal_values(

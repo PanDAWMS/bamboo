@@ -182,7 +182,7 @@ class Reader:
     ) -> bool:
         """Whether *run* fills its bind *key* with the value *held* names in *func*."""
         binds = sql.bound_values(
-            func, run.varmap or "", key, run.window, across=True, at=run.run_at
+            func, run.varmap or "", key, run.window, across=True, at=run
         )  # type: ignore[arg-type]
         if not run.varmap:
             binds = binds + sql.inline_binds(run.call, key)

@@ -360,7 +360,7 @@ class _Reader:
                 return [WrittenValue(column=column, why=_NO_MAP)]
         else:
             try:
-                binds = sql.bound_values(func, run.varmap, given.text, at=run.run_at)  # type: ignore[arg-type]
+                binds = sql.bound_values(func, run.varmap, given.text, at=run)  # type: ignore[arg-type]
             except Exception:  # noqa: BLE001
                 binds = []
         if not binds:
@@ -819,7 +819,7 @@ class _Values:
                 key,
                 run.window,
                 across=True,
-                at=run.run_at,  # type: ignore[arg-type]
+                at=run,  # type: ignore[arg-type]
             )
             if not run.varmap:
                 binds = binds + sql.inline_binds(run.call, key)

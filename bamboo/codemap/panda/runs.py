@@ -1964,7 +1964,12 @@ def _column_binds(
             if column.lower() != attr.lower() or given.kind != "bind":
                 continue
             if run.varmap:
-                found += sql.bound_values(func, run.varmap, given.text, at=(call,))  # type: ignore[arg-type]
+                found += sql.bound_values(
+                    func,  # type: ignore[arg-type]
+                    run.varmap,
+                    given.text,
+                    at=run._replace(calls=(call,)),
+                )
             else:
                 found += sql.inline_binds(call, given.text)
     return found

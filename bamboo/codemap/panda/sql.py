@@ -57,9 +57,12 @@ from bamboo.codemap.panda.pathcond import (
     ancestors,
     attach_parents,
     bindings,
+    carried_round,
     enclosing_function,
+    only_through,
     parted,
     ruled_out_by,
+    site_of,
     surviving_writes,
     targets_of,
     written_value,
@@ -1920,7 +1923,7 @@ def settled_precondition(
     window: Optional[tuple[int, int]],
     settle,
     beside: Optional[ast.stmt] = None,
-    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
+    at: Optional[ast.AST | Execution] = None,
 ) -> tuple[str, bool]:
     """*term* with its bind replaced by the value, and whether that happened.
 
@@ -2045,17 +2048,20 @@ def bound_values(
     key: str,
     window: Optional[tuple[int, int]] = None,
     across: bool = False,
-    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
+    at: Optional[ast.AST | Execution] = None,
 ) -> list[Bind]:
     """Return the assignments filling ``<varmap>[<key>]`` in *func*.
 
     Several are normal and correct: a method that runs the same statement twice
     with different values has two, and both are outcomes of that write.
 
-    *at* is the execution the binds are read for -- a call, or the calls that
-    run one statement (:attr:`Execution.run_at`) -- and only the binds the map
-    it runs with can still hold are returned; see :func:`_live_at`.  Every
-    reader of a run asks this way, in both call forms.  Reading every bind of
+    *at* is the execution the binds are read for -- the run itself, or a bare
+    call -- and only the binds the map it runs with can still hold are
+    returned; see :func:`_live_at`.  Every reader of a run asks this way, in
+    both call forms.  Given the run, they are also its own branch's: one text
+    of the statement is built on some passes and another on others, and a bind
+    only a pass building another text fills is not this one's
+    (:func:`_not_its_text`).  Reading every bind of
     the key instead was once thought safe for ``execute``, on the argument that
     the binds reachable by key are exactly the values that write site can
     produce.  They are not: one function binds ``:status`` for statements on
@@ -2131,7 +2137,7 @@ def scan_binds(
     window: Optional[tuple[int, int]] = None,
     across: bool = False,
     hops: int = 0,
-    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
+    at: Optional[ast.AST | Execution] = None,
 ) -> BindScan:
     """:func:`bound_values`, with the census of what the walk passed over.
 
@@ -2250,8 +2256,11 @@ def scan_binds(
     if gated:
         writes = [gate for _bind, gate in gated]
         live: set[int] = set()
-        for one in at if isinstance(at, tuple) else (at,):
+        run = at if isinstance(at, Execution) else None
+        for one in run.run_at if run is not None else (at,):
             live |= _live_at(func, varmap, writes, one)
+        if run is not None:
+            live -= _not_its_text(func, varmap, run, [gate for gate in writes if id(gate) in live], writes)
         for bind, gate in gated:
             if id(gate) in live:
                 found.append(bind)
@@ -2365,6 +2374,166 @@ def _live_at(
             for append in _appended(func, loop.iter.id, varmap):
                 live |= surviving(append)
     return live
+
+
+def _not_its_text(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: str,
+    run: Execution,
+    live: list[ast.AST],
+    writes: list[ast.AST],
+) -> set[int]:
+    """The ``id`` of each of *live* that no pass building *run*'s text fills.
+
+    :func:`_live_at` reads the binds the map can hold at the call, whatever
+    the text; one call can run several texts of one statement, and each is
+    built on some passes and not others.  ``updateTaskStatusByContFeeder_JEDI``
+    adds ``,oldStatus=:oldStatus,splitRule=:splitRule`` to its ``UPDATE`` only
+    when it is given a task, fills ``:status`` from the task in that case and
+    ``'assigning'`` or ``'ready'`` otherwise, and runs whichever it built at
+    one call: read by the call alone, the text with the clause wrote
+    ``assigning``.  ``insertNewJob`` fills a file's ``:status`` and appends
+    its ``is_waiting`` clause under two tests of one flag.
+
+    A bind is not the text's where it cannot be on one pass with a statement
+    that put a piece of the text there (:func:`pathcond.parted`) -- unless a
+    loop carries it to the call from an earlier pass that the conditions let
+    differ (:func:`pathcond.carried_round`) -- or where it runs only through
+    the arm of a piece another text at the call adds to all of this one's
+    (:func:`pathcond.only_through`): the pass that built this text skipped
+    that arm.  A text written twice the same -- ``archiveJob`` writes
+    ``sqlFMod`` before its loop and again in one arm -- is built two ways and
+    no statement is on both (:func:`_text_reading`), so it parts nothing.
+    """
+    calls, mine, added = _text_reading(func, run)
+    if not mine:
+        return set()
+    held = _pairs_read(func)
+    renewals = _renews(func, varmap)
+    sites = list({id(site): site for site in [*writes, *renewals]}.values())
+    rereads = [write for write in writes if _rereads(write, varmap)]
+    found: set[int] = set()
+    for write in live:
+        if enclosing_function(write) is not func:
+            continue
+        if any(
+            piece is not write
+            and held(parted, piece, write)
+            and not any(carried_round(write, call, piece, sites, rereads) for call in calls)
+            for piece in mine
+        ) or any(held(only_through, write, piece) for piece in added):
+            found.add(id(write))
+    return found
+
+
+def _text_reading(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution
+) -> tuple[list[ast.AST], list[ast.AST], list[ast.AST]]:
+    """*run*'s calls as statements, the statements every way of building its text runs, and the pieces other texts at
+    those calls add to all of its own -- read once per run, as every key of the run asks.
+
+    A text is built by every way that renders it (:func:`_text_ways`), and a
+    statement only some of them run decides nothing: the same text written in
+    each arm of an ``if`` and run once after it is one run, its pieces naming
+    one arm.  Where the ways are not all known, no statement is taken.
+    """
+    store = _held_on(func, "_sql_text_reading")
+    key = (reading_context(), run.sql, tuple(id(call) for call in run.run_at), _piece_ids(run))
+    if key not in store:
+        calls = [site_of(call) for call in run.run_at]
+        ways = _text_ways(func, run, calls)
+        mine = _every_way(ways)
+        anywhere = {one for way in ways or () for one in way}
+        own = {id(one) for one in mine}
+        added: list[ast.AST] = []
+        for other in executions(func) if mine else ():
+            if not any(call is one for call in other.run_at for one in run.run_at):
+                continue
+            theirs = _every_way(_text_ways(func, other, calls))
+            if not own <= {id(one) for one in theirs}:
+                continue
+            added += [
+                one for one in theirs if id(one) not in anywhere and not any(only_through(held, one) for held in mine)
+            ]
+        store[key] = (calls, mine, added)
+    return store[key]
+
+
+#: How many ways of building one text are read; past them, the ways are not all known.
+TEXT_WAYS_CAP = 16
+
+
+def _text_ways(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution, calls: list[ast.AST]
+) -> Optional[list[dict[int, ast.AST]]]:
+    """Each way *run*'s text is built at its calls, as the statements of *func* putting its pieces; None where the ways
+    are not all known -- more than :data:`TEXT_WAYS_CAP`, or the text not rendered again from what reaches a call."""
+    store = _held_on(func, "_sql_text_ways")
+    key = (reading_context(), run.sql, tuple(id(call) for call in run.run_at), _piece_ids(run))
+    if key not in store:
+        reading = _evaluation(func)
+        drawn = [run.pieces]
+        for call in run.run_at:
+            found = sqleval.rendered_as(list(reading.values.get(call.lineno, {})), run.sql, limit=TEXT_WAYS_CAP + 1)
+            if not found or len(found) > TEXT_WAYS_CAP:
+                drawn = []
+                break
+            drawn += [one.pieces for one in found]
+        store[key] = [_text_statements(func, pieces, calls) for pieces in drawn] or None
+    return store[key]
+
+
+def _every_way(ways: Optional[list[dict[int, ast.AST]]]) -> list[ast.AST]:
+    """The statements every one of *ways* runs."""
+    if not ways:
+        return []
+    return [node for key, node in ways[0].items() if all(key in way for way in ways[1:])]
+
+
+def _piece_ids(run: Execution) -> tuple[int, ...]:
+    return tuple(id(one) for _start, _end, way in run.pieces for one in way if isinstance(one, ast.AST))
+
+
+def _held_on(func: ast.AST, name: str) -> dict:
+    store = getattr(func, name, None)
+    if store is None:
+        store = {}
+        setattr(func, name, store)
+    return store
+
+
+def _pairs_read(func: ast.FunctionDef | ast.AsyncFunctionDef):
+    """A reader of a test on two statements of *func* (``parted``, ``only_through``), each pair read once."""
+    store = _held_on(func, "_sql_pairs_read")
+
+    def held(test, one: ast.AST, other: ast.AST) -> bool:
+        key = (test.__name__, id(one), id(other))
+        if key not in store:
+            store[key] = test(one, other)
+        return store[key]
+
+    return held
+
+
+def _text_statements(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, pieces: tuple, calls: list[ast.AST]
+) -> dict[int, ast.AST]:
+    """The statements of *func* that put one of *pieces*, by ``id``, where one can be on a pass through *calls*.
+
+    One run holds every call that runs its text, and two calls can run one
+    text from two assignments in two arms -- ``activateJob`` writes ``sqlJob``
+    for its call in each arm -- while the pieces name one of them.
+    """
+    found: dict[int, ast.AST] = {}
+    for _start, _end, way in pieces:
+        for one in way:
+            if not isinstance(one, ast.AST):
+                continue
+            node = one if isinstance(one, ast.stmt) else site_of(one)
+            if enclosing_function(node) is not func or all(parted(node, call) for call in calls):
+                continue
+            found.setdefault(id(node), node)
+    return found
 
 
 def _rereads(write: ast.AST, varmap: str) -> bool:
