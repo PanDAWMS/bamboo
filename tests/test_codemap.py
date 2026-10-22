@@ -16133,6 +16133,38 @@ def test_a_test_and_its_negation_are_matched_as_they_mean_not_as_spelled():
     assert not pathcond.parted(first, second)
 
 
+def test_a_comparison_is_the_negation_of_its_opposite():
+    """``AdderAtlasPlugin.update_outputs`` fills a value under the ``else`` of ``if
+    file.lfn not in alt`` and reads it under ``if file.lfn in alt``: the two arms
+    cannot meet.  ``==`` / ``!=``, ``in`` / ``not in`` and ``is`` / ``is not`` are
+    each other's negation, read either way round, and ``not not x`` is ``x``;
+    ``<`` and ``>=`` are not (a set's order, a NaN).
+    """
+    assert pathcond.negates("numSlots == -1", "numSlots != -1")
+    assert pathcond.negates("numSlots != -1", "numSlots == -1")
+    assert pathcond.negates("x in L", "x not in L")
+    assert pathcond.negates("x not in L", "x in L")
+    assert pathcond.negates("x is None", "x is not None")
+    assert pathcond.negates("x", "not not not x")
+    assert pathcond.exclusive(["x not in L"], ["x in L"])
+    assert not pathcond.negates("x < 1", "x >= 1")
+    assert not pathcond.negates("x == 1", "x != 2")
+
+    func = _func(
+        "def f(lfn, alt):\n"
+        "    if lfn not in alt:\n"
+        "        a = 1\n"
+        "    else:\n"
+        "        b = 2\n"
+        "    if lfn in alt:\n"
+        "        c = 3\n"
+    )
+    assigned = {n.targets[0].id: n for n in ast.walk(func) if isinstance(n, ast.Assign)}
+
+    assert pathcond.parted(assigned["a"], assigned["c"], exits=False)
+    assert not pathcond.parted(assigned["b"], assigned["c"], exits=False)
+
+
 def test_a_write_reaches_a_read_round_a_loop_whose_arms_one_pass_keeps_apart():
     """``parse_condition_string``: the ``else`` of ``if not items`` replaces ``s``, and the next pass's ``if`` hands it on.
 

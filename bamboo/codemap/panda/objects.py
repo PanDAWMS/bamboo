@@ -321,8 +321,11 @@ class _Reader:
             )
         for table, kind in tables:
             bare = table.rpartition(".")[2]
-            if bare.lower() not in seen:
-                # Nothing named, but rows written: a whole row of {}, or a SET only of names made at run time.
+            # Nothing named, but rows written: a whole row of {}, or a text no tree reads -- each said by a stop on
+            # the run.  A build left no stop writes nothing the call's other builds do not (sql._executions_read): a
+            # SET {} in which no attribute changed.  A SET only of names made at run time is read above, with its
+            # WHERE's keys (sqltext.writes).
+            if bare.lower() not in seen and unread:
                 seen.add(bare.lower())
                 found.append(
                     DbWrite(

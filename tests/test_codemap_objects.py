@@ -1140,3 +1140,66 @@ def test_a_table_known_to_hold_no_spec_is_not_the_objects_row(tmp_path):
     assert [site.how for site in unknown.because] == [
         "insert jobs_Unknown writes ddmErrorCode on the object's row"
     ]
+
+
+#: A spec whose changed attributes make the SET, as PanDA's: a build with none changed has an empty SET.
+CHANGES_SPEC = (
+    SPEC
+    + """
+    def bindUpdateChangesExpression(self):
+        ret = ""
+        for attr in self._attributes:
+            if attr in self._changedAttrs:
+                ret += f"{attr}=:{attr},"
+        ret = ret[:-1]
+        ret += " "
+        return ret
+"""
+)
+
+KEEPER = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def keepJob(self, panda_id):
+        sql = "SELECT PandaID,jobStatus,ddmErrorCode,jobMetrics,modificationTime FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+        self.cur.execute(sql, {":PandaID": panda_id})
+        res = self.cur.fetchall()
+        job = JobSpec()
+        job.pack(res[0])
+        job.jobStatus = "holding"
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = job.PandaID
+        self.cur.execute(sql, varMap)  # keepJob's update
+"""
+
+
+def test_a_write_whose_set_python_builds_names_its_row_by_its_where(tmp_path):
+    """``SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID``: the columns are the job's changed
+    attributes, which the map does not read, and the row is the WHERE's -- so asked by the key, jobStatus, which
+    keepJob assigns on the job it read from the row, changes, and jobMetrics stays as read; not "a row whose key is
+    not read".  The build of the SET with no attribute changed writes nothing the other does not: one write."""
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=CHANGES_SPEC, keeper=KEEPER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    keep = "pkg/keeper.py::DBProxy.keepJob"
+    (write,) = [w for w in rows[keep].writes if w.kind == "update"]
+    assert (write.table, write.whole, write.changed, write.unread) == (
+        "jobsActive4",
+        "job",
+        True,
+        True,
+    )
+    assert write.lines == [_line(KEEPER, "# keepJob's update")]
+    assert [(v.column, v.path) for v in write.keys] == [("PandaID", "job.PandaID")]
+    status = objects.may_change(rows, keep, "panda_id", "jobStatus", keys=("panda_id",))
+    assert status.verdict is True
+    assert ("DBProxy.keepJob", "update jobsActive4") in {
+        (site.owner.split("::")[1], site.how) for site in status.because
+    }
+    metrics = objects.may_change(
+        rows, keep, "panda_id", "jobMetrics", keys=("panda_id",)
+    )
+    assert metrics.verdict is False
+    assert not metrics.open

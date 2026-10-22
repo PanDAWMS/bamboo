@@ -20,6 +20,7 @@ import ast
 import functools
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap.panda import sqleval
 from bamboo.codemap.panda.reaching import reaching
 
 
@@ -732,8 +733,10 @@ def negates(test: str, other: str) -> bool:
     Read by the AST, so ``not noNewJob``, ``not (noNewJob)`` and ``not
     (noNewJob)  [noNewJob := ...]`` are one negation of ``noNewJob``: a bare
     name's annotation (:func:`_substitute_bare_name`) says what the name is
-    bound to and is left out.  A condition that does not parse is compared as
-    written.
+    bound to and is left out.  A comparison is the negation of its opposite
+    (:func:`sqleval.positive`): ``setNumSlotsForWP`` builds its ``DELETE``
+    under ``if numSlots == -1`` and runs it under the ``else`` of ``if
+    numSlots != -1``.  A condition that does not parse is compared as written.
     """
     return _read_test(other) == _read_test(f"not ({_unannotated(test)})")
 
@@ -742,9 +745,22 @@ def negates(test: str, other: str) -> bool:
 def _read_test(condition: str) -> str:
     text = _unannotated(condition)
     try:
-        return ast.dump(ast.parse(text, mode="eval").body)
+        return ast.dump(_negations_read(ast.parse(text, mode="eval").body))
     except SyntaxError:
         return text
+
+
+def _negations_read(test: ast.expr) -> ast.expr:
+    """*test* with a comparison's opposite read as ``not`` of it, and ``not not`` as nothing."""
+    form, opposite = sqleval.positive(test)
+    if opposite:
+        return ast.UnaryOp(op=ast.Not(), operand=form)
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _negations_read(test.operand)
+        if isinstance(inner, ast.UnaryOp) and isinstance(inner.op, ast.Not):
+            return inner.operand
+        return ast.UnaryOp(op=ast.Not(), operand=inner)
+    return test
 
 
 def _unannotated(condition: str) -> str:

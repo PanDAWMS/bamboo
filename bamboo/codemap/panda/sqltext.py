@@ -942,6 +942,11 @@ def writes(sql: str) -> list[SqlWrite]:
     nested parentheses, and took a subquery's terms for the row's.  A
     statement that does not parse, or whose two readings disagree on its
     parts, is read off its text as before -- see :func:`_writes_in_text`.
+
+    An ``UPDATE`` whose ``SET`` gives no column it can read -- ``SET {}``, a
+    spec's ``bindUpdateChangesExpression()`` -- is returned with no columns
+    and its ``WHERE``'s keys: the row it writes is read whether or not what
+    it writes there is (:data:`SET_ITEM_IS_A_HOLE` says the columns are not).
     """
     read = _statement(sql)
     if read is None:
@@ -953,11 +958,11 @@ def writes(sql: str) -> list[SqlWrite]:
         if pairs is None:
             return _writes_in_text(plain(sql))
         columns = {name: value for name, _end, value in pairs}
-        if not columns or table is None:
+        if table is None:
             return []
         guarded = _guards(node, sql, tokens, set(columns))
         if guarded is None:
-            return _writes_in_text(plain(sql))
+            return _writes_in_text(plain(sql)) if columns else []
         preconditions, keys, spans = guarded
         return [
             SqlWrite(
@@ -1001,7 +1006,7 @@ def unread_columns(sql: str) -> list[tuple[str, str]]:
             _insert_pairs(node, sql, tokens, passed)
         found.update(dict.fromkeys(passed))
     if not found:
-        written = {write.table.lower() for write in writes(sql)}
+        written = {write.table.lower() for write in writes(sql) if write.columns}
         for table in [*creates(sql), *updates(sql)]:
             if table.lower() not in written:
                 found[(table, COLUMNS_NOT_READ)] = None

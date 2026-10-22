@@ -837,8 +837,18 @@ def test_what_a_statement_writes_is_read_off_the_tree_in_its_own_spelling():
     assert _written("INSERT /*+ ignore_row_on_dupkey_index (e(r)) */ INTO ATLAS_PANDA.CARBON_REGION_EMISSIONS e (REGION) VALUES(:r)") == [
         ("insert", "CARBON_REGION_EMISSIONS", {"REGION": ("bind", ":r")}, {}, {})
     ]
-    # A column Python names at run time is no column.
-    assert _written("UPDATE {}.JEDI_Tasks SET merge{}={} WHERE jediTaskID=:jediTaskID") == []
+    # A column Python names at run time is no column; the row its WHERE names is still read.
+    assert _written("UPDATE {}.JEDI_Tasks SET merge{}={} WHERE jediTaskID=:jediTaskID") == [
+        ("update", "JEDI_Tasks", {}, {}, {"jediTaskID": ":jediTaskID"})
+    ]
+    # A spec's bindUpdateChangesExpression(): the columns are Python's, the row is the WHERE's.
+    assert _written(
+        "UPDATE ATLAS_PANDA.jobsDefined4 SET {} WHERE PandaID=:PandaID AND (jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)"
+    ) == [("update", "jobsDefined4", {}, {}, {"PandaID": ":PandaID"})]
+    # With no SET item at all (a build in which no attribute changed) the statement still writes no column, said.
+    assert sqltext.unread_columns("UPDATE ATLAS_PANDA.filesTable4 SET WHERE row_ID=:row_ID") == [
+        ("filesTable4", sqltext.COLUMNS_NOT_READ)
+    ]
 
 
 def test_a_write_is_guarded_only_by_what_every_row_it_changes_meets():
