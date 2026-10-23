@@ -200,6 +200,8 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "bindings",
         "call_bindings",
         "writes",
+        "order",
+        "cleared",
     ),
 }
 

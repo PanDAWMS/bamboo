@@ -71,7 +71,10 @@ gives its keys, but ``for k in d`` is read as d's values (more, not less).
 (:class:`~bamboo.codemap.models.DbWrite`): each written column's value as a
 path or another value, the keys of the row, and whether the bind map is the
 whole of one object (``job.valuesMap()``) -- read at each call that runs the
-statement, the calls with the same values and keys one write.
+statement, the calls with the same values and keys one write.  A spec's
+reset of its changed attributes (``resetChangedAttr``, ``resetChangedList``)
+is read with them, not as an assignment, and :func:`order.attach` reads the
+order of each function's lines and what its resets clear.
 """
 
 from __future__ import annotations
@@ -97,7 +100,7 @@ from bamboo.codemap.models import (
     WrittenValue,
 )
 from bamboo.codemap.objects import RETURN, table_classes
-from bamboo.codemap.panda import pathcond, specwrites, sql, sqltext
+from bamboo.codemap.panda import order, pathcond, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
 #: The classes whose columns an assignment is kept for (tmaeno, 10-18: D1).
@@ -157,21 +160,28 @@ def attach(
     """Read every function's object records into its :class:`ReachNode`; how many assigns, bindings, call bindings and writes.
 
     Inside the build's reading context (:func:`sql.across_calls`), so the
-    statements are the ones every slice read.
+    statements are the ones every slice read.  Then the order of their lines
+    and the resets between them (:func:`order.attach`).
     """
     reader = _Reader(modules, calls, table_classes(fragment.entities))
     rows = {row.owner: row for row in fragment.reach_graph}
     counts = [0, 0, 0, 0]
+    functions: dict[str, ast.AST] = {}
+    resets: dict[str, list[order.Reset]] = {}
     for file, func, owner in reader.names.functions:
         row = rows.get(owner)
         if row is None:
             continue
-        row.assigns, row.bindings, row.call_bindings = reader.read(file, func, row)
+        functions[owner] = func
+        row.assigns, row.bindings, row.call_bindings, resets[owner] = reader.read(
+            file, func, row
+        )
         row.writes = reader.writes(func)
         counts[0] += len(row.assigns)
         counts[1] += len(row.bindings)
         counts[2] += len(row.call_bindings)
         counts[3] += len(row.writes)
+    order.attach(functions, rows, resets)
     return counts[0], counts[1], counts[2], counts[3]
 
 
@@ -199,7 +209,9 @@ class _Reader:
 
     def read(
         self, file: str, func: ast.AST, row
-    ) -> tuple[list[PathAssign], list[PathBinding], list[CallBinding]]:
+    ) -> tuple[
+        list[PathAssign], list[PathBinding], list[CallBinding], list[order.Reset]
+    ]:
         values = _Values(self, file, func, row)
         for node in C.own_nodes(func):
             values.site(node)
@@ -227,6 +239,7 @@ class _Reader:
             sorted(values.assigns.values(), key=key),
             sorted(values.bindings.values(), key=key),
             sorted(values.handed.values(), key=key),
+            list(values.resets.values()),
         )
 
     def writes(self, func: ast.AST) -> list[DbWrite]:
@@ -523,6 +536,8 @@ class _Values:
         self.assigns: dict[tuple, PathAssign] = {}
         self.bindings: dict[tuple, PathBinding] = {}
         self.handed: dict[tuple, CallBinding] = {}
+        #: Its resets of a spec's changed attributes (:func:`order.reset_columns`): not assignments, so not in assigns.
+        self.resets: dict[tuple, order.Reset] = {}
         self.hole_lines = {(hole.line, hole.callee) for hole in row.holes}
         self.database = set(row.database)
         self._placed: dict[int, C.Placed] = {}
@@ -1037,6 +1052,21 @@ class _Values:
     def _call(self, call: ast.Call) -> None:
         line = call.lineno
         called = call.func
+        reset = order.reset_columns(call)
+        if reset is not None and isinstance(called, ast.Attribute):
+            columns = tuple(
+                one
+                for one in reset
+                if one == order.ALL_COLUMNS or one in self.reader.columns
+            )
+            for item in self.carried(called.value) if columns else []:
+                held = self.held_by(item) if not item.at else None
+                if held is not None:
+                    statement = pathcond.site_of(call)
+                    self.resets.setdefault(
+                        (id(statement), held, columns),
+                        order.Reset(statement, held, columns),
+                    )
         placed = self.placed(call)
         if isinstance(called, ast.Attribute) and not placed.targets:
             self._fill(call, line)

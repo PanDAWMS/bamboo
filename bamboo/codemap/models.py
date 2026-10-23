@@ -4617,6 +4617,109 @@ class DbWrite(BaseModel):
     )
 
 
+#: The lines :class:`ClearedLines` reads a function's entry and its normal exit as.
+ENTRY_LINE = 0
+EXIT_LINE = -1
+
+
+class LoopLines(BaseModel):
+    """A loop of a function whose body holds lines of its record: the line of its header and its body's first and last."""
+
+    line: int
+    start: int
+    end: int
+    again: bool = Field(default=False, description="A ``while``: its test runs again after each pass of its body.")
+
+
+class LineStart(BaseModel):
+    """A line of the record whose statement starts on another: a call on the second line of a statement."""
+
+    line: int
+    start: int
+
+
+class LinesApart(BaseModel):
+    """A line of a function and lines of others the order of its lines says it can run before, and it cannot."""
+
+    line: int
+    lines: list[int]
+
+
+class Renewed(BaseModel):
+    """A name a loop binds to another object between a line and a later pass's line, on every way.
+
+    Another object: an element of what the loop or a ``with`` holds, a
+    call's result, a literal, or a path rooted at a name the loop binds so
+    -- ``TaskRefinerThread.runImpl`` binds ``impl`` to a new refiner for each
+    task, and ``tmpTaskSpec`` to its ``impl.taskSpec``; ``job = self.job``
+    gives ``job`` the object every pass holds.  A way from a line to a line
+    of a later pass goes round the loop's top, so every way passes such a
+    binding where every way from the first line to the top does
+    (:attr:`after`) or every way from the top to the second does
+    (:attr:`before`).
+    """
+
+    loop: int = Field(description="The :attr:`LoopLines.line` of the loop.")
+    name: str = Field(description="The name, without its version: ``impl`` of ``impl@166``.")
+    after: list[int] = Field(default_factory=list)
+    before: list[int] = Field(default_factory=list)
+
+
+class LineOrder(BaseModel):
+    """Which lines of a function's assignments, writes and calls can run before which: :attr:`ReachNode.order`.
+
+    Before on one run: on one pass, by a way through the function with no
+    jump away from the second line (``continue``, ``return``, ``break``) and
+    no test parting the two (:func:`bamboo.codemap.panda.pathcond.parted`);
+    or on a later pass of a loop holding both, by a way round it whose
+    passes no test parts.  Most of it the lines' order says, and only the
+    rest is here.  A line can run before another on one pass where its
+    statement starts no later; one starting later can run before it only on
+    a later pass of a loop holding both, or before a ``while``'s test on its
+    next pass.  :attr:`apart`, :attr:`rounds` and :attr:`before` are the
+    pairs where that is not so: ``retryJob`` writes the job back at 4146 under ``if not
+    getNewPandaID`` and sets its ``parentID`` at 4171 in the ``else`` (4171
+    apart from 4146); ``TaskRefinerThread.runImpl`` updates the task at 226
+    and goes on to the next task, so its register at 597 follows only on a
+    later pass (226 round to 597).
+    """
+
+    loops: list[LoopLines] = Field(default_factory=list)
+    starts: list[LineStart] = Field(default_factory=list)
+    apart: list[LinesApart] = Field(
+        default_factory=list, description="The lines it cannot run before on one run, although their order says it can."
+    )
+    rounds: list[LinesApart] = Field(
+        default_factory=list,
+        description="The lines it runs before only on a later pass of a loop holding both, although it starts no later.",
+    )
+    before: list[LinesApart] = Field(
+        default_factory=list,
+        description="The lines it can run before on one pass, although their order says it cannot (none expected).",
+    )
+    renewed: list[Renewed] = Field(default_factory=list)
+
+
+class ClearedLines(BaseModel):
+    """Lines of a function every way between which passes a reset of what changed on an object.
+
+    A spec's changed attributes are what ``bindUpdateChangesExpression`` and
+    ``valuesMap(onlyChanged=True)`` write, and ``resetChangedAttr`` /
+    ``resetChangedList`` take them back out.  ``registerTaskInOneShot_JEDI``
+    resets ``jediTaskID`` on ``taskSpec`` at 5800, before its ``UPDATE`` at
+    5832: every way from its entry to 5832 passes it.  A call of a function
+    that resets what it is handed on every way to its normal exit is a reset
+    where it is called (``resetRefinedAttrs``).
+    """
+
+    path: str = Field(description="The object reset, as a path of the function.")
+    columns: list[str] = Field(
+        description="The attributes reset, each by these resets; ``*`` for all of them (``resetChangedList``)."
+    )
+    line: int = Field(description=f"Where the change was made: a line, or {ENTRY_LINE} for before the function was entered.")
+    lines: list[int] = Field(description=f"Each line, or {EXIT_LINE} for its normal exit, every way to which from :attr:`line` passes the reset.")
+
+
 class ReachNode(BaseNode):
     """Where one function can go on to, for every function in the corpus: the record ``reach`` is answered from.
 
@@ -4701,6 +4804,18 @@ class ReachNode(BaseNode):
     writes: list[DbWrite] = Field(
         default_factory=list,
         description="The statements it runs that write rows, with where each value and key comes from.",
+    )
+    order: Optional[LineOrder] = Field(
+        default=None,
+        description=(
+            "Which lines of its assignments, writes and calls can run before which: read by "
+            ":func:`bamboo.codemap.objects.may_change`, an assignment changes a row at a write only before it.  "
+            "None for a function with fewer than two."
+        ),
+    )
+    cleared: list[ClearedLines] = Field(
+        default_factory=list,
+        description="The lines every way between which passes a reset of an object's changed attributes.",
     )
     anchor: Optional[Anchor] = None
 

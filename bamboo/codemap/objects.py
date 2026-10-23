@@ -57,7 +57,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from functools import lru_cache
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Sequence
 
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -65,9 +65,12 @@ from bamboo.codemap.models import (
     BIND_FILL,
     BIND_RESULT,
     BIND_RETURN,
+    ENTRY_LINE,
+    EXIT_LINE,
     CallBinding,
     DbWrite,
     EntityNode,
+    LoopLines,
     ReachNode,
 )
 
@@ -615,6 +618,12 @@ CHANGE_PREMISES: dict[str, str] = {
         "A call the record could not place lands at a function of its name or outside the corpus "
         "(reach's no_runtime_methods): one whose name no function writing the column has is not a write of it."
     ),
+    "changes_in_order": (
+        "An assignment changes the row at a write only where it can run before it on one run, by the record's "
+        "calls and the order of each function's lines (a loop's later pass among them, unless it holds the object "
+        "by names bound afresh), and, for a write of the changed attributes, where no reset of the change stands "
+        "on every way between.  A call the record could not place is no way."
+    ),
 }
 
 NO_FLUSH = (
@@ -670,7 +679,18 @@ def may_change(
     own: the column changes where an object read from the row that holds it
     assigns it, and not otherwise (:func:`_carried_objects`,
     :func:`_row_objects`) -- so asking by the object or by its key answers
-    alike.  Where no such object is found the column is open.
+    alike.  Where no such object is found the column is open -- unless only
+    the changed attributes are written and no change the object held before
+    its way began reaches the write.
+
+    Both ways, an assignment changes the row at a write only where it can run
+    before the write on one run, on the same object, with no reset of the
+    change on every way between for a write of the changed attributes
+    (:class:`_Order`, from :attr:`ReachNode.order` and
+    :attr:`ReachNode.cleared`): ``retryJob``'s ``else`` sets ``parentID`` on
+    the job its ``if`` writes back, and that write never takes it.  The
+    answer names ``changes_in_order`` where an assignment was dropped so; an
+    assignment no write of the object takes is in ``unwritten``.
 
     What leaves the answer open is said: a hole the object reaches, a write
     of the column whose row is named by something not followed to the
@@ -694,6 +714,8 @@ def may_change(
         return table in table_classes and table_classes[table] != spec_class
 
     obj = follow(rows, owner, path)
+    closure = _closure(rows, owner)
+    order = _Order(rows, closure)
     because: dict[Site, None] = {}
     opened: dict[Site, None] = {}
     premises = [
@@ -709,7 +731,7 @@ def may_change(
         for site in [*obj.assigned.get(column, []), *obj.assigned.get("*", [])]
         if site.how not in NOT_A_CHANGE
     ]
-    flushes: list[Site] = []
+    flushes: list[tuple[Site, DbWrite, bool]] = []
     for at, paths in obj.held.items():
         row = rows.get(at)
         for write in row.writes if row is not None else []:
@@ -717,20 +739,36 @@ def may_change(
                 continue
             held = set(paths)
             attributes = {f"{one}.{column}" for one in held}
-            takes = bool(write.whole and _holds(held, write.whole)) or any(
+            whole = bool(write.whole and _holds(held, write.whole))
+            takes = whole or any(
                 value.column.lower() == lowered
                 and bool(value.path)
                 and _holds(attributes, value.path)
                 for value in write.columns
             )
             if takes:
-                flushes.append(Site(at, write.lines[0], f"{write.kind} {write.table}"))
-    if assigned and flushes:
-        for site in [*assigned, *flushes]:
+                flushes.append(
+                    (
+                        Site(at, write.lines[0], f"{write.kind} {write.table}"),
+                        write,
+                        whole and write.changed,
+                    )
+                )
+    written: dict[Site, None] = {}
+    taking: dict[Site, None] = {}
+    for site in assigned:
+        for flush, write, changed in flushes:
+            if order.meets(site, flush.owner, write.lines, obj.held, column, changed):
+                written[site] = None
+                taking[flush] = None
+    for site in [*written, *(flush for flush, _write, _changed in flushes)]:
+        if site in written or site in taking:
             because[site] = None
-    unwritten = (
-        [] if flushes else [Site(site.owner, site.line, NO_FLUSH) for site in assigned]
-    )
+    unwritten = [
+        Site(site.owner, site.line, NO_FLUSH)
+        for site in assigned
+        if site not in written
+    ]
     if flushes:
         premises.append("written_back_as_read")
     for site in obj.holes:
@@ -747,7 +785,6 @@ def may_change(
             keyed[at] |= set(paths)
     if capped:
         premises.append("follow_capped")
-    closure = _closure(rows, owner)
     handing: Optional[dict[str, list[tuple[str, CallBinding]]]] = None
     for at in closure:
         row = rows[at]
@@ -787,7 +824,8 @@ def may_change(
                 if handing is None:
                     handing = _handing(rows, closure)
                 # What a row object holds unassigned is the row's own value; an object no way reads from the
-                # row changes the column where it is assigned, and is not known to otherwise.
+                # row changes the column where it is assigned, and is not known to otherwise -- unless only its
+                # changed attributes are written and no change it held before its way began reaches the write.
                 changes: list[Site] = []
                 for one in carried:
                     found, unread = _row_objects(
@@ -795,13 +833,23 @@ def may_change(
                     )
                     if found and "written_back_as_read" not in premises:
                         premises.append("written_back_as_read")
+                    changed = write.changed and one == write.whole
                     changes += [
-                        site for reach in found for site in _changes(reach, column)
+                        site
+                        for reach in found
+                        for site in _written(order, reach, column, at, write, changed)
                     ]
-                    for reach in unread:
-                        assigned_there = _changes(reach, column)
+                    for top, reach in unread:
+                        assigned_there = _written(
+                            order, reach, column, at, write, changed
+                        )
                         changes += assigned_there
-                        if not assigned_there:
+                        if not assigned_there and (
+                            not changed
+                            or order.before_entry_meets(
+                                top, at, write.lines, reach.held, column
+                            )
+                        ):
                             spelled = ", ".join(text for _held, text in key_values)
                             opened[
                                 Site(
@@ -853,6 +901,8 @@ def may_change(
                 opened[
                     Site(at, hole.line, HOLE_NAMED.format(name=name, column=column))
                 ] = None
+    if order.dropped:
+        premises.append("changes_in_order")
     verdict: Optional[bool] = True if because else (None if opened else False)
     return Change(
         verdict=verdict,
@@ -905,9 +955,9 @@ def _row_objects(
     key_column: str,
     at: str,
     whole: str,
-) -> tuple[list[ObjectReach], list[ObjectReach]]:
+) -> tuple[list[ObjectReach], list[tuple[str, ObjectReach]]]:
     """The follows of the objects read from the row that hold *whole* at *at*, one on each way the key comes by,
-    and of the object at the top of each way that reaches none.
+    and of the object at the top of each way that reaches none, with the function it is at.
 
     Found up from the write.  *whole*'s own follow reads the row where it
     reaches a spec's read of one (:data:`READS_ROW`, ``pack``) on the key
@@ -924,7 +974,7 @@ def _row_objects(
     ``archiveJob``), a field.
     """
     found: list[ObjectReach] = []
-    unread: list[ObjectReach] = []
+    unread: list[tuple[str, ObjectReach]] = []
     work = [(at, whole)]
     seen: set[_State] = set()
     while work:
@@ -956,10 +1006,26 @@ def _row_objects(
                 if _holds(keyed.get(caller, set()), f"{handed}.{key_column}"):
                     ups.append((caller, handed))
         if not ups:
-            unread.append(reach)
+            unread.append((function, reach))
             continue
         work += ups
     return found, unread
+
+
+def _written(
+    order: "_Order",
+    reach: ObjectReach,
+    column: str,
+    at: str,
+    write: DbWrite,
+    changed: bool,
+) -> list[Site]:
+    """The assignments of *column* on the object *reach* follows that *write*, in *at*, writes (:class:`_Order`)."""
+    return [
+        site
+        for site in _changes(reach, column)
+        if order.meets(site, at, write.lines, reach.held, column, changed)
+    ]
 
 
 def _changes(reach: ObjectReach, column: str) -> list[Site]:
@@ -982,6 +1048,285 @@ def _closure(rows: dict[str, ReachNode], owner: str) -> list[str]:
         found[at] = None
         todo.extend(call.to for call in rows[at].calls)
     return list(found)
+
+
+#: What :func:`by_line_order` and :class:`~bamboo.codemap.models.LineOrder` say of one line running before another.
+ONE_PASS, ROUND, APART = "one pass", "round", "apart"
+
+
+def by_line_order(start: int, other_start: int, loops: Sequence[LoopLines]) -> str:
+    """What the order of two lines says of the first running before the second, by the lines their statements
+    start at (:class:`~bamboo.codemap.models.LineOrder`): on one pass where it starts no later, or before a
+    ``while``'s test on its next pass; only on a later pass where a loop's body holds both; else not."""
+    if start <= other_start:
+        return ONE_PASS
+    inside = [loop for loop in loops if loop.start <= start <= loop.end]
+    if any(loop.again and loop.line == other_start for loop in inside):
+        return ONE_PASS
+    if any(loop.start <= other_start <= loop.end for loop in inside):
+        return ROUND
+    return APART
+
+
+def line_paths(row: ReachNode) -> dict[int, set[str]]:
+    """Each line of *row* with the paths it takes an object by: an assignment's object, what a call hands and the
+    name its result is bound to, a write's whole and the objects of its values."""
+    found: dict[int, set[str]] = defaultdict(set)
+    for one in row.assigns:
+        found[one.line].add(one.path)
+    for call in row.call_bindings:
+        found[call.line].add(call.path)
+    for binding in row.bindings:
+        if binding.how == BIND_RESULT:
+            found[binding.line].add(binding.name)
+    for write in row.writes:
+        held = {write.whole} if write.whole else set()
+        for value in write.columns:
+            if value.path:
+                held |= {value.path, value.path.rpartition(".")[0]} - {""}
+        for line in write.lines:
+            found[line] |= held
+    return found
+
+
+def root_name(path: str) -> str:
+    """The name *path* starts at, without its version: ``impl`` of ``impl@166.taskSpec``; a call's result,
+    ``<result@12:4>``, whole."""
+    root = _root(path)
+    return root if root.startswith("<") else root.split("@", 1)[0]
+
+
+class _Lines:
+    """One function's :attr:`ReachNode.order` and :attr:`ReachNode.cleared`, read for :class:`_Order`."""
+
+    def __init__(self, row: ReachNode):
+        order = row.order
+        self.loops = order.loops if order is not None else []
+        self.starts = {one.line: one.start for one in order.starts} if order else {}
+        self.said: dict[tuple[int, int], str] = {}
+        for kind, held in (
+            (APART, order.apart if order else []),
+            (ROUND, order.rounds if order else []),
+            (ONE_PASS, order.before if order else []),
+        ):
+            for one in held:
+                for other in one.lines:
+                    self.said[(one.line, other)] = kind
+        self.renewed = {
+            (one.loop, one.name): (set(one.after), set(one.before))
+            for one in (order.renewed if order else [])
+        }
+        self.paths = line_paths(row)
+        tables: dict[tuple[str, tuple[str, ...]], dict[int, set[int]]] = defaultdict(
+            dict
+        )
+        for one in row.cleared:
+            tables[(one.path, tuple(one.columns))][one.line] = set(one.lines)
+        self.cleared = [
+            (path, set(columns), table) for (path, columns), table in tables.items()
+        ]
+
+    def kind(self, one: int, other: int) -> str:
+        said = self.said.get((one, other))
+        if said is not None:
+            return said
+        return by_line_order(
+            self.starts.get(one, one), self.starts.get(other, other), self.loops
+        )
+
+    def renewed_between(self, one: int, other: int, name: str) -> bool:
+        """Whether every loop holding both lines renews *name* on every way from *one* round to *other*."""
+        start, other_start = self.starts.get(one, one), self.starts.get(other, other)
+        common = [
+            loop
+            for loop in self.loops
+            if loop.start <= start <= loop.end and loop.start <= other_start <= loop.end
+        ]
+        if not common:
+            return False
+        for loop in common:
+            held = self.renewed.get((loop.line, name))
+            if held is None or not (one in held[0] or other in held[1]):
+                return False
+        return True
+
+
+class _Order:
+    """The record's order over one run's closure: whether a change can be what a write writes.
+
+    A change made at a line of one function and a write at a line of another
+    meet where some function of the closure has a line leading to the change
+    -- its own, or a call going down to it, the change surviving to the
+    normal exit of each function on the way back up -- before a line leading
+    to the write -- its own, or a call going down to it, reached from the
+    entry of each function on the way down.  A call is a way for the object
+    only where it hands the object, or what holds it, or binds what it
+    returns to a path holding it (:func:`line_paths`): ``updateTask_JEDI(tmpTaskSpec, ...)``
+    with a new spec is not a way to write the refined one.  The two lines
+    can run one before the other (:attr:`ReachNode.order`), and where only on
+    a later pass of a loop, not where every path the second line takes the
+    object by is rooted at a name the loop binds to another object between
+    (:class:`~bamboo.codemap.models.Renewed`; ``for job in jobs`` holds the
+    object as ``jobs[]`` too, which names no one element); and, for a
+    write of the changed attributes, no reset of the column on a path holding
+    the object stands on every way between (:attr:`ReachNode.cleared`).  One
+    line going down to the same functions both ways is read further down.  A
+    function not in the closure is taken to meet.
+    """
+
+    def __init__(self, rows: dict[str, ReachNode], closure: list[str]):
+        self.rows = rows
+        self.inside = set(closure)
+        self.callers: dict[str, list[tuple[str, int]]] = defaultdict(list)
+        for at in closure:
+            for call in rows[at].calls:
+                if call.to in self.inside:
+                    for line in call.lines or [call.line]:
+                        self.callers[call.to].append((at, line))
+        self._lines: dict[str, _Lines] = {}
+        #: Whether a pair was found not to meet: the answer rests on the order (``changes_in_order``).
+        self.dropped = False
+
+    def meets(
+        self,
+        change: Site,
+        at: str,
+        lines: list[int],
+        held: dict[str, list[str]],
+        column: str,
+        changed: bool,
+    ) -> bool:
+        """Whether *change* can be what the write at *lines* of *at* writes, the object held as *held* says."""
+        if change.owner not in self.inside or at not in self.inside:
+            return True
+        ups = self._ways(change.owner, [change.line], held, column, changed, True)
+        downs = self._ways(at, lines, held, column, changed, False)
+        for frame in sorted(ups.keys() & downs.keys()):
+            paths = set(held.get(frame, ()))
+            for one, those in ups[frame].items():
+                for other, these in downs[frame].items():
+                    if one == other:
+                        if those != these or "" in those:
+                            return True
+                        continue
+                    if self._before(frame, one, other, paths, column, changed):
+                        return True
+        self.dropped = True
+        return False
+
+    def before_entry_meets(
+        self,
+        top: str,
+        at: str,
+        lines: list[int],
+        held: dict[str, list[str]],
+        column: str,
+    ) -> bool:
+        """Whether a change of *column* the object held before *top* was entered can be what the write of its changed
+        attributes at *lines* of *at* writes."""
+        if top not in self.inside or at not in self.inside:
+            return True
+        downs = self._ways(at, lines, held, column, True, False)
+        paths = set(held.get(top, ()))
+        if any(
+            self._before(top, ENTRY_LINE, other, paths, column, True)
+            for other in downs.get(top, {})
+        ):
+            return True
+        self.dropped = True
+        return False
+
+    def _ways(
+        self,
+        start: str,
+        lines: list[int],
+        held: dict[str, list[str]],
+        column: str,
+        changed: bool,
+        up: bool,
+    ) -> dict[str, dict[int, set[str]]]:
+        """Each function with the lines at which what happens at *lines* of *start* happens there: its own, ``""``,
+        or the calls going down to it carrying the object, the functions called.  *up*: a change, surviving to each
+        exit on the way; else a write, reached from each entry."""
+        found: dict[str, dict[int, set[str]]] = defaultdict(lambda: defaultdict(set))
+        for line in lines:
+            found[start][line].add("")
+
+        def passes(frame: str, line: int) -> bool:
+            if not changed:
+                return True
+            paths = set(held.get(frame, ()))
+            if up:
+                return not self._is_cleared(frame, line, EXIT_LINE, paths, column)
+            return not self._is_cleared(frame, ENTRY_LINE, line, paths, column)
+
+        live = [start] if any(passes(start, line) for line in lines) else []
+        seen = set(live)
+        while live:
+            callee = live.pop()
+            for caller, line in self.callers.get(callee, ()):
+                if not self._carries(caller, line, held):
+                    continue
+                found[caller][line].add(callee)
+                if caller not in seen and passes(caller, line):
+                    seen.add(caller)
+                    live.append(caller)
+        return found
+
+    def _carries(self, frame: str, line: int, held: dict[str, list[str]]) -> bool:
+        """Whether a path *line* of *frame* takes an object by holds the object or what holds it."""
+        here = held.get(frame)
+        if not here:
+            return False
+        return any(
+            _under(path, one) is not None
+            for path in self._lines_of(frame).paths.get(line, ())
+            for one in here
+        )
+
+    def _before(
+        self,
+        frame: str,
+        one: int,
+        other: int,
+        paths: set[str],
+        column: str,
+        changed: bool,
+    ) -> bool:
+        lines = self._lines_of(frame)
+        kind = lines.kind(one, other)
+        if kind == APART:
+            return False
+        if kind == ROUND:
+            # What the later pass writes it takes by the second line's paths.
+            taken = [
+                path
+                for path in lines.paths.get(other, ())
+                if any(_under(path, held) is not None for held in paths)
+            ]
+            if taken and all(
+                lines.renewed_between(one, other, root_name(path)) for path in taken
+            ):
+                return False
+        return not (changed and self._is_cleared(frame, one, other, paths, column))
+
+    def _is_cleared(
+        self, frame: str, one: int, other: int, paths: set[str], column: str
+    ) -> bool:
+        if not paths:
+            return False
+        return any(
+            (column in columns or "*" in columns)
+            and other in table.get(one, ())
+            and _holds(paths, path)
+            for path, columns, table in self._lines_of(frame).cleared
+        )
+
+    def _lines_of(self, frame: str) -> _Lines:
+        found = self._lines.get(frame)
+        if found is None:
+            found = self._lines[frame] = _Lines(self.rows[frame])
+        return found
 
 
 def _function_names(rows: dict[str, ReachNode]) -> dict[str, set[str]]:

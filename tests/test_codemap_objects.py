@@ -1203,3 +1203,261 @@ def test_a_write_whose_set_python_builds_names_its_row_by_its_where(tmp_path):
     )
     assert metrics.verdict is False
     assert not metrics.open
+
+
+#: A spec with the resets of PanDA's: one changed attribute, or each of the names a method spells.
+RESETS_SPEC = (
+    CHANGES_SPEC
+    + """
+    def resetChangedAttr(self, name):
+        try:
+            del self._changedAttrs[name]
+        except Exception:
+            pass
+
+    def keepOld(self):
+        for name in ["jobMetrics", "ddmErrorCode"]:
+            self.resetChangedAttr(name)
+"""
+)
+
+ORDERED = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def updateJob(self, job: JobSpec):
+        job.resetChangedAttr("PandaID")
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = job.PandaID
+        self.cur.execute(sql, varMap)  # updateJob's update
+
+    def retryJob(self, job: JobSpec, again):
+        if not again:
+            sql = "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobMetrics) VALUES (:PandaID,:jobMetrics)"
+            self.cur.execute(sql, job.valuesMap())  # retryJob's write-back
+        else:
+            job.jobMetrics = "retried"  # retryJob's else
+
+    def markJob(self, job: JobSpec):
+        job.jobMetrics = "marked"  # markJob's change
+
+
+class Runner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+        self.job: JobSpec = JobSpec()
+
+    def make(self) -> JobSpec:
+        return JobSpec()
+
+    def finish(self, job: JobSpec):
+        job.PandaID = 5  # reset by updateJob
+        job.jobStatus = "done"  # written
+        job.jobMetrics = "m"  # reset by keepOld
+        job.keepOld()
+        self.proxy.updateJob(job)  # finish's update
+        job.modificationTime = 3  # after the write
+
+    def each(self, jobs: list[JobSpec]):
+        for job in jobs:
+            if job.jobStatus == "x":
+                self.proxy.updateJob(job)  # each's update
+            else:
+                job.ddmErrorCode = 1  # another job's
+
+    def again(self, job: JobSpec, tries):
+        for n in tries:
+            if n:
+                self.proxy.updateJob(job)  # again's update
+            else:
+                job.ddmErrorCode = 2  # the next try writes it
+
+    def refine(self, jobs: list[JobSpec]):
+        for job in jobs:
+            try:
+                if job.jobStatus == "bad":
+                    self.proxy.markJob(job)  # refine's mark
+                    continue
+            except Exception:
+                pass
+            self.proxy.updateJob(job)  # refine's update
+
+    def other(self, job: JobSpec):
+        self.proxy.updateJob(job)  # the job's update
+        job.ddmErrorCode = 7  # after its update
+        fresh = JobSpec()
+        self.proxy.updateJob(fresh)  # another object's update
+
+    def swap(self, job: JobSpec, other: JobSpec):
+        self.proxy.updateJob(other)  # the other's update
+
+    def alias(self, tries):
+        for n in tries:
+            job = self.job
+            if n:
+                self.proxy.updateJob(job)  # alias's update
+            else:
+                job.ddmErrorCode = 5  # the same job each pass
+
+    def fresh(self, tries):
+        for n in tries:
+            made = self.make()
+            job = made
+            if n:
+                self.proxy.updateJob(job)  # fresh's update
+            else:
+                job.ddmErrorCode = 6  # another job each pass
+"""
+
+
+def _ordered(tmp_path: Path) -> dict:
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=RESETS_SPEC, ordered=ORDERED)
+    return {row.owner: row for row in fragment.reach_graph}
+
+
+def test_the_record_says_where_line_order_is_wrong_what_a_loop_renews_and_what_a_reset_clears(
+    tmp_path,
+):
+    """retryJob's write-back cannot run before its else, which comes later; refine's mark runs before its update only
+    on a later pass, for the continue between; each's for renews job at every top; updateJob clears PandaID from its
+    entry to its update; keepOld clears the names its for spells on every way out, one entry for both, and so its call
+    does in finish."""
+    rows = _ordered(tmp_path)
+    retry = rows["pkg/ordered.py::DBProxy.retryJob"].order
+    back, other = (
+        _line(ORDERED, "# retryJob's write-back"),
+        _line(ORDERED, "# retryJob's else"),
+    )
+    assert [(one.line, one.lines) for one in retry.apart] == [(back, [other])]
+    refine = rows["pkg/ordered.py::Runner.refine"].order
+    mark, update = (
+        _line(ORDERED, "# refine's mark"),
+        _line(ORDERED, "# refine's update"),
+    )
+    assert (mark, [update]) in [(one.line, one.lines) for one in refine.rounds]
+    each = rows["pkg/ordered.py::Runner.each"].order
+    (loop,) = each.loops
+    assert [(one.loop, one.name, one.before) for one in each.renewed] == [
+        (
+            loop.line,
+            "job",
+            [_line(ORDERED, "# each's update"), _line(ORDERED, "# another job's")],
+        )
+    ]
+    update_job = rows["pkg/ordered.py::DBProxy.updateJob"]
+    assert any(
+        (one.path, one.columns, one.line) == ("job", ["PandaID"], 0)
+        and _line(ORDERED, "# updateJob's update") in one.lines
+        for one in update_job.cleared
+    )
+    keep = rows["pkg/spec.py::JobSpec.keepOld"]
+    assert [
+        (one.path, one.columns)
+        for one in keep.cleared
+        if one.line == 0 and -1 in one.lines
+    ] == [("self", ["ddmErrorCode", "jobMetrics"])]
+    finish = rows["pkg/ordered.py::Runner.finish"]
+    assert any(
+        (one.path, one.columns, one.line)
+        == ("job", ["ddmErrorCode", "jobMetrics"], _line(ORDERED, "# reset by keepOld"))
+        and _line(ORDERED, "# finish's update") in one.lines
+        for one in finish.cleared
+    )
+
+
+def test_a_change_writes_the_row_only_where_it_can_run_before_the_write_and_no_reset_stands_between(
+    tmp_path,
+):
+    """finish writes jobStatus; PandaID is reset by updateJob, jobMetrics by keepOld, modificationTime assigned
+    after; retryJob's else never runs before its write-back; each's other arm is another job's; again's next try
+    writes the same job."""
+    rows = _ordered(tmp_path)
+    finish = "pkg/ordered.py::Runner.finish"
+    written = objects.may_change(rows, finish, "job", "jobStatus")
+    assert written.verdict is True
+    assert ("Runner.finish", _line(ORDERED, "# written")) in {
+        (site.owner.split("::")[1], site.line) for site in written.because
+    }
+    for column, marker in (
+        ("PandaID", "# reset by updateJob"),
+        ("jobMetrics", "# reset by keepOld"),
+        ("modificationTime", "# after the write"),
+    ):
+        answer = objects.may_change(rows, finish, "job", column)
+        assert (column, answer.verdict, answer.because) == (column, False, [])
+        assert [(site.line, site.how) for site in answer.unwritten] == [
+            (_line(ORDERED, marker), objects.NO_FLUSH)
+        ]
+        assert "changes_in_order" in answer.premises
+    retry = objects.may_change(
+        rows, "pkg/ordered.py::DBProxy.retryJob", "job", "jobMetrics"
+    )
+    assert (retry.verdict, retry.because) == (False, [])
+    assert [site.line for site in retry.unwritten] == [
+        _line(ORDERED, "# retryJob's else")
+    ]
+    each = objects.may_change(
+        rows, "pkg/ordered.py::Runner.each", "jobs[]", "ddmErrorCode"
+    )
+    assert (each.verdict, each.because) == (False, [])
+    again = objects.may_change(
+        rows, "pkg/ordered.py::Runner.again", "job", "ddmErrorCode"
+    )
+    assert again.verdict is True
+    assert "changes_in_order" not in again.premises
+
+    refine = objects.may_change(
+        rows, "pkg/ordered.py::Runner.refine", "jobs[]", "jobMetrics"
+    )
+    assert (refine.verdict, refine.because) == (False, [])
+    assert [site.line for site in refine.unwritten] == [
+        _line(ORDERED, "# markJob's change")
+    ]
+    other = objects.may_change(
+        rows, "pkg/ordered.py::Runner.other", "job", "ddmErrorCode"
+    )
+    assert (other.verdict, other.because) == (False, [])
+
+
+def test_an_object_not_read_from_its_row_is_open_only_where_a_change_it_came_with_reaches_the_write(
+    tmp_path,
+):
+    """swap hands other to updateJob, which writes its changed attributes on other.PandaID's row, and nothing in the
+    run reads other from the row: jobStatus may have been changed before other was handed in, and is open; PandaID's
+    change is reset on every way to the write, and is not written."""
+    rows = _ordered(tmp_path)
+    swap = "pkg/ordered.py::Runner.swap"
+    status = objects.may_change(rows, swap, "job", "jobStatus", keys=("other.PandaID",))
+    assert status.verdict is None
+    assert [site.how for site in status.open] == [
+        objects.NOT_READ_HERE.format(
+            column="jobStatus", object="job", key="job.PandaID"
+        )
+    ]
+    key = objects.may_change(rows, swap, "job", "PandaID", keys=("other.PandaID",))
+    assert (key.verdict, key.open, key.because) == (False, [], [])
+    assert "changes_in_order" in key.premises
+
+
+def test_a_later_pass_writes_another_object_only_where_it_takes_it_by_a_name_bound_to_one(
+    tmp_path,
+):
+    """alias binds job to self.job on every pass, the same job, and its next pass writes the change; fresh binds job
+    to what make() returns, another job each pass, and the change made on one pass is not the next pass's write."""
+    rows = _ordered(tmp_path)
+    alias = objects.may_change(
+        rows, "pkg/ordered.py::Runner.alias", "self.job", "ddmErrorCode"
+    )
+    assert alias.verdict is True
+    assert _line(ORDERED, "# the same job each pass") in {
+        site.line for site in alias.because
+    }
+    fresh = objects.may_change(
+        rows, "pkg/ordered.py::Runner.fresh", "job", "ddmErrorCode"
+    )
+    assert (fresh.verdict, fresh.because) == (False, [])
+    assert [site.line for site in fresh.unwritten] == [
+        _line(ORDERED, "# another job each pass")
+    ]
