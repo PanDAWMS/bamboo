@@ -755,6 +755,95 @@ def test_a_key_given_again_between_the_arm_and_the_history_call_is_said(
     )
 
 
+SPEC_PARENT = SPEC.replace(
+    '("PandaID", "jobStatus")', '("PandaID", "jobStatus", "parentID")'
+)
+
+NEW_KEYS = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+_logger = None
+
+
+class NewKeys(DBProxy):
+    def retry(self, job: JobSpec, new_id):
+        tmp_log = LogWrapper(_logger, f"PandaID={job.PandaID}")  # N0
+        tmp_log.debug(f"retry {job.PandaID}")  # N1
+        job.jobStatus = "retried"  # N2
+        job.parentID = job.PandaID  # N3
+        job.PandaID = int(new_id)  # N4
+        tmp_log.debug(f"new PandaID {job.parentID} -> {job.PandaID}")  # N5
+        self.note_change(job.PandaID, job.jobStatus)  # N6
+
+    def clone(self, job: JobSpec, new_id):
+        tmp_log = LogWrapper(_logger, f"PandaID={job.PandaID}")  # N7
+        job.jobStatus = "cloned"  # N8
+        job.PandaID = int(new_id)  # N9
+        self.note_change(job.PandaID, job.jobStatus)  # N10
+        tmp_log.debug("done")  # N11
+
+    def lose(self, job: JobSpec, other: JobSpec, new_id):
+        tmp_log = LogWrapper(_logger, f"PandaID={job.PandaID}")  # N12
+        job.jobStatus = "lost"  # N13
+        job.parentID = job.PandaID  # N14
+        job.parentID = None  # N15
+        job.PandaID = int(new_id)  # N16
+        tmp_log.debug(f"other {other.PandaID}")  # N17
+        self.note_change(job.PandaID, job.jobStatus)  # N18
+"""
+
+
+def test_a_key_given_again_names_where_the_old_key_is_kept_and_where_the_new_one_is_printed(
+    tmp_path: Path,
+) -> None:
+    """retryJob: parentID is given the old PandaID before the new one, and a print after it prints the new one."""
+    fragment = _build(
+        tmp_path,
+        [
+            ("new_keys", f"NewKeys.{owner}", marker, "JobSpec.jobStatus")
+            for owner, marker in (("retry", "N2"), ("clone", "N8"), ("lose", "N13"))
+        ],
+        spec=SPEC_PARENT,
+        proxy=PROXY,
+        new_keys=NEW_KEYS,
+    )
+    owner = "pkg/new_keys.py::NewKeys"
+    (retried,) = _branch(fragment, "N2").history or []
+    # The print before the new key is the old key's; the one after prints both.
+    assert retried.rekeyed == [
+        HistoryRekey(
+            at=f"{owner}.retry:{_line(NEW_KEYS, 'N4')}",
+            path="job.PandaID",
+            kept_in=["parentID"],
+            printed_at=[_line(NEW_KEYS, "N5")],
+        )
+    ]
+    # Nothing keeps the old key, and no print after names the new one: said by both lists empty.
+    (cloned,) = _branch(fragment, "N8").history or []
+    assert cloned.rekeyed == [
+        HistoryRekey(at=f"{owner}.clone:{_line(NEW_KEYS, 'N9')}", path="job.PandaID")
+    ]
+    # The old key kept, then given another value; a print of another object's key.
+    (lost,) = _branch(fragment, "N13").history or []
+    assert lost.rekeyed == [
+        HistoryRekey(at=f"{owner}.lose:{_line(NEW_KEYS, 'N16')}", path="job.PandaID")
+    ]
+    assert history_pairs_resolve(fragment).passed
+    retried.rekeyed[0].kept_in = ["jobStatus"]
+    retried.rekeyed[0].printed_at = [_line(NEW_KEYS, "N2")]
+    failures = history_pairs_resolve(fragment).failures
+    assert any(
+        "jobStatus is bound to the key by no alias of the row" in one
+        for one in failures
+    )
+    assert any(
+        "is no print of the function spelling the key" in one for one in failures
+    )
+
+
 TASKS = """\
 from pkg.proxy import DBProxy
 from pkg.spec import JobSpec

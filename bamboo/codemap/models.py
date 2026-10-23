@@ -443,6 +443,23 @@ class HistoryRekey(BaseModel):
         default="",
         description="What it is given, where that is a literal -- ``None`` --; empty where the value is not read.",
     )
+    kept_in: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The object's attributes given the old key before the new one, in that function: ``parentID`` from "
+            "``job.parentID = job.PandaID`` on a way to the assignment, the object not bound again and the attribute "
+            "not given another value between.  The row written whole holds the old key there."
+        ),
+    )
+    printed_at: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of that function's prints that print the new key: on a way from the assignment, the object "
+            "not bound again between, a hole spelling the key's path.  The line prints in its statement's runs, "
+            "whose mark was made with the old key where the run started before.  With ``kept_in``, empty where "
+            "nothing names the old key and the new together."
+        ),
+    )
 
 
 class HistoryPair(BaseModel):

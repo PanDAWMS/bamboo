@@ -109,8 +109,12 @@ RETURNING``, ``ppEventServiceJob``'s clone given a new ``PandaID``,
 ``storeJobs``' ``job.PandaID = None`` for a jumbo job with no ready event.
 The row then is the new key's, the arm's values in it, and ``same`` or
 ``can`` holds for that row, while the run's mark carries the old key;
-``rekeyed`` says where, with the value where it is a literal.  Only an
-assignment on a path the record follows the object by is seen.
+``rekeyed`` says where, with the value where it is a literal, and what
+names the old key with the new: an attribute given the old key on the way
+there (``kept_in``: ``retryJob``'s ``job.parentID = job.PandaID``), and the
+prints after it that print the new key (``printed_at``: ``Generate new
+PandaID ...``, in a run the old key marks).  Only an assignment on a path
+the record follows the object by is seen.
 
 **Not read.**  What the calls on the way down to the writer hand: the
 object is followed without the values calls hand
@@ -137,6 +141,7 @@ from typing import Callable, Iterator, NamedTuple, Optional, Union
 from bamboo.codemap import calls as C
 from bamboo.codemap import objects, reach
 from bamboo.codemap.models import (
+    BIND_ALIAS,
     BIND_FILL,
     BIND_RESULT,
     HISTORY_AFTER,
@@ -1555,10 +1560,15 @@ class _Reader:
                 continue
             node = self._statement(func, one.line)
             if node is not None and node not in assigns:
+                kept_in, printed_at = self._old_and_new(
+                    owner, func, one.path, key, node
+                )
                 assigns[node] = HistoryRekey(
                     at=f"{owner}:{one.line}",
                     path=f"{one.path}.{key}",
                     value=_literal(node),
+                    kept_in=kept_in,
+                    printed_at=printed_at,
                 )
         calls: dict[ast.AST, tuple[str, str]] = {}
         for handed in row.call_bindings:
@@ -1576,6 +1586,54 @@ class _Reader:
                 calls.setdefault(node, (handed.to, handed.parameter + handed.at + rest))
         self._candidates[(owner, held, key)] = (assigns, calls)
         return assigns, calls
+
+    def _old_and_new(
+        self, owner: str, func: ast.AST, obj: str, key: str, rekey: ast.stmt
+    ) -> tuple[list[str], list[int]]:
+        """What names the old key and the new together where *rekey* gives the object *obj* holds its *key* again
+        (:attr:`HistoryRekey.kept_in`, :attr:`HistoryRekey.printed_at`).
+
+        Kept: an attribute the record binds to the key before -- ``job.parentID = job.PandaID``, an alias -- on a way
+        to *rekey* with none of the object's killers on it (:meth:`_killers`), nor the attribute's.  Printed: a print
+        statement of the function on a way from *rekey* with none of the object's killers on it, a hole of which
+        spells the key's path (as the source writes it: ``name@line`` read bare).
+        """
+        row = self.rows[owner]
+        killers = self._killers(owner, func, obj)
+        kept: set[str] = set()
+        for binding in row.bindings:
+            if binding.how != BIND_ALIAS or not _same_path(
+                binding.path, f"{obj}.{key}"
+            ):
+                continue
+            rest = objects._under(obj, binding.name) or ""
+            attr = rest[1:] if rest.startswith(".") else ""
+            if not attr.isidentifier() or attr == key:
+                continue
+            statement = self._statement(func, binding.line)
+            if statement is None:
+                continue
+            given = [
+                one
+                for one in self._killers(owner, func, f"{obj}.{attr}")
+                if one is not statement
+            ]
+            if _flows(statement, rekey, [*killers, *given]):
+                kept.add(attr)
+        spelled = _bare(f"{obj}.{key}")
+        printed: set[int] = set()
+        node = self.prints.get(owner)
+        for statement in node.statements if node is not None else []:
+            if not any(
+                _bare(hole.expression) == spelled
+                for one in statement.rows
+                for hole in one.holes
+            ):
+                continue
+            site = self._statement(func, statement.line)
+            if site is not None and site is not rekey and _flows(rekey, site, killers):
+                printed.add(statement.line)
+        return sorted(kept), sorted(printed)
 
     def _statement(self, func: ast.AST, line: int) -> Optional[ast.stmt]:
         """:func:`mustprints._statement_at`, kept: it walks the whole function, and the walk asks one line many times."""

@@ -29,10 +29,12 @@ from pydantic import BaseModel, Field
 
 from bamboo.codemap import evidence
 from bamboo.codemap.models import (
+    BIND_ALIAS,
     BIND_RESULT,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
     RUN_KEY_TIME,
+    FunctionPrintsNode,
     HistoryPair,
     MapFragment,
     ReachNode,
@@ -1472,7 +1474,7 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                 key = HISTORY_KEYS.get(junction.subject.rpartition(".")[0], "")
                 if pair.row == HISTORY_ROW_CAN:
                     failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows, key)]
-                failures += [f"{at}: {why}" for why in _rekeyed_unresolved(pair, rows, key)]
+                failures += [f"{at}: {why}" for why in _rekeyed_unresolved(pair, rows, prints, key)]
     return GateResult(
         gate="history-pairs-resolve",
         passed=not failures,
@@ -1485,11 +1487,15 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     )
 
 
-def _rekeyed_unresolved(pair: HistoryPair, rows: dict[str, ReachNode], key: str) -> list[str]:
+def _rekeyed_unresolved(
+    pair: HistoryPair, rows: dict[str, ReachNode], prints: dict[str, FunctionPrintsNode], key: str
+) -> list[str]:
     """Why a pair's ``rekeyed`` names an assignment no record holds; empty where each is one.
 
     Each is an assignment of the class's *key* -- by name, or a computed one -- at its line, on the path it names, in a
-    reach row; and only a ``same`` or ``can`` pair has one.
+    reach row; and only a ``same`` or ``can`` pair has one.  Each attribute it says keeps the old key is bound to the
+    key there by an alias of that row, and each line it says prints the new one is a print of that function with a
+    hole spelling the key.
     """
     if pair.rekeyed and pair.row not in (HISTORY_ROW_SAME, HISTORY_ROW_CAN):
         return [f"rekeyed on a {pair.row or 'unread'} row"]
@@ -1506,6 +1512,24 @@ def _rekeyed_unresolved(pair: HistoryPair, rows: dict[str, ReachNode], key: str)
             for held in row.assigns
         ):
             failures.append(f"rekeyed {one.at} {one.path}: no assignment of it on the line")
+        for attr in one.kept_in:
+            if not any(
+                binding.how == BIND_ALIAS and binding.name == f"{assigned}.{attr}" and binding.path == one.path
+                for binding in row.bindings
+            ):
+                failures.append(f"rekeyed {one.at} {one.path}: {attr} is bound to the key by no alias of the row")
+        spelled = re.sub(r"@\d+", "", one.path)
+        node = prints.get(owner)
+        spelling = {
+            statement.line
+            for statement in (node.statements if node is not None else [])
+            for row_text in statement.rows
+            for hole in row_text.holes
+            if re.sub(r"@\d+", "", hole.expression) == spelled
+        }
+        for printed in one.printed_at:
+            if printed not in spelling:
+                failures.append(f"rekeyed {one.at} {one.path}: line {printed} is no print of the function spelling the key")
     return failures
 
 
