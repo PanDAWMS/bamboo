@@ -4567,10 +4567,16 @@ class CallBinding(BaseModel):
     why: str = Field(default="", description="Why a hole is one, where :attr:`ReachNode.holes` does not say.")
 
 
+#: The column of a key a loop over a mapping names by the mapping's key: ``WHERE {k}=:cr_{k}`` for each ``k`` of
+#: ``criteria``, its value ``criteria[k]``.  Its :attr:`WrittenValue.path` is the mapping's element, ``criteria[]``:
+#: the row is named, for each key the mapping holds, by the column of that name.
+MAP_KEY = "[]"
+
+
 class WrittenValue(BaseModel):
     """Where one column a statement writes takes its value from, or one key it picks its row by."""
 
-    column: str
+    column: str = Field(description="The column; for a key, :data:`MAP_KEY` where the column is a mapping's key.")
     path: str = Field(
         default="",
         description="The value as a path of the function -- ``job.jobStatus``, ``pandaID`` -- where it is one.",

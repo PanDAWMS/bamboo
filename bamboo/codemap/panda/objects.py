@@ -91,6 +91,7 @@ from bamboo.codemap.models import (
     BIND_FILL,
     BIND_RESULT,
     BIND_RETURN,
+    MAP_KEY,
     CallBinding,
     DbWrite,
     MapFragment,
@@ -324,7 +325,8 @@ class _Reader:
                         for value in self._values(
                             func, run, column, sqltext.classify(bind), "", versions
                         )
-                    ],
+                    ]
+                    + _map_keys(func, run, one.key_holes, versions),
                     new_row=new_row
                     or any(
                         "nextval" in given.text.lower()
@@ -1236,13 +1238,39 @@ _NO_MAP = "the statement runs with no bind map"
 _NOT_BOUND_HERE = "the bind is not filled in this function (the map is handed in, or filled by a computed key)"
 
 
+def _map_keys(
+    func: ast.AST, run, key_holes, versions: "_Versions"
+) -> list[WrittenValue]:
+    """The keys a loop over a mapping names *run*'s row by (:data:`MAP_KEY`, :func:`sql.map_key`), one per path the
+    mapping is; a term ``{}=:cr_{}`` whose holes are no such loop's key names nothing."""
+    if not key_holes:
+        return []
+    holes = run.reading_holes
+    found: dict[str, WrittenValue] = {}
+    for column, bind, numbers in key_holes:
+        if not all(0 < number <= len(holes) for number in (column, *numbers)):
+            continue
+        mapping = sql.map_key(
+            func,  # type: ignore[arg-type]
+            run,
+            holes[column - 1],
+            bind,
+            tuple(holes[number - 1] for number in numbers),
+        )
+        for held in versions.paths(mapping) if mapping is not None else []:
+            found.setdefault(held, WrittenValue(column=MAP_KEY, path=f"{held}[]"))
+    return list(found.values())
+
+
 def _whole_row(func: ast.AST, run, versions: "_Versions") -> tuple[str, bool, bool]:
     """The path whose ``valuesMap()`` the run's bind map is; whether only its changed attributes are in it; whether its key is new.
 
     ``execute(sql, job.valuesMap())`` hands the map in the call, and
     ``varMap = job.valuesMap(useSeq=True)`` binds it to a name first: the
     run says the name only (:attr:`sql.Execution.varmap`), so the call's
-    argument is read here, and a name's every value.
+    argument is read here, and a name's every value.  A map filled entry by
+    entry from one -- ``for k, v in task.valuesMap(onlyChanged=True).items():
+    varMap[k] = v`` -- holds what it holds, beside what else it is given.
     """
     given = [(call, call.args[1]) for call in run.run_at if len(call.args) >= 2]
     values: list[ast.expr] = []
@@ -1257,13 +1285,27 @@ def _whole_row(func: ast.AST, run, versions: "_Versions") -> tuple[str, bool, bo
                 and isinstance(targets[0], ast.Name)
                 and targets[0].id == one.id
             ]
+            # A copy adds to the map and takes nothing from it: read as a reread, which overwrites nothing.
+            copies = _row_copies(func, one.id)
             try:
                 live = (
-                    pathcond.surviving_writes(sites, call, as_run=True) if sites else []
+                    pathcond.surviving_writes(
+                        sites + list(copies.values()),
+                        call,
+                        rereads=list(copies.values()),
+                        as_run=True,
+                    )
+                    if sites or copies
+                    else []
                 )
             except Exception:  # noqa: BLE001 -- not read, so no whole row is said
                 live = []
-            values.extend(site.value for site in live)  # type: ignore[attr-defined]
+            values.extend(
+                copies_from
+                if (copies_from := _copied(copies, site)) is not None
+                else site.value  # type: ignore[attr-defined]
+                for site in live
+            )
         else:
             values.append(one)
     for value in values:
@@ -1283,6 +1325,46 @@ def _whole_row(func: ast.AST, run, versions: "_Versions") -> tuple[str, bool, bo
             }
             return held, "onlyChanged" in flags, "useSeq" in flags
     return "", False, False
+
+
+def _row_copies(func: ast.AST, name: str) -> dict[ast.expr, ast.AST]:
+    """Each ``name[k] = v`` in ``for k, v in X.valuesMap(...).items()``, under the ``X.valuesMap(...)`` it copies."""
+    found: dict[ast.expr, ast.AST] = {}
+    for loop in C.own_nodes(func):
+        if not (
+            isinstance(loop, ast.For)
+            and isinstance(loop.iter, ast.Call)
+            and isinstance(loop.iter.func, ast.Attribute)
+            and loop.iter.func.attr == "items"
+            and not loop.iter.args
+            and isinstance(copied := loop.iter.func.value, ast.Call)
+            and isinstance(copied.func, ast.Attribute)
+            and copied.func.attr == "valuesMap"
+            and isinstance(loop.target, ast.Tuple)
+            and len(loop.target.elts) == 2
+            and all(isinstance(part, ast.Name) for part in loop.target.elts)
+        ):
+            continue
+        key, value = (part.id for part in loop.target.elts)  # type: ignore[attr-defined]
+        for node in loop.body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(target := node.targets[0], ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == name
+                and isinstance(target.slice, ast.Name)
+                and target.slice.id == key
+                and isinstance(node.value, ast.Name)
+                and node.value.id == value
+            ):
+                found[copied] = node
+    return found
+
+
+def _copied(copies: dict[ast.expr, ast.AST], site: ast.AST) -> Optional[ast.expr]:
+    """The ``X.valuesMap(...)`` *site* copies entry by entry, if it is one of *copies*."""
+    return next((copied for copied, node in copies.items() if node is site), None)
 
 
 #: How a binding gives its name a value it spells: not a loop's, a ``with``'s or a caught exception's.

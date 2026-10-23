@@ -736,6 +736,25 @@ class Execution(NamedTuple):
         pass of each text the loop appends (:func:`reading_text`).  :attr:`sql` itself where nothing repeats."""
         return reading_text(self.sql, self.holes)
 
+    @property
+    def reading_holes(self) -> tuple:
+        """Each hole of :attr:`reading` in order, as sqltext numbers them (``__h1`` the first): the
+        :class:`sqleval.HoleAt` it is, a repeated part's own holes included (:attr:`sqleval.HoleAt.inner`), else
+        ``None``."""
+        return reading_holes(self.sql, self.holes)
+
+
+def reading_holes(text: str, holes: tuple) -> tuple:
+    """:func:`reading_text`'s holes, each ``{}`` of it in order: the :class:`sqleval.HoleAt` it is, else ``None``.
+
+    Out of a repeated part, the hole *holes* has at its offset; in one, the hole
+    the text a pass appends has there (:attr:`sqleval.HoleAt.inner`).  Counted
+    as sqltext counts the holes it names -- every ``{}`` and ``{0}`` of the
+    reading, a literal one too, which is a hole no one wrote.
+    """
+    out, at_offset = _reading(text, holes)
+    return tuple(at_offset.get(match.start()) for match in _READING_HOLE.finditer(out))
+
 
 def reading_text(text: str, holes: tuple) -> str:
     """*text* with each ``{}`` a loop of unknown length repeats (:data:`sqleval.REPEATED`) as one pass of each text
@@ -748,15 +767,47 @@ def reading_text(text: str, holes: tuple) -> str:
     ``{}`` glued the first one to the hole.  sqltext reads the statement with
     them and says what it read in *text*'s terms (:data:`sqltext.REPEAT_OPEN`).
     """
+    return _reading(text, holes)[0]
+
+
+#: What sqltext reads as a hole of a statement (``sqltext._HOLE``).
+_READING_HOLE = re.compile(r"\{\d*\}")
+
+
+def _reading(text: str, holes: tuple) -> tuple[str, dict]:
+    """:func:`reading_text`, and the hole at each offset of it."""
     out = text
-    for at, hole in sorted(holes, key=lambda one: one[0], reverse=True):
-        if hole.reason != sqleval.REPEATED or not hole.repeats or out[at : at + 2] != "{}":
+    at_offset: dict[int, object] = {}
+    shift = 0
+    # Front to back: each repeated part moves what follows it on by what it put in place of its ``{}``.
+    for at, hole in sorted(holes, key=lambda one: one[0]):
+        where = at + shift
+        if hole.reason != sqleval.REPEATED or not hole.repeats or out[where : where + 2] != "{}":
+            at_offset[where] = hole
             continue
-        passes = (hole.joiner or "").join(hole.repeats) if hole.listed else "".join(hole.repeats)
-        if hole.end and passes.endswith(hole.end):
-            passes = passes[: -len(hole.end)]
-        out = out[:at] + sqltext.REPEAT_OPEN + passes + sqltext.REPEAT_CLOSE + out[at + 2 :]
-    return out
+        passes, inner = _passes(hole)
+        out = out[:where] + sqltext.REPEAT_OPEN + passes + sqltext.REPEAT_CLOSE + out[where + 2 :]
+        for offset, one in inner:
+            at_offset[where + 1 + offset] = one
+        shift += len(passes)
+    return out, at_offset
+
+
+def _passes(hole) -> tuple[str, tuple]:
+    """What a repeated part holds in a reading -- one pass of each text, run together or joined, less its end --
+    and its holes, ``(offset, HoleAt)``."""
+    inner = hole.inner if len(hole.inner) == len(hole.repeats) else ((),) * len(hole.repeats)
+    joiner = (hole.joiner or "") if hole.listed else ""
+    passes = ""
+    found: list = []
+    for index, (text, held) in enumerate(zip(hole.repeats, inner, strict=True)):
+        if index:
+            passes += joiner
+        found += [(len(passes) + offset, one) for offset, one in held]
+        passes += text
+    if hole.end and passes.endswith(hole.end):
+        passes = passes[: -len(hole.end)]
+    return passes, tuple((offset, one) for offset, one in found if offset < len(passes))
 
 
 def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -1306,6 +1357,73 @@ def spells_key(
     if not kept:
         return False
     return any(_string_value(spelled, {name: one}, loop) == key for one in kept)
+
+
+def map_key(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: Execution,
+    column: object,
+    bind: str,
+    bind_holes: tuple,
+) -> Optional[ast.expr]:
+    """The mapping a term of *run* is named by the key of, where it is one: ``d`` for ``{k}=:cr_{k}`` written in
+    ``for k, v in d.items()`` with ``varMap[f":cr_{k}"] = v`` in the loop.
+
+    The term asks the row for each key the mapping holds, with the mapping's
+    value at it -- read where the caller says the keys.  *column* is the hole
+    the term's column is and *bind_holes* the holes of its bind
+    (:attr:`Execution.reading_holes`), *bind* the bind as the statement spells
+    it, ``{}`` for each hole (``:cr_{}``).  Each is the loop's key, as written
+    there (:attr:`sqleval.HoleAt.source`), and the run's map gets the bind in
+    the loop -- the bind spelt with the key -- valued by the loop's value or
+    ``d[k]``, and still holds it at a call of the run (:func:`_live_at`).  The
+    keys of a mapping the function itself is handed back are read by putting
+    each in (:func:`spells_key`): no hole is left.
+    """
+    if type(column) is not sqleval.HoleAt or not run.varmap or not bind_holes:
+        return None
+    loop = next((one for one in ancestors(column.stmt) if isinstance(one, ast.For)), None)
+    if loop is None:
+        return None
+    key, mapping = _mapping_iterated(loop)
+    if not key or mapping is None or column.source != key:
+        return None
+    for hole in bind_holes:
+        if type(hole) is not sqleval.HoleAt or hole.source != key or not any(one is loop for one in ancestors(hole.stmt)):
+            return None
+    target = loop.target
+    value_name = (
+        target.elts[1].id
+        if loop.iter.func.attr == "items"  # type: ignore[attr-defined]
+        and isinstance(target, ast.Tuple)
+        and len(target.elts) == 2
+        and isinstance(target.elts[1], ast.Name)
+        else None
+    )
+    probe = "\x00key"
+    spelled = bind.replace("{}", probe)
+    for node in ast.walk(loop):
+        for stored in targets_of(node):
+            if not (
+                isinstance(stored, ast.Subscript)
+                and isinstance(stored.value, ast.Name)
+                and stored.value.id == run.varmap
+                and _string_value(stored.slice, {key: probe}, loop) == spelled
+            ):
+                continue
+            value = written_value(node)
+            by_value = value_name is not None and isinstance(value, ast.Name) and value.id == value_name
+            by_key = (
+                isinstance(value, ast.Subscript)
+                and ast.dump(value.value) == ast.dump(mapping)
+                and isinstance(value.slice, ast.Name)
+                and value.slice.id == key
+            )
+            if (by_value or by_key) and any(
+                id(node) in _live_at(func, run.varmap, [node], call) for call in run.run_at
+            ):
+                return mapping
+    return None
 
 
 class KeyColumnCensus(NamedTuple):

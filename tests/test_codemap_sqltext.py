@@ -1364,3 +1364,14 @@ def test_unread_columns_are_stops_on_the_statement_and_not_on_the_rows_it_picks(
     stops = sqlwrite.statement_stops(func, "taskbuffer/db_proxy_mods/job_complex_module.py")
     said = [stop for stop in stops if stop.reason == sqltext.SET_COLUMN_IS_A_HOLE]
     assert [(stop.statement, stop.detail, stop.reads) for stop in said] == [(6, "SET {}=:{}", [])]
+
+
+def test_a_term_naming_its_column_and_its_bind_by_holes_is_kept_apart_from_the_keys():
+    """``{k}=:cr_{k}`` over a mapping's keys names no column a reader of *keys* can take, and was dropped -- in a
+    loop's passes or not.  It is kept apart (:attr:`sqltext.SqlWrite.key_holes`): the holes' numbers, for a reader
+    holding what the holes are, which says whether it names the row."""
+    marked = f"UPDATE T SET a=:a WHERE {sqltext.REPEAT_OPEN}{{}}=:cr_{{}}{sqltext.REPEAT_CLOSE} AND b=:b"
+    (write,) = sqltext.writes(marked)
+    assert (write.keys, write.key_holes) == ({"b": ":b"}, [(1, ":cr_{}", (2,))])
+    (unrolled,) = sqltext.writes("UPDATE T SET a=:a WHERE {}=:cr_{}")
+    assert (unrolled.keys, unrolled.key_holes) == ({}, [(1, ":cr_{}", (2,))])

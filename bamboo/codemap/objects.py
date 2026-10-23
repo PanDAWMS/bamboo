@@ -67,11 +67,13 @@ from bamboo.codemap.models import (
     BIND_RETURN,
     ENTRY_LINE,
     EXIT_LINE,
+    MAP_KEY,
     CallBinding,
     DbWrite,
     EntityNode,
     LoopLines,
     ReachNode,
+    WrittenValue,
 )
 
 #: How many (function, path) states one answer reads before it stops and says so.
@@ -563,6 +565,33 @@ def _tokens(path: str) -> tuple[str, ...]:
 _PART = re.compile(r"\.[^.\[]+|\[[^\]]*\]")
 
 
+def key_path(value: WrittenValue, column: str) -> str:
+    """Where *value*, a key a write names its row by, holds the value it names the row by *column* with: its path
+    where *column* is its column; the mapping's value at *column* where its column is the mapping's key
+    (:data:`MAP_KEY`) -- ``criteria['jediTaskID']`` of ``criteria[]``; empty where neither."""
+    if value.column.lower() == column.lower():
+        return value.path
+    if value.column == MAP_KEY and value.path.endswith("[]"):
+        return f"{value.path[:-2]}['{column}']"
+    return ""
+
+
+def map_key_columns(path: str, held: set[str]) -> set[str]:
+    """The columns a key whose column is the mapping's key (:data:`MAP_KEY`), the mapping's element at *path*
+    (``criteria[]``), names the row by where *held* holds the value: the literal key each held path is at
+    (``criteria['jediTaskID']``).  A value held at a key not known names no column."""
+    found: set[str] = set()
+    for one in held:
+        if _under(path, one) == "" and (
+            key := _LITERAL_KEY.fullmatch(_tokens(one)[-1])
+        ):
+            found.add(key.group(1))
+    return found
+
+
+_LITERAL_KEY = re.compile(r"\['(.+)'\]")
+
+
 def _holds(held: set[str], path: str) -> bool:
     """Whether *path* is one of *held*, read part by part (:func:`_under`)."""
     if path in held:
@@ -667,7 +696,11 @@ def may_change(
 
     Two ways write the row.  The object: *column* assigned on it
     (:func:`follow`) and a write taking it -- the whole object
-    (``valuesMap()``), its changed attributes, or the attribute by name.  A
+    (``valuesMap()``), its changed attributes, or the attribute by name --
+    where an ``UPDATE``'s key is the object's: held by the key's follow, or
+    handed equal to the object's key by every call of the record handing the
+    object (:func:`_on_its_row`); one naming its row by anything else is open
+    on it, not a write of the object's row.  A
     key: a statement anywhere in the closure writing *column* by another
     value, on the row its ``WHERE`` -- or an ``INSERT``'s *key_column* --
     names, where that key is one of *keys* (paths of *owner* holding the
@@ -731,7 +764,19 @@ def may_change(
         for site in [*obj.assigned.get(column, []), *obj.assigned.get("*", [])]
         if site.how not in NOT_A_CHANGE
     ]
+    # The key: every write of the column in the closure, by the row it names.
+    # The row's key is followed as an object is: from *keys*, and from the object's own key attribute, which
+    # goes on as a value -- ``recordStatusChange(job.PandaID, ...)``.
+    keyed: dict[str, set[str]] = defaultdict(set)
+    capped = bool(obj.capped or obj.cut)
+    for one in (*keys, f"{path}.{key_column}"):
+        key = follow(rows, owner, one)
+        capped = capped or bool(key.capped or key.cut)
+        for at, paths in key.held.items():
+            keyed[at] |= set(paths)
     flushes: list[tuple[Site, DbWrite, bool]] = []
+    # An update taking the object lands on its row only where a key of it is the object's key (:func:`_on_its_row`).
+    off_row: dict[Site, None] = {}
     for at, paths in obj.held.items():
         row = rows.get(at)
         for write in row.writes if row is not None else []:
@@ -740,13 +785,29 @@ def may_change(
             held = set(paths)
             attributes = {f"{one}.{column}" for one in held}
             whole = bool(write.whole and _holds(held, write.whole))
-            takes = whole or any(
-                value.column.lower() == lowered
+            taken = [write.whole] if whole else []
+            taken += [
+                value.path.rsplit(".", 1)[0]
+                for value in write.columns
+                if value.column.lower() == lowered
                 and bool(value.path)
                 and _holds(attributes, value.path)
-                for value in write.columns
-            )
-            if takes:
+            ]
+            if taken and write.kind == "update":
+                if not _on_its_row(rows, at, write, taken, keyed, key_column):
+                    key_values = _key_values(write, key_column)
+                    spelled = ", ".join(text for _held, text in key_values)
+                    off_row[
+                        Site(
+                            at,
+                            write.lines[0],
+                            NOT_FOLLOWED_KEY.format(column=column, key=spelled)
+                            if key_values
+                            else UNREAD_KEY.format(column=column),
+                        )
+                    ] = None
+                    continue
+            if taken:
                 flushes.append(
                     (
                         Site(at, write.lines[0], f"{write.kind} {write.table}"),
@@ -773,16 +834,8 @@ def may_change(
         premises.append("written_back_as_read")
     for site in obj.holes:
         opened[site] = None
-    # The key: every write of the column in the closure, by the row it names.
-    # The row's key is followed as an object is: from *keys*, and from the object's own key attribute, which
-    # goes on as a value -- ``recordStatusChange(job.PandaID, ...)``.
-    keyed: dict[str, set[str]] = defaultdict(set)
-    capped = bool(obj.capped or obj.cut)
-    for one in (*keys, f"{path}.{key_column}"):
-        key = follow(rows, owner, one)
-        capped = capped or bool(key.capped or key.cut)
-        for at, paths in key.held.items():
-            keyed[at] |= set(paths)
+    for site in off_row:
+        opened[site] = None
     if capped:
         premises.append("follow_capped")
     handing: Optional[dict[str, list[tuple[str, CallBinding]]]] = None
@@ -806,12 +859,7 @@ def may_change(
             if not named and not write.unread and not write.whole:
                 continue
             site_line = write.lines[0]
-            named_by = write.columns if write.kind == "insert" else write.keys
-            key_values = [
-                (v.path, v.path or v.value or v.why)
-                for v in named_by
-                if v.column.lower() == key_column.lower()
-            ]
+            key_values = _key_values(write, key_column)
             if write.kind == "insert" and write.whole and not key_values:
                 key_values = [
                     (f"{write.whole}.{key_column}", f"{write.whole}.{key_column}")
@@ -911,6 +959,131 @@ def may_change(
         premises=premises,
         unwritten=unwritten,
     )
+
+
+def _key_values(write: DbWrite, key_column: str) -> list[tuple[str, str]]:
+    """``(path, spelled)`` of each value *write* names its row by on *key_column* -- an ``INSERT``'s column, an
+    ``UPDATE``'s key: the path holding it (:func:`key_path`) and how an answer spells it."""
+    named_by = write.columns if write.kind == "insert" else write.keys
+    return [
+        (held, v.path if v.column == MAP_KEY else held or v.value or v.why)
+        for v in named_by
+        if (held := key_path(v, key_column)) or v.column.lower() == key_column.lower()
+    ]
+
+
+def _on_its_row(
+    rows: dict[str, ReachNode],
+    at: str,
+    write: DbWrite,
+    taken: list[str],
+    keyed: dict[str, set[str]],
+    key_column: str,
+) -> bool:
+    """Whether the ``UPDATE`` *write* at *at*, taking the objects at *taken*, names its row by one of their keys.
+
+    A key of the write on *key_column* is the object's where the asked key's
+    follow holds it (*keyed*: the keys given and the object's own key
+    attribute, which reads an assignment either way and a row read by the
+    key), or where every call of the record hands it and the object equal
+    (:func:`_by_callers`): ``registerTaskInOneShot_JEDI`` takes ``jediTaskID``
+    and ``taskSpec`` apart and writes the spec's changes on the id's row.  A
+    write naming its row by anything else -- another row's key, a key not
+    read -- is not the object's row's.
+    """
+    for held, _spelled in _key_values(write, key_column):
+        if not held:
+            continue
+        if _holds(keyed.get(at, set()), held):
+            return True
+        if any(_by_callers(rows, at, held, f"{one}.{key_column}", 0) for one in taken):
+            return True
+    return False
+
+
+#: How many frames up :func:`_by_callers` reads the callers' word.
+CALLER_FRAMES = 4
+
+_CALLERS: dict[int, tuple[dict, dict, frozenset]] = {}
+
+
+def _callers_of(
+    rows: dict[str, ReachNode],
+) -> tuple[dict[str, dict[tuple[str, int], list[CallBinding]]], frozenset]:
+    """Each function's calls in the record -- caller and line, with every binding of the call, a spread one too --
+    and the names of the calls it could not place; kept with *rows* itself, so a cache entry is never another
+    record's."""
+    held = _CALLERS.get(id(rows))
+    if held is None or held[0] is not rows:
+        calls: dict[str, dict[tuple[str, int], list[CallBinding]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for caller, row in rows.items():
+            for call in row.call_bindings:
+                if call.to:
+                    calls[call.to][(caller, call.line)].append(call)
+        names = frozenset(
+            name
+            for row in rows.values()
+            for hole in row.holes
+            if (name := _called_name(hole.callee)) is not None
+        )
+        _CALLERS.clear()
+        held = _CALLERS[id(rows)] = (rows, calls, names)
+    return held[1], held[2]
+
+
+def _by_callers(
+    rows: dict[str, ReachNode], at: str, value: str, key: str, frames: int
+) -> bool:
+    """Whether every call of the record handing *at* the object *key* is the key of hands *value* equal to it --
+    paths of *at* rooted at its parameters: one held by the other's follow at the caller, or so at its callers in
+    turn.
+
+    The caller's word, read over the record rather than a run's closure: a
+    function asked below its callers has none in the run.  A call not handing
+    the object leaves it the parameter's default -- no object, no row of it --
+    and is not asked (``updateTaskStatusByContFeeder_JEDI`` called with no
+    taskSpec).  Not where a call the record could not place has the
+    function's name (holes_land_by_name), where a call spreads its arguments
+    (what lands where is not said), or where one hands the object and not the
+    value; nor where no call hands the object.
+    """
+    calls, unplaced = _callers_of(rows)
+    if at.rpartition(".")[2].rpartition(":")[2] in unplaced or frames >= CALLER_FRAMES:
+        return False
+    asked = 0
+    for (caller, _line), bindings in calls.get(at, {}).items():
+        if any(not one.parameter or one.parameter.startswith("*") for one in bindings):
+            return False
+        handed = {one.parameter + one.at: one.path for one in bindings if one.path}
+        handed_value, handed_key = (
+            next(
+                (
+                    path + rest
+                    for name, path in handed.items()
+                    if (rest := _under(name, one)) is not None
+                ),
+                None,
+            )
+            for one in (value, key)
+        )
+        if handed_key is None:
+            continue
+        asked += 1
+        if handed_value is None or not (
+            handed_value == handed_key
+            or _holds(_held_in(rows, caller, handed_key), handed_value)
+            or _holds(_held_in(rows, caller, handed_value), handed_key)
+            or _by_callers(rows, caller, handed_value, handed_key, frames + 1)
+        ):
+            return False
+    return asked > 0
+
+
+def _held_in(rows: dict[str, ReachNode], at: str, path: str) -> set[str]:
+    """The paths of *at* that hold what *path* holds there (:func:`follow`)."""
+    return set(follow(rows, at, path).held.get(at, ()))
 
 
 def _carried_objects(write: DbWrite, named: list, column: str) -> list[str]:

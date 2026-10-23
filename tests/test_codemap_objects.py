@@ -8,7 +8,13 @@ from pathlib import Path
 from bamboo.codemap import objects, reach
 from bamboo.codemap.gates import object_records_resolve
 from bamboo.codemap.gitsource import blob_sha
-from bamboo.codemap.models import CallBinding, EntityNode, MapFragment, SourceModule
+from bamboo.codemap.models import (
+    MAP_KEY,
+    CallBinding,
+    EntityNode,
+    MapFragment,
+    SourceModule,
+)
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import pathcond, sql
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
@@ -1461,3 +1467,194 @@ def test_a_later_pass_writes_another_object_only_where_it_takes_it_by_a_name_bou
     assert [site.line for site in fresh.unwritten] == [
         _line(ORDERED, "# another job each pass")
     ]
+
+
+MAPPED = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def updateBy(self, spec: JobSpec, criteria: dict):
+        sql = "WHERE "
+        varMap = {}
+        for key, value in criteria.items():
+            crKey = f":cr_{key}"
+            sql += f"{key}={crKey} AND "
+            varMap[crKey] = value
+        sql = sql[:-4]
+        sqlU = f"UPDATE ATLAS_PANDA.jobsActive4 SET {spec.bindUpdateChangesExpression()} "
+        for name, held in spec.valuesMap(onlyChanged=True).items():
+            varMap[name] = held
+        self.cur.execute(sqlU + sql, varMap)  # the mapped update
+
+
+class Runner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+
+    def finish(self, job: JobSpec):
+        job.jobStatus = "done"  # written on the job's row
+        self.proxy.updateBy(job, {"PandaID": job.PandaID})
+
+    def mark(self, job: JobSpec):
+        fresh = JobSpec()
+        fresh.jobStatus = "marked"
+        self.proxy.updateBy(fresh, {"PandaID": job.PandaID})
+
+    def hold(self, job: JobSpec, other: JobSpec):
+        other.jobStatus = "held"
+        self.proxy.updateBy(other, {"jobStatus": "running"})  # rows the status names
+
+    def hand(self, job: JobSpec):
+        job.jobStatus = "handed"  # written on rows the status names
+        self.proxy.updateBy(job, {"jobStatus": "running"})
+"""
+
+
+def test_a_row_named_by_the_keys_of_a_mapping_is_named_where_the_caller_says_them(
+    tmp_path,
+):
+    """updateBy names its row by each key of criteria, ``{key}=:cr_{key}`` with criteria's value at it, and writes the
+    changed attributes it copies from spec.valuesMap(onlyChanged=True) entry by entry.  The write's key is the
+    mapping's key (MAP_KEY), its value criteria[]; its row is the whole of spec's.  finish hands job as spec, and the
+    write takes it.  mark hands another object with {"PandaID": job.PandaID}: the asked key is followed to
+    criteria['PandaID'], so the write is on job's row -- and the object written there, handed with no key of that
+    row, is not followed to where it was read (open, as for any write).  hold hands another object with
+    {"jobStatus": ...}: no PandaID there to follow, and the write is open, on a row named by criteria[]."""
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=CHANGES_SPEC, mapped=MAPPED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    (write,) = rows["pkg/mapped.py::DBProxy.updateBy"].writes
+    assert [(key.column, key.path) for key in write.keys] == [(MAP_KEY, "criteria[]")]
+    assert (write.whole, write.changed) == ("spec", True)
+    finish = objects.may_change(
+        rows, "pkg/mapped.py::Runner.finish", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert finish.verdict is True
+    assert _line(MAPPED, "# written on the job's row") in {
+        site.line for site in finish.because
+    }
+    mark = objects.may_change(
+        rows, "pkg/mapped.py::Runner.mark", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert mark.verdict is None
+    assert [(site.line, site.how) for site in mark.open] == [
+        (
+            _line(MAPPED, "# the mapped update"),
+            objects.NOT_READ_HERE.format(
+                column="jobStatus", object="spec", key="criteria[]"
+            ),
+        )
+    ]
+    hold = objects.may_change(
+        rows, "pkg/mapped.py::Runner.hold", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert hold.verdict is None
+    assert [(site.line, site.how) for site in hold.open] == [
+        (
+            _line(MAPPED, "# the mapped update"),
+            objects.NOT_FOLLOWED_KEY.format(column="jobStatus", key="criteria[]"),
+        )
+    ]
+    assert objects.key_path(write.keys[0], "PandaID") == "criteria['PandaID']"
+    assert objects.map_key_columns(
+        "criteria[]",
+        {
+            "criteria['PandaID']",
+            "criteria[]",
+            "criteria['jobStatus'].x",
+            "other['jobStatus']",
+        },
+    ) == {"PandaID"}
+
+    hand = objects.may_change(
+        rows, "pkg/mapped.py::Runner.hand", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert (hand.verdict, hand.because) == (None, [])
+    assert [(site.line, site.how) for site in hand.open] == [
+        (
+            _line(MAPPED, "# the mapped update"),
+            objects.NOT_FOLLOWED_KEY.format(column="jobStatus", key="criteria[]"),
+        )
+    ]
+
+
+CALLED = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def registerBy(self, panda_id, job: JobSpec):
+        job.jobStatus = "registered"
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = panda_id
+        self.cur.execute(sql, varMap)  # registerBy's update
+
+    def registerAny(self, panda_id, job: JobSpec):
+        job.jobStatus = "registered"
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = panda_id
+        self.cur.execute(sql, varMap)  # registerAny's update
+
+    def registerMaybe(self, panda_id, job: JobSpec | None = None):
+        if job is not None:
+            job.jobStatus = "registered"
+            sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+            varMap = job.valuesMap(onlyChanged=True)
+            varMap[":PandaID"] = panda_id
+            self.cur.execute(sql, varMap)  # registerMaybe's update
+
+
+class Runner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+
+    def register(self, job: JobSpec):
+        self.proxy.registerBy(job.PandaID, job)
+        self.proxy.registerAny(job.PandaID, job)
+
+    def other(self, job: JobSpec, panda_id):
+        self.proxy.registerAny(panda_id, job)
+        self.proxy.registerMaybe(job.PandaID, job)
+        self.proxy.registerMaybe(panda_id)
+"""
+
+
+def test_a_write_takes_the_objects_row_where_its_key_is_the_objects_key_or_every_caller_hands_it_so(
+    tmp_path,
+):
+    """registerBy and registerAny take the job and the id of the row they write apart.  Asked at either, the id is
+    not the job's by anything they do; registerBy's one caller hands the job's own PandaID, so its write is the
+    job's row's and jobStatus changes there.  registerAny is also handed another id beside the job by other: the
+    write is not known to be the job's row, and the answer is open on it rather than written.  registerMaybe is also
+    called with no job, which leaves it None: that call writes no job, and the one handing the job hands its own
+    PandaID."""
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=CHANGES_SPEC, called=CALLED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    by = objects.may_change(
+        rows, "pkg/called.py::DBProxy.registerBy", "job", "jobStatus"
+    )
+    assert by.verdict is True
+    assert _line(CALLED, "# registerBy's update") in {site.line for site in by.because}
+    any_ = objects.may_change(
+        rows, "pkg/called.py::DBProxy.registerAny", "job", "jobStatus"
+    )
+    assert (any_.verdict, any_.because) == (None, [])
+    assert [(site.line, site.how) for site in any_.open] == [
+        (
+            _line(CALLED, "# registerAny's update"),
+            objects.NOT_FOLLOWED_KEY.format(column="jobStatus", key="panda_id"),
+        )
+    ]
+    from_top = objects.may_change(
+        rows, "pkg/called.py::Runner.register", "job", "jobStatus"
+    )
+    assert from_top.verdict is True
+    maybe = objects.may_change(
+        rows, "pkg/called.py::DBProxy.registerMaybe", "job", "jobStatus"
+    )
+    assert maybe.verdict is True
+    assert _line(CALLED, "# registerMaybe's update") in {
+        site.line for site in maybe.because
+    }

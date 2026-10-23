@@ -830,6 +830,30 @@ def f(self, criteria):
     assert sqltext.plain(marked) == run.text
 
 
+def test_a_part_a_loop_repeats_keeps_what_each_hole_of_its_passes_is():
+    """``updateTask_JEDI`` names a column and a bind by the key of ``criteria`` in each pass: ``{k}=:cr_{k}``.  A pass's
+    holes were rendered ``{}`` and what they were was dropped, so no reader could tell the term names its column by
+    the loop's key.  The part keeps them (:attr:`sqleval.HoleAt.inner`), and the reading says what each ``{}`` of it
+    is, counted as sqltext names them (:func:`sql.reading_holes`): the schema's, then the pass's two."""
+    src = """
+def f(self, criteria):
+    sql = "UPDATE {}.T SET a=:a WHERE ".format(schema)
+    for k, v in criteria.items():
+        crKey = f":cr_{k}"
+        sql += f"{k}={crKey} AND "
+    sql = sql[:-4]
+    self.cur.execute(sql, varMap)
+"""
+    _got, reading = _texts(src)
+    run = reading.cover(8)[0][0]
+    assert sql.reading_text(run.text, run.holes).endswith(
+        f"WHERE {sqltext.REPEAT_OPEN}{{}}=:cr_{{}}{sqltext.REPEAT_CLOSE} "
+    )
+    first, column, bind = sql.reading_holes(run.text, run.holes)
+    assert first.source == "schema"
+    assert [(hole.source, hole.stmt.lineno) for hole in (column, bind)] == [("k", 6), ("k", 5)]
+
+
 def test_a_list_of_objects_a_loop_appends_to_is_not_one_part():
     """``_read_unprocessed_inputs``' ``file_spec_list``: no text, so a pass starts without it, as it did -- kept, its
     length decided every test on it and split the paths of every pass (the function's run went 3 s to 35 s)."""

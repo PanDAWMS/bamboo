@@ -979,11 +979,7 @@ class _Reader:
             if not given:
                 continue
             named = [*write.keys, *(write.columns if write.kind == "insert" else [])]
-            found = {
-                value.path
-                for value in named
-                if value.column.lower() == key.lower() and value.path
-            }
+            found = {held for value in named if (held := objects.key_path(value, key))}
             keys |= found
             if found:
                 at.update(given)

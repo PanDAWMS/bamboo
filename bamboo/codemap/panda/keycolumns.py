@@ -55,7 +55,7 @@ from typing import Callable, Optional
 
 from bamboo.codemap import calls as C
 from bamboo.codemap import objects, reach
-from bamboo.codemap.models import KeyStop, MapFragment, SourceModule
+from bamboo.codemap.models import MAP_KEY, KeyStop, MapFragment, SourceModule
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import pathcond, sql, sqltext
 from bamboo.codemap.panda.objects import is_parameter, unconverted
@@ -171,10 +171,16 @@ class Reader:
         for write in row.writes:
             named = [*write.keys, *(write.columns if write.kind == "insert" else [])]
             for value in named:
-                if value.path and objects._holds(held, value.path):
+                if value.column == MAP_KEY:
+                    columns = objects.map_key_columns(value.path, held)
+                elif value.path and objects._holds(held, value.path):
+                    columns = {value.column}
+                else:
+                    continue
+                for column in sorted(columns):
                     self._column(
                         write.table,
-                        value.column,
+                        column,
                         f"{here}:{write.lines[0]}",
                         found,
                         stops,

@@ -177,6 +177,15 @@ class SqlWrite(BaseModel):
             "statement was read off its text rather than its tree."
         ),
     )
+    key_holes: list[tuple[int, str, tuple[int, ...]]] = Field(
+        default_factory=list,
+        description=(
+            "The ``WHERE`` terms ``{}=:cr_{}`` -- a column that is a hole, equated to a bind whose name holds one: "
+            "the column's hole number (``__h3`` is 3), the bind spelt with ``{}`` for its holes (``:cr_{}``), and "
+            "their numbers.  Kept out of *keys*, which name a column: what the holes are says whether the term "
+            "names its row (``sql.map_key``), and that is the run's to read."
+        ),
+    )
 
 
 #: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
@@ -847,8 +856,10 @@ def _conjunct_spans(tokens: list, lo: int, hi: int) -> list[tuple[int, int]]:
 
 def _guards(
     node: exp.Update, sql: str, tokens: list, written: set[str]
-) -> Optional[tuple[dict[str, str], dict[str, str], dict[str, list[tuple[int, int]]]]]:
-    """``(preconditions, keys, spans)`` of an ``UPDATE``, off its tree and in its own spelling.
+) -> Optional[
+    tuple[dict[str, str], dict[str, str], dict[str, list[tuple[int, int]]], list[tuple[int, str, tuple[int, ...]]]]
+]:
+    """``(preconditions, keys, spans, key_holes)`` of an ``UPDATE``, off its tree and in its own spelling.
 
     A term counts only where every row has to meet it -- a conjunct of the
     ``WHERE`` -- and only its own columns do: the text reading took a term
@@ -858,14 +869,17 @@ def _guards(
     precondition, kept whole -- ``(lockedBy IS NULL OR lockedTime<:t)`` is the
     lock a compare-and-set takes, and neither half of it is.  ``None`` where
     the two readings of the clause disagree on its terms.  *spans* says where
-    in *sql* each precondition's conjuncts are.
+    in *sql* each precondition's conjuncts are.  A term naming its column and
+    its bind by holes, ``{}=:cr_{}``, is in *key_holes* (:attr:`SqlWrite.key_holes`),
+    a loop's passes' or not: what the holes are says whether it names the row.
     """
     where = node.args.get("where")
     preconditions: dict[str, str] = {}
     keys: dict[str, str] = {}
     spans_of: dict[str, list[tuple[int, int]]] = {}
+    key_holes: list[tuple[int, str, tuple[int, ...]]] = []
     if where is None:
-        return preconditions, keys, spans_of
+        return preconditions, keys, spans_of, key_holes
     at = _at_depth(tokens, (_at_depth(tokens, 0, {_T.SET}) or 0) + 1, {_T.WHERE})
     if at is None:
         return None
@@ -878,6 +892,10 @@ def _guards(
     testing: dict[str, list[str]] = {}
     repeated = _source(sql)[1]
     for (a, b), term in zip(spans, terms, strict=True):
+        held = _key_hole(term)
+        if held is not None:
+            key_holes.append(held)
+            continue
         # A term only a loop's passes append is on no row the loop gave no pass: required of none.
         if any(lo <= tokens[a].start and tokens[b - 1].end < hi for lo, hi in repeated):
             continue
@@ -899,7 +917,18 @@ def _guards(
         ):
             keys.setdefault(term.this.name, f":{term.expression.name}")
     preconditions.update((owner, " AND ".join(dict.fromkeys(said))) for owner, said in testing.items())
-    return preconditions, keys, spans_of
+    return preconditions, keys, spans_of, key_holes
+
+
+def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
+    """``(column hole, bind, bind holes)`` of a term ``{}=:cr_{}`` (:attr:`SqlWrite.key_holes`); ``None`` for any other."""
+    if not (isinstance(term, exp.EQ) and _is_hole(term.this) and isinstance(term.expression, exp.Placeholder)):
+        return None
+    column = _HOLE_NUMBER.fullmatch(term.this.name)
+    numbers = tuple(int(number) for number in _HOLE_NUMBER.findall(term.expression.name))
+    if column is None or not numbers:
+        return None
+    return int(column.group(1)), ":" + _NAMED_HOLE.sub("{}", term.expression.name), numbers
 
 
 #: Why a column a statement writes is not in what :func:`writes` returns.  Each
@@ -963,7 +992,7 @@ def writes(sql: str) -> list[SqlWrite]:
         guarded = _guards(node, sql, tokens, set(columns))
         if guarded is None:
             return _writes_in_text(plain(sql)) if columns else []
-        preconditions, keys, spans = guarded
+        preconditions, keys, spans, key_holes = guarded
         return [
             SqlWrite(
                 kind="update",
@@ -971,6 +1000,7 @@ def writes(sql: str) -> list[SqlWrite]:
                 columns=columns,
                 preconditions=preconditions,
                 keys=keys,
+                key_holes=key_holes,
                 precondition_spans={
                     owner: [(_at_plain(sql, a), _at_plain(sql, b, end=True)) for a, b in found]
                     for owner, found in spans.items()

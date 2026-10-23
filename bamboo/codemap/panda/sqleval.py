@@ -155,7 +155,9 @@ class HoleAt(NamedTuple):
     hole holds what the passes appended less *end*, which each of them ends with and which stands after the hole
     where nothing cut it (``ret[:-1]`` cuts the comma of ``{},``).  Where the passes appended items to a list
     (*listed*), each text is an item, and *joiner* is what the text joins them with once it does (``" AND
-    ".join(conditions)``, :func:`joined_by`)."""
+    ".join(conditions)``, :func:`joined_by`).  *inner* holds, for each text of *repeats*, its holes as one rendering
+    of it has them, ``(offset, HoleAt)`` as :attr:`Rendered.holes`: ``{}=:cr_{}`` over ``criteria.items()`` is the
+    loop's key twice; ``()`` for a text no rendering in reach spells."""
 
     stmt: object
     source: str
@@ -164,6 +166,7 @@ class HoleAt(NamedTuple):
     end: str = ""
     listed: bool = False
     joiner: Optional[str] = None
+    inner: tuple = ()
 
 
 #: Why a hole stands where a loop of unknown length appended to a name: the passes'
@@ -5310,6 +5313,16 @@ def _common_end(texts) -> str:
     return common[at:]
 
 
+def _holes_of(values, text: str) -> tuple:
+    """The holes of a rendering of *values* that spells *text*, ``(offset, HoleAt)`` in order; ``()`` where none in
+    reach does."""
+    for value in values:
+        for one in itertools.islice(_renderings(value), MAX_TEMPLATES):
+            if one.rendered() == text:
+                return rendered(list(one.runs)).holes
+    return ()
+
+
 def _ending(values, text: str, origin) -> Str:
     """*text*, which the texts *values* render all end with, with the origins of one rendering's pieces there."""
     for value in values:
@@ -5336,7 +5349,8 @@ def repeated_part(loop, name: str, added: list) -> Callable:
     if listed and pieces and not (templates or capped):  # items, none a text
         return lambda before: Lst(before.items + (UNK,))
     end = "" if capped else _common_end(templates)
-    part = hole_str(HoleAt(loop, name, REPEATED, templates, end, listed))
+    inner = tuple(_holes_of(pieces, text) for text in templates)
+    part = hole_str(HoleAt(loop, name, REPEATED, templates, end, listed, inner=inner))
     if end:
         part = make_cat([part, _ending(pieces, end, loop)])
     if listed:
