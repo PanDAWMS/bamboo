@@ -896,6 +896,9 @@ class Rerun:
         self._graph_read = None
         #: ``_called_at``'s answers: (caller, callee) function -> the lines of the calls that go on into it
         self._calls_into: dict[tuple[str, str], list[str]] = {}
+        #: H1's readings by (subject, value), read once (``_writers``); the runs F1 read the rows after (``rows_between``)
+        self._readings: dict[tuple[str, str], list] = {}
+        self._rows_read: set[str] = set()
 
     # ------------------------------------------------------------ plumbing
     def say(self, text: str = "") -> None:
@@ -959,6 +962,7 @@ class Rerun:
         sp = self.data["spellings"]
         env = E.Env(rows={s: entity for entity, spellings in sp.items() if entity != "about" for s in spellings})
         rows, env.unread = HD.at_run(self.data, self.args.subject.partition(".")[0], self.args.key, at)
+        env.at = at
         for entity, row in rows.items():
             env.table[entity] = {k: E.Value(v["value"], v["source"]) for k, v in row.items()}
         if file_row is not None:
@@ -1197,10 +1201,7 @@ class Rerun:
         """
         # H1
         self.start("H1", "candidates")
-        symptom = Symptom(subject=subject, observed=value, task_id=key)
-        inv, _ = asyncio.run(_investigate("panda", None, symptom, None, key, None, 1, None))
-        R.check_blobs(inv, "derive-strategy's readings")
-        readings = inv.hops[0].strategy.readings
+        readings = self._writers(subject, value, key)
         self.say(f"{len(readings)} reading(s) from the map for {subject}={value}")
         attr = subject.split(".")[-1]
 
@@ -1222,7 +1223,7 @@ class Rerun:
             asking = W.at_transition(state)
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
-        cands = [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
+        cands = self._candidates(readings)
         runs = self.runs(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
         self.need(f"a run of {key} at {when}", at)
@@ -1258,6 +1259,78 @@ class Rerun:
             self.say(f"the run: {question.describe()}")
         self.question = question
         return Wrote(readings, question, cands, env, chosen)
+
+    def _writers(self, subject: str, value: str, key: str) -> list:
+        """H1's reading: the map's writers of ``subject=value`` (derive-strategy's readings), read once per value."""
+        if (subject, value) not in self._readings:
+            symptom = Symptom(subject=subject, observed=value, task_id=key)
+            inv, _ = asyncio.run(_investigate("panda", None, symptom, None, key, None, 1, None))
+            R.check_blobs(inv, "derive-strategy's readings")
+            self._readings[(subject, value)] = inv.hops[0].strategy.readings
+        return self._readings[(subject, value)]
+
+    def _candidates(self, readings: list) -> list[Candidate]:
+        return [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
+
+    # ------------------------------------------------------------ F1: who wrote the rows between
+    def rows_between(self, at: str | None) -> None:
+        """F1: which run wrote each statuslog row between a run that began *at* and ``as_of`` -- the first of the facts
+        K22 waits for (rows-at-time-querier.md 1.3) -- asked of the logs as H2 asks for its own row.
+
+        For each row: the map's writers of its status (H1), their logs at the row's time on the row's host
+        (``W.at_transition``), by the key.  Every row's asks are gathered before one stop, so that the recording step
+        fetches them in one round.  With the answers each row's candidates are judged as H2 judges them, at the row's
+        time; a row no candidate is chosen for says so, and the next is read -- nothing here stops the step.  The step
+        that read the value stops after, as before: which writes between can change it and the writes that leave no
+        row are not read yet.  A run that prints the key in none of its records is not found (KNOWN_ISSUES.md K22).
+        """
+        if at is None or at in self._rows_read:
+            return
+        self._rows_read.add(at)
+        cls = self.args.subject.partition(".")[0]
+        history = PT.history_of_class(cls)
+        log = self.data.get("statuslog") or {}
+        if history is None or not log.get("states"):
+            return
+        hop = self.hop
+        self.start("F1", "who wrote the rows between")
+        states = HD.rows_after(log["states"], at, log.get("as_of"))
+        self.say(f"{len(states)} statuslog row(s) after the run's {at}" + (f", to as_of {log['as_of']}" if log.get("as_of") else ""))
+        key, attr = self.args.key, history.subject.split(".")[-1]
+        asked, unanswered = [], []
+        for state in states:
+            readings = self._writers(history.subject, state["status"], key)
+            cands = self._candidates(readings)
+            asking = W.at_transition(state)
+            names = list(dict.fromkeys(f for c in cands for f in c.log_files))
+            runs, missed, holes = self._ask(key, names, asking)
+            unanswered += missed
+            asked.append((state, readings, cands, asking, names, runs, holes))
+        self._stop_unanswered(unanswered)
+        chosen = 0
+        for state, readings, cands, asking, names, runs, holes in asked:
+            lo, hi = asking.window
+            self.say(f"-- {state['status']!r} at {hi}: {len(readings)} reading(s) from the map, logs {names}")
+            at_row = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+            if not at_row:
+                unsearched = "".join(f"; {name} not searched: {'; '.join(h)}" for name, h in holes.items())
+                self.say(f"   no run of {key} at {hi} in {', '.join(runs) or 'no log asked'}{unsearched}: no writer chosen")
+                continue
+            # as H2: runs in more than one log are each judged on their own; in one log, the first is the row's
+            question = None if len(at_row) > 1 else next(iter(at_row.values()))[0]
+            at_hand = [question] if question is not None else [r for rs in at_row.values() for r in rs]
+            env = self.base_env(at=state["time"])
+            stable_holes([R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
+                          for c in cands for run in at_hand if run.log.name in c.log_files], env)
+            j = judge(
+                cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi),
+                subject=attr, observed=state["status"], question_run=question, env=env, called_at=self._called_at,
+            )
+            self.say(j.report(question))
+            chosen += j.chosen is not None
+        self.say(f"F1: a writer chosen for {chosen} of {len(states)} row(s); which of them can change the value, and the "
+                 f"writes that leave no row, are not read yet (KNOWN_ISSUES.md K22)")
+        self.hop = hop
 
     # ------------------------------------------------------------ SetBy: which call set it
     def set_by(self, q: SetBy):
@@ -1397,9 +1470,12 @@ class Rerun:
         for i in implicit:
             value = E.evaluate(ast.unparse(i.test), env7)
             used = {k: v for k, v in env7.used.items() if k in ast.unparse(i.test)}
-            used |= {k: f"unknown: {why}" for k, why in env7.unread_in(ast.unparse(i.test)).items()}
+            unread = env7.unread_in(ast.unparse(i.test))
+            used |= {k: f"unknown: {why}" for k, why in unread.items()}
             self.say(f"  implicit else of {i.lineno}: test {ast.unparse(i.test)!r} is {value!r} {used}" + (" -> it did not run" if value is True else ""))
             if value is not True:
+                if unread:
+                    self.rows_between(env7.at)
                 self.need(f"the implicit else of {i.lineno}", None)
         cand7 = Candidate(make.rel, make.func, sorted(set(arms)), run=r2)
         j = judge([cand7], {r2.log.name: [r2]}, mode=self.mode, decide=self.decide, question_run=r2, env=env7)
@@ -1649,7 +1725,10 @@ class Rerun:
         what = f"{m[1]}.{m[2]}" if m else q.expr
         self.say(f"next question: {what} for this instance ({q.why})")
         value = q.env.lookup(q.expr)
-        why = next(iter(q.env.unread_in(q.expr).values()), "the rows file does not have it")
+        unread = q.env.unread_in(q.expr)
+        why = next(iter(unread.values()), "the rows file does not have it")
+        if value is E.UNKNOWN and unread:
+            self.rows_between(q.env.at)
         found = self.need(f"the value of {what} (a field of the {m[1] if m else '?'} row: {why})",
                           None if value is E.UNKNOWN else repr(value))
         self.end(f"{what} = {found}")

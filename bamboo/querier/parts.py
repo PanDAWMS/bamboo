@@ -74,6 +74,12 @@ def history(subject: str) -> History | None:
     return found[0] if found else None
 
 
+def history_of_class(cls: str) -> History | None:
+    """The history of *cls*'s status: what a rows file's ``statuslog`` holds for a row of the class; None for a class
+    no history records."""
+    return next((found for found, _, _ in _HISTORIES.values() if found.subject.partition(".")[0] == cls), None)
+
+
 def history_holding(subject: str) -> History | None:
     """The history whose rows hold ``Class.attr`` beside the status they record (``JobSpec.computingSite`` in the
     job's); None for a status itself and for a subject no history holds."""

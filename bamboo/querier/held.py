@@ -71,12 +71,18 @@ def at_run(data: dict, subject: str | None, key: str | None, at: str | None) -> 
     return rows, unread
 
 
+def rows_after(states: list[dict], at: str, as_of: str | None) -> list[dict]:
+    """The statuslog rows written after a run that began *at*, up to *as_of* where it is given: the rows whose writers
+    F1 asks the logs for, and the count a value read at *as_of* is said to lie behind."""
+    since = W.when(at)
+    return [s for s in states if W.when(s.get("time_extended") or s["time"]) > since
+            and (as_of is None or W.when(s["time"]) <= W.when(as_of))]
+
+
 def _why(as_of: str | None, clock: str | None, states: list[dict], at: str | None) -> str:
     read = f"read at {as_of} ({clock} clock)" if as_of else "in the rows file's after, written at the decision or later"
     if at is None:
         return f"{read}, not at the step's run; which writes between can change it is not known yet (KNOWN_ISSUES.md K22)"
-    since = W.when(at)
-    n = sum(1 for s in states if W.when(s.get("time_extended") or s["time"]) > since
-            and (as_of is None or W.when(s["time"]) <= W.when(as_of)))
+    n = len(rows_after(states, at, as_of))
     return (f"{read}; {n} statuslog row(s) after the run's {at}, and writes that leave no such row may lie between "
             f"too; which writes between can change it is not known yet (KNOWN_ISSUES.md K22)")

@@ -148,7 +148,7 @@ class Walk:
             return self.env
         # the element's row is read as the collection holds it, so what the subject's row left unread is not its
         unread = {k: v for k, v in self.env.unread.items() if not k.startswith(f"<{element.entity}>.")}
-        env = E.Env(dict(self.env.values), dict(self.env.rows), dict(self.env.table), dict(self.env.stale), unread=unread)
+        env = E.Env(dict(self.env.values), dict(self.env.rows), dict(self.env.table), dict(self.env.stale), unread=unread, at=self.env.at)
         env.rows[element.var] = element.entity
         env.table[element.entity] = {k: E.Value(v["value"], v["source"]) for k, v in element.row.items()}
         return env

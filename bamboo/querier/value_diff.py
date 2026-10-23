@@ -36,7 +36,7 @@ FIELD = re.compile(r"\b((?:self\.)?[a-z_]+)\.([A-Za-z_]+)\b(?!\()")
 
 def local_env(fn: R.Function, run: Run, mode: str, line: int, base: E.Env) -> E.Env:
     """*base* plus the holes *fn* printed above *line* in *run*, unbound since."""
-    env = E.Env(dict(base.values), dict(base.rows), base.table, dict(base.stale), unread=base.unread)
+    env = E.Env(dict(base.values), dict(base.rows), base.table, dict(base.stale), unread=base.unread, at=base.at)
     sn = R.seen(fn, run, mode)
     for row in fn.rows:
         if row.line >= line:

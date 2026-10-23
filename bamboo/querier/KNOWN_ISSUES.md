@@ -209,12 +209,23 @@ job's runs, and they wait for the same facts (tmaeno, 2026-10-18).  The row's cr
 whatever the time, as set once when the row is made (`Rerun._created`, H2's bounds): a premise the map does not
 state yet.
 
-*Shows:* a stop where a step needs such a value (on the record door, H7's implicit else at 785 for A, R5's
-`job.jobMetrics` for K), saying when the value was read; silent for the file rows and the creation time.
-*Revisit:* with the map's facts: the run each history row was written by; the attributes a run can set on an
-object and the columns a SET fills with another value than the one at hand; the writes that leave no row, with
-the select and the caller each is reached from, which can set a writer aside with no log asked
-(updateJobMetrics_JEDI takes only jobs a select found finished).
+Before such a stop, F1 (`Rerun.rows_between`) reads the first of the three: for each statuslog row between the
+run's start and `as_of`, the run that wrote it, asked and judged as H2 asks and judges its own row -- the map's
+writers of the row's status, their logs at the row's time on the row's host, by the key, every row's asks before
+one stop (tmaeno, 2026-10-23, so that the logs of A's rows are recorded before they expire).  A run that prints
+the key in none of its records is not found there: its marks name the row by another column or by none (the map's
+F1 kinds row, time, other, none, nohole, norun: of the 107 same / can pairs of `JobSpec.jobStatus` on ced60ed, 57
+have no run marked by the key, and a run of one of them is found only where it prints the key in a record's
+body).  The ask the record format allows for it is the row's second, as text every record of that second begins
+with; not made yet.
+
+*Shows:* a stop where a step needs such a value (on the record door, H7's implicit else at 785 for A and N, R5's
+`job.jobMetrics` for K), saying when the value was read, after F1's section; silent for the file rows and the
+creation time.
+*Revisit:* with the map's facts: the attributes a run can set on an object and the columns a SET fills with
+another value than the one at hand; the writes that leave no row, with the select and the caller each is reached
+from, which can set a writer aside with no log asked (updateJobMetrics_JEDI takes only jobs a select found
+finished); for F1, the asks by the row's second.
 
 ## H steps
 

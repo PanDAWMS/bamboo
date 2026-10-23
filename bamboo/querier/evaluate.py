@@ -84,6 +84,8 @@ class Env:
     #: row fields the rows file holds as read at another time than the step's, so not in ``table``, with why
     #: (``held.at_run``): "<job>.destinationSE" -> why
     unread: dict[str, str] = field(default_factory=dict)
+    #: when the run the values are read for began (``Rerun.base_env``); None where no run is named
+    at: str | None = None
 
     def canonical(self, text: str) -> str:
         """*text* with every spelling of a row variable replaced by the row's name.

@@ -1639,6 +1639,54 @@ def test_a_step_says_why_a_row_value_it_needs_is_not_its_runs(tmp_path):
     assert printed is False and after_print == {}
 
 
+def test_f1_asks_for_every_row_after_the_run_before_one_stop_and_then_reads_each(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    r.opened, r.unanswered, r._rows_read, r._readings = [], [], set(), {}
+    r.args.asks = "asks.jsonl"
+    r.hop = "H7"
+    r.data["statuslog"] = {"as_of": "2026-01-04 00:00:00", "states": [
+        {"status": "defined", "time": "2026-01-01 00:00:00", "host": "m1"},
+        {"status": "activated", "time": "2026-01-01 00:00:02", "time_extended": "2026-01-01 00:00:02.5", "host": "m1"},
+        {"status": "sent", "time": "2026-01-02 00:00:00", "host": "m2"},
+        {"status": "failed", "time": "2026-01-05 00:00:00", "host": "m3"}]}
+    asked = []
+    r._writers = lambda subject, value, key: asked.append((subject, value)) or [
+        N(file=f"{value}.py", owner=f"{value}.py::C.write", lines=[1], log_files=[f"{value}.log"])]
+    r.files_of = lambda owner, today, lines: list(today)
+    answered = False
+
+    def ask(key, names, asking):
+        if answered:
+            return {}, [], {}
+        return {}, [(N(key=f"{names[0]}@{asking.machine}"), asking.why)], {}
+
+    r._ask = ask
+    try:
+        r.rows_between("2026-01-01 00:00:01,000")
+        stop = None
+    except rerun.Stop as e:
+        stop = str(e)
+    first = [stop, r.hop, list(asked), [a.key for _, a, _ in r.unanswered]]
+    r._rows_read, r.unanswered, r.hop, answered = set(), [], "H7", True
+    r.rows_between("2026-01-01 00:00:01,000")
+    again = r.rows_between("2026-01-01 00:00:01,000")
+    print(json.dumps(first + [r.hop, r.lines[-1], [x for x in r.lines if x.startswith("   no run")], r.opened]))
+    """,
+        )
+    )
+    stop, hop, asked, keys, hop2, last, none_run, opened = json.loads(out.splitlines()[-1])
+    # the rows after the run's start to as_of: not the one before it, not the one after as_of; one stop for both
+    assert asked == [["JobSpec.jobStatus", "activated"], ["JobSpec.jobStatus", "sent"]]
+    assert keys == ["activated.log@m1", "sent.log@m2"]
+    assert stop.startswith("F1: 2 ask(s) of the logs not in the records") and hop == "F1"
+    # answered: each row read, none stops, and the step that asked goes on under its own name
+    assert len(none_run) == 2 and last.startswith("F1: a writer chosen for 0 of 2 row(s)") and hop2 == "H7"
+    assert opened == ["F1", "F1"]
+
+
 def test_stuck_reads_at_the_moment_the_rows_file_says_its_values_were_read(tmp_path):
     out = _ok(
         _run(
