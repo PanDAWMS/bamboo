@@ -31,6 +31,8 @@ built on, and reads the same trees -- :func:`parsed`.
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
@@ -100,6 +102,46 @@ _STARTERS = {("threading", "Thread"), ("multiprocessing", "Process")}
 #: hook, and then it is what the hook returns.  The map reads the corpus's
 #: annotations and not typeshed's, so it is said here.
 _COPIES = {("copy", "copy"): "__copy__", ("copy", "deepcopy"): "__deepcopy__"}
+
+
+class RecordedClass(NamedTuple):
+    """A class in an instance's record, by the dotted path Python prints it with."""
+
+    dotted: str
+
+
+#: An instance's recorded run-time values of module names, ``{(file, name): value}`` -- what a configuration made of
+#: them, which the code alone cannot say: ``panda_config.g_pluginMap`` is filled by importing the classes the
+#: configuration names, and a name that does not import is passed over (:func:`read_recorded`).
+Recorded = dict[tuple[str, str], object]
+
+
+def _recorded_value(value: object) -> object:
+    if isinstance(value, dict):
+        if set(value) == {"class"}:
+            return RecordedClass(str(value["class"]))
+        return {key: _recorded_value(one) for key, one in value.items()}
+    if isinstance(value, list):
+        return [_recorded_value(one) for one in value]
+    return value
+
+
+def read_recorded(path: Path) -> tuple[Recorded, str]:
+    """The record of an instance at *path*, and its stamp ``<path>: <instance>, <n> value(s), <digest>``.
+
+    A JSON object: ``instance`` (which deployment), ``taken`` (by whom, when, by what command) and ``values``, a list
+    of ``{"file", "name", "value"}`` -- the name's value in that module once the code's own setup has run, a class
+    written ``{"class": "<dotted path>"}``.  Another instance, another experiment's included, may configure other
+    classes: a build without a record reads the names as the code alone says them.  A name no module-level
+    assignment of the corpus binds stops :class:`Types`: a record of another tree.
+    """
+    raw = path.read_bytes()
+    held = json.loads(raw)
+    recorded: Recorded = {
+        (str(one["file"]), str(one["name"])): _recorded_value(one["value"]) for one in held.get("values", [])
+    }
+    stamp = f"{path}: {held.get('instance', 'an instance not named')}, {len(recorded)} value(s), "
+    return recorded, stamp + hashlib.sha256(raw).hexdigest()[:16]
 
 
 #: Parsed modules shared by every reading of the same files.  A walk is made
@@ -2056,13 +2098,22 @@ class Types:
     #: method".
     LINEAGE = 40
 
-    def __init__(self, roots: dict[str, Path], walked: dict[str, tuple[str, ast.Module]]):
+    def __init__(
+        self,
+        roots: dict[str, Path],
+        walked: dict[str, tuple[str, ast.Module]],
+        recorded: Optional[Recorded] = None,
+    ):
         self.roots = roots
         self.walked = walked
+        #: The instance's recorded values of module names (:func:`read_recorded`); empty reads the code alone.
+        self.recorded: Recorded = recorded or {}
         self.parsed: dict[str, Optional[ast.Module]] = {}
         self._imports: dict[str, dict[str, tuple[str, str]]] = {}
-        self._bound: dict[str, dict[str, list[ast.expr]]] = {}
+        #: :meth:`_module_bound` per file.
+        self._module_bindings: dict[str, dict[str, list[ast.expr]]] = {}
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
+        #: :meth:`bound` per function.
         self._bound: dict[int, dict[str, list[ast.expr]]] = {}
         # (file, id(func), name, depth) -> (func, classes): see ``declared``.
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
@@ -2072,6 +2123,25 @@ class Types:
         #: ``Any`` -- :meth:`Calls.handed_classes`, set by the :class:`Calls`
         #: that reads this tree; ``None`` reads the declaration alone.
         self.handed_to: Optional[Callable[[str, ast.AST, str, int], Optional[Classes]]] = None
+        unbound = [f"{file} {name}" for file, name in sorted(self.recorded) if name not in self._module_names(file)]
+        if unbound:
+            # A record whose name the corpus does not bind would be read nowhere, and the build would read the
+            # code alone under the record's stamp: a module moved or a name renamed since the record was taken.
+            raise ValueError(f"the instance record names what no module-level assignment binds: {', '.join(unbound)}")
+
+    def _module_names(self, file: str) -> set[str]:
+        """The names an assignment at *file*'s module level binds, whatever the value."""
+        tree = self.tree(file)
+        names: set[str] = set()
+        for node in _module_statements(tree.body) if tree is not None else ():
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            names.update(target.id for target in targets if isinstance(target, ast.Name))
+        return names
 
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
         """``pathcond.assigned_expressions``, once per function."""
@@ -2301,7 +2371,7 @@ class Types:
 
     def _module_bound(self, file: str) -> dict[str, list[ast.expr]]:
         """``{name: [value]}`` for each ``name = value`` / ``name: T = value`` run at module level, the value a name or ``a.b``."""
-        if file not in self._bound:
+        if file not in self._module_bindings:
             found: dict[str, list[ast.expr]] = {}
             tree = self.tree(file)
             for node in _module_statements(tree.body) if tree is not None else ():
@@ -2314,8 +2384,8 @@ class Types:
                 if isinstance(node.value, (ast.Name, ast.Attribute)):
                     for one in names:
                         found.setdefault(one, []).append(node.value)
-            self._bound[file] = found
-        return self._bound[file]
+            self._module_bindings[file] = found
+        return self._module_bindings[file]
 
     def annotated(self, file: str, annotation: Optional[ast.expr]) -> Optional[tuple[str, ast.ClassDef]]:
         """The class an annotation states, where it states exactly one -- :meth:`annotated_all`."""
@@ -3159,6 +3229,10 @@ class Types:
 
         if isinstance(expression, ast.Constant) and expression.value is None:
             return frozenset(), False
+        if not instances and isinstance(expression, ast.Subscript):
+            recorded = self._recorded_at(file, func, expression)
+            if recorded is not None:
+                return recorded
         if instances and (builtin := self._builtin_instance(file, func, expression)):
             return frozenset({(BUILTIN, builtin)}), False
         if isinstance(expression, ast.Call):
@@ -3342,7 +3416,11 @@ class Types:
         return frozenset(found)
 
     def _owner_of(self, file: str, func: ast.AST, called: ast.expr) -> Optional[tuple[str, ast.AST]]:
-        """The function *called* names, for a call on ``self`` or a plain name."""
+        """The function *called* names: a method on ``self``, a module's function by a plain name, or ``module.f``.
+
+        ``panda_config.getPlugin(...)`` returns the class ``setupper_plugin_class`` builds; read as nothing, the call
+        left the holder open before getPlugin's body was read.
+        """
         if (
             isinstance(called, ast.Attribute)
             and isinstance(called.value, ast.Name)
@@ -3352,5 +3430,58 @@ class Types:
             if holder is None:
                 return None
             return self.method(holder[0], holder[1], called.attr)
+        if isinstance(called, ast.Name):
+            return None if self._local(func, called.id) else self._function_named(file, called.id)
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            module = None if self._local(func, called.value.id) else self.module_named(file, called.value)
+            return self._function_named(module, called.attr) if module is not None else None
         return None
+
+    def _recorded_at(
+        self, file: str, func: ast.AST, expression: ast.Subscript
+    ) -> Optional[tuple[frozenset[tuple[str, str]], bool]]:
+        """The classes at ``m[k1]...[kn]``, where *m* is a name of *file*'s module the instance's record gives.
+
+        Every value the record holds that many keys down, at any key: the keys are read at run time.  A class of the
+        corpus is a class found; one outside it, a value not a class, or a key into a value not a mapping leaves the
+        reading open.  ``None`` where the record says nothing of the name, or *func* binds it itself -- read as the
+        code says it.  ``getPlugin``'s ``g_pluginMap[modConfigName][vo]`` holds nothing on ATLAS's production
+        instance, so the call returns ``None`` alone.
+        """
+        root: ast.expr = expression
+        depth = 0
+        while isinstance(root, ast.Subscript):
+            root, depth = root.value, depth + 1
+        if not isinstance(root, ast.Name) or (file, root.id) not in self.recorded or self._local(func, root.id):
+            return None
+        values = [self.recorded[(file, root.id)]]
+        for _ in range(depth):
+            if not all(isinstance(one, dict) for one in values):
+                return frozenset(), True
+            values = [one for held in values for one in held.values()]  # type: ignore[attr-defined]
+        found: set[tuple[str, str]] = set()
+        opened = False
+        for one in values:
+            placed = self._recorded_class(one) if isinstance(one, RecordedClass) else None
+            if placed is None:
+                opened = opened or one is not None
+            else:
+                found.add(placed)
+        return frozenset(found), opened
+
+    def _recorded_class(self, one: RecordedClass) -> Optional[tuple[str, str]]:
+        """``(file, name)`` of the corpus class a record names by its dotted path, or ``None``."""
+        module, _, name = one.dotted.rpartition(".")
+        where = self.module_file(module) if module else None
+        return (where, name) if where is not None and self.class_def(where, name) is not None else None
+
+    def _local(self, func: ast.AST, name: str) -> bool:
+        """Whether *func* binds *name* itself -- assigned there or a parameter --, so it names no module's."""
+        arguments = getattr(func, "args", None)
+        every = (
+            [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
+            if arguments is not None
+            else []
+        )
+        return name in self.assigned(func) or any(one is not None and one.arg == name for one in every)
 

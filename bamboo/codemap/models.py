@@ -2520,6 +2520,10 @@ class MapFragment(BaseModel):
 
     map_id: str
     derived_from: str
+    #: The instance record the calls were read with -- ``<path>: <instance>, <n> value(s), <digest>``
+    #: (:func:`~bamboo.codemap.calls.read_recorded`) -- or ``""``, the code alone.  A reader computing at query
+    #: time reads module names the same way only with the same record.
+    instance_record: str = ""
     subjects: list[SubjectNode] = Field(default_factory=list)
     entities: list[EntityNode] = Field(default_factory=list)
     junctions: list[JunctionNode] = Field(default_factory=list)
@@ -2599,12 +2603,13 @@ class MapFragment(BaseModel):
     def extend(self, other: "MapFragment") -> None:
         """Merge *other* into this fragment in place.
 
-        Every part but the two that name the build, read off the model rather
-        than listed here: a list of fields written out by hand is a second
-        copy of the model, and the part added next is the one it drops.
+        Every part but the three that name the build and its inputs, read off
+        the model rather than listed here: a list of fields written out by hand
+        is a second copy of the model, and the part added next is the one it
+        drops.
         """
         for part in type(self).model_fields:
-            if part in ("map_id", "derived_from"):
+            if part in ("map_id", "derived_from", "instance_record"):
                 continue
             held = getattr(self, part)
             if isinstance(held, dict):

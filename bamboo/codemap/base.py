@@ -36,7 +36,12 @@ class CodeMapPlugin(ABC):
         """
 
     @abstractmethod
-    def prepare(self, source_root: Path | None = None, schema_root: Path | None = None) -> str:
+    def prepare(
+        self,
+        source_root: Path | None = None,
+        schema_root: Path | None = None,
+        instance_record: Path | None = None,
+    ) -> str:
         """Resolve the source snapshot and return its version stamp.
 
         Called before :meth:`run`.  The stamp is recorded on every node as
@@ -52,6 +57,11 @@ class CodeMapPlugin(ABC):
                 may name a column without the table it belongs to, and the
                 definitions say which; without them such a column is reported
                 rather than read.
+            instance_record: One deployment's recorded values of module names
+                -- what its configuration made of them, which the code alone
+                cannot say (:func:`bamboo.codemap.calls.read_recorded`).
+                Another deployment may configure other values; without a
+                record the names are read as the code says them.
 
         Returns:
             Version stamp, e.g. ``"panda-server-source 1.0.2"``.

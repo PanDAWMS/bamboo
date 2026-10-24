@@ -54,7 +54,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
-from bamboo.codemap.calls import FILLERS, UNSET, Calls, Target, Types
+from bamboo.codemap.calls import FILLERS, UNSET, Calls, Recorded, Target, Types
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     AddedTerm,
@@ -2423,11 +2423,14 @@ def _module_of(node: ast.AST) -> Optional[ast.Module]:
     return node if isinstance(node, ast.Module) else None
 
 
-def corpus_calls(modules: list[SourceModule], roots: Optional[dict[str, Path]]) -> Optional[Calls]:
+def corpus_calls(
+    modules: list[SourceModule], roots: Optional[dict[str, Path]], recorded: Optional[Recorded] = None
+) -> Optional[Calls]:
     """The corpus's calls, read over the build's own trees; ``None`` without *roots*.
 
     The trees are the modules' so that a caller :meth:`Calls.callers` finds is
     a function the build has already parsed and attached parents to.
+    *recorded* is the instance's record, where the build has one (:func:`~bamboo.codemap.calls.read_recorded`).
     """
     if not roots:
         return None
@@ -2435,7 +2438,7 @@ def corpus_calls(modules: list[SourceModule], roots: Optional[dict[str, Path]]) 
     for module in modules:
         attach_parents(module.tree)
         walked[module.rel_path] = (module.blob_sha, module.tree)
-    return Calls(Types(roots, walked))
+    return Calls(Types(roots, walked, recorded))
 
 
 def read_side(

@@ -63,7 +63,7 @@ import click
 from bamboo.codemap import evidence, gates
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import MapFragment
-from bamboo.scripts.build_map import schema_root_option
+from bamboo.scripts.build_map import instance_record_option, schema_root_option
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +452,7 @@ def _report_gates(results: list[gates.GateResult]) -> None:
     help="Check the map built from PATH instead of the installed distribution.",
 )
 @schema_root_option
+@instance_record_option
 @click.option(
     "--evidence",
     "evidence_path",
@@ -519,6 +520,7 @@ def main(
     map_id: str,
     source_root: Optional[Path],
     schema_root: Optional[Path],
+    instance_record: Optional[Path],
     evidence_path: Path,
     fetch: bool,
     log_file_specs: tuple[str, ...],
@@ -540,7 +542,7 @@ def main(
         ) from exc
 
     try:
-        plugin.prepare(source_root, schema_root)
+        plugin.prepare(source_root, schema_root, instance_record)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 

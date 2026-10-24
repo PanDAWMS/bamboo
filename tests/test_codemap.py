@@ -11978,7 +11978,7 @@ def test_a_dumped_build_reads_back_as_the_same_map(tmp_path, monkeypatch):
         _stage_for_diff("-disk", ["a < b"], 100),
         _stage_for_diff("-rse", ["c"], 200),
     )
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: built)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema, record: built)
 
     target = _dumped(tmp_path)
 
@@ -11988,11 +11988,11 @@ def test_a_dumped_build_reads_back_as_the_same_map(tmp_path, monkeypatch):
 def test_a_baseline_file_stands_in_for_the_older_build(tmp_path, monkeypatch):
     """The point of the pair: the source is fixed and the map moved anyway."""
     before = _fragment_of(_stage_for_diff("-disk", ["a < b"], 100))
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: before)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema, record: before)
     target = _dumped(tmp_path)
 
     after = _fragment_of(_stage_for_diff("-disk", ["a <= b"], 100))
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: after)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema, record: after)
     result = click.testing.CliRunner().invoke(
         diff_map.main, ["--baseline", str(target)]
     )
@@ -12010,7 +12010,7 @@ def test_comparing_a_baseline_with_a_source_tree_is_refused(tmp_path, monkeypatc
     source by the same code, reported as no difference at all.
     """
     monkeypatch.setattr(
-        diff_map, "_build", lambda map_id, root, schema: _fragment_of(_stage_for_diff("-d", ["a"], 1))
+        diff_map, "_build", lambda map_id, root, schema, record: _fragment_of(_stage_for_diff("-d", ["a"], 1))
     )
     target = _dumped(tmp_path)
     runner = click.testing.CliRunner()

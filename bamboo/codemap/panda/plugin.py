@@ -205,18 +205,25 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._stop_disagreements: list[str] = []
         self._schema: Optional[dict[str, frozenset[str]]] = None
         self._schema_stamp = "none"
+        self._recorded: Optional[calls_mod.Recorded] = None
+        self._record_stamp = "none"
 
     @property
     def map_id(self) -> str:
         return "panda"
 
     def prepare(
-        self, source_root: Optional[Path] = None, schema_root: Optional[Path] = None
+        self,
+        source_root: Optional[Path] = None,
+        schema_root: Optional[Path] = None,
+        instance_record: Optional[Path] = None,
     ) -> str:
         """Resolve the source snapshot, parse it, and return the version stamp."""
         if schema_root is not None:
             self._schema = sqltext.read_schema(schema_root)
             self._schema_stamp = _schema_stamp(Path(schema_root), self._schema)
+        if instance_record is not None:
+            self._recorded, self._record_stamp = calls_mod.read_recorded(Path(instance_record))
         self._roots = self._resolve_roots(source_root)
         if not self._roots:
             raise FileNotFoundError(
@@ -241,7 +248,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         """
         if not self._modules:
             raise RuntimeError("prepare() must be called before run()")
-        self._calls = sqlwrite.corpus_calls(self._modules, self._roots)
+        self._calls = sqlwrite.corpus_calls(self._modules, self._roots, self._recorded)
         with sql.across_calls(self._calls), sqltext.with_schema(self._schema):
             return self._run()
 
@@ -250,9 +257,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         """Which table definitions decided the unqualified columns, or ``none``."""
         return self._schema_stamp
 
+    @property
+    def record_stamp(self) -> str:
+        """Which instance's record the calls read module names by (:func:`calls.read_recorded`), or ``none``."""
+        return self._record_stamp
+
     def _run(self) -> MapFragment:
 
-        fragment = MapFragment(map_id=self.map_id, derived_from=self._version)
+        fragment = MapFragment(
+            map_id=self.map_id,
+            derived_from=self._version,
+            instance_record="" if self._recorded is None else self._record_stamp,
+        )
         enums, enum_coverage = errorcode.extract(self._modules, self.map_id, self._version)
         fragment.value_enums.extend(enums)
         fragment.coverage.extend(enum_coverage)

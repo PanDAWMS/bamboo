@@ -298,6 +298,10 @@ _REPORT = "not stored: the build's report on itself, printed by the build"
 NOT_COMPARED_PARTS: dict[str, str] = {
     "map_id": _IDENTITY,
     "derived_from": _PROVENANCE,
+    "instance_record": (
+        "the instance record the calls were read with, an input of the build like derived_from; "
+        "two builds compared must have read the same one"
+    ),
     "diagnostics": _REPORT,
     "enumeration_writes": _REPORT,
     "coverage": _REPORT,

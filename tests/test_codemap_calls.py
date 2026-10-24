@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from bamboo.codemap import calls as calls_mod
 
 PACKAGE = "pkg"
@@ -2769,6 +2771,52 @@ def test_a_call_on_a_local_holding_a_plugin_class_lands_at_the_constructors_of_i
     assert placed.unplaced == calls_mod.UNPLACED_OPEN
     for cls_name, file in (("AtlasPlugin", "atlas"), ("PluginBase", "base")):
         assert [site.call.lineno for site in calls.callers(_method(calls, file, cls_name, "__init__")) if site.file == "pkg/m.py"] == [8]
+
+
+def test_a_plugin_class_is_read_from_an_instance_s_record_of_the_map_getplugin_returns_from(tmp_path):
+    """``getPlugin`` returns ``g_map[name]``, which the code alone cannot say: a configuration fills it.  With one
+    instance's record of ``g_map`` the call lands at what the record holds at any key, closed -- nothing (as on
+    ATLAS's production server, ``{'adder_plugins': {}, 'setupper_plugins': {}}`` two keys down), so the default alone;
+    DummyPlugin, on an instance configuring it, built by PluginBase's ``__init__`` --; a record naming a class
+    outside the corpus, or a value not a class, leaves it open; without a record, as the code alone says.  The
+    record is read from its file with a stamp; one naming what no module-level assignment of the corpus binds -- a
+    module moved, a name renamed -- stops the reading rather than be read nowhere."""
+    roots = _tree(
+        tmp_path,
+        **_PLUGINS,
+        m=(
+            "from pkg import config\n"
+            "\n"
+            "def run(job, logger):\n"
+            "    plugin_class = config.getPlugin('x')\n"
+            "    if plugin_class is None:\n"
+            "        from pkg.atlas import AtlasPlugin\n"
+            "        plugin_class = AtlasPlugin\n"
+            "    plugin_class(job, logger)\n"
+        ),
+    )
+    record = tmp_path / "record.json"
+    record.write_text(
+        '{"instance": "one", "values": [{"file": "pkg/config.py", "name": "g_map",'
+        ' "value": {"x": {"class": "pkg.dummy.DummyPlugin"}}}]}'
+    )
+
+    def placed(recorded):
+        one = _placed(calls_mod.Calls(calls_mod.Types(roots, {}, recorded)), "m", "run", "plugin_class")
+        return sorted(t.cls.name for t in one.targets), one.unplaced
+
+    read, stamp = calls_mod.read_recorded(record)
+    key = ("pkg/config.py", "g_map")
+    assert read == {key: {"x": calls_mod.RecordedClass("pkg.dummy.DummyPlugin")}}
+    assert stamp.startswith(f"{record}: one, 1 value(s), ")
+    assert placed({key: {}}) == (["AtlasPlugin"], "")
+    assert placed(read) == (["AtlasPlugin", "PluginBase"], "")
+    assert placed({key: {"x": calls_mod.RecordedClass("elsewhere.Plugin")}})[1] == calls_mod.UNPLACED_OPEN
+    assert placed({key: {"x": {}}})[1] == calls_mod.UNPLACED_OPEN
+    assert placed(None) == (["AtlasPlugin", "PluginBase"], calls_mod.UNPLACED_OPEN)
+    for stale in (("pkg/config.py", "g_other"), ("pkg/moved.py", "g_map")):
+        with pytest.raises(ValueError, match="no module-level assignment binds"):
+            calls_mod.Types(roots, {}, {stale: {}})
 
 
 def test_a_field_holding_a_plugin_class_is_read_through_the_method_that_returns_it(tmp_path):

@@ -42,14 +42,20 @@ import click
 from bamboo.codemap import diff
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import MapFragment
-from bamboo.scripts.build_map import schema_root_option, write_dump
+from bamboo.scripts.build_map import (
+    instance_record_option,
+    schema_root_option,
+    write_dump,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _build(map_id: str, source_root: Optional[Path], schema_root: Optional[Path]) -> MapFragment:
+def _build(
+    map_id: str, source_root: Optional[Path], schema_root: Optional[Path], instance_record: Optional[Path]
+) -> MapFragment:
     plugin = get_code_map_plugin(map_id)
-    plugin.prepare(source_root, schema_root)
+    plugin.prepare(source_root, schema_root, instance_record)
     return plugin.run()
 
 
@@ -137,6 +143,7 @@ def _report(result: diff.MapDiff, top: int) -> None:
     ),
 )
 @schema_root_option
+@instance_record_option
 @click.option(
     "--against",
     default=None,
@@ -174,6 +181,7 @@ def main(
     map_id: str,
     source_root: Optional[Path],
     schema_root: Optional[Path],
+    instance_record: Optional[Path],
     against: Optional[Path],
     baseline: Optional[Path],
     dump_to: Optional[Path],
@@ -204,9 +212,9 @@ def main(
     try:
         # The side this run builds.  With --against that is the newer source;
         # otherwise it is this code's reading of the source it already has.
-        new = _build(map_id, against if against is not None else source_root, schema_root)
+        new = _build(map_id, against if against is not None else source_root, schema_root, instance_record)
         old = _load(baseline) if baseline is not None else (
-            _build(map_id, source_root, schema_root) if against is not None else None
+            _build(map_id, source_root, schema_root, instance_record) if against is not None else None
         )
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
