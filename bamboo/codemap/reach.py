@@ -1002,7 +1002,12 @@ class _Holders:
     a value bound or put there, is an answer.  Where a part that bears goes anywhere else -- returned, yielded,
     stored on an attribute, read in a nested function, handed to a call not placed, placed open, placed outside the
     corpus or on another thread, to a builtin not read here -- other code can put into it, and the ask is not read
-    (``None``): no premise says what outside code puts into what it is handed.  So is a binding not read here
+    (``None``): no premise says what outside code puts into what it is handed.  But a return from the function the
+    ask is in hands the container to its caller when the call ends, after every read of the call, and goes nowhere
+    those reads see -- ``collect_existing_files`` returns the ``dataset_file_map`` it fills; a caller that fills
+    what was returned and hands it in again does so by a name the walk reads up through the parameter
+    (``getOutputFiles_JEDI``'s ``parallelOutMap``).  A callee's return is the container under a name of its caller
+    the walk does not read, and is not read.  So is a binding not read here
     (``with``, ``except``, ``global``), a name the function does not bind, a module's name, ``self``, a merge from a
     value not read as a mapping or a set, a path longer than :data:`_PATH_CUT` keys, and more than
     :data:`_HOLDERS_CUT` holders.
@@ -1020,6 +1025,8 @@ class _Holders:
             tuple[int, str, tuple[Optional[str], ...], tuple[Optional[str], ...]]
         ] = set()
         self.found: list[tuple[str, ast.AST, ast.expr, _Path]] = []
+        #: The function the ask is in, whose return goes nowhere its reads see (:meth:`_goes`).
+        self.start: Optional[ast.AST] = None
         #: Holders a put on a value of a class not read needs to be among those read (:meth:`_put_into`).
         self.required: set[
             tuple[int, str, tuple[Optional[str], ...], tuple[Optional[str], ...]]
@@ -1031,6 +1038,7 @@ class _Holders:
     ) -> Optional[list[tuple[str, ast.AST, ast.expr, _Path]]]:
         """``(file, function, value, path)`` for each value at the asked place -- what *value* holds at *path* --;
         ``None`` where a move is not read."""
+        self.start = func
         self._hold(file, func, name, (), ())
         while self.pending and not self.failed:
             self._read(*self.pending.pop())
@@ -1486,6 +1494,8 @@ class _Holders:
                     ast.Assert, ast.Delete, ast.Slice,
                 ),
             ):  # fmt: skip
+                return
+            elif isinstance(parent, ast.Return) and func is self.start:
                 return
             else:
                 self._unread(at, of)

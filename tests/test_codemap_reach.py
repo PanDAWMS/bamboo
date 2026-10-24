@@ -943,6 +943,50 @@ def test_a_container_s_values_are_read_from_every_name_holding_it(tmp_path):
         assert ("d['a'][-1].move" in holes(name)) is (name != "callee_reads"), name
 
 
+def test_a_container_the_function_makes_and_returns_holds_what_the_function_puts_there(
+    tmp_path,
+):
+    """``files = {}`` ... ``files[name]['specs'].append(name)`` ... ``return files``: a list the function put there.
+
+    The caller gets the container when the call ends, after every read of the call (collect_existing_files'
+    dataset_file_map).  A caller that fills what was returned and hands it in again is read where it hands it in,
+    up through the parameter (getOutputFiles_JEDI's parallelOutMap): ``handed_back``'s stays a hole.  A callee that
+    returns what it was handed gives the caller the container under another name, which is not read.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def made(names: list):\n"
+            "    files = {}\n"
+            "    for name in names:\n"
+            "        files[name] = {'specs': []}\n"
+            "        files[name]['specs'].append(name)\n"
+            "    return files\n\n"
+            "def handed_back(files: dict) -> dict:\n"
+            "    files.setdefault('a', [Taker()])\n"
+            "    files['a'][-1].move()\n"
+            "    return files\n\n"
+            "def again():\n"
+            "    held = {}\n"
+            "    for _ in range(2):\n"
+            "        held = handed_back(held)\n"
+            "        held['a'].append(undeclared())\n\n"
+            "def keep(d: dict) -> dict:\n"
+            "    return d\n\n"
+            "def aliased():\n"
+            "    d = {'a': [Taker()]}\n"
+            "    same = keep(d)\n"
+            "    same['a'].append(undeclared())\n"
+            "    d['a'][-1].move()\n"
+            "    return d\n"
+        ),
+    )
+
+    assert _callees(record, "pkg/mod.py::made") == []
+    assert "files['a'][-1].move" in _callees(record, "pkg/mod.py::handed_back")
+    assert "d['a'][-1].move" in _callees(record, "pkg/mod.py::aliased")
+
+
 def test_a_value_unpacked_into_a_container_s_place_is_the_slot_the_call_is_declared_to_return(
     tmp_path,
 ):
