@@ -215,9 +215,9 @@ class Walk:
         for s in defs:
             key = _written_key(s)
             if key is None:
-                if s.value.strip() == "{}":
-                    continue  # an empty dict adds no key
-                found.opaque.append(f"@{s.line} {container} = {s.value} does not say its keys")
+                if _puts_no_key(s):
+                    continue
+                found.opaque.append(f"@{s.line} {_shown(container, s)} does not say its keys")
                 continue
             elements = self.elements(s)
             if not elements:
@@ -278,9 +278,9 @@ class Walk:
         for s in defs:
             key_expr = _written_key(s)
             if key_expr is None:
-                if s.value.strip() == "{}":
+                if _puts_no_key(s):
                     continue
-                return None, [f"@{s.line} {name} = {s.value} is not a keyed write"]
+                return None, [f"@{s.line} {_shown(name, s)} is not a keyed write"]
             elements = self.elements(s)
             if not elements:
                 return None, [f"@{s.line} runs over rows this investigation does not have"]
@@ -304,8 +304,15 @@ class Walk:
                 if reached is E.UNKNOWN:
                     note = f"@{s.line} taken as run: {why}"
                     assumed[note] = assumed.get(note, 0) + 1
+                label = el.label if el else "the call"
+                if _operator(s) == ".setdefault":
+                    if not _setdefault_alone(s):
+                        value[key] = Opaque(f"what @{s.line} makes of {name}[{key!r}] for {label}")
+                        continue
+                    if key in value:
+                        continue  # setdefault leaves a key that is there as it is
                 v = E.evaluate(s.value, env) if _parses(s.value) else E.UNKNOWN
-                value[key] = Opaque(f"{s.value} for {el.label if el else 'the call'}") if v is E.UNKNOWN else v
+                value[key] = Opaque(f"{s.value} for {label}") if v is E.UNKNOWN else v
         notes = [f"{how} ({n} row(s))" for how, n in assumed.items()]
         notes.append(f"order: the rows file's order of {name}'s loop rows is taken as the code's")
         return value, notes
@@ -331,8 +338,22 @@ MUTATORS = {"update", "setdefault", "pop", "popitem", "clear", "append", "extend
 READERS = {"len", "str", "repr", "list", "sorted", "set", "dict", "tuple", "bool", "any", "all", "isinstance", "min", "max", "sum", "enumerate", "zip", "iter"}
 
 
+def _held_in(node: ast.expr) -> str | None:
+    """The name whose container *node* is a place in -- ``d`` for ``d``, ``d[k][j]``, ``d.setdefault(k, [])`` and
+    ``d.get(k)`` --, or None."""
+    while True:
+        if isinstance(node, ast.Subscript):
+            node = node.value
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("setdefault", "get"):
+            node = node.func.value
+        else:
+            return node.id if isinstance(node, ast.Name) else None
+
+
 def _writes(owner: str, name: str, before: int | None) -> list[int]:
-    """Lines of *owner* above *before* that write *name*, change it in place, or hand it to a call."""
+    """Lines of *owner* above *before* that write *name*, change it in place, or hand it to a call -- *name* itself or
+    a place in it at any depth (``d[k][j] = v``, ``d[k].append(x)``, ``d.setdefault(k, []).append(x)``, ``f(d[k])``),
+    since a value rebuilt from the walk's writes of *name* alone is short of what those put there."""
     rel, func = owner.split("::", 1)
     try:
         fn = R.function(rel, func)
@@ -346,14 +367,13 @@ def _writes(owner: str, name: str, before: int | None) -> list[int]:
         if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
             targets = n.targets if isinstance(n, (ast.Assign, ast.Delete)) else [n.target]
             for t in targets:
-                base = t.value if isinstance(t, ast.Subscript) else t
-                if isinstance(base, ast.Name) and base.id == name and not (isinstance(n, ast.AnnAssign) and n.value is None):
+                if _held_in(t) == name and not (isinstance(n, ast.AnnAssign) and n.value is None):
                     out.append(line)
         elif isinstance(n, ast.Call):
             f = n.func
-            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == name and f.attr in MUTATORS:
+            if isinstance(f, ast.Attribute) and _held_in(f.value) == name and f.attr in MUTATORS:
                 out.append(line)
-            elif any(isinstance(a, ast.Name) and a.id == name for a in [*n.args, *(k.value for k in n.keywords)]):
+            elif any(_held_in(a) == name for a in [*n.args, *(k.value for k in n.keywords)]):
                 if not (isinstance(f, ast.Name) and f.id in READERS):
                     out.append(line)
     return out
@@ -367,20 +387,63 @@ def _parses(text: str) -> bool:
         return False
 
 
-def _written_key(step) -> str | None:
-    """The key of ``d[k] = ...`` on the step's line, read off the statement."""
+def _operator(step) -> str:
+    """How the step's value reaches its name, as the map writes it: ``=``, ``+=``, or the filling method (``.setdefault``)."""
+    return getattr(step, "operator", "") or "="
+
+
+def _puts_no_key(step) -> bool:
+    """``d = {}`` or ``d.update({})``: a write that puts no key.  ``d.setdefault(k, {})`` carries the same value and
+    puts *k*, so the form is read, not the value alone."""
+    return step.value.strip() == "{}" and _operator(step) in ("=", ".update")
+
+
+def _shown(name: str, step) -> str:
+    op = _operator(step)
+    if op == ".setdefault":
+        return f"{name}.setdefault(..., {step.value})"
+    return f"{name}{op}({step.value})" if op.startswith(".") else f"{name} {op} {step.value}"
+
+
+def _statement(step) -> ast.stmt | None:
     rel, func = step.owner.split("::", 1)
     try:
         fn = R.function(rel, func)
     except LookupError:
         return None
-    stmt = R.statement_at(fn.node, step.line)
+    return R.statement_at(fn.node, step.line)
+
+
+def _setdefault_of(step, stmt: ast.stmt | None) -> ast.Call | None:
+    """The ``d.setdefault(k, v)`` call in *stmt* the step stands for: on the step's name, with the step's value."""
+    if stmt is None or _operator(step) != ".setdefault":
+        return None
+    for n in ast.walk(stmt):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "setdefault" and len(n.args) == 2
+                and ast.unparse(n.func.value) == step.name and ast.unparse(n.args[1]) == step.value):
+            return n
+    return None
+
+
+def _written_key(step) -> str | None:
+    """The key of ``d[k] = ...`` / ``d[k] op= ...`` or of ``d.setdefault(k, ...)`` on the step's line, read off the
+    statement."""
+    stmt = _statement(step)
     if isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
         for t in targets:
             if isinstance(t, ast.Subscript) and ast.unparse(t.value) == step.name:
                 return ast.unparse(t.slice)
-    return None
+    call = _setdefault_of(step, stmt)
+    return ast.unparse(call.args[0]) if call is not None else None
+
+
+def _setdefault_alone(step) -> bool:
+    """Whether the statement is the setdefault call and nothing else: in ``d.setdefault(k, []).append(x)`` or
+    ``x = d.setdefault(k, [])`` the statement goes on to change, or to keep a name for, what *k* holds."""
+    stmt = _statement(step)
+    call = _setdefault_of(step, stmt)
+    return call is not None and isinstance(stmt, ast.Expr) and stmt.value is call
 
 
 def flat(origins: list[Origin]) -> list[tuple[Origin, Origin]]:

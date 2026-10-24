@@ -2069,3 +2069,82 @@ def test_the_tree_hash_moves_with_the_code_only(tmp_path):
     )
     first, unmoved, moved = json.loads(out.splitlines()[-1])
     assert len(first) == 64 and first == unmoved and moved != first
+
+
+_FILLED = """def f(self):
+    d = {}
+    d.setdefault("a", {})
+    d["b"] = 2
+    d.setdefault("b", 3)
+    e = {}
+    e["a"] = []
+    e["a"].append(1)
+    g = {}
+    g.setdefault("a", []).append(1)
+    return d, e, g
+"""
+
+
+def test_a_container_is_read_by_the_form_of_each_write_and_not_rebuilt_where_a_place_in_it_is_written(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_FILLED)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import false_guard as G
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "walk"
+            owner = "pandaserver/a.py::f"
+            # the steps the map's walk makes for these writes: a fill carries its last argument and its method
+            made = [("d", 2, "{}", "="), ("d", 3, "{}", ".setdefault"), ("d", 4, "2", "="), ("d", 5, "3", ".setdefault"),
+                    ("e", 6, "{}", "="), ("e", 7, "[]", "="), ("g", 9, "{}", "="), ("g", 10, "[]", ".setdefault")]
+            steps = [N(name=n, owner=owner, kind="binding", line=line, value=v, operator=op, guards=[], unseen=[], reads=[],
+                       terminal="", detail="", depth=1, cls="") for n, line, v, op in made]
+            walk = G.Walk(steps, E.Env(), {}, {})
+            got = {}
+            for name in ("d", "e", "g"):
+                value, notes = walk.build(name, owner)
+                keys = walk.keys(name, owner)
+                got[name] = [None if value is None else {k: repr(v) for k, v in value.items()}, notes[:1],
+                             [o.value for o in keys.origins], keys.opaque]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # d.setdefault("a", {}) puts "a" (it was read as an empty dict putting nothing); d.setdefault("b", 3) leaves 2
+    assert list(got["d"][0]) == ["a", "b"] and "{} for the call" in got["d"][0]["a"] and got["d"][0]["b"] == "2"
+    assert got["d"][2] == ["a", "b", "b"] and got["d"][3] == []
+    # e["a"].append(1) changes what e["a"] holds, and no step of e names it: not rebuilt as {"a": []}
+    assert got["e"][0] is None
+    assert got["e"][1] == ["e is also written or passed on at [8] in f, which the walk does not name"]
+    assert got["e"][2] == ["a"]
+    # the setdefault's statement goes on to append to what "a" holds: the key is known, its value is not
+    assert list(got["g"][0]) == ["a"] and "what @10 makes of g['a'] for the call" in got["g"][0]["a"]
+    assert got["g"][2] == ["a"]
+
+
+def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_name(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+
+            owner = "pandaserver/a.py::f"
+            step = lambda kind, line, value: N(name="original_name", owner=owner, kind=kind, line=line, value=value,
+                                                guards=[], unseen=[], reads=[], terminal="", detail="", depth=1, cls="")
+            # f binds its original_name at 2, and at 3 hands file.destinationDBlock to a callee's original_name
+            t = E.taken([step("binding", 2, "'x'"), step("handover", 3, "file.destinationDBlock")], "original_name",
+                        E.Env(), owner=owner)
+            print(json.dumps([t.step.line if t.step else None, repr(t.value), [s.line for s in t.kept]]))
+            """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == [2, "'x'", [2]]

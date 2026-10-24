@@ -268,6 +268,10 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
     for step in steps:
         if step.name != name:
             continue
+        if getattr(step, "kind", "") == "handover" and step.owner == owner:
+            # the owner's side of a call: it binds the callee's parameter of that name, not the owner's own
+            # (setup_destination 768 hands file.destinationDBlock to make_sub_dataset_name's original_name)
+            continue
         if step.owner and step.owner != owner:
             if name.startswith("self."):
                 if lineage is None or not getattr(step, "cls", ""):
