@@ -1687,6 +1687,128 @@ def test_f1_asks_for_every_row_after_the_run_before_one_stop_and_then_reads_each
     assert opened == ["F1", "F1"]
 
 
+_LEFT = """
+def f(self):
+    self.logger.debug("starting the update of the job")
+    try:
+        self.logger.debug("asking the broker for a site")
+        x = g()
+        self.logger.debug("the broker answered the request")
+    except Exception:
+        pass
+    y = h(x)
+    self.logger.debug("the update of the job was handed")
+    if x:
+        z = x.size
+    self.logger.debug("finished the update of the job")
+"""
+
+
+def test_a_candidates_must_rows_stop_where_a_traceback_of_its_run_shows_the_call_left(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_LEFT)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    frame = '  File "/opt/panda/lib/python3.11/site-packages/pandaserver/a.py", line {}, in f\n    {}\n'
+    tb = "Traceback (most recent call last):\n" + frame + "ValueError: no\n"
+    logs = {
+        "raised": stamp.format(0, "starting the update of the job") + stamp.format(1, "failed") + tb.format(10, "y = h(x)"),
+        "unplaced": stamp.format(0, "starting the update of the job") + stamp.format(1, "failed") + tb.format(10, "y = h(x, 1)"),
+        "none": stamp.format(0, "starting the update of the job"),
+        "caught": stamp.format(0, "starting the update of the job") + stamp.format(1, "failed") + tb.format(6, "x = g()")
+        + stamp.format(2, "the update of the job was handed") + stamp.format(3, "finished the update of the job"),
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text(text)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, judge
+
+            R.ROWS_FROM = "walk"
+            fn = R.function("pandaserver/a.py", "f", (10,))
+            site = R.statement_at(fn.node, 10)
+            lines = lambda found: [[s.lineno for s in part] for part in found]
+            must = {name: lines(R.must_rows(fn.node, site, raised)) for name, raised in
+                    [("none", set()), ("site", {10}), ("in the if", {13}), ("in the try", {6}), ("unplaced", None)]}
+            got = {}
+            for name in ("raised", "unplaced", "none", "caught"):
+                run, = runs_for(read_log(f"{name}.log"), "1")
+                c = Candidate("pandaserver/a.py", "f", [10], [run.log.name], run=run)
+                v, = judge([c], {run.log.name: [run]}, question_run=run).verdicts
+                at = R.raised_in(fn, run)[1]
+                got[name] = [sorted(at) if at is not None else None, v.kind, v.reasons]
+            print(json.dumps([must, got]))
+            """,
+        )
+    )
+    must, got = json.loads(out.splitlines()[-1])
+    # no traceback: every print after the call until one that can leave is a must row
+    assert must["none"] == [[3], [11, 14]]
+    # the call left at the statement holding the frame's line, the site itself included (a call after the site
+    # stops the must rows anyway: it can leave)
+    assert must["site"] == [[3], []]
+    assert must["in the if"] == [[3], [11]]
+    # a frame inside a try before the site: the try printed up to it, and the call went on to the site
+    assert must["in the try"] == [[3, 5], [11, 14]]
+    # where it left is not known: no print after the site is required
+    assert must["unplaced"] == [[3], []]
+    # the judge reads each candidate's own run: the rows after the call that raised are not looked for
+    assert got["raised"][:2] == [[10], "kept"] and "a traceback frame raised at [10]" in got["raised"][2]
+    assert not any(r.startswith("rule 4") for r in got["raised"][2])
+    assert got["unplaced"][:2] == [None, "kept"]
+    assert "a traceback frame of f cannot be placed in the corpus: no row after 10 is required" in got["unplaced"][2]
+    # with no traceback the same run excludes it; a try that raised before the site owes its prints up to the frame
+    assert got["none"][1] == "excluded" and "rule 4: must row(s) [11, 14] not in the run" in got["none"][2]
+    assert got["caught"][:2] == [[6], "excluded"] and "rule 4: must row(s) [5] not in the run" in got["caught"][2]
+
+
+def test_a_row_is_missing_only_from_a_run_of_a_file_the_map_places_it_in(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_LEFT)
+    for name in ("panda-a.log", "panda-b.log"):
+        (tmp_path / name).write_text("2026-01-01 00:00:00,000 panda.log.X: DEBUG    <PandaID=1> asking the broker for a site\n")
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log
+
+            rel = "pandaserver/a.py"
+            mapped = lambda text: [N(pattern=text, refused="", keyed=False)]
+            prints = N(anchor=N(blob_sha=R._blob_sha(rel)), statements=[
+                N(line=3, rows=mapped("starting the update of the job"), log_files=["panda-a.log"], log_files_basis="logger"),
+                N(line=5, rows=mapped("asking the broker for a site"), log_files=["panda-b.log"], log_files_basis="logger"),
+                N(line=7, rows=mapped("the broker answered the request"), log_files=["panda-b.log"], log_files_basis="module"),
+            ])
+            R._function_prints = lambda owner: prints
+            R._prints_of = lambda owner, lines=(): prints
+            rows = {r.line: r for r in R.function(rel, "f").rows}
+            a, b = read_log("panda-a.log"), read_log("panda-b.log")
+            print(json.dumps([
+                {line: r.log_files for line, r in rows.items()},
+                R.split_files(f"{rel}::f"),
+                [R.absence_trusted(rows[3], log, "map") for log in (a, b)],
+                [R.absence_trusted(rows[5], log, "map") for log in (a, b)],
+                [rows[7].lands_in(log.name) for log in (a, b)],
+            ]))
+            """,
+        )
+    )
+    files, split, row3, row5, row7 = json.loads(out.splitlines()[-1])
+    # a statement's files are the map's where it follows the logger; another basis does not place it
+    assert files == {"3": ["panda-a.log"], "5": ["panda-b.log"], "7": None, "11": None, "14": None}
+    assert split == [["panda-a.log"], ["panda-b.log"]]
+    # missing from a run of a file it lands in is evidence; from another file's run it is not
+    assert row3 == [[True, ""], [False, "another file"]]
+    assert row5 == [[False, "another file"], [True, ""]]
+    assert row7 == [True, True]
+
+
 def test_stuck_reads_at_the_moment_the_rows_file_says_its_values_were_read(tmp_path):
     out = _ok(
         _run(

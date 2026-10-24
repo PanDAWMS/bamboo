@@ -270,3 +270,15 @@ the question's, as before (Fr1, 2026-10-14).  The line before still says each ca
 *Shows:* "one run: <log> <first>..<last> ran inside the call at <file:line>[ or <file:line> ...] of the run in <log>
 (between <record> and <record>), on <machine>", and rule 3 "runs inside the call at ..." for its candidates.
 *Revisit:* when a log line names its process or thread; when the map says which prints precede a statement.
+
+### K23. A function whose rows land in several files is read in one run of one of them
+
+A candidate is judged on one run, of one log.  A row the map places only in other files than that run's is neither
+shown nor missing there (`Row.lands_in`, `rows.absence_trusted`): its lines are not read, so it neither excludes the
+candidate nor proves it.  The runs of the other files are not joined to the candidate's, as K21 joins runs only
+inside a call.  On ced60ed, 2 of the 1093 functions with prints have rows in different files (`rows.split_files`):
+pilot_api's `acquire_jobs` and `update_job`, in panda-PilotRequests.log and panda-api_pilot.log.  No case reads them.
+
+*Shows:* said: "<function>'s rows land in different files [...]: a row is read only in a run of a file it lands in (KNOWN_ISSUES.md K23)".
+*Revisit:* when a case reads one of the two; when one pass's runs in several files can be joined by the key, the
+time and the machine.

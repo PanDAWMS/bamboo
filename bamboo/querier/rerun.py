@@ -954,7 +954,7 @@ class Rerun:
 
     def warn_split(self, owner: str, lines) -> None:
         if split := R.split_files(owner, lines):
-            self.say(f"WARNING: {owner.split('::')[-1]}'s rows land in different files {split}; read in one, the others' read as missing")
+            self.say(f"{owner.split('::')[-1]}'s rows land in different files {split}: a row is read only in a run of a file it lands in (KNOWN_ISSUES.md K23)")
 
     def base_env(self, file_row: dict | None = None, at: str | None = None) -> E.Env:
         """The row values a step reads, for a run that began *at*: a value read at another time than the run's is not
@@ -1024,15 +1024,6 @@ class Rerun:
             self.windows_said.add((self.hop, window))
             self.say(f"window: {window[0]} .. {window[1]}, {asking.why}")
         return window
-
-    def frames_of(self, run) -> dict[str, set[int]]:
-        out: dict[str, set[int]] = {}
-        for r in run.records:
-            for ch in r.chains():
-                for f in ch.frames:
-                    if f.in_corpus and f.same_source and R.functions(f.rel, f.func):
-                        out.setdefault(f"{f.rel}::{f.func}", set()).add(f.line)
-        return out
 
     def stamp(self, when: str) -> None:
         """Which trees this run read, said at its start and again at its end.
@@ -1346,8 +1337,7 @@ class Rerun:
         for s in c.kept():
             by_fn.setdefault((s.rel, s.func), []).append(s.line)
         sites = [Candidate(rel, func, lines, run=question) for (rel, func), lines in by_fn.items()]
-        frames = self.frames_of(question)
-        j = judge(sites, {question.log.name: [question]}, mode=self.mode, decide=self.decide, question_run=question, raised_at=frames, env=env)
+        j = judge(sites, {question.log.name: [question]}, mode=self.mode, decide=self.decide, question_run=question, env=env)
         self.say(j.report(question))
         chosen = self.pick("which call set it", j)
         for s in sites:

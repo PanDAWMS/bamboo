@@ -1215,23 +1215,6 @@ def _prove_at(fn: R.Function, sn: R.Seen, stmt: ast.stmt, s_star: ast.If, printe
     return _verdict(w, paths, s_star, sorted(order), anchor_before)
 
 
-def _raised_in(fn: R.Function, sn: R.Seen) -> tuple[bool, set[int] | None]:
-    """``(a traceback in the run names fn, the lines its frames of fn show)``; lines None when a frame of fn
-    is of another version of the code (its source line differs) and cannot be placed."""
-    named, lines = False, set()
-    base = fn.rel.rsplit("/", 1)[-1]
-    for record in sn.run.records:
-        for ch in record.chains():
-            for f in ch.frames:
-                if f.func != fn.name or f.path.rsplit("/", 1)[-1] != base:
-                    continue
-                named = True
-                if not (f.in_corpus and f.same_source and f.rel == fn.rel):
-                    return True, None
-                lines.add(f.line)
-    return named, lines
-
-
 def _callers_in_run(fn: R.Function, sn: R.Seen) -> bool:
     """Whether every caller tied to *fn*'s run only by ``same?`` (:mod:`bamboo.querier.callers`) prints a row in *sn*'s run."""
     from . import callers
@@ -1251,7 +1234,7 @@ def _handler_rule(w: Walker, fn: R.Function, sn: R.Seen, paths: list[Path]) -> l
     exception did not happen.  A TB with no handler is the callers' (lib/callers,
     ``P_FOLLOW_OUT``): their traceback holds this function's frames too, and a
     caller tied only by ``same?`` must print in the run first.  ``LOG``: a row at the top of the handler whose
-    absence counts (``Row.absence_counts``) is missing from the run.
+    absence counts (``Row.absence_counts``) is missing from the run, a run of a file it lands in (``Row.lands_in``).
     """
     raised: tuple[bool, set[int] | None] | None = None
     out = []
@@ -1262,7 +1245,7 @@ def _handler_rule(w: Walker, fn: R.Function, sn: R.Seen, paths: list[Path]) -> l
             continue
         if cls == "TB" and raising is not None:
             if raised is None:
-                raised = _raised_in(fn, sn)
+                raised = R.raised_in(fn, sn.run)
             named, lines = raised
             span = range(raising.lineno, (raising.end_lineno or raising.lineno) + 1)
             if not named or (lines is not None and not any(n in span for n in lines)):
@@ -1270,7 +1253,7 @@ def _handler_rule(w: Walker, fn: R.Function, sn: R.Seen, paths: list[Path]) -> l
                 continue
         elif cls == "LOG" and handler is not None:
             top = [fn.row_at(st) for st in handler.body]
-            if any(r is not None and r.absence_counts(sn.mode) and not sn.present(r) for r in top):
+            if any(r is not None and r.absence_counts(sn.mode) and r.lands_in(sn.run.log.name) and not sn.present(r) for r in top):
                 w.dropped["E6 handler"] += 1
                 continue
         out.append(p)

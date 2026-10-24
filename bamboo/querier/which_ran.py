@@ -395,7 +395,6 @@ def judge(
     subject: str = "",
     observed: str = "",
     question_run: Run | None = None,
-    raised_at: dict[str, set[int]] | None = None,
     env: E.Env | None = None,
     complete: bool = True,
     called_at: Callable[[R.Function, Candidate], list[str]] | None = None,
@@ -403,8 +402,10 @@ def judge(
     """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of every
     call from which it goes on there.  Given it, and no *question_run*, runs of the key in several logs are read as
     one where every run but one ran inside a call that one made (:func:`inside_call`, on the machine both name), and
-    that one is the question's run."""
-    raised_at = raised_at or {}
+    that one is the question's run.
+
+    A candidate's must rows are read with where a traceback of its run shows its function left by an exception
+    (:func:`rows.raised_in`)."""
     verdicts: list[Verdict] = []
     map_findings: set[str] = set()
     p_notes: list[str] = []
@@ -486,6 +487,7 @@ def judge(
         fn = sn.fn
         present_once = sn.single_call()
         callee = callee_values(fn, run, mode)
+        named, raised = R.raised_in(fn, run)
         for line in c.lines:
             stmt = R.statement_at(fn.node, line)
             v = Verdict(c, line, "kept")
@@ -493,7 +495,7 @@ def judge(
                 v.reasons.append("no statement on this line")
                 verdicts.append(v)
                 continue
-            before, after = R.must_rows(fn.node, stmt, raised_at.get(c.owner, set()))
+            before, after = R.must_rows(fn.node, stmt, raised if named else set())
             must = before + after
             absent, neutral, shown, proof, wrong_value, per_element = [], [], [], False, [], []
             for s in must:
@@ -518,7 +520,7 @@ def judge(
                     absent.append(row.line)
                 else:
                     neutral.append(row.line)
-                    if trust[1] not in ("", "unreadable"):
+                    if trust[1] not in ("", "unreadable", R.ANOTHER_FILE):
                         map_findings.add(trust[1])
             if absent:
                 v.kind = "excluded"
@@ -608,8 +610,11 @@ def judge(
                         if must
                         else "no row every path through it prints"
                     )
-            if raised_at.get(c.owner):
-                v.reasons.append(f"a traceback frame raised at {sorted(raised_at[c.owner])}")
+            if named:
+                v.reasons.append(
+                    f"a traceback frame raised at {sorted(raised)}" if raised is not None
+                    else f"a traceback frame of {fn.name} cannot be placed in the corpus: no row after {line} is required"
+                )
             where = f"{Path(c.rel).name}::{c.func}:{line}"
             if proof.kind == "positive" and v.kind == "excluded":
                 p_notes.append(f"P twin: {where} excluded ({'; '.join(v.reasons)}), but {proof.reason}")
