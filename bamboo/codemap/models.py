@@ -576,6 +576,8 @@ class HistoryPair(BaseModel):
             "the caller, in each function on ``row_via``, or in a call made "
             "between that is handed the object.  Only an assignment on a path "
             "the record follows the object by is seen, as with ``can`` itself."
+            "  The entries are in the order of their ``at`` texts, compared as "
+            "strings, not the order they run in."
         ),
     )
     runs: list[int] = Field(
