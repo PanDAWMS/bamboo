@@ -1683,6 +1683,7 @@ class Types:
         self._imports: dict[str, dict[str, tuple[str, str]]] = {}
         self._bound: dict[str, dict[str, list[ast.expr]]] = {}
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
+        self._bound: dict[int, dict[str, list[ast.expr]]] = {}
         # (file, id(func), name, depth) -> (func, classes): see ``declared``.
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
@@ -1697,6 +1698,27 @@ class Types:
         if id(func) not in self._assigned:
             self._assigned[id(func)] = pathcond.assigned_expressions(func)
         return self._assigned[id(func)]
+
+    def bound(self, func: ast.AST) -> dict[str, list[ast.expr]]:
+        """The values a name is bound to, read for what it is: :meth:`assigned` less the right side of ``x op= y``.
+
+        An augmented assignment leaves a name what it was: a builtin's in-place
+        operator returns the object itself (a list's ``+=``) or a value of its
+        type, and no class of the corpus defines one; its right side is a piece
+        the text readers want (``errMsg += ...``), not a value the name takes.
+        ``candidateSpecList = []`` ... ``candidateSpecList += sitesWithWeight``
+        is a list.  A class of the corpus defining the binary operator would be
+        read past -- ``x *= y`` on a ``GlobalShares`` is a float, its
+        ``__mul__``'s -- as leaving ``x`` what it was.
+        """
+        if id(func) not in self._bound:
+            augmented = {id(node.value) for node in ast.walk(func) if isinstance(node, ast.AugAssign)}
+            self._bound[id(func)] = {
+                name: kept
+                for name, values in self.assigned(func).items()
+                if (kept := [value for value in values if id(value) not in augmented])
+            }
+        return self._bound[id(func)]
 
     # -- modules -----------------------------------------------------------
 
@@ -2298,7 +2320,7 @@ class Types:
                     return file, node.annotation
             # ``target = self.nuclei`` or ``target = self.satellites``: an
             # alias carries what every value it is bound to was declared as.
-            bound = self.assigned(func).get(expression.id, [])
+            bound = self.bound(func).get(expression.id, [])
             if bound and expression.id not in seen:
                 found = [
                     self._annotation_of(file, func, value, seen | {expression.id}) for value in bound
@@ -2430,7 +2452,7 @@ class Types:
         return found.pop() if len(found) == 1 else None
 
     def _assigned_here(self, func: ast.AST, name: str) -> list[ast.expr]:
-        """What *func*'s own assignments bind *name* to, less the ``None`` it is cleared with.
+        """What *func*'s own assignments bind *name* to (:meth:`bound`: an augmented one adds nothing), less the ``None`` it is cleared with.
 
         Not a function's, lambda's or class's nested in it: ``taskBuffer =
         ...`` inside ``add_main.main``'s inner function binds that function's
@@ -2439,7 +2461,7 @@ class Types:
         nested = {id(one.value) for one in pathcond.bindings(func, name) if one.nested and one.value is not None}
         return [
             value
-            for value in self.assigned(func).get(name, [])
+            for value in self.bound(func).get(name, [])
             if not (isinstance(value, ast.Constant) and value.value is None) and id(value) not in nested
         ]
 
@@ -2569,6 +2591,8 @@ class Types:
             declared = self._field_annotation(owner, source.attr) if owner is not None else None
         if declared is None:
             declared = self._returned(file, func, source, depth)
+        if declared is None and isinstance(source, ast.Name):
+            declared = self._bound_to_calls(file, func, source.id, depth)
         if declared is None:
             return None
         where, annotation = declared
@@ -2592,6 +2616,26 @@ class Types:
         else:
             element = None
         return self.annotated_all(where, element) if element is not None else None
+
+    def _bound_to_calls(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[tuple[str, ast.expr]]:
+        """What the calls a local *name* is bound to are declared to return, where every binding of it is one and they
+        say one thing: ``taskList = self.taskBufferIF.getTasksToReassign_JEDI(...)`` then ``for taskSpec in taskList``.
+
+        For a loop over the name (:meth:`_iterated`); a parameter, or a name bound any other way -- unpacked, by a
+        loop or a ``with`` -- says nothing here.
+        """
+        if name in _parameter_names(func):
+            return None
+        sites = [one for one in pathcond.bindings(func, name) if not one.nested and one.kind != pathcond.BIND_AUGMENTED]
+        if not sites or any(
+            one.kind != pathcond.BIND_ASSIGN or one.unpacked or not isinstance(one.value, ast.Call) for one in sites
+        ):
+            return None
+        found = [self._returned(file, func, one.value, depth) for one in sites]
+        held = [one for one in found if one is not None]
+        if len(held) != len(found) or len({ast.unparse(annotation) for _where, annotation in held}) != 1:
+            return None
+        return held[0]
 
     def of_expression(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
         """The class *expression*, read in *func* of *file*, is declared to be, where it is declared one.

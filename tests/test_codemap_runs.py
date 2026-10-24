@@ -1378,6 +1378,10 @@ from pkg.spec import JobSpec
 _logger = None
 
 
+def sender_of():
+    return None
+
+
 class Keys(DBProxy):
     def kill(self, panda_id):
         tmp_log = LogWrapper(_logger, f"PandaID={panda_id}")  # K1
@@ -1444,7 +1448,7 @@ class Keys(DBProxy):
         tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K14
         tmp_log.debug("handed on")
         self.many(pid)  # K15
-        senders = {"x": None}
+        senders = {"x": sender_of()}
         senders["x"].send(pid)  # K16
 
     def many(self, *ids):
@@ -1489,7 +1493,7 @@ class Sender:
     def __init__(self, pid):
         self.pid = pid
         self.logger = LogWrapper(_logger, str(self.pid))  # K19
-        senders = {"x": None}
+        senders = {"x": sender_of()}
         senders["x"].send(self.pid)  # K20
 
     def run(self):

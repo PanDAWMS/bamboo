@@ -36,7 +36,7 @@ from __future__ import annotations
 import ast
 import builtins
 from collections import Counter, deque
-from typing import Callable, Iterable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
 from bamboo.codemap import calls as C
 from bamboo.codemap.models import (
@@ -150,10 +150,11 @@ _ELEMENT_METHODS = {
     "setdefault",
     "values",
     "items",
-    "copy",
     "popleft",
     "__getitem__",
 }
+#: Methods of a builtin whose value is another of the same type: ``d.copy()`` is a dict.
+_SAME_TYPE_METHODS = {"copy"}
 #: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
 _OPERATORS: dict[type, tuple[str, ...]] = {
     op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
@@ -285,6 +286,7 @@ class _Receivers:
         self._open: dict[tuple[str, int, int], int] = {}
         self._low: list[int] = []
         self._operators: dict[type, Optional[tuple[str, str]]] = {}
+        self._fills: dict[tuple[int, str], Optional[list[_Put]]] = {}
 
     def of(
         self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
@@ -388,6 +390,9 @@ class _Receivers:
         if isinstance(expression, (ast.NamedExpr, ast.Await)):
             return self.of(file, func, expression.value, depth + 1)
         if isinstance(expression, ast.Subscript):
+            filled = self._filled(file, func, expression, depth)
+            if filled is not None:
+                return filled
             return _element(self.of(file, func, expression.value, depth + 1))
         if isinstance(expression, ast.Call):
             return self._called(file, func, expression, depth)
@@ -395,7 +400,7 @@ class _Receivers:
             return self._named(file, func, expression.id, depth)
         if isinstance(expression, ast.Attribute):
             return self._attribute(file, func, expression, depth)
-        return _UNKNOWN, f"a {type(expression).__name__}"
+        return _UNKNOWN, _a(type(expression).__name__)
 
     def _operated(
         self, file: str, func: ast.AST, expression: ast.BinOp | ast.UnaryOp, depth: int
@@ -438,6 +443,44 @@ class _Receivers:
             ]
             self._operators[op] = _joined(found) if found else None
         return self._operators[op]
+
+    def _slot(
+        self,
+        file: str,
+        func: ast.AST,
+        value: Optional[ast.expr],
+        slot: Optional[int],
+        depth: int,
+    ) -> tuple[str, str]:
+        """What a name unpacked from *value* at *slot* is: the literal's element there, the slot of the ``tuple[...]``
+        the call's targets are declared to return, else one of what *value* holds -- ``siteid, queue_data_json, ... =
+        resTmp``, a row the database returned."""
+        if value is None:
+            return _UNKNOWN, "an unpacking of nothing read"
+        if (
+            isinstance(value, (ast.Tuple, ast.List))
+            and slot is not None
+            and slot < len(value.elts)
+            and not any(isinstance(one, ast.Starred) for one in value.elts)
+        ):
+            return self.of(file, func, value.elts[slot], depth + 1)
+        if isinstance(value, ast.Call) and slot is not None:
+            try:
+                placed = self.calls.callees(file, func, value)
+            except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+                placed = C.Placed()
+            if placed.targets and not placed.unplaced and not placed.thread:
+                kinds = []
+                for target in placed.targets:
+                    returns = getattr(target.func, "returns", None)
+                    held = C._slot_of(returns, slot) if returns is not None else None
+                    kinds.append(
+                        self.annotation(target.file, held)
+                        if held is not None
+                        else _element(self.annotation(target.file, returns))
+                    )
+                return _joined(kinds)
+        return _element(self.of(file, func, value, depth + 1))
 
     def _handed_only_outside(
         self, file: str, func: ast.AST, call: ast.Call, depth: int
@@ -512,19 +555,77 @@ class _Receivers:
 
     @staticmethod
     def _method_result(receiver: tuple[str, str], method: str) -> tuple[str, str]:
-        """What a builtin's or a queue's method returns: one of what it holds, or a builtin."""
+        """What a builtin's or a queue's method returns: one of what it holds, another of its type (a copy), or a builtin."""
         kind, held = receiver
         if kind == _QUEUE:
             return (
-                (_UNKNOWN, f"what a {held} holds")
+                (_UNKNOWN, f"what {_a(held)} holds")
                 if method in _GETS
                 else (_BUILTIN, "")
             )
         if held in _SCALARS:
             return _BUILTIN, ""
+        if method in _SAME_TYPE_METHODS:
+            return _BUILTIN, held
         if method in _ELEMENT_METHODS:
-            return _UNKNOWN, f"what a {held or 'builtin container'} holds"
+            return _UNKNOWN, f"what {_a(held or 'builtin container')} holds"
         return _BUILTIN, ""
+
+    def _filled(
+        self, file: str, func: ast.AST, expression: ast.Subscript, depth: int
+    ) -> Optional[tuple[str, str]]:
+        """What ``d[k]...`` is where *d* is a builtin container the function alone fills: the join of what it puts at
+        that place, read down the literals it puts (``file_list[block] = {"lfns": [], ...}`` then
+        ``file_list[block]["lfns"].append(lfn)``: a list).
+
+        ``None`` -- the element of what *d* is, as before -- where *d* is not a local of the function, is not a
+        builtin, goes where other code can fill it (:func:`_leaves`: handed to a call other than a builtin's,
+        stored, returned, aliased, read in a nested function), is filled in a way not read here (:func:`_puts`), or
+        has nothing put at that place.
+        """
+        root, keys = _subscripted(expression)
+        if root is None or isinstance(func, ast.Module) or root.id in _parameters(func):
+            return None
+        container = self.of(file, func, root, depth + 1)
+        if container[0] != _BUILTIN or container[1] in _SCALARS:
+            return None
+        cached = (id(func), root.id)
+        if cached not in self._fills:
+            sites = [one for one in pathcond.bindings(func, root.id) if not one.nested]
+            local = bool(sites) and all(
+                one.kind
+                in (
+                    pathcond.BIND_ASSIGN,
+                    pathcond.BIND_ANNOTATED,
+                    pathcond.BIND_AUGMENTED,
+                )
+                and not one.unpacked
+                for one in sites
+            )
+            self._fills[cached] = (
+                _puts(func, root.id)
+                if local
+                and not _leaves(
+                    func, root.id, lambda name: self._is_builtin(file, func, name)
+                )
+                else None
+            )
+        puts = self._fills[cached]
+        if not puts:
+            return None
+        kinds = []
+        for put in puts:
+            if len(put.keys) > len(keys) or not all(
+                _same_key(one, other)
+                for one, other in zip(put.keys, keys[: len(put.keys)], strict=True)
+            ):
+                continue
+            for end, more in _ends(put.value, keys[len(put.keys) :], put.more):
+                kind = self.of(file, func, end, depth + 1)
+                for _level in range(more):
+                    kind = _element(kind)
+                kinds.append(kind)
+        return _joined(kinds) if kinds else None
 
     def _is_builtin(self, file: str, func: ast.AST, name: str) -> bool:
         if name not in _BUILTINS:
@@ -547,8 +648,15 @@ class _Receivers:
         for source, entered in _loop_sources(func, name):
             held = self.of(file, func, source, depth + 1)
             kinds.append(_entered(held) if entered else _element(held))
-        for value in self.types.assigned(func).get(name, ()):
+        for value in self.types.bound(func).get(name, ()):
             kinds.append(self.of(file, func, value, depth + 1))
+        for one in pathcond.bindings(func, name):
+            if (
+                not one.nested
+                and one.unpacked
+                and one.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED)
+            ):
+                kinds.append(self._slot(file, func, one.value, one.slot, depth))
         if kinds:
             return _joined(kinds)
         enclosing = self.types.enclosing_function(file, func)
@@ -657,7 +765,15 @@ def _element(container: tuple[str, str]) -> tuple[str, str]:
         return _BUILTIN, "str" if detail == "str" else ""
     if kind == _UNKNOWN:
         return container
-    return _UNKNOWN, f"an element of a {detail or kind}"
+    return _UNKNOWN, f"an element of {_a(detail or kind)}"
+
+
+def _a(held: str) -> str:
+    """*held* with its article -- ``a list``, ``an iterator`` --; a phrase that has one (``an attribute of NoneType``)
+    as it is."""
+    if held.startswith(("a ", "an ", "what ", "the ")):
+        return held
+    return f"an {held}" if held[:1].lower() in tuple("aeiou") else f"a {held}"
 
 
 def _entered(manager: tuple[str, str]) -> tuple[str, str]:
@@ -669,6 +785,253 @@ def _entered(manager: tuple[str, str]) -> tuple[str, str]:
         if manager[0] in (_BUILTIN, _OUTSIDE)
         else (_UNKNOWN, f"what entering {manager[1]} yields")
     )
+
+
+class _Put(NamedTuple):
+    """One value a function puts into a container: at *keys* below it (``None`` for a position not said -- an
+    ``append``), *more* levels above its elements (``extend(xs)``, ``+= xs``: one of what *value* holds)."""
+
+    keys: tuple[Optional[ast.expr], ...]
+    value: ast.expr
+    more: int
+
+
+def _subscripted(expression: ast.expr) -> tuple[Optional[ast.Name], list[ast.expr]]:
+    """The name ``d[k1][k2]`` is taken out of, and its keys in order; no name for another root, or a slice."""
+    keys: list[ast.expr] = []
+    while isinstance(expression, ast.Subscript):
+        if isinstance(expression.slice, ast.Slice):
+            return None, []
+        keys.append(expression.slice)
+        expression = expression.value
+    return (expression if isinstance(expression, ast.Name) else None), keys[::-1]
+
+
+def _same_key(one: Optional[ast.expr], other: Optional[ast.expr]) -> bool:
+    """Whether two keys can be the same: two constants by value; any other pair can."""
+    if isinstance(one, ast.Constant) and isinstance(other, ast.Constant):
+        return bool(one.value == other.value)
+    return True
+
+
+def _literal_puts(value: ast.expr) -> Optional[list[_Put]]:
+    """What a container literal bound to the name puts into it; ``None`` for a value whose content is not read here."""
+    if isinstance(value, ast.Dict):
+        if any(key is None for key in value.keys):
+            return None
+        return [
+            _Put((key,), one, 0)
+            for key, one in zip(value.keys, value.values, strict=True)
+        ]
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        if any(isinstance(one, ast.Starred) for one in value.elts):
+            return None
+        return [_Put((None,), one, 0) for one in value.elts]
+    if isinstance(value, (ast.ListComp, ast.SetComp)):
+        return [_Put((None,), value.elt, 0)]
+    if isinstance(value, ast.DictComp):
+        return [_Put((None,), value.value, 0)]
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in ("dict", "list", "set")
+        and not value.args
+        and not value.keywords
+    ):
+        return []
+    return None
+
+
+def _puts(func: ast.AST, name: str) -> Optional[list[_Put]]:
+    """Everything *func* puts into the container *name* holds, or ``None`` where one put is not read here.
+
+    Read: the name bound to a container literal; ``d[k] = v``; ``d.setdefault(k, v)``, ``append`` / ``add`` /
+    ``insert`` / ``extend``, ``update`` with a dict literal or keywords, ``+= xs`` -- on the name or on what it holds
+    (``d[k].append(v)``).  Not read: the name bound to anything else, unpacked into, ``|=`` and the like, an
+    ``update`` of another mapping.
+    """
+    found: list[_Put] = []
+    for node in ast.walk(func):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    if any(
+                        isinstance(one, ast.Name) and one.id == name
+                        for one in ast.walk(target)
+                    ):
+                        return None
+                    continue
+                if node.value is None:
+                    continue
+                if isinstance(target, ast.Name) and target.id == name:
+                    own = _literal_puts(node.value)
+                    if own is None:
+                        return None
+                    found += own
+                    continue
+                root, keys = (
+                    _subscripted(target)
+                    if isinstance(target, ast.Subscript)
+                    else (None, [])
+                )
+                if root is not None and root.id == name:
+                    found.append(_Put(tuple(keys), node.value, 0))
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name):
+                root, keys = (node.target, [])
+            else:
+                root, keys = (
+                    _subscripted(node.target)
+                    if isinstance(node.target, ast.Subscript)
+                    else (None, [])
+                )
+            if root is None or root.id != name:
+                continue
+            if isinstance(node.op, ast.Add):
+                found.append(_Put((*keys, None), node.value, 1))
+            elif not keys:
+                return None
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            owner = node.func.value
+            if isinstance(owner, ast.Name):
+                root, keys = owner, []
+            else:
+                root, keys = (
+                    _subscripted(owner)
+                    if isinstance(owner, ast.Subscript)
+                    else (None, [])
+                )
+            if root is None or root.id != name:
+                continue
+            method, args = node.func.attr, node.args
+            if method == "setdefault" and len(args) == 2:
+                found.append(_Put((*keys, args[0]), args[1], 0))
+            elif method in ("append", "add") and len(args) == 1:
+                found.append(_Put((*keys, None), args[0], 0))
+            elif method == "insert" and len(args) == 2:
+                found.append(_Put((*keys, None), args[1], 0))
+            elif method == "extend" and len(args) == 1:
+                found.append(_Put((*keys, None), args[0], 1))
+            elif method == "update":
+                if any(one.arg is None for one in node.keywords) or (
+                    args
+                    and not (
+                        len(args) == 1
+                        and isinstance(args[0], ast.Dict)
+                        and None not in args[0].keys
+                    )
+                ):
+                    return None
+                if args:
+                    found += [
+                        _Put((*keys, key), one, 0)
+                        for key, one in zip(args[0].keys, args[0].values, strict=True)
+                    ]
+                found += [
+                    _Put((*keys, ast.Constant(one.arg)), one.value, 0)
+                    for one in node.keywords
+                ]
+            elif method == "__setitem__":
+                return None
+    return found
+
+
+def _ends(
+    value: ast.expr, rest: list[ast.expr], more: int
+) -> list[tuple[ast.expr, int]]:
+    """The expressions a put value holds at *rest* below it, each with how many levels of "one of what it holds" are
+    left: read down dict literals by key and list, tuple and set literals by element."""
+    if more or not rest:
+        return [(value, more + len(rest))]
+    key, below = rest[0], rest[1:]
+    if isinstance(value, ast.Dict) and None not in value.keys:
+        return [
+            end
+            for one, held in zip(value.keys, value.values, strict=True)
+            if _same_key(one, key)
+            for end in _ends(held, below, 0)
+        ]
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)) and not any(
+        isinstance(one, ast.Starred) for one in value.elts
+    ):
+        return [end for one in value.elts for end in _ends(one, below, 0)]
+    if isinstance(value, (ast.ListComp, ast.SetComp)):
+        return _ends(value.elt, below, 0)
+    if isinstance(value, ast.DictComp):
+        return _ends(value.value, below, 0)
+    return [(value, len(rest))]
+
+
+#: Where a container, or a part of it, can be read without going where other code can fill it.
+_KEPT_IN = (
+    ast.Expr,
+    ast.Compare,
+    ast.For,
+    ast.AsyncFor,
+    ast.comprehension,
+    ast.FormattedValue,
+    ast.If,
+    ast.While,
+    ast.BoolOp,
+    ast.UnaryOp,
+    ast.BinOp,
+    ast.Assert,
+    ast.Delete,
+)
+
+
+def _leaves(func: ast.AST, name: str, is_builtin: Callable[[str], bool]) -> bool:
+    """Whether the container *name* holds in *func*, or a part of it, can go where other code fills it: handed to a
+    call other than a builtin's, bound to another name or stored (as the value of an assignment, in a literal),
+    returned or yielded, or read in a function or lambda nested in *func*.  Its own method calls, subscripts, tests,
+    loops over it and prints are kept here."""
+    parents = {
+        id(child): node
+        for node in ast.walk(func)
+        for child in ast.iter_child_nodes(node)
+    }
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Name) and node.id == name):
+            continue
+        above = parents.get(id(node))
+        while above is not None and above is not func:
+            if isinstance(
+                above, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            ):
+                return True
+            above = parents.get(id(above))
+        if not isinstance(node.ctx, ast.Load):
+            continue
+        here: ast.AST = node
+        while True:
+            parent = parents.get(id(here))
+            if (
+                isinstance(parent, (ast.Subscript, ast.Attribute))
+                and parent.value is here
+            ):
+                here = parent
+            elif isinstance(parent, ast.Call) and parent.func is here:
+                here = parent
+            else:
+                break
+        if isinstance(parent, ast.keyword):
+            parent = parents.get(id(parent))
+            if not (
+                isinstance(parent, ast.Call)
+                and isinstance(parent.func, ast.Name)
+                and is_builtin(parent.func.id)
+            ):
+                return True
+        elif isinstance(parent, ast.Call):
+            if not (isinstance(parent.func, ast.Name) and is_builtin(parent.func.id)):
+                return True
+        elif isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            if here is parent.value:
+                return True
+        elif not isinstance(parent, _KEPT_IN):
+            return True
+    return False
 
 
 def _parameters(func: ast.AST) -> dict[str, Optional[ast.expr]]:

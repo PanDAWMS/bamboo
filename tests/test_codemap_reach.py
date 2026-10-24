@@ -761,3 +761,150 @@ def test_a_dunder_python_runs_unasked_that_reaches_a_write_fails_the_gate(tmp_pa
     assert result.failures == [
         "pkg/mod.py::Lock.__enter__ reaches ['pkg/mod.py::write']"
     ]
+
+
+#: A class defining the methods the tests below call, so that a call on an unknown receiver is a hole, not settled as
+#: a method no class of the corpus defines.
+_TAKER = (
+    "class Taker:\n"
+    "    def update(self, x):\n"
+    "        pass\n\n"
+    "    def append(self, x):\n"
+    "        pass\n\n"
+    "    def move(self):\n"
+    "        pass\n\n"
+)
+
+
+def _callees(record: reach.ReachGraph, owner: str) -> list[str]:
+    return [hole.callee for hole in record.rows[owner].holes]
+
+
+def test_a_container_s_copy_is_the_container_and_an_augmented_assignment_leaves_a_name_what_it_was(
+    tmp_path,
+):
+    """``msg_dict = update_msg_dict.copy()`` is a dict; ``found = []`` ... ``found += other()`` is a list.
+
+    Read before as one of what the dict holds, and as what ``other()`` is: push_job_status_message's ``.update`` and
+    retryTask_JEDI's ``retried_tasks.append`` were holes.  A value the dict holds is still one of what it holds.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def other():\n"
+            "    return 1\n\n"
+            "def push(orig: dict):\n"
+            "    msg = orig.copy()\n"
+            "    msg.update({'a': 1})\n"
+            "    found = []\n"
+            "    found += other()\n"
+            "    found.append(1)\n"
+            "    held = orig.get('k')\n"
+            "    held.update({})\n"
+        ),
+    )
+
+    assert _callees(record, "pkg/mod.py::push") == ["held.update"]
+
+
+def test_a_name_unpacked_from_a_call_is_the_slot_its_tuple_is_declared_with(tmp_path):
+    """``ok, data = pair()`` on ``-> tuple[bool, dict]``: ``data`` is a dict, where the record found no binding of it.
+
+    A slot declared ``Any`` says nothing; a row the database hands back is what code outside the corpus made.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "from typing import Any\n\n"
+            "def pair() -> tuple[bool, dict]:\n"
+            "    return True, {}\n\n"
+            "def anything() -> tuple[bool, Any]:\n"
+            "    return True, None\n\n"
+            "def use():\n"
+            "    ok, data = pair()\n"
+            "    data.update({})\n"
+            "    ok, held = anything()\n"
+            "    held.update({})\n"
+            "    first, second = (1, {})\n"
+            "    second.update({})\n"
+        ),
+    )
+
+    assert _callees(record, "pkg/mod.py::use") == ["held.update"]
+
+
+def test_a_local_container_s_values_are_what_the_function_puts_into_it(tmp_path):
+    """``files[name] = {'lfns': []}`` then ``files[name]['lfns'].append(name)``: a list, put there by the function.
+
+    Not where the container goes where other code can fill it -- handed to a call --, nor where a put is not read
+    (``update`` with another mapping), nor where nothing the function puts is at that place.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def keep(d):\n"
+            "    pass\n\n"
+            "def fill(names: list, more: dict):\n"
+            "    files = {}\n"
+            "    for name in names:\n"
+            "        files[name] = {'lfns': [], 'job': None}\n"
+            "        files[name]['lfns'].append(name)\n"
+            "    by_weight = {}\n"
+            "    by_weight[1] = []\n"
+            "    by_weight[1].append(2)\n"
+            "    shared = {}\n"
+            "    shared['x'] = []\n"
+            "    keep(shared)\n"
+            "    shared['x'].append(1)\n"
+            "    merged = {}\n"
+            "    merged['x'] = []\n"
+            "    merged.update(more)\n"
+            "    merged['x'].append(1)\n"
+            "    files[name]['job'].move()\n"
+        ),
+    )
+
+    assert sorted(_callees(record, "pkg/mod.py::fill")) == [
+        "merged['x'].append",
+        "shared['x'].append",
+    ]
+
+
+def test_a_loop_over_a_name_bound_to_a_call_is_over_what_the_call_is_declared_to_return(
+    tmp_path,
+):
+    """``taskList = buffer.tasks()`` then ``for task in taskList``: each a ``Task`` (doActionForReassign's)."""
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "class Task:\n"
+            "    def move(self):\n"
+            "        pass\n\n"
+            "class Buffer:\n"
+            "    def tasks(self) -> list[Task]:\n"
+            "        return []\n\n"
+            "def reassign(buffer: Buffer):\n"
+            "    found = buffer.tasks()\n"
+            "    for task in found:\n"
+            "        task.move()\n"
+        ),
+    )
+
+    assert record.rows["pkg/mod.py::reassign"].holes == []
+    assert "pkg/mod.py::Task.move" in _to(record, "pkg/mod.py::reassign")
+
+
+def test_a_hole_names_what_its_receiver_is_one_of_with_its_article(tmp_path):
+    """``for idx, item in enumerate(items)``: one of what an iterator holds -- "an iterator", not "a iterator"."""
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def run(items):\n"
+            "    for idx, item in enumerate(items):\n"
+            "        item.move()\n"
+        ),
+    )
+
+    assert [hole.why for hole in record.rows["pkg/mod.py::run"].holes] == [
+        "the receiver's class is not declared: an element of an iterator"
+    ]
