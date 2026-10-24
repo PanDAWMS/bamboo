@@ -3114,3 +3114,122 @@ class JobSpec:
     assert read("PandaID") is None
     assert read("site") == ["Site"]
     assert read("plain") == ["Site"]
+
+
+_TIMED = (
+    "import threading\n\n"
+    "class Timed:\n"
+    "    def __init__(self, method, timeout):\n"
+    "        self.method = method\n"
+    "        self.result = None\n\n"
+    "    def __call__(self, *var, **kwargs):\n"
+    "        self.result = self.method(*var, **kwargs)\n\n"
+    "    def run(self, *var, **kwargs):\n"
+    "        thr = threading.Thread(target=self, args=var, kwargs=kwargs)\n"
+    "        thr.start()\n"
+    "        thr.join()\n"
+)
+_UPDATING = "class Buffer:\n    def update(self, job_id, param):\n        return 1\n"
+
+
+def _api(body: str = "") -> str:
+    return (
+        "from pkg.timed import Timed\n"
+        "from pkg.buffer import Buffer\n\n"
+        "buffer: Buffer = None\n\n"
+        "def log(value):\n"
+        "    return value\n\n"
+        "def update(job_id, param):\n"
+        "    timed = Timed(buffer.update, 10)\n"
+        "    timed.run(job_id, param)\n"
+        f"{body}"
+        "    return timed.result\n"
+    )
+
+
+def test_a_call_on_an_object_built_with_a_function_it_hands_its_arguments_to_lands_at_the_function(tmp_path):
+    """``Timed`` keeps ``method``; ``run`` starts a thread on the object with its own arguments and joins it, and the
+    thread's ``__call__`` calls ``method`` with them: ``timed.run(job_id, param)`` calls ``buffer.update(job_id,
+    param)`` and returns nothing.  It is placed there, handed its arguments as a call of it is, run on ``buffer``,
+    and is among ``update``'s callers -- which leave nothing missed -- and the read of ``buffer.update`` that built
+    the object is one whose every call hands it on."""
+    roots = _tree(tmp_path, timed=_TIMED, buffer=_UPDATING, api=_api())
+    calls = _calls(roots)
+    func = _function(calls, "api", "update")
+    call = _call_in(func, "timed.run")
+
+    placed = calls.callees("pkg/api.py", func, call)
+
+    (target,) = placed.targets
+    assert (target.file, target.func.name) == ("pkg/buffer.py", "update")
+    assert [ast.unparse(one) for one in placed.forwarded] == ["buffer.update"]
+    assert (placed.thread, placed.on_class, placed.returns_none) == (False, False, True)
+    assert ast.unparse(calls.made_on("pkg/api.py", func, call)) == "buffer"
+    (site,) = calls.callers(target)
+    assert site.call is call
+    assert {name: ast.unparse(value) for name, value in calls.handed(site, target).items()} == {
+        "job_id": "job_id",
+        "param": "param",
+    }
+    assert calls.missed(target) == []
+    timed = calls.types.class_named("pkg/api.py", ast.Name(id="Timed", ctx=ast.Load()))
+    assert (calls.forwarding(timed, "run"), calls.forwarding(timed, "__call__")) == ("method", "method")
+    assert calls.forwarded_reads() == {id(placed.forwarded[0])}
+
+
+def test_a_wrapper_hands_its_arguments_on_by_calling_the_function_or_itself(tmp_path):
+    """The three ways a method hands its own arguments to the function the object keeps: calling it, calling the
+    object -- whose ``__call__`` calls it --, or a thread started on the object and joined."""
+    forms = {
+        "direct": "    def run(self, *var, **kwargs):\n        self.method(*var, **kwargs)\n",
+        "called": (
+            "    def __call__(self, *var):\n        self.method(*var)\n\n"
+            "    def run(self, *var):\n        self(*var)\n"
+        ),
+    }
+    for name, body in forms.items():
+        wrapper = f"class Timed:\n    def __init__(self, method, timeout):\n        self.method = method\n\n{body}"
+        calls = _calls(_tree(tmp_path / name, timed=wrapper, buffer=_UPDATING, api=_api()))
+        placed = _placed(calls, "api", "update", "timed.run")
+        assert [(one.file, one.func.name) for one in placed.targets] == [("pkg/buffer.py", "update")], name
+
+
+def test_a_wrapper_or_an_object_whose_function_may_be_called_some_other_way_is_not_read_through(tmp_path):
+    """Not read through, and the call stays on the wrapper's method: a method returning what the function returns (the
+    call's value is no longer None), a thread not joined, a field read some other way in the class, an argument
+    added; and an object handed on, its field read, or bound otherwise.  The function built in is then read as a
+    value, as any function handed is."""
+    wrappers = {
+        "returns": "    def run(self, *var, **kwargs):\n        return self.method(*var, **kwargs)\n",
+        "unjoined": (
+            "    def __call__(self, *var, **kwargs):\n        self.result = self.method(*var, **kwargs)\n\n"
+            "    def run(self, *var, **kwargs):\n"
+            "        thr = threading.Thread(target=self, args=var, kwargs=kwargs)\n"
+            "        thr.start()\n"
+        ),
+        "peeked": (
+            "    def run(self, *var, **kwargs):\n        self.method(*var, **kwargs)\n\n"
+            "    def peek(self):\n        return self.method\n"
+        ),
+        "added": "    def run(self, *var, **kwargs):\n        self.method(*var, 1, **kwargs)\n",
+    }
+    for name, body in wrappers.items():
+        wrapper = (
+            "import threading\n\n"
+            f"class Timed:\n    def __init__(self, method, timeout):\n        self.method = method\n\n{body}"
+        )
+        calls = _calls(_tree(tmp_path / name, timed=wrapper, buffer=_UPDATING, api=_api()))
+        placed = _placed(calls, "api", "update", "timed.run")
+        assert placed.forwarded == (), name
+        assert [one.func.name for one in placed.targets] == ["run"], name
+        assert calls.forwarded_reads() == set(), name
+    uses = {
+        "handed": "    log(timed)\n",
+        "field": "    log(timed.method)\n",
+        "rebound": "    timed = log(None)\n",
+    }
+    for name, body in uses.items():
+        calls = _calls(_tree(tmp_path / f"use_{name}", timed=_TIMED, buffer=_UPDATING, api=_api(body)))
+        placed = _placed(calls, "api", "update", "timed.run")
+        assert placed.forwarded == (), name
+        assert calls.forwarded_reads() == set(), name

@@ -394,7 +394,7 @@ def _called(
     if file is None:
         return []
     placed = _CALLS.callees(file, func, call)
-    if placed.unplaced or placed.thread:
+    if placed.unplaced or placed.returns_none:
         return []
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
     for callee in placed.targets:
@@ -476,7 +476,7 @@ def every_return(
     if file is None:
         return None
     placed = _CALLS.callees(file, func, call)
-    if not placed.targets or placed.unplaced or placed.thread:
+    if not placed.targets or placed.unplaced or placed.returns_none:
         return None
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
     for target in placed.targets:
@@ -1119,7 +1119,10 @@ _KEY_HOPS = 2
 def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
     """The name bound to the key by ``for k, v in d.items()``, and ``d``.
 
-    Only a loop that plainly walks a mapping.  ``for table in (...)`` is a
+    Only a loop that plainly walks a mapping: over ``d.items()`` or
+    ``d.keys()``, or over ``d`` or a builtin's copy of it -- ``list(d)``,
+    ``sorted(d)`` -- where the loop reads ``d[k]``: ``updateJobStatus``' ``for
+    key in list(param): ... param[key]``.  ``for table in (...)`` is a
     sequence and :func:`_literal_values` already answers for it; reading a
     sequence element as a column name would put the *values* of a list into a
     ``SET`` clause.
@@ -1131,7 +1134,7 @@ def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
         and over.func.attr in {"items", "keys"}
         and not over.args
     ):
-        return "", None
+        return _keys_walked(node)
     target = node.target
     if isinstance(target, ast.Name):
         return target.id, over.func.value
@@ -1142,6 +1145,46 @@ def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
     ):
         return target.elts[0].id, over.func.value
     return "", None
+
+
+def _keys_walked(node: ast.For) -> tuple[str, Optional[ast.expr]]:
+    """:func:`_mapping_iterated` of ``for k in d`` or ``for k in list(d)``: ``("k", d)`` where the loop reads ``d[k]``."""
+    over, target = node.iter, node.target
+    if (
+        isinstance(over, ast.Call)
+        and isinstance(over.func, ast.Name)
+        and over.func.id in ("list", "tuple", "sorted", "set")
+        and len(over.args) == 1
+        and not over.keywords
+    ):
+        over = over.args[0]
+    if not (isinstance(over, ast.Name) and isinstance(target, ast.Name)):
+        return "", None
+    if any(
+        isinstance(one, ast.Subscript)
+        and isinstance(one.value, ast.Name)
+        and one.value.id == over.id
+        and isinstance(one.slice, ast.Name)
+        and one.slice.id == target.id
+        for one in ast.walk(node)
+    ):
+        return target.id, over
+    return "", None
+
+
+def kept_map_keys(column: object, keys: list[str]) -> Optional[list[str]]:
+    """Of *keys*, the ones a pass reaches *column* with -- the hole a loop over a mapping's keys fills with its key
+    (:func:`map_key`) --, read as the loop's ``continue`` tests take them (:func:`_kept_keys`); ``None`` where they
+    are not read so."""
+    if type(column) is not sqleval.HoleAt:
+        return None
+    loop = next((one for one in ancestors(column.stmt) if isinstance(one, ast.For)), None)
+    if loop is None:
+        return None
+    key, mapping = _mapping_iterated(loop)
+    if not key or mapping is None or column.source != key:
+        return None
+    return _kept_keys(loop, key, keys)
 
 
 def _literal_keys(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -1394,7 +1437,9 @@ def map_key(
     target = loop.target
     value_name = (
         target.elts[1].id
-        if loop.iter.func.attr == "items"  # type: ignore[attr-defined]
+        if isinstance(loop.iter, ast.Call)
+        and isinstance(loop.iter.func, ast.Attribute)
+        and loop.iter.func.attr == "items"
         and isinstance(target, ast.Tuple)
         and len(target.elts) == 2
         and isinstance(target.elts[1], ast.Name)
@@ -2981,7 +3026,8 @@ def assembled_texts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, l
 
 
 def _placed_callees():
-    """The calls a run follows: the map's own placing of each (:func:`across_calls`), every target, nothing open."""
+    """The calls a run follows: the map's own placing of each (:func:`across_calls`), every target, nothing open,
+    nothing whose value is not what the targets return (:attr:`calls.Placed.returns_none`)."""
     calls = _CALLS
     if calls is None:
         return None
@@ -2991,7 +3037,7 @@ def _placed_callees():
         if file is None:
             return None
         placed = calls.callees(file, func, call)
-        if placed.unplaced or not placed.targets:
+        if placed.unplaced or not placed.targets or placed.returns_none:
             return None
         return [target.func for target in placed.targets]
 

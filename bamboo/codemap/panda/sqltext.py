@@ -186,6 +186,15 @@ class SqlWrite(BaseModel):
             "names its row (``sql.map_key``), and that is the run's to read."
         ),
     )
+    column_holes: list[tuple[int, str, tuple[int, ...]]] = Field(
+        default_factory=list,
+        description=(
+            "The ``SET`` items ``{}=:{}`` -- a column that is a hole, given a bind whose name holds one -- as "
+            "*key_holes* spells a term: ``updateJobStatus``' ``,{key}=:{key}`` for each key of ``param``.  Not in "
+            "*columns*, and each still a :data:`SET_COLUMN_IS_A_HOLE`: which columns the holes are is the run's "
+            "to read."
+        ),
+    )
 
 
 #: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
@@ -732,12 +741,18 @@ def _supplied(node: exp.Expression, spelled: str, insert: bool) -> ColumnValue:
 
 
 def _update_pairs(
-    node: exp.Update, sql: str, tokens: list, passed: Optional[list[tuple[str, str]]] = None
+    node: exp.Update,
+    sql: str,
+    tokens: list,
+    passed: Optional[list[tuple[str, str]]] = None,
+    holes: Optional[list[tuple[int, str, tuple[int, ...]]]] = None,
 ) -> Optional[list[tuple[str, int, ColumnValue]]]:
     """``(column, end offset, value)`` for each ``SET`` item of *node*, or ``None`` where the two readings disagree.
 
     An item it cannot pair goes into *passed*, where given, as ``(the item as
-    the statement spells it, why)`` -- see :func:`unread_columns`.
+    the statement spells it, why)`` -- see :func:`unread_columns`; one whose
+    column is a hole and whose bind holds one goes into *holes* as well, where
+    given (:attr:`SqlWrite.column_holes`).
     """
     update = _at_depth(tokens, 0, {_T.UPDATE})
     assign = _at_depth(tokens, update + 1, {_T.SET}) if update is not None else None
@@ -766,6 +781,8 @@ def _update_pairs(
                 passed.append(
                     ("SET " + _spelled(sql, tokens, lo, hi, written=True), SET_COLUMN_IS_A_HOLE if equals is not None else SET_ITEM_NOT_READ)
                 )
+            if holes is not None and equals is not None and (held := _key_hole(item)) is not None:
+                holes.append(held)
             continue
         found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi, written=True), False)))
     return found
@@ -983,7 +1000,8 @@ def writes(sql: str) -> list[SqlWrite]:
     node, tokens = read
     table = _named_table(node.this.this if isinstance(node.this, exp.Schema) else node.this, set())
     if isinstance(node, exp.Update):
-        pairs = _update_pairs(node, sql, tokens)
+        column_holes: list[tuple[int, str, tuple[int, ...]]] = []
+        pairs = _update_pairs(node, sql, tokens, holes=column_holes)
         if pairs is None:
             return _writes_in_text(plain(sql))
         columns = {name: value for name, _end, value in pairs}
@@ -1001,6 +1019,7 @@ def writes(sql: str) -> list[SqlWrite]:
                 preconditions=preconditions,
                 keys=keys,
                 key_holes=key_holes,
+                column_holes=column_holes,
                 precondition_spans={
                     owner: [(_at_plain(sql, a), _at_plain(sql, b, end=True)) for a, b in found]
                     for owner, found in spans.items()

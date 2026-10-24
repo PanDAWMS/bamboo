@@ -1720,3 +1720,115 @@ def test_a_write_takes_the_objects_row_where_its_key_is_the_objects_key_or_every
     assert _line(CALLED, "# registerMaybe's update") in {
         site.line for site in maybe.because
     }
+
+
+KEYED = """\
+import threading
+
+from pkg.spec import JobSpec
+
+
+class Timed:
+    def __init__(self, method, timeout):
+        self.method = method
+        self.result = None
+
+    def __call__(self, *var, **kwargs):
+        self.result = self.method(*var, **kwargs)
+
+    def run(self, *var, **kwargs):
+        thr = threading.Thread(target=self, args=var, kwargs=kwargs)
+        thr.start()
+        thr.join()
+
+
+class Status:
+    def update(self, pandaID, jobStatus, param):
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus"
+        varMap = {}
+        for key in list(param):
+            if key in ["corruptedFiles"]:
+                continue
+            if param[key] is not None:
+                param[key] = str(param[key])
+                sql += f",{key}=:{key}"
+                varMap[f":{key}"] = param[key]
+        sql += " WHERE PandaID=:PandaID"
+        varMap[":jobStatus"] = jobStatus
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+
+
+status: Status = None
+
+
+def log(value):
+    return value
+
+
+def update_job(job_id, job_status, metrics, files):
+    param = {}
+    fields = [("jobMetrics", metrics), ("corruptedFiles", files)]
+    for key, value in fields:
+        if value is not None:
+            param[key] = value
+    param["ddmErrorCode"] = 0
+    timed = Timed(status.update, 10)
+    timed.run(job_id, job_status, param)
+    return timed.result
+"""
+
+
+def test_a_set_naming_its_columns_by_a_mapping_s_keys_writes_each_key_its_callers_put(
+    tmp_path,
+):
+    """Status.update's SET adds ``{key}=:{key}`` for each key of ``param`` its loop does not skip, valued by
+    ``param[key]``; ``param``'s keys are what ``update_job`` puts -- through ``Timed``, whose ``run`` hands the
+    method it was built with its own arguments.  The write names jobMetrics and ddmErrorCode (corruptedFiles is
+    skipped) and no other column: ddmErrorCode may change on the job's row, modificationTime does not.  Where a
+    caller hands a mapping the record cannot read the keys of (``from_rest``'s parameter, no call names it), or
+    the wrapper is handed on (``log(timed)``) and the method may be called some other way, the write names its
+    columns at run time as before."""
+    fragment = _build(tmp_path / "keyed", spec=SPEC, keyed=KEYED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    owner = "pkg/keyed.py::Status.update"
+    writes = rows[owner].writes
+    assert len(writes) == 2
+    assert {w.unread for w in writes} == {False}
+    named = {
+        (v.column, v.path) for w in writes for v in w.columns if v.column != "jobStatus"
+    }
+    assert named == {
+        ("jobMetrics", "param['jobMetrics']"),
+        ("ddmErrorCode", "param['ddmErrorCode']"),
+    }
+    written = objects.may_change(
+        rows, owner, "pandaID", "ddmErrorCode", keys=("pandaID",)
+    )
+    assert written.verdict is True
+    unwritten = objects.may_change(
+        rows, owner, "pandaID", "modificationTime", keys=("pandaID",)
+    )
+    assert (unwritten.verdict, unwritten.open) == (False, [])
+
+    rest = (
+        KEYED
+        + "\n\ndef from_rest(job_id, data):\n    status.update(job_id, 'running', data)\n"
+    )
+    handed = KEYED.replace(
+        "    timed.run(job_id, job_status, param)\n",
+        "    timed.run(job_id, job_status, param)\n    log(timed)\n",
+    )
+    for name, text in (("rest", rest), ("handed", handed)):
+        rows = {
+            row.owner: row
+            for row in _build(tmp_path / name, spec=SPEC, keyed=text).reach_graph
+        }
+        # The pass that adds no key writes jobStatus alone, a statement with no hole.
+        assert {w.unread for w in rows[owner].writes} == {True, False}, name
+        unread = objects.may_change(
+            rows, owner, "pandaID", "modificationTime", keys=("pandaID",)
+        )
+        assert [site.how for site in unread.open] == [
+            objects.NAMED_AT_RUN_TIME.format(column="modificationTime")
+        ], name

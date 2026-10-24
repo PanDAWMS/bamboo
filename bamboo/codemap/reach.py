@@ -293,6 +293,7 @@ class _Receivers:
         ] = {}
         self._scopes: dict[int, _Scope] = {}
         self._as_values: Optional[set[str]] = None
+        self._keys: dict[tuple[int, str], Optional[frozenset[str]]] = {}
 
     def of(
         self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
@@ -475,7 +476,7 @@ class _Receivers:
                 placed = self.calls.callees(file, func, value)
             except Exception:  # noqa: BLE001 -- a reading that fails says nothing
                 placed = C.Placed()
-            if placed.targets and not placed.unplaced and not placed.thread:
+            if placed.targets and not placed.unplaced and not placed.returns_none:
                 kinds = []
                 for target in placed.targets:
                     returns = getattr(target.func, "returns", None)
@@ -510,7 +511,7 @@ class _Receivers:
             placed = self.calls.callees(file, func, call)
         except Exception as error:  # noqa: BLE001 -- a reading that fails says nothing
             return _UNKNOWN, f"placing it failed: {type(error).__name__}"
-        if placed.thread:
+        if placed.returns_none:
             return _BUILTIN, "NoneType"
         if placed.targets:
             if placed.unplaced:
@@ -626,15 +627,29 @@ class _Receivers:
         cls = owned[1] if owned is not None and func in owned[1].body else None
         return C.Target(file, func, cls, ())
 
+    def keys(self, file: str, func: ast.AST, name: str) -> Optional[frozenset[str]]:
+        """The keys the mapping *name* holds in *func* can be at: the texts every put into it puts it at, read from
+        every name holding it (:class:`_Keys`) -- ``param`` in ``updateJobStatus``, filled by ``pilot_api.update_job``;
+        ``None`` where one is not read."""
+        asked = (id(func), name)
+        if asked not in self._keys:
+            self._keys[asked] = _Keys(self).read_keys(file, func, name)
+        return self._keys[asked]
+
     def _read_as_value(self, func: ast.AST) -> bool:
         """Whether a name spelt as *func*'s is read anywhere in the corpus other than as what a call calls: handed as
-        a callback, a thread's target, held -- called then with what no call here says."""
+        a callback, a thread's target, held -- called then with what no call here says.  Not a read to build an
+        object whose every call hands the function its arguments (:meth:`Calls.forwarded_reads`): those calls are
+        placed at it."""
         if self._as_values is None:
             found: set[str] = set()
+            forwarded = self.calls.forwarded_reads()
             for file in self.types.corpus_files():
                 for node in ast.walk(
                     self.types.tree(file) or ast.Module(body=[], type_ignores=[])
                 ):
+                    if id(node) in forwarded:
+                        continue
                     if isinstance(node, ast.Attribute) and isinstance(
                         node.ctx, ast.Load
                     ):
@@ -1734,6 +1749,180 @@ class _Holders:
             self._hold(file, func, positional[index], at, of)
         elif arguments.vararg is not None:
             self._unread(at, of)
+
+
+class _Keys(_Holders):
+    """The keys a mapping may hold, read from every name that holds it (E15): :class:`_Holders`' walk, asked of the
+    mapping itself.
+
+    A holder is a name holding the mapping whole, at a path or not; a value put at one of its keys -- ``d[k] = v``,
+    ``setdefault(k, ...)``, a dict literal's entry, ``update`` with a literal or keywords -- is an answer, and its key
+    is read (:func:`_key_texts`).  What is read out of the mapping, and where it goes, is no move: ``varMap[f":{k}"] =
+    param[k]`` puts a value, not the mapping.  ``None`` where a move is not read, as for :class:`_Holders`, where the
+    mapping is a value not read as one (a call's result), and where a key is not read as texts.
+    """
+
+    def __init__(self, receivers: "_Receivers"):
+        super().__init__(receivers, (None,))
+        #: ``(file, function, key)`` of each put; ``None`` for a key not said (a comprehension's).
+        self.keyed: list[tuple[str, ast.AST, Optional[ast.expr]]] = []
+
+    def read_keys(
+        self, file: str, func: ast.AST, name: str
+    ) -> Optional[frozenset[str]]:
+        found = self.values(file, func, name)
+        if found is None or any(path for _file, _func, _value, path in found):
+            return None
+        holders: dict[int, set[str]] = {}
+        for held, spelled, at, of in self.seen:
+            if not at and not of:
+                holders.setdefault(held, set()).add(spelled)
+        texts: set[str] = set()
+        for _file, scope, key in self.keyed:
+            read = (
+                _key_texts(scope, key, holders.get(id(scope), set()))
+                if key is not None
+                else None
+            )
+            if read is None:
+                return None
+            texts |= read
+        return frozenset(texts)
+
+    def _bears(self, at: _Path, of: _Path) -> str:
+        if not of:
+            return "holder"
+        return "value" if len(of) == 1 and not at else ""
+
+    def _place(
+        self, file: str, func: ast.AST, value: ast.expr, at: _Path, of: _Path
+    ) -> None:
+        if not self.failed and self._bears(at, of) == "value":
+            self.keyed.append((file, func, of[0]))
+        super()._place(file, func, value, at, of)
+
+
+def _key_texts(func: ast.AST, key: ast.expr, holders: set[str]) -> Optional[set[str]]:
+    """The texts *key*, a key put into a mapping in *func*, can be: a literal, or a name bound only to literals -- by
+    assignment, or as a loop's target, whole or at a slot, over a literal or a local bound only to literals.  A key
+    taken from the mapping itself (``for k in list(d): d[k] = ...``, *holders* the names holding it whole there) adds
+    none.  ``None`` where one is not read so."""
+    if isinstance(key, ast.Constant):
+        return {key.value} if isinstance(key.value, str) else None
+    if not isinstance(key, ast.Name) or key.id in _parameters(func):
+        return None
+    stores = [
+        node
+        for node in C.own_nodes(func)
+        if isinstance(node, ast.Name)
+        and node.id == key.id
+        and not isinstance(node.ctx, ast.Load)
+    ]
+    if not stores or any(
+        isinstance(node, (ast.Global, ast.Nonlocal)) and key.id in node.names
+        for node in ast.walk(func)
+    ):
+        return None
+    texts: set[str] = set()
+    for node in stores:
+        parent = getattr(node, "parent", None)
+        if isinstance(parent, (ast.Assign, ast.AnnAssign)) and node is not parent.value:
+            value = parent.value
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                return None
+            texts.add(value.value)
+            continue
+        slot: Optional[int] = None
+        if isinstance(parent, ast.Tuple) and not any(
+            isinstance(one, ast.Starred) for one in parent.elts
+        ):
+            slot = next(i for i, one in enumerate(parent.elts) if one is node)
+            node, parent = parent, getattr(parent, "parent", None)
+        if not (isinstance(parent, (ast.For, ast.AsyncFor)) and parent.target is node):
+            return None
+        read = _iterated_texts(func, parent.iter, slot, holders)
+        if read is None:
+            return None
+        texts |= read
+    return texts
+
+
+def _iterated_texts(
+    func: ast.AST, over: ast.expr, slot: Optional[int], holders: set[str]
+) -> Optional[set[str]]:
+    """:func:`_key_texts` of a loop's target over *over*, at *slot* of each element (the element where ``None``)."""
+    taken = ""
+    if isinstance(over, ast.Name) and slot is None:
+        taken = over.id  # for k in d
+    elif isinstance(over, ast.Call) and not over.keywords:
+        called = over.func
+        if (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Name)
+            and not over.args
+            and called.attr
+            == ("keys" if slot is None else "items" if slot == 0 else None)
+        ):
+            taken = called.value.id  # for k in d.keys(), for k, v in d.items()
+        elif (
+            isinstance(called, ast.Name)
+            and called.id in ("list", "tuple", "sorted", "set")
+            and slot is None
+            and len(over.args) == 1
+            and isinstance(over.args[0], ast.Name)
+        ):
+            taken = over.args[0].id  # for k in list(d)
+    if taken and taken in holders:
+        return set()  # the mapping's own keys
+    sequences: list[ast.expr]
+    if isinstance(over, (ast.List, ast.Tuple, ast.Set)):
+        sequences = [over]
+    elif isinstance(over, ast.Name) and over.id not in _parameters(func):
+        uses = [
+            node
+            for node in ast.walk(func)
+            if isinstance(node, ast.Name) and node.id == over.id
+        ]
+        bound = [
+            getattr(node, "parent", None)
+            for node in uses
+            if isinstance(node.ctx, ast.Store)
+        ]
+        read = [node for node in uses if isinstance(node.ctx, ast.Load)]
+        if (
+            not bound
+            or not all(
+                isinstance(one, (ast.Assign, ast.AnnAssign))
+                and isinstance(one.value, (ast.List, ast.Tuple))
+                for one in bound
+            )
+            or not all(
+                isinstance(getattr(node, "parent", None), (ast.For, ast.AsyncFor))
+                and node.parent.iter is node  # type: ignore[attr-defined]
+                for node in read
+            )
+        ):
+            return None
+        sequences = [one.value for one in bound]  # type: ignore[union-attr]
+    else:
+        return None
+    texts: set[str] = set()
+    for sequence in sequences:
+        for element in sequence.elts:  # type: ignore[attr-defined]
+            if slot is not None:
+                if not (
+                    isinstance(element, (ast.Tuple, ast.List))
+                    and len(element.elts) > slot
+                    and not any(isinstance(one, ast.Starred) for one in element.elts)
+                ):
+                    return None
+                element = element.elts[slot]
+            if not (
+                isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ):
+                return None
+            texts.add(element.value)
+    return texts
 
 
 def _handed(

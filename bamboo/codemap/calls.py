@@ -211,12 +211,28 @@ class Placed(NamedTuple):
     there (:data:`_STARTERS`).  It returns at once, and nothing a definition
     returns comes back through it: a reader of what a call returns takes
     nothing from these.
+
+    *forwarded*: the call is made on an object built with a function, and the
+    method called hands that function its own arguments
+    (:meth:`Calls.forwarding`) -- ``timed_method.run(job_id, ...)`` after
+    ``timed_method = TimedMethod(global_task_buffer.updateJobStatus, t)``.
+    The targets are the function's, handed the call's arguments as a call of
+    it would (:func:`bind`); these are the expressions the function was
+    handed as, whose receiver is the object it runs on (:meth:`Calls.made_on`).
+    The method returns nothing, and nothing the function returns comes back
+    through the call.
     """
 
     targets: tuple[Target, ...] = ()
     unplaced: str = ""
     on_class: bool = False
     thread: bool = False
+    forwarded: tuple[ast.expr, ...] = ()
+
+    @property
+    def returns_none(self) -> bool:
+        """Whether the call's value is ``None`` whatever the targets return: *thread* or *forwarded*."""
+        return self.thread or bool(self.forwarded)
 
 
 #: The owner of a call in a module's own body -- the walk's spelling of the
@@ -397,6 +413,15 @@ class Calls:
         #: The parameters :meth:`handed_classes` is reading now: one asked
         #: again on the way is a cycle, and says nothing.
         self._handing: set[tuple[str, int, str]] = set()
+        #: :meth:`forwarding` by class, the locals :meth:`_wrapped` reads, and
+        #: what :meth:`_wrappings` finds across the corpus.
+        self._forwarders: dict[tuple[str, int], dict[str, tuple[str, str]]] = {}
+        self._wraps: dict[tuple[int, str], Optional[tuple[list[tuple[tuple[str, ast.ClassDef], ast.Call]], list[ast.Call]]]] = {}
+        self._wrapping_names: Optional[set[str]] = None
+        self._wrapping_classes: Optional[set[str]] = None
+        self._wrapped_by: Optional[list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]]] = None
+        self._wrapped_spellings: Optional[dict[str, set[str]]] = None
+        self._forwarded_reads: Optional[set[int]] = None
         types.handed_to = self.handed_classes
 
     # -- where a call lands -------------------------------------------------
@@ -508,6 +533,10 @@ class Calls:
         if named is not None:
             placed = self._method_of(named, called.attr)._replace(on_class=True)
             return placed._replace(targets=tuple(one._replace(bound=self._handed_self(file, func, call, bound)) for one in placed.targets))
+        # ``timed_method.run(job_id, ...)``: the function it was built with, called with them.
+        forwarded = self._handed_on(file, func, call)
+        if forwarded is not None:
+            return forwarded
         declared = self.types.declared(file, func, receiver)
         if declared is not None:
             # ``self.conn: WrappedOracleConn | WrappedPostgresConn`` -- each
@@ -663,6 +692,331 @@ class Calls:
                     return True
         return False
 
+    # -- a call a wrapper hands on -------------------------------------------
+
+    def forwarding(self, declared: tuple[str, ast.ClassDef], name: str) -> Optional[str]:
+        """The parameter of *declared*'s ``__init__`` holding the function its method *name* calls with its own arguments.
+
+        ``TimedMethod(method, timeout)`` keeps ``self.method = method``; its
+        ``run(self, *var, **kwargs)`` starts ``threading.Thread(target=self,
+        args=var, kwargs=kwargs)`` and joins it, and the thread calls
+        ``__call__(self, *var, **kwargs)``, which sets ``self.result =
+        self.method(*var, **kwargs)``: ``run(a, b)`` calls ``method(a, b)``
+        and returns, with nothing, once it has returned.  Python's rules, read
+        where every step is said: the method takes its object, ``*var`` and
+        maybe ``**kw`` and nothing else, returns no value, and one statement
+        of its own body hands them on, read nowhere else -- a call
+        ``self.<field>(*var, **kw)``, a call ``self(*var, **kw)``, or a
+        ``Thread`` or ``Process`` (:data:`_STARTERS`) built with
+        ``target=self, args=var, kwargs=kw``, started and joined by the next
+        two statements, the last two read through ``__call__`` the same way;
+        ``__init__`` binds the field to the parameter and reads the parameter
+        nowhere else; and no method of the class or its bases binds the field
+        again or reads it but to make that call.  ``None`` otherwise.
+        """
+        found = self._forwarding_methods(declared).get(name)
+        return found[1] if found is not None else None
+
+    def _forwarding_methods(self, declared: tuple[str, ast.ClassDef]) -> dict[str, tuple[str, str]]:
+        """``{method: (field, parameter)}`` for each method of *declared* :meth:`forwarding` reads."""
+        key = (declared[0], declared[1].lineno)
+        if key not in self._forwarders:
+            names = {
+                node.name
+                for _where, holder in self.types.mro(*declared)
+                for node in holder.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.args.vararg is not None
+            }
+            self._forwarders[key] = {
+                name: found for name in sorted(names) if (found := self._forwarder(declared, name)) is not None
+            }
+        return self._forwarders[key]
+
+    def _forwarder(self, declared: tuple[str, ast.ClassDef], name: str) -> Optional[tuple[str, str]]:
+        """``(field, parameter)`` where :meth:`forwarding` reads *declared*'s method *name*."""
+        found = self._handing_on(declared, name, 0)
+        init = self._method_of(declared, "__init__").targets
+        if found is None or len(init) != 1:
+            return None
+        field, made = found
+        stores = [
+            statement
+            for statement in init[0].func.body  # type: ignore[attr-defined]
+            if isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Attribute)
+            and _self_field(statement.targets[0]) == field
+            and isinstance(statement.value, ast.Name)
+        ]
+        if len(stores) != 1:
+            return None
+        parameter = stores[0].value.id  # type: ignore[attr-defined]
+        if parameter not in {one.arg for one in _positional(init[0], False)} | {
+            one.arg for one in init[0].func.args.kwonlyargs  # type: ignore[attr-defined]
+        }:
+            return None
+        if sum(isinstance(node, ast.Name) and node.id == parameter for node in ast.walk(init[0].func)) != 1:
+            return None
+        for _where, holder in self.types.mro(*declared):
+            for node in ast.walk(holder):
+                if not (isinstance(node, ast.Attribute) and node.attr == field and _self_field(node) == field):
+                    continue
+                if node is stores[0].targets[0]:
+                    continue
+                if not (isinstance(node.ctx, ast.Load) and any(node is call.func for call in made)):
+                    return None
+        return field, parameter
+
+    def _handing_on(
+        self, declared: tuple[str, ast.ClassDef], name: str, depth: int
+    ) -> Optional[tuple[str, list[ast.Call]]]:
+        """``(field, the calls of it)`` where *declared*'s method *name* hands its own arguments to ``self.<field>``."""
+        targets = self._method_of(declared, name).targets
+        if len(targets) != 1 or depth > 1:
+            return None
+        func = targets[0].func
+        args = func.args  # type: ignore[attr-defined]
+        if (
+            args.posonlyargs
+            or len(args.args) != 1
+            or args.kwonlyargs
+            or args.vararg is None
+            or _is_static(func)
+            or _is_classmethod(func)
+            or any(isinstance(node, ast.Return) and node.value is not None for node in own_nodes(func))
+        ):
+            return None
+        own, var = args.args[0].arg, args.vararg.arg
+        kw = args.kwarg.arg if args.kwarg is not None else None
+        body = func.body  # type: ignore[attr-defined]
+        for index, statement in enumerate(body):
+            value = statement.value if isinstance(statement, (ast.Expr, ast.Assign)) else None
+            if not isinstance(value, ast.Call):
+                continue
+            called = value.func
+            found: Optional[tuple[str, list[ast.Call]]]
+            if (
+                _hands_on(value, var, kw)
+                and isinstance(called, ast.Attribute)
+                and isinstance(called.value, ast.Name)
+                and called.value.id == own
+            ):
+                found = (called.attr, [value])
+            elif (_hands_on(value, var, kw) and isinstance(called, ast.Name) and called.id == own) or (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and self.types.library_class(targets[0].file, called) in _STARTERS
+                and not value.args
+                and {one.arg: getattr(one.value, "id", None) for one in value.keywords}
+                == {"target": own, "args": var, **({"kwargs": kw} if kw else {})}
+                and [_called_on(one) for one in body[index + 1 : index + 3]]
+                == [(statement.targets[0].id, "start"), (statement.targets[0].id, "join")]
+            ):
+                found = self._handing_on(declared, "__call__", depth + 1)
+            else:
+                continue
+            inside = {id(node) for node in ast.walk(statement)}
+            if found is None or any(
+                isinstance(node, ast.Name) and node.id in (var, kw) and id(node) not in inside
+                for node in own_nodes(func)
+            ):
+                return None
+            return found
+        return None
+
+    def _wrapped(
+        self, file: str, func: ast.AST, name: str
+    ) -> Optional[tuple[list[tuple[tuple[str, ast.ClassDef], ast.Call]], list[ast.Call]]]:
+        """``(each (class, construction) the local *name* is bound to, the calls made on it)`` where every use is read.
+
+        Every binding of *name* in *func* is ``name = C(...)``, ``C`` a class
+        of the corpus with a method :meth:`forwarding` reads; every other use
+        is an attribute read off it -- a call of such a method, or a field that
+        does not hold the function; it is not a parameter, not declared
+        ``global`` or ``nonlocal``, and no nested scope uses it.  So the
+        function the object was built with is called by those calls alone.
+        ``None`` otherwise.
+        """
+        key = (id(func), name)
+        if key in self._wraps:
+            return self._wraps[key]
+        self._wraps[key] = None
+        args = getattr(func, "args", None)
+        if args is None or name in {
+            one.arg for one in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if one is not None
+        }:
+            return None
+        own = {id(node) for node in own_nodes(func)}
+        built: list[tuple[tuple[str, ast.ClassDef], ast.Call]] = []
+        read: list[tuple[str, Optional[ast.Call]]] = []
+        for node in ast.walk(func):
+            if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+                return None
+            if not (isinstance(node, ast.Name) and node.id == name):
+                continue
+            parent = getattr(node, "parent", None)
+            if id(node) not in own:
+                return None
+            if isinstance(node.ctx, ast.Store):
+                if not (
+                    isinstance(parent, ast.Assign) and parent.targets == [node] and isinstance(parent.value, ast.Call)
+                ):
+                    return None
+                cls = self.types.class_named(file, parent.value.func)
+                if cls is None or not self._forwarding_methods(cls):
+                    return None
+                built.append((cls, parent.value))
+            elif isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Attribute) and isinstance(parent.ctx, ast.Load):
+                above = getattr(parent, "parent", None)
+                read.append((parent.attr, above if isinstance(above, ast.Call) and above.func is parent else None))
+            else:
+                return None
+        if not built:
+            return None
+        for cls, _construction in built:
+            methods = self._forwarding_methods(cls)
+            fields = {field for field, _parameter in methods.values()}
+            if any((attr not in methods) if call is not None else (attr in fields) for attr, call in read):
+                return None
+        found = (built, [call for _attr, call in read if call is not None])
+        self._wraps[key] = found
+        return found
+
+    def _handed_on(self, file: str, func: ast.AST, call: ast.Call) -> Optional[Placed]:
+        """Where *call*, made on a local :meth:`_wrapped` reads, lands: the functions it was built with (:attr:`Placed.forwarded`)."""
+        called = call.func
+        if not (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Name)
+            and called.attr in self._wrapping_methods()
+        ):
+            return None
+        wrapped = self._wrapped(file, func, called.value.id)
+        if wrapped is None:
+            return None
+        handed: list[ast.expr] = []
+        for cls, construction in wrapped[0]:
+            value = self._built_with(cls, construction, called.attr)
+            if value is None:
+                return None
+            handed.append(value)
+        targets: list[Target] = []
+        on_class: set[bool] = set()
+        for value in handed:
+            landed = self.named_callables(file, func, value)
+            if not landed:
+                return None
+            targets += [one for one in landed if one not in targets]
+            on_class.add(isinstance(value, ast.Attribute) and self.types.class_named(file, value.value) is not None)
+        if len(on_class) != 1:
+            return None
+        return Placed(tuple(targets), on_class=on_class.pop(), forwarded=tuple(handed))
+
+    def _built_with(self, cls: tuple[str, ast.ClassDef], construction: ast.Call, method: str) -> Optional[ast.expr]:
+        """What *construction* hands the parameter whose function *cls*'s *method* calls; ``None`` where it does not say."""
+        found = self._forwarding_methods(cls).get(method)
+        init = self._method_of(cls, "__init__").targets
+        if found is None or len(init) != 1 or found[1] not in said(construction, init[0]):
+            return None
+        return bind(construction, init[0]).get(found[1])
+
+    def _wrapping_methods(self) -> set[str]:
+        """The names of the methods :meth:`forwarding` reads, on any class of the corpus."""
+        return self._wrappers()[0]
+
+    def _wrappers(self) -> tuple[set[str], set[str]]:
+        """``(the methods' names, the classes' names)`` of every class of the corpus with a method :meth:`forwarding` reads."""
+        if self._wrapping_names is None or self._wrapping_classes is None:
+            methods: set[str] = set()
+            classes: set[str] = set()
+            for file in self.types.corpus_files():
+                tree = self.types.tree(file)
+                for node in ast.walk(tree) if tree is not None else ():
+                    if isinstance(node, ast.ClassDef) and (found := self._forwarding_methods((file, node))):
+                        methods |= set(found)
+                        classes.add(node.name)
+            self._wrapping_names, self._wrapping_classes = methods, classes
+        return self._wrapping_names, self._wrapping_classes
+
+    def _wrappings(self) -> list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]]:
+        """``(file, function, construction, the function it is built with, the calls made on it)`` across the corpus.
+
+        Each ``name = C(...)`` in a function, where :meth:`_wrapped` reads
+        *name*, for each method called on it -- a candidate list: what a call
+        lands at is :meth:`callees`'.
+        """
+        if self._wrapped_by is not None:
+            return self._wrapped_by
+        classes = self._wrappers()[1]
+        aliases = self._aliases()
+        names = classes | {other for one in classes for other in aliases.get(one, ())}
+        found: list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]] = []
+        for file in self.types.corpus_files() if names else []:
+            tree = self.types.tree(file)
+            for func in ast.walk(tree) if tree is not None else ():
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in own_nodes(func):
+                    if not (
+                        isinstance(node, ast.Assign)
+                        and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)
+                        and isinstance(node.value, ast.Call)
+                        and _head_name(node.value.func) in names
+                    ):
+                        continue
+                    wrapped = self._wrapped(file, func, node.targets[0].id)
+                    if wrapped is None:
+                        continue
+                    for cls, construction in wrapped[0]:
+                        if construction is not node.value:
+                            continue
+                        for method in dict.fromkeys(one.func.attr for one in wrapped[1]):  # type: ignore[attr-defined]
+                            value = self._built_with(cls, construction, method)
+                            if value is not None:
+                                found.append((file, func, construction, value, wrapped[1]))
+        self._wrapped_by = found
+        return found
+
+    def _forwarding_spellings(self, target: Target) -> list[str]:
+        """The names of the methods called on an object built with a function spelt as *target* (:meth:`_wrappings`)."""
+        if self._wrapped_spellings is None:
+            spelt: dict[str, set[str]] = {}
+            for _file, _func, _construction, value, made in self._wrappings():
+                held = value.attr if isinstance(value, ast.Attribute) else value.id if isinstance(value, ast.Name) else ""
+                if held:
+                    spelt.setdefault(held, set()).update(one.func.attr for one in made)  # type: ignore[attr-defined]
+            self._wrapped_spellings = spelt
+        return sorted({one for name in self.spellings(target) for one in self._wrapped_spellings.get(name, ())})
+
+    def forwarded_reads(self) -> set[int]:
+        """``id`` of each function read as a value only to build an object whose every call hands it on (:attr:`Placed.forwarded`).
+
+        ``global_task_buffer.updateJobStatus`` in ``TimedMethod(global_task_buffer.updateJobStatus, t)``:
+        nothing calls it but ``timed_method.run(...)``, placed there with its arguments.
+        """
+        if self._forwarded_reads is None:
+            self._forwarded_reads = {
+                id(value)
+                for file, func, _construction, value, made in self._wrappings()
+                if all(value in self.callees(file, func, one).forwarded for one in made)
+            }
+        return self._forwarded_reads
+
+    def made_on(self, file: str, func: ast.AST, call: ast.Call) -> Optional[ast.expr]:
+        """The expression whose object the method *call*, made in *func*, runs on; ``None`` where it says none.
+
+        The receiver it is called on -- or, for a call :attr:`Placed.forwarded`
+        a function read off an object, that object: ``timed_method.run(...)``
+        runs ``updateJobStatus`` on ``global_task_buffer``.
+        """
+        forwarded = self.callees(file, func, call).forwarded
+        if forwarded:
+            (handed, *more) = forwarded
+            return handed.value if not more and isinstance(handed, ast.Attribute) else None
+        return call.func.value if isinstance(call.func, ast.Attribute) else None
+
     def _constructed(self, file: str, func: ast.AST, holder: ast.expr) -> Optional[Placed]:
         """Where a call on a local or a ``self.<field>`` holding a class lands: that class's ``__init__``.
 
@@ -806,9 +1160,10 @@ class Calls:
 
         Every call :meth:`callees` places at *target* is here -- the
         consistency the tests and the census hold it to.  The candidates are
-        the calls spelled with any of :meth:`spellings`; the target's own
-        name comes first, so a list that was whole under that name alone
-        keeps its order.
+        the calls spelled with any of :meth:`spellings`, then with a method
+        called on an object built with a function spelt so
+        (:meth:`_forwarding_spellings`); the target's own name comes first,
+        so a list that was whole under that name alone keeps its order.
 
         A *target* bound to classes (:attr:`Target.bound`) is called by the
         calls that run it on an object of one of them: ``WorkerThread.run``
@@ -840,7 +1195,7 @@ class Calls:
             return _CALLERS[shared]
         kept = [
             site
-            for name in self.spellings(target)
+            for name in dict.fromkeys([*self.spellings(target), *self._forwarding_spellings(target)])
             for site in self._index().get(name, [])
             if any(
                 (placed.file, placed.func.lineno) == key  # type: ignore[attr-defined]
@@ -1574,6 +1929,31 @@ def _class_key(one: tuple[str, ast.ClassDef]) -> tuple[str, str, int]:
 
 def _bound_key(bound: tuple[tuple[str, ast.ClassDef], ...]) -> tuple[tuple[str, int], ...]:
     return tuple((file, cls.lineno) for file, cls in bound)
+
+
+def _hands_on(call: ast.Call, var: str, kw: Optional[str]) -> bool:
+    """Whether *call* hands ``*var`` and ``**kw`` and nothing else -- ``*var`` alone where *kw* is ``None``."""
+    star = call.args[0] if len(call.args) == 1 else None
+    return (
+        isinstance(star, ast.Starred)
+        and isinstance(star.value, ast.Name)
+        and star.value.id == var
+        and [(one.arg, getattr(one.value, "id", None)) for one in call.keywords] == ([(None, kw)] if kw else [])
+    )
+
+
+def _called_on(statement: ast.stmt) -> Optional[tuple[str, str]]:
+    """``("thr", "start")`` for the statement ``thr.start()``; ``None`` for any other."""
+    call = statement.value if isinstance(statement, ast.Expr) else None
+    if (
+        isinstance(call, ast.Call)
+        and not call.args
+        and not call.keywords
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+    ):
+        return call.func.value.id, call.func.attr
+    return None
 
 
 def _reads_self(call: ast.Call) -> bool:

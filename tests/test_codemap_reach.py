@@ -1006,3 +1006,75 @@ def test_a_hole_names_what_its_receiver_is_one_of_with_its_article(tmp_path):
     assert [hole.why for hole in record.rows["pkg/mod.py::run"].holes] == [
         "the receiver's class is not declared: an element of an iterator"
     ]
+
+
+def test_the_keys_a_mapping_may_hold_are_read_from_every_put_into_every_name_holding_it(
+    tmp_path,
+):
+    """``update``'s ``param`` holds the keys every caller puts into what it hands: ``first``, through a wrapper whose
+    ``run`` hands the function it was built with its own arguments (the read of ``update`` that built it is no read
+    as a value), puts at a literal list's first slots, at a literal loop's, at a literal; ``second`` hands a dict
+    literal.  ``update``'s own put at a key taken from ``param`` adds none.  Both ways, as every holder is read:
+    ``first``'s mapping is ``update``'s ``param``, which ``second`` fills too -- more than ``first`` puts, never
+    less.  Not read: a key no literal is (an f-string, a parameter), a mapping handed outside the corpus, one a
+    call returns."""
+    timed = (
+        "class Timed:\n"
+        "    def __init__(self, method, timeout):\n"
+        "        self.method = method\n\n"
+        "    def run(self, *var, **kwargs):\n"
+        "        self.method(*var, **kwargs)\n"
+    )
+    mod = (
+        "import json\n"
+        "from pkg.timed import Timed\n\n"
+        "def update(job_id, param):\n"
+        "    for key in list(param):\n"
+        "        param[key] = str(param[key])\n\n"
+        "def first(job_id, metrics):\n"
+        "    param = {}\n"
+        "    fields = [('jobMetrics', metrics, int), ('nEvents', 1, int)]\n"
+        "    for key, value, cast in fields:\n"
+        "        param[key] = cast(value)\n"
+        "    for key, value in [('startTime', 1), ('endTime', 2)]:\n"
+        "        param[key] = value\n"
+        "    param['diag'] = None\n"
+        "    timed = Timed(update, 10)\n"
+        "    timed.run(job_id, param)\n\n"
+        "def second(job_id):\n"
+        "    update(job_id, {'cloud': 'x'})\n\n"
+        "def by_fstring(param, n):\n"
+        "    param[f'x{n}'] = 1\n\n"
+        "def by_parameter(param, name):\n"
+        "    param[name] = 1\n\n"
+        "def outside(param):\n"
+        "    json.dumps(param)\n\n"
+        "def made():\n"
+        "    return json.loads('{}')\n\n"
+        "def returned():\n"
+        "    param = made()\n"
+        "    param['a'] = 1\n"
+    )
+    calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, timed=timed, mod=mod), {}))
+    receivers = reach._Receivers(calls, None)
+    tree = calls.types.tree("pkg/mod.py")
+
+    def keys(owner: str):
+        func = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == owner
+        )
+        return receivers.keys("pkg/mod.py", func, "param")
+
+    assert keys("update") == {
+        "jobMetrics",
+        "nEvents",
+        "startTime",
+        "endTime",
+        "diag",
+        "cloud",
+    }
+    assert keys("first") == keys("update")
+    for owner in ("by_fstring", "by_parameter", "outside", "returned"):
+        assert keys(owner) is None, owner

@@ -3461,8 +3461,9 @@ class _Walk:
             # declaration is read, and that resolution is gone into.
             return
         placed = self.calls.callees(frame.file, frame.func, call)
-        if placed.thread:
-            # ``thr.start()`` returns at once; what ``run`` returns is not its value.
+        if placed.returns_none:
+            # ``thr.start()`` returns at once; what ``run`` returns is not its
+            # value, nor what a wrapper's ``run`` hands its arguments to.
             return
         if not placed.targets:
             if placed.unplaced and step is not None and not step.terminal:
@@ -3608,8 +3609,9 @@ class _Walk:
             # Evaluated where the ``def`` is, once: nothing on the path to
             # this call chose it, so there is nothing further to walk.
             value, reads, detail = _text(argument), [], f"left to the default {callee}'s signature gives it"
-        elif name == calls_mod.receiver_parameter(target) and isinstance(call.func, ast.Attribute):
-            receiver = call.func.value
+        elif name == calls_mod.receiver_parameter(target) and (
+            receiver := self.calls.made_on(caller.file, caller.func, call)
+        ) is not None:
             own = _own_object(caller.func)
             if _is_super(receiver) and own is not None:
                 receiver = ast.Name(id=own, ctx=ast.Load())
@@ -3889,9 +3891,7 @@ class _Walk:
         if getattr(frame.func, "name", "") == "__init__":
             matches = lambda site, built: _site_key(site) in built  # noqa: E731
         else:
-            matches = lambda site, built: bool(  # noqa: E731
-                (self._made_at(site.file, site.func, site.call.func.value) or set()) & built
-            )
+            matches = lambda site, built: bool((self._site_made(site) or set()) & built)  # noqa: E731
         narrowed = _Narrowed(made, left, matches, follow, max(room, 0), step)
         key = (frame.file, getattr(frame.func, "lineno", 0))
         self.narrowings.setdefault(key, []).append(narrowed)
@@ -3939,7 +3939,8 @@ class _Walk:
         if made is not None and made <= narrowed.made:
             return
         narrowed.said.add(where)
-        receiver = _text(call.func.value) if isinstance(call.func, ast.Attribute) else _text(call.func)
+        on = self.calls.made_on(frame.file, frame.func, call)
+        receiver = _text(on) if on is not None else _text(call.func)
         came = f"; another object came in later on {receiver} at {frame.file}:{where[1]}"
         if made is None:
             if narrowed.left:
@@ -4009,8 +4010,7 @@ class _Walk:
             return sites, [], None
         kept, left = [], []
         for site in sites:
-            call = site.call
-            receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+            receiver = self.calls.made_on(site.file, site.func, site.call)
             if receiver is None or (isinstance(receiver, ast.Name) and receiver.id == "self"):
                 kept.append(site)
                 continue
@@ -4024,6 +4024,11 @@ class _Walk:
         if key not in self._made:
             self._made[key] = self._constructions(file, func, expression, _BUILT_HOPS, set()) or None
         return self._made[key]
+
+    def _site_made(self, site: "calls_mod.CallSite") -> Optional[set[tuple[str, int, int]]]:
+        """:meth:`_made_at` of the object the call at *site* runs its method on (:meth:`calls.Calls.made_on`)."""
+        receiver = self.calls.made_on(site.file, site.func, site.call)
+        return self._made_at(site.file, site.func, receiver) if receiver is not None else None
 
     def _entered_on(self, frame: _Frame, depth: int) -> Optional[list[tuple[str, ast.AST, ast.expr]]]:
         """``(file, function, object)`` for each call that brought the walk into *frame*.
@@ -4047,9 +4052,9 @@ class _Walk:
         self, caller: _Frame, call: ast.Call, depth: int
     ) -> Optional[list[tuple[str, ast.AST, ast.expr]]]:
         """``(file, function, object)`` *call*, made in *caller*, is made on; see :meth:`_entered_on`."""
-        if not isinstance(call.func, ast.Attribute):
+        receiver = self.calls.made_on(caller.file, caller.func, call)
+        if receiver is None:
             return None
-        receiver = call.func.value
         if isinstance(receiver, ast.Name) and receiver.id == "self":
             if depth >= 4:
                 return None

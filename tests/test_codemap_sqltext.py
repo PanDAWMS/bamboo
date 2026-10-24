@@ -1375,3 +1375,17 @@ def test_a_term_naming_its_column_and_its_bind_by_holes_is_kept_apart_from_the_k
     assert (write.keys, write.key_holes) == ({"b": ":b"}, [(1, ":cr_{}", (2,))])
     (unrolled,) = sqltext.writes("UPDATE T SET a=:a WHERE {}=:cr_{}")
     assert (unrolled.keys, unrolled.key_holes) == ({}, [(1, ":cr_{}", (2,))])
+
+
+def test_a_set_item_naming_its_column_and_its_bind_by_holes_is_kept_with_its_holes():
+    """``,{key}=:{key}`` for each key of a mapping names no column a reader of *columns* can take; it is still a
+    SET_COLUMN_IS_A_HOLE, and its holes are kept (:attr:`sqltext.SqlWrite.column_holes`) -- in a loop's passes or
+    not -- for a reader holding what the holes are."""
+    marked = f"UPDATE T SET a=:a{sqltext.REPEAT_OPEN},{{}}=:{{}}{sqltext.REPEAT_CLOSE} WHERE b=:b"
+    (write,) = sqltext.writes(marked)
+    assert (sorted(write.columns), write.column_holes) == (["a"], [(1, ":{}", (2,))])
+    assert {why for _what, why in sqltext.unread_columns(marked)} == {sqltext.SET_COLUMN_IS_A_HOLE}
+    (unrolled,) = sqltext.writes("UPDATE T SET a=:a,{}=:x_{} WHERE b=:b")
+    assert unrolled.column_holes == [(1, ":x_{}", (2,))]
+    (named,) = sqltext.writes("UPDATE T SET a=:a,merge{}=:b WHERE b=:b")
+    assert named.column_holes == []

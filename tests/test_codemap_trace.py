@@ -4512,3 +4512,40 @@ def go(spec):
     said = _said(_walked_in(roots, "m", "go", [10]))
 
     assert not [one for one in said if one[2] == "run"]
+
+
+def test_a_function_a_wrapper_hands_its_arguments_to_runs_on_the_object_it_was_read_off(tmp_path):
+    """``timed.run()`` calls ``Spec.columns()`` (``calls.Placed.forwarded``): ``cls`` holds ``Spec``, the object the
+    function was read off, not the ``Timed`` the call is made on."""
+    roots = _tree(
+        tmp_path,
+        **{"m.py": '''\
+class Timed:
+    def __init__(self, method, timeout):
+        self.method = method
+
+    def run(self, *var, **kwargs):
+        self.method(*var, **kwargs)
+
+
+class Spec:
+    @classmethod
+    def columns(cls, prefix=None):
+        if prefix:
+            names = prefix
+        else:
+            names = cls.attributes
+        spec.status = names
+
+
+def build():
+    timed = Timed(Spec.columns, 10)
+    timed.run()
+'''},
+    )
+
+    walked = _walked_in(roots, "m.py", "columns", [16])
+    handed = {s.name: s for s in walked.steps if s.kind == "handover"}
+
+    assert handed["cls"].detail == "the object columns is called on"
+    assert handed["cls"].value == "Spec"

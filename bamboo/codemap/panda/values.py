@@ -866,7 +866,7 @@ def handed(resolve, calls: Optional["Calls"]):
         if calls is None or depth >= HANDED_DEPTH:
             return []
         placed = calls.callees(file, func, call)
-        if not placed.targets or placed.unplaced or placed.thread:
+        if not placed.targets or placed.unplaced or placed.returns_none:
             return []
         found: list[Handed] = []
         for target in placed.targets:

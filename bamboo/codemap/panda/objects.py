@@ -196,6 +196,8 @@ class _Reader:
         self.calls = calls
         self.types = calls.types
         self.names = reach._Names(calls.types)
+        #: What a mapping holds, read from every name holding it (:meth:`reach._Receivers.keys`).
+        self.receivers = reach._Receivers(calls, None)
         declared = progress.spec_attributes(modules)
         self.columns: frozenset[str] = frozenset().union(
             *(declared.get(name, set()) for name in COLUMN_CLASSES)
@@ -295,7 +297,15 @@ class _Reader:
         if not read and not tables:
             return found
         whole, changed, sequenced = _whole_row(func, run, versions)
-        unread = bool(run.unread_columns)
+        keyed = [
+            self._keyed_columns(func, run, one.column_holes, versions) for one in read
+        ]
+        spelt = {item for _values, items in keyed for item in items}
+        # A SET item ``{}=:{}`` read as a column for each key of the mapping it walks is not a column left unread.
+        unread = any(
+            stop.reason != sqltext.SET_COLUMN_IS_A_HOLE or stop.source not in spelt
+            for stop in run.unread_columns
+        )
         # A row is new only where an INSERT makes it; an UPDATE whose bind map a sequence filled on some way
         # (updateJobStatus 242 after the corrupted files' valuesMap(useSeq=True)) still writes a row that was there.
         new_row = sequenced or any(
@@ -304,7 +314,7 @@ class _Reader:
         )
         lines = sorted({call.lineno for call in run.run_at})
         seen: set[str] = set()
-        for one in read:
+        for one, (by_keys, _items) in zip(read, keyed, strict=True):
             seen.add(one.table.lower())
             found.append(
                 DbWrite(
@@ -317,7 +327,8 @@ class _Reader:
                         for value in self._values(
                             func, run, column, given, whole, versions
                         )
-                    ],
+                    ]
+                    + by_keys,
                     whole=whole,
                     changed=changed,
                     unread=unread,
@@ -359,6 +370,57 @@ class _Reader:
                     )
                 )
         return found
+
+    def _keyed_columns(
+        self, func: ast.AST, run: sql.Execution, column_holes, versions: "_Versions"
+    ) -> tuple[list[WrittenValue], list[str]]:
+        """The columns *run*'s ``SET`` items ``{}=:{}`` write, where a loop over a mapping's keys fills the holes with
+        its key (:func:`sql.map_key`): one for each key the mapping can hold (:meth:`reach._Receivers.keys`) that
+        the loop's ``continue`` tests let through (:func:`sql.kept_map_keys`), valued by the mapping at it -- and the
+        items so read, as the statement spells them (``SET {}=:{}``).  ``updateJobStatus``' ``for key in
+        list(param): ... sql1 += f",{key}=:{key}"; varMap[f":{key}"] = param[key]``, ``param`` filled by
+        ``pilot_api.update_job``."""
+        file = self.types.file_of(func)
+        holes = run.reading_holes
+        found: dict[str, WrittenValue] = {}
+        items: list[str] = []
+        for column, bind, numbers in column_holes:
+            if file is None or not all(
+                0 < number <= len(holes) for number in (column, *numbers)
+            ):
+                continue
+            hole = holes[column - 1]
+            try:
+                mapping = sql.map_key(
+                    func,  # type: ignore[arg-type]
+                    run,
+                    hole,
+                    bind,
+                    tuple(holes[number - 1] for number in numbers),
+                )
+                keys = (
+                    self.receivers.keys(file, func, mapping.id)
+                    if isinstance(mapping, ast.Name)
+                    else None
+                )
+                kept = (
+                    sql.kept_map_keys(hole, sorted(keys)) if keys is not None else None
+                )
+            except Exception:  # noqa: BLE001 -- not read: the item stays a hole
+                kept = None
+            if kept is None:
+                continue
+            items.append(f"SET {{}}={bind}")
+            for key in kept:
+                value = ast.Subscript(
+                    value=mapping, slice=ast.Constant(value=key), ctx=ast.Load()
+                )
+                held = versions.paths(value)
+                for one in [WrittenValue(column=key, path=path) for path in held] or [
+                    WrittenValue(column=key, value=_cut(value))
+                ]:
+                    found.setdefault(one.model_dump_json(), one)
+        return list(found.values()), items
 
     def _values(
         self, func, run, column: str, given, whole: str, versions: "_Versions"
