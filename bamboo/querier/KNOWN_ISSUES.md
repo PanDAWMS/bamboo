@@ -213,11 +213,16 @@ Before such a stop, F1 (`Rerun.rows_between`) reads the first of the three: for 
 run's start and `as_of`, the run that wrote it, asked and judged as H2 asks and judges its own row -- the map's
 writers of the row's status, their logs at the row's time on the row's host, by the key, every row's asks before
 one stop (tmaeno, 2026-10-23, so that the logs of A's rows are recorded before they expire).  A run that prints
-the key in none of its records is not found there: its marks name the row by another column or by none (the map's
-F1 kinds row, time, other, none, nohole, norun: of the 107 same / can pairs of `JobSpec.jobStatus` on ced60ed, 57
-have no run marked by the key, and a run of one of them is found only where it prints the key in a record's
-body).  The ask the record format allows for it is the row's second, as text every record of that second begins
-with; not made yet.
+the key in none of its records is not found there.  On dc440d8 no writer is such: of the 120 arms with a same or
+can pair at level 0 (`JobSpec.jobStatus` 53, `JediTaskSpec.status` 67), the writer's run carries the key in its
+mark, or the function spells it in a print, for all but 7, and each of the 7, read in the code, is found by the
+key: Watcher.run's mark is filled by `str(pandaID)`; the post-processors' run is their caller's,
+PostProcessorThread.post_process_tasks, marked `<jediTaskID={}>`; Setupper.update_jobs prints counts only, in
+Setupper.run's run marked by a time stamp, and the rows its arms lead to are written in activateJob's run, marked
+`PandaID={}` (2026-10-24, analyzer-handover/out/lim-count.txt).  Asking the row's second instead would not be
+enough: it returns every record of that second, and with no key in them the records do not tell which run wrote
+the row -- that needs a run matched to the row by another column its mark holds (getJobs' `siteName` against the
+row's `computingSite`).
 
 *Shows:* a stop where a step needs such a value (on the record door, H7's implicit else at 785 for A and N, R5's
 `job.jobMetrics` for K), saying when the value was read, after F1's section; silent for the file rows and the
@@ -225,7 +230,8 @@ creation time.
 *Revisit:* with the map's facts: the attributes a run can set on an object and the columns a SET fills with
 another value than the one at hand; the writes that leave no row, with the select and the caller each is reached
 from, which can set a writer aside with no log asked (updateJobMetrics_JEDI takes only jobs a select found
-finished); for F1, the asks by the row's second.
+finished); for F1, a writer whose runs print no key (count again when the pin moves), with its run matched to
+the row by another column of the mark.
 
 ## H steps
 
@@ -277,8 +283,10 @@ A candidate is judged on one run, of one log.  A row the map places only in othe
 shown nor missing there (`Row.lands_in`, `rows.absence_trusted`): its lines are not read, so it neither excludes the
 candidate nor proves it.  The runs of the other files are not joined to the candidate's, as K21 joins runs only
 inside a call.  On ced60ed, 2 of the 1093 functions with prints have rows in different files (`rows.split_files`):
-pilot_api's `acquire_jobs` and `update_job`, in panda-PilotRequests.log and panda-api_pilot.log.  No case reads them.
+pilot_api's `acquire_jobs` and `update_job`, in panda-PilotRequests.log and panda-api_pilot.log.  Neither writes: on
+dc440d8 the map's reach gives them no assignment and no write, so neither is a candidate of H1, H2, F1 or S1, and no
+step meets the limit today (2026-10-24).
 
 *Shows:* said: "<function>'s rows land in different files [...]: a row is read only in a run of a file it lands in (KNOWN_ISSUES.md K23)".
-*Revisit:* when a case reads one of the two; when one pass's runs in several files can be joined by the key, the
-time and the machine.
+*Revisit:* when a writer's rows land in several files (compare `rows.split_files` with the writers when the pin
+moves); when one pass's runs in several files can be joined by the key, the time and the machine.
