@@ -35,6 +35,10 @@ loop that runs no times is real Python (``i = -1; for i in items: ...; use(i)``)
 and stays -- except a ``for`` over a list or tuple literal with an element and
 no ``*``, which runs at least once: ``reserve_old_attributes`` resets each of
 nine names it spells, and the way past the loop with none reset is not one.
+And a ``for`` over ``range(1)``, or ``range(n)`` with ``n`` a name its scope
+binds only to the literal ``1``, runs exactly once, with no way round:
+``updateJobStatus``'s ``nTry = 1; for iTry in range(nTry):`` tries once, and
+the bind map its corrupted-files arm fills is not read by a next try's write.
 :func:`pathcond.can_reach` still filters the answer by the conditions on the
 write and the read, as before.
 
@@ -318,6 +322,90 @@ def _runs_once(node: ast.For | ast.AsyncFor) -> bool:
     )
 
 
+def _runs_exactly_once(node: ast.For | ast.AsyncFor) -> bool:
+    """Whether the loop runs its body exactly once: over ``range(1)``, or ``range(n)`` with *n* a name its scope
+    binds only to the literal ``1`` -- and ``range`` not one the scope binds."""
+    held = getattr(node, "_reaching_once", None)
+    if held is None:
+        items = node.iter
+        scope = _scope_of(node)
+        held = (
+            scope is not None
+            and isinstance(items, ast.Call)
+            and isinstance(items.func, ast.Name)
+            and items.func.id == "range"
+            and len(items.args) == 1
+            and not items.keywords
+            and not _binds(scope, "range")
+            and (
+                _is_one(items.args[0])
+                or (
+                    isinstance(items.args[0], ast.Name)
+                    and _bound_only_to_one(scope, items.args[0].id)
+                )
+            )
+        )
+        node._reaching_once = held  # type: ignore[attr-defined]
+    return held
+
+
+def _is_one(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant) and type(node.value) is int and node.value == 1
+    )
+
+
+def _bound_only_to_one(scope: ast.AST, name: str) -> bool:
+    """Whether *scope* binds *name*, and only by plain assignments of the literal ``1`` -- in its nested scopes
+    neither, nor declared global or nonlocal."""
+    allowed = {
+        id(one)
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Assign) and _is_one(node.value)
+        for one in node.targets
+        if isinstance(one, ast.Name) and one.id == name
+    }
+    return bool(allowed) and not _binds(scope, name, allowed)
+
+
+def _binds(
+    scope: ast.AST, name: str, allowed: frozenset[int] | set[int] = frozenset()
+) -> bool:
+    """Whether anything inside *scope* -- its nested scopes too -- binds *name*, besides the nodes in *allowed*."""
+    for node in ast.walk(scope):
+        if id(node) in allowed:
+            continue
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and not isinstance(node.ctx, ast.Load)
+        ):
+            return True
+        if isinstance(node, ast.arg) and node.arg == name:
+            return True
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            return True
+        if (
+            isinstance(node, ast.alias)
+            and (node.asname or node.name.split(".")[0]) == name
+        ):
+            return True
+        if (
+            isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
+            and node.name == name
+        ):
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+        if (
+            node is not scope
+            and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == name
+        ):
+            return True
+    return False
+
+
 def _catches_all(handler: ast.ExceptHandler) -> bool:
     kind = handler.type
     if kind is None:
@@ -482,9 +570,10 @@ class _Flow:
     _AsyncWith = _With
 
     def _loop(
-        self, node: ast.For | ast.AsyncFor | ast.While, before: int
+        self, node: ast.For | ast.AsyncFor | ast.While, before: int, rounds: bool = True
     ) -> tuple[int, Optional[int], Optional[int]]:
-        """Iterate the body to a fixpoint: (the state at the head, the ``break`` paths, the state after a pass)."""
+        """Iterate the body to a fixpoint, or once where it has no way round: (the state at the head, the
+        ``break`` paths, the state after a pass)."""
         head = before
         while True:
             loop = _Loop(len(self._catchers))
@@ -493,17 +582,18 @@ class _Flow:
             self._loops.pop()
             passed = _join(end, loop.continues)
             again = before | (passed or 0)
-            if again == head:
+            if again == head or not rounds:
                 return head, loop.breaks, passed
             head = again
 
     def _For(self, node: ast.For | ast.AsyncFor, state: Optional[int]) -> Optional[int]:
         if state is None:
             return None
-        head, breaks, passed = self._loop(node, state)
+        once = _runs_exactly_once(node)
+        head, breaks, passed = self._loop(node, state, rounds=not once)
         self._raise(head)  # ``next()`` on the iterator, every time round
-        # Over a literal with an element the loop ends after a pass, never before the first.
-        done = passed if _runs_once(node) else head
+        # Over a literal with an element, or range(1), the loop ends after a pass, never before the first.
+        done = passed if once or _runs_once(node) else head
         return _join(self._block(node.orelse, done), breaks)
 
     _AsyncFor = _For

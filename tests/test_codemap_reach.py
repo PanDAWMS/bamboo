@@ -836,15 +836,14 @@ def test_a_name_unpacked_from_a_call_is_the_slot_its_tuple_is_declared_with(tmp_
 def test_a_local_container_s_values_are_what_the_function_puts_into_it(tmp_path):
     """``files[name] = {'lfns': []}`` then ``files[name]['lfns'].append(name)``: a list, put there by the function.
 
-    Not where the container goes where other code can fill it -- handed to a call --, nor where a put is not read
-    (``update`` with another mapping), nor where nothing the function puts is at that place.
+    Not where the container goes where other code can fill it -- handed to a call outside the corpus --, nor where
+    a put is not read (``update`` with a mapping handed in from nowhere the corpus calls), nor where nothing the
+    function puts is at that place.
     """
     record = _record(
         tmp_path,
         mod=(
-            _TAKER + "def keep(d):\n"
-            "    pass\n\n"
-            "def fill(names: list, more: dict):\n"
+            "import json\n\n" + _TAKER + "def fill(names: list, more: dict):\n"
             "    files = {}\n"
             "    for name in names:\n"
             "        files[name] = {'lfns': [], 'job': None}\n"
@@ -854,7 +853,7 @@ def test_a_local_container_s_values_are_what_the_function_puts_into_it(tmp_path)
             "    by_weight[1].append(2)\n"
             "    shared = {}\n"
             "    shared['x'] = []\n"
-            "    keep(shared)\n"
+            "    json.dump(shared, None)\n"
             "    shared['x'].append(1)\n"
             "    merged = {}\n"
             "    merged['x'] = []\n"
@@ -868,6 +867,105 @@ def test_a_local_container_s_values_are_what_the_function_puts_into_it(tmp_path)
         "merged['x'].append",
         "shared['x'].append",
     ]
+
+
+def test_a_container_s_values_are_read_from_every_name_holding_it(tmp_path):
+    """What ``d[k]...`` is, read from every name holding d's container: across calls, through parts, aliases, loops.
+
+    ``record`` is handed ``extracted`` by ``insert``; ``insert`` by ``bulk``'s ``insert(*args, **kwargs)`` after
+    ``kwargs.update(new_kwargs)`` -- the ``**`` holds the key on every way, so the ``*`` does not fill it -- and by
+    ``store`` with the default: ``extracted['state']['vars']`` is the list ``setdefault`` puts there.  Where the
+    update is on some ways only (``bulk2``), the ``*`` may fill it and the call stays a hole.  A value put through a
+    part (``setdefault(...).append``, ``get(...).append``), an alias (``e = d or more``), a loop over the values or
+    items or a builtin's copy of them, or by a callee handed the container, is one of what it holds there: the
+    undeclared one leaves ``d['a'][-1].move`` a hole.  A callee that only reads it leaves it closed.
+    """
+    shapes = {
+        "chain_setdefault": "    d.setdefault('a', []).append(undeclared())\n",
+        "chain_get": "    d.get('a').append(undeclared())\n",
+        "loop_values": "    for v in d.values():\n        v.append(undeclared())\n",
+        "loop_items": "    for k, v in d.items():\n        v.append(undeclared())\n",
+        "alias": "    e = d or {}\n    e['a'].append(undeclared())\n",
+        "copy_values": "    for v in list(d.values()):\n        v.append(undeclared())\n",
+        "callee_puts": "    puts(d)\n",
+        "callee_reads": "    looks(d)\n",
+    }
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def record(job, extracted: dict | None = None):\n"
+            "    if extracted is not None:\n"
+            "        extracted.setdefault('state', {'sql': 's', 'vars': []})\n"
+            "        extracted['state']['vars'].append(job)\n\n"
+            "def insert(job, user, flag=True, extracted: dict | None = None):\n"
+            "    record(job, extracted=extracted)\n\n"
+            "def bulk(arg_list: list):\n"
+            "    for args, kwargs in arg_list:\n"
+            "        tmp = {}\n"
+            "        new_kwargs = {'extracted': tmp}\n"
+            "        kwargs.update(new_kwargs)\n"
+            "        insert(*args, **kwargs)\n\n"
+            "def store(jobs: list):\n"
+            "    params = []\n"
+            "    for job in jobs:\n"
+            "        params.append([[job, 'u'], {'flag': False}])\n"
+            "    bulk(params)\n"
+            "    insert(jobs[0], 'u')\n\n"
+            "def record2(job, extracted: dict | None = None):\n"
+            "    extracted.setdefault('state', {'vars': []})\n"
+            "    extracted['state']['vars'].append(job)\n\n"
+            "def insert2(job, extracted: dict | None = None):\n"
+            "    record2(job, extracted=extracted)\n\n"
+            "def bulk2(arg_list: list, c):\n"
+            "    for args, kwargs in arg_list:\n"
+            "        if c:\n"
+            "            kwargs.update({'extracted': {}})\n"
+            "        insert2(*args, **kwargs)\n\n"
+            "def store2(jobs: list):\n"
+            "    bulk2([[[job], {}] for job in jobs], True)\n\n"
+            "def puts(d):\n"
+            "    d['a'].append(undeclared())\n\n"
+            "def looks(d):\n"
+            "    print(len(d))\n\n"
+            + "".join(
+                f"def {name}():\n    d = {{'a': [1]}}\n{body}    d['a'][-1].move()\n\n"
+                for name, body in shapes.items()
+            )
+        ),
+    )
+
+    def holes(owner: str) -> list[str]:
+        return sorted(_callees(record, f"pkg/mod.py::{owner}"))
+
+    assert "extracted['state']['vars'].append" not in holes("record")
+    assert "extracted['state']['vars'].append" in holes("record2")
+    for name in shapes:
+        assert ("d['a'][-1].move" in holes(name)) is (name != "callee_reads"), name
+
+
+def test_a_value_unpacked_into_a_container_s_place_is_the_slot_the_call_is_declared_to_return(
+    tmp_path,
+):
+    """``(fetched[site], held[site]) = buffer.outputs()``, declared ``tuple[list, Any]``: ``fetched[site]`` is a list
+    (doGenerate's ``fetched_out_sub_chunks[site_name]``, put by getOutputFiles_JEDI's first slot), ``held[site]``
+    what the second slot is declared -- not one of what the tuple holds."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "from typing import Any\n\n" + _TAKER + "class Buffer:\n"
+            "    def outputs(self) -> tuple[list, Any]:\n"
+            "        return [], None\n\n"
+            "def generate(buffer: Buffer, site):\n"
+            "    fetched = {}\n"
+            "    held = {}\n"
+            "    (fetched[site], held[site]) = buffer.outputs()\n"
+            "    fetched[site].append(1)\n"
+            "    held[site].move()\n"
+        ),
+    )
+    holes = record.rows["pkg/mod.py::generate"].holes
+    assert [hole.callee for hole in holes] == ["held[site].move"]
+    assert holes[0].why.endswith("declared Any")
 
 
 def test_a_loop_over_a_name_bound_to_a_call_is_over_what_the_call_is_declared_to_return(

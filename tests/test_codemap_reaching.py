@@ -365,6 +365,60 @@ def s40_loop_over_a_starred_or_empty_literal(rest):
     for name in ():
         x = name  # w:c
     use(x)  # r:x a b c
+
+
+def s41_loop_over_range_of_a_name_bound_to_one_runs_once(spec):
+    x = 0  # w:a
+    nTry = 1
+    for iTry in range(nTry):
+        use(x)  # r:x a
+        if spec:
+            x = spec  # w:b
+            continue
+        x = None  # w:c
+    else:
+        use(x)  # r:x b c
+    use(x)  # r:x b c
+
+
+def s42_loop_over_range_one_breaks_or_ends(spec):
+    x = 0  # w:a
+    for _ in range(1):
+        use(x)  # r:x a
+        if spec:
+            x = 1  # w:b
+            break
+        x = 2  # w:c
+    else:
+        use(x)  # r:x c
+    use(x)  # r:x b c
+
+
+def s43_loop_over_range_of_a_name_bound_otherwise(spec, c):
+    x = 0  # w:a
+    nTry = 1
+    if c:
+        nTry = 3
+    for iTry in range(nTry):
+        use(x)  # r:x a b
+        x = spec  # w:b
+    use(x)  # r:x a b
+
+
+def s44_loop_over_range_of_a_parameter(spec, nTry=1):
+    x = 0  # w:a
+    for iTry in range(nTry):
+        use(x)  # r:x a b
+        x = spec  # w:b
+    use(x)  # r:x a b
+
+
+def s45_loop_over_a_range_the_function_rebinds(spec):
+    range = list
+    x = 0  # w:a
+    for _ in range(1):
+        x = spec  # w:b
+    use(x)  # r:x a b
 '''
 
 

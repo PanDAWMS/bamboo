@@ -4630,7 +4630,7 @@ class DbWrite(BaseModel):
     )
     changed: bool = Field(default=False, description="The map holds only the attributes changed since the object was read.")
     unread: bool = Field(
-        default=False, description="It names a column at run time that is not read, so it can write any column."
+        default=False, description="It names columns at run time that are not read: which of the row's columns it writes is not known."
     )
     keys: list[WrittenValue] = Field(
         default_factory=list, description="The ``WHERE`` terms that name its row: ``PandaID=:PandaID``."

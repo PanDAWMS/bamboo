@@ -662,6 +662,7 @@ NOT_FOLLOWED_KEY = (
     "writes {column} on a row named by {key}, which is not followed to the object's"
 )
 UNREAD_KEY = "writes {column} on a row whose key is not read"
+NAMED_AT_RUN_TIME = "names columns at run time on the object's row, which are not read: {column} may be one"
 NOT_READ_HERE = "writes {column} as {object} holds it, which is not followed to where it was read, on a row named by {key}"
 HOLE_NAMED = (
     "a call the record could not place, named {name}, as a function writing {column} is"
@@ -727,8 +728,11 @@ def may_change(
 
     What leaves the answer open is said: a hole the object reaches, a write
     of the column whose row is named by something not followed to the
-    object's, and a call of the closure the record could not place whose name
-    a function writing the column has (:data:`CHANGE_PREMISES`).
+    object's, a write naming columns at run time the record does not read,
+    on the object's row, of a column it does not name (``updateJobStatus``'s
+    ``SET`` of the keys of the map it is handed), and a call of the closure
+    the record could not place whose name a function writing the column has
+    (:data:`CHANGE_PREMISES`).
 
     *spec_class* and *table_classes* (:func:`table_classes`) keep to the
     tables that hold the object's class: ``filesTable4`` holds FileSpec, and a
@@ -916,13 +920,18 @@ def may_change(
                 held and _holds(keyed.get(at, set()), held)
                 for held, _spelled in key_values
             ):
-                because[
-                    Site(
-                        at,
-                        site_line,
-                        f"{write.kind} {write.table} writes {column} on the object's row",
-                    )
-                ] = None
+                if named:
+                    because[
+                        Site(
+                            at,
+                            site_line,
+                            f"{write.kind} {write.table} writes {column} on the object's row",
+                        )
+                    ] = None
+                else:
+                    opened[
+                        Site(at, site_line, NAMED_AT_RUN_TIME.format(column=column))
+                    ] = None
             elif key_values:
                 spelled = ", ".join(text for _held, text in key_values)
                 opened[

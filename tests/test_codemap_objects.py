@@ -395,6 +395,68 @@ def test_a_whole_row_write_of_the_object_takes_what_was_assigned_on_it(tmp_path)
     assert owners == {"Adder.finish", "DBProxy.archiveJob"}
 
 
+def test_an_update_writes_a_row_that_was_there_whatever_filled_its_map(tmp_path):
+    """An UPDATE whose bind map ``valuesMap(useSeq=True)`` made is no new row: only an INSERT makes one."""
+    proxy = PROXY.replace(
+        "        self.cur.execute(sql, job.valuesMap(useSeq=True))\n",
+        "        self.cur.execute(sql, job.valuesMap(useSeq=True))\n"
+        '        job.jobMetrics = "stored"\n'
+        "        varMap = job.valuesMap(useSeq=True)\n"
+        '        varMap[":PandaID"] = job.PandaID\n'
+        '        sql = "UPDATE ATLAS_PANDA.jobsDefined4 SET jobMetrics=:jobMetrics WHERE PandaID=:PandaID"\n'
+        "        self.cur.execute(sql, varMap)\n",
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=ADDER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    writes = rows["pkg/proxy.py::DBProxy.insertNewJob"].writes
+    assert sorted((w.kind, w.new_row) for w in writes) == [
+        ("insert", True),
+        ("update", False),
+    ]
+    answer = objects.may_change(
+        rows, "pkg/proxy.py::DBProxy.insertNewJob", "job", "jobMetrics"
+    )
+    assert answer.verdict is True
+    assert [site.line for site in answer.because] == [26, 30]
+
+
+def test_a_write_naming_columns_at_run_time_is_open_on_a_column_it_does_not_name(
+    tmp_path,
+):
+    """updateJobStatus' SET adds a column for each key of the map it is handed: on the job's row it writes jobStatus,
+    which it names, and may write cloud -- whether it does is the caller's keys', which the record does not read."""
+    proxy = (
+        PROXY
+        + """
+
+class Status:
+    def update(self, pandaID, jobStatus, param):
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus"
+        varMap = {}
+        for key in list(param):
+            sql += f",{key}=:{key}"
+            varMap[f":{key}"] = param[key]
+        sql += " WHERE PandaID=:PandaID"
+        varMap[":jobStatus"] = jobStatus
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+"""
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=ADDER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    owner = "pkg/proxy.py::Status.update"
+    assert [(w.unread, [k.path for k in w.keys]) for w in rows[owner].writes] == [
+        (True, ["pandaID"])
+    ]
+    named = objects.may_change(rows, owner, "pandaID", "jobStatus", keys=("pandaID",))
+    assert named.verdict is True
+    unnamed = objects.may_change(rows, owner, "pandaID", "cloud", keys=("pandaID",))
+    assert unnamed.verdict is None
+    assert [site.how for site in unnamed.open] == [
+        objects.NAMED_AT_RUN_TIME.format(column="cloud")
+    ]
+
+
 def test_a_map_bound_again_for_each_statement_is_the_one_that_reaches_the_call(
     tmp_path,
 ):

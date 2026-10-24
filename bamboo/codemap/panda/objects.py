@@ -296,6 +296,8 @@ class _Reader:
             return found
         whole, changed, sequenced = _whole_row(func, run, versions)
         unread = bool(run.unread_columns)
+        # A row is new only where an INSERT makes it; an UPDATE whose bind map a sequence filled on some way
+        # (updateJobStatus 242 after the corrupted files' valuesMap(useSeq=True)) still writes a row that was there.
         new_row = sequenced or any(
             "useSeq=True" in (hole.source or "").replace(" ", "")
             for _offset, hole in run.holes
@@ -327,10 +329,13 @@ class _Reader:
                         )
                     ]
                     + _map_keys(func, run, one.key_holes, versions),
-                    new_row=new_row
-                    or any(
-                        "nextval" in given.text.lower()
-                        for given in one.columns.values()
+                    new_row=one.kind == "insert"
+                    and (
+                        new_row
+                        or any(
+                            "nextval" in given.text.lower()
+                            for given in one.columns.values()
+                        )
                     ),
                 )
             )
@@ -350,7 +355,7 @@ class _Reader:
                         whole=whole,
                         changed=changed,
                         unread=True,
-                        new_row=new_row,
+                        new_row=kind == "insert" and new_row,
                     )
                 )
         return found
