@@ -56,7 +56,7 @@ import logging
 import re
 import string
 import sys
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence
 
@@ -195,6 +195,95 @@ _WALKED_THROUGH = frozenset({STOP_EXTERNAL})
 MODULE_SCOPE = "module-scope"
 NESTED_SCOPE = "nested-def"
 
+#: The kinds of :class:`Question`: the bindings of a name read at a place, what
+#: a call returns, and the calls of a method that sets ``self.<field>``.
+ASK_BINDINGS = "bindings"
+ASK_RETURNS = "returns"
+ASK_SETTER_CALLS = "setter_calls"
+
+#: The kinds of :class:`Move`: into a call, up to a caller through what it
+#: hands a parameter, into a method assigning a field the frame reads, and
+#: across to a function read for a name without a call.
+MOVE_DOWN = "down"
+MOVE_UP = "up"
+MOVE_INTO = "into"
+MOVE_ACROSS = "across"
+
+
+class Move(NamedTuple):
+    """One way a walk came to a function that changes how it is read there.
+
+    ``down``: through a call, so a parameter is what that call hands it; ``up``:
+    to a caller, from what it hands, so its names are read at the call; ``into``:
+    to a method assigning a field the function before reads, so a constructor's
+    or a setter's callers are the ones made on that object; ``across``: to the
+    entry a map handover names, or a closure's enclosing function, changing
+    nothing but where the walk reads.  *file*, *owner*, *line*: the function
+    moved to and its ``def``; *call*: a ``down``'s call in the function before
+    (:func:`_place`).
+    """
+
+    kind: str
+    file: str
+    owner: str
+    line: int
+    call: tuple = ()
+
+
+class Question(NamedTuple):
+    """One hop of a walk, asked on its own (:class:`Asker`).
+
+    *kind* :data:`ASK_BINDINGS`: *name* in *owner* read at *line* (``0``: the
+    function's own answer); :data:`ASK_RETURNS`: what the call *name* at *line*
+    returns, taken at *path*; :data:`ASK_SETTER_CALLS`: the calls of the method
+    at *line*, which sets *name*.  *armed*: one the arms hand back -- what they
+    read and call --, however the walk came to it again; there a binding is
+    kept only if it can run before an arm.
+    *at* and *chain* are the walk's own -- the node read at or called, and the
+    moves that brought the walk to *owner* -- and come back unchanged from an
+    answer's frontier.  No depth: a name asked at one place is one question
+    however deep the walk was when it came to it.
+    """
+
+    kind: str
+    file: str
+    owner: str
+    name: str
+    line: int
+    armed: bool = False
+    at: tuple = ()
+    path: tuple = ()
+    chain: tuple[Move, ...] = ()
+
+
+class Answer(NamedTuple):
+    """A question's one hop: its steps, the note, and what it did not follow (*frontier*)."""
+
+    steps: list[TraceStep]
+    note: str
+    frontier: list[Question]
+    skeleton: list[SkeletonLine] = []
+
+
+def _place(node: Optional[ast.AST]) -> tuple:
+    """Where *node* is in its tree, to find it again (:func:`_node_at`)."""
+    if node is None:
+        return ()
+    return (
+        type(node).__name__,
+        getattr(node, "lineno", 0),
+        getattr(node, "col_offset", 0),
+        getattr(node, "end_lineno", 0),
+        getattr(node, "end_col_offset", 0),
+    )
+
+
+def _node_at(func: ast.AST, place: tuple) -> Optional[ast.AST]:
+    """The node of *func* at *place*, or ``None``."""
+    if not place:
+        return None
+    return next((node for node in ast.walk(func) if _place(node) == place), None)
+
 
 class _Frame(NamedTuple):
     file: str
@@ -208,6 +297,19 @@ def _with_class(file: str, tree: ast.Module, func: ast.AST) -> str:
     """``file::Class.method``: the owner of *func* told apart from another class's method of its name."""
     cls = pathcond.class_of(tree, func)
     return f"{file}::{cls.name if cls is not None else 'module'}.{getattr(func, 'name', '')}"
+
+
+def _located(tree: ast.Module, owner: str, line: Optional[int]) -> Optional[ast.AST]:
+    """The function of *tree* *owner* names: the one holding *line*, or with no line the first of its name."""
+    if line is not None:
+        return containing_function(tree, line, owner)
+    wanted = owner.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+    return next((node for node, _cls in pathcond.functions_with_owner(tree) if node.name == wanted), None)
+
+
+def _holds(func: ast.AST, line: Optional[int]) -> bool:
+    """Whether *line* is in *func*, or no line is asked."""
+    return line is None or func.lineno <= line <= (func.end_lineno or func.lineno)
 
 
 def _text(node: ast.AST) -> str:
@@ -1713,8 +1815,27 @@ class _Walk:
         reading_at: Optional[tuple[str, str, int]] = None,
         narrowed: Optional[tuple[str, str]] = None,
         guards_above: bool = True,
+        calls: Optional["calls_mod.Calls"] = None,
+        hop: Optional[int] = None,
     ) -> None:
         self.roots = roots
+        #: The depth a question is answered at (:class:`Asker`): a follow
+        #: deeper than it is not run but handed back as a question in
+        #: :attr:`frontier`, and the depth budget caps the question's chain
+        #: (:meth:`_ask_later`).  ``None`` -- :func:`walk` -- follows everything.
+        self.hop = hop
+        self.frontier: list[Question] = []
+        self._later: set[Question] = set()
+        #: The questions the arms hand back (:meth:`Asker.start`'s frontier):
+        #: one asked again from deeper in is still theirs.
+        self.arms_asked: frozenset[Question] = frozenset()
+        #: ``{(file, owner): [the moves that brought the walk there]}``, kept
+        #: only where :attr:`hop` is set: what a frontier question carries.
+        self.chains: dict[tuple[str, str], list[tuple[Move, ...]]] = {}
+        #: ``{(file, def line): owner}`` a question spells a function by ahead
+        #: of :meth:`_spelled`'s rule -- the start, as the map names it.
+        self.kept_owners: dict[tuple[str, int], str] = {}
+        self._names: dict[str, Counter] = {}
         #: Whether an arm's walk explains the tests above it as well as its own.
         #: See :func:`walk`.
         self.guards_above = guards_above
@@ -1779,9 +1900,13 @@ class _Walk:
         self._role = ""
         self._roles: dict[tuple, str] = {}
         self._constants: dict[int, dict[str, list]] = {}
-        self.types = _Types(roots, self.parsed)
+        #: One reading of the corpus for every question an :class:`Asker`
+        #: asks, or the walk's own; a shared one is told each file the walk
+        #: reads, as the walk's own reads :attr:`parsed`.
+        self._shared = calls is not None
+        self.types = calls.types if calls is not None else _Types(roots, self.parsed)
         self._declared: dict[tuple[str, str, str], Optional[str]] = {}
-        self.calls = calls_mod.Calls(self.types)
+        self.calls = calls if calls is not None else calls_mod.Calls(self.types)
         #: ``{(file, owner): [(caller frame, the call, what it binds)]}`` for
         #: every function the walk went into, so a parameter read there is
         #: answered by the call that brought the walk in.
@@ -1820,6 +1945,8 @@ class _Walk:
             logger.debug("trace: %s unreadable", file)
             return None
         self.parsed[file] = held
+        if self._shared:
+            self.types.walked.setdefault(file, held)
         return held
 
     def frame(
@@ -1830,10 +1957,19 @@ class _Walk:
         line: Optional[int] = None,
         handovers: Sequence[Handover] = (),
     ) -> Optional[_Frame]:
+        held = self.frames.get((file, owner))
+        located = None
+        if self.hop is not None and (held is None or not _holds(held.func, line)):
+            # A question spells the function by its file, so it is found
+            # before its key is known (:meth:`_spelled`).
+            parsed = self.module(file)
+            located = _located(parsed[1], owner, line) if parsed is not None else None
+            if located is not None:
+                owner = self._spelled(file, parsed[1], located)
         key = (file, owner)
         if key in self.frames:
             held = self.frames[key]
-            if held is None or line is None or held.func.lineno <= line <= (held.func.end_lineno or held.func.lineno):
+            if held is None or _holds(held.func, line):
                 return held
             # Two classes of one file with a method of one name, and the key
             # holds the other one's: ``datasetManager.py`` defines ``run`` in
@@ -1852,24 +1988,31 @@ class _Walk:
         if parsed is None:
             return None
         _source, tree = parsed
-        wanted = owner.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
-        if line is not None:
-            func = containing_function(tree, line, owner)
-        else:
-            func = next(
-                (
-                    node
-                    for node, _cls in pathcond.functions_with_owner(tree)
-                    if node.name == wanted
-                ),
-                None,
-            )
+        func = located or _located(tree, owner, line)
         if func is None:
             return None
         self.frames[key] = _Frame(
             file, owner, func, tuple(handovers), _imported_names(tree)
         )
         return self.frames[key]
+
+    def _spelled(self, file: str, tree: ast.Module, func: ast.AST) -> str:
+        """The owner a question names *func* by, which the file alone decides.
+
+        :func:`walk` spells a function plainly unless another function of the
+        file with its name holds that spelling already, so which of two is
+        ``Box.__init__`` and which ``__init__`` follows the order the walk made
+        their frames in.  A question is a walk of its own, and a reader joins
+        the answers by the owner: with its class where another function of
+        the file has its name, else plain; the start as the map names it.
+        """
+        kept = self.kept_owners.get((file, getattr(func, "lineno", 0)))
+        if kept is not None:
+            return kept
+        if file not in self._names:
+            self._names[file] = Counter(node.name for node, _cls in pathcond.functions_with_owner(tree))
+        name = getattr(func, "name", "")
+        return _with_class(file, tree, func) if self._names[file][name] > 1 else f"{file}::{name}"
 
     def _functions_limit(self) -> int:
         return self.budget.functions + (self.budget.crossed_functions if self.crossing else 0)
@@ -2175,6 +2318,89 @@ class _Walk:
         key = (frame.file, frame.owner)
         return (self.narrowed is not None and key == self.narrowed) or key in self.entered
 
+    # -- questions ---------------------------------------------------------
+
+    def _beyond_hop(self, depth: int) -> bool:
+        """Whether a follow at *depth* is past the question being answered (:attr:`hop`)."""
+        return self.hop is not None and depth > self.hop
+
+    def _ask_later(
+        self, frame: _Frame, kind: str, name: str, depth: int, at: Optional[ast.AST], path: tuple = ()
+    ) -> None:
+        """Hand a follow this hop does not run back as a question, once for each way the walk came to *frame*.
+
+        The depth budget caps a question's chain, not its depth, which a
+        question does not carry: each move costs the walk at least one hop, so
+        a chain of the budget's moves is as deep as :func:`walk` goes, and a
+        recursion's chain, which grows a move a call, stops there.
+        """
+        line = getattr(frame.func, "lineno", 0) if kind == ASK_SETTER_CALLS else getattr(at, "lineno", 0)
+        limit = self.budget.depth + (self.budget.crossed_depth if self.crossing else 0)
+        for chain in self.chains.get((frame.file, frame.owner)) or [()]:
+            if len(chain) >= limit:
+                self._exhausted("depth")
+                continue
+            question = Question(kind, frame.file, frame.owner, name, line, True, _place(at), tuple(path), chain)
+            if depth != 1 and question not in self.arms_asked:
+                question = question._replace(armed=False)
+            if question not in self._later:
+                self._later.add(question)
+                self.frontier.append(question)
+
+    def _moved(self, frame: _Frame, to: _Frame, move: Move) -> None:
+        """Note that the walk came from *frame* to *to* by *move*, where a question is being answered."""
+        if self.hop is None:
+            return
+        held = self.chains.setdefault((to.file, to.owner), [])
+        for chain in list(self.chains.get((frame.file, frame.owner)) or [()]):
+            one = (*chain, move)
+            if one not in held:
+                held.append(one)
+
+    def _replay(self, start: _Frame, chain: tuple[Move, ...]) -> Optional[_Frame]:
+        """Make the moves of *chain* from *start* as the walk made them, and return the frame they end in."""
+        frame = start
+        for move in chain:
+            if move.kind == MOVE_DOWN:
+                call = _node_at(frame.func, move.call)
+                if not isinstance(call, ast.Call):
+                    return None
+                placed = self.calls.callees(frame.file, frame.func, call)
+                target = next(
+                    (one for one in placed.targets if one.file == move.file and getattr(one.func, "lineno", 0) == move.line),
+                    None,
+                )
+                callee = self._callee_frame(target) if target is not None else None
+                if target is None or callee is None:
+                    return None
+                self._go_into(frame, call, target, placed, callee)
+                frame = callee
+                continue
+            if move.kind == MOVE_INTO and move.file == frame.file:
+                # A sibling in the file, made as the walk made it: it carries
+                # the handovers of the frame that asked.
+                parsed = self.module(move.file)
+                method = next(
+                    (
+                        node
+                        for node in (ast.walk(parsed[1]) if parsed is not None else ())
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.lineno == move.line
+                    ),
+                    None,
+                )
+                other = self._sibling(frame, method) if method is not None else None
+            else:
+                other = self.frame(move.file, move.owner, line=move.line)
+            if other is None:
+                return None
+            if move.kind == MOVE_INTO:
+                self._asked_into(other, frame)
+            if move.kind == MOVE_UP or (move.kind == MOVE_INTO and move.file != frame.file):
+                self.entered.add((other.file, other.owner))
+            self._moved(frame, other, move)
+            frame = other
+        return frame
+
     def want(
         self,
         frame: _Frame,
@@ -2195,7 +2421,12 @@ class _Walk:
         1002.  Asked once, from 1019, the walk kept 1007 and never asked
         again, so the percentile and both scout settings behind it were cut.
         """
-        if depth > self.budget.depth + (self.budget.crossed_depth if self.crossing else 0):
+        if self._beyond_hop(depth):
+            for name in names:
+                if name not in frame.imports:
+                    self._ask_later(frame, ASK_BINDINGS, name, depth, at)
+            return
+        if self.hop is None and depth > self.budget.depth + (self.budget.crossed_depth if self.crossing else 0):
             self._exhausted("depth")
             return
         for name in names:
@@ -3078,6 +3309,9 @@ class _Walk:
                         line=enclosing.lineno,
                     )
                     if outer_frame is not None:
+                        self._moved(
+                            frame, outer_frame, Move(MOVE_ACROSS, outer_frame.file, outer_frame.owner, enclosing.lineno)
+                        )
                         self.want(outer_frame, [name], depth)
                         return
             # The file's own body is the last place to look.  Asked only here,
@@ -3356,10 +3590,18 @@ class _Walk:
         )
         sites = self.calls.callers(target)
         sites, left, made = self._on_the_object(method_frame, sites)
+        name = getattr(method_frame.func, "name", "")
+        if self._beyond_hop(depth):
+            # The calls are a question of their own; that none is made on the
+            # object is said here, on the step of what the method assigns.
+            if sites:
+                self._ask_later(method_frame, ASK_SETTER_CALLS, f"self.{field}", depth, None)
+            elif left and said is not None:
+                said.detail += f"; none of the {len(left)} call(s) of {name} is made on the object the walk came in on"
+            return
         before = len(self.steps)
         if not self._mutations(method_frame, field, depth, sites[:_MAX_MUTATIONS]):
             return
-        name = getattr(method_frame.func, "name", "")
         if left:
             step = said
             if len(self.steps) > before:
@@ -3417,6 +3659,7 @@ class _Walk:
             if site.in_module:
                 continue
             self.entered.add((caller.file, caller.owner))
+            self._moved(method_frame, caller, Move(MOVE_UP, caller.file, caller.owner, site.func.lineno))  # type: ignore[attr-defined]
             for test, names in guards:
                 self.want(caller, names, depth + 1, test)
         return True
@@ -3470,22 +3713,23 @@ class _Walk:
                 step.detail = f"not entered: {placed.unplaced}"
             return
         entered: list[str] = []
+        if self._beyond_hop(depth):
+            # Placed, so the step says where it returns from, and asked later.
+            for target in placed.targets:
+                callee = self._callee_frame(target)
+                if callee is not None:
+                    entered.append(callee.owner)
+            if entered:
+                handed = slot if isinstance(slot, tuple) else ((slot,) if slot is not None else ())
+                self._ask_later(frame, ASK_RETURNS, _text(expression), depth, expression, handed)
+            if entered and step is not None and not step.terminal:
+                step.detail = f"returns from {', '.join(entered)}" + (f"; {placed.unplaced}" if placed.unplaced else "")
+            return
         for target in placed.targets:
             callee = self._callee_frame(target)
             if callee is None:
                 continue
-            if placed.unplaced:
-                self._entered_open(callee, placed.unplaced)
-            # One entry per call, however many ways the walk arrived at it: the
-            # ten statements under one ``if`` each enter the test's
-            # ``JediTaskSpec.statusToIncexec()``, and a parameter read there was
-            # handed over once for each of them.
-            held = self.passed.setdefault((callee.file, callee.owner), [])
-            if not any(one is call for _caller, one, _bound in held):
-                held.append((frame, call, calls_mod.bind(call, target, placed.on_class)))
-                for narrowed in self.watched.get((callee.file, callee.owner), ()):
-                    self._came_later(narrowed, frame, call)
-            self.entered.add((callee.file, callee.owner))
+            self._go_into(frame, call, target, placed, callee)
             entered.append(callee.owner)
             # Once per function and way of taking its value: a second call of
             # ``percentile`` hands its arguments in beside the first's, and
@@ -3536,6 +3780,29 @@ class _Walk:
                     self._ask_keyed(callee, value, depth + 1, statement)
         if entered and step is not None and not step.terminal:
             step.detail = f"returns from {', '.join(entered)}" + (f"; {placed.unplaced}" if placed.unplaced else "")
+
+    def _go_into(
+        self,
+        frame: _Frame,
+        call: ast.Call,
+        target: "calls_mod.Target",
+        placed: "calls_mod.Placed",
+        callee: _Frame,
+    ) -> None:
+        """Go into *callee* through *call*, made in *frame*: what a question replays for a :data:`MOVE_DOWN`."""
+        if placed.unplaced:
+            self._entered_open(callee, placed.unplaced)
+        # One entry per call, however many ways the walk arrived at it: the
+        # ten statements under one ``if`` each enter the test's
+        # ``JediTaskSpec.statusToIncexec()``, and a parameter read there was
+        # handed over once for each of them.
+        held = self.passed.setdefault((callee.file, callee.owner), [])
+        if not any(one is call for _caller, one, _bound in held):
+            held.append((frame, call, calls_mod.bind(call, target, placed.on_class)))
+            for narrowed in self.watched.get((callee.file, callee.owner), ()):
+                self._came_later(narrowed, frame, call)
+        self.entered.add((callee.file, callee.owner))
+        self._moved(frame, callee, Move(MOVE_DOWN, callee.file, callee.owner, callee.func.lineno, _place(call)))
 
     def _entered_open(self, callee: _Frame, reason: str) -> None:
         """Say on each return step of *callee* that some call that entered it was placed open.
@@ -3739,18 +4006,18 @@ class _Walk:
         if left:
             self._narrowed(
                 frame, made, stopped, left,
-                lambda more: self._follow_callers(target, name, depth, more, stopped),
+                lambda more: self._follow_callers(frame, target, name, depth, more, stopped),
                 _MAX_CALLERS - len(sites),
             )
         if unbuilt:
             self.by_class.setdefault((frame.file, getattr(frame.func, "lineno", 0)), []).append(
                 _ByClass(
                     asking, unbuilt,
-                    lambda more: self._follow_callers(target, name, depth, more, stopped),
+                    lambda more: self._follow_callers(frame, target, name, depth, more, stopped),
                     _MAX_CALLERS - len(sites), stopped,
                 )
             )
-        self._follow_callers(target, name, depth, sites, stopped)
+        self._follow_callers(frame, target, name, depth, sites, stopped)
         return True
 
     def _asking_classes(self, frame: _Frame) -> Optional[list[tuple[str, ast.ClassDef]]]:
@@ -3795,7 +4062,7 @@ class _Walk:
         )
 
     def _follow_callers(
-        self, target: "calls_mod.Target", name: str, depth: int, sites: list, stopped: TraceStep
+        self, frame: _Frame, target: "calls_mod.Target", name: str, depth: int, sites: list, stopped: TraceStep
     ) -> None:
         """A step for each of *sites* saying what it hands *name*, and the names that reads asked in its caller.
 
@@ -3838,6 +4105,7 @@ class _Walk:
                 break
             if step.reads and not site.in_module:
                 self.entered.add((caller.file, caller.owner))
+                self._moved(frame, caller, Move(MOVE_UP, caller.file, caller.owner, site.func.lineno))  # type: ignore[attr-defined]
                 self.want(caller, step.reads, depth + 1, statement)
         for why, where in unwalked.items():
             stopped.detail += f"; {len(where)} of them not walked, {why}: {', '.join(where)}"
@@ -4266,6 +4534,8 @@ class _Walk:
         in one of its methods as in another.
         """
         owner = f"{frame.owner.rsplit('::', 1)[0]}::{method.name}"
+        if self.hop is not None and frame.file in self.parsed:
+            owner = self._spelled(frame.file, self.parsed[frame.file][1], method)
         key = (frame.file, owner)
         held = self.frames.get(key)
         if held is not None and held.func is not method and frame.file in self.parsed:
@@ -4328,6 +4598,7 @@ class _Walk:
                     if other is None:
                         break
                     self._asked_into(other, frame)
+                    self._moved(frame, other, Move(MOVE_INTO, other.file, other.owner, method.lineno))
                     before = len(self.steps)
                     self._binding(other, name, expression, depth)
                     said = said or next((step for step in self.steps[before:] if step.owner == other.owner), None)
@@ -4424,6 +4695,7 @@ class _Walk:
             return
         self._asked_into(other, frame)
         self.entered.add((other.file, other.owner))
+        self._moved(frame, other, Move(MOVE_INTO, other.file, other.owner, method.lineno))
         for expression in pathcond.attribute_expressions(other.func, field):
             self._binding(other, name, expression, depth)
         if getattr(method, "name", "") != "__init__":
@@ -4489,6 +4761,8 @@ class _Walk:
         supplied = handover.fields[key]
         owner = f"{handover.entry}::{handover.via}"
         other = self.frame(handover.entry, owner)
+        if other is not None:
+            self._moved(frame, other, Move(MOVE_ACROSS, other.file, other.owner, getattr(other.func, "lineno", 0)))
         try:
             expression = ast.parse(supplied, mode="eval").body
         except SyntaxError:
@@ -4755,6 +5029,144 @@ def walk(
         state.arm(frame, line)
     state.drain()
     return Walked(state.steps, state.notes(), state.skeleton(frame, region))
+
+
+class Asker:
+    """The arms of one function, asked one hop at a time: :meth:`start`, then the questions its answers hand back.
+
+    :func:`walk` explains the arms and goes on until nothing is left to ask
+    or a budget runs out, and a reader that wants one name's bindings at one
+    place pays for every other.  Here an answer is one hop -- the steps of
+    one depth -- and its frontier holds every follow it did not
+    run, as a question the reader may ask next.  Each question is answered by
+    a walk of its own, so the answer depends on the question alone; the moves
+    of its chain are made again first, by the walk's own code, so a name in a
+    function the walk came to is read as the walk reads it there.  One
+    reading of the corpus serves every question -- *types*, handed in, carries
+    what the build read with it, an instance's record among them.
+
+    Every frontier question asked once, the answers hold what :func:`walk`
+    answers, except where that depends on the order one walk took: a
+    function entered by two calls is answered for each call apart, an
+    object that comes in later on a frame already asked
+    (:meth:`_Walk._came_later`) has no "later" within one question, and a
+    function is spelled by its file, not by which frame came first
+    (:meth:`_Walk._spelled`).
+    """
+
+    def __init__(
+        self,
+        roots: dict[str, Path],
+        *,
+        file: str,
+        owner: str,
+        lines: Sequence[int],
+        reaching: bool,
+        observed: str = "",
+        expected_sha: str = "",
+        handovers: Sequence[Handover] = (),
+        classify: Optional[Classifier] = None,
+        budget: Budget = DEFAULT_BUDGET,
+        region: Optional[tuple[int, int]] = None,
+        bindings_within: Optional[tuple[int, int]] = None,
+        reading_at: Optional[int] = None,
+        guards_above: bool = True,
+        types: Optional[_Types] = None,
+    ) -> None:
+        self.roots = roots
+        self.file = file
+        self.owner = owner
+        self.lines = list(lines)
+        self.reaching = reaching
+        self.observed = observed
+        self.expected_sha = expected_sha
+        self.handovers = tuple(handovers)
+        self.classify = classify or _nothing
+        self.budget = budget
+        self.region = region
+        self.bindings_within = bindings_within
+        self.reading_at = reading_at
+        self.guards_above = guards_above
+        self.calls = calls_mod.Calls(types if types is not None else _Types(roots, {}))
+        self._arms_asked: Optional[frozenset[Question]] = None
+
+    def _walk(self, hop: int) -> _Walk:
+        return _Walk(
+            self.roots,
+            self.classify,
+            self.budget,
+            self.observed,
+            within=(self.file, self.owner, *self.bindings_within) if self.bindings_within else None,
+            reading_at=(self.file, self.owner, self.reading_at) if self.reading_at else None,
+            narrowed=(self.file, self.owner) if self.reaching or self.reading_at else None,
+            guards_above=self.guards_above,
+            calls=self.calls,
+            hop=hop,
+        )
+
+    def _start(self, state: _Walk) -> tuple[Optional[_Frame], str]:
+        """The starting function's frame, or why there is none -- :func:`walk`'s refusals."""
+        parsed = state.module(self.file)
+        if parsed is None:
+            return None, "the map's file could not be read from this tree"
+        if self.expected_sha and git_blob_sha(parsed[0]) != self.expected_sha:
+            return None, "the walk was not run: this tree is not the one that was mapped"
+        if not self.lines:
+            return None, "the map records no line for these arms"
+        func = containing_function(parsed[1], self.lines[0], self.owner)
+        if func is not None:
+            state.kept_owners[(self.file, func.lineno)] = self.owner
+        frame = state.frame(self.file, self.owner, line=self.lines[0], handovers=self.handovers)
+        if frame is None:
+            return None, "the map's function could not be located in this tree"
+        # Reached by no move, and still so where a move comes back to it -- a
+        # call of itself the walk goes up through.
+        state.chains[(frame.file, frame.owner)] = [()]
+        return frame, ""
+
+    def start(self) -> Answer:
+        """The arms: their steps and the skeleton, and as the frontier what they read and call."""
+        state = self._walk(0)
+        frame, refused = self._start(state)
+        if frame is None:
+            return Answer([], refused, [])
+        for line in self.lines:
+            state.arm(frame, line)
+        state.drain()
+        return Answer(state.steps, state.notes(), state.frontier, state.skeleton(frame, self.region))
+
+    def ask(self, question: Question) -> Answer:
+        """One hop: *question*'s steps, and its frontier."""
+        # The arms' own hop at the walk's first depth, where explain keeps the
+        # bindings that can run before an arm; every other one past it.
+        depth = 1 if question.armed else 2
+        state = self._walk(depth)
+        if self._arms_asked is None:
+            self._arms_asked = frozenset(self.start().frontier)
+        state.arms_asked = self._arms_asked
+        start, refused = self._start(state)
+        if start is None:
+            return Answer([], refused, [])
+        for line in self.lines:
+            # The arms, which a name the arms read is narrowed against.
+            statement = _statement_at(start.func, line)
+            if statement is not None:
+                state.armed[line] = statement
+        frame = state._replay(start, question.chain)
+        if frame is None or (frame.file, frame.owner) != (question.file, question.owner):
+            return Answer([], "the question's moves do not lead to its function in this tree", [])
+        at = _node_at(frame.func, question.at)
+        if question.kind == ASK_BINDINGS:
+            state.want(frame, [question.name], depth, at)
+        elif question.kind == ASK_RETURNS and isinstance(at, ast.expr):
+            state.beyond.append(lambda: state._enter(frame, None, at, question.path or None, depth))
+        elif question.kind == ASK_SETTER_CALLS:
+            field = question.name.split(".", 1)[1]
+            state.beyond.append(lambda: state._mutated_at(frame, field, depth))
+        else:
+            return Answer([], "the question's call is not found in its function", [])
+        state.drain()
+        return Answer(state.steps, state.notes(), state.frontier)
 
 
 def walk_from_print(
