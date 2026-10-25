@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
+    "asked", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
 ]
 
@@ -2093,6 +2093,7 @@ def test_a_container_is_read_by_the_form_of_each_write_and_not_rebuilt_where_a_p
             """
             import json
             from types import SimpleNamespace as N
+            from bamboo.querier import asked as A
             from bamboo.querier import evaluate as E
             from bamboo.querier import false_guard as G
             from bamboo.querier import rows as R
@@ -2104,7 +2105,7 @@ def test_a_container_is_read_by_the_form_of_each_write_and_not_rebuilt_where_a_p
                     ("e", 6, "{}", "="), ("e", 7, "[]", "="), ("g", 9, "{}", "="), ("g", 10, "[]", ".setdefault")]
             steps = [N(name=n, owner=owner, kind="binding", line=line, value=v, operator=op, guards=[], unseen=[], reads=[],
                        terminal="", detail="", depth=1, cls="") for n, line, v, op in made]
-            walk = G.Walk(steps, E.Env(), {}, {})
+            walk = G.Walk(A.given(steps), E.Env(), {}, {})
             got = {}
             for name in ("d", "e", "g"):
                 value, notes = walk.build(name, owner)
@@ -2135,16 +2136,74 @@ def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_na
             """
             import json
             from types import SimpleNamespace as N
+            from bamboo.querier import asked as A
             from bamboo.querier import evaluate as E
 
             owner = "pandaserver/a.py::f"
             step = lambda kind, line, value: N(name="original_name", owner=owner, kind=kind, line=line, value=value,
                                                 guards=[], unseen=[], reads=[], terminal="", detail="", depth=1, cls="")
             # f binds its original_name at 2, and at 3 hands file.destinationDBlock to a callee's original_name
-            t = E.taken([step("binding", 2, "'x'"), step("handover", 3, "file.destinationDBlock")], "original_name",
+            t = E.taken(A.given([step("binding", 2, "'x'"), step("handover", 3, "file.destinationDBlock")]), "original_name",
                         E.Env(), owner=owner)
             print(json.dumps([t.step.line if t.step else None, repr(t.value), [s.line for s in t.kept]]))
             """,
         )
     )
     assert json.loads(out.splitlines()[-1]) == [2, "'x'", [2]]
+
+
+def test_a_reader_asks_the_questions_it_reads_and_refuses_steps_that_cannot_ask(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.codemap import trace
+            from bamboo.codemap.models import TraceStep
+            from bamboo.querier import asked as A
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import false_guard as G
+
+            f, g = "pandaserver/a.py::f", "pandaserver/a.py::g"
+            q = lambda kind, owner, name, line: trace.Question(kind, "pandaserver/a.py", owner, name, line)
+            x3, y4, m5 = q("bindings", f, "x", 3), q("bindings", f, "y", 4), q("returns", f, "self.job.m()", 5)
+            x7, z9 = q("bindings", f, "x", 7), q("bindings", g, "z", 9)
+            step = lambda name, line, kind="binding": TraceStep(kind=kind, name=name, owner=f, line=line, value="1", depth=2)
+            answers = {
+                x3: trace.Answer([step("x", 2)], "", [x7, z9]),
+                # the same binding from another place, a hop deeper, and cut there
+                x7: trace.Answer([step("x", 2).model_copy(update={"depth": 3})], "the depth budget ran out", []),
+                m5: trace.Answer([step("m()", 6, "return")], "", []),
+            }
+
+            class Asker:
+                def ask(self, question):
+                    return answers[question]
+
+            steps = A.Asked([step("a", 1)], Asker(), [x3, y4, m5], "", "f:1")
+            A.made[:] = [steps]
+            walk = G.Walk(steps, E.Env(), {}, {})
+            got = {"defs": [s.line for s in walk.defs("x", f)], "after_defs": [(a.name, a.line) for a in steps.asked]}
+            got["returns"] = [s.line for s in G.returns_of("self.job.m()", walk)]
+            got["asked"] = [(a.name, a.line) for a in steps.asked]
+            got["steps"] = [(s.name, s.line) for s in steps]
+            got["summary"] = A.summary()
+            refused = []
+            for read in (lambda: G.Walk([step("x", 2)], E.Env(), {}, {}).defs("x", f), lambda: E.taken([step("x", 2)], "x", E.Env(), owner=f)):
+                try:
+                    read()
+                except TypeError as e:
+                    refused.append(str(e)[:24])
+            got["refused"] = refused
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # x at 3, then x at 7, which x's answer handed back; not y, and not g's z
+    assert got["defs"] == [2] and got["after_defs"] == [["x", 3], ["x", 7]]
+    assert got["returns"] == [6] and got["asked"] == [["x", 3], ["x", 7], ["self.job.m()", 5]]
+    # x at 7 hands back the step x at 3 did: kept once
+    assert got["steps"] == [["a", 1], ["x", 2], ["m()", 6]]
+    assert got["summary"] == ["walk from f:1: asked 3 question(s), 3 step(s); cut: x in f: the depth budget ran out"]
+    assert got["refused"] == ["the steps were not asked"] * 2

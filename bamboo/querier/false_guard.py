@@ -32,7 +32,9 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
+from itertools import pairwise
 
+from bamboo.querier import asked as A  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 
@@ -106,6 +108,10 @@ class Walk:
         #: traceback frame shows running was not taken, so nothing below it was cut off by it.
         #: Only early exits: they carry their line, and a guard's text alone does not say which ``if``.
         self.held: set[tuple[str, str, str]] = set()
+        # the steps at a caller's line are its handovers to the next frame, which that frame's parameters'
+        # bindings hand back: asked from the innermost frame out, as the walk goes up
+        for _, (callee, at) in reversed(list(pairwise(ran))):
+            A.parameters(self.steps, callee, at)
         for owner, line in ran:
             for s in self.steps:
                 if s.owner == owner and s.line == line:
@@ -117,10 +123,12 @@ class Walk:
     # ------------------------------------------------------------ the walk's steps
     def defs(self, name: str, owner: str) -> list:
         # a handover step is the caller's, but binds the callee's parameter
+        A.bindings(self.steps, owner, name)
         return [s for s in self.steps if s.name == name and s.owner == owner and s.kind not in ("unbound", "handover")]
 
     def handed(self, name: str, owner: str) -> list:
         """The caller's side of a parameter: the handover steps that pass *name* in."""
+        A.bindings(self.steps, owner, name)
         unbound = [s for s in self.steps if s.name == name and s.owner == owner and s.kind == "unbound"]
         if not unbound:
             return []
@@ -517,6 +525,7 @@ def returns_of(expr: str, walk: Walk) -> list:
     m = re.fullmatch(r"(.+)\.(\w+)\(\)", expr)
     if not m:
         return []
+    A.returns(walk.steps, m[2])
     return [s for s in walk.steps if s.name == f"{m[2]}()" and s.kind == "return"]
 
 
@@ -571,6 +580,7 @@ def derivation(expr: str, walk: Walk, depth: int = 6) -> tuple[list[str], list[s
                 lines.append(f"    stop: {s.terminal} ({s.detail})")
                 continue
             for r in s.reads:
+                A.bindings(walk.steps, s.owner, r)
                 nxt += [t for t in walk.steps if t.name == r and t.owner == s.owner]
         frontier = nxt
     return lines, list(dict.fromkeys(leaves))

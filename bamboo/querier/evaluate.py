@@ -262,6 +262,10 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
     class cannot be told (a tree before f9b501c, or own steps of two classes),
     such a step is ``foreign`` and no binding is taken, as before.
     """
+    # imported here: evaluate reads no corpus, and asked's rows reads it as it is imported
+    from bamboo.querier import asked as A
+
+    A.bindings(steps, owner, name)
     out = Taken(name)
     walked = {s.cls for s in steps if s.owner == owner and getattr(s, "cls", "")}
     lineage = _lineage(next(iter(walked))) if len(walked) == 1 else None

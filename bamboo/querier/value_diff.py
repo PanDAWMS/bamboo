@@ -25,8 +25,7 @@ import ast
 import re
 from dataclasses import dataclass, field
 
-from bamboo.codemap import trace  # noqa: E402
-from bamboo.codemap.panda.provenance import classify  # noqa: E402
+from bamboo.querier import asked as A  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 from bamboo.querier.records import Run  # noqa: E402
@@ -86,8 +85,8 @@ def names_of(atom: str) -> list[str]:
     return [ast.unparse(n) for n in ([tree.left, *tree.comparators] if isinstance(tree, ast.Compare) else [tree])]
 
 
-def walk_steps(fn: R.Function, line: int) -> list:
-    return trace.walk(R.ROOTS, file=fn.rel, owner=fn.owner, lines=[line], classify=classify, reaching=False).steps
+def walk_steps(fn: R.Function, line: int) -> A.Asked:
+    return A.walk(fn, line)
 
 
 def value_of(name: str, side: Side) -> tuple[object, str]:

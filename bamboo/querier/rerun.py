@@ -55,7 +55,7 @@ A value that does not move (``--stuck``):
                                         another value and every exit of the function
 ``Blocked``    S3  what kept it from moving  the exit's path condition, solved true; per arm, the guards
                                         the pass made false; the arm with fewest is the nearest (rule 21)
-``Input``      S4  where the guard's name was bound  ``trace.walk`` from the guard's ``if``, the binding
+``Input``      S4  where the guard's name was bound  ``asked.walk`` from the guard's ``if``, the binding
                                         the pass's values leave (``E.taken``); a stop -> its question
 ``Rows``       S5  what the call returned  a call that returns rows by a key: the call, its
                                         arguments, the tables it reads at its constants
@@ -81,14 +81,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bamboo.codemap import strategy as strategy_mod
-from bamboo.codemap import trace
 from bamboo.codemap.calls import Types
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import Symptom, required_values
 from bamboo.codemap.panda import pathcond, sqltext
 from bamboo.codemap.panda import sql as sql_mod
-from bamboo.codemap.panda.provenance import classify, facade_calls
+from bamboo.codemap.panda.provenance import facade_calls
 from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
+from bamboo.querier import asked as A
 from bamboo.querier import census as C
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
@@ -867,6 +867,7 @@ def _union(spans: list) -> list:
 class Rerun:
     def __init__(self, args: argparse.Namespace) -> None:
         mapdump.require("rerun")  # _investigate and _writers_of open their own graph clients
+        A.made.clear()
         self.args = args
         self.mode, self.decide = args.patterns, args.decide
         self.data = json.loads(Path(args.rows).read_text())
@@ -1557,8 +1558,11 @@ class Rerun:
             for side in (a_side, b_side):
                 t = E.taken(side.steps, name, side.env, owner=side.owner)
                 if t.step is not None and t.step.terminal:
+                    read = [n.id for n in ast.walk(ast.parse(t.step.value, mode="eval")) if isinstance(n, ast.Name) and n.id != "self"]
+                    for n in dict.fromkeys(read):
+                        A.bindings(side.steps, t.step.owner, n)
                     bound = {s.name for s in side.steps}
-                    loose = [n.id for n in ast.walk(ast.parse(t.step.value, mode="eval")) if isinstance(n, ast.Name) and n.id not in bound and n.id != "self"]
+                    loose = [n for n in read if n not in bound]
                     end = f"{side.label}:{t.step.line} stops at {t.step.terminal} ({t.step.detail})"
                     if loose:
                         end += f"; the walk does not say what {loose} was looked up with"
@@ -1598,9 +1602,8 @@ class Rerun:
         cls = class_of(fn)
         # a plugin's own attributes (``self.add_to_top_only``) printed by its other methods in the run
         stable_holes([R.seen(f, q2, self.mode) for f, q2 in self.touched if q2 is question and class_of(f) == cls], env, cls)
-        walked = trace.walk(R.ROOTS, file=fn.rel, owner=fn.owner, lines=[frame.line], classify=classify, reaching=False)
-        steps = walked.steps
-        self.say(f"walk from {fn.name}:{frame.line}: {len(steps)} step(s)" + (f"; {walked.note}" if walked.note else ""))
+        steps = A.walk(fn, frame.line)
+        self.say(f"walk from {fn.name}:{frame.line}: asked by question" + (f"; {steps.note}" if steps.note else ""))
         ran = [(f"{f.rel}::{f.func}", f.line) for f in ch.frames if f.in_corpus]
         walk = G.Walk(steps, env, self._collections(env), self.data, ran)
         if walk.held:
@@ -2122,9 +2125,9 @@ class Rerun:
         names = list(dict.fromkeys(n for n in names if all(E.ev(ast.Name(n), env) is E.UNKNOWN for env in q.envs)))
         self.say(f"{q.guard!r} at {q.line} reads {names} (unknown from the passes)")
         name = self.need("one name the guard reads", names[0] if len(names) == 1 else None)
-        walked = trace.walk(R.ROOTS, file=fn.rel, owner=fn.owner, lines=[q.line], classify=classify, reaching=False)
-        self.say(f"walk from {fn.name}:{q.line}: {len(walked.steps)} step(s)" + (f"; {walked.note}" if walked.note else ""))
-        takens = [E.taken(walked.steps, name, env, owner=fn.owner) for env in q.envs]
+        steps = A.walk(fn, q.line)
+        self.say(f"walk from {fn.name}:{q.line}: asked by question" + (f"; {steps.note}" if steps.note else ""))
+        takens = [E.taken(steps, name, env, owner=fn.owner) for env in q.envs]
         t = takens[0]
         for step, false in t.dropped:
             self.say(f"  {name} @{step.line} = {step.value}: out, {false!r} is false")
@@ -3105,11 +3108,15 @@ def main() -> None:
     try:
         r.run()
         r.say()
+        for line in A.summary():
+            r.say(line)
         r.say(f"== reached the end; HAND used {len(r.hand_used)} time(s) {r.hand_used}")
         ends = [line for _, line in r.ends]
         outcome = {"kind": "end", "step": r.ends[-1][0] if r.ends else r.hop, "text": "\n".join(ends) or None, "code": None}
     except Stop as stop:
         r.say()
+        for line in A.summary():
+            r.say(line)
         r.say(f"STOP {stop}; HAND used {len(r.hand_used)} time(s) {r.hand_used}")
         outcome = {"kind": "stop", "step": r.hop, "text": r.lines[-1], "code": stop.code}
     r.stamp("end")
