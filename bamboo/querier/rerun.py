@@ -54,8 +54,9 @@ A value that does not move (``--stuck``):
                                         row (rule 20); in each, ``which_ran`` over the arms that write
                                         another value and every exit of the function
 ``Blocked``    S3  what kept it from moving  the exit's path condition, solved true; per arm, the guards
-                                        the pass made false (not a callee's, ``E.in_callee``); the arm
-                                        with fewest is the nearest (rule 21); its guard's ``if`` (``guard_if``)
+                                        the pass made false (not one read elsewhere, ``E.read_elsewhere``);
+                                        the arm with fewest is the nearest (rule 21); its guard's ``if``
+                                        (``guard_if``)
 ``Input``      S4  where the guard's name was bound  ``asked.walk`` from the guard's ``if``, the binding
                                         the pass's values leave (``E.taken``); a stop -> its question
 ``Rows``       S5  what the call returned  a call that returns rows by a key: the call, its
@@ -2107,7 +2108,7 @@ class Rerun:
             for arm in q.arms:
                 blocking[arm.line] = [
                     g for g in arm.guards
-                    if not E.in_callee(g)
+                    if not E.read_elsewhere(g)
                     and E._truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
                 ]
             per_pass.append((fixed, blocking))

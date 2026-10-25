@@ -153,10 +153,12 @@ def strip_annotation(text: str) -> str:
     return re.sub(r"\s+\[\w+ := .*\]$", "", text)
 
 
-def in_callee(text: str) -> bool:
-    """Whether a path condition is tested in a method the function calls: the map marks it ``  [in f()]``
-    (``alias._produced``).  Its names are the callee's, so the caller's passes cannot say it."""
-    return re.search(r"\s+\[in \w+\(\)\]$", text) is not None
+def read_elsewhere(text: str) -> bool:
+    """Whether the map marks a path condition as read where the function's passes cannot say it.  ``  [in f()]``
+    (``alias._produced``): tested in a method the function calls, its names the callee's.  ``  [at N]`` (the map's
+    PC): a later write's test, its names as they are when line N's test runs, after the branch's write; a pass holds
+    one value per name for the whole pass, which may have been printed before that write (KNOWN_ISSUES.md K24)."""
+    return re.search(r"\s+\[(in \w+\(\)|at \d+)\]$", text) is not None
 
 
 def _call(node: ast.Call, env: Env) -> Any:

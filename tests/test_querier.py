@@ -1329,7 +1329,7 @@ def test_an_arm_moves_the_value_unless_its_write_requires_another(tmp_path):
                     "unThrottle": {}, "touch": {"12": ["failed"]}}
 
 
-def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_callees_test(tmp_path):
+def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_guard_read_elsewhere(tmp_path):
     out = _ok(
         _run(
             tmp_path,
@@ -1360,30 +1360,32 @@ def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_call
 
     found = {line: {g: getattr(RR.guard_if(at(line), g), "lineno", None)
                     for g in [*pathcond.path_condition(at(line)), "b == 1", "not (a == 1)"]} for line in (3, 6, 8)}
-    callee = [E.in_callee(g) for g in ["s in ['ready']  [in setOnHold()]", "not (x)  [x := f(y)]", "a == 1"]]
+    elsewhere = [E.read_elsewhere(g) for g in ["s in ['ready']  [in setOnHold()]", "not (s == '')  [at 391]",
+                                               "not (x)  [x := f(y)]", "a == 1"]]
 
     env = E.Env()
     for name, value in {"a": 1, "b": 1, "c": 0, "d": 1}.items():
         env.put(name, value, "the test")
     r = RR.Rerun.__new__(RR.Rerun)
     r.lines, r.opened, r.hand, r.hand_used, r.hop = [], [], {}, [], None
-    arms = [RR.Arm(6, ["two"], ["not (a == 1)", "b == 1", "s in ['ready']  [in setOnHold()]"]),
+    arms = [RR.Arm(6, ["two"], ["not (a == 1)", "b == 1", "s in ['ready']  [in setOnHold()]", "not (d == 1)  [at 9]"]),
             RR.Arm(8, ["three"], ["not (a == 1)", "not (b == 1)", "c == 1"])]
     went = r.blocked(RR.Blocked(N(node=fn, name="f"), 10, [None], [env], arms))
     print(json.dumps(found))
-    print(json.dumps(callee))
+    print(json.dumps(elsewhere))
     print(json.dumps([went.guard, went.line]))
     """,
         )
     )
-    found, callee, went = (json.loads(line) for line in out.splitlines()[-3:])
+    found, elsewhere, went = (json.loads(line) for line in out.splitlines()[-3:])
     # the test above the arm, the arm in its body; not (t) is the if testing t with the arm in its else, an elif's
     # too; neither where the arm is on the other side, nor for a test no if above the arm holds (KNOWN_ISSUES.md K24)
     assert found == {"3": {"a == 1": 2, "b == 1": None, "not (a == 1)": None},
                      "6": {"not (a == 1)": 2, "b == 1": 5},
                      "8": {"not (a == 1)": 2, "not (b == 1)": 5, "c == 1": 7, "b == 1": None}}
-    assert callee == [True, False, False]
-    # arm 6's callee test is read neither false nor named, so arm 6 is nearest with one guard, from the if at 2
+    assert elsewhere == [True, True, False, False]
+    # arm 6's callee test and its later write's test (false if read) are read neither false nor named, so arm 6 is
+    # nearest with one guard, from the if at 2
     assert went == ["not (a == 1)", 2]
 
 

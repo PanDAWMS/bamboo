@@ -291,7 +291,7 @@ step meets the limit today (2026-10-24).
 *Revisit:* when a writer's rows land in several files (compare `rows.split_files` with the writers when the pin
 moves); when one pass's runs in several files can be joined by the key, the time and the machine.
 
-### K24. S3 names no guard that no test above the arm says, and reads no callee's test
+### K24. S3 names no guard that no test above the arm says, and reads no callee's test nor a later write's
 
 S3 (`Rerun.blocked`) names the guard the passes made false against the nearest arm, then goes on from the `if` that
 tests it (`guard_if`): one above the arm whose test is the guard, or for `not (t)` one testing t with the arm in its
@@ -301,13 +301,19 @@ negation of its test (`pathcond.literal_values`; the map's PC adds more for fiel
 such a guard stops S3 at "the if whose test is ...", so S3 withholds, never answers wrong.  The dump holds each entry
 as text only, and one function can hold several `if`s of the same text (`storeJobs`' `match is not None` at 267, 288
 and 305), so the querier cannot place them itself.  A guard the map marks `  [in f()]` (`alias._produced`) is tested
-in a method the function calls, in that method's names: S3 counts it neither false nor true (`E.in_callee`), as any
-guard the passes leave unknown.  On 5e84330's dump (`tools/s3_guards.py`, 1,202 branches, 2,803 entries) 80 entries
-of about 31 branches have no test above the arm, and 207 of 43 branches are marked; S3 meets marked guards on
+in a method the function calls, in that method's names.  One the map's PC marks `  [at N]` is a later write's test
+reading a name given a new value after the branch's write (the write's own place among them), its names as they
+are when line N's test runs; a pass holds one value per name for the whole pass (`stable_holes`), which may have
+been printed before the write, and read so the entry could be false where the later write never ran.  S3 counts
+either neither false nor true (`E.read_elsewhere`), as any guard the passes leave unknown: on an `[at N]` entry S3
+is as it was before PC, and can name a guard whose flip alone would not move the value.  On 5e84330's dump
+(`tools/s3_guards.py`, 1,202 branches, 2,803 entries) 80 entries of about 31 branches have no test above the arm,
+207 of 43 branches are marked `[in f()]` and none `[at N]` (PC not built); S3 meets `[in f()]` guards on
 JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), none of them in a case of mine
 (2026-10-25).
 
 *Shows:* stopped: "the if whose test is '<guard>'" for a guard with no test above the arm; a marked guard in an arm's
 "needs [...]" and never in "false in the passes".
 *Revisit:* when S3 must go on from such a guard: the map would record each entry's place (its `if`'s line, or the
-replacing write's, and for a callee's test the method and how its names map to the caller's).
+replacing write's, and for a callee's test the method and how its names map to the caller's); for an `[at N]`
+entry, when a reader holds a name's value at a line rather than for the whole pass.
