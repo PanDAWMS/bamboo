@@ -47,13 +47,14 @@ import contextlib
 import logging
 import re
 import string
-from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional
+from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap.panda import sqleval, sqltext
 from bamboo.codemap.panda.pathcond import (
     BIND_ANNOTATED,
     BIND_ASSIGN,
     BIND_FOR,
+    Replacement,
     ancestors,
     attach_parents,
     bindings,
@@ -61,6 +62,7 @@ from bamboo.codemap.panda.pathcond import (
     enclosing_function,
     only_through,
     parted,
+    replacements,
     ruled_out_by,
     site_of,
     surviving_writes,
@@ -2592,6 +2594,49 @@ def _live_at(
             for append in appends:
                 live |= surviving(append)
     return live
+
+
+def bind_replacements(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution, key: str, binds: Sequence[Bind]
+) -> dict[int, list[Replacement]]:
+    """What the run's other binds of *key* do to each of *binds* *func* writes, by its site's ``id``.
+
+    The route a statement map's key takes to its write (:func:`pathcond.replacements`):
+    the binds of the key the run can still hold (:func:`scan_binds` at the
+    run) are asked about; every bind of the key in *func* is a write of the
+    place -- the ones only another text of the statement is built with, too
+    -- the calls running the statement are its reads, the map's renewals what
+    gives it a new map, and a bind filling the key from what it held a
+    reread.  ``updateTaskStatusByContFeeder_JEDI`` fills ``:errorDialog`` with
+    None and fills it again from the task where it is given one, which builds
+    another text.  Which binds the run holds is :func:`scan_binds`' to say, so
+    a bind it keeps is kept here too, with no entry where the reading finds it
+    reaching none.
+    """
+    if run.varmap is None:
+        return {}
+    asked = list({id(bind.site): bind.site for bind in binds if enclosing_function(bind.site) is func}.values())
+    every = [bind for bind in scan_binds(func, run.varmap, key).binds if enclosing_function(bind.site) is func]
+    sites = list({id(one): one for one in [*asked, *(bind.site for bind in every)]}.values())
+    held = {id(site) for site in sites}
+    rereads = [site for site in sites if _rereads(site, run.varmap)]
+    killers = [one for one in _renews(func, run.varmap) if id(one) not in held]
+    reads = list({id(one): one for one in (site_of(call) for call in run.run_at)}.values())
+    place = f"{run.varmap}[{key!r}]"
+    values = {id(bind.site): bind.value for bind in [*every, *binds]}
+    found: dict[int, list[Replacement]] = {}
+    for site in asked:
+        replaced = replacements(
+            site,
+            [one for one in sites if one is not site],
+            reads,
+            place=place,
+            value=values.get(id(site)),
+            killers=killers,
+            rereads=rereads,
+        )
+        found[id(site)] = replaced or []
+    return found
 
 
 def _listed_maps(

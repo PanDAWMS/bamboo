@@ -45,7 +45,7 @@ helper's own marked with where they came from.
 from __future__ import annotations
 
 import ast
-from typing import Optional
+from typing import Callable, Optional
 
 from bamboo.codemap.models import (
     Anchor,
@@ -58,13 +58,18 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import CERTAIN, SpecAttributor
 from bamboo.codemap.panda.pathcond import (
+    Callee,
     attach_parents,
     enclosing_class,
     enclosing_function,
+    entries,
+    field_replacements,
     functions_with_owner,
     literal_values,
     path_condition,
+    site_of,
     targets_of,
+    unmarked,
     written_value,
 )
 
@@ -150,6 +155,11 @@ def _returned_values(
     helper further in.
     """
     mark = f"  [in {func.name}()]"
+
+    def marked(test: str) -> str:
+        # One mark an entry: the callee's says the test is read where the caller cannot.
+        return unmarked(test) + mark
+
     values: list[tuple[str, list[str]]] = []
     opaque = False
     for node in ast.walk(func):
@@ -159,19 +169,16 @@ def _returned_values(
             continue
         returning = path_condition(node)
         if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            values.append((node.value.value, [test + mark for test in returning]))
+            values.append((node.value.value, [marked(test) for test in returning]))
         elif isinstance(node.value, ast.Name):
-            resolved = literal_values(func, node.value.id)
+            resolved = literal_values(func, node.value.id, at=node)
             if resolved:
                 # The return's own guards as well: a chain assigning the local
                 # can sit inside a branch of the function.
                 values.extend(
                     (
                         literal,
-                        [
-                            test + mark
-                            for test in returning + [c for c in conditions if c not in returning]
-                        ],
+                        [marked(test) for test in returning + [c for c in conditions if c not in returning]],
                     )
                     for literal, conditions, _line in resolved
                 )
@@ -184,7 +191,7 @@ def _returned_values(
                 continue
             deeper, deeper_opaque = followed
             values.extend(
-                (literal, [test + mark for test in returning] + inner) for literal, inner in deeper
+                (literal, [marked(test) for test in returning] + inner) for literal, inner in deeper
             )
             opaque = opaque or deeper_opaque
         else:
@@ -242,6 +249,8 @@ def extract_producers(
     junctions: dict[str, JunctionNode] = {}
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str]] = set()
+    aliases = find_aliases(modules, declarations)
+    memo: dict = {}
 
     for module in modules:
         attach_parents(module.tree)
@@ -269,6 +278,14 @@ def extract_producers(
                 candidates += 1
                 attributed.add((spec_class, target.attr))
                 caller = path_condition(node)
+                # What the field still holds where the object leaves: no branch
+                # where it never does, an entry per later write that can replace it.
+                replaced = field_replacements(
+                    node, target.value, target.attr, call, setters_of(aliases, attributor, target.attr), memo
+                )
+                if replaced is None:
+                    continue
+                later = entries(replaced, caller)
                 followed = _produced(func, call) if func is not None else None
                 if followed is None or not followed[0]:
                     # The helper returns something this slice cannot follow --
@@ -285,7 +302,7 @@ def extract_producers(
                         spec_class=spec_class,
                         attribute=target.attr,
                         literal=f"runtime({call.func.attr}())",
-                        condition=caller,
+                        condition=caller + later,
                         tier=2,
                     )
                     continue
@@ -302,7 +319,7 @@ def extract_producers(
                         spec_class=spec_class,
                         attribute=target.attr,
                         literal=literal,
-                        condition=caller + inner,
+                        condition=caller + inner + [entry for entry in later if entry not in inner],
                     )
                 if opaque:
                     # Says the list is not closed rather than letting it read as
@@ -317,7 +334,7 @@ def extract_producers(
                         spec_class=spec_class,
                         attribute=target.attr,
                         literal=f"runtime({call.func.attr}())",
-                        condition=caller,
+                        condition=caller + later,
                         tier=2,
                     )
         if candidates:
@@ -342,6 +359,25 @@ def extract_producers(
         for spec_class, attribute in sorted(attributed)
     ]
     return subjects, list(junctions.values()), coverage
+
+
+def setters_of(
+    aliases: dict[str, list[Alias]], attributor: SpecAttributor, attribute: str
+) -> Callable[[ast.Call], Optional[Callee]]:
+    """What a call's method does to *attribute*: its writes of it, each with the method's tests on it.
+
+    How a write of a field reads a setter call on the same object for the
+    value it may replace (:func:`pathcond.field_replacements`).
+    """
+
+    def callee(call: ast.Call) -> Optional[Callee]:
+        alias = _alias_at(aliases, call, attributor, enclosing_function(call), enclosing_class(call))
+        if alias is None:
+            return None
+        writes = tuple(tuple(inner) for written, _literal, inner in alias.writes if written == attribute)
+        return Callee(alias.method, writes) if writes else None
+
+    return callee
 
 
 def _alias_at(
@@ -378,6 +414,7 @@ def extract(
     junctions: dict[str, JunctionNode] = {}
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str]] = set()
+    memo: dict = {}
 
     for module in modules:
         attach_parents(module.tree)
@@ -397,6 +434,20 @@ def extract(
             caller = path_condition(node)
             for attribute, literal, inner in alias.writes:
                 attributed.add((alias.spec_class, attribute))
+                # The call writes the field as an assignment would: no branch
+                # where what it writes never leaves the object, an entry per
+                # later write that can replace it.
+                replaced = field_replacements(
+                    site_of(node),
+                    node.func.value,
+                    attribute,
+                    ast.Constant(value=literal),
+                    setters_of(aliases, attributor, attribute),
+                    memo,
+                )
+                if replaced is None:
+                    continue
+                marked = [f"{test}  [in {alias.method}()]" for test in inner]
                 _record(
                     junctions,
                     map_id=map_id,
@@ -411,8 +462,7 @@ def extract(
                     # alias's own decide whether running it changes anything.
                     # Both are required and they fail differently, so the second
                     # set says where it lives.
-                    condition=caller
-                    + [f"{test}  [in {alias.method}()]" for test in inner],
+                    condition=caller + marked + [entry for entry in entries(replaced, caller) if entry not in marked],
                 )
         if candidates:
             coverage.append(

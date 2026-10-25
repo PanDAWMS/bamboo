@@ -4532,6 +4532,11 @@ def _func(source: str, name: str = "f"):
     )
 
 
+def _returned(func):
+    """The ``return`` of *func*: the statement a returned local is read at."""
+    return next(node for node in ast.walk(func) if isinstance(node, ast.Return))
+
+
 def _held(func, name: str) -> list[str]:
     """Every statement the local *name* holds where the code uses it (:func:`sql.assembled_texts`)."""
     return sql.assembled_texts(func).get(name, [])
@@ -4547,7 +4552,7 @@ def test_a_guarded_chain_gives_each_value_its_own_condition():
         "    return status\n"
     )
 
-    values = pathcond.literal_values(func, "status")
+    values = pathcond.literal_values(func, "status", at=_returned(func))
 
     assert [(literal, conditions) for literal, conditions, _line in values] == [
         ("broken", ["spec.status == 'tobroken'"]),
@@ -4580,7 +4585,7 @@ def test_a_later_write_that_is_not_exclusive_becomes_a_condition():
 
     values = {
         literal: conditions
-        for literal, conditions, _line in pathcond.literal_values(func, "status")
+        for literal, conditions, _line in pathcond.literal_values(func, "status", at=_returned(func))
     }
 
     assert values["aborted"] == ["spec.status == 'toabort'", "not (spec.is_hpo())"]
@@ -4605,7 +4610,7 @@ def test_exclusive_siblings_do_not_negate_each_other():
 
     values = {
         literal: conditions
-        for literal, conditions, _line in pathcond.literal_values(func, "criteria")
+        for literal, conditions, _line in pathcond.literal_values(func, "criteria", at=_returned(func))
     }
 
     assert values["-dest_blacklisted"] == ["spec.blacklisted"]
@@ -4613,10 +4618,11 @@ def test_exclusive_siblings_do_not_negate_each_other():
         "not (spec.blacklisted)",
         "spec.queued >= spec.limit",
     ]
-    # The unconditional default carries both, because either replaces it.
+    # The unconditional default carries both, because either replaces it --
+    # each as every test it is under: the ``elif`` runs where the ``if`` did not.
     assert values["-link_unusable"] == [
         "not (spec.blacklisted)",
-        "not (spec.queued >= spec.limit)",
+        "not (not (spec.blacklisted) and spec.queued >= spec.limit)",
     ]
 
 
@@ -5065,10 +5071,12 @@ def test_a_block_settling_the_same_attribute_twice_names_neither():
         "        if n > 1:\n"
         "            tmpLog.info('#ATM action=set_exhausted reason=low_efficiency')\n"
         "            taskSpec.status = 'scouting'\n"
+        "            self.taskBufferIF.updateTask_JEDI(taskSpec)\n"
         "            taskSpec.status = 'exhausted'\n"
     )
     _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(source), MAP_ID, VERSION)
 
+    # Both land -- the task is saved between -- and the tag names neither.
     settled = [j for j in junctions if j.owner.endswith("::scout")]
     assert [b.tags for j in settled for b in j.branches] == [[], []]
 
@@ -7105,10 +7113,13 @@ def test_a_default_tag_carries_what_would_have_replaced_it():
 
     default = next(s for s in stages if s.criteria_tag == "-link_unusable")
 
+    # Each replacement as every test it runs under: an ``elif`` runs where the
+    # arms above it did not.
     assert default.conditions == [
         "nucleus  [nucleus := taskSpec.nucleus]",
-        "not (nucleus in unwritable_over_wan)",
-        "not (totalQueued >= self.total_queue_threshold)",
+        "not (not (nucleus == tmpAtlasSiteName) and nucleus in unwritable_over_wan)",
+        "not (not (nucleus == tmpAtlasSiteName) and not (nucleus in unwritable_over_wan)"
+        " and totalQueued >= self.total_queue_threshold)",
     ]
 
 

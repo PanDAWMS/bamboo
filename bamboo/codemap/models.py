@@ -608,9 +608,18 @@ class Branch(BaseModel):
     the same as one that took a different branch).
 
     ``path_condition`` is the conjunction of the ``if``/``elif``/``else`` tests
-    dominating the write.  It is not solved symbolically -- the values come
-    from observation and are substituted in, which answers "which branch
-    actually fired" rather than "which branch could fire".
+    dominating the write, and of one entry for every other write of the same
+    place that can replace the value before it is read
+    (:func:`~bamboo.codemap.panda.pathcond.replacements`): ``not (<the tests
+    that write is under and this one is not>)``, ``not any(<them> for <target>
+    in <iter>)`` where it sits in a loop this one is not in, ending in ``  [in
+    <method>()]`` where a setter's own tests decide it, or in ``  [at <line>]``
+    where a test reads what may have changed since this write -- its names as
+    they are when that line's test runs.  A write whose value is
+    never read -- replaced on every way to its write -- is no branch.  It is
+    not solved symbolically -- the values come from observation and are
+    substituted in, which answers "which branch actually fired" rather than
+    "which branch could fire".
 
     ``row_precondition`` is the other kind of condition, and the two are not
     interchangeable: the path condition is evaluated by the code, before the

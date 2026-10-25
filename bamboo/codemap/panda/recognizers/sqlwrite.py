@@ -89,6 +89,7 @@ from bamboo.codemap.panda.pathcond import (
     compatible,
     containers_changed,
     enclosing_function,
+    entries,
     functions_with_owner,
     handed_in,
     literal_values,
@@ -724,6 +725,9 @@ def _outcomes(
     that reached ``varMap[":status"] = newTaskStatus`` say the write happened,
     and the guards on the assignment that gave the local its value say which
     value.  Both are needed, and neither is derivable from the other's node.
+    And a bind of the key the run holds can be filled again before the run:
+    each later one that can replace it adds its entry
+    (:func:`sql.bind_replacements`).
 
     *why* is appended to, and only when the return is empty: the reason a
     column produced no outcome is decided at the branch that gave up, and
@@ -741,12 +745,15 @@ def _outcomes(
             why.append(NO_VARMAP)
             return []
         scan = sql.scan_binds(func, run.varmap, supplied.text, run.window, at=run)
+        # A later bind of the key the run still holds replaces this one where it runs.
+        replaced = sql.bind_replacements(func, run, supplied.text, scan.binds)
         found = []
         for bind in scan.binds:
             value, site = bind.value, bind.site
+            later = entries(replaced.get(id(site), ()), path_condition(site))
             settled = settle(value, func)
             if settled:
-                found.extend(_Outcome(outcome, 1, site, [], site) for outcome in settled)
+                found.extend(_Outcome(outcome, 1, site, list(later), site) for outcome in settled)
                 continue
             template = values.diagnostic_template(value)
             if template:
@@ -755,7 +762,7 @@ def _outcomes(
                 # Reaching definitions, the same reading the attribute slice
                 # makes of a local: 19% of the corpus's writes fill the bind
                 # from a variable a guarded chain assigned above it.
-                reached = literal_values(func, value.id, settle)
+                reached = literal_values(func, value.id, settle, at=site)
                 if reached:
                     dominating = path_condition(site)
                     found.extend(
@@ -763,7 +770,8 @@ def _outcomes(
                             outcome,
                             1,
                             site,
-                            [c for c in conditions if c not in dominating],
+                            [c for c in conditions if c not in dominating]
+                            + [entry for entry in later if entry not in conditions],
                             # Where the value was chosen, which is not where it
                             # was bound: ``newTaskStatus = "exhausted"`` sits in
                             # the block that also records why, and the bind is
@@ -781,7 +789,7 @@ def _outcomes(
                     f"runtime({ast.unparse(value)})",
                     2,
                     site,
-                    [],
+                    list(later),
                     site,
                     tuple(values.value_frames(value, func)),
                 )

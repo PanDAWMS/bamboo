@@ -61,7 +61,9 @@ from bamboo.codemap.panda.pathcond import (
     attach_parents,
     enclosing_class,
     enclosing_function,
+    entries,
     exclusive,
+    field_replacements,
     functions_with_owner,
     literal_values,
     parted,
@@ -69,6 +71,7 @@ from bamboo.codemap.panda.pathcond import (
     targets_of,
     written_value,
 )
+from bamboo.codemap.panda.recognizers.alias import find_aliases, setters_of
 from bamboo.codemap.panda.recognizers.selection import log_level
 
 SLICE_NAME = "progress"
@@ -614,6 +617,7 @@ def _resolve(
     owner_class: Optional[str],
     spec_names: set[str],
     settle,
+    at: Optional[ast.AST] = None,
 ) -> list[Resolved]:
     """Return every outcome *value* can settle to, with the tier of each.
 
@@ -632,7 +636,8 @@ def _resolve(
     provenance terminal looks exactly like that.
 
     *settle* is the corpus-level value resolver, which is what lets a subscript
-    of a declared mapping come out as the values it can hold.
+    of a declared mapping come out as the values it can hold.  *at* is the
+    write, which a local's values are read at.
     """
     if isinstance(value, ast.Constant):
         if isinstance(value.value, str):
@@ -644,7 +649,7 @@ def _resolve(
         return [Resolved(ast.unparse(value), 1)]
 
     if isinstance(value, ast.Name) and func is not None:
-        resolved = literal_values(func, value.id, settle)
+        resolved = literal_values(func, value.id, settle, at=at)
         if resolved:
             return [
                 Resolved(
@@ -884,6 +889,8 @@ def extract(
     attributor.learn_return_types(modules)
     attributor.learn_import_aliases(modules)
     settle = values.resolver()
+    aliases = find_aliases(modules, declarations)
+    memo: dict = {}
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --
@@ -970,6 +977,20 @@ def extract(
                     )
                 )
 
+            # What the field still holds where the object leaves: no branch
+            # where it never does -- ``remAttribute`` rewrites ``self.attributes``
+            # four times before ``if self.attributes == "":`` -- and an entry per
+            # later write that can replace it.
+            replaced = (
+                field_replacements(
+                    node, target.value, target.attr, value, setters_of(aliases, attributor, target.attr), memo
+                )
+                if func is not None
+                else []
+            )
+            if replaced is None:
+                continue
+
             structural = attributor.structural_class(target, func, owner_class)
             junction = junctions.get(name)
             if junction is None:
@@ -990,6 +1011,7 @@ def extract(
             # The write's own guards, shared by every outcome its right-hand
             # side can produce: reaching a write is necessary for any of them.
             dominating = path_condition(node)
+            later = entries(replaced, dominating)
             tags, messages = (
                 recorded_signature(node, func, setters, target.attr)
                 if func is not None
@@ -1003,11 +1025,14 @@ def extract(
                 owner_class=owner_class,
                 spec_names=spec_attribute_names,
                 settle=settle,
+                at=node,
             ):
                 junction.branches.append(
                     Branch(
                         outcome=resolved.outcome,
-                        path_condition=dominating + list(resolved.conditions),
+                        path_condition=dominating
+                        + list(resolved.conditions)
+                        + [entry for entry in later if entry not in resolved.conditions],
                         order=len(junction.branches),
                         tier=resolved.tier,
                         tags=tags,
