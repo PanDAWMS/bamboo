@@ -891,7 +891,10 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
       an adder plugin the map then dropped -- 520 crossings over 239
       statements where 71 over 38 are real, and 176 statements carrying the
       same two leads to nowhere.  Nothing else noticed: the field was
-      populated, the diff reported it as content, and every unit test passed.
+      populated, the diff reported it as content, and every unit test passed;
+    * a ``crosses_open`` entry must name a hole of the reach record, where its
+      why is read: an entry naming none says "this may go further" with no
+      reason anyone can look up.
 
     Not a coverage gate.  Most statements have no exit and no crossing, and
     that is an answer rather than a gap -- "the rows go nowhere in particular"
@@ -899,6 +902,9 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
     all is that the coordinates offered are the map's own.
     """
     owners = {junction.owner for junction in fragment.junctions}
+    holes = {
+        (row.owner, hole.line, hole.callee) for row in fragment.reach_graph for hole in row.holes
+    }
     failures: list[str] = []
     for site in sorted(fragment.read_sites, key=lambda s: s.name):
         spans = [
@@ -920,6 +926,12 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
                 failures.append(
                     f"{site.owner}@{site.anchor.line_start} leads to {reached},"
                     " which the map holds no junction for"
+                )
+        for one in site.crosses_open:
+            if (one.owner, one.line, one.callee) not in holes:
+                failures.append(
+                    f"{site.owner}@{site.anchor.line_start} leaves {one.callee} at {one.owner}:{one.line}"
+                    " open, which the reach record holds no hole for"
                 )
     return GateResult(
         gate="statement-leads-resolve",
@@ -1691,17 +1703,23 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     ``outside_calls_back_only_handed``): no edge says when ``with`` or
     ``for`` runs one, so a closure through one is not taken, and that is
     only safe while none of them reaches a write.  One that does needs its
-    edges.  One whose closure has a hole is not known either way, and is
-    counted in the note, not failed.
+    edges, and one the record has edges into is asked like any function --
+    ``JobSpec.__setattr__``, entered from each store on a ``JobSpec``
+    (``reach.HOW_SETATTR``), sets ``stateChangeTime``.  One whose closure has
+    a hole is not known either way, and is counted in the note, not failed.
     """
     from bamboo.codemap import reach
 
     record = reach.ReachGraph(fragment.reach_graph)
     anywhere = reach.every_write(fragment.junctions, record)
+    entered = {call.to for row in fragment.reach_graph for call in row.calls}
     failures: list[str] = []
-    checked = undecided = 0
+    checked = undecided = asked = 0
     for row in fragment.reach_graph:
         if row.function not in reach.IMPLICIT_DUNDERS:
+            continue
+        if row.owner in entered:
+            asked += 1
             continue
         checked += 1
         answer = record.reach([row.owner], reach.Destination(anywhere.arms, []))
@@ -1717,7 +1735,10 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
         question="does any dunder Python runs unasked reach a write?",
         finding="a dunder no edge enters reaches a write, so closures through it miss the write",
         failures=failures,
-        note=f"{undecided} of them have a hole in their closure and are not known either way.",
+        note=(
+            f"{undecided} of them have a hole in their closure and are not known either way; "
+            f"{asked} more have edges into them and are asked as any function is."
+        ),
     )
 
 

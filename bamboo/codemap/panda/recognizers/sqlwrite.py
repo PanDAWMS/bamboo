@@ -52,9 +52,23 @@ import dataclasses
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 
-from bamboo.codemap.calls import FILLERS, UNSET, Calls, Recorded, Target, Types
+from bamboo.codemap.calls import (
+    FILLERS,
+    UNSET,
+    Calls,
+    CallSite,
+    Placed,
+    Recorded,
+    Target,
+    Types,
+    own_nodes,
+    receiver_parameter,
+)
+from bamboo.codemap.calls import (
+    said as fills,
+)
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     AddedTerm,
@@ -70,6 +84,7 @@ from bamboo.codemap.models import (
     EntityNode,
     GuardRead,
     JunctionNode,
+    OpenCrossing,
     OrderHole,
     PrintedBy,
     ReadingStop,
@@ -106,6 +121,9 @@ from bamboo.codemap.panda.pathcond import (
 # Both halves of the map disagreeing about a fact is the failure this codebase
 # has spent the most effort undoing.
 from bamboo.codemap.panda.recognizers import progress
+
+if TYPE_CHECKING:
+    from bamboo.codemap.reach import ReachGraph
 
 SLICE_NAME = "sql-write"
 
@@ -237,7 +255,7 @@ def _subject_of(
     Where no class exists the table qualifies instead, which is how
     ``ddm_endpoint.blacklisted`` -- the writer behind a blacklisted RSE, and a
     root cause the map is supposed to reach -- becomes reachable at all.  What
-    keeps the bookkeeping out is promotion, not the absence of a spec class.
+    tells the bookkeeping apart is the criteria, not the absence of a spec class.
     """
     if spec_class is not None:
         attribute = _declared_spelling(attributor, spec_class, column)
@@ -2550,8 +2568,8 @@ def read_side(
         if verb != "read" or at is None:
             return
         # Filed against the statement as well as the function, and only kept
-        # when a pair actually lands: a run whose predicates name nothing the
-        # map promoted is not somewhere to send a reader, so it gets no row.
+        # when a pair actually lands: a run whose predicates name no subject
+        # is not somewhere to send a reader, so it gets no row.
         kept = statements.setdefault((at.owner, at.line), at)
         kept.selects.add((subject, value))
         # Unioned across the variants, not taken from whichever recorded
@@ -3675,11 +3693,14 @@ class CrossingCensus(NamedTuple):
     junction for.  The difference is the shape the map can see and cannot
     answer -- a number worth printing, because an empty ``crosses_to`` on a
     statement that plainly hands its rows on reads as "nowhere" otherwise.
+    ``opened`` counts the statements with a call on the way, or a caller
+    back, this reading cannot place (``crosses_open``).
     """
 
     stored: int
     handing_back: int
     resolved: int
+    opened: int
 
 
 #: How a row leaves the name the statement first bound it to.  Assignment and
@@ -3760,14 +3781,23 @@ class _Carry:
     ``dataset_spec`` and adds it to an ``input_chunk`` of the list it returns.
     The names reached that ``return`` only because ``tmp_res`` was used again;
     following every method call would carry rows into ``tmp_log``.
+
+    The rows can also come in with the call (*parameters*): the parameters
+    the call handed them to hold them on entry, as ``pathcond.reaching``
+    reads a parameter list among a name's writes, until a write replaces
+    them.
     """
 
-    def __init__(self, func: ast.AST, start: Iterable[ast.AST]):
+    def __init__(self, func: ast.AST, start: Iterable[ast.AST], parameters: Iterable[str] = ()):
         self._writes: dict[str, dict[int, ast.AST]] = {}
         self._adds: dict[str, dict[int, ast.AST]] = {}
         self._takes: list[tuple[ast.AST, list[ast.AST]]] = []
         self._read(func)
         self._holding = {id(node) for node in start}
+        arguments = getattr(func, "args", None)
+        for name in parameters:
+            self._write(name, arguments, False)
+            self._holding.add(id(arguments))
         self._grow()
 
     def _write(self, name: str, node: ast.AST, adds: bool) -> None:
@@ -3854,98 +3884,221 @@ def _enclosing(node: ast.AST, kinds: tuple) -> Optional[ast.AST]:
     return node
 
 
-def _consumers_of(
-    name: str,
-    calls: dict[str, list[tuple[str, ast.Call, ast.AST]]],
-    where: str,
-    definition: ast.AST,
-) -> list[tuple[str, ast.Call, ast.AST]]:
-    """The call sites of *name* that are somewhere an investigation would go.
+def _takes(carry: _Carry, call: ast.Call) -> bool:
+    """Whether *call* is handed what *carry* holds: an argument reading it, or the object it is made on.
 
-    Two kinds are dropped.  The function calling itself, which is not a
-    crossing.  And the proxy layer: ``JediTaskBuffer.getTasksToExecCommand_JEDI``
-    consists of ``return proxy.getTasksToExecCommand_JEDI(...)``, so naming it
-    as where the rows went would stop the reader one hop short of the code
-    that does anything with them.  A caller whose own function has the same
-    name and hands the call straight back is that layer, by construction.
-
-    It is what makes the rest answerable rather than a refinement: 12 of the
-    corpus's statements had exactly one call site before this, 52 after.
+    The object only where it is a name -- ``thr.start()`` on the thread built
+    from the rows, ``taskSpec.setErrDiag(...)`` on a spec they filled.
+    ``self.taskBufferIF.getTask(...)`` is made on a field of ``self``, which
+    is another object whatever ``self`` holds.
     """
-    found = []
-    for rel, call, caller in calls.get(name, []):
-        if caller is None or (rel == where and caller is definition):
-            continue
-        if caller.name == name and isinstance(
-            _enclosing(call, (ast.stmt,)), ast.Return
-        ):
-            continue
-        found.append((rel, call, caller))
-    return found
+    if any(carry.reaches(one, call) for one in (*call.args, *(keyword.value for keyword in call.keywords))):
+        return True
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    return isinstance(receiver, ast.Name) and carry.reaches(receiver, call)
 
 
-def _reached_by(
-    caller: ast.AST,
-    arrived: ast.stmt,
-    by_func: dict[str, set[str]],
-    by_class: dict[str, set[str]],
-) -> set[str]:
-    """The junctions the rows that *arrived* reach in *caller*, by the two rules already used.
+class _Everything:
+    """What a call of a statement's region hands: all of it -- the region is the statement's own stretch."""
 
-    The same pair :func:`attach_crossings` applies inside a region -- a call
-    the map owns a junction for, and a class built here and started as a
-    thread -- with one thing added that the region form does not need.  There
-    the stretch is the statement's own and everything in it is about these
-    rows.  Here it is somebody else's whole function, so the call has to take
-    something that holds these rows where it runs -- carried from the line
-    they arrived on, see :class:`_Carry`.
+    def reaches(self, expression: ast.AST, at: ast.AST) -> bool:
+        return True
 
-    That is not caution.  ``datasetManager.py::main`` runs seven queries into
-    the same ``res`` and hands each to a different thread class, so carried by
-    name one statement's rows resolve to all seven constructions -- the reuse
-    P1-54 met on the exits, met again a function further out.  At the
-    construction on line 906 the ``res`` in scope is the one from line 896,
-    and the six others were overwritten or had not run.
+
+def _made_on(call: ast.Call, holder: Optional[str]) -> bool:
+    """Whether *call* is a method call on the name *holder* -- ``self.runImpl()`` where ``self`` holds the rows."""
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    return holder is not None and isinstance(receiver, ast.Name) and receiver.id == holder
+
+
+def _own_calls(func: ast.AST) -> list[ast.Call]:
+    """The calls *func* makes itself; a function, lambda or class nested in it runs elsewhere."""
+    return [node for node in own_nodes(func) if isinstance(node, ast.Call)]
+
+
+class _Crossings:
+    """Where the rows one statement keeps reach a junction, read through the corpus's calls.
+
+    A call lands where :meth:`Calls.callees` places it and a function is
+    called from where :meth:`Calls.callers` finds it -- the reading the reach
+    record and the walk have, not a name.  Read by name, ``thr.run()`` in
+    ``datasetManager.py::run`` crossed to every ``run`` that owns a junction
+    (closer's, and finisher's, Watcher's, activator's and setupper's besides),
+    ``main(...)`` in ``RecoverLostFilesCore.main`` to two other files'
+    ``main``, and a started ``JobGeneratorThread`` to all six of its methods
+    that own one, five of which run after ``runImpl``.
+
+    **Rows reaching a function that owns no junction are followed through
+    it**, both ways.  Into a call: the parameters the call hands them to hold
+    them there (:class:`_Carry`), and so does the object it is made on where
+    it is a name that holds them (:func:`_takes`), and each call that
+    function makes with them is read the same way -- ``self.taskBufferIF.
+    updateTask_JEDI(task_spec, ...)`` lands in ``JediTaskBuffer``, which hands
+    ``taskSpec`` to ``proxy.updateTask_JEDI``, which owns one.  An object
+    holding them is followed along the calls made on it, not through every
+    argument that reads one of its fields: a started thread's ``run`` is
+    ``WorkerThread``'s, whose ``self.runImpl()`` is placed for the class the
+    thread was built as (:attr:`Target.bound`), and nothing else ``run`` does
+    with ``self`` is taken for the rows.  Read so, ``self`` would hold them in
+    every method it reaches -- ``calculateWorldRWwithPrio_JEDI``'s rows went
+    through ``AtlasProdTaskBrokerThread.runImpl`` to ``getTaskWithID_JEDI``
+    and ``updateTask_JEDI`` that way.  So rows put into a field and read back
+    are not followed: what the class's calls on the object reach is.  Back to a
+    caller: one that returns them hands them back again, and its callers are
+    read too -- ``TaskBuffer.getConfigValue`` returns what
+    ``proxy.getConfigValue`` returned, and ``AtlasAnalJobBroker`` is where the
+    value goes.  The name had found both, through the one name the layers
+    share; the placed calls stop at the layer.  Each definition is entered
+    once a statement, and a call the record reads as the database is not
+    followed: what a statement hands the database is another run's input.
+
+    A call on the way that this reading cannot place -- a hole of the reach
+    record -- is kept in :attr:`open`, as the record names it, where it could
+    land at a junction: ``x.f(...)`` lands at a definition named ``f``, if in
+    the corpus at all, so one whose name no junction owner's function has is
+    no way to one -- ``tmpLogger.error``, ``self.logger.debug``.  A name is
+    how such a call is found, never how it is placed: here it bounds where a
+    hole can go.  A plain name called is a hole whatever it spells -- the
+    value of a local or a parameter -- and is kept.
+
+    So is a caller this reading cannot place, on the way back: rows a function
+    returns go to each caller :meth:`Calls.callers` finds, and a hole spelled
+    ``x.f(...)``, ``f`` the function's name, may be one more --
+    ``insert_step_task``'s task id goes back through ``TaskBuffer`` to
+    ``self.tbif.insert_step_task(...)`` in ``PandaTaskStepHandler.submit_target``,
+    a receiver declared ``Any``, and on to ``update_output_data_names``; read
+    only through the callers found, the statement said nowhere and open
+    nothing.  The name bounds where a hole can come from as it bounds where
+    one can go.  A plain name called is not taken for one here: it could be
+    any function's caller.
     """
-    carry = _Carry(caller, [arrived])
-    reached: set[str] = set()
-    built: dict[str, ast.AST] = {}
-    for node in ast.walk(caller):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
-            continue
-        callee = node.value.func
-        made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
-        if made in by_class and any(carry.reaches(a, node) for a in node.value.args):
-            for target in targets_of(node):
-                if isinstance(target, ast.Name):
-                    built[target.id] = made
-    for node in ast.walk(caller):
-        if not isinstance(node, ast.Call):
-            continue
-        callee = node.func
-        if isinstance(callee, ast.Attribute):
-            if (
-                callee.attr == "start"
-                and isinstance(callee.value, ast.Name)
-                and callee.value.id in built
-            ):
-                reached |= by_class[built[callee.value.id]]
+
+    def __init__(self, calls: Calls, owners: set[str], record: "ReachGraph"):
+        self.calls = calls
+        self.owners = owners
+        self.record = record
+        self._owner_names = {owner.rsplit("::", 1)[-1] for owner in owners}
+        #: ``(owner, line, callee)`` of each hole on the way, as the reach record spells it.
+        self.open: dict[tuple[str, int, str], None] = {}
+        self._entered: set[tuple[str, int]] = set()
+        self._returned: set[tuple[str, int]] = set()
+
+    def into(
+        self,
+        file: str,
+        func: ast.AST,
+        call: ast.Call,
+        carry: Optional[_Carry | _Everything],
+        bound: tuple[tuple[str, ast.ClassDef], ...] = (),
+        holder: Optional[str] = None,
+    ) -> set[str]:
+        """The junctions *call*, made in *func*, reaches: each definition it lands at that owns one, and through each
+        that owns none where it is handed what *carry* holds (``None``: not followed through) or is made on *holder*,
+        the name in *func* of the object holding them."""
+        if self.record.is_database(file, call):
+            return set()
+        hole = self.record.hole_at(file, call)
+        if hole is not None and (not isinstance(call.func, ast.Attribute) or call.func.attr in self._owner_names):
+            self.open[hole] = None
+        try:
+            placed = self.calls.callees(file, func, call, bound)
+        except Exception:  # noqa: BLE001 -- the record has the call as a hole
+            return set()
+        reached: set[str] = set()
+        for target in placed.targets:
+            if target.owner in self.owners:
+                reached.add(target.owner)
+            elif carry is not None:
+                reached |= self._through(CallSite(file, func, call), placed, target, carry, holder)
+        return reached
+
+    def _through(
+        self, site: CallSite, placed: Placed, target: Target, carry: _Carry | _Everything, holder: Optional[str]
+    ) -> set[str]:
+        """The junctions reached through *target*, which owns none, from the parameters *site* hands the rows to and
+        the object it is made on, where that holds them."""
+        key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
+        if key in self._entered:
+            return set()
+        call = site.call
+        handed = self.calls.handed(site, target)
+        given = {
+            name
+            for name in fills(call, target, placed.on_class)
+            if handed.get(name) is not None and carry.reaches(handed[name], call)  # type: ignore[arg-type]
+        }
+        if any(
+            isinstance(one, ast.Starred) and carry.reaches(one, call) for one in call.args
+        ) or any(keyword.arg is None and carry.reaches(keyword.value, call) for keyword in call.keywords):
+            given |= {name for name, value in handed.items() if value is None}
+        receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+        inner_holder = (
+            receiver_parameter(target)
+            if not placed.on_class
+            and isinstance(receiver, ast.Name)
+            and (receiver.id == holder or carry.reaches(receiver, call))
+            else None
+        )
+        given.discard(inner_holder or "")
+        if not given and inner_holder is None:
+            return set()
+        self._entered.add(key)
+        inner = _Carry(target.func, [], given)
+        reached: set[str] = set()
+        for one in _own_calls(target.func):
+            if _takes(inner, one) or _made_on(one, inner_holder):
+                reached |= self.into(target.file, target.func, one, inner, target.bound, inner_holder)
+        return reached
+
+    def back(self, file: str, func: ast.AST) -> set[str]:
+        """The junctions the rows *func* returns reach in its callers -- and in theirs, where a caller returns them."""
+        key = (file, func.lineno)  # type: ignore[attr-defined]
+        if key in self._returned:
+            return set()
+        self._returned.add(key)
+        for hole in self.record.holes_spelled(func.name):  # type: ignore[attr-defined]
+            self.open[hole] = None
+        held = self.calls.types.method_class(file, func)
+        reached: set[str] = set()
+        for site in self.calls.callers(Target(file, func, held[1] if held is not None else None)):
+            # A call in a module's own body has no caller to hand the rows on
+            # to, and a function calling itself is not where they go next.
+            if site.in_module or (site.file == file and site.func is func):
                 continue
-            called = callee.attr
-        elif isinstance(callee, ast.Name):
-            called = callee.id
-        else:
-            continue
-        if any(carry.reaches(a, node) for a in node.args):
-            reached |= by_func.get(called, set())
-    return reached
+            statement = _enclosing(site.call, (ast.stmt,))
+            carry = (
+                _Carry(site.func, [statement])
+                if statement is not None and targets_of(statement) and _bound_by(statement)
+                else None
+            )
+            if carry is not None:
+                for one in _own_calls(site.func):
+                    if _takes(carry, one):
+                        reached |= self.into(site.file, site.func, one, carry)
+            if isinstance(statement, ast.Return) or (carry is not None and _hands_rows_back(site.func, carry)):
+                reached |= self.back(site.file, site.func)
+        return reached
+
+
+def _region_calls(func: ast.AST, first: int, last: int) -> list[ast.Call]:
+    """The calls *func* makes itself in the statements that start between *first* and *last*."""
+    own = {id(call) for call in _own_calls(func)}
+    found: dict[int, ast.Call] = {}
+    for node in ast.walk(func):
+        if isinstance(node, ast.stmt) and first <= node.lineno <= last:
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call) and id(inner) in own:
+                    found[id(inner)] = inner
+    return sorted(found.values(), key=lambda call: (call.lineno, call.col_offset))
 
 
 def attach_crossings(
     read_sites: list[ReadSiteNode],
     modules: list[SourceModule],
     junctions: list[JunctionNode],
-) -> int:
+    calls: Optional[Calls],
+    record: Optional["ReachGraph"],
+) -> CrossingCensus:
     """Say which junction a row handled here is carried on to.
 
     The request's sixth point: a reader wants to be able to pick a *statement*
@@ -3954,111 +4107,59 @@ def attach_crossings(
     could not say is that the ones it keeps are handed to something the map
     already holds an answer for.
 
-    Two shapes resolve by name and both are stored:
+    Two shapes, both stored, every call placed as :class:`_Crossings` reads
+    it (*calls*, and *record* for the holes and the database's calls):
 
-    * the region calls a function the map owns a junction in -- 65 of them;
-    * the region builds a class the map owns a junction in and starts it as a
-      thread -- 6, and one of those is the statement this whole slice is
-      measured on.  ``copyArchive.py::main``'s ``holding`` query hands each
-      job to ``Watcher(...)`` and calls ``.start()``, so the next thing that
-      happens to a held job is ``Watcher.run``, which is a junction.  The
-      ``start`` in ``thr.start()`` is not itself a junction owner, which is
-      why the class the name was built from has to be carried.
+    * a call in the statement's region lands in a function the map owns a
+      junction in, or, handed the rows, goes through functions owning none to
+      one -- ``copyArchive.py::main``'s ``holding`` query hands each job to
+      ``Watcher(...)`` and calls ``.start()``, so the next thing that happens
+      to a held job is ``Watcher.run``;
+    * the rows are handed back to a caller, and what it does with them is
+      read the same way -- the flagship, ``getTasksToExecCommand_JEDI@4591``,
+      returns its tasks to the ``JediTaskBuffer`` layer and ``TaskCommando``
+      starts a ``TaskCommandoThread`` with them, whose ``runImpl`` owns one.
 
-    * the rows are handed back to the caller and the caller does one of those
-      two things with them -- 51 more, and the flagship is one.
-
-    **The third one was sized against the wrong shape.**  It used to be read
-    off "a ``return`` inside the region", which is 139 returns over 73
+    **The second was sized against the wrong shape once.**  It used to be
+    read off "a ``return`` inside the region", which is 139 returns over 73
     statements and does not include ``getTasksToExecCommand_JEDI@4591`` at
     all: that statement owns 4573-4603, works its rows through 4600-4621, and
     the function returns on 4647, the rows having travelled ``resList`` ->
     ``retTaskIDs`` -> ``retTaskList`` on the way.  Followed as the function
-    runs instead -- see :class:`_Carry` -- 240 statements hand their rows back.
+    runs instead -- see :class:`_Carry` -- 254 statements hand their rows back.
 
-    **A crossing is only stored where all three of these hold**, and 174 of
-    those 240 fail the last one and keep an empty ``crosses_to``:
+    A crossing names a junction, never the caller's own function: naming the
+    caller would satisfy the question and not the purpose.  Where a call on
+    the way could not be placed, or a hole may be a caller the rows go back
+    to, the statement says so (``crosses_open``): what ``crosses_to`` names is
+    then what this reading knows, not all of it.
 
-    1. the rows reach a ``return``;
-    2. the owner has a call site that is not the proxy layer -- see
-       :func:`_consumers_of`;
-    3. at that call site the returned value is bound to a name from which the
-       caller does something the map holds a junction for.
-
-    Naming the caller's function and stopping there would satisfy 2 and not 3,
-    and a lead that does not name a junction is a lead pointing at whoever
-    happened to be grepped first.  Where several call sites resolve, all of
-    them are stored: the map's junctions are indexed by bare name throughout
-    this function, so one statement reaching five is the same ambiguity the
-    other two shapes already carry, not a new one.
-
-    Run after promotion, not merely after the merge.  A crossing is a lead,
-    and a lead has to name somewhere the map will answer for -- resolved
-    against the candidate junctions instead, every ``self.cur.execute(...)``
-    in a region resolved to the ``execute`` of an adder plugin that promotion
-    then dropped: 520 crossings over 239 statements where 71 over 38 are real,
-    with 176 statements handed the same two leads to nowhere.
+    A lead has to name somewhere the map will answer for, and read by name it
+    did not: before promotion filtered the junctions, every
+    ``self.cur.execute(...)`` in a region resolved to the ``execute`` of an
+    adder plugin promotion then dropped -- 520 crossings over 239 statements
+    where 71 over 38 are real -- and over every candidate, 98 statements went
+    to ``WorkQueue.pack`` from ``datasetSpec.pack(...)``.  A placed call goes
+    where it lands, and promotion now drops nothing.
 
     Returns the census: how many crossings were stored, how many statements
-    hand their rows back at all, and how many of those named a junction.  The
-    gap between the last two is the honest size of what is still unresolved,
-    and it is reported rather than silently left as an empty field.
+    hand their rows back at all, how many of those named a junction, and how
+    many statements have a call on the way, or a caller back, this reading
+    cannot place.  The
+    gap between the second and third is the honest size of what is still
+    unresolved, and it is reported rather than silently left as an empty
+    field.  Without *calls* or *record* nothing is placed and nothing stored.
     """
+    if calls is None or record is None:
+        return CrossingCensus(0, 0, 0, 0)
     owners = {junction.owner for junction in junctions}
-    calls: dict[str, list[tuple[str, ast.Call, ast.AST]]] = {}
-    by_func: dict[str, set[str]] = {}
-    for owner in owners:
-        name = owner.rsplit("::", 1)[-1]
-        # ``self.cur.execute(sql, varMap)`` names the database, not a function
-        # of this corpus, so a junction living in a *method* called ``execute``
-        # must not answer for it.  The adder plugins have one, and without this
-        # every statement in the corpus crosses to both of them: 222 read sites
-        # handed the same two false leads, which is the shape the crossing pass
-        # was written to avoid and had been avoiding by accident, because until
-        # ``JobSpec.ddmErrorDiag`` was promoted no ``execute`` owned a junction.
-        if name in sql.CURSOR_RUNNERS:
-            continue
-        by_func.setdefault(name, set()).add(owner)
     trees = {module.rel_path: module.tree for module in modules}
-    by_class: dict[str, set[str]] = {}
-    for rel, tree in trees.items():
-        # The call index the return shape resolves against, and the parent
-        # links it walks upwards through.  Built once over the whole corpus
-        # because the question is the reverse of the other two shapes': not
-        # what this function calls, but who calls it.
-        attach_parents(tree)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                callee = node.func
-                called = (
-                    callee.attr
-                    if isinstance(callee, ast.Attribute)
-                    else (callee.id if isinstance(callee, ast.Name) else None)
-                )
-                if called:
-                    calls.setdefault(called, []).append(
-                        (
-                            rel,
-                            node,
-                            _enclosing(node, (ast.FunctionDef, ast.AsyncFunctionDef)),
-                        )
-                    )
-            if not isinstance(node, ast.ClassDef):
-                continue
-            for item in node.body:
-                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                name = f"{rel}::{item.name}"
-                if name in owners:
-                    by_class.setdefault(node.name, set()).add(name)
-
-    stored = 0
-    handing_back = 0
-    resolved = 0
+    stored = handing_back = resolved = opened = 0
     for site in read_sites:
         if not site.region:
             continue
-        tree = trees.get(site.anchor.file)
+        file = site.anchor.file
+        tree = trees.get(file)
         if tree is None:
             continue
         wanted = site.owner.rsplit("::", 1)[-1]
@@ -4075,85 +4176,39 @@ def attach_crossings(
         if func is None:
             continue
         first, last = site.region
+        handled = site.rows_handled
+        through = max(last, handled[1] if len(handled) >= 2 else last)
+        rows = _rows_written(func, site.anchor.line_start, through)
+        carry = _Carry(func, rows) if rows else None
+        crossings = _Crossings(calls, owners, record)
         reached: set[str] = set()
-        # The name a thread was built from, so ``.start()`` can be resolved.
-        built: dict[str, str] = {}
-        for node in ast.walk(func):
-            if not isinstance(node, ast.stmt) or not first <= node.lineno <= last:
-                continue
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call):
-                callee = node.value.func
-                made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
-                if made in by_class:
-                    for target in targets_of(node):
-                        if isinstance(target, ast.Name):
-                            built[target.id] = made
-            for inner in ast.walk(node):
-                if not isinstance(inner, ast.Call):
-                    continue
-                if isinstance(inner.func, ast.Attribute):
-                    receiver = inner.func.value
-                    if (
-                        inner.func.attr == "start"
-                        and isinstance(receiver, ast.Name)
-                        and receiver.id in built
-                    ):
-                        reached |= by_class[built[receiver.id]]
-                        continue
-                    called = inner.func.attr
-                elif isinstance(inner.func, ast.Name):
-                    called = inner.func.id
-                else:
-                    continue
-                reached |= by_func.get(called, set())
-        back, hands = _handed_back(site, func, wanted, calls, by_func, by_class)
+        for call in _region_calls(func, first, last):
+            # Every call of the region is the statement's own stretch, and is
+            # followed through a function owning no junction with all it hands:
+            # ``do_preassign`` hands its statement to ``JediTaskBuffer.
+            # queryTasksToPreassign_JEDI``, which hands it to the proxy that
+            # updates the tasks it picks, and ``copyArchive.py::main`` counts a
+            # destination's jobs and calls ``taskBuffer.updateUnmergedDatasets``
+            # when none is left -- what runs because of the rows, given none.
+            reached |= crossings.into(file, func, call, _Everything())
+        hands = carry is not None and _hands_rows_back(func, carry)
+        back = crossings.back(file, func) if hands else set()
         # Not itself: a statement is not somewhere its own rows go next.  Done
-        # to the return shape's answer before it is counted as well as to the
+        # to the handed-back answer before it is counted as well as to the
         # whole, or the census reports two statements as resolved whose only
         # lead was back to themselves.
         back.discard(site.owner)
         reached |= back
+        reached.discard(site.owner)
         handing_back += 1 if hands else 0
         resolved += 1 if back else 0
-        reached.discard(site.owner)
         site.crosses_to = sorted(reached)
+        site.crosses_open = [
+            OpenCrossing(owner=owner, line=line, callee=callee) for owner, line, callee in sorted(crossings.open)
+        ]
         stored += len(site.crosses_to)
-    return CrossingCensus(stored, handing_back, resolved)
-
-
-def _handed_back(
-    site: ReadSiteNode,
-    func: ast.AST,
-    wanted: str,
-    calls: dict[str, list[tuple[str, ast.Call, ast.AST]]],
-    by_func: dict[str, set[str]],
-    by_class: dict[str, set[str]],
-) -> tuple[set[str], bool]:
-    """The junctions reached by giving these rows back, and whether it is given.
-
-    The third shape of :func:`attach_crossings`, kept apart because it is the
-    only one that leaves the statement's own file.  Nothing here is new
-    machinery: the rows are followed to the ``return`` by name, the callers
-    are read off the corpus-wide call index with the proxy layer removed, and
-    what happens to them there is decided by the same two rules the region
-    scan uses.
-    """
-    first, last = site.region
-    handled = site.rows_handled
-    through = max(last, handled[1] if len(handled) >= 2 else last)
-    rows = _rows_written(func, site.anchor.line_start, through)
-    if not rows or not _hands_rows_back(func, _Carry(func, rows)):
-        return set(), False
-    reached: set[str] = set()
-    for _rel, call, caller in _consumers_of(wanted, calls, site.anchor.file, func):
-        statement = _enclosing(call, (ast.stmt,))
-        if not targets_of(statement):
-            # Returned on again, or thrown away.  The first is the proxy shape
-            # under another name and the second has no rows to follow.
-            continue
-        if _bound_by(statement):
-            reached |= _reached_by(caller, statement, by_func, by_class)
-    return reached, True
+        opened += 1 if site.crosses_open else 0
+    return CrossingCensus(stored, handing_back, resolved, opened)
 
 
 def entity_nodes(

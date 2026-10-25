@@ -522,6 +522,7 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         rows_handled=list(site.rows_handled),
         exits=[_statement_exit(text) for text in site.exits],
         crosses_to=list(site.crosses_to),
+        crosses_open=list(site.crosses_open),
     )
 
 
@@ -1587,7 +1588,7 @@ def _read_names(
     if len(declaring) <= 1:
         return (declaring[0] if declaring else ""), declaring
     # Only attributes some subject declares can discriminate; the rest are
-    # fields the promotion did not keep and say nothing about the class.
+    # fields no subject declares and say nothing about the class.
     asked = {name for name in reads.get(receiver, set()) if name in by_attr}
     fits = [name for name in declaring if asked <= by_class.get(name.rpartition(".")[0], set())]
     return (fits[0] if len(fits) == 1 else ""), declaring

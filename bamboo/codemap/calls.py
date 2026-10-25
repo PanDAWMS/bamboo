@@ -35,7 +35,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, Iterator, NamedTuple, Optional
 
 from bamboo.codemap.panda import pathcond
 
@@ -333,6 +333,16 @@ def own_nodes(scope: ast.AST):
         yield from own_nodes(child)
 
 
+def bound_defs(scope: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
+    """The ``def`` and ``class`` statements *scope*'s own body runs -- under an ``if`` or a ``try`` too -- each binding
+    its name there; one nested in another function or class binds it in that one."""
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield child
+        elif not isinstance(child, ast.Lambda):
+            yield from bound_defs(child)
+
+
 def returns(func: ast.AST) -> list[ast.expr]:
     """The values *func* hands back, in source order; a bare ``return`` is ``None``."""
     return [
@@ -464,6 +474,8 @@ class Calls:
         self._wrapped_by: Optional[list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]]] = None
         self._wrapped_spellings: Optional[dict[str, set[str]]] = None
         self._forwarded_reads: Optional[set[int]] = None
+        #: :meth:`stored` by the store, each call kept for as long as this reading is.
+        self._stores: dict[int, ast.Call] = {}
         types.handed_to = self.handed_classes
 
     # -- where a call lands -------------------------------------------------
@@ -483,6 +495,31 @@ class Calls:
         if key not in self._placed:
             self._placed[key] = self._place(file, func, call, bound if bound and _reads_self(call) else ())
         return self._placed[key]
+
+    def stored(self, store: ast.Attribute | ast.Call, name: ast.expr, value: Optional[ast.expr]) -> ast.Call:
+        """The call Python makes for an attribute store -- ``x.a = value``, or ``setattr(x, name, value)``, the call
+        *store* -- ``type(x).__setattr__(x, name, value)``.
+
+        Spelled ``x.__setattr__(name, value)``, its receiver the store's, so
+        :meth:`callees` places it as it places any method call on ``x`` -- at a
+        corpus class's ``__setattr__`` where ``x`` can be one that has it, at
+        nothing where its classes take ``object``'s.  No call of the corpus is
+        it, and none is: :meth:`callers` does not find it.  One call per store,
+        kept here, because a placing is kept by the call's id.
+        """
+        held = self._stores.get(id(store))
+        if held is None:
+            receiver = store.args[0] if isinstance(store, ast.Call) else store.value
+            held = ast.Call(
+                func=ast.Attribute(value=receiver, attr="__setattr__", ctx=ast.Load()),
+                args=[name, value if value is not None else ast.Constant(value=None)],
+                keywords=[],
+            )
+            ast.copy_location(held, store)
+            ast.copy_location(held.func, store)
+            held.parent = getattr(store, "parent", None)  # type: ignore[attr-defined]
+            self._stores[id(store)] = held
+        return held
 
     def named_callables(
         self, file: str, func: ast.AST, value: ast.expr, bound: tuple[tuple[str, ast.ClassDef], ...] = ()
@@ -1102,15 +1139,18 @@ class Calls:
         return placed if placed.targets else None
 
     def _named(self, file: str, func: ast.AST, name: str) -> Placed:
-        # A function defined inside this one, or inside one that holds it.
+        # A function or a class defined inside this one, or inside one that
+        # holds it: ``datasetManager.main`` defines ``setTobeDeletedToDis`` and
+        # ``FinisherThr``, and builds one with ``FinisherThr(...)``.
         scope: Optional[ast.AST] = func
         while scope is not None:
-            for node in own_nodes(scope):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                    return Placed((Target(file, node, None),))
-            for node in ast.iter_child_nodes(scope):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                    return Placed((Target(file, node, None),))
+            for node in bound_defs(scope):
+                if node.name != name:
+                    continue
+                if isinstance(node, ast.ClassDef):
+                    init = self._method_of((file, node), "__init__")
+                    return init if init.targets else Placed((), UNPLACED_NO_INIT)
+                return Placed((Target(file, node, None),))
             scope = self.types.enclosing_function(file, scope)
         tree = self.types.tree(file)
         if tree is None:
@@ -2205,12 +2245,18 @@ class Types:
         return found
 
     def enclosing_function(self, file: str, node: ast.AST) -> Optional[ast.AST]:
-        """The function *node* is nested in, or ``None`` at module or class scope."""
+        """The function a name *node* does not bind is read from next, or ``None`` at module scope.
+
+        Python's scoping: a class body is no scope for the functions in it, so
+        a method of a class a function defines reads that function's names --
+        ``datasetManager.main`` defines ``setTobeDeletedToDis`` and the class
+        ``CloserThr``, whose ``run`` calls it.
+        """
         parent = getattr(node, "parent", None)
         while parent is not None:
             if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 return parent
-            if isinstance(parent, (ast.ClassDef, ast.Module)):
+            if isinstance(parent, ast.Module):
                 return None
             parent = getattr(parent, "parent", None)
         return None
@@ -2333,6 +2379,16 @@ class Types:
         if tree is None:
             return None
         if isinstance(expression, ast.Name):
+            # A class a function defines is a name of that function's, read
+            # from where the name is written: ``finThr = FinisherThr(...)`` in
+            # ``datasetManager.main``.  A name made here for the lookup has no
+            # place, and is the module's.
+            scope = self.enclosing_function(file, expression)
+            while scope is not None:
+                for node in bound_defs(scope):
+                    if node.name == expression.id:
+                        return (file, node) if isinstance(node, ast.ClassDef) else None
+                scope = self.enclosing_function(file, scope)
             for node in tree.body:
                 if isinstance(node, ast.ClassDef) and node.name == expression.id:
                     return file, node

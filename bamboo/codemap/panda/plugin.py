@@ -548,7 +548,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             )
 
         # Promotion last, because criterion 3 reads the extracted branches.
-        # Everything the slices found is a *candidate*; what survives is what
+        # Everything the slices found is kept; the criteria say which subjects
         # the code treats as deciding something.
         criteria = promotion.criteria_for(
             fragment,
@@ -558,22 +558,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             ),
         )
         criteria = promotion.close_over_passthrough(fragment, criteria)
-        self._dropped = promotion.apply(fragment, criteria)
-
-        # Where a row a statement keeps is carried on to.  **After promotion**,
-        # because a crossing is a lead and a lead has to name somewhere the map
-        # will answer for: resolved against the candidates instead, every
-        # ``self.cur.execute(...)`` resolved to the ``execute`` of an adder
-        # plugin -- 520 crossings over 239 statements where 71 over 38 are
-        # real, and 176 statements handed the same two false leads.
-        # Read by the build's report rather than logged, so that the census
-        # appears where the other read-side counts do and nothing changes for
-        # the readers that only check the map.  The gap between the last two
-        # is the finding: an empty ``crosses_to`` on a statement that plainly
-        # hands its rows on would otherwise read as "these rows go nowhere".
-        self.crossings = sqlwrite.attach_crossings(
-            fragment.read_sites, self._modules, fragment.junctions
-        )
+        self._unmarked = promotion.apply(fragment, criteria)
 
         # A column name the code builds from a mapping key.  Where the keys
         # cannot be read the statement names no column, which in the map looks
@@ -593,8 +578,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             )
         )
 
-        # After promotion, so the reach figure describes the map that is kept
-        # rather than every candidate the slices produced.
+        # After promotion, which marks the subjects and drops none: the reach
+        # figure is over every junction the slices produced.
         # Classified once and handed to both readers of it: the trigger slice
         # builds entry points from it, and the log sites need the same fact to
         # say whether a reader re-evaluates.
@@ -645,14 +630,29 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     {module.rel_path: module.blob_sha for module in self._modules},
                 )
             )
+        # Where a row a statement keeps is carried on to: after the reach
+        # record, whose holes and database calls it reads, over every junction
+        # the map keeps.
+        # Read by the build's report rather than logged, so that the census
+        # appears where the other read-side counts do and nothing changes for
+        # the readers that only check the map.  The gap between the middle two
+        # is the finding: an empty ``crosses_to`` on a statement that plainly
+        # hands its rows on would otherwise read as "these rows go nowhere".
+        self.crossings = sqlwrite.attach_crossings(
+            fragment.read_sites,
+            self._modules,
+            fragment.junctions,
+            self._calls,
+            reach.ReachGraph(fragment.reach_graph) if self._calls is not None else None,
+        )
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the
         # shape the map already trades in.
         self._dispatching = trigger.attach_dispatch(fragment.junctions, self._modules)
 
-        # Which file each node's diagnostics land in.  After promotion for the
-        # same reason as the trigger reach: it describes the map that is kept.
+        # Which file each node's diagnostics land in, for every junction the
+        # map keeps, as the trigger reach is.
         self._log_files = logfile.attach(fragment, self._modules, cadence)
         self._declared_files = logfile.declared_files(self._modules)
 
@@ -883,8 +883,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
     @property
     def unpromoted(self) -> tuple[int, int]:
-        """``(subjects, junctions)`` dropped for satisfying no promotion criterion."""
-        return getattr(self, "_dropped", (0, 0))
+        """``(subjects, junctions)`` no promotion criterion marks -- kept, with empty ``criteria``."""
+        return getattr(self, "_unmarked", (0, 0))
 
     @property
     def uncovered_tables(self) -> set[str]:

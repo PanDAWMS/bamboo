@@ -10,8 +10,9 @@ graph is human-validated and irreplaceable.
 The node kinds:
 
 ``SubjectNode``
-    An attribute whose value is worth asking "why is it this?" about --
-    promoted from the declared spec attributes by the census criteria.
+    An attribute the code writes -- a declared spec attribute or a table's
+    column -- with the census criteria that say its value is worth asking
+    "why is it this?" about (``criteria``; none where none fires).
 ``JunctionNode``
     A place where the code settles a subject's value.  Its branches are the
     possible outcomes, each with the path condition that selects it.  A
@@ -97,7 +98,7 @@ class Anchor(BaseModel):
 
 
 class SubjectNode(BaseNode):
-    """An attribute the reasoning may start from, with its promotion evidence.
+    """An attribute the reasoning may start from, with the promotion criteria that fire on it -- none where none does.
 
     ``name`` is qualified as ``"<spec_class>.<attribute>"`` because the same
     attribute name means different things in different classes -- ``FileSpec``
@@ -128,7 +129,10 @@ class SubjectNode(BaseNode):
     attribute: str
     criteria: list[str] = Field(
         default_factory=list,
-        description="Promotion criteria satisfied, e.g. ['1:state-gate-in-where'].",
+        description=(
+            "Promotion criteria satisfied, e.g. ['1:state-gate-in-where']; empty "
+            "where none is -- the subject is kept, and nothing says it decides anything."
+        ),
     )
     vocabulary: list[str] = Field(
         default_factory=list,
@@ -1312,7 +1316,7 @@ class JunctionNode(BaseNode):
 
 
 class LogSiteNode(BaseNode):
-    """Where one function's diagnostics land, for a function that decides nothing.
+    """Where one function's diagnostics land, for a function that owns no junction.
 
     The map already answers this for a junction, and a junction is not who is
     asked.  Two thirds of the owners the map names as reading a value own no
@@ -1325,7 +1329,9 @@ class LogSiteNode(BaseNode):
     **Only for owners that are not junctions.**  One fact in two places is how
     ``log_files`` came to answer both "where does this code live" and "whose
     log mentions it"; a reader checks junctions first and these second, so
-    nothing is stored twice.
+    nothing is stored twice.  Since promotion marks subjects and drops none,
+    every function writing a subject owns a junction: on pin k 328 rows became
+    228, each owner of the 100 now a junction's, with the same ``log_files``.
 
     **Stored, not merely reported.**  ``DiagnosticTemplate`` and
     ``EnumerationWrite`` are built on every run, carry no label and reach
@@ -1734,6 +1740,23 @@ class OrderHole(BaseModel):
             "for leave in sorted_leaves (sorted_leaves = self.get_sorted_leaves()@867)``."
         ),
     )
+
+
+class OpenCrossing(BaseModel):
+    """A call on the way a statement's rows are carried, or back, that the corpus's calls cannot place: a hole of the reach record.
+
+    Named as the record names the hole -- the function's ``owner`` in
+    ``reach_graph``, the ``line`` and the ``callee`` -- so the why is read
+    there: ``taskSpec.setErrDiag(...)`` in ``ContentsFeeder.feed_contents_to_tasks``,
+    whose ``taskSpec`` is unpacked from a call's result and declared nowhere;
+    ``self.tbif.insert_step_task(...)`` in ``PandaTaskStepHandler.submit_target``,
+    which may be a caller ``insert_step_task``'s rows go back to, its receiver
+    declared ``Any``.
+    """
+
+    owner: str = Field(..., description="The ``reach_graph`` row holding the call: ``file::Class.method``.")
+    line: int
+    callee: str = Field(..., description="As :attr:`ReachHole.callee` spells it.")
 
 
 class CallReading(BaseModel):
@@ -2166,18 +2189,34 @@ class ReadSiteNode(BaseNode):
             "Junction owners a row kept by this statement is carried on to, "
             "sorted -- where the investigation goes next when the statement "
             "itself is the lead.\n\n"
-            "Resolved by name, from two shapes: the region calls a function "
-            "the map owns a junction in, or it builds a class the map owns "
-            "one in and starts it as a thread. The second is not decoration: "
-            "``copyArchive.py::main``'s ``holding`` query hands each job to "
-            "``Watcher(...).start()``, so the next thing that happens to a "
-            "held job is ``Watcher.run`` -- and ``start`` is not itself a "
-            "junction owner, so the class the name was built from is what "
-            "resolves it.\n\n"
-            "**A value returned to the caller is not here.** 137 statements "
-            "end in a ``return`` inside their region, and who receives it is "
-            "a question about call sites this slice cannot answer; naming the "
-            "caller would be a lead pointing at whoever was grepped first."
+            "Every call is placed by the corpus's calls, as the reach record "
+            "places it, not by its name: a call of the region landing in a "
+            "function the map owns a junction in, and the rows handed back to "
+            "a caller and what it does with them.  Rows reaching a function "
+            "that owns none are followed through it -- into the calls it hands "
+            "them to (``JediTaskBuffer.updateTask_JEDI`` handing ``taskSpec`` "
+            "to ``proxy.updateTask_JEDI``; a started thread's inherited "
+            "``run`` calling ``self.runImpl()`` for the class it was built "
+            "as), and back to its callers where it returns them "
+            "(``TaskBuffer.getConfigValue``).  ``copyArchive.py::main``'s "
+            "``holding`` query hands each job to ``Watcher(...)`` and calls "
+            "``.start()``, so the next thing that happens to a held job is "
+            "``Watcher.run``.  A call the record reads as the database is not "
+            "followed.\n\n"
+            "Never the caller's own function: naming it would satisfy the "
+            "question and not the purpose.  Where a call on the way could not "
+            "be placed, :attr:`crosses_open` names it, and this is what is "
+            "known rather than all."
+        ),
+    )
+    crosses_open: list[OpenCrossing] = Field(
+        default_factory=list,
+        description=(
+            "The calls on the way the rows are carried that the corpus's calls "
+            "cannot place, and the ones that may be a caller they go back to "
+            "(spelled with the returning function's name) -- each a hole of the "
+            "reach record, its why there.  Empty: every call on the way was "
+            "placed, and no hole may be a caller back."
         ),
     )
     anchor: Anchor = Field(
@@ -2788,7 +2827,7 @@ class EnumerationWrite(BaseModel):
 
     **Outside promotion**, also for that class's reason: no criterion fires on
     these fields -- every write is tier 2, the right-hand side being a module
-    constant rather than a literal -- so promotion drops them, and rightly.
+    constant rather than a literal -- so their subjects carry none, and rightly.
     "Why is this field 100?" is not the question anyone asks of it; "what does
     100 mean here?" is, and that is an index.
     """
@@ -4455,7 +4494,9 @@ class ReachCall(BaseModel):
             "``call``; ``handed``, a function or method passed as an argument "
             "-- ``Thread(target=self.run)``, ``executor.submit(fn)`` -- taken "
             "as called; ``lambda``, a call in a lambda's body, taken as made "
-            "by the function holding the lambda."
+            "by the function holding the lambda; ``setattr``, an attribute "
+            "store running its object's ``__setattr__`` -- ``job.jobStatus = "
+            "'closed'`` -- or ``setattr(x, name, v)``."
         ),
     )
     for_classes: list[str] = Field(
@@ -5260,23 +5301,18 @@ class StatementReading(BaseModel):
         default_factory=list,
         description=(
             "Junction owners a row this statement keeps is carried on to -- "
-            "where the investigation goes next when the statement is the lead. "
-            "Three shapes resolve and all three name a junction the map holds: "
-            "the region calls one, the region builds a class the map owns one "
-            "in and starts it as a thread, or the rows are returned and the "
-            "caller does one of those two with them. 110 crossings over 73 of "
-            "the corpus's 264 statements. "
-            "Resolved by the callee's *name*, which is why the database's own "
-            "runners are excluded from the index: a junction in a method "
-            "called execute would answer for every self.cur.execute in the "
-            "corpus, and did, until JobSpec.ddmErrorDiag was promoted and 222 "
-            "statements were handed the adder plugins as their lead. "
-            "Empty is not 'nowhere': 107 statements hand their rows back and "
-            "70 of them lead to a caller that does nothing the map answers "
-            "for, which the build reports rather than hides. Naming that "
-            "caller's own function instead would satisfy the question and not "
-            "the purpose -- a lead has to be somewhere the map will answer."
+            "where the investigation goes next when the statement is the lead: "
+            ":attr:`ReadSiteNode.crosses_to`, every call placed by the corpus's "
+            "calls, through functions that own no junction.  Empty is not "
+            "'nowhere': a statement whose rows are handed back may lead to a "
+            "caller that does nothing the map answers for, which the build "
+            "reports rather than hides, and a call on the way may not be "
+            "placed (``crosses_open``)."
         ),
+    )
+    crosses_open: list[OpenCrossing] = Field(
+        default_factory=list,
+        description=":attr:`ReadSiteNode.crosses_open`: the calls on the way, and the callers back, this reading cannot place.",
     )
 
 
