@@ -837,8 +837,18 @@ def test_what_a_statement_writes_is_read_off_the_tree_in_its_own_spelling():
     assert _written("INSERT /*+ ignore_row_on_dupkey_index (e(r)) */ INTO ATLAS_PANDA.CARBON_REGION_EMISSIONS e (REGION) VALUES(:r)") == [
         ("insert", "CARBON_REGION_EMISSIONS", {"REGION": ("bind", ":r")}, {}, {})
     ]
-    # A column Python names at run time is no column.
-    assert _written("UPDATE {}.JEDI_Tasks SET merge{}={} WHERE jediTaskID=:jediTaskID") == []
+    # A column Python names at run time is no column; the row its WHERE names is still read.
+    assert _written("UPDATE {}.JEDI_Tasks SET merge{}={} WHERE jediTaskID=:jediTaskID") == [
+        ("update", "JEDI_Tasks", {}, {}, {"jediTaskID": ":jediTaskID"})
+    ]
+    # A spec's bindUpdateChangesExpression(): the columns are Python's, the row is the WHERE's.
+    assert _written(
+        "UPDATE ATLAS_PANDA.jobsDefined4 SET {} WHERE PandaID=:PandaID AND (jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)"
+    ) == [("update", "jobsDefined4", {}, {}, {"PandaID": ":PandaID"})]
+    # With no SET item at all (a build in which no attribute changed) the statement still writes no column, said.
+    assert sqltext.unread_columns("UPDATE ATLAS_PANDA.filesTable4 SET WHERE row_ID=:row_ID") == [
+        ("filesTable4", sqltext.COLUMNS_NOT_READ)
+    ]
 
 
 def test_a_write_is_guarded_only_by_what_every_row_it_changes_meets():
@@ -1354,3 +1364,28 @@ def test_unread_columns_are_stops_on_the_statement_and_not_on_the_rows_it_picks(
     stops = sqlwrite.statement_stops(func, "taskbuffer/db_proxy_mods/job_complex_module.py")
     said = [stop for stop in stops if stop.reason == sqltext.SET_COLUMN_IS_A_HOLE]
     assert [(stop.statement, stop.detail, stop.reads) for stop in said] == [(6, "SET {}=:{}", [])]
+
+
+def test_a_term_naming_its_column_and_its_bind_by_holes_is_kept_apart_from_the_keys():
+    """``{k}=:cr_{k}`` over a mapping's keys names no column a reader of *keys* can take, and was dropped -- in a
+    loop's passes or not.  It is kept apart (:attr:`sqltext.SqlWrite.key_holes`): the holes' numbers, for a reader
+    holding what the holes are, which says whether it names the row."""
+    marked = f"UPDATE T SET a=:a WHERE {sqltext.REPEAT_OPEN}{{}}=:cr_{{}}{sqltext.REPEAT_CLOSE} AND b=:b"
+    (write,) = sqltext.writes(marked)
+    assert (write.keys, write.key_holes) == ({"b": ":b"}, [(1, ":cr_{}", (2,))])
+    (unrolled,) = sqltext.writes("UPDATE T SET a=:a WHERE {}=:cr_{}")
+    assert (unrolled.keys, unrolled.key_holes) == ({}, [(1, ":cr_{}", (2,))])
+
+
+def test_a_set_item_naming_its_column_and_its_bind_by_holes_is_kept_with_its_holes():
+    """``,{key}=:{key}`` for each key of a mapping names no column a reader of *columns* can take; it is still a
+    SET_COLUMN_IS_A_HOLE, and its holes are kept (:attr:`sqltext.SqlWrite.column_holes`) -- in a loop's passes or
+    not -- for a reader holding what the holes are."""
+    marked = f"UPDATE T SET a=:a{sqltext.REPEAT_OPEN},{{}}=:{{}}{sqltext.REPEAT_CLOSE} WHERE b=:b"
+    (write,) = sqltext.writes(marked)
+    assert (sorted(write.columns), write.column_holes) == (["a"], [(1, ":{}", (2,))])
+    assert {why for _what, why in sqltext.unread_columns(marked)} == {sqltext.SET_COLUMN_IS_A_HOLE}
+    (unrolled,) = sqltext.writes("UPDATE T SET a=:a,{}=:x_{} WHERE b=:b")
+    assert unrolled.column_holes == [(1, ":x_{}", (2,))]
+    (named,) = sqltext.writes("UPDATE T SET a=:a,merge{}=:b WHERE b=:b")
+    assert named.column_holes == []

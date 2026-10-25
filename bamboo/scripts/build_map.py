@@ -694,6 +694,19 @@ schema_root_option = click.option(
         "belongs to; without them such a column is reported, not read."
     ),
 )
+#: Shared the same way: two builds compared must have read the same record.
+instance_record_option = click.option(
+    "--instance-record",
+    default=None,
+    metavar="FILE",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "One deployment's recorded values of module names -- for PanDA, the "
+        "plugin map its configuration made (bamboo.codemap.calls.read_recorded).  "
+        "Another deployment may configure other values; without a record the "
+        "names are read as the code says them.  The dump says which record."
+    ),
+)
 
 
 @click.command("build-map")
@@ -715,6 +728,7 @@ schema_root_option = click.option(
     ),
 )
 @schema_root_option
+@instance_record_option
 @click.option(
     "--dump",
     "dump_to",
@@ -739,6 +753,7 @@ def main(
     map_id: str,
     source_root: Optional[Path],
     schema_root: Optional[Path],
+    instance_record: Optional[Path],
     dump_to: Optional[Path],
     strict: bool,
     top: int,
@@ -755,7 +770,7 @@ def main(
         ) from exc
 
     try:
-        plugin.prepare(source_root, schema_root)
+        plugin.prepare(source_root, schema_root, instance_record)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 

@@ -182,9 +182,11 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "count",
         "statements",
         "log_files",
+        "runs",
     ),
-    # ``calls``, ``database`` and ``holes`` hold lines, as ``statements`` does
-    # above: between two builds of one tree they do not move.
+    # ``calls``, ``database``, ``holes``, ``history`` and the object records
+    # hold lines, as ``statements`` does above: between two builds of one tree
+    # they do not move.
     NodeType.REACH.value: (
         "cls",
         "function",
@@ -193,6 +195,13 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "database",
         "holes",
         "settled",
+        "history",
+        "assigns",
+        "bindings",
+        "call_bindings",
+        "writes",
+        "order",
+        "cleared",
     ),
 }
 
@@ -269,6 +278,8 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "must_prints",
     "must_names",
     "must_hole",
+    "history",
+    "history_hole",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",
@@ -287,6 +298,10 @@ _REPORT = "not stored: the build's report on itself, printed by the build"
 NOT_COMPARED_PARTS: dict[str, str] = {
     "map_id": _IDENTITY,
     "derived_from": _PROVENANCE,
+    "instance_record": (
+        "the instance record the calls were read with, an input of the build like derived_from; "
+        "two builds compared must have read the same one"
+    ),
     "diagnostics": _REPORT,
     "enumeration_writes": _REPORT,
     "coverage": _REPORT,

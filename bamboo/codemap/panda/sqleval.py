@@ -4,7 +4,8 @@
 abstract interpreter over one function at a time:
 
 - Every path is run.  An ``if`` whose test it cannot settle runs both arms, and two tests spelled the same, on names
-  nothing rebinds in between, are taken the same way (facts).  A test that reads attributes (``self.backend ==
+  nothing rebinds in between, are taken the same way (facts) -- a test and its opposite (``in`` / ``not in``, ``==`` /
+  ``!=``, ``is`` / ``is not``) the opposite way.  A test that reads attributes (``self.backend ==
   'oracle'``) is one too, until something assigns the attribute or the object, or a call is handed the object (as its
   receiver or an argument): a call handed something else -- ``self.cur.execute(...)`` -- is taken not to change it.
 - A loop over a sequence it knows is unrolled; over anything else, its body runs once or twice (:data:`UNKNOWN_EMPTY`).
@@ -106,7 +107,19 @@ WHOLE_WORK: Optional[int] = (
     500_000  # the run over every call of a function; past it, each call on its own (was 5 s)
 )
 CALLEE_WORK: Optional[int] = 200_000  # one callee run (was 0.5 s)
+#: The names a call runs a statement by where no corpus is read; a corpus says its own (``sql.runners``), installed
+#: for the reading by :func:`use_runners`.
 RUNNERS = frozenset({"execute", "executemany", "querySQL", "querySQLS"})
+_RUNNERS: frozenset[str] = RUNNERS
+
+
+def use_runners(names: frozenset[str]) -> frozenset[str]:
+    """Read statements at calls by *names* from now on; returns the names read until now."""
+    global _RUNNERS
+    previous, _RUNNERS = _RUNNERS, names
+    return previous
+
+
 _DICT_READS = frozenset(
     {"keys", "items", "values", "get", "copy"}
 )  # methods that read a dict's structure
@@ -142,7 +155,9 @@ class HoleAt(NamedTuple):
     hole holds what the passes appended less *end*, which each of them ends with and which stands after the hole
     where nothing cut it (``ret[:-1]`` cuts the comma of ``{},``).  Where the passes appended items to a list
     (*listed*), each text is an item, and *joiner* is what the text joins them with once it does (``" AND
-    ".join(conditions)``, :func:`joined_by`)."""
+    ".join(conditions)``, :func:`joined_by`).  *inner* holds, for each text of *repeats*, its holes as one rendering
+    of it has them, ``(offset, HoleAt)`` as :attr:`Rendered.holes`: ``{}=:cr_{}`` over ``criteria.items()`` is the
+    loop's key twice; ``()`` for a text no rendering in reach spells."""
 
     stmt: object
     source: str
@@ -151,6 +166,7 @@ class HoleAt(NamedTuple):
     end: str = ""
     listed: bool = False
     joiner: Optional[str] = None
+    inner: tuple = ()
 
 
 #: Why a hole stands where a loop of unknown length appended to a name: the passes'
@@ -984,7 +1000,7 @@ def runner_calls(func: ast.AST) -> list[ast.Call]:
         for node in _own_nodes(func)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr in RUNNERS
+        and node.func.attr in _RUNNERS
         and node.args
     ]
 
@@ -1129,10 +1145,13 @@ def _pure(test: ast.expr) -> bool:
                 ast.Load,
                 ast.Tuple,
                 ast.List,
+                ast.Set,
                 ast.BoolOp,
                 ast.boolop,
                 ast.UnaryOp,
                 ast.Not,
+                ast.USub,
+                ast.UAdd,
             ),
         )
         for node in ast.walk(test)
@@ -1147,7 +1166,9 @@ _FACTUAL: dict[int, tuple[ast.AST, bool]] = {}
 def _factual(test: ast.expr) -> bool:
     """Whether a path can remember how it took *test*: :func:`_pure`, or pure but for attributes it reads.
 
-    No call and no subscript: ``self.backend == 'oracle'`` is one, ``isinstance(v, list)`` is not.
+    No call and no subscript: ``self.backend == 'oracle'`` is one, ``isinstance(v, list)`` is not.  A signed number
+    and a set display are values as a list is: ``setNumSlotsForWP`` builds a ``DELETE`` under ``if numSlots == -1``
+    and runs it under the ``else`` of ``if numSlots != -1``.
     """
     held = _FACTUAL.get(id(test))
     if held is not None and held[0] is test:
@@ -1164,10 +1185,13 @@ def _factual(test: ast.expr) -> bool:
                 ast.Load,
                 ast.Tuple,
                 ast.List,
+                ast.Set,
                 ast.BoolOp,
                 ast.boolop,
                 ast.UnaryOp,
                 ast.Not,
+                ast.USub,
+                ast.UAdd,
             ),
         )
         for node in ast.walk(test)
@@ -1220,6 +1244,46 @@ def _spelled(test: ast.expr) -> str:
     text = ast.unparse(test)
     _SPELLED[id(test)] = (test, text)
     return text
+
+
+#: A comparison and the one it is the negation of, for every value: ``a not in b`` is ``not (a in b)``.  Not ``<``
+#: and ``>=``, which are not (a set's order, a NaN).
+_OPPOSITES = {ast.NotIn: ast.In, ast.NotEq: ast.Eq, ast.IsNot: ast.Is}
+_FACT_KEYS: dict[int, tuple[ast.AST, tuple[str, bool]]] = {}
+
+
+def positive(test: ast.expr) -> tuple[ast.expr, bool]:
+    """*test* as the comparison it is the negation of, and True -- ``a in b`` for ``a not in b`` -- else *test* and
+    False.  Read by :func:`_fact_key` and by :func:`bamboo.codemap.panda.pathcond.negates`."""
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and type(test.ops[0]) in _OPPOSITES
+    ):
+        return ast.Compare(
+            left=test.left,
+            ops=[_OPPOSITES[type(test.ops[0])]()],
+            comparators=test.comparators,
+        ), True
+    return test, False
+
+
+def _fact_key(test: ast.expr) -> tuple[str, bool]:
+    """What a fact on *test* is kept under, and whether *test* holds where that fact is False.
+
+    A test and its opposite are one fact: ``insertNewJob`` sets its flag only
+    under ``if file.type not in ["output", "log"]`` and adds
+    ``,outPandaID=:PandaID`` under ``if file.type in ["output", "log"]``.
+    Spelled apart, they were two tests, each spelled once, and the clause and
+    the flag's ``,is_waiting=:is_waiting`` met in a text no pass builds.
+    """
+    held = _FACT_KEYS.get(id(test))
+    if held is not None and held[0] is test:
+        return held[1]
+    form, opposite = positive(test)
+    answer = (ast.unparse(form) if opposite else _spelled(test), opposite)
+    _FACT_KEYS[id(test)] = (test, answer)
+    return answer
 
 
 def _source(node: ast.AST) -> str:
@@ -1604,6 +1668,7 @@ def clear_memo() -> None:
     _HELD_BY.clear()
     _HOLDS.clear()
     _FACTUAL.clear()
+    _FACT_KEYS.clear()
     _JOINED.clear()
 
 
@@ -2037,8 +2102,8 @@ class Ref:
         return frozenset(found & self.relevant)
 
     def _repeated_atoms(self):
-        """Tests spelled twice or more, the names each reads (a rebinding forgets it), and for one that reads
-        attributes what else forgets it (:meth:`kills`)."""
+        """Tests spelled twice or more, a test and its opposite as one (:func:`_fact_key`), the names each reads (a
+        rebinding forgets it), and for one that reads attributes what else forgets it (:meth:`kills`)."""
         counts: dict[str, int] = {}
         names: dict[str, set[str]] = {}
         touched: dict[str, frozenset[str]] = {}
@@ -2046,7 +2111,7 @@ class Ref:
             if isinstance(node, (ast.If, ast.While, ast.IfExp)):
                 for part in _test_keys(node.test):
                     if _factual(part):
-                        key = _spelled(part)
+                        key, _opposite = _fact_key(part)
                         counts[key] = counts.get(key, 0) + 1
                         names[key] = _names(part)
                         touched[key] = _touched_by(part)
@@ -2458,9 +2523,9 @@ class Ref:
 
     def decide(self, test: ast.expr, env: Env) -> Optional[bool]:
         if _factual(test):
-            key = _spelled(test)
+            key, opposite = _fact_key(test)
             if key in env.facts:
-                return env.facts[key]
+                return env.facts[key] is not opposite
         if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
             inner = self.decide(test.operand, env)
             return None if inner is None else not inner
@@ -2499,10 +2564,10 @@ class Ref:
                     env = self.assume(value, outcome, env)
             return env
         if _factual(test):
-            key = _spelled(test)
+            key, opposite = _fact_key(test)
             if key in self.repeated:
                 facts = dict(env.facts)
-                facts[key] = outcome
+                facts[key] = outcome is not opposite
                 return Env(env.vars, facts)
         return env
 
@@ -2566,7 +2631,7 @@ class Ref:
             for here in _expression_nodes(node)
             if isinstance(here, ast.Call)
             and isinstance(here.func, ast.Attribute)
-            and here.func.attr in RUNNERS
+            and here.func.attr in _RUNNERS
             and here.args
         ]
         for call in calls:
@@ -2667,9 +2732,9 @@ class Ref:
                 if isinstance(n, (ast.If, ast.While, ast.IfExp)):
                     for part in _test_keys(n.test):
                         if _factual(part):
-                            spelled = _spelled(part)
-                            if spelled in self.repeated:
-                                found.add(spelled)
+                            fact, _opposite = _fact_key(part)
+                            if fact in self.repeated:
+                                found.add(fact)
             self._loads[key] = frozenset(found)
         return self._loads[key]
 
@@ -4499,7 +4564,7 @@ class Ref:
             if isinstance(node.func, ast.Attribute)
             else getattr(node.func, "id", "")
         )
-        if name in RUNNERS or name in _DATABASE_READS:
+        if name in _RUNNERS or name in _DATABASE_READS:
             return [UNK]  # what the database hands back
         held = _PLACED.get(id(node))
         if held is None or held[0] is not node:
@@ -5248,6 +5313,16 @@ def _common_end(texts) -> str:
     return common[at:]
 
 
+def _holes_of(values, text: str) -> tuple:
+    """The holes of a rendering of *values* that spells *text*, ``(offset, HoleAt)`` in order; ``()`` where none in
+    reach does."""
+    for value in values:
+        for one in itertools.islice(_renderings(value), MAX_TEMPLATES):
+            if one.rendered() == text:
+                return rendered(list(one.runs)).holes
+    return ()
+
+
 def _ending(values, text: str, origin) -> Str:
     """*text*, which the texts *values* render all end with, with the origins of one rendering's pieces there."""
     for value in values:
@@ -5274,7 +5349,8 @@ def repeated_part(loop, name: str, added: list) -> Callable:
     if listed and pieces and not (templates or capped):  # items, none a text
         return lambda before: Lst(before.items + (UNK,))
     end = "" if capped else _common_end(templates)
-    part = hole_str(HoleAt(loop, name, REPEATED, templates, end, listed))
+    inner = tuple(_holes_of(pieces, text) for text in templates)
+    part = hole_str(HoleAt(loop, name, REPEATED, templates, end, listed, inner=inner))
     if end:
         part = make_cat([part, _ending(pieces, end, loop)])
     if listed:

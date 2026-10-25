@@ -17,8 +17,10 @@ such a helper between two releases.
 from __future__ import annotations
 
 import ast
+import functools
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap.panda import sqleval
 from bamboo.codemap.panda.reaching import reaching
 
 
@@ -708,19 +710,66 @@ def exclusive(one: list[str], other: list[str]) -> bool:
 
     Detected from the negations :func:`path_condition` already writes down: an
     ``elif`` branch carries ``not (<the test before it>)``, so two branches of
-    one chain each hold a negation of something the other asserts.
+    one chain each hold a negation of something the other asserts.  A test and
+    its negation are matched by :func:`negates`, as they mean, not as they are
+    spelled: ``if noNewJob:`` and a later ``if not noNewJob:`` write
+    ``noNewJob`` and ``not noNewJob``, which no ``not (...)`` spelled.
 
-    Deliberately conservative -- an annotated test will not match textually, so
-    some exclusive pairs read as compatible.  That is the safe direction for
-    both callers.  Deciding whether a later write overwrites an earlier one, a
+    Conservative where a missed exclusion is the safe direction for both
+    callers.  Deciding whether a later write overwrites an earlier one, a
     missed exclusion adds a condition that is true but redundant where a missed
     *overlap* would drop a required one; splitting a SQL statement built across
     branches, a missed exclusion leaves the statement folded as it was before,
     where a missed overlap would split a statement that is really one.
     """
-    return any(f"not ({test})" in other for test in one) or any(
-        f"not ({test})" in one for test in other
+    return any(negates(test, held) for test in one for held in other) or any(
+        negates(test, held) for test in other for held in one
     )
+
+
+def negates(test: str, other: str) -> bool:
+    """Whether the condition *other* is the negation of *test*, both as :func:`path_condition` writes them.
+
+    Read by the AST, so ``not noNewJob``, ``not (noNewJob)`` and ``not
+    (noNewJob)  [noNewJob := ...]`` are one negation of ``noNewJob``: a bare
+    name's annotation (:func:`_substitute_bare_name`) says what the name is
+    bound to and is left out.  A comparison is the negation of its opposite
+    (:func:`sqleval.positive`): ``setNumSlotsForWP`` builds its ``DELETE``
+    under ``if numSlots == -1`` and runs it under the ``else`` of ``if
+    numSlots != -1``.  A condition that does not parse is compared as written.
+    """
+    return _read_test(other) == _read_test(f"not ({_unannotated(test)})")
+
+
+@functools.lru_cache(maxsize=None)
+def _read_test(condition: str) -> str:
+    text = _unannotated(condition)
+    try:
+        return ast.dump(_negations_read(ast.parse(text, mode="eval").body))
+    except SyntaxError:
+        return text
+
+
+def _negations_read(test: ast.expr) -> ast.expr:
+    """*test* with a comparison's opposite read as ``not`` of it, and ``not not`` as nothing."""
+    form, opposite = sqleval.positive(test)
+    if opposite:
+        return ast.UnaryOp(op=ast.Not(), operand=form)
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _negations_read(test.operand)
+        if isinstance(inner, ast.UnaryOp) and isinstance(inner.op, ast.Not):
+            return inner.operand
+        return ast.UnaryOp(op=ast.Not(), operand=inner)
+    return test
+
+
+def _unannotated(condition: str) -> str:
+    """*condition* without the ``  [name := definition]`` :func:`_substitute_bare_name` puts after a bare name."""
+    rendered, sep, rest = condition.partition("  [")
+    name, colon, _definition = rest.partition(" := ")
+    if sep and colon and name.isidentifier() and rest.endswith("]"):
+        return rendered
+    return condition
 
 
 #: A test the constants at hand do not settle.
@@ -775,23 +824,64 @@ def decided(test: ast.expr, values: dict[str, object]) -> object:
 def ruled_out_by(node: ast.AST, func: ast.AST, values: dict[str, object]) -> bool:
     """Whether *func* never runs *node* when its parameters hold *values*.
 
-    Only *func*'s own ``if`` statements are ruled on: a nested function or
-    lambda has parameters of its own, whatever they are called.
+    Two ways a test keeps *node* from running: an ``if`` holding it whose
+    test the values decide against the arm it is in, and an ``if`` before it
+    in a block holding it that leaves the block on the arm the values decide
+    -- ``if forAnal: return None`` above ``job.jobStatus = "unknown"``.  Only
+    *func*'s own statements are ruled on: a nested function or lambda has
+    parameters of its own, whatever they are called.
     """
+    for test, keeps in _tests_on(node, func):
+        result = decided(test, values)
+        if result is not UNDECIDED and result is not keeps:
+            return True
+    return False
+
+
+def tests_on(node: ast.AST, func: ast.AST) -> list[ast.expr]:
+    """The tests :func:`ruled_out_by` reads for *node* in *func*: what its parameters must settle to rule on it."""
+    return [test for test, _keeps in _tests_on(node, func)]
+
+
+def _tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
+    """Each test of *func* that decides whether *node* runs, with the value it runs on.
+
+    Kept on *node*, as its ``parent`` is: a route reading asks it of every
+    node of a function, once per route.
+    """
+    held = getattr(node, "_tests_on", None)
+    if held is not None and held[0] is func:
+        return held[1]
+    found = _read_tests_on(node, func)
+    node._tests_on = (func, found)  # type: ignore[attr-defined]
+    return found
+
+
+def _read_tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
     if enclosing_function(node) is not func:
-        return False
+        return []
+    found: list[tuple[ast.expr, bool]] = []
     child = node
     for ancestor in ancestors(node):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(ancestor, field, None)
+            if not isinstance(block, list) or not any(child is one for one in block):
+                continue
+            for statement in block[: next(i for i, one in enumerate(block) if one is child)]:
+                if isinstance(statement, ast.If):
+                    if _jumps(statement.body):
+                        found.append((statement.test, False))
+                    elif statement.orelse and _jumps(statement.orelse):
+                        found.append((statement.test, True))
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             break
         if isinstance(ancestor, ast.If):
-            result = decided(ancestor.test, values)
-            if result is False and any(child is one for one in ancestor.body):
-                return True
-            if result is True and any(child is one for one in ancestor.orelse):
-                return True
+            if any(child is one for one in ancestor.body):
+                found.append((ancestor.test, True))
+            elif any(child is one for one in ancestor.orelse):
+                found.append((ancestor.test, False))
         child = ancestor
-    return False
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -826,7 +916,12 @@ def site_of(expression: ast.AST) -> ast.AST:
 
 def loops_over(node: ast.AST) -> set[int]:
     """The header line of every loop whose *body* holds *node*."""
-    found: set[int] = set()
+    return {loop.lineno for loop in _loops_holding(node)}
+
+
+def _loops_holding(node: ast.AST) -> list[ast.For | ast.AsyncFor | ast.While]:
+    """Every loop whose *body* holds *node*, innermost first."""
+    found: list[ast.For | ast.AsyncFor | ast.While] = []
     previous = node
     for ancestor in ancestors(node):
         if isinstance(
@@ -834,7 +929,7 @@ def loops_over(node: ast.AST) -> set[int]:
         ):
             break
         if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)) and previous in ancestor.body:
-            found.add(ancestor.lineno)
+            found.append(ancestor)
         previous = ancestor
     return found
 
@@ -1030,7 +1125,9 @@ def _given_between(
     )
 
 
-def parted(one: ast.AST, other: ast.AST, exits: bool = True) -> bool:
+def parted(
+    one: ast.AST, other: ast.AST, exits: bool = True, around: Optional[ast.AST] = None
+) -> bool:
     """Whether *one* and *other* cannot both be on one run, read as the function runs.
 
     :func:`exclusive` compares conditions as text, and a condition describes
@@ -1064,18 +1161,92 @@ def parted(one: ast.AST, other: ast.AST, exits: bool = True) -> bool:
 
     *exits* reads :func:`reachable_when`'s early exits as well as the ``if``
     tests, as :func:`compatible` does; without it, the tests alone.
+
+    *around* reads the contradiction across the passes of that loop rather
+    than within one: one pass runs one arm and a later pass the other, so it
+    holds only where the loop gives no name a test reads a new value -- a
+    ``for`` target, a binding or a call on it, as :func:`_rebinds` reads them,
+    anywhere in the loop (:func:`_given_in`).  ``parse_condition_string``
+    replaces ``cond_string`` in the ``else`` of ``if not item_list``, goes
+    round its ``while``, binds ``item_list`` afresh, and hands the replaced
+    string on from the ``if``.  A call counts here as it does between two
+    tests, and the whole loop is between: ``doGenerate`` makes 68 calls on
+    ``taskSpec`` in its loop, so ``taskSpec.usePrePro()`` reads as able to
+    change from one pass to the next, which it is not -- a value offered in
+    excess, the safe side.
     """
     func = enclosing_function(one)
     mine, theirs = _tested_by(one, exits), _tested_by(other, exits)
     for text, statement in mine:
         for other_text, other_statement in theirs:
-            if other_text != f"not ({text})" and text != f"not ({other_text})":
+            if not (negates(text, other_text) or negates(other_text, text)):
                 continue
-            if statement is None or other_statement is None or statement is other_statement:
+            if statement is None or other_statement is None or func is None:
+                return True
+            if around is not None:
+                if _given_in(func, around, (statement, other_statement)):
+                    continue
+                return True
+            if statement is other_statement:
                 return True
             earlier, later = sorted((statement, other_statement), key=lambda held: held.lineno)
-            if func is None or not _given_between(func, earlier, later, (one, other)):
+            if not _given_between(func, earlier, later, (one, other)):
                 return True
+    return False
+
+
+def _given_in(func: ast.AST, loop: ast.AST, statements: tuple[ast.stmt, ...]) -> bool:
+    """Whether *loop* gives a name one of the *statements*' tests reads a new value."""
+    names: set[str] = set()
+    for statement in statements:
+        names |= _names_in(statement.test)  # type: ignore[attr-defined]
+    rebinds = _rebinds(func)
+    return any(_within(site, loop) for name in names for site in rebinds.get(name, ()))
+
+
+def arm_of(node: ast.AST) -> Optional[tuple[ast.If, bool]]:
+    """The innermost ``if`` arm holding *node*: the ``if``, and whether the arm is its body.  None outside any."""
+    previous = node
+    for ancestor in ancestors(node):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+            return None
+        if isinstance(ancestor, ast.If):
+            if any(previous is one for one in ancestor.body):
+                return ancestor, True
+            if any(previous is one for one in ancestor.orelse):
+                return ancestor, False
+        previous = ancestor
+    return None
+
+
+def only_through(site: ast.AST, piece: ast.AST) -> bool:
+    """Whether *site* runs only on a pass through the innermost ``if`` arm holding *piece*.
+
+    On that arm, or under a test meaning the arm's condition -- matched by the
+    AST as :func:`negates` matches, the same way round -- with no name the test
+    reads given a new value between the two, as :func:`parted` reads two
+    statements testing one thing.  ``updateTaskStatusByContFeeder_JEDI`` adds
+    ``,oldStatus=:oldStatus,splitRule=:splitRule`` to its ``UPDATE`` under ``if
+    taskSpec is not None`` and fills ``:status`` from ``taskSpec`` under a
+    second ``if taskSpec is not None`` further down: a pass that built the
+    statement without the clause never ran that fill.
+    """
+    arm = arm_of(piece)
+    if arm is None:
+        return False
+    branch, body = arm
+    if any(_within(site, one) for one in (branch.body if body else branch.orelse)):
+        return True
+    func = enclosing_function(branch)
+    condition = next((text for text, held in _tested_by(piece, False) if held is branch), None)
+    if func is None or condition is None:
+        return False
+    for text, held in _tested_by(site, False):
+        if held is None or held is branch or not negates(text, f"not ({_unannotated(condition)})"):
+            continue
+        earlier, later = sorted((branch, held), key=lambda one: one.lineno)
+        if not _given_between(func, earlier, later, (piece, site)):
+            return True
     return False
 
 
@@ -1159,9 +1330,78 @@ def surviving_writes(
 
     *as_run* reads a test as describing its name as it was when the test ran
     (:func:`parted`).  The walk and the build both ask for it.
+
+    With *as_run*, a write the conditions drop is kept where it reaches the
+    read round a loop that holds both (:func:`_round_a_loop`): a contradiction
+    is one pass's, and the next pass tests afresh.  ``insertFilesForDataset_JEDI``
+    adds ``nRemEvents`` to ``splitStartEvent`` in the ``else`` of ``if
+    splitStartEvent + nRemEvents >= numEventsInFile``, and the next pass's
+    ``if`` starts the last chunk there.  Only that way round:
+    ``_read_unprocessed_inputs`` tests ``tmp_dataset_spec.isMaster()`` twice in
+    one pass, and the first test's ``max_files_to_read_for_this_dataset`` does
+    not reach the second's ``else`` -- within the pass the contradiction holds,
+    and round the loop every arm binds the name again.  The flow takes every
+    branch both ways, so a value a literal rules out still comes round:
+    ``get_origin_datasets`` sets ``dataset_names = None`` and breaks, and the
+    ``append`` under ``dataset_names is not None`` is offered it.
     """
     reached = reaching(target, sites, killers, rereads)
-    return [site for site in reached if site is target or can_reach(site, target, as_run)]
+    kept = [site for site in reached if site is target or can_reach(site, target, as_run)]
+    if as_run and len(kept) < len(reached):
+        held = {id(site) for site in kept}
+        extra = {
+            id(site)
+            for site in reached
+            if id(site) not in held and _round_a_loop(site, target, sites, killers, rereads)
+        }
+        if extra:
+            kept = [site for site in reached if id(site) in held or id(site) in extra]
+    return kept
+
+
+def _round_a_loop(
+    site: ast.AST,
+    target: ast.AST,
+    sites: Sequence[ast.AST],
+    killers: Sequence[ast.AST],
+    rereads: Sequence[ast.AST],
+    beside: Optional[ast.AST] = None,
+) -> bool:
+    """Whether *site* reaches *target* from one pass of a loop holding both to a later pass.
+
+    The conditions do not part them across the passes (:func:`parted`
+    *around* the loop), *site* is live at the top of the next pass, and a
+    write at the top of a pass -- the loop itself, as a site, is one -- reaches
+    *target* with nothing overwriting it.  With *beside*, the loop holds it too
+    and does not part it from *site* either: the later pass runs it.
+    """
+    theirs = {id(loop) for loop in _loops_holding(target)}
+    if beside is not None:
+        theirs &= {id(loop) for loop in _loops_holding(beside)}
+    for loop in _loops_holding(site):
+        if id(loop) not in theirs or parted(site, target, around=loop):
+            continue
+        if beside is not None and parted(beside, site, around=loop):
+            continue
+        if not any(site is one for one in reaching(loop.body[0], sites, killers, rereads)):
+            continue
+        if any(loop is one for one in reaching(target, [*sites, loop], killers, rereads)):
+            return True
+    return False
+
+
+def carried_round(
+    site: ast.AST, target: ast.AST, beside: ast.AST, sites: Sequence[ast.AST], rereads: Sequence[ast.AST] = ()
+) -> bool:
+    """Whether *site*, parted from *beside* on one pass, is still what *target* reads on a pass running *beside*.
+
+    It is where a loop holds all three and carries *site* to *target* from
+    one pass to a later one that runs *beside* (:func:`_round_a_loop`), the
+    map's renewals among *sites*.  A map made afresh in the loop carries
+    nothing: ``insertNewJob`` makes ``varMap = {}`` for each file, so the
+    other arm's ``:status`` of the file before is gone.
+    """
+    return _round_a_loop(site, target, sites, (), rereads, beside)
 
 
 def literal_values(

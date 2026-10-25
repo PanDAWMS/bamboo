@@ -1,0 +1,1834 @@
+"""Where an object goes and which of its columns are assigned -- ``codemap.panda.objects`` and ``codemap.objects``."""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+from bamboo.codemap import objects, reach
+from bamboo.codemap.gates import object_records_resolve
+from bamboo.codemap.gitsource import blob_sha
+from bamboo.codemap.models import (
+    MAP_KEY,
+    CallBinding,
+    EntityNode,
+    MapFragment,
+    SourceModule,
+)
+from bamboo.codemap.panda import objects as panda_objects
+from bamboo.codemap.panda import pathcond, sql
+from bamboo.codemap.panda.plugin import _DatabaseLeaves
+from bamboo.codemap.panda.recognizers import sqlwrite
+
+PACKAGE = "pkg"
+
+SPEC = """\
+class JobSpec:
+    _attributes = ("PandaID", "jobStatus", "ddmErrorCode", "jobMetrics", "modificationTime")
+
+    def __init__(self):
+        for attr in self._attributes:
+            object.__setattr__(self, attr, None)
+
+    def pack(self, values):
+        for attr, value in zip(self._attributes, values):
+            object.__setattr__(self, attr, value)
+
+    def setErrDiag(self, diag):
+        self.ddmErrorCode = 1
+"""
+
+PROXY = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def archiveJob(self, job: JobSpec):
+        job.modificationTime = 1
+        updated = [job]
+        other = JobSpec()
+        updated.append(other)
+        other.jobMetrics = "another job's"
+        varMap = {}
+        varMap[":modificationTime"] = job.modificationTime
+        varMap[":PandaID"] = job.PandaID
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET modificationTime=:modificationTime WHERE PandaID=:PandaID"
+        self.cur.execute(sql, varMap)
+        sql = "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobMetrics) VALUES (:PandaID,:jobMetrics)"
+        self.cur.execute(sql, job.valuesMap())
+
+    def killJob(self, panda_id):
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobMetrics=:jobMetrics WHERE PandaID=:PandaID"
+        self.cur.execute(sql, {":jobMetrics": "killed", ":PandaID": panda_id})
+
+    def insertNewJob(self, job: JobSpec):
+        sql = "INSERT INTO ATLAS_PANDA.jobsDefined4 (PandaID,jobMetrics) VALUES (:PandaID,:jobMetrics)"
+        self.cur.execute(sql, job.valuesMap(useSeq=True))
+
+    def peekJob(self, panda_id) -> JobSpec:
+        job = JobSpec()
+        job.pack([panda_id])
+        job.jobMetrics = "read"
+        return job
+
+
+class TaskBuffer:
+    def __init__(self):
+        self.proxy = DBProxy()
+
+    def updateJobs(self, jobs: list[JobSpec]):
+        for idx, job in enumerate(jobs):
+            self.proxy.archiveJob(job)
+
+    def killJobs(self, ids):
+        for one in ids:
+            self.proxy.killJob(one)
+
+    def storeJobs(self, jobs):
+        for job in jobs:
+            self.proxy.insertNewJob(job)
+
+    def peekJobs(self, ids) -> list[JobSpec]:
+        found = []
+        for one in ids:
+            found.append(self.proxy.peekJob(one))
+        return found
+"""
+
+PLUGIN = """\
+class Plugin:
+    def __init__(self, job):
+        self.job = job
+
+    def execute(self):
+        self.job.ddmErrorCode = 2
+"""
+
+ADDER = """\
+import threading
+
+from pkg.plugin import Plugin
+from pkg.proxy import TaskBuffer
+from pkg.spec import JobSpec
+
+
+class Adder:
+    def __init__(self, tb: TaskBuffer):
+        self.tb = tb
+        self.job_id = 1
+        self.job: JobSpec = JobSpec()
+
+    def process(self, other):
+        self.job.jobStatus = "failed"
+        self.finish()
+        plugin = Plugin(self.job)
+        plugin.execute()
+        self.tb.updateJobs([self.job])
+        other.execute(self.job)
+        other.execute(5)
+        len(self.job.jobStatus)
+        threading.Thread(target=self.worker, args=(self.job,)).start()
+
+    def finish(self):
+        self.job.jobMetrics = "m"
+
+    def worker(self, job):
+        pass
+
+    def run(self):
+        self.job = self.tb.peekJobs([1])[0]
+        self.process(None)
+
+    def close(self):
+        self.job.modificationTime = 2
+        self.tb.updateJobs([self.job])
+        self.tb.killJobs([self.job_id])
+        self.tb.storeJobs([JobSpec()])
+"""
+
+
+def _build(tmp_path: Path, entities: tuple = (), **files: str) -> MapFragment:
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    modules = []
+    for name, text in files.items():
+        (root / f"{name}.py").write_text(text)
+        tree = ast.parse(text)
+        pathcond.attach_parents(tree)
+        modules.append(
+            SourceModule(
+                package=PACKAGE,
+                rel_path=f"{PACKAGE}/{name}.py",
+                tree=tree,
+                source=text,
+                blob_sha=blob_sha(text),
+            )
+        )
+    calls = sqlwrite.corpus_calls(modules, {PACKAGE: root})
+    with sql.across_calls(calls):
+        fragment = MapFragment(
+            map_id="m",
+            derived_from="v",
+            reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
+            entities=list(entities),
+        )
+        panda_objects.attach(fragment, modules, calls)
+    return fragment
+
+
+def _adder(tmp_path: Path) -> dict:
+    fragment = _build(tmp_path, spec=SPEC, proxy=PROXY, plugin=PLUGIN, adder=ADDER)
+    return {row.owner: row for row in fragment.reach_graph}
+
+
+def _line(text: str, marker: str) -> int:
+    (line,) = [n for n, one in enumerate(text.splitlines(), 1) if marker in one]
+    return line
+
+
+def test_an_object_is_followed_into_self_calls_constructors_and_list_literals(tmp_path):
+    """The adder's job: assigned in place, through ``self.finish()``, by the plugin it builds, and by archiveJob."""
+    rows = _adder(tmp_path)
+    found = objects.follow(rows, "pkg/adder.py::Adder.process", "self.job")
+
+    where = {
+        attr: sorted((site.owner.split("::")[1], site.line) for site in sites)
+        for attr, sites in found.assigned.items()
+    }
+    assert where["jobStatus"] == [
+        ("Adder.process", _line(ADDER, 'jobStatus = "failed"'))
+    ]
+    # archiveJob's other job shares a list with it, and is not it.
+    assert where["jobMetrics"] == [("Adder.finish", _line(ADDER, 'jobMetrics = "m"'))]
+    # Plugin(self.job) keeps it as self.job, and plugin.execute() runs on that.
+    assert where["ddmErrorCode"] == [
+        ("Plugin.execute", _line(PLUGIN, "ddmErrorCode = 2"))
+    ]
+    # [self.job] -> jobs -> enumerate(jobs) -> archiveJob(job)
+    assert where["modificationTime"] == [
+        ("DBProxy.archiveJob", _line(PROXY, "modificationTime = 1"))
+    ]
+    assert "PandaID" not in where
+
+
+def test_only_the_holes_the_object_reaches_count(tmp_path):
+    """``other.execute(self.job)`` is the object's hole; ``other.execute(5)`` is not, and ``len`` is outside."""
+    rows = _adder(tmp_path)
+    found = objects.follow(rows, "pkg/adder.py::Adder.process", "self.job")
+
+    lines = sorted({site.line for site in found.holes})
+    assert lines == [
+        _line(ADDER, "other.execute(self.job)"),
+        _line(ADDER, "threading.Thread("),
+    ]
+    (thread,) = [
+        site for site in found.holes if site.line == _line(ADDER, "threading.Thread(")
+    ]
+    assert thread.how == panda_objects.HANDED_WITH_A_CALLABLE
+    # The closure's own holes include the unrelated call; the object's do not.
+    assert _line(ADDER, "other.execute(5)") in {
+        hole.line for hole in rows["pkg/adder.py::Adder.process"].holes
+    }
+
+
+def test_an_object_returned_by_a_call_is_followed_into_where_it_was_made(tmp_path):
+    """``self.job = self.tb.peekJobs([1])[0]``: peekJob made it, packed it from the row and set jobMetrics."""
+    rows = _adder(tmp_path)
+    found = objects.follow(rows, "pkg/adder.py::Adder.run", "self.job")
+
+    where = {
+        attr: sorted({(site.owner.split("::")[1], site.how) for site in sites})
+        for attr, sites in found.assigned.items()
+    }
+    assert ("DBProxy.peekJob", "=") in where["jobMetrics"]
+    # pack sets every column from the row: a write of the row's own values, said as such.
+    assert ("JobSpec.pack", "row_read") in where["PandaID"]
+    assert ("JobSpec.__init__", "construct") in where["PandaID"]
+    # and it goes on into process as before
+    assert ("Plugin.execute", "=") in where["ddmErrorCode"]
+    came = {(site.owner.split("::")[1], site.how) for site in found.came_from}
+    assert {
+        ("Adder.run", "self.job"),
+        ("TaskBuffer.peekJobs", "found[]"),
+        ("DBProxy.peekJob", "job"),
+    } <= came
+
+
+def test_the_records_are_paths_of_the_function(tmp_path):
+    """The receiver of a placed call is bound as ``self``; a module's names are not paths."""
+    rows = _adder(tmp_path)
+    process = rows["pkg/adder.py::Adder.process"]
+    finish = [c for c in process.call_bindings if c.to == "pkg/adder.py::Adder.finish"]
+    assert [(c.parameter, c.path) for c in finish] == [("self", "self")]
+    updated = [
+        c
+        for c in process.call_bindings
+        if c.to == "pkg/proxy.py::TaskBuffer.updateJobs"
+    ]
+    assert {(c.parameter, c.path, c.at) for c in updated} == {
+        ("jobs", "self.job", "[]"),
+        ("self", "self.tb", ""),
+    }
+    assert not any(c.path.startswith("threading") for c in process.call_bindings)
+
+
+def test_the_gate_holds_every_record_to_its_function_and_its_rows(tmp_path):
+    """object-records-resolve passes on what the build writes and fails on a call binding into nothing."""
+    fragment = _build(tmp_path, spec=SPEC, proxy=PROXY, plugin=PLUGIN, adder=ADDER)
+    result = object_records_resolve(fragment)
+    assert result.passed, result.failures
+    assert result.checked > 0
+
+    process = next(
+        row
+        for row in fragment.reach_graph
+        if row.owner == "pkg/adder.py::Adder.process"
+    )
+    process.call_bindings.append(
+        CallBinding(
+            line=process.anchor.line_start,
+            to="pkg/gone.py::gone",
+            parameter="x",
+            path="self.job",
+        )
+    )
+    process.call_bindings.append(
+        CallBinding(
+            line=process.anchor.line_start, to="", parameter="", path="self.job"
+        )
+    )
+    failures = object_records_resolve(fragment).failures
+    assert any("pkg/gone.py::gone, which has no reach row" in one for one in failures)
+    assert any("a hole with no reason" in one for one in failures)
+
+
+def test_a_class_held_in_a_field_builds_an_object_it_has_no_receiver(tmp_path):
+    """``self.plugin_class(self.job)`` builds the plugin: its ``self`` is the result, not the caller's ``self``."""
+    adder = ADDER.replace(
+        "        plugin = Plugin(self.job)\n",
+        "        self.plugin_class = Plugin\n        plugin = self.plugin_class(self.job)\n",
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=PROXY, plugin=PLUGIN, adder=adder)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    line = _line(adder, "plugin = self.plugin_class(self.job)")
+    built = [
+        c for c in rows["pkg/adder.py::Adder.process"].call_bindings if c.line == line
+    ]
+    assert {(c.to, c.parameter, c.path) for c in built} == {
+        ("pkg/plugin.py::Plugin.__init__", "job", "self.job")
+    }
+    found = objects.follow(rows, "pkg/adder.py::Adder.process", "self.job")
+    assert "pkg/plugin.py::Plugin.execute" in found.functions
+
+
+def test_a_column_changes_by_the_object_written_back_or_by_a_key_of_its_row(tmp_path):
+    """close(): modificationTime assigned and written by archiveJob; jobMetrics written by killJob on self.job_id's row."""
+    rows = _adder(tmp_path)
+    close = "pkg/adder.py::Adder.close"
+
+    written = objects.may_change(rows, close, "self.job", "modificationTime")
+    assert written.verdict is True
+    assert {site.owner.split("::")[1] for site in written.because} == {
+        "Adder.close",
+        "DBProxy.archiveJob",
+    }
+    assert "written_back_as_read" in written.premises
+
+    by_key = objects.may_change(
+        rows, close, "self.job", "jobMetrics", keys=("self.job_id",)
+    )
+    assert by_key.verdict is True
+    assert [site.owner.split("::")[1] for site in by_key.because] == ["DBProxy.killJob"]
+
+    # The key not given: killJob's row is named by panda_id, not followed to the job's.
+    unkeyed = objects.may_change(rows, close, "self.job", "jobMetrics")
+    assert unkeyed.verdict is None
+    assert [site.how for site in unkeyed.open] == [
+        objects.NOT_FOLLOWED_KEY.format(column="jobMetrics", key="panda_id")
+    ]
+    # insertNewJob's row is new: the sequence names it.
+    assert not any(
+        "insertNewJob" in site.owner for site in [*unkeyed.open, *unkeyed.because]
+    )
+
+
+def test_a_column_assigned_and_never_written_does_not_change_the_row(tmp_path):
+    """No statement of close()'s closure writes PandaID on the job's row: killJob names it in WHERE, insertNewJob's row is new."""
+    rows = _adder(tmp_path)
+    answer = objects.may_change(
+        rows, "pkg/adder.py::Adder.close", "self.job", "PandaID"
+    )
+    assert answer.verdict is False
+    assert answer.open == [] and answer.because == []
+
+
+def test_the_objects_own_key_is_followed_as_a_value(tmp_path):
+    """``self.tb.killJobs([self.job.PandaID])``: the job's key, handed as a value, names killJob's row."""
+    adder = ADDER.replace(
+        "        self.tb.killJobs([self.job_id])\n",
+        "        self.tb.killJobs([self.job.PandaID])\n",
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=PROXY, plugin=PLUGIN, adder=adder)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    answer = objects.may_change(
+        rows, "pkg/adder.py::Adder.close", "self.job", "jobMetrics"
+    )
+    assert answer.verdict is True
+    assert [site.owner.split("::")[1] for site in answer.because] == ["DBProxy.killJob"]
+
+
+def test_a_whole_row_write_of_the_object_takes_what_was_assigned_on_it(tmp_path):
+    """process(): finish() assigns jobMetrics, and archiveJob writes the whole job (``job.valuesMap()``)."""
+    rows = _adder(tmp_path)
+    archive = rows["pkg/proxy.py::DBProxy.archiveJob"]
+    (whole,) = [w for w in archive.writes if w.table == "jobsArchived4"]
+    assert (whole.whole, whole.new_row) == ("job", False)
+    (new,) = rows["pkg/proxy.py::DBProxy.insertNewJob"].writes
+    assert (new.whole, new.new_row) == ("job", True)
+
+    answer = objects.may_change(
+        rows, "pkg/adder.py::Adder.process", "self.job", "jobMetrics"
+    )
+    assert answer.verdict is True
+    owners = {site.owner.split("::")[1] for site in answer.because}
+    assert owners == {"Adder.finish", "DBProxy.archiveJob"}
+
+
+def test_an_update_writes_a_row_that_was_there_whatever_filled_its_map(tmp_path):
+    """An UPDATE whose bind map ``valuesMap(useSeq=True)`` made is no new row: only an INSERT makes one."""
+    proxy = PROXY.replace(
+        "        self.cur.execute(sql, job.valuesMap(useSeq=True))\n",
+        "        self.cur.execute(sql, job.valuesMap(useSeq=True))\n"
+        '        job.jobMetrics = "stored"\n'
+        "        varMap = job.valuesMap(useSeq=True)\n"
+        '        varMap[":PandaID"] = job.PandaID\n'
+        '        sql = "UPDATE ATLAS_PANDA.jobsDefined4 SET jobMetrics=:jobMetrics WHERE PandaID=:PandaID"\n'
+        "        self.cur.execute(sql, varMap)\n",
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=ADDER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    writes = rows["pkg/proxy.py::DBProxy.insertNewJob"].writes
+    assert sorted((w.kind, w.new_row) for w in writes) == [
+        ("insert", True),
+        ("update", False),
+    ]
+    answer = objects.may_change(
+        rows, "pkg/proxy.py::DBProxy.insertNewJob", "job", "jobMetrics"
+    )
+    assert answer.verdict is True
+    assert [site.line for site in answer.because] == [26, 30]
+
+
+def test_a_write_naming_columns_at_run_time_is_open_on_a_column_it_does_not_name(
+    tmp_path,
+):
+    """updateJobStatus' SET adds a column for each key of the map it is handed: on the job's row it writes jobStatus,
+    which it names, and may write cloud -- whether it does is the caller's keys', which the record does not read."""
+    proxy = (
+        PROXY
+        + """
+
+class Status:
+    def update(self, pandaID, jobStatus, param):
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus"
+        varMap = {}
+        for key in list(param):
+            sql += f",{key}=:{key}"
+            varMap[f":{key}"] = param[key]
+        sql += " WHERE PandaID=:PandaID"
+        varMap[":jobStatus"] = jobStatus
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+"""
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=ADDER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    owner = "pkg/proxy.py::Status.update"
+    assert [(w.unread, [k.path for k in w.keys]) for w in rows[owner].writes] == [
+        (True, ["pandaID"])
+    ]
+    named = objects.may_change(rows, owner, "pandaID", "jobStatus", keys=("pandaID",))
+    assert named.verdict is True
+    unnamed = objects.may_change(rows, owner, "pandaID", "cloud", keys=("pandaID",))
+    assert unnamed.verdict is None
+    assert [site.how for site in unnamed.open] == [
+        objects.NAMED_AT_RUN_TIME.format(column="cloud")
+    ]
+
+
+def test_a_map_bound_again_for_each_statement_is_the_one_that_reaches_the_call(
+    tmp_path,
+):
+    """``varMap = file.valuesMap(onlyChanged=True)`` is one statement's map, not every statement's that uses the name."""
+    proxy = (
+        PROXY
+        + """
+
+class Files:
+    def update(self, job: JobSpec, file):
+        varMap = file.valuesMap(onlyChanged=True)
+        self.cur.execute("UPDATE ATLAS_PANDA.filesTable4 SET status=:status WHERE row_ID=:row_ID", varMap)
+        varMap = {}
+        varMap[":PandaID"] = job.PandaID
+        varMap[":modificationTime"] = job.modificationTime
+        self.cur.execute("UPDATE ATLAS_PANDA.metaTable SET modificationTime=:modificationTime WHERE PandaID=:PandaID", varMap)
+"""
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=ADDER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    writes = {w.table: w for w in rows["pkg/proxy.py::Files.update"].writes}
+    assert (writes["filesTable4"].whole, writes["filesTable4"].changed) == (
+        "file",
+        True,
+    )
+    assert writes["metaTable"].whole == ""
+    assert [(v.column, v.path) for v in writes["metaTable"].columns] == [
+        ("modificationTime", "job.modificationTime")
+    ]
+
+
+def test_a_map_bound_again_with_an_annotation_is_bound_again(tmp_path):
+    """``varMap: dict = {}`` binds the map again as ``varMap = {}`` does (retryJob): round the loop the file's map does not reach."""
+    proxy = (
+        PROXY
+        + """
+
+class Retry:
+    def retry(self, job: JobSpec, file):
+        for _ in range(3):
+            varMap: dict = {}
+            varMap[":PandaID"] = job.PandaID
+            varMap[":modificationTime"] = job.modificationTime
+            self.cur.execute("UPDATE ATLAS_PANDA.metaTable SET modificationTime=:modificationTime WHERE PandaID=:PandaID", varMap)
+            varMap = file.valuesMap(onlyChanged=True)
+            self.cur.execute("UPDATE ATLAS_PANDA.filesTable4 SET status=:status WHERE row_ID=:row_ID", varMap)
+"""
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=ADDER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    writes = {w.table: w for w in rows["pkg/proxy.py::Retry.retry"].writes}
+    assert writes["filesTable4"].whole == "file"
+    assert writes["metaTable"].whole == ""
+    assert [(v.column, v.path) for v in writes["metaTable"].keys] == [
+        ("PandaID", "job.PandaID")
+    ]
+
+
+def test_a_write_of_a_table_of_another_class_is_not_the_objects_row(tmp_path):
+    """A whole row of a file on filesTable4 writes every FileSpec column, and none of the job's."""
+    proxy = PROXY.replace(
+        """    def killJob(self, panda_id):""",
+        """    def touchFiles(self, job: JobSpec, file):
+        self.cur.execute("INSERT INTO ATLAS_PANDA.filesTable4 (PandaID) VALUES (:PandaID)", file.valuesMap())
+
+    def killJob(self, panda_id):""",
+    )
+    adder = ADDER.replace(
+        "        self.tb.storeJobs([JobSpec()])\n",
+        "        self.tb.storeJobs([JobSpec()])\n        self.tb.proxy.touchFiles(self.job, None)\n",
+    )
+    fragment = _build(tmp_path, spec=SPEC, proxy=proxy, plugin=PLUGIN, adder=adder)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    close = "pkg/adder.py::Adder.close"
+    loose = objects.may_change(rows, close, "self.job", "PandaID")
+    assert any("touchFiles" in site.owner for site in loose.open)
+    kept = objects.may_change(
+        rows,
+        close,
+        "self.job",
+        "PandaID",
+        spec_class="JobSpec",
+        table_classes={"filestable4": "FileSpec"},
+    )
+    assert not any("touchFiles" in site.owner for site in [*kept.open, *kept.because])
+
+
+def test_a_slice_holds_the_containers_elements_not_the_container(tmp_path):
+    """setupper's ``jobs_list = self.jobs`` or ``self.jobs[a:b]``: jobs_list's elements are self.jobs's, never a job.
+
+    A slice is a new list of the container's elements, at positions not
+    known -- ``self.jobs[1:][0]`` is not ``self.jobs[0]``.
+    """
+    batch = """\
+from pkg.spec import JobSpec
+
+
+class Batch:
+    def __init__(self, jobs: list[JobSpec]):
+        self.jobs = jobs
+
+    def run(self, start, n):
+        if n is None:
+            jobs_list = self.jobs
+        else:
+            jobs_list = self.jobs[start : start + n]
+        for job in jobs_list:
+            job.jobStatus = "failed"
+        rest = self.split()[1:]
+        return rest
+
+    def split(self):
+        return [self.jobs]
+"""
+    fragment = _build(tmp_path, spec=SPEC, batch=batch)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = rows["pkg/batch.py::Batch.run"]
+    # Bound at two statements, the name is two: jobs_list@10 and jobs_list@12.
+    assert {
+        (b.name, b.path) for b in run.bindings if b.name.startswith("jobs_list")
+    } == {("jobs_list@10", "self.jobs"), ("jobs_list@12[]", "self.jobs[]")}
+    assert [(b.name, b.path) for b in run.bindings if b.name.startswith("rest")] == [
+        ("rest[]", "[]")
+    ]
+    container = objects.follow(rows, "pkg/batch.py::Batch.run", "self.jobs")
+    assert "job" not in container.held["pkg/batch.py::Batch.run"]
+    assert "jobStatus" not in container.assigned
+    element = objects.follow(rows, "pkg/batch.py::Batch.run", "self.jobs[]")
+    assert "job" in element.held["pkg/batch.py::Batch.run"]
+    assert "jobStatus" in element.assigned
+
+
+def test_a_name_bound_in_two_places_is_two_names_and_a_field_is_read_back_only_by_the_binding_the_object_came_by(
+    tmp_path,
+):
+    """setupper's ``tag_job = self.jobs[0]`` / ``tag_job = self.jumbo_jobs[0]``: a job of one list is not one of the other.
+
+    A local name bound at two statements is a name for each, and a use is
+    the ones that reach it; a field is one name however often it is bound,
+    and is read back only by the binding the object came in by.
+    """
+    batch = """\
+from pkg.spec import JobSpec
+
+
+class Batch:
+    def __init__(self, jobs: list[JobSpec], jumbo: list[JobSpec]):
+        self.jobs = jobs
+        self.jumbo_jobs = jumbo
+
+    def run(self):
+        tag_job = None
+        if self.jobs:
+            tag_job = self.jobs[0]
+        else:
+            tag_job = self.jumbo_jobs[0]
+        tag_job.jobStatus = "failed"
+
+    def mark(self):
+        if self.jobs:
+            self.tag = self.jobs[0]
+        else:
+            self.tag = self.jumbo_jobs[0]
+        self.tag.jobStatus = "failed"
+"""
+    fragment = _build(tmp_path, spec=SPEC, batch=batch)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/batch.py::Batch.run"
+    jobs = objects.follow(rows, run, "self.jobs[]")
+    assert set(jobs.held[run]) == {"self.jobs[]", "tag_job@12"}
+    assert "jobStatus" in jobs.assigned
+    jumbo = objects.follow(rows, run, "self.jumbo_jobs[]")
+    assert set(jumbo.held[run]) == {"self.jumbo_jobs[]", "tag_job@14"}
+    # The use at 15 is reached by both, not by tag_job = None (no branch keeps it).
+    assert {(a.path, a.line) for a in rows[run].assigns} == {
+        ("tag_job@12", 15),
+        ("tag_job@14", 15),
+    }
+    assert objects.steps_to(rows[run], "self.jobs[]", "tag_job@12") == [
+        (12, "alias", "tag_job@12")
+    ]
+    mark = "pkg/batch.py::Batch.mark"
+    jobs = objects.follow(rows, mark, "self.jobs[]")
+    assert "self.tag" in jobs.held[mark]
+    assert "self.jumbo_jobs[0]" not in jobs.held[mark]
+    either = objects.follow(rows, mark, "self.tag")
+    assert {"self.jobs[0]", "self.jumbo_jobs[0]"} <= set(either.held[mark])
+
+
+def test_a_name_filled_and_bound_again_to_a_calls_result_is_not_followed_into_the_call(
+    tmp_path,
+):
+    """makeFakeCoJumbo: ``varMap`` filled with the old job's PandaID, then bound to the new job's ``valuesMap()``."""
+    spec = (
+        SPEC
+        + """
+    def valuesMap(self):
+        return [self.PandaID]
+"""
+    )
+    maker = """\
+from pkg.spec import JobSpec
+
+
+class Maker:
+    def make(self, old: JobSpec):
+        var_map = {}
+        var_map[":PandaID"] = old.PandaID
+        new = JobSpec()
+        var_map = new.valuesMap()
+        return new
+"""
+    fragment = _build(tmp_path, spec=spec, maker=maker)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    make = "pkg/maker.py::Maker.make"
+    old = objects.follow(rows, make, "old.PandaID")
+    assert "var_map@6[':PandaID']" in old.held[make]
+    assert not any(one.startswith("var_map@9") for one in old.held[make])
+    assert "new.PandaID" not in old.held[make]
+    # The new job's own key still goes into its valuesMap and back.
+    new = objects.follow(rows, make, "var_map@9[]")
+    assert "new.PandaID" in new.held[make]
+
+
+def test_a_path_handed_to_a_method_and_back_keeps_how_it_was_reached(tmp_path):
+    """TaskRefiner: ``tmpTaskSpec = impl.taskSpec`` or a new spec given ``jediTaskID``, then ``tmpTaskSpec.setErrDiag()``."""
+    refiner = """\
+from pkg.spec import JobSpec
+
+
+class Refiner:
+    def run(self, impl, task_id):
+        if impl is None:
+            spec = JobSpec()
+            spec.PandaID = task_id
+        else:
+            spec = impl.job
+        spec.setErrDiag("x")
+"""
+    fragment = _build(tmp_path, spec=SPEC, refiner=refiner)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/refiner.py::Refiner.run"
+    key = objects.follow(rows, run, "impl.job.PandaID")
+    assert "spec@10.PandaID" in key.held[run]
+    assert "spec@7.PandaID" not in key.held[run]
+    assert "task_id" not in key.held[run]
+    assert "spec@7.PandaID" in objects.follow(rows, run, "task_id").held[run]
+
+
+def test_a_name_bound_again_is_split_unless_every_binding_spells_a_str_or_a_number(
+    tmp_path,
+):
+    """``found += more`` keeps what found held and adds more's elements; ``sql``, only ever a str, is not split.
+
+    A use after ``found += more`` is reached by both bindings (``+=`` kills
+    nothing), so the new one holds only what it adds.
+    """
+    batch = """\
+from pkg.spec import JobSpec
+
+
+class Batch:
+    def run(self, jobs: list[JobSpec], more: list[JobSpec]):
+        found = jobs
+        found += more
+        sql = "SELECT PandaID FROM jobs"
+        sql += " WHERE jobStatus=:status"
+        for job in found:
+            job.jobStatus = "failed"
+        return sql
+"""
+    fragment = _build(tmp_path, spec=SPEC, batch=batch)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/batch.py::Batch.run"
+    assert sorted((b.name, b.path, b.how) for b in rows[run].bindings) == [
+        ("<return>", "sql", "return"),
+        ("found@6", "jobs", "alias"),
+        ("found@7[]", "more[]", "fill"),
+        ("job", "found@6[]", "element"),
+        ("job", "found@7[]", "element"),
+    ]
+    assert "jobStatus" in objects.follow(rows, run, "jobs[]").assigned
+    assert "jobStatus" in objects.follow(rows, run, "more[]").assigned
+
+
+def test_a_parameter_bound_again_keeps_its_name_only_where_its_entry_reaches(tmp_path):
+    """``if x: job = other`` then ``job = other``: what a caller hands as ``job`` reaches the first use, not the second."""
+    fixer = """\
+from pkg.spec import JobSpec
+
+
+class Fixer:
+    def fix(self, job: JobSpec, other: JobSpec, x):
+        if x:
+            job = other
+        job.jobStatus = "failed"
+        job = other
+        job.ddmErrorCode = 1
+
+    def run(self, mine: JobSpec, theirs: JobSpec):
+        self.fix(mine, theirs, True)
+"""
+    fragment = _build(tmp_path, spec=SPEC, fixer=fixer)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    fix = "pkg/fixer.py::Fixer.fix"
+    assert {(a.path, a.line) for a in rows[fix].assigns} == {
+        ("job", 8),
+        ("job@7", 8),
+        ("job@9", 10),
+    }
+    handed = objects.follow(rows, "pkg/fixer.py::Fixer.run", "mine")
+    assert "jobStatus" in handed.assigned
+    assert "ddmErrorCode" not in handed.assigned
+    other = objects.follow(rows, "pkg/fixer.py::Fixer.run", "theirs")
+    assert {"jobStatus", "ddmErrorCode"} <= set(other.assigned)
+
+
+def test_the_record_keeps_every_path_and_follow_says_where_its_cap_stops_it(
+    tmp_path,
+):
+    """A file's owner is the job (JobSpec.addFile), so ``job.Files[]._owner`` names the job again, and again: the
+    parts cap is what stops the cycle, and follow says where it did; may_change names ``follow_capped``.  The
+    record keeps a path however long -- how far one is read is follow's."""
+    owned = """\
+class FileSpec:
+    def setOwner(self, owner):
+        self._owner = owner
+
+
+class Job:
+    def __init__(self):
+        self.Files = []
+
+    def addFile(self, file: FileSpec):
+        file.setOwner(self)
+        self.Files.append(file)
+
+
+class Runner:
+    def run(self, job: Job, f: FileSpec):
+        job.addFile(f)
+        deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": job}}}}}}}
+        return deep
+
+    def other(self, job: Job):
+        job.jobStatus = "failed"
+"""
+    fragment = _build(tmp_path, spec=SPEC, owned=owned)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/owned.py::Runner.run"
+    deep = "deep['a']['b']['c']['d']['e']['f']['g']"
+    assert (deep, "job") in {(b.name, b.path) for b in rows[run].bindings}
+
+    found = objects.follow(rows, run, "job")
+    assert found.held[run] == [
+        "job",
+        "job.Files[]._owner",
+        "job.Files[]._owner.Files[]._owner",
+    ]
+    spent = objects.PARTS_SPENT.format(path="")
+    assert {
+        (site.owner, site.line, site.how[len(spent) :]) for site in found.capped
+    } == {
+        (run, _line(owned, "deep = "), deep),
+        (run, _line(owned, "deep = "), deep + ".Files[]._owner"),
+        (run, _line(owned, "deep = "), deep + ".Files[]._owner.Files[]._owner"),
+        (
+            "pkg/owned.py::FileSpec.setOwner",
+            _line(owned, "self._owner = owner"),
+            "self._owner.Files[]._owner.Files[]._owner",
+        ),
+    }
+    assert all(
+        objects._parts(path) <= objects.MAX_PARTS
+        for paths in found.held.values()
+        for path in paths
+    )
+    assert "follow_capped" in objects.may_change(rows, run, "job", "jobStatus").premises
+    plain = objects.may_change(rows, "pkg/owned.py::Runner.other", "job", "jobStatus")
+    assert "follow_capped" not in plain.premises
+    # Parts are counted as _under reads them: a literal key is one, whatever it holds.
+    assert objects._parts("varMap[':a.b']") == 1
+
+
+FORMS = """\
+from typing import Iterator
+
+from pkg.spec import JobSpec
+
+
+class Store:
+    def get(self, key):
+        return key
+
+
+class Mapper:
+    def pick(self, job: JobSpec) -> JobSpec:
+        return job
+
+
+class Forms:
+    def __init__(self):
+        self.store: Store = Store()
+
+    def make(self, spec: JobSpec) -> tuple[bool, JobSpec]:
+        return True, spec
+
+    def wrap(self, job: JobSpec) -> JobSpec:
+        return job
+
+    def handle(self, job: JobSpec):
+        job.jobStatus = "handled"
+
+    def mapper(self) -> Mapper:
+        return Mapper()
+
+    def each(self, jobs: list[JobSpec]) -> Iterator[JobSpec]:
+        for one in jobs:
+            yield one
+
+    def keys(self, job: JobSpec, other, k):
+        var_map = {":PandaID": job.PandaID, ":status": other}
+        status = var_map[":status"]
+        any_one = var_map[k]
+        return status, any_one
+
+    def unpack(self, spec: JobSpec):
+        status, job = self.make(spec)
+        job.jobMetrics = "made"
+        return status
+
+    def pairs(self, job: JobSpec, n):
+        pairs = []
+        pairs.append((job, n))
+        for first, second in pairs:
+            first.ddmErrorCode = 1
+            second.modificationTime = 2
+
+    def forms(self, job: JobSpec, other: JobSpec, jobs: list[JobSpec], c):
+        either = job or other
+        either.ddmErrorCode = 3
+        maybe = job if c else None
+        found = [one for one in jobs]
+        for one in found:
+            one.jobStatus = "found"
+        last = jobs.pop()
+        stored = self.store.get(1)
+        return maybe, last, stored
+
+    def plus(self, job: JobSpec, extra):
+        for each in job.Files + extra:
+            each.jobStatus = "file"
+
+    def generated(self, jobs: list[JobSpec]):
+        for one in self.each(jobs):
+            one.jobMetrics = "each"
+
+    def nested(self, job: JobSpec):
+        self.handle(self.wrap(job))
+        picked = self.mapper().pick(job)
+        return picked
+
+    def reordered(self, job: JobSpec, other, z):
+        t = (job, other)
+        t = list(t)
+        t.insert(0, z)
+        second = t[1]
+        return second
+
+    def columns(self, job: JobSpec):
+        job.jobStatus, job.PandaID = "x", 1
+"""
+
+_FORMS = "pkg/forms.py::Forms"
+
+
+def _forms(tmp_path: Path) -> tuple[MapFragment, dict]:
+    fragment = _build(tmp_path, spec=SPEC, forms=FORMS)
+    return fragment, {row.owner: row for row in fragment.reach_graph}
+
+
+def _assigned(found: objects.ObjectReach) -> dict[str, set[str]]:
+    return {
+        attr: {site.owner.split("::")[1] for site in sites}
+        for attr, sites in found.assigned.items()
+    }
+
+
+def test_a_dict_literal_keeps_each_value_under_its_key(tmp_path):
+    """``{":PandaID": job.PandaID, ":status": other}``: the key is read at its own key, and at one computed."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.keys"
+    key = objects.follow(rows, owner, "job.PandaID").held[owner]
+    assert "var_map[':PandaID']" in key
+    assert "any_one" in key
+    assert "status" not in key
+    other = objects.follow(rows, owner, "other").held[owner]
+    assert {"status", "any_one"} <= set(other)
+
+
+def test_a_tuple_target_takes_each_position_of_what_a_call_returns(tmp_path):
+    """``status, job = self.make(spec)`` with ``return True, spec``: job is the spec, status is not."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.unpack"
+    results = {
+        (b.name, b.path, tuple(b.to)) for b in rows[owner].bindings if b.how == "result"
+    }
+    assert results == {
+        ("status", "[0]", (f"{_FORMS}.make",)),
+        ("job", "[1]", (f"{_FORMS}.make",)),
+    }
+    found = objects.follow(rows, owner, "spec")
+    assert "job" in found.held[owner]
+    assert "status" not in found.held[owner]
+    assert _assigned(found)["jobMetrics"] == {"Forms.unpack"}
+
+
+def test_a_tuple_put_in_a_list_keeps_its_positions(tmp_path):
+    """``pairs.append((job, n))`` then ``for first, second in pairs``: first is the job, second is not."""
+    _fragment, rows = _forms(tmp_path)
+    found = _assigned(objects.follow(rows, f"{_FORMS}.pairs", "job"))
+    assert "ddmErrorCode" in found
+    assert "modificationTime" not in found
+
+
+def test_or_if_else_a_comprehension_pop_and_plus_carry_what_they_hold(tmp_path):
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.forms"
+    job = objects.follow(rows, owner, "job")
+    assert "ddmErrorCode" in _assigned(job)  # either = job or other
+    assert "maybe" in job.held[owner]  # job if c else None
+    element = objects.follow(rows, owner, "jobs[]")
+    assert "jobStatus" in _assigned(element)  # [one for one in jobs], then a loop
+    assert "last" in element.held[owner]  # jobs.pop()
+    files = objects.follow(rows, f"{_FORMS}.plus", "job.Files[]")
+    assert "jobStatus" in _assigned(files)  # for each in job.Files + extra
+
+
+def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):
+    """``self.store.get(1)`` runs ``Store.get``: its result, not a value of ``self.store`` under a key."""
+    _fragment, rows = _forms(tmp_path)
+    stored = [b for b in rows[f"{_FORMS}.forms"].bindings if b.name == "stored"]
+    assert [(b.how, b.path, b.to) for b in stored] == [
+        ("result", "", ["pkg/forms.py::Store.get"])
+    ]
+
+
+def test_what_a_generator_yields_are_the_elements_of_its_result(tmp_path):
+    _fragment, rows = _forms(tmp_path)
+    found = objects.follow(rows, f"{_FORMS}.generated", "jobs[]")
+    assert _assigned(found)["jobMetrics"] == {"Forms.generated"}
+
+
+def test_a_result_is_its_own_calls_and_one_no_name_takes_is_followed(tmp_path):
+    """``self.handle(self.wrap(job))``: wrap's result goes into handle.  ``self.mapper().pick(job)``: picked is
+    pick's result, not mapper's."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.nested"
+    found = objects.follow(rows, owner, "job")
+    assert _assigned(found)["jobStatus"] == {"Forms.handle"}
+    (picked,) = [b for b in rows[owner].bindings if b.name == "picked"]
+    assert picked.to == ["pkg/forms.py::Mapper.pick"]
+    assert f"{_FORMS}.mapper" not in objects.follow(rows, owner, "picked").functions
+
+
+def test_a_list_made_of_a_tuple_is_read_at_any_position(tmp_path):
+    """``t = list(t)`` then ``t.insert(0, z)``: the job is no longer at [0], so ``t[1]`` can be it."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.reordered"
+    assert "second" in objects.follow(rows, owner, "job").held[owner]
+
+
+def test_a_tuple_targets_columns_are_assigned(tmp_path):
+    _fragment, rows = _forms(tmp_path)
+    assigns = {(a.path, *a.attrs) for a in rows[f"{_FORMS}.columns"].assigns}
+    assert assigns == {("job", "jobStatus"), ("job", "PandaID")}
+
+
+def test_the_gate_reads_keys_positions_and_a_calls_own_result(tmp_path):
+    fragment, _rows = _forms(tmp_path)
+    result = object_records_resolve(fragment)
+    assert result.passed, result.failures
+
+
+#: The tables JobSpec is held in, as the build learns them (EntityNode.spec_class).
+JOB_TABLES = (
+    EntityNode(
+        name="jobsactive4",
+        map_id="m",
+        derived_from="v",
+        spec_class="JobSpec",
+        tables=["jobsActive4"],
+    ),
+    EntityNode(
+        name="jobsarchived4",
+        map_id="m",
+        derived_from="v",
+        spec_class="JobSpec",
+        tables=["jobsArchived4"],
+    ),
+    # a table the build knows and learned no class for: a log of the job's states, not the job's row
+    EntityNode(
+        name="jobs_statuslog", map_id="m", derived_from="v", tables=["jobs_StatusLog"]
+    ),
+)
+
+READER = """\
+from pkg.spec import JobSpec
+
+COLUMNS = "PandaID,jobStatus,ddmErrorCode,jobMetrics,modificationTime"
+
+
+class DBProxy:
+    def killJob(self, panda_id):
+        sql = f"SELECT {COLUMNS} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+        res = None
+        self.cur.execute(sql, {":PandaID": panda_id})
+        res = self.cur.fetchall()
+        job = JobSpec()
+        job.pack(res[0])  # killJob's pack
+        job.jobStatus = "cancelled"
+        sql = "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobStatus,jobMetrics) VALUES (:PandaID,:jobStatus,:jobMetrics)"
+        self.cur.execute(sql, job.valuesMap())
+        sql = "INSERT INTO ATLAS_PANDA.jobs_StatusLog (PandaID,modificationTime) VALUES (:PandaID,:modificationTime)"
+        self.cur.execute(sql, {":PandaID": panda_id, ":modificationTime": 1})
+        sql = "INSERT INTO ATLAS_PANDA.jobs_Unknown (PandaID,ddmErrorCode) VALUES (:PandaID,:ddmErrorCode)"
+        self.cur.execute(sql, {":PandaID": panda_id, ":ddmErrorCode": 1})
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus,jobMetrics=:jobMetrics WHERE PandaID=:PandaID"
+        self.cur.execute(sql, {":jobStatus": job.jobStatus, ":jobMetrics": job.jobMetrics, ":PandaID": job.PandaID})
+
+    def peekJobs(self, status):
+        sql = f"SELECT {COLUMNS} FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:status OR PandaID=:PandaID"
+        self.cur.execute(sql, {":status": status, ":PandaID": 1})
+        jobs = []
+        for row in self.cur.fetchall():
+            job = JobSpec()
+            job.pack(row)  # peekJobs' pack
+            jobs.append(job)
+        return jobs
+
+    def archiveJob(self, job: JobSpec):
+        job.jobStatus = "archived"
+        sql = "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobStatus,jobMetrics) VALUES (:PandaID,:jobStatus,:jobMetrics)"
+        self.cur.execute(sql, job.valuesMap())
+
+
+class Runner:
+    def __init__(self):
+        self.proxy = DBProxy()
+
+    def kill(self, panda_id):
+        self.proxy.killJob(panda_id)
+
+    def archive(self, panda_id, job: JobSpec):
+        job.PandaID = panda_id
+        self.proxy.archiveJob(job)
+"""
+
+
+def _reader(tmp_path: Path) -> dict:
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=SPEC, reader=READER)
+    return {row.owner: row for row in fragment.reach_graph}
+
+
+def test_a_spec_read_from_a_row_holds_the_bind_its_where_sets_the_key_to(tmp_path):
+    """killJob's select names the row by ``PandaID=:PandaID``, filled with panda_id: the job it packs holds it as
+    ``job.PandaID``.  The ``res = None`` before holds no row.  peekJobs' ``OR`` holds of no one column."""
+    rows = _reader(tmp_path)
+    kill = rows["pkg/reader.py::DBProxy.killJob"]
+    line = _line(READER, "# killJob's pack")
+    assert [
+        (b.name, b.path, b.how)
+        for b in kill.bindings
+        if b.line == line and b.name == "job.PandaID"
+    ] == [("job.PandaID", "panda_id", "alias")]
+    peek = rows["pkg/reader.py::DBProxy.peekJobs"]
+    line = _line(READER, "# peekJobs' pack")
+    assert not [
+        b for b in peek.bindings if b.line == line and b.name.startswith("job.")
+    ]
+
+
+def test_a_whole_object_written_on_its_row_changes_only_what_is_assigned_on_it(
+    tmp_path,
+):
+    """Asked by the key, killJob's INSERT of the job it read, and its UPDATE of the job's own attributes, write
+    jobStatus, which it assigns, and leave jobMetrics as read -- as asking by the object would say.  archive's job
+    is not read from the row: jobStatus, which archiveJob assigns, changes; jobMetrics is open."""
+    rows = _reader(tmp_path)
+    kill = "pkg/reader.py::Runner.kill"
+    status = objects.may_change(rows, kill, "panda_id", "jobStatus", keys=("panda_id",))
+    assert status.verdict is True
+    assert {(site.owner.split("::")[1], site.how) for site in status.because} == {
+        ("DBProxy.killJob", "="),
+        ("DBProxy.killJob", "insert jobsArchived4"),
+        ("DBProxy.killJob", "update jobsActive4"),
+    }
+    metrics = objects.may_change(
+        rows, kill, "panda_id", "jobMetrics", keys=("panda_id",)
+    )
+    assert metrics.verdict is False
+    assert "written_back_as_read" in metrics.premises
+
+    archive = "pkg/reader.py::Runner.archive"
+    unread = objects.may_change(
+        rows, archive, "panda_id", "jobMetrics", keys=("panda_id",)
+    )
+    assert unread.verdict is None
+    assert [site.how for site in unread.open] == [
+        objects.NOT_READ_HERE.format(
+            column="jobMetrics", object="job", key="job.PandaID"
+        )
+    ]
+    assigned = objects.may_change(
+        rows, archive, "panda_id", "jobStatus", keys=("panda_id",)
+    )
+    assert assigned.verdict is True
+    assert {(site.owner.split("::")[1], site.how) for site in assigned.because} == {
+        ("DBProxy.archiveJob", "="),
+        ("DBProxy.archiveJob", "insert jobsArchived4"),
+    }
+
+
+def test_a_table_known_to_hold_no_spec_is_not_the_objects_row(tmp_path):
+    """killJob's jobs_StatusLog insert -- a table the build knows, holding no spec -- writes a log's row, not the
+    job's; jobs_Unknown, a table it does not know, may be the job's and is kept."""
+    rows = _reader(tmp_path)
+    kill = "pkg/reader.py::Runner.kill"
+    logged = objects.may_change(
+        rows,
+        kill,
+        "panda_id",
+        "modificationTime",
+        keys=("panda_id",),
+        spec_class="JobSpec",
+        table_classes=objects.table_classes(list(JOB_TABLES)),
+    )
+    assert logged.verdict is False
+    unknown = objects.may_change(
+        rows,
+        kill,
+        "panda_id",
+        "ddmErrorCode",
+        keys=("panda_id",),
+        spec_class="JobSpec",
+        table_classes=objects.table_classes(list(JOB_TABLES)),
+    )
+    assert unknown.verdict is True
+    assert [site.how for site in unknown.because] == [
+        "insert jobs_Unknown writes ddmErrorCode on the object's row"
+    ]
+
+
+#: A spec whose changed attributes make the SET, as PanDA's: a build with none changed has an empty SET.
+CHANGES_SPEC = (
+    SPEC
+    + """
+    def bindUpdateChangesExpression(self):
+        ret = ""
+        for attr in self._attributes:
+            if attr in self._changedAttrs:
+                ret += f"{attr}=:{attr},"
+        ret = ret[:-1]
+        ret += " "
+        return ret
+"""
+)
+
+KEEPER = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def keepJob(self, panda_id):
+        sql = "SELECT PandaID,jobStatus,ddmErrorCode,jobMetrics,modificationTime FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+        self.cur.execute(sql, {":PandaID": panda_id})
+        res = self.cur.fetchall()
+        job = JobSpec()
+        job.pack(res[0])
+        job.jobStatus = "holding"
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = job.PandaID
+        self.cur.execute(sql, varMap)  # keepJob's update
+"""
+
+
+def test_a_write_whose_set_python_builds_names_its_row_by_its_where(tmp_path):
+    """``SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID``: the columns are the job's changed
+    attributes, which the map does not read, and the row is the WHERE's -- so asked by the key, jobStatus, which
+    keepJob assigns on the job it read from the row, changes, and jobMetrics stays as read; not "a row whose key is
+    not read".  The build of the SET with no attribute changed writes nothing the other does not: one write."""
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=CHANGES_SPEC, keeper=KEEPER)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    keep = "pkg/keeper.py::DBProxy.keepJob"
+    (write,) = [w for w in rows[keep].writes if w.kind == "update"]
+    assert (write.table, write.whole, write.changed, write.unread) == (
+        "jobsActive4",
+        "job",
+        True,
+        True,
+    )
+    assert write.lines == [_line(KEEPER, "# keepJob's update")]
+    assert [(v.column, v.path) for v in write.keys] == [("PandaID", "job.PandaID")]
+    status = objects.may_change(rows, keep, "panda_id", "jobStatus", keys=("panda_id",))
+    assert status.verdict is True
+    assert ("DBProxy.keepJob", "update jobsActive4") in {
+        (site.owner.split("::")[1], site.how) for site in status.because
+    }
+    metrics = objects.may_change(
+        rows, keep, "panda_id", "jobMetrics", keys=("panda_id",)
+    )
+    assert metrics.verdict is False
+    assert not metrics.open
+
+
+#: A spec with the resets of PanDA's: one changed attribute, or each of the names a method spells.
+RESETS_SPEC = (
+    CHANGES_SPEC
+    + """
+    def resetChangedAttr(self, name):
+        try:
+            del self._changedAttrs[name]
+        except Exception:
+            pass
+
+    def keepOld(self):
+        for name in ["jobMetrics", "ddmErrorCode"]:
+            self.resetChangedAttr(name)
+"""
+)
+
+ORDERED = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def updateJob(self, job: JobSpec):
+        job.resetChangedAttr("PandaID")
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = job.PandaID
+        self.cur.execute(sql, varMap)  # updateJob's update
+
+    def retryJob(self, job: JobSpec, again):
+        if not again:
+            sql = "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobMetrics) VALUES (:PandaID,:jobMetrics)"
+            self.cur.execute(sql, job.valuesMap())  # retryJob's write-back
+        else:
+            job.jobMetrics = "retried"  # retryJob's else
+
+    def markJob(self, job: JobSpec):
+        job.jobMetrics = "marked"  # markJob's change
+
+
+class Runner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+        self.job: JobSpec = JobSpec()
+
+    def make(self) -> JobSpec:
+        return JobSpec()
+
+    def finish(self, job: JobSpec):
+        job.PandaID = 5  # reset by updateJob
+        job.jobStatus = "done"  # written
+        job.jobMetrics = "m"  # reset by keepOld
+        job.keepOld()
+        self.proxy.updateJob(job)  # finish's update
+        job.modificationTime = 3  # after the write
+
+    def each(self, jobs: list[JobSpec]):
+        for job in jobs:
+            if job.jobStatus == "x":
+                self.proxy.updateJob(job)  # each's update
+            else:
+                job.ddmErrorCode = 1  # another job's
+
+    def again(self, job: JobSpec, tries):
+        for n in tries:
+            if n:
+                self.proxy.updateJob(job)  # again's update
+            else:
+                job.ddmErrorCode = 2  # the next try writes it
+
+    def refine(self, jobs: list[JobSpec]):
+        for job in jobs:
+            try:
+                if job.jobStatus == "bad":
+                    self.proxy.markJob(job)  # refine's mark
+                    continue
+            except Exception:
+                pass
+            self.proxy.updateJob(job)  # refine's update
+
+    def other(self, job: JobSpec):
+        self.proxy.updateJob(job)  # the job's update
+        job.ddmErrorCode = 7  # after its update
+        fresh = JobSpec()
+        self.proxy.updateJob(fresh)  # another object's update
+
+    def swap(self, job: JobSpec, other: JobSpec):
+        self.proxy.updateJob(other)  # the other's update
+
+    def alias(self, tries):
+        for n in tries:
+            job = self.job
+            if n:
+                self.proxy.updateJob(job)  # alias's update
+            else:
+                job.ddmErrorCode = 5  # the same job each pass
+
+    def fresh(self, tries):
+        for n in tries:
+            made = self.make()
+            job = made
+            if n:
+                self.proxy.updateJob(job)  # fresh's update
+            else:
+                job.ddmErrorCode = 6  # another job each pass
+"""
+
+
+def _ordered(tmp_path: Path) -> dict:
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=RESETS_SPEC, ordered=ORDERED)
+    return {row.owner: row for row in fragment.reach_graph}
+
+
+def test_the_record_says_where_line_order_is_wrong_what_a_loop_renews_and_what_a_reset_clears(
+    tmp_path,
+):
+    """retryJob's write-back cannot run before its else, which comes later; refine's mark runs before its update only
+    on a later pass, for the continue between; each's for renews job at every top; updateJob clears PandaID from its
+    entry to its update; keepOld clears the names its for spells on every way out, one entry for both, and so its call
+    does in finish."""
+    rows = _ordered(tmp_path)
+    retry = rows["pkg/ordered.py::DBProxy.retryJob"].order
+    back, other = (
+        _line(ORDERED, "# retryJob's write-back"),
+        _line(ORDERED, "# retryJob's else"),
+    )
+    assert [(one.line, one.lines) for one in retry.apart] == [(back, [other])]
+    refine = rows["pkg/ordered.py::Runner.refine"].order
+    mark, update = (
+        _line(ORDERED, "# refine's mark"),
+        _line(ORDERED, "# refine's update"),
+    )
+    assert (mark, [update]) in [(one.line, one.lines) for one in refine.rounds]
+    each = rows["pkg/ordered.py::Runner.each"].order
+    (loop,) = each.loops
+    assert [(one.loop, one.name, one.before) for one in each.renewed] == [
+        (
+            loop.line,
+            "job",
+            [_line(ORDERED, "# each's update"), _line(ORDERED, "# another job's")],
+        )
+    ]
+    update_job = rows["pkg/ordered.py::DBProxy.updateJob"]
+    assert any(
+        (one.path, one.columns, one.line) == ("job", ["PandaID"], 0)
+        and _line(ORDERED, "# updateJob's update") in one.lines
+        for one in update_job.cleared
+    )
+    keep = rows["pkg/spec.py::JobSpec.keepOld"]
+    assert [
+        (one.path, one.columns)
+        for one in keep.cleared
+        if one.line == 0 and -1 in one.lines
+    ] == [("self", ["ddmErrorCode", "jobMetrics"])]
+    finish = rows["pkg/ordered.py::Runner.finish"]
+    assert any(
+        (one.path, one.columns, one.line)
+        == ("job", ["ddmErrorCode", "jobMetrics"], _line(ORDERED, "# reset by keepOld"))
+        and _line(ORDERED, "# finish's update") in one.lines
+        for one in finish.cleared
+    )
+
+
+def test_a_change_writes_the_row_only_where_it_can_run_before_the_write_and_no_reset_stands_between(
+    tmp_path,
+):
+    """finish writes jobStatus; PandaID is reset by updateJob, jobMetrics by keepOld, modificationTime assigned
+    after; retryJob's else never runs before its write-back; each's other arm is another job's; again's next try
+    writes the same job."""
+    rows = _ordered(tmp_path)
+    finish = "pkg/ordered.py::Runner.finish"
+    written = objects.may_change(rows, finish, "job", "jobStatus")
+    assert written.verdict is True
+    assert ("Runner.finish", _line(ORDERED, "# written")) in {
+        (site.owner.split("::")[1], site.line) for site in written.because
+    }
+    for column, marker in (
+        ("PandaID", "# reset by updateJob"),
+        ("jobMetrics", "# reset by keepOld"),
+        ("modificationTime", "# after the write"),
+    ):
+        answer = objects.may_change(rows, finish, "job", column)
+        assert (column, answer.verdict, answer.because) == (column, False, [])
+        assert [(site.line, site.how) for site in answer.unwritten] == [
+            (_line(ORDERED, marker), objects.NO_FLUSH)
+        ]
+        assert "changes_in_order" in answer.premises
+    retry = objects.may_change(
+        rows, "pkg/ordered.py::DBProxy.retryJob", "job", "jobMetrics"
+    )
+    assert (retry.verdict, retry.because) == (False, [])
+    assert [site.line for site in retry.unwritten] == [
+        _line(ORDERED, "# retryJob's else")
+    ]
+    each = objects.may_change(
+        rows, "pkg/ordered.py::Runner.each", "jobs[]", "ddmErrorCode"
+    )
+    assert (each.verdict, each.because) == (False, [])
+    again = objects.may_change(
+        rows, "pkg/ordered.py::Runner.again", "job", "ddmErrorCode"
+    )
+    assert again.verdict is True
+    assert "changes_in_order" not in again.premises
+
+    refine = objects.may_change(
+        rows, "pkg/ordered.py::Runner.refine", "jobs[]", "jobMetrics"
+    )
+    assert (refine.verdict, refine.because) == (False, [])
+    assert [site.line for site in refine.unwritten] == [
+        _line(ORDERED, "# markJob's change")
+    ]
+    other = objects.may_change(
+        rows, "pkg/ordered.py::Runner.other", "job", "ddmErrorCode"
+    )
+    assert (other.verdict, other.because) == (False, [])
+
+
+def test_an_object_not_read_from_its_row_is_open_only_where_a_change_it_came_with_reaches_the_write(
+    tmp_path,
+):
+    """swap hands other to updateJob, which writes its changed attributes on other.PandaID's row, and nothing in the
+    run reads other from the row: jobStatus may have been changed before other was handed in, and is open; PandaID's
+    change is reset on every way to the write, and is not written."""
+    rows = _ordered(tmp_path)
+    swap = "pkg/ordered.py::Runner.swap"
+    status = objects.may_change(rows, swap, "job", "jobStatus", keys=("other.PandaID",))
+    assert status.verdict is None
+    assert [site.how for site in status.open] == [
+        objects.NOT_READ_HERE.format(
+            column="jobStatus", object="job", key="job.PandaID"
+        )
+    ]
+    key = objects.may_change(rows, swap, "job", "PandaID", keys=("other.PandaID",))
+    assert (key.verdict, key.open, key.because) == (False, [], [])
+    assert "changes_in_order" in key.premises
+
+
+def test_a_later_pass_writes_another_object_only_where_it_takes_it_by_a_name_bound_to_one(
+    tmp_path,
+):
+    """alias binds job to self.job on every pass, the same job, and its next pass writes the change; fresh binds job
+    to what make() returns, another job each pass, and the change made on one pass is not the next pass's write."""
+    rows = _ordered(tmp_path)
+    alias = objects.may_change(
+        rows, "pkg/ordered.py::Runner.alias", "self.job", "ddmErrorCode"
+    )
+    assert alias.verdict is True
+    assert _line(ORDERED, "# the same job each pass") in {
+        site.line for site in alias.because
+    }
+    fresh = objects.may_change(
+        rows, "pkg/ordered.py::Runner.fresh", "job", "ddmErrorCode"
+    )
+    assert (fresh.verdict, fresh.because) == (False, [])
+    assert [site.line for site in fresh.unwritten] == [
+        _line(ORDERED, "# another job each pass")
+    ]
+
+
+MAPPED = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def updateBy(self, spec: JobSpec, criteria: dict):
+        sql = "WHERE "
+        varMap = {}
+        for key, value in criteria.items():
+            crKey = f":cr_{key}"
+            sql += f"{key}={crKey} AND "
+            varMap[crKey] = value
+        sql = sql[:-4]
+        sqlU = f"UPDATE ATLAS_PANDA.jobsActive4 SET {spec.bindUpdateChangesExpression()} "
+        for name, held in spec.valuesMap(onlyChanged=True).items():
+            varMap[name] = held
+        self.cur.execute(sqlU + sql, varMap)  # the mapped update
+
+
+class Runner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+
+    def finish(self, job: JobSpec):
+        job.jobStatus = "done"  # written on the job's row
+        self.proxy.updateBy(job, {"PandaID": job.PandaID})
+
+    def mark(self, job: JobSpec):
+        fresh = JobSpec()
+        fresh.jobStatus = "marked"
+        self.proxy.updateBy(fresh, {"PandaID": job.PandaID})
+
+    def hold(self, job: JobSpec, other: JobSpec):
+        other.jobStatus = "held"
+        self.proxy.updateBy(other, {"jobStatus": "running"})  # rows the status names
+
+    def hand(self, job: JobSpec):
+        job.jobStatus = "handed"  # written on rows the status names
+        self.proxy.updateBy(job, {"jobStatus": "running"})
+"""
+
+
+def test_a_row_named_by_the_keys_of_a_mapping_is_named_where_the_caller_says_them(
+    tmp_path,
+):
+    """updateBy names its row by each key of criteria, ``{key}=:cr_{key}`` with criteria's value at it, and writes the
+    changed attributes it copies from spec.valuesMap(onlyChanged=True) entry by entry.  The write's key is the
+    mapping's key (MAP_KEY), its value criteria[]; its row is the whole of spec's.  finish hands job as spec, and the
+    write takes it.  mark hands another object with {"PandaID": job.PandaID}: the asked key is followed to
+    criteria['PandaID'], so the write is on job's row -- and the object written there, handed with no key of that
+    row, is not followed to where it was read (open, as for any write).  hold hands another object with
+    {"jobStatus": ...}: no PandaID there to follow, and the write is open, on a row named by criteria[]."""
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=CHANGES_SPEC, mapped=MAPPED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    (write,) = rows["pkg/mapped.py::DBProxy.updateBy"].writes
+    assert [(key.column, key.path) for key in write.keys] == [(MAP_KEY, "criteria[]")]
+    assert (write.whole, write.changed) == ("spec", True)
+    finish = objects.may_change(
+        rows, "pkg/mapped.py::Runner.finish", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert finish.verdict is True
+    assert _line(MAPPED, "# written on the job's row") in {
+        site.line for site in finish.because
+    }
+    mark = objects.may_change(
+        rows, "pkg/mapped.py::Runner.mark", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert mark.verdict is None
+    assert [(site.line, site.how) for site in mark.open] == [
+        (
+            _line(MAPPED, "# the mapped update"),
+            objects.NOT_READ_HERE.format(
+                column="jobStatus", object="spec", key="criteria[]"
+            ),
+        )
+    ]
+    hold = objects.may_change(
+        rows, "pkg/mapped.py::Runner.hold", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert hold.verdict is None
+    assert [(site.line, site.how) for site in hold.open] == [
+        (
+            _line(MAPPED, "# the mapped update"),
+            objects.NOT_FOLLOWED_KEY.format(column="jobStatus", key="criteria[]"),
+        )
+    ]
+    assert objects.key_path(write.keys[0], "PandaID") == "criteria['PandaID']"
+    assert objects.map_key_columns(
+        "criteria[]",
+        {
+            "criteria['PandaID']",
+            "criteria[]",
+            "criteria['jobStatus'].x",
+            "other['jobStatus']",
+        },
+    ) == {"PandaID"}
+
+    hand = objects.may_change(
+        rows, "pkg/mapped.py::Runner.hand", "job", "jobStatus", keys=("job.PandaID",)
+    )
+    assert (hand.verdict, hand.because) == (None, [])
+    assert [(site.line, site.how) for site in hand.open] == [
+        (
+            _line(MAPPED, "# the mapped update"),
+            objects.NOT_FOLLOWED_KEY.format(column="jobStatus", key="criteria[]"),
+        )
+    ]
+
+
+CALLED = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def registerBy(self, panda_id, job: JobSpec):
+        job.jobStatus = "registered"
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = panda_id
+        self.cur.execute(sql, varMap)  # registerBy's update
+
+    def registerAny(self, panda_id, job: JobSpec):
+        job.jobStatus = "registered"
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = panda_id
+        self.cur.execute(sql, varMap)  # registerAny's update
+
+    def registerMaybe(self, panda_id, job: JobSpec | None = None):
+        if job is not None:
+            job.jobStatus = "registered"
+            sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+            varMap = job.valuesMap(onlyChanged=True)
+            varMap[":PandaID"] = panda_id
+            self.cur.execute(sql, varMap)  # registerMaybe's update
+
+
+class Runner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+
+    def register(self, job: JobSpec):
+        self.proxy.registerBy(job.PandaID, job)
+        self.proxy.registerAny(job.PandaID, job)
+
+    def other(self, job: JobSpec, panda_id):
+        self.proxy.registerAny(panda_id, job)
+        self.proxy.registerMaybe(job.PandaID, job)
+        self.proxy.registerMaybe(panda_id)
+"""
+
+
+def test_a_write_takes_the_objects_row_where_its_key_is_the_objects_key_or_every_caller_hands_it_so(
+    tmp_path,
+):
+    """registerBy and registerAny take the job and the id of the row they write apart.  Asked at either, the id is
+    not the job's by anything they do; registerBy's one caller hands the job's own PandaID, so its write is the
+    job's row's and jobStatus changes there.  registerAny is also handed another id beside the job by other: the
+    write is not known to be the job's row, and the answer is open on it rather than written.  registerMaybe is also
+    called with no job, which leaves it None: that call writes no job, and the one handing the job hands its own
+    PandaID."""
+    fragment = _build(tmp_path, entities=JOB_TABLES, spec=CHANGES_SPEC, called=CALLED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    by = objects.may_change(
+        rows, "pkg/called.py::DBProxy.registerBy", "job", "jobStatus"
+    )
+    assert by.verdict is True
+    assert _line(CALLED, "# registerBy's update") in {site.line for site in by.because}
+    any_ = objects.may_change(
+        rows, "pkg/called.py::DBProxy.registerAny", "job", "jobStatus"
+    )
+    assert (any_.verdict, any_.because) == (None, [])
+    assert [(site.line, site.how) for site in any_.open] == [
+        (
+            _line(CALLED, "# registerAny's update"),
+            objects.NOT_FOLLOWED_KEY.format(column="jobStatus", key="panda_id"),
+        )
+    ]
+    from_top = objects.may_change(
+        rows, "pkg/called.py::Runner.register", "job", "jobStatus"
+    )
+    assert from_top.verdict is True
+    maybe = objects.may_change(
+        rows, "pkg/called.py::DBProxy.registerMaybe", "job", "jobStatus"
+    )
+    assert maybe.verdict is True
+    assert _line(CALLED, "# registerMaybe's update") in {
+        site.line for site in maybe.because
+    }
+
+
+KEYED = """\
+import threading
+
+from pkg.spec import JobSpec
+
+
+class Timed:
+    def __init__(self, method, timeout):
+        self.method = method
+        self.result = None
+
+    def __call__(self, *var, **kwargs):
+        self.result = self.method(*var, **kwargs)
+
+    def run(self, *var, **kwargs):
+        thr = threading.Thread(target=self, args=var, kwargs=kwargs)
+        thr.start()
+        thr.join()
+
+
+class Status:
+    def update(self, pandaID, jobStatus, param):
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus"
+        varMap = {}
+        for key in list(param):
+            if key in ["corruptedFiles"]:
+                continue
+            if param[key] is not None:
+                param[key] = str(param[key])
+                sql += f",{key}=:{key}"
+                varMap[f":{key}"] = param[key]
+        sql += " WHERE PandaID=:PandaID"
+        varMap[":jobStatus"] = jobStatus
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+
+
+status: Status = None
+
+
+def log(value):
+    return value
+
+
+def update_job(job_id, job_status, metrics, files):
+    param = {}
+    fields = [("jobMetrics", metrics), ("corruptedFiles", files)]
+    for key, value in fields:
+        if value is not None:
+            param[key] = value
+    param["ddmErrorCode"] = 0
+    timed = Timed(status.update, 10)
+    timed.run(job_id, job_status, param)
+    return timed.result
+"""
+
+
+def test_a_set_naming_its_columns_by_a_mapping_s_keys_writes_each_key_its_callers_put(
+    tmp_path,
+):
+    """Status.update's SET adds ``{key}=:{key}`` for each key of ``param`` its loop does not skip, valued by
+    ``param[key]``; ``param``'s keys are what ``update_job`` puts -- through ``Timed``, whose ``run`` hands the
+    method it was built with its own arguments.  The write names jobMetrics and ddmErrorCode (corruptedFiles is
+    skipped) and no other column: ddmErrorCode may change on the job's row, modificationTime does not.  Where a
+    caller hands a mapping the record cannot read the keys of (``from_rest``'s parameter, no call names it), or
+    the wrapper is handed on (``log(timed)``) and the method may be called some other way, the write names its
+    columns at run time as before."""
+    fragment = _build(tmp_path / "keyed", spec=SPEC, keyed=KEYED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    owner = "pkg/keyed.py::Status.update"
+    writes = rows[owner].writes
+    assert len(writes) == 2
+    assert {w.unread for w in writes} == {False}
+    named = {
+        (v.column, v.path) for w in writes for v in w.columns if v.column != "jobStatus"
+    }
+    assert named == {
+        ("jobMetrics", "param['jobMetrics']"),
+        ("ddmErrorCode", "param['ddmErrorCode']"),
+    }
+    written = objects.may_change(
+        rows, owner, "pandaID", "ddmErrorCode", keys=("pandaID",)
+    )
+    assert written.verdict is True
+    unwritten = objects.may_change(
+        rows, owner, "pandaID", "modificationTime", keys=("pandaID",)
+    )
+    assert (unwritten.verdict, unwritten.open) == (False, [])
+
+    rest = (
+        KEYED
+        + "\n\ndef from_rest(job_id, data):\n    status.update(job_id, 'running', data)\n"
+    )
+    handed = KEYED.replace(
+        "    timed.run(job_id, job_status, param)\n",
+        "    timed.run(job_id, job_status, param)\n    log(timed)\n",
+    )
+    for name, text in (("rest", rest), ("handed", handed)):
+        rows = {
+            row.owner: row
+            for row in _build(tmp_path / name, spec=SPEC, keyed=text).reach_graph
+        }
+        # The pass that adds no key writes jobStatus alone, a statement with no hole.
+        assert {w.unread for w in rows[owner].writes} == {True, False}, name
+        unread = objects.may_change(
+            rows, owner, "pandaID", "modificationTime", keys=("pandaID",)
+        )
+        assert [site.how for site in unread.open] == [
+            objects.NAMED_AT_RUN_TIME.format(column="modificationTime")
+        ], name

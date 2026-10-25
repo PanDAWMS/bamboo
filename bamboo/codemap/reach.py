@@ -50,6 +50,7 @@ from bamboo.codemap.models import (
     required_values,
 )
 from bamboo.codemap.panda import pathcond
+from bamboo.codemap.panda.reaching import reaching
 
 #: What every answer rests on.  Said once, to every reader, rather than
 #: counted per answer: no answer could be given without them.
@@ -83,6 +84,10 @@ ASSUMPTIONS: dict[str, str] = {
         "of the corpus defines lands in no corpus code."
     ),
     "runner_runs_only_sql": "A call the map reads a SQL statement at runs the statement and nothing of the corpus.",
+    "runner_runs_callers_sql": (
+        "A call running the statement its function was handed runs its callers' statement, read where they "
+        "run it, and nothing of the corpus."
+    ),
     "driver_talks_only_to_db": "A call on the database driver -- a cursor, a connection -- goes only to the database.",
 }
 
@@ -146,10 +151,11 @@ _ELEMENT_METHODS = {
     "setdefault",
     "values",
     "items",
-    "copy",
     "popleft",
     "__getitem__",
 }
+#: Methods of a builtin whose value is another of the same type: ``d.copy()`` is a dict.
+_SAME_TYPE_METHODS = {"copy"}
 #: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
 _OPERATORS: dict[type, tuple[str, ...]] = {
     op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
@@ -281,6 +287,13 @@ class _Receivers:
         self._open: dict[tuple[str, int, int], int] = {}
         self._low: list[int] = []
         self._operators: dict[type, Optional[tuple[str, str]]] = {}
+        self._held: dict[
+            tuple[int, str, tuple[Optional[str], ...]],
+            Optional[list[tuple[str, ast.AST, ast.expr, int]]],
+        ] = {}
+        self._scopes: dict[int, _Scope] = {}
+        self._as_values: Optional[set[str]] = None
+        self._keys: dict[tuple[int, str], Optional[frozenset[str]]] = {}
 
     def of(
         self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
@@ -384,6 +397,9 @@ class _Receivers:
         if isinstance(expression, (ast.NamedExpr, ast.Await)):
             return self.of(file, func, expression.value, depth + 1)
         if isinstance(expression, ast.Subscript):
+            filled = self._filled(file, func, expression, depth)
+            if filled is not None:
+                return filled
             return _element(self.of(file, func, expression.value, depth + 1))
         if isinstance(expression, ast.Call):
             return self._called(file, func, expression, depth)
@@ -391,7 +407,7 @@ class _Receivers:
             return self._named(file, func, expression.id, depth)
         if isinstance(expression, ast.Attribute):
             return self._attribute(file, func, expression, depth)
-        return _UNKNOWN, f"a {type(expression).__name__}"
+        return _UNKNOWN, _a(type(expression).__name__)
 
     def _operated(
         self, file: str, func: ast.AST, expression: ast.BinOp | ast.UnaryOp, depth: int
@@ -435,6 +451,44 @@ class _Receivers:
             self._operators[op] = _joined(found) if found else None
         return self._operators[op]
 
+    def _slot(
+        self,
+        file: str,
+        func: ast.AST,
+        value: Optional[ast.expr],
+        slot: Optional[int],
+        depth: int,
+    ) -> tuple[str, str]:
+        """What a name unpacked from *value* at *slot* is: the literal's element there, the slot of the ``tuple[...]``
+        the call's targets are declared to return, else one of what *value* holds -- ``siteid, queue_data_json, ... =
+        resTmp``, a row the database returned."""
+        if value is None:
+            return _UNKNOWN, "an unpacking of nothing read"
+        if (
+            isinstance(value, (ast.Tuple, ast.List))
+            and slot is not None
+            and slot < len(value.elts)
+            and not any(isinstance(one, ast.Starred) for one in value.elts)
+        ):
+            return self.of(file, func, value.elts[slot], depth + 1)
+        if isinstance(value, ast.Call) and slot is not None:
+            try:
+                placed = self.calls.callees(file, func, value)
+            except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+                placed = C.Placed()
+            if placed.targets and not placed.unplaced and not placed.returns_none:
+                kinds = []
+                for target in placed.targets:
+                    returns = getattr(target.func, "returns", None)
+                    held = C._slot_of(returns, slot) if returns is not None else None
+                    kinds.append(
+                        self.annotation(target.file, held)
+                        if held is not None
+                        else _element(self.annotation(target.file, returns))
+                    )
+                return _joined(kinds)
+        return _element(self.of(file, func, value, depth + 1))
+
     def _handed_only_outside(
         self, file: str, func: ast.AST, call: ast.Call, depth: int
     ) -> Optional[str]:
@@ -457,7 +511,7 @@ class _Receivers:
             placed = self.calls.callees(file, func, call)
         except Exception as error:  # noqa: BLE001 -- a reading that fails says nothing
             return _UNKNOWN, f"placing it failed: {type(error).__name__}"
-        if placed.thread:
+        if placed.returns_none:
             return _BUILTIN, "NoneType"
         if placed.targets:
             if placed.unplaced:
@@ -508,19 +562,107 @@ class _Receivers:
 
     @staticmethod
     def _method_result(receiver: tuple[str, str], method: str) -> tuple[str, str]:
-        """What a builtin's or a queue's method returns: one of what it holds, or a builtin."""
+        """What a builtin's or a queue's method returns: one of what it holds, another of its type (a copy), or a builtin."""
         kind, held = receiver
         if kind == _QUEUE:
             return (
-                (_UNKNOWN, f"what a {held} holds")
+                (_UNKNOWN, f"what {_a(held)} holds")
                 if method in _GETS
                 else (_BUILTIN, "")
             )
         if held in _SCALARS:
             return _BUILTIN, ""
+        if method in _SAME_TYPE_METHODS:
+            return _BUILTIN, held
         if method in _ELEMENT_METHODS:
-            return _UNKNOWN, f"what a {held or 'builtin container'} holds"
+            return _UNKNOWN, f"what {_a(held or 'builtin container')} holds"
         return _BUILTIN, ""
+
+    def _filled(
+        self, file: str, func: ast.AST, expression: ast.Subscript, depth: int
+    ) -> Optional[tuple[str, str]]:
+        """What ``d[k]...`` is, read from what is put at that place of the container *d* holds: the join of the values
+        every holder of it puts there (:class:`_Holders`), read down the literals put (``file_list[block] = {"lfns":
+        [], ...}`` then ``file_list[block]["lfns"].append(lfn)``: a list) and, for a value held at a slot, the slot
+        (:meth:`_slot`: ``(fetched[site], ...) = self.getOutputFiles_JEDI(...)``, the first of the tuple it is declared
+        to return).
+
+        ``None`` -- the element of what *d* is, as before -- where *d* is read at a module's scope, is a scalar, an
+        outside object or a queue, where a move of the walk is not read, or where nothing is put at that place.
+        """
+        root, keys = _subscripted(expression)
+        if root is None or isinstance(func, ast.Module):
+            return None
+        container = self.of(file, func, root, depth + 1)
+        if container[0] in (_OUTSIDE, _QUEUE) or (
+            container[0] == _BUILTIN and container[1] in _SCALARS
+        ):
+            return None
+        asked = (id(func), root.id, _spelled(tuple(keys)))
+        if asked not in self._held:
+            self._held[asked] = _Holders(self, tuple(keys)).values(file, func, root.id)
+        values = self._held[asked]
+        if not values:
+            return None
+        kinds = []
+        for where, scope, value, path in values:
+            if path:
+                kind = self._slot(where, scope, value, _position(path[0]), depth)
+            else:
+                kind = self.of(where, scope, value, depth + 1)
+            for _key in path[1:]:
+                kind = _element(kind)
+            kinds.append(kind)
+        return _joined(kinds)
+
+    def _scope(self, func: ast.AST) -> "_Scope":
+        held = self._scopes.get(id(func))
+        if held is None:
+            held = self._scopes[id(func)] = _Scope(func)
+        return held
+
+    def _target(self, file: str, func: ast.AST) -> C.Target:
+        """*func* as a call lands at it: a method with the class defining it, or a function."""
+        owned = self.types.method_class(file, func)
+        cls = owned[1] if owned is not None and func in owned[1].body else None
+        return C.Target(file, func, cls, ())
+
+    def keys(self, file: str, func: ast.AST, name: str) -> Optional[frozenset[str]]:
+        """The keys the mapping *name* holds in *func* can be at: the texts every put into it puts it at, read from
+        every name holding it (:class:`_Keys`) -- ``param`` in ``updateJobStatus``, filled by ``pilot_api.update_job``;
+        ``None`` where one is not read."""
+        asked = (id(func), name)
+        if asked not in self._keys:
+            self._keys[asked] = _Keys(self).read_keys(file, func, name)
+        return self._keys[asked]
+
+    def _read_as_value(self, func: ast.AST) -> bool:
+        """Whether a name spelt as *func*'s is read anywhere in the corpus other than as what a call calls: handed as
+        a callback, a thread's target, held -- called then with what no call here says.  Not a read to build an
+        object whose every call hands the function its arguments (:meth:`Calls.forwarded_reads`): those calls are
+        placed at it."""
+        if self._as_values is None:
+            found: set[str] = set()
+            forwarded = self.calls.forwarded_reads()
+            for file in self.types.corpus_files():
+                for node in ast.walk(
+                    self.types.tree(file) or ast.Module(body=[], type_ignores=[])
+                ):
+                    if id(node) in forwarded:
+                        continue
+                    if isinstance(node, ast.Attribute) and isinstance(
+                        node.ctx, ast.Load
+                    ):
+                        spelled = node.attr
+                    elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                        spelled = node.id
+                    else:
+                        continue
+                    parent = getattr(node, "parent", None)
+                    if not (isinstance(parent, ast.Call) and parent.func is node):
+                        found.add(spelled)
+            self._as_values = found
+        return func.name in self._as_values  # type: ignore[attr-defined]
 
     def _is_builtin(self, file: str, func: ast.AST, name: str) -> bool:
         if name not in _BUILTINS:
@@ -543,8 +685,15 @@ class _Receivers:
         for source, entered in _loop_sources(func, name):
             held = self.of(file, func, source, depth + 1)
             kinds.append(_entered(held) if entered else _element(held))
-        for value in self.types.assigned(func).get(name, ()):
+        for value in self.types.bound(func).get(name, ()):
             kinds.append(self.of(file, func, value, depth + 1))
+        for one in pathcond.bindings(func, name):
+            if (
+                not one.nested
+                and one.unpacked
+                and one.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED)
+            ):
+                kinds.append(self._slot(file, func, one.value, one.slot, depth))
         if kinds:
             return _joined(kinds)
         enclosing = self.types.enclosing_function(file, func)
@@ -653,7 +802,15 @@ def _element(container: tuple[str, str]) -> tuple[str, str]:
         return _BUILTIN, "str" if detail == "str" else ""
     if kind == _UNKNOWN:
         return container
-    return _UNKNOWN, f"an element of a {detail or kind}"
+    return _UNKNOWN, f"an element of {_a(detail or kind)}"
+
+
+def _a(held: str) -> str:
+    """*held* with its article -- ``a list``, ``an iterator`` --; a phrase that has one (``an attribute of NoneType``)
+    as it is."""
+    if held.startswith(("a ", "an ", "what ", "the ")):
+        return held
+    return f"an {held}" if held[:1].lower() in tuple("aeiou") else f"a {held}"
 
 
 def _entered(manager: tuple[str, str]) -> tuple[str, str]:
@@ -665,6 +822,1319 @@ def _entered(manager: tuple[str, str]) -> tuple[str, str]:
         if manager[0] in (_BUILTIN, _OUTSIDE)
         else (_UNKNOWN, f"what entering {manager[1]} yields")
     )
+
+
+#: A place in a container: its keys from the top, ``None`` for a position not said (an ``append``, a loop's element).
+_Path = tuple[Optional[ast.expr], ...]
+
+#: How many keys a path of :class:`_Holders` is read to; a longer one is not read.
+_PATH_CUT = 8
+#: How many holders one ask of :class:`_Holders` reads; more are not read.
+_HOLDERS_CUT = 300
+#: The slot of an item's value -- ``for key, value in d.items()``, ``for index, one in enumerate(xs)``.
+_SECOND = ast.Constant(value=1)
+
+#: Builtins whose value holds nothing of what they are handed: a count, a text, a test.
+_KEEPING_BUILTINS = {
+    "len", "str", "repr", "int", "float", "bool", "bytes", "print", "isinstance", "issubclass", "hash", "id",
+    "type", "any", "all", "sum", "format", "abs", "round", "callable", "hasattr", "getattr", "ord", "chr",
+    "bin", "hex", "oct", "ascii", "divmod", "pow",
+}  # fmt: skip
+#: Builtins whose value holds the elements of the one value they are handed, each as an element of its own.
+_COPYING_BUILTINS = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
+#: Builtins whose value is one of the elements of what they are handed.
+_PICKING_BUILTINS = {"max", "min", "next"}
+#: A builtin container's methods that put what they are handed into it.
+_PUTTING_METHODS = {"append", "add", "insert", "extend", "setdefault", "update"}
+#: ... and those that hand back a part of it: (the part's place below the receiver, the value's place below the part).
+_PARTS: dict[str, tuple[_Path, _Path]] = {
+    "copy": ((), ()),
+    "values": ((None,), (None,)),
+    "items": ((None, _SECOND), (None,)),
+    "popitem": ((_SECOND,), (None,)),
+}
+
+
+def _subscripted(expression: ast.expr) -> tuple[Optional[ast.Name], list[ast.expr]]:
+    """The name ``d[k1][k2]`` is taken out of, and its keys in order; no name for another root, or a slice."""
+    keys: list[ast.expr] = []
+    while isinstance(expression, ast.Subscript):
+        if isinstance(expression.slice, ast.Slice):
+            return None, []
+        keys.append(expression.slice)
+        expression = expression.value
+    return (expression if isinstance(expression, ast.Name) else None), keys[::-1]
+
+
+def _same_key(one: Optional[ast.expr], other: Optional[ast.expr]) -> bool:
+    """Whether two keys can be the same: two constants by value; any other pair can."""
+    if isinstance(one, ast.Constant) and isinstance(other, ast.Constant):
+        return bool(one.value == other.value)
+    return True
+
+
+def _position(key: Optional[ast.expr]) -> Optional[int]:
+    """The slot a key names -- a literal integer from the start --, ``None`` for any other key."""
+    if isinstance(key, ast.Constant) and type(key.value) is int and key.value >= 0:
+        return key.value
+    return None
+
+
+def _matched(one: _Path, other: _Path) -> bool:
+    """Whether two paths can be the same as far as the shorter goes."""
+    return all(_same_key(a, b) for a, b in zip(one, other, strict=False))
+
+
+def _spelled(path: _Path) -> tuple[Optional[str], ...]:
+    return tuple(None if key is None else ast.dump(key) for key in path)
+
+
+def _composed(
+    ys: _Path, xs: _Path, at: _Path, of: _Path
+) -> Optional[tuple[_Path, _Path]]:
+    """Y at *ys* is X at *xs*, and X at *at* is the container at *of*: where Y holds the container's -- (Y's path, the
+    container's) --, or ``None`` where the two are other places."""
+    if not _matched(xs, at):
+        return None
+    if len(xs) <= len(at):
+        return ys + at[len(xs) :], of
+    return ys, of + xs[len(at) :]
+
+
+def _chain(expression: ast.AST) -> Optional[tuple[ast.Name, _Path]]:
+    """The name *expression* is a part of, and the keys down to it: ``d[k]``, ``d.get(k)``, ``d.setdefault(k, v)``,
+    ``d.pop(k)``, ``d.copy()`` (the same keys); ``None`` for another root, or a slice."""
+    keys: list[Optional[ast.expr]] = []
+    while True:
+        if isinstance(expression, ast.Subscript) and not isinstance(
+            expression.slice, ast.Slice
+        ):
+            keys.append(expression.slice)
+            expression = expression.value
+        elif (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Attribute)
+            and not expression.keywords
+            and not any(isinstance(one, ast.Starred) for one in expression.args)
+            and (
+                (
+                    expression.func.attr in ("get", "setdefault", "pop")
+                    and expression.args
+                )
+                or (expression.func.attr == "copy" and not expression.args)
+            )
+        ):
+            if expression.func.attr != "copy":
+                keys.append(expression.args[0])
+            expression = expression.func.value
+        else:
+            break
+    return (expression, tuple(keys[::-1])) if isinstance(expression, ast.Name) else None
+
+
+def _mapping_key(key: Optional[ast.expr]) -> bool:
+    """Whether *key* is one only a mapping is read at: a text.  No list, tuple or set holds anything there -- and none
+    is read as a mapping: a merge is read only from a mapping or a set (:meth:`_Holders._merged`), so a list of pairs
+    ``dict(pairs)`` or ``d.update(pairs)`` reads is not taken for one."""
+    return isinstance(key, ast.Constant) and isinstance(key.value, str)
+
+
+class _Scope:
+    """One function's names, for :class:`_Holders`: every ``Name`` node by its id, and the names bound otherwise --
+    ``except ... as``, an import, ``global`` / ``nonlocal``, a ``match`` capture, a nested ``def`` or class."""
+
+    __slots__ = ("func", "names", "others")
+
+    def __init__(self, func: ast.AST) -> None:
+        self.func = func
+        self.names: dict[str, list[ast.Name]] = {}
+        self.others: set[str] = set()
+        for node in ast.walk(func):
+            if isinstance(node, ast.Name):
+                self.names.setdefault(node.id, []).append(node)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                self.others.add(node.name)
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                self.others.update(node.names)
+            elif isinstance(node, ast.alias):
+                self.others.add(node.asname or node.name.split(".")[0])
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                self.others.add(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                self.others.add(node.rest)
+            elif node is not func and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                self.others.add(node.name)
+
+    def nested(self, node: ast.AST) -> bool:
+        """Whether *node* is in a function, lambda or class nested in this one."""
+        above = getattr(node, "parent", None)
+        while above is not None and above is not self.func:
+            if isinstance(
+                above, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            ):
+                return True
+            above = getattr(above, "parent", None)
+        return False
+
+
+class _Holders:
+    """The values put at one place of a container, read from every name that holds it (R6).
+
+    A holder is ``(file, function, name, at, of)``: the name's value at the keys *at* is the container's at *of*
+    (:data:`_Path`).  Asked of ``d[k1]...[kn]`` in F, the walk starts from ``(F, d, (), ())`` and moves, each move
+    read with the map's readers and its paths composed (:func:`_composed`):
+
+    * up through a parameter, to what every call placed at the function hands it (:meth:`Calls.callers`, with
+      :meth:`Calls.missed` empty and the function's name read nowhere as a value): a name, a literal, the default,
+      or a ``**`` spread's entry at the parameter's name;
+    * through the name's own bindings: an assignment, a slot it is unpacked from, a loop over a value (an element;
+      of ``values()``, of ``items()``'s second slot, of a builtin's copy);
+    * through the puts into a holder -- ``y[k] = v``, ``append`` / ``add`` / ``insert`` / ``extend`` / ``setdefault``
+      / ``update``, ``+=``, ``|=`` -- on the name or on a part of it (``y[k]``, ``y.get(k)``, ``y.setdefault(k, [])``);
+    * and wherever a holder's value or a part of it goes: bound to a name, put into a local's container, held in a
+      literal, iterated, picked or copied by a builtin (a copy holds the same elements), ``or`` / ``if`` ``else``,
+      handed to a call placed in the corpus -- its parameter; ``**`` to the parameter of the key's name.
+
+    A place bears on the ask where its path on the container is a prefix of the asked keys: a strict one, or the
+    asked place itself held inside another value -- that holder is walked; the asked place itself, reached up from
+    a value bound or put there, is an answer.  Where a part that bears goes anywhere else -- returned, yielded,
+    stored on an attribute, read in a nested function, handed to a call not placed, placed open, placed outside the
+    corpus or on another thread, to a builtin not read here -- other code can put into it, and the ask is not read
+    (``None``): no premise says what outside code puts into what it is handed.  But a return from the function the
+    ask is in hands the container to its caller when the call ends, after every read of the call, and goes nowhere
+    those reads see -- ``collect_existing_files`` returns the ``dataset_file_map`` it fills; a caller that fills
+    what was returned and hands it in again does so by a name the walk reads up through the parameter
+    (``getOutputFiles_JEDI``'s ``parallelOutMap``).  A callee's return is the container under a name of its caller
+    the walk does not read, and is not read.  So is a binding not read here
+    (``with``, ``except``, ``global``), a name the function does not bind, a module's name, ``self``, a merge from a
+    value not read as a mapping or a set, a path longer than :data:`_PATH_CUT` keys, and more than
+    :data:`_HOLDERS_CUT` holders.
+
+    Flow-insensitive, and both ways: a name holding the container at one place holds whatever any value bound or put
+    there holds, at any time -- more than the code may put there, never less.
+    """
+
+    def __init__(self, receivers: _Receivers, keys: tuple[ast.expr, ...]):
+        self.receivers = receivers
+        self.calls = receivers.calls
+        self.keys: _Path = keys
+        self.pending: list[tuple[str, ast.AST, str, _Path, _Path]] = []
+        self.seen: set[
+            tuple[int, str, tuple[Optional[str], ...], tuple[Optional[str], ...]]
+        ] = set()
+        self.found: list[tuple[str, ast.AST, ast.expr, _Path]] = []
+        #: The function the ask is in, whose return goes nowhere its reads see (:meth:`_goes`).
+        self.start: Optional[ast.AST] = None
+        #: Holders a put on a value of a class not read needs to be among those read (:meth:`_put_into`).
+        self.required: set[
+            tuple[int, str, tuple[Optional[str], ...], tuple[Optional[str], ...]]
+        ] = set()
+        self.failed = False
+
+    def values(
+        self, file: str, func: ast.AST, name: str
+    ) -> Optional[list[tuple[str, ast.AST, ast.expr, _Path]]]:
+        """``(file, function, value, path)`` for each value at the asked place -- what *value* holds at *path* --;
+        ``None`` where a move is not read."""
+        self.start = func
+        self._hold(file, func, name, (), ())
+        while self.pending and not self.failed:
+            self._read(*self.pending.pop())
+        if self.failed or not self.required <= self.seen:
+            return None
+        return self.found
+
+    # -- what a place is to the ask ---------------------------------------------
+
+    def _bears(self, at: _Path, of: _Path) -> str:
+        """``holder`` where a value at *at* of a holder at *of* is walked, ``value`` where it is the asked place, ``""``
+        where it is another place."""
+        if len(of) > len(self.keys) or not _matched(of, self.keys):
+            return ""
+        return "value" if len(of) == len(self.keys) and not at else "holder"
+
+    def _unread(self, at: _Path, of: _Path) -> None:
+        """A part at *of* goes where this walk does not follow: the ask is not read where it bears."""
+        if self._bears(at, of) == "holder":
+            self.failed = True
+
+    def _hold(self, file: str, func: ast.AST, name: str, at: _Path, of: _Path) -> None:
+        if self.failed or self._bears(at, of) != "holder":
+            return
+        if len(at) > _PATH_CUT or len(of) > _PATH_CUT:
+            self.failed = True
+            return
+        key = (id(func), name, _spelled(at), _spelled(of))
+        if key in self.seen:
+            return
+        self.seen.add(key)
+        if len(self.seen) > _HOLDERS_CUT:
+            self.failed = True
+            return
+        self.pending.append((file, func, name, at, of))
+
+    # -- a value bound or put at a holder's place --------------------------------
+
+    def _place(
+        self, file: str, func: ast.AST, value: ast.expr, at: _Path, of: _Path
+    ) -> None:
+        """*value*, read in *func*, holds at *at* what the container holds at *of*."""
+        bears = self._bears(at, of)
+        if not bears or self.failed:
+            return
+        if bears == "value":
+            self.found.append((file, func, value, ()))
+            return
+        if isinstance(value, ast.Constant) and value.value is None:
+            return  # holds nothing
+        if isinstance(value, ast.BoolOp):
+            for one in value.values:
+                self._place(file, func, one, at, of)
+            return
+        if isinstance(value, ast.IfExp):
+            for one in (value.body, value.orelse):
+                self._place(file, func, one, at, of)
+            return
+        if isinstance(value, ast.NamedExpr):
+            self._place(file, func, value.value, at, of)
+            return
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr in ("get", "pop")
+            and len(value.args) == 2
+        ):
+            self._place(file, func, value.args[1], at, of)  # the default
+        chain = _chain(value)
+        if chain is not None:
+            root, path = chain
+            self._hold(file, func, root.id, path + at, of)
+            return
+        moved = self._copied(file, func, value)
+        if moved is not None:
+            for source, ys, xs in moved:
+                composed = _composed(ys, xs, at, of)
+                if composed is not None:
+                    self._place(file, func, source, *composed)
+            return
+        if at:
+            self._read_down(file, func, value, at, of)
+        else:
+            self._entries(file, func, value, of)
+
+    def _copied(
+        self, file: str, func: ast.AST, value: ast.expr
+    ) -> Optional[list[tuple[ast.expr, _Path, _Path]]]:
+        """Where *value* is made of another value's parts: ``(source, ys, xs)``, the source at *ys* being the value
+        at *xs* -- a builtin's copy or pick, a view, a slice, a sum."""
+        if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice):
+            return [(value.value, (None,), (None,))]
+        if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.Add, ast.Mult)):
+            return [
+                (one, (None,), (None,))
+                for one in (value.left, value.right)
+                if not isinstance(one, ast.Constant)
+            ]
+        if (
+            not isinstance(value, ast.Call)
+            or value.keywords
+            and not (isinstance(value.func, ast.Name) and value.func.id == "sorted")
+        ):
+            return None
+        called = value.func
+        if (
+            isinstance(called, ast.Attribute)
+            and not value.args
+            and called.attr in _PARTS
+        ):
+            ys, xs = _PARTS[called.attr]
+            return [(called.value, xs, ys)]
+        if (
+            isinstance(called, ast.Attribute)
+            and called.attr == "keys"
+            and not value.args
+        ):
+            return []
+        if (
+            isinstance(called, ast.Name)
+            and len(value.args) == 1
+            and not isinstance(value.args[0], ast.Starred)
+            and self.receivers._is_builtin(file, func, called.id)
+        ):
+            if called.id in _COPYING_BUILTINS:
+                return [(value.args[0], (None,), (None,))]
+            if called.id == "enumerate":
+                return [(value.args[0], (None,), (None, _SECOND))]
+            if called.id in _PICKING_BUILTINS:
+                return [(value.args[0], (None,), ())]
+        return None
+
+    def _read_down(
+        self, file: str, func: ast.AST, value: ast.expr, at: _Path, of: _Path
+    ) -> None:
+        """A literal holding at *at* what the container holds at *of*: what it holds there."""
+        key, below = at[0], at[1:]
+        if isinstance(value, ast.Dict):
+            for one, held in zip(value.keys, value.values, strict=True):
+                if one is None:
+                    self._place(file, func, held, at, of)  # {**held}
+                elif _same_key(one, key):
+                    self._place(file, func, held, below, of)
+        elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            if _mapping_key(key):
+                return  # nothing: a sequence holds nothing at a text
+            fixed = (
+                _position(key)
+                if isinstance(value, ast.Tuple)
+                and not any(isinstance(one, ast.Starred) for one in value.elts)
+                else None
+            )
+            for index, one in enumerate(value.elts):
+                if isinstance(one, ast.Starred):
+                    self._place(file, func, one.value, (None, *below), of)
+                elif fixed is None or fixed == index:
+                    self._place(file, func, one, below, of)
+        elif isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            if _mapping_key(key):
+                return  # nothing: a sequence holds nothing at a text
+            self._place(file, func, value.elt, below, of)
+        elif isinstance(value, ast.DictComp):
+            self._place(file, func, value.value, below, of)
+        elif self._constructed(value):
+            for keyword in value.keywords:  # type: ignore[attr-defined]
+                if keyword.arg is None:
+                    self._place(file, func, keyword.value, at, of)
+                elif _same_key(ast.Constant(value=keyword.arg), key):
+                    self._place(file, func, keyword.value, below, of)
+        else:
+            self.found.append((file, func, value, (*at, *self.keys[len(of) :])))
+
+    def _entries(self, file: str, func: ast.AST, value: ast.expr, of: _Path) -> None:
+        """A value that is the container at *of*, a strict prefix of the asked keys: each value it holds."""
+        if isinstance(value, ast.Dict):
+            for one, held in zip(value.keys, value.values, strict=True):
+                self._place(file, func, held, (), of if one is None else (*of, one))
+        elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            for one in value.elts:
+                if isinstance(one, ast.Starred):
+                    self._place(file, func, one.value, (None,), (*of, None))
+                else:
+                    self._place(file, func, one, (), (*of, None))
+        elif isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            self._place(file, func, value.elt, (), (*of, None))
+        elif isinstance(value, ast.DictComp):
+            self._place(file, func, value.value, (), (*of, None))
+        elif self._constructed(value):
+            for keyword in value.keywords:  # type: ignore[attr-defined]
+                self._place(
+                    file,
+                    func,
+                    keyword.value,
+                    (),
+                    of
+                    if keyword.arg is None
+                    else (*of, ast.Constant(value=keyword.arg)),
+                )
+        else:
+            self.found.append((file, func, value, self.keys[len(of) :]))
+
+    def _constructed(self, value: ast.expr) -> bool:
+        """``dict()``, ``list()``, ``set()``, ``dict(k=v, ...)``: a builtin container from keywords alone."""
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in ("dict", "list", "set")
+            and not value.args
+            and (value.func.id == "dict" or not value.keywords)
+        )
+
+    def _merged(
+        self, file: str, func: ast.AST, source: ast.expr, at: _Path, of: _Path
+    ) -> None:
+        """*source*'s entries merged at the same keys into a value holding at *at* what the container holds at *of*:
+        read where *source* is a mapping or a set -- a literal, or so read --; a list of pairs is not read."""
+        if self._bears(at, of) != "holder":
+            return  # the asked place's own content
+        if isinstance(
+            source, (ast.Dict, ast.DictComp, ast.Set, ast.SetComp)
+        ) or self._constructed(source):
+            self._place(file, func, source, at, of)
+            return
+        kind = self.receivers.of(file, func, source)
+        if kind[0] == _BUILTIN and kind[1] in ("dict", "set", "frozenset"):
+            self._place(file, func, source, at, of)
+        else:
+            self.failed = True
+
+    # -- one holder ----------------------------------------------------------------
+
+    def _read(self, file: str, func: ast.AST, name: str, at: _Path, of: _Path) -> None:
+        if isinstance(func, ast.Module) or name in ("self", "cls"):
+            self.failed = True
+            return
+        scope = self.receivers._scope(func)
+        nodes = scope.names.get(name, [])
+        parameters = _parameters(func)
+        if name in scope.others or (
+            name not in parameters
+            and not any(isinstance(node.ctx, ast.Store) for node in nodes)
+        ):
+            self.failed = True
+            return
+        if name in parameters:
+            self._up(file, func, name, at, of)
+        for node in nodes:
+            if self.failed:
+                return
+            if scope.nested(node):
+                self.failed = True
+            elif isinstance(node.ctx, ast.Store):
+                self._bound(file, func, node, at, of)
+            elif isinstance(node.ctx, ast.Load):
+                self._goes(file, func, node, at, of)
+
+    def _up(self, file: str, func: ast.AST, name: str, at: _Path, of: _Path) -> None:
+        """A parameter: what every call placed at *func* hands it."""
+        arguments = func.args  # type: ignore[attr-defined]
+        if any(
+            one is not None and one.arg == name
+            for one in (arguments.vararg, arguments.kwarg)
+        ):
+            self.failed = True
+            return
+        target = self.receivers._target(file, func)
+        try:
+            sites = self.calls.callers(target)
+            missed = self.calls.missed(target)
+        except Exception:  # noqa: BLE001 -- a call not read is a move not read
+            self.failed = True
+            return
+        if not sites or missed or self.receivers._read_as_value(func):
+            self.failed = True
+            return
+        tree = self.receivers.types.tree(target.file)
+        for site in sites:
+            try:
+                placed = self.calls.callees(site.file, site.func, site.call)
+            except Exception:  # noqa: BLE001
+                self.failed = True
+                return
+            handed = (
+                None if placed.thread else _handed(site, target, placed.on_class, name)
+            )
+            if handed is None:
+                self.failed = True
+                return
+            for value, path, default in handed:
+                where, scope = (
+                    (target.file, tree) if default else (site.file, site.func)
+                )
+                if scope is None:
+                    self.failed = True
+                    return
+                self._place(where, scope, value, path + at, of)
+
+    def _bound(
+        self, file: str, func: ast.AST, node: ast.expr, at: _Path, of: _Path
+    ) -> None:
+        """A binding of a holder's name, or a put at a holder's place (``y[k] = ...``): *node*, a target, holds at
+        *at* what the container holds at *of*."""
+        slots: list[Optional[ast.expr]] = []
+        here: ast.AST = node
+        parent = getattr(here, "parent", None)
+        while isinstance(parent, (ast.Tuple, ast.List)):
+            if any(isinstance(one, ast.Starred) for one in parent.elts):
+                slots.insert(0, None)
+            else:
+                slots.insert(0, ast.Constant(value=parent.elts.index(here)))  # type: ignore[arg-type]
+            here = parent
+            parent = getattr(here, "parent", None)
+        if isinstance(parent, ast.Starred):
+            self._unread(at, of)
+            return
+        path = tuple(slots)
+        if isinstance(parent, ast.Assign) or (
+            isinstance(parent, ast.AnnAssign) and parent.target is here
+        ):
+            if parent.value is not None:
+                self._place(file, func, parent.value, path + at, of)
+        elif isinstance(parent, ast.AugAssign) and parent.target is here:
+            if isinstance(parent.op, ast.Add):
+                moved = _composed((None,), (None,), at, of)
+                if moved is not None:
+                    self._place(file, func, parent.value, *moved)
+            elif isinstance(parent.op, ast.BitOr):
+                self._merged(file, func, parent.value, at, of)
+        elif (
+            isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension))
+            and parent.target is here
+        ):
+            self._place(file, func, parent.iter, (None, *path, *at), of)
+        elif isinstance(parent, ast.NamedExpr) and parent.target is here:
+            self._place(file, func, parent.value, at, of)
+        else:
+            self._unread(at, of)
+
+    # -- where a holder's value goes ------------------------------------------------
+
+    def _goes(
+        self, file: str, func: ast.AST, node: ast.Name, at: _Path, of: _Path
+    ) -> None:
+        """A read of a holder's name, followed up the expression it is in: *here* at *at* is the container at *of*."""
+        here: ast.AST = node
+        while not self.failed and self._bears(at, of):
+            parent = getattr(here, "parent", None)
+            step: Optional[tuple[_Path, _Path]] = None  # the parent at ys is here at xs
+            if isinstance(parent, ast.Subscript) and parent.value is here:
+                sliced = isinstance(parent.slice, ast.Slice)
+                if isinstance(parent.ctx, ast.Store):
+                    moved = None if sliced else _composed((), (parent.slice,), at, of)
+                    if sliced:
+                        self._unread(at, of)
+                    elif moved is not None:
+                        self._bound(file, func, parent, *moved)
+                    return
+                if not isinstance(parent.ctx, ast.Load):
+                    return
+                step = ((None,), (None,)) if sliced else ((), (parent.slice,))
+            elif isinstance(parent, ast.Attribute) and parent.value is here:
+                call = getattr(parent, "parent", None)
+                if not (isinstance(call, ast.Call) and call.func is parent):
+                    return  # an attribute of it, read or set
+                step = self._method(file, func, call, parent.attr, at, of)
+                if step is None:
+                    return
+                parent = call
+            elif isinstance(parent, ast.Call):
+                if parent.func is here:
+                    return
+                step = self._handed_to(file, func, parent, here, at, of)
+                if step is None:
+                    return
+            elif isinstance(parent, ast.Starred):
+                call = getattr(parent, "parent", None)
+                if isinstance(call, ast.Call):
+                    step = self._handed_to(file, func, call, parent, at, of)
+                    if step is None:
+                        return
+                    parent = call
+                elif isinstance(call, (ast.List, ast.Tuple, ast.Set)):
+                    step = ((None,), (None,))
+                    parent = call
+                else:
+                    self._unread(at, of)
+                    return
+            elif isinstance(parent, ast.keyword):
+                call = getattr(parent, "parent", None)
+                if not isinstance(call, ast.Call):
+                    self._unread(at, of)
+                    return
+                step = self._handed_to(file, func, call, parent, at, of)
+                if step is None:
+                    return
+                parent = call
+            elif isinstance(parent, ast.BoolOp):
+                step = ((), ())
+            elif isinstance(parent, ast.IfExp):
+                if parent.test is here:
+                    return
+                step = ((), ())
+            elif isinstance(parent, ast.NamedExpr) and parent.value is here:
+                self._hold(file, func, parent.target.id, at, of)
+                step = ((), ())
+            elif isinstance(parent, (ast.List, ast.Tuple, ast.Set)):
+                step = ((None,), ())
+            elif isinstance(parent, ast.Dict):
+                if any(one is here for one in parent.keys):
+                    return
+                index = next(i for i, one in enumerate(parent.values) if one is here)
+                held = parent.keys[index]
+                step = ((), ()) if held is None else ((held,), ())
+            elif isinstance(parent, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                step = ((None,), ())
+            elif isinstance(parent, ast.DictComp):
+                if parent.value is not here:
+                    return
+                step = ((None,), ())
+            elif isinstance(parent, (ast.comprehension, ast.For, ast.AsyncFor)):
+                if parent.iter is here:
+                    self._assigned(file, func, parent.target, (), (None,), at, of)
+                return
+            elif (
+                isinstance(parent, (ast.Assign, ast.AnnAssign)) and parent.value is here
+            ):
+                targets = (
+                    parent.targets
+                    if isinstance(parent, ast.Assign)
+                    else [parent.target]
+                )
+                for target in targets:
+                    self._assigned(file, func, target, (), (), at, of)
+                return
+            elif isinstance(parent, ast.AugAssign) and parent.value is here:
+                if isinstance(parent.op, ast.Add):
+                    moved = _composed((None,), (None,), at, of)
+                    if moved is not None:
+                        self._into(file, func, parent.target, *moved)
+                elif isinstance(parent.op, ast.BitOr):
+                    self._unread(at, of)
+                return
+            elif isinstance(parent, ast.BinOp):
+                if isinstance(parent.op, ast.Mod):
+                    return  # a text formatted
+                step = ((None,), (None,))
+            elif isinstance(parent, ast.Subscript) and parent.slice is here:
+                return  # a key
+            elif isinstance(
+                parent,
+                (
+                    ast.Expr, ast.Compare, ast.UnaryOp, ast.FormattedValue, ast.JoinedStr, ast.If, ast.While,
+                    ast.Assert, ast.Delete, ast.Slice,
+                ),
+            ):  # fmt: skip
+                return
+            elif isinstance(parent, ast.Return) and func is self.start:
+                return
+            else:
+                self._unread(at, of)
+                return
+            moved = _composed(step[0], step[1], at, of)
+            if moved is None:
+                return
+            at, of = moved
+            here = parent
+
+    def _assigned(
+        self,
+        file: str,
+        func: ast.AST,
+        target: ast.expr,
+        ys: _Path,
+        xs: _Path,
+        at: _Path,
+        of: _Path,
+    ) -> None:
+        """*target* at *ys* is bound to the value at *xs* below one holding at *at* what the container holds at *of*:
+        a name, a slot it is unpacked into, ``*rest`` (its elements), a place put at."""
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if ys:
+                self._unread(at, of)
+                return
+            starred = any(isinstance(one, ast.Starred) for one in target.elts)
+            for index, one in enumerate(target.elts):
+                if isinstance(one, ast.Starred):
+                    self._assigned(file, func, one.value, (None,), (*xs, None), at, of)
+                else:
+                    slot = None if starred else ast.Constant(value=index)
+                    self._assigned(file, func, one, (), (*xs, slot), at, of)
+            return
+        moved = _composed(ys, xs, at, of)
+        if moved is None:
+            return
+        if isinstance(target, ast.Name):
+            self._hold(file, func, target.id, *moved)
+        else:
+            self._into(file, func, target, *moved)
+
+    def _into(
+        self, file: str, func: ast.AST, target: ast.expr, at: _Path, of: _Path
+    ) -> None:
+        """A value put at *target* (``y[k]``, ``self.x``) holds at *at* what the container holds at *of*."""
+        chain = _chain(target)
+        if chain is None:
+            self._unread(at, of)  # stored on an attribute
+            return
+        root, path = chain
+        self._hold(file, func, root.id, path + at, of)
+
+    def _method(
+        self,
+        file: str,
+        func: ast.AST,
+        call: ast.Call,
+        method: str,
+        at: _Path,
+        of: _Path,
+    ) -> Optional[tuple[_Path, _Path]]:
+        """``here.method(...)``, *here* at *at* the container at *of*: its puts, and where its value is a part of it
+        (the step from it, as :meth:`_goes` takes one); ``None`` where its value holds nothing of it."""
+        args = call.args
+        if any(isinstance(one, ast.Starred) for one in args):
+            self._unread(at, of)
+            return None
+        if (method in ("append", "add") and len(args) == 1) or (
+            method == "insert" and len(args) == 2
+        ):
+            moved = _composed((), (None,), at, of)
+            if moved is not None:
+                self._place(file, func, args[-1], *moved)
+        elif method == "extend" and len(args) == 1:
+            moved = _composed((None,), (None,), at, of)
+            if moved is not None:
+                self._place(file, func, args[0], *moved)
+        elif method == "setdefault" and args:
+            if len(args) == 2:
+                moved = _composed((), (args[0],), at, of)
+                if moved is not None:
+                    self._place(file, func, args[1], *moved)
+            return (), (args[0],)
+        elif method == "update":
+            for one in args:
+                self._merged(file, func, one, at, of)
+            for keyword in call.keywords:
+                if keyword.arg is None:
+                    self._merged(file, func, keyword.value, at, of)
+                else:
+                    moved = _composed((), (ast.Constant(value=keyword.arg),), at, of)
+                    if moved is not None:
+                        self._place(file, func, keyword.value, *moved)
+        elif method in ("get", "pop"):
+            return ((), (args[0],)) if args else ((), (None,))
+        elif method in _PARTS:
+            return _PARTS[method]
+        elif method.startswith("__"):
+            self._unread(at, of)
+        return None
+
+    def _handed_to(
+        self,
+        file: str,
+        func: ast.AST,
+        call: ast.Call,
+        argument: ast.AST,
+        at: _Path,
+        of: _Path,
+    ) -> Optional[tuple[_Path, _Path]]:
+        """*argument* -- the value, ``*value`` or ``name=value`` -- handed to *call*, the value at *at* being the
+        container at *of*: the parameters it binds, a put into another container; the step from it where the call's
+        value is made of it (a builtin's copy or pick); ``None`` where it holds nothing of it."""
+        called = call.func
+        if isinstance(called, ast.Name) and self.receivers._is_builtin(
+            file, func, called.id
+        ):
+            builtin = called.id
+            if builtin in _KEEPING_BUILTINS:
+                return None
+            if isinstance(argument, (ast.keyword, ast.Starred)):
+                self._unread(at, of)
+                return None
+            if builtin in _PICKING_BUILTINS and len(call.args) > 1:
+                return (), ()  # max(a, b): one of them
+            if len(call.args) == 1 and builtin in _COPYING_BUILTINS:
+                return (None,), (None,)
+            if len(call.args) == 1 and builtin == "enumerate":
+                return (None, _SECOND), (None,)
+            if len(call.args) == 1 and builtin in _PICKING_BUILTINS:
+                return (), (None,)
+            self._unread(at, of)
+            return None
+        try:
+            placed = self.calls.callees(file, func, call)
+        except Exception:  # noqa: BLE001
+            self._unread(at, of)
+            return None
+        if placed.targets and not placed.unplaced and not placed.thread:
+            for target in placed.targets:
+                self._parameters(call, target, placed.on_class, argument, at, of)
+            return None
+        if isinstance(called, ast.Attribute) and not placed.targets:
+            receiver = self.receivers.of(file, func, called.value)
+            if receiver[0] == _BUILTIN and receiver[1] in _SCALARS:
+                return None  # a text's method: ", ".join(xs)
+            if receiver[0] == _BUILTIN and not called.attr.startswith("__"):
+                if called.attr in _PUTTING_METHODS:
+                    self._put_into(file, func, call, argument, at, of)
+                return None  # a key, a test: y.index(x), y.remove(x)
+            if (
+                receiver[0] == _UNKNOWN
+                and called.attr in _PUTTING_METHODS
+                and placed.unplaced == C.UNPLACED_RECEIVER
+            ):
+                self._put_into(file, func, call, argument, at, of, held=True)
+                return None
+        self._unread(at, of)
+        return None
+
+    def _put_into(
+        self,
+        file: str,
+        func: ast.AST,
+        call: ast.Call,
+        argument: ast.AST,
+        at: _Path,
+        of: _Path,
+        held: bool = False,
+    ) -> None:
+        """``y.append(here)`` and the like on a builtin container *y*: *y* holds it.
+
+        *held*: *y*'s class is not read (``kwargs.update(new_kwargs)``, ``kwargs`` one of a list declared ``Any``).
+        The put is read only where *y* is a holder of the same place anyway, reached by another move: its own walk
+        reads what it is bound to, and any binding not a literal makes the answer what it holds, not a builtin.
+        Asked at the walk's end (:meth:`values`), so the order the holders are read in does not decide it."""
+        called = call.func
+        method = called.attr  # type: ignore[attr-defined]
+        if not isinstance(argument, ast.expr) or isinstance(argument, ast.Starred):
+            self._unread(at, of)
+            return
+        position = next(i for i, one in enumerate(call.args) if one is argument)
+        if method in ("append", "add") or (method == "insert" and position == 1):
+            link: Optional[tuple[_Path, _Path]] = ((None,), ())
+        elif method == "extend":
+            link = ((None,), (None,))
+        elif method == "setdefault" and position == 1:
+            link = ((call.args[0],), ())
+        elif method == "update":
+            link = ((), ())
+        else:
+            link = None  # a key
+        if link is None:
+            return
+        moved = _composed(link[0], link[1], at, of)
+        if moved is None:
+            return
+        if not held:
+            self._into(file, func, called.value, *moved)  # type: ignore[attr-defined]
+            return
+        chain = _chain(called.value)  # type: ignore[attr-defined]
+        if chain is None:
+            self._unread(*moved)
+        elif self._bears(chain[1] + moved[0], moved[1]) == "holder":
+            self.required.add(
+                (
+                    id(func),
+                    chain[0].id,
+                    _spelled(chain[1] + moved[0]),
+                    _spelled(moved[1]),
+                )
+            )
+
+    def _parameters(
+        self,
+        call: ast.Call,
+        target: C.Target,
+        on_class: bool,
+        argument: ast.AST,
+        at: _Path,
+        of: _Path,
+    ) -> None:
+        """The parameters of *target* that *argument* of *call* binds hold at *at* what the container holds at *of*."""
+        arguments = target.func.args  # type: ignore[attr-defined]
+        positional = [one.arg for one in C._positional(target, on_class)]
+        keyword_only = [one.arg for one in arguments.kwonlyargs]
+        named = {one.arg for one in call.keywords if one.arg}
+        stars = [i for i, one in enumerate(call.args) if isinstance(one, ast.Starred)]
+        first_star = stars[0] if stars else len(call.args)
+        file, func = target.file, target.func
+        if isinstance(argument, ast.keyword):
+            if argument.arg is None:  # **value
+                for name in [*positional[first_star:], *keyword_only]:
+                    if name not in named:
+                        moved = _composed((), (ast.Constant(value=name),), at, of)
+                        if moved is not None:
+                            self._hold(file, func, name, *moved)
+                if arguments.kwarg is not None:
+                    self._hold(file, func, arguments.kwarg.arg, at, of)
+            elif argument.arg in positional or argument.arg in keyword_only:
+                self._hold(file, func, argument.arg, at, of)
+            elif arguments.kwarg is not None:
+                moved = _composed((ast.Constant(value=argument.arg),), (), at, of)
+                if moved is not None:
+                    self._hold(file, func, arguments.kwarg.arg, *moved)
+            return
+        if isinstance(argument, ast.Starred):  # *value
+            for name in positional[first_star:]:
+                if name not in named:
+                    moved = _composed((), (None,), at, of)
+                    if moved is not None:
+                        self._hold(file, func, name, *moved)
+            if arguments.vararg is not None:
+                self._unread(at, of)
+            return
+        index = next(i for i, one in enumerate(call.args) if one is argument)
+        if index > first_star:
+            self._unread(at, of)
+        elif index < len(positional):
+            self._hold(file, func, positional[index], at, of)
+        elif arguments.vararg is not None:
+            self._unread(at, of)
+
+
+class _Keys(_Holders):
+    """The keys a mapping may hold, read from every name that holds it (E15): :class:`_Holders`' walk, asked of the
+    mapping itself.
+
+    A holder is a name holding the mapping whole, at a path or not; a value put at one of its keys -- ``d[k] = v``,
+    ``setdefault(k, ...)``, a dict literal's entry, ``update`` with a literal or keywords -- is an answer, and its key
+    is read (:func:`_key_texts`).  What is read out of the mapping, and where it goes, is no move: ``varMap[f":{k}"] =
+    param[k]`` puts a value, not the mapping.  ``None`` where a move is not read, as for :class:`_Holders`, where the
+    mapping is a value not read as one (a call's result), and where a key is not read as texts.
+    """
+
+    def __init__(self, receivers: "_Receivers"):
+        super().__init__(receivers, (None,))
+        #: ``(file, function, key)`` of each put; ``None`` for a key not said (a comprehension's).
+        self.keyed: list[tuple[str, ast.AST, Optional[ast.expr]]] = []
+
+    def read_keys(
+        self, file: str, func: ast.AST, name: str
+    ) -> Optional[frozenset[str]]:
+        found = self.values(file, func, name)
+        if found is None or any(path for _file, _func, _value, path in found):
+            return None
+        holders: dict[int, set[str]] = {}
+        for held, spelled, at, of in self.seen:
+            if not at and not of:
+                holders.setdefault(held, set()).add(spelled)
+        texts: set[str] = set()
+        for _file, scope, key in self.keyed:
+            read = (
+                _key_texts(scope, key, holders.get(id(scope), set()))
+                if key is not None
+                else None
+            )
+            if read is None:
+                return None
+            texts |= read
+        return frozenset(texts)
+
+    def _bears(self, at: _Path, of: _Path) -> str:
+        if not of:
+            return "holder"
+        return "value" if len(of) == 1 and not at else ""
+
+    def _place(
+        self, file: str, func: ast.AST, value: ast.expr, at: _Path, of: _Path
+    ) -> None:
+        if not self.failed and self._bears(at, of) == "value":
+            self.keyed.append((file, func, of[0]))
+        super()._place(file, func, value, at, of)
+
+
+def _key_texts(func: ast.AST, key: ast.expr, holders: set[str]) -> Optional[set[str]]:
+    """The texts *key*, a key put into a mapping in *func*, can be: a literal, or a name bound only to literals -- by
+    assignment, or as a loop's target, whole or at a slot, over a literal or a local bound only to literals.  A key
+    taken from the mapping itself (``for k in list(d): d[k] = ...``, *holders* the names holding it whole there) adds
+    none.  ``None`` where one is not read so."""
+    if isinstance(key, ast.Constant):
+        return {key.value} if isinstance(key.value, str) else None
+    if not isinstance(key, ast.Name) or key.id in _parameters(func):
+        return None
+    stores = [
+        node
+        for node in C.own_nodes(func)
+        if isinstance(node, ast.Name)
+        and node.id == key.id
+        and not isinstance(node.ctx, ast.Load)
+    ]
+    if not stores or any(
+        isinstance(node, (ast.Global, ast.Nonlocal)) and key.id in node.names
+        for node in ast.walk(func)
+    ):
+        return None
+    texts: set[str] = set()
+    for node in stores:
+        parent = getattr(node, "parent", None)
+        if isinstance(parent, (ast.Assign, ast.AnnAssign)) and node is not parent.value:
+            value = parent.value
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                return None
+            texts.add(value.value)
+            continue
+        slot: Optional[int] = None
+        if isinstance(parent, ast.Tuple) and not any(
+            isinstance(one, ast.Starred) for one in parent.elts
+        ):
+            slot = next(i for i, one in enumerate(parent.elts) if one is node)
+            node, parent = parent, getattr(parent, "parent", None)
+        if not (isinstance(parent, (ast.For, ast.AsyncFor)) and parent.target is node):
+            return None
+        read = _iterated_texts(func, parent.iter, slot, holders)
+        if read is None:
+            return None
+        texts |= read
+    return texts
+
+
+def _iterated_texts(
+    func: ast.AST, over: ast.expr, slot: Optional[int], holders: set[str]
+) -> Optional[set[str]]:
+    """:func:`_key_texts` of a loop's target over *over*, at *slot* of each element (the element where ``None``)."""
+    taken = ""
+    if isinstance(over, ast.Name) and slot is None:
+        taken = over.id  # for k in d
+    elif isinstance(over, ast.Call) and not over.keywords:
+        called = over.func
+        if (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Name)
+            and not over.args
+            and called.attr
+            == ("keys" if slot is None else "items" if slot == 0 else None)
+        ):
+            taken = called.value.id  # for k in d.keys(), for k, v in d.items()
+        elif (
+            isinstance(called, ast.Name)
+            and called.id in ("list", "tuple", "sorted", "set")
+            and slot is None
+            and len(over.args) == 1
+            and isinstance(over.args[0], ast.Name)
+        ):
+            taken = over.args[0].id  # for k in list(d)
+    if taken and taken in holders:
+        return set()  # the mapping's own keys
+    sequences: list[ast.expr]
+    if isinstance(over, (ast.List, ast.Tuple, ast.Set)):
+        sequences = [over]
+    elif isinstance(over, ast.Name) and over.id not in _parameters(func):
+        uses = [
+            node
+            for node in ast.walk(func)
+            if isinstance(node, ast.Name) and node.id == over.id
+        ]
+        bound = [
+            getattr(node, "parent", None)
+            for node in uses
+            if isinstance(node.ctx, ast.Store)
+        ]
+        read = [node for node in uses if isinstance(node.ctx, ast.Load)]
+        if (
+            not bound
+            or not all(
+                isinstance(one, (ast.Assign, ast.AnnAssign))
+                and isinstance(one.value, (ast.List, ast.Tuple))
+                for one in bound
+            )
+            or not all(
+                isinstance(getattr(node, "parent", None), (ast.For, ast.AsyncFor))
+                and node.parent.iter is node  # type: ignore[attr-defined]
+                for node in read
+            )
+        ):
+            return None
+        sequences = [one.value for one in bound]  # type: ignore[union-attr]
+    else:
+        return None
+    texts: set[str] = set()
+    for sequence in sequences:
+        for element in sequence.elts:  # type: ignore[attr-defined]
+            if slot is not None:
+                if not (
+                    isinstance(element, (ast.Tuple, ast.List))
+                    and len(element.elts) > slot
+                    and not any(isinstance(one, ast.Starred) for one in element.elts)
+                ):
+                    return None
+                element = element.elts[slot]
+            if not (
+                isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ):
+                return None
+            texts.add(element.value)
+    return texts
+
+
+def _handed(
+    site: C.CallSite, target: C.Target, on_class: bool, name: str
+) -> Optional[list[tuple[ast.expr, _Path, bool]]]:
+    """What the call at *site* hands *target*'s parameter *name*: ``(value, path, default)`` -- the value, or the value
+    at *path* below it (a ``**`` spread's entry at the parameter's name), *default* where it is the parameter's
+    default, read in the module --; ``None`` where a ``*`` spread may fill it, or it is the object the call is made on.
+
+    A ``*`` spread does not fill a parameter a ``**`` spread at the call holds on every way to it
+    (:func:`_always_given`): Python would raise, given it twice -- ``self.insertNewJob(*args, **kwargs)`` after
+    ``kwargs.update(new_kwargs)``, ``new_kwargs`` spelling ``extracted_sqls``."""
+    call = site.call
+    arguments = target.func.args  # type: ignore[attr-defined]
+    positional = [one.arg for one in C._positional(target, on_class)]
+    if name == C.receiver_parameter(target) and name not in positional:
+        return None
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return [(keyword.value, (), False)]
+    stars = [i for i, one in enumerate(call.args) if isinstance(one, ast.Starred)]
+    first_star = stars[0] if stars else len(call.args)
+    if name in positional:
+        index = positional.index(name)
+        if index < first_star:
+            return [(call.args[index], (), False)]
+        if stars and not any(
+            _always_given(site.func, call, keyword.value, name)
+            for keyword in call.keywords
+            if keyword.arg is None
+        ):
+            return None
+    found: list[tuple[ast.expr, _Path, bool]] = [
+        (keyword.value, (ast.Constant(value=name),), False)
+        for keyword in call.keywords
+        if keyword.arg is None
+    ]
+    defaults = dict(
+        zip(
+            [
+                *[one.arg for one in arguments.posonlyargs],
+                *[one.arg for one in arguments.args],
+            ][
+                len(arguments.posonlyargs)
+                + len(arguments.args)
+                - len(arguments.defaults) :
+            ],
+            arguments.defaults,
+            strict=True,
+        )
+    )
+    defaults.update(
+        (one.arg, default)
+        for one, default in zip(
+            arguments.kwonlyargs, arguments.kw_defaults, strict=True
+        )
+        if default is not None
+    )
+    if name in defaults:
+        found.append((defaults[name], (), True))
+    return found
+
+
+def _always_given(func: ast.AST, call: ast.Call, spread: ast.expr, key: str) -> bool:
+    """Whether the name *spread*, spread by ``**`` at *call* in *func*, holds *key* on every way to the call.
+
+    A put of the key -- ``s[key] = v``, ``s.update(key=v)``, ``s.setdefault(key, v)``, ``s.update(d)`` with *d* a
+    dict literal spelling it or a name bound only to such literals and never emptied, a binding of *s* to such a
+    literal -- after every other binding of the name and every removal from it (``pop``, ``popitem``, ``clear``,
+    ``del``), read by :func:`reaching.reaching` with the puts as killers.  No where the name is not bound in *func*,
+    or a nested function reads it.
+    """
+    if not isinstance(spread, ast.Name) or isinstance(func, ast.Module):
+        return False
+    name = spread.id
+    statement = _statement(call)
+    puts: list[ast.AST] = []
+    sites: list[ast.AST] = []
+    if name in _parameters(func):
+        sites.append(func.args)  # type: ignore[attr-defined]
+    for node in ast.walk(func):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            and node is not func
+        ):
+            if any(
+                isinstance(one, ast.Name) and one.id == name for one in ast.walk(node)
+            ):
+                return False
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and isinstance(node.ctx, ast.Store)
+        ):
+            binder = _statement(node)
+            if (
+                isinstance(binder, ast.Assign)
+                and node in binder.targets
+                and _spells(func, binder.value, key)
+            ):
+                puts.append(binder)
+            elif binder is not None:
+                sites.append(binder)
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(one, ast.Subscript)
+            and isinstance(one.value, ast.Name)
+            and one.value.id == name
+            and isinstance(one.slice, ast.Constant)
+            and one.slice.value == key
+            for one in node.targets
+        ):
+            puts.append(node)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+        ):
+            method, args = node.func.attr, node.args
+            put = (
+                (method == "update" and any(one.arg == key for one in node.keywords))
+                or (
+                    method == "update"
+                    and len(args) == 1
+                    and _spells(func, args[0], key)
+                )
+                or (
+                    method == "setdefault"
+                    and args
+                    and isinstance(args[0], ast.Constant)
+                    and args[0].value == key
+                )
+            )
+            held = _statement(node)
+            if put and held is not None:
+                puts.append(held)
+            elif (
+                method in ("pop", "popitem", "clear", "__delitem__")
+                and held is not None
+            ):
+                sites.append(held)
+        elif isinstance(node, ast.Delete) and any(
+            name in {one.id for one in ast.walk(target) if isinstance(one, ast.Name)}
+            for target in node.targets
+        ):
+            sites.append(node)
+    if statement is None or not puts or not sites:
+        return False
+    return not reaching(statement, sites, puts)
+
+
+def _spells(func: ast.AST, value: ast.expr, key: str) -> bool:
+    """Whether *value* is a dict literal spelling *key*, or a name *func* binds only to such literals and never
+    empties or takes the key out of."""
+    if isinstance(value, ast.Dict):
+        return any(
+            isinstance(one, ast.Constant) and one.value == key for one in value.keys
+        )
+    if not isinstance(value, ast.Name) or isinstance(func, ast.Module):
+        return False
+    if value.id in _parameters(func):
+        return False
+    bound = False
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Name)
+            and node.id == value.id
+            and not isinstance(node.ctx, ast.Load)
+        ):
+            binder = _statement(node)
+            if not (
+                isinstance(binder, ast.Assign)
+                and node in binder.targets
+                and isinstance(binder.value, ast.Dict)
+                and _spells(func, binder.value, key)
+            ):
+                return False
+            bound = True
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == value.id
+            and node.func.attr in ("pop", "popitem", "clear", "__delitem__")
+        ):
+            return False
+        elif isinstance(node, ast.Delete) and any(
+            isinstance(one, ast.Subscript)
+            and isinstance(one.value, ast.Name)
+            and one.value.id == value.id
+            for one in node.targets
+        ):
+            return False
+    return bound
+
+
+def _statement(node: ast.AST) -> Optional[ast.stmt]:
+    """The statement *node* is in."""
+    current: Optional[ast.AST] = node
+    while current is not None and not isinstance(current, ast.stmt):
+        current = getattr(current, "parent", None)
+    return current  # type: ignore[return-value]
 
 
 def _parameters(func: ast.AST) -> dict[str, Optional[ast.expr]]:

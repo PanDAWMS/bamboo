@@ -28,9 +28,22 @@ from typing import NamedTuple, Optional
 from pydantic import BaseModel, Field
 
 from bamboo.codemap import evidence
-from bamboo.codemap.models import MapFragment, required_values
+from bamboo.codemap.models import (
+    BIND_ALIAS,
+    BIND_RESULT,
+    HISTORY_ROW_CAN,
+    HISTORY_ROW_SAME,
+    RUN_KEY_TIME,
+    FunctionPrintsNode,
+    HistoryPair,
+    MapFragment,
+    ReachNode,
+    required_values,
+)
+from bamboo.codemap.objects import STEPPED, _under
 from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
+from bamboo.codemap.panda.runs import HISTORY_KEYS
 
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
 _PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
@@ -533,9 +546,17 @@ MOVER_OTHER_TERMS = (
     "every statement here that reads these rows was read in full, and asks by other"
     " terms -- the value is the write's own compare-and-set"
 )
+#: ``queryTasksToBePending_JEDI`` runs a ``SELECT`` its caller hands it and
+#: updates the tasks it picks.  The statement is read where the caller runs
+#: it (``sql.SKIP_CALLERS``), so this is an answer that sends a reader there;
+#: a reading with no corpus reads it nowhere, :data:`MOVER_HANDED_IN`.
+MOVER_CALLERS_QUERY = (
+    "a statement here that may read these rows is its callers', read where they"
+    " run it"
+)
 #: The three that used to be one reason, "nothing the map holds here reads these
-#: rows".  That one was an answer, and it held a gap: ``queryTasksToBePending_JEDI``
-#: runs a ``SELECT`` its caller hands it, which is now :data:`MOVER_HANDED_IN`.
+#: rows".  That one was an answer, and it held a gap: the statement a caller
+#: hands in, now :data:`MOVER_CALLERS_QUERY`.
 #: What is left splits on who named the rows the write lands on.
 MOVER_HANDED_ROWS = (
     "no query here reads these rows -- the write lands on rows named by what the"
@@ -559,6 +580,7 @@ MOVER_ORDER = (
     MOVER_PARTIAL,
     MOVER_ASKS_NOTHING,
     MOVER_OTHER_TERMS,
+    MOVER_CALLERS_QUERY,
     MOVER_HANDED_ROWS,
     MOVER_OWN_WHERE,
     MOVER_UNDECIDED,
@@ -748,7 +770,8 @@ def mover_reason(
     ]
     unnoded = [stop for stop in stopped if stop.statement not in noded]
     handed = [stop for stop in unnoded if stop.reason == sql.SKIP_HANDED_IN]
-    unnoded = [stop for stop in unnoded if stop.reason != sql.SKIP_HANDED_IN]
+    callers = [stop for stop in unnoded if stop.reason == sql.SKIP_CALLERS]
+    unnoded = [stop for stop in unnoded if stop.reason not in (sql.SKIP_HANDED_IN, sql.SKIP_CALLERS)]
     # The node's own record of the gap, and the build's -- the same fact
     # twice, so either is enough.
     partial = sorted(
@@ -761,6 +784,8 @@ def mover_reason(
         return MOVER_HANDED_IN, _stops_where(handed)
     if partial:
         return MOVER_PARTIAL, ", ".join(f"@{line}" for line in partial)
+    if callers:
+        return MOVER_CALLERS_QUERY, _stops_where(callers)
     if known:
         reason = (
             MOVER_OTHER_TERMS
@@ -1376,6 +1401,287 @@ def must_prints_resolve(fragment: MapFragment) -> GateResult:
         failures=failures[:50],
         note=f"Unread, by reason: {dict(sorted(holes.items()))}.",
     )
+
+
+def history_pairs_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every history pair names writes and runs a dump-only reader finds, and every branch unread says why.
+
+    A pair's ``writes`` are looked up on the writing function's
+    :class:`ReachNode` (:attr:`ReachNode.history`, where the values are), its
+    ``runs`` in the :class:`FunctionPrintsNode` of the caller or of
+    ``runs_in``, and a print statement's ``runs`` in its own node: a line
+    found in none of them is a pair or a print no reader can place in a run.
+    A branch left unread with no reason reads as one no history row is
+    written beside.  A ``can`` row names the caller's path holding the arm's
+    object and a way to one of the pair's writes through calls of reach rows:
+    a reader asks the run of that path, and checks the way.  A run's key
+    names a column of a class a table holds (:attr:`EntityNode.spec_class`)
+    or says where each reading stopped (:attr:`RunKey.stops`), never both: a
+    reader matches a history row by it.
+    """
+    rows = {row.owner: row for row in fragment.reach_graph}
+    prints = {node.owner: node for node in fragment.function_prints}
+    holding = {entity.spec_class for entity in fragment.entities if entity.spec_class}
+    failures: list[str] = []
+    holes: Counter = Counter()
+    for node in fragment.function_prints:
+        lines = [run.line for run in node.runs]
+        if len(set(lines)) != len(lines):
+            failures.append(f"{node.owner}: two runs start on one line, so a line names neither")
+        for run in node.runs:
+            for key in run.key:
+                named = key.columns == [RUN_KEY_TIME] or any(one.partition(".")[0] in holding for one in key.columns)
+                if named == bool(key.stops):
+                    failures.append(
+                        f"{node.owner}: run {run.line}'s key {key.expression!r} "
+                        + ("names a row's column and stops" if named else "names no row's column and no stop")
+                    )
+        for statement in node.statements:
+            for line in statement.runs:
+                if line not in lines:
+                    failures.append(f"{node.owner}:{statement.line}: run {line} is not one of the function's runs")
+    read = 0
+    for junction in fragment.junctions:
+        for branch in junction.branches:
+            where = f"{junction.owner}:{branch.line} {branch.outcome}"
+            if branch.history is None:
+                holes[branch.history_hole.split(":")[0] or "(no reason)"] += 1
+                if not branch.history_hole:
+                    failures.append(f"{where}: not read, and no reason given")
+                continue
+            read += 1
+            for pair in branch.history:
+                at = f"{where}: pair {pair.caller}:{pair.call}"
+                row = rows.get(pair.caller)
+                if row is None or not any(pair.call in (call.lines or [call.line]) for call in row.calls):
+                    failures.append(f"{at}: not a call the caller's reach row records")
+                if not pair.writes:
+                    failures.append(f"{at}: leads to no history write")
+                for write in pair.writes:
+                    owner, _sep, line = write.rpartition(":")
+                    target = rows.get(owner)
+                    if target is None or not any(str(held.line) == line for held in target.history):
+                        failures.append(f"{at}: write {write} is no history call of a reach row")
+                node = prints.get(pair.runs_in or pair.caller)
+                started = [run.line for run in node.runs] if node is not None else []
+                for line in pair.runs:
+                    if line not in started:
+                        failures.append(f"{at}: run {line} is not one of {pair.runs_in or 'the caller'}'s runs")
+                if not pair.runs and not pair.run_hole:
+                    failures.append(f"{at}: no run, and no reason given")
+                if not pair.row and not pair.row_why:
+                    failures.append(f"{at}: row not read, and no reason given")
+                key = HISTORY_KEYS.get(junction.subject.rpartition(".")[0], "")
+                if pair.row == HISTORY_ROW_CAN:
+                    failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows, key)]
+                failures += [f"{at}: {why}" for why in _rekeyed_unresolved(pair, rows, prints, key)]
+    return GateResult(
+        gate="history-pairs-resolve",
+        passed=not failures,
+        checked=read,
+        unit="branches",
+        question="does every history pair name writes and runs a dump-only reader finds?",
+        finding="a pair or a print whose history write or run is in no record, or a branch unread with no reason",
+        failures=failures[:50],
+        note=f"Unread, by reason: {dict(sorted(holes.items()))}.",
+    )
+
+
+def _rekeyed_unresolved(
+    pair: HistoryPair, rows: dict[str, ReachNode], prints: dict[str, FunctionPrintsNode], key: str
+) -> list[str]:
+    """Why a pair's ``rekeyed`` names an assignment no record holds; empty where each is one.
+
+    Each is an assignment of the class's *key* -- by name, or a computed one -- at its line, on the path it names, in a
+    reach row; and only a ``same`` or ``can`` pair has one.  Each attribute it says keeps the old key is bound to the
+    key there by an alias of that row, and each line it says prints the new one is a print of that function with a
+    hole spelling the key.
+    """
+    if pair.rekeyed and pair.row not in (HISTORY_ROW_SAME, HISTORY_ROW_CAN):
+        return [f"rekeyed on a {pair.row or 'unread'} row"]
+    failures = []
+    for one in pair.rekeyed:
+        owner, _sep, line = one.at.rpartition(":")
+        row = rows.get(owner)
+        assigned, dot, attr = one.path.rpartition(".")
+        if row is None or not dot or attr != key:
+            failures.append(f"rekeyed {one.at} {one.path}: not the key {key!r} of a path in a reach row")
+            continue
+        if not any(
+            str(held.line) == line and held.path == assigned and (key in held.attrs or "*" in held.attrs)
+            for held in row.assigns
+        ):
+            failures.append(f"rekeyed {one.at} {one.path}: no assignment of it on the line")
+        for attr in one.kept_in:
+            if not any(
+                binding.how == BIND_ALIAS and binding.name == f"{assigned}.{attr}" and binding.path == one.path
+                for binding in row.bindings
+            ):
+                failures.append(f"rekeyed {one.at} {one.path}: {attr} is bound to the key by no alias of the row")
+        spelled = re.sub(r"@\d+", "", one.path)
+        node = prints.get(owner)
+        spelling = {
+            statement.line
+            for statement in (node.statements if node is not None else [])
+            for row_text in statement.rows
+            for hole in row_text.holes
+            if re.sub(r"@\d+", "", hole.expression) == spelled
+        }
+        for printed in one.printed_at:
+            if printed not in spelling:
+                failures.append(f"rekeyed {one.at} {one.path}: line {printed} is no print of the function spelling the key")
+    return failures
+
+
+def _row_via_unresolved(pair: HistoryPair, rows: dict[str, ReachNode], key: str) -> list[str]:
+    """Why a ``can`` pair's object and way are not a walk a dump-only reader can make; empty where they are.
+
+    The walk starts in the pair's caller, holding the object or its *key* --
+    the subject's class's (:data:`bamboo.codemap.panda.runs.HISTORY_KEYS`),
+    as runs starts it --, and each step is the
+    record on its line, in the function the walk is in, from a path it
+    holds: a binding of that kind taking the path to the one it names (read
+    back, from its name to its path); a call binding into the callee
+    handing the path as the one the callee takes; a call into the callee,
+    taking a path the walk holds, that hands back the one it names -- a name
+    its result is bound to, or a receiver it keeps the object on; and last,
+    one of the pair's writes, whose call hands a key below a path held.
+    """
+    if not pair.object:
+        return ["can, with no object"]
+    if not pair.row_via:
+        return ["can, with no way to the writer"]
+    here = pair.caller
+    held = {pair.object, f"{pair.object}.{key}"} if key else {pair.object}
+    *steps, last = pair.row_via
+    for step in steps:
+        why, here, held = _row_step(step, here, held, rows)
+        if why:
+            return [f"way {step!r}: {why}"]
+    write, _sep, key = last.partition(" ")
+    target, _sep, line = write.rpartition(":")
+    if write not in pair.writes:
+        return [f"way ends at {write}, not one of the pair's writes"]
+    if target != here:
+        return [f"way ends in {target}, not in {here}, where it is"]
+    row = rows.get(target)
+    if row is None or not any(str(call.line) == line and call.path == key for call in row.call_bindings):
+        return [f"way ends at {write}, whose calls hand no {key}"]
+    if not any(_under(one, key) is not None for one in held):
+        return [f"way ends at {write} {key}, below no path it holds"]
+    return []
+
+
+def _row_step(step: str, here: str, held: set[str], rows: dict[str, ReachNode]) -> tuple[str, str, set[str]]:
+    """One step of a way walked in *here*, from the paths it *held*: why it is not a step from them (empty where it is),
+    and the function and paths the walk goes on in."""
+    words = step.split(" ")
+    owner, _sep, line = words[0].rpartition(":")
+    row = rows.get(owner)
+    if owner != here:
+        return f"in {owner}, not in {here}, where the way is", here, held
+    if row is None or not line.isdigit():
+        return "no reach row's line", here, held
+    at = int(line)
+    if len(words) == 4 and words[1] == "->":
+        callee, path = words[2:]
+        calls = [call for call in row.call_bindings if call.line == at and call.to == callee]
+        if not calls:
+            return "no call binding of the line into the callee", here, held
+        if not any(
+            (rest := _under(call.path, one)) is not None and call.parameter + call.at + rest == path
+            for call in calls
+            for one in held
+        ):
+            return "the call hands no path held as the one the callee takes", here, held
+        return "", callee, {path}
+    if len(words) == 4 and words[1] == "<-":
+        callee, back = words[2:]
+        sides = [
+            binding.name
+            for binding in row.bindings
+            if binding.line == at and binding.how == BIND_RESULT and callee in binding.to
+        ] + [call.path for call in row.call_bindings if call.line == at and call.to == callee]
+        if not any(_under(side, back) is not None for side in sides):
+            return "no call of the line into the callee hands it back", here, held
+        if not any(_under(side, one) is not None for side in sides for one in held):
+            return "the call takes no path held", here, held
+        return "", here, {back}
+    how, path = " ".join(words[1:-1]), words[-1]
+    kind, back = how.removesuffix(" back"), how.endswith(" back")
+    bindings = [binding for binding in row.bindings if binding.line == at and binding.how == kind]
+    if kind not in STEPPED or not bindings:
+        return f"no {kind} binding of the line", here, held
+    for binding in bindings:
+        frm, to = (binding.name, binding.path) if back else (binding.path, binding.name)
+        if any((rest := _under(frm, one)) is not None and to + rest == path for one in held):
+            return "", here, {path}
+    return "the binding takes no path held to it", here, held
+
+
+def object_records_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every object record names a path, a line of its function, and a call a dump-only reader finds.
+
+    :func:`bamboo.codemap.objects.follow` answers from these records alone, so
+    a call binding into no reach row is an object followed into nothing, and
+    a hole with no reason -- neither its own nor a hole of the row on its line
+    -- is one a reader cannot say why it stopped at.  A record outside its
+    function's lines, or a path that is not a name and its parts, is one no
+    reader can place.
+    """
+    rows = {row.owner: row for row in fragment.reach_graph}
+    failures: list[str] = []
+    checked = 0
+    holes = 0
+    for row in fragment.reach_graph:
+        anchor = row.anchor
+        first = anchor.line_start if anchor is not None else None
+        last = (anchor.line_end or anchor.line_start) if anchor is not None else None
+        hole_lines = {hole.line for hole in row.holes}
+        for record in [*row.assigns, *row.bindings, *row.call_bindings]:
+            checked += 1
+            where = f"{row.owner}:{record.line}"
+            if first is not None and not first <= record.line <= (last or first):
+                failures.append(f"{where}: outside its function's lines {first}-{last}")
+            paths = [record.path] if not hasattr(record, "name") else [record.name, record.path]
+            for path in paths:
+                if path and not _OBJECT_PATH.fullmatch(path):
+                    failures.append(f"{where}: {path!r} is not a name and its parts")
+        for write in row.writes:
+            checked += 1
+            where = f"{row.owner}:{write.lines[0] if write.lines else 0}"
+            if not write.lines or (first is not None and not all(first <= line <= (last or first) for line in write.lines)):
+                failures.append(f"{where}: a write with no line of its function")
+            for value in [*write.columns, *write.keys]:
+                if not (value.path or value.value or value.why):
+                    failures.append(f"{where}: {value.column} has no value and no reason")
+                if value.path and not _OBJECT_PATH.fullmatch(value.path):
+                    failures.append(f"{where}: {value.path!r} is not a name and its parts")
+            if write.whole and not _OBJECT_PATH.fullmatch(write.whole):
+                failures.append(f"{where}: whole row of {write.whole!r}, which is not a name and its parts")
+        for call in row.call_bindings:
+            if call.to and call.to not in rows:
+                failures.append(f"{row.owner}:{call.line}: lands in {call.to}, which has no reach row")
+            if not call.to:
+                holes += 1
+                if not call.why and call.line not in hole_lines:
+                    failures.append(f"{row.owner}:{call.line}: a hole with no reason, and no hole of the row on its line")
+    return GateResult(
+        gate="object-records-resolve",
+        passed=not failures,
+        checked=checked,
+        unit="records",
+        question="does every object record name a path, a line of its function and a call a dump-only reader finds?",
+        finding="a record outside its function, a path that is not one, or a call binding into nothing",
+        failures=failures[:50],
+        note=f"{holes} call binding(s) are holes.",
+    )
+
+
+#: A path of :mod:`bamboo.codemap.objects`: a name -- a call's own for a result no name takes -- then ``.attr``,
+#: ``[]``, ``[i]`` and ``['k']`` parts; or the parts alone, where in what a call returns a name is bound.
+_PATH_PART = r"(\.[A-Za-z_][A-Za-z_0-9]*|\[\]|\[\d+\]|\['[A-Za-z0-9_:\-]*'\])"
+_OBJECT_PATH = re.compile(rf"(<return>|<result@\d+:\d+>|[A-Za-z_][A-Za-z_0-9]*(@\d+)?){_PATH_PART}*|{_PATH_PART}+")
 
 
 def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
@@ -2427,9 +2733,13 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(prints_are_counted(fragment))
     if any(branch.must_prints is not None or branch.must_hole for junction in fragment.junctions for branch in junction.branches):
         results.append(must_prints_resolve(fragment))
+    if any(branch.history is not None or branch.history_hole for junction in fragment.junctions for branch in junction.branches):
+        results.append(history_pairs_resolve(fragment))
     if fragment.reach_graph:
         results.append(reach_records_resolve(fragment))
         results.append(implicit_dunders_reach_no_write(fragment))
+    if any(row.assigns or row.bindings or row.call_bindings or row.writes for row in fragment.reach_graph):
+        results.append(object_records_resolve(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

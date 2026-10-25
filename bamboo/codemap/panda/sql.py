@@ -57,9 +57,12 @@ from bamboo.codemap.panda.pathcond import (
     ancestors,
     attach_parents,
     bindings,
+    carried_round,
     enclosing_function,
+    only_through,
     parted,
     ruled_out_by,
+    site_of,
     surviving_writes,
     targets_of,
     written_value,
@@ -332,10 +335,12 @@ def across_calls(calls: Optional["Calls"]) -> Iterator[None]:
     """
     global _CALLS
     previous, _CALLS = _CALLS, calls
+    held = sqleval.use_runners(frozenset(runners()))
     try:
         yield
     finally:
         _CALLS = previous
+        sqleval.use_runners(held)
 
 
 def _slot(target: ast.expr, name: str) -> Optional[int]:
@@ -389,7 +394,7 @@ def _called(
     if file is None:
         return []
     placed = _CALLS.callees(file, func, call)
-    if placed.unplaced or placed.thread:
+    if placed.unplaced or placed.returns_none:
         return []
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
     for callee in placed.targets:
@@ -471,7 +476,7 @@ def every_return(
     if file is None:
         return None
     placed = _CALLS.callees(file, func, call)
-    if not placed.targets or placed.unplaced or placed.thread:
+    if not placed.targets or placed.unplaced or placed.returns_none:
         return None
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
     for target in placed.targets:
@@ -731,6 +736,25 @@ class Execution(NamedTuple):
         pass of each text the loop appends (:func:`reading_text`).  :attr:`sql` itself where nothing repeats."""
         return reading_text(self.sql, self.holes)
 
+    @property
+    def reading_holes(self) -> tuple:
+        """Each hole of :attr:`reading` in order, as sqltext numbers them (``__h1`` the first): the
+        :class:`sqleval.HoleAt` it is, a repeated part's own holes included (:attr:`sqleval.HoleAt.inner`), else
+        ``None``."""
+        return reading_holes(self.sql, self.holes)
+
+
+def reading_holes(text: str, holes: tuple) -> tuple:
+    """:func:`reading_text`'s holes, each ``{}`` of it in order: the :class:`sqleval.HoleAt` it is, else ``None``.
+
+    Out of a repeated part, the hole *holes* has at its offset; in one, the hole
+    the text a pass appends has there (:attr:`sqleval.HoleAt.inner`).  Counted
+    as sqltext counts the holes it names -- every ``{}`` and ``{0}`` of the
+    reading, a literal one too, which is a hole no one wrote.
+    """
+    out, at_offset = _reading(text, holes)
+    return tuple(at_offset.get(match.start()) for match in _READING_HOLE.finditer(out))
+
 
 def reading_text(text: str, holes: tuple) -> str:
     """*text* with each ``{}`` a loop of unknown length repeats (:data:`sqleval.REPEATED`) as one pass of each text
@@ -743,15 +767,47 @@ def reading_text(text: str, holes: tuple) -> str:
     ``{}`` glued the first one to the hole.  sqltext reads the statement with
     them and says what it read in *text*'s terms (:data:`sqltext.REPEAT_OPEN`).
     """
+    return _reading(text, holes)[0]
+
+
+#: What sqltext reads as a hole of a statement (``sqltext._HOLE``).
+_READING_HOLE = re.compile(r"\{\d*\}")
+
+
+def _reading(text: str, holes: tuple) -> tuple[str, dict]:
+    """:func:`reading_text`, and the hole at each offset of it."""
     out = text
-    for at, hole in sorted(holes, key=lambda one: one[0], reverse=True):
-        if hole.reason != sqleval.REPEATED or not hole.repeats or out[at : at + 2] != "{}":
+    at_offset: dict[int, object] = {}
+    shift = 0
+    # Front to back: each repeated part moves what follows it on by what it put in place of its ``{}``.
+    for at, hole in sorted(holes, key=lambda one: one[0]):
+        where = at + shift
+        if hole.reason != sqleval.REPEATED or not hole.repeats or out[where : where + 2] != "{}":
+            at_offset[where] = hole
             continue
-        passes = (hole.joiner or "").join(hole.repeats) if hole.listed else "".join(hole.repeats)
-        if hole.end and passes.endswith(hole.end):
-            passes = passes[: -len(hole.end)]
-        out = out[:at] + sqltext.REPEAT_OPEN + passes + sqltext.REPEAT_CLOSE + out[at + 2 :]
-    return out
+        passes, inner = _passes(hole)
+        out = out[:where] + sqltext.REPEAT_OPEN + passes + sqltext.REPEAT_CLOSE + out[where + 2 :]
+        for offset, one in inner:
+            at_offset[where + 1 + offset] = one
+        shift += len(passes)
+    return out, at_offset
+
+
+def _passes(hole) -> tuple[str, tuple]:
+    """What a repeated part holds in a reading -- one pass of each text, run together or joined, less its end --
+    and its holes, ``(offset, HoleAt)``."""
+    inner = hole.inner if len(hole.inner) == len(hole.repeats) else ((),) * len(hole.repeats)
+    joiner = (hole.joiner or "") if hole.listed else ""
+    passes = ""
+    found: list = []
+    for index, (text, held) in enumerate(zip(hole.repeats, inner, strict=True)):
+        if index:
+            passes += joiner
+        found += [(len(passes) + offset, one) for offset, one in held]
+        passes += text
+    if hole.end and passes.endswith(hole.end):
+        passes = passes[: -len(hole.end)]
+    return passes, tuple((offset, one) for offset, one in found if offset < len(passes))
 
 
 def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -1063,7 +1119,10 @@ _KEY_HOPS = 2
 def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
     """The name bound to the key by ``for k, v in d.items()``, and ``d``.
 
-    Only a loop that plainly walks a mapping.  ``for table in (...)`` is a
+    Only a loop that plainly walks a mapping: over ``d.items()`` or
+    ``d.keys()``, or over ``d`` or a builtin's copy of it -- ``list(d)``,
+    ``sorted(d)`` -- where the loop reads ``d[k]``: ``updateJobStatus``' ``for
+    key in list(param): ... param[key]``.  ``for table in (...)`` is a
     sequence and :func:`_literal_values` already answers for it; reading a
     sequence element as a column name would put the *values* of a list into a
     ``SET`` clause.
@@ -1075,7 +1134,7 @@ def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
         and over.func.attr in {"items", "keys"}
         and not over.args
     ):
-        return "", None
+        return _keys_walked(node)
     target = node.target
     if isinstance(target, ast.Name):
         return target.id, over.func.value
@@ -1086,6 +1145,46 @@ def _mapping_iterated(node: ast.For) -> tuple[str, Optional[ast.expr]]:
     ):
         return target.elts[0].id, over.func.value
     return "", None
+
+
+def _keys_walked(node: ast.For) -> tuple[str, Optional[ast.expr]]:
+    """:func:`_mapping_iterated` of ``for k in d`` or ``for k in list(d)``: ``("k", d)`` where the loop reads ``d[k]``."""
+    over, target = node.iter, node.target
+    if (
+        isinstance(over, ast.Call)
+        and isinstance(over.func, ast.Name)
+        and over.func.id in ("list", "tuple", "sorted", "set")
+        and len(over.args) == 1
+        and not over.keywords
+    ):
+        over = over.args[0]
+    if not (isinstance(over, ast.Name) and isinstance(target, ast.Name)):
+        return "", None
+    if any(
+        isinstance(one, ast.Subscript)
+        and isinstance(one.value, ast.Name)
+        and one.value.id == over.id
+        and isinstance(one.slice, ast.Name)
+        and one.slice.id == target.id
+        for one in ast.walk(node)
+    ):
+        return target.id, over
+    return "", None
+
+
+def kept_map_keys(column: object, keys: list[str]) -> Optional[list[str]]:
+    """Of *keys*, the ones a pass reaches *column* with -- the hole a loop over a mapping's keys fills with its key
+    (:func:`map_key`) --, read as the loop's ``continue`` tests take them (:func:`_kept_keys`); ``None`` where they
+    are not read so."""
+    if type(column) is not sqleval.HoleAt:
+        return None
+    loop = next((one for one in ancestors(column.stmt) if isinstance(one, ast.For)), None)
+    if loop is None:
+        return None
+    key, mapping = _mapping_iterated(loop)
+    if not key or mapping is None or column.source != key:
+        return None
+    return _kept_keys(loop, key, keys)
 
 
 def _literal_keys(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -1158,11 +1257,12 @@ def _string_value(
         if hops >= _KEY_HOPS:
             return None
         for other in ast.walk(scope):
-            if isinstance(other, ast.Assign) and any(
+            value = written_value(other)
+            if value is not None and any(
                 isinstance(target, ast.Name) and target.id == node.id
-                for target in other.targets
+                for target in targets_of(other)
             ):
-                return _string_value(other.value, bound, scope, hops + 1)
+                return _string_value(value, bound, scope, hops + 1)
         return None
     if isinstance(node, ast.JoinedStr):
         parts = [
@@ -1302,6 +1402,75 @@ def spells_key(
     return any(_string_value(spelled, {name: one}, loop) == key for one in kept)
 
 
+def map_key(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: Execution,
+    column: object,
+    bind: str,
+    bind_holes: tuple,
+) -> Optional[ast.expr]:
+    """The mapping a term of *run* is named by the key of, where it is one: ``d`` for ``{k}=:cr_{k}`` written in
+    ``for k, v in d.items()`` with ``varMap[f":cr_{k}"] = v`` in the loop.
+
+    The term asks the row for each key the mapping holds, with the mapping's
+    value at it -- read where the caller says the keys.  *column* is the hole
+    the term's column is and *bind_holes* the holes of its bind
+    (:attr:`Execution.reading_holes`), *bind* the bind as the statement spells
+    it, ``{}`` for each hole (``:cr_{}``).  Each is the loop's key, as written
+    there (:attr:`sqleval.HoleAt.source`), and the run's map gets the bind in
+    the loop -- the bind spelt with the key -- valued by the loop's value or
+    ``d[k]``, and still holds it at a call of the run (:func:`_live_at`).  The
+    keys of a mapping the function itself is handed back are read by putting
+    each in (:func:`spells_key`): no hole is left.
+    """
+    if type(column) is not sqleval.HoleAt or not run.varmap or not bind_holes:
+        return None
+    loop = next((one for one in ancestors(column.stmt) if isinstance(one, ast.For)), None)
+    if loop is None:
+        return None
+    key, mapping = _mapping_iterated(loop)
+    if not key or mapping is None or column.source != key:
+        return None
+    for hole in bind_holes:
+        if type(hole) is not sqleval.HoleAt or hole.source != key or not any(one is loop for one in ancestors(hole.stmt)):
+            return None
+    target = loop.target
+    value_name = (
+        target.elts[1].id
+        if isinstance(loop.iter, ast.Call)
+        and isinstance(loop.iter.func, ast.Attribute)
+        and loop.iter.func.attr == "items"
+        and isinstance(target, ast.Tuple)
+        and len(target.elts) == 2
+        and isinstance(target.elts[1], ast.Name)
+        else None
+    )
+    probe = "\x00key"
+    spelled = bind.replace("{}", probe)
+    for node in ast.walk(loop):
+        for stored in targets_of(node):
+            if not (
+                isinstance(stored, ast.Subscript)
+                and isinstance(stored.value, ast.Name)
+                and stored.value.id == run.varmap
+                and _string_value(stored.slice, {key: probe}, loop) == spelled
+            ):
+                continue
+            value = written_value(node)
+            by_value = value_name is not None and isinstance(value, ast.Name) and value.id == value_name
+            by_key = (
+                isinstance(value, ast.Subscript)
+                and ast.dump(value.value) == ast.dump(mapping)
+                and isinstance(value.slice, ast.Name)
+                and value.slice.id == key
+            )
+            if (by_value or by_key) and any(
+                id(node) in _live_at(func, run.varmap, [node], call) for call in run.run_at
+            ):
+                return mapping
+    return None
+
+
 class KeyColumnCensus(NamedTuple):
     """How many statements name a column from a mapping key, and how many resolve."""
 
@@ -1378,10 +1547,12 @@ def _run_fragments(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[a
                 inside = [
                     node
                     for node in ast.walk(hole.stmt)
-                    if isinstance(node, (ast.Assign, ast.AugAssign))
+                    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
                     and any(
                         isinstance(t, ast.Name) and t.id == hole.source
-                        for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                        for t in (
+                            [node.target] if isinstance(node, ast.AugAssign) else targets_of(node)
+                        )
                     )
                 ]
             else:
@@ -1453,7 +1624,12 @@ def executions(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     skipped: Optional[list["Skip"]] = None,
 ) -> list[Execution]:
-    """Return one :class:`Execution` per statement each cursor execution in *func* runs.
+    """Return one :class:`Execution` per statement each runner call in *func* runs (:func:`runners`).
+
+    A call by a runner's name -- the cursor's ``execute``, or a function that
+    runs a statement it is handed, ``getClobObj(sql, varMap)`` -- runs the
+    statement its first argument holds, with the binds its second does; one
+    with no second runs it with none.
 
     The call is what pairs a statement with its binds.  Reading them separately
     -- every statement in the function against every bind in the function --
@@ -1473,7 +1649,8 @@ def executions(
     hands it, and the one function that moves ``ready`` tasks to ``pending``
     looked like one whose write picks its own rows.  Each is a :class:`Skip`
     with the reason, so a consumer can tell "read in full" from "never read"
-    -- see :data:`SKIP_REASONS`.
+    -- see :data:`SKIP_REASONS`; a runner handing on its own statement says so
+    too (:data:`SKIP_CALLERS`): that ``SELECT`` is read where the callers run it.
 
     Kept per reading context (:func:`reading_context`), as the run is.
     """
@@ -1491,45 +1668,36 @@ def executions(
 
 
 class Skip(NamedTuple):
-    """A cursor execution :func:`executions` saw and read no statement out of.
-
-    ``texts`` is whatever text the statement can be read to hold -- the
-    variants of its name, or what it renders to -- so a consumer can still say
-    which tables it touches.  Empty when there is none, and then *which rows it
-    reads* is unknown rather than "none".
-    """
+    """A runner call :func:`executions` saw and read no statement out of: its text is not here, so *which rows it
+    reads* is unknown rather than "none"."""
 
     line: int
     reason: str
     detail: str
-    texts: tuple[str, ...] = ()
 
 
 #: The ways an execution is seen and not read.  Spelled for a reader of the
 #: build's stop list, beside the reasons a statement that *was* read stopped.
-SKIP_NO_VARMAP = (
-    "the statement runs with no bind map, and this build reads a statement only"
-    " with its binds"
-)
+#: A statement handed in is said only by a reading with no corpus: in one,
+#: the function handing it on is a runner (:func:`runners`), and the statement
+#: is read at its callers (:data:`SKIP_CALLERS`).
 SKIP_HANDED_IN = "the statement is handed in by the caller, so its text is not in this function"
 SKIP_UNBOUND = "the statement is a name this function does not bind"
 SKIP_UNREAD_NAME = "the statement is a name bound here to text this build cannot render"
 SKIP_UNRENDERED = "the statement written into the call does not render"
 SKIP_UNREACHED = "no statement this function builds reaches this call"
 SKIP_REASONS = (
-    SKIP_NO_VARMAP,
     SKIP_HANDED_IN,
     SKIP_UNBOUND,
     SKIP_UNREAD_NAME,
     SKIP_UNRENDERED,
     SKIP_UNREACHED,
 )
-
-#: Functions whose own statement parameter this reader reads at their callers
-#: instead: the cursor's own ``execute`` wrapped, and the forwarded form.  The
-#: same names :func:`executions` accepts, so a statement handed to one of them
-#: is read where it is written, and handing it on is not a gap.
-_READ_AT_THE_CALLER = frozenset({"execute", "executemany"}) | frozenset({"querySQL", "querySQLS"})
+#: A runner handing on the statement its function was handed: not read here, and no gap -- the text is the
+#: callers', read where they run it.  Said all the same, so a reader of this function knows a statement runs
+#: here whose rows it does not see: ``queryTasksToBePending_JEDI`` updates the tasks the ``SELECT`` it is handed
+#: picks.
+SKIP_CALLERS = "the statement is its callers', read where they run it"
 
 
 def _unparsed(node: ast.AST) -> str:
@@ -1549,17 +1717,15 @@ def _skip_without_text(
     call: ast.Call,
     head: ast.expr,
 ) -> Optional[Skip]:
-    """Why a call whose statement has no text here was not read, or ``None``.
+    """Why a call whose statement has no text here was not read.
 
-    ``None`` for a function this reader already reads at its callers --
-    ``WrappedCursor.execute(sql, ...)`` hands on a statement every caller
-    wrote, and the callers are where it is read.
+    A runner (:func:`runners`) handing on its own statement --
+    ``WrappedCursor.execute(sql, ...)``, ``getClobObj(sql, varMap)`` -- runs
+    what its callers wrote, and they are where it is read (:data:`SKIP_CALLERS`).
     """
     if isinstance(head, ast.Name):
         if _is_parameter(func, head.id):
-            if func.name in _READ_AT_THE_CALLER:
-                return None
-            return Skip(call.lineno, SKIP_HANDED_IN, head.id)
+            return Skip(call.lineno, SKIP_CALLERS if func.name in runners() else SKIP_HANDED_IN, head.id)
         # ``sql = sql1_0 % (JobSpec.columnNames(), table) + sql1_1`` binds the
         # name to something no rendering here follows -- a different fact from
         # a name that came from nowhere in this function, and a different
@@ -1572,29 +1738,6 @@ def _skip_without_text(
     return Skip(call.lineno, SKIP_UNRENDERED, _clipped(_unparsed(head)))
 
 
-def _skip_without_binds(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    call: ast.Call,
-    texts: tuple[str, ...],
-) -> Optional[Skip]:
-    """The skip for ``execute(sql)``, which names no bind map to pair it with.
-
-    ``None`` on the same terms as :func:`_skip_without_text`: a wrapper of the
-    cursor handing on its caller's statement.  *texts* is what the call runs
-    (:func:`_texts_at`).
-    """
-    statement, _fillers, _spelling = _call_site_fill(func, call.args[0])
-    head = _concatenated(statement)[0]
-    if not texts:
-        # No text either: a statement handed in is handed in whether or not a
-        # map comes with it, and saying so is the more useful of the two.
-        skip = _skip_without_text(func, call, head)
-        if skip is None or skip.reason == SKIP_HANDED_IN:
-            return skip
-    detail = head.id if isinstance(head, ast.Name) else _clipped(texts[0] if texts else _unparsed(head))
-    return Skip(call.lineno, SKIP_NO_VARMAP, detail, texts)
-
-
 def _is_parameter(func: ast.AST, name: str) -> bool:
     args = getattr(func, "args", None)
     if args is None:
@@ -1604,16 +1747,100 @@ def _is_parameter(func: ast.AST, name: str) -> bool:
     return any(argument.arg == name for argument in every)
 
 
-#: How the daemon layer runs a statement.  A second execution form rather than
-#: a second reading: the statement, the binds and the pairing between them are
-#: the same three things, reached through the task buffer instead of a cursor.
-_FORWARDED = frozenset({"querySQL", "querySQLS"})
+class Runner(NamedTuple):
+    """How a call by a runner's name runs its statement (:func:`runners`)."""
 
-#: Every call form :func:`executions` will read a statement out of.  Exposed so
-#: that a reader reporting which form it *declined* names the same set this one
-#: accepts -- a second copy of the list would drift, and the whole point of the
-#: read side's denominator is to catch a form nobody added.
-RUNNERS = frozenset({"execute", "executemany"}) | _FORWARDED
+    #: Its binds are a list of maps, one per row: ``executemany``, and what hands its own on to it.
+    many: bool
+    #: A function of this name runs statements of its own as well as the one it is handed:
+    #: ``queryTasksToBePending_JEDI`` runs the ``SELECT`` its caller hands it and updates the tasks it picks.
+    own: bool
+
+
+#: The cursor's own forms: the driver, which runs the statement and nothing of the corpus.
+_CURSOR = {"execute": Runner(many=False, own=False), "executemany": Runner(many=True, own=False)}
+#: Their names: a call by one lands in the driver, never in a function of the corpus of that name.
+CURSOR_RUNNERS = frozenset(_CURSOR)
+
+#: The runners of a reading with no corpus: the cursor's and the task buffer's (``taskBuffer.querySQLS(sql,
+#: var_map)``, the daemon layer's form).  A corpus says its own (:func:`runners`).
+_NO_CORPUS = {**_CURSOR, "querySQL": Runner(many=False, own=False), "querySQLS": Runner(many=False, own=False)}
+RUNNERS = frozenset(_NO_CORPUS)
+
+#: :func:`runners` of each corpus, by its roots.
+_RUNNERS_OF: dict[tuple, dict[str, Runner]] = {}
+
+
+def runners() -> dict[str, Runner]:
+    """Every name a call runs a statement by, in the corpus read through (:func:`across_calls`).
+
+    The cursor's ``execute`` and ``executemany``, and every function that runs,
+    as its statement, one of its own parameters -- ``getClobObj(sql, varMap)``
+    runs ``self.cur.execute(sql, varMap)``, ``TaskBuffer.querySQLS`` hands its
+    own to the proxy's -- to a fixed point.  A call by one of these names runs
+    the statement its caller writes, and is read there (:func:`executions`);
+    the function handing it on is no gap (:data:`SKIP_CALLERS`).  A function
+    sharing a runner's name is taken to be one, as ``execute`` always was.
+
+    Read from the whole corpus whichever file is read, as :meth:`Calls.every_call`
+    is, so a reading of one file reads the runners the build does.
+    """
+    if _CALLS is None:
+        return _NO_CORPUS
+    types = _CALLS.types
+    key = tuple(sorted((package, str(root)) for package, root in types.roots.items()))
+    if key not in _RUNNERS_OF:
+        _RUNNERS_OF[key] = _corpus_runners(types)
+    return _RUNNERS_OF[key]
+
+
+def _corpus_runners(types) -> dict[str, Runner]:
+    from bamboo.codemap.calls import own_nodes
+
+    # Each function's calls by a name, and whether each runs one of the function's parameters as its statement.
+    calling: list[tuple[str, list[tuple[str, bool]]]] = []
+    for file in types.corpus_files():
+        tree = types.tree(file)
+        if tree is None:
+            continue
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            parameters = {
+                argument.arg
+                for argument in (*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs)
+            }
+            made = []
+            for node in own_nodes(func):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
+                    named = any(isinstance(one, ast.Name) and one.id in parameters for one in ast.walk(node.args[0]))
+                    made.append((node.func.attr, named and _runs_a_parameter(func, node)))
+            if made:
+                calling.append((func.name, made))
+    found = dict(_CURSOR)
+    grown = True
+    while grown:
+        grown = False
+        for name, made in calling:
+            if name in found:
+                continue
+            handed = [called for called, hands in made if hands and called in found]
+            if handed:
+                found[name] = Runner(many=any(found[called].many for called in handed), own=False)
+                grown = True
+    for name, made in calling:
+        if name in found and name not in _CURSOR:
+            ran = [hands for called, hands in made if called in found]
+            if any(ran) and not all(ran):
+                found[name] = found[name]._replace(own=True)
+    return found
+
+
+def _runs_a_parameter(func: ast.AST, call: ast.Call) -> bool:
+    """Whether *call* hands on, as its statement, a parameter of *func* -- the head :func:`executions` reads."""
+    statement, _fillers, _spelling = _call_site_fill(func, call.args[0])  # type: ignore[arg-type]
+    head = _concatenated(statement)[0]
+    return isinstance(head, ast.Name) and _is_parameter(func, head.id)
 
 
 #: ``RETURNING <column> INTO <bind>``, either side a comma list: the binds the
@@ -1853,6 +2080,57 @@ def binding_window(
     return start, line
 
 
+#: Where a statement's rows arrive.  The ``execute`` form binds nothing at the
+#: call -- ``self.cur.execute(sql, varMap)`` and then ``res =
+#: self.cur.fetchall()`` -- so reading the call line alone finds the rows for
+#: 48 of the corpus's 264 statements and misses every exit taken because none
+#: came back.  A fetch reads the rows of the run whose region holds it (:func:`regions`).
+FETCHES = ("fetchall", "fetchone", "fetchmany")
+
+
+def regions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, executions: list[Execution]
+) -> dict[int, tuple[int, int]]:
+    """The stretch of *func* each run owns, by its call's line: ``(first, last)``.
+
+    From where the run's binds start being filled to just before the next
+    run's do, so a ``fetch*`` in it reads this run's rows.  Every run of the
+    function is laid out: the statement that ends a region may be one no
+    reader keeps, and stopping at the next *kept* one would hand a reader the
+    following query's rows as well.
+
+    Where two statements share one ``var_map = {}`` the later one's binds
+    start filling *above* the earlier one's call, so the next run's window
+    is no edge at all: it would end a region before the statement it
+    belongs to ran, taking that statement's own ``fetchall`` with it.  A
+    statement's territory cannot close at or before it ran, so where the
+    windows overlap the next *call* is the edge.
+
+    Keyed by the call line because a branchy statement is several runs at one
+    ``execute``: without the key the region ends at the statement's own second
+    variant, which is itself.
+    """
+    starts: dict[int, int] = {}
+    for run in executions:
+        line = run.call.lineno
+        window = run.window
+        if window is None and run.varmap:
+            window = binding_window(func, run.varmap, line)
+        begins = window[0] if window else line
+        starts[line] = min(starts.get(line, begins), begins)
+    last = func.end_lineno or func.lineno
+    ordered = sorted(starts.items())
+    found: dict[int, tuple[int, int]] = {}
+    for index, (line, begins) in enumerate(ordered):
+        if index + 1 < len(ordered):
+            next_line, next_begins = ordered[index + 1]
+            following = next_begins if next_begins > line else next_line
+        else:
+            following = last + 1
+        found[line] = (begins, max(line, following - 1))
+    return found
+
+
 #: ``jobStatus=:oldJobStatus`` -- the only shape of precondition whose value
 #: is in Python.  ``commandToPilot IS NULL`` and ``nFiles>nFilesUsed`` name no
 #: bind, and there is nothing to settle in them.
@@ -1866,7 +2144,7 @@ def settled_precondition(
     window: Optional[tuple[int, int]],
     settle,
     beside: Optional[ast.stmt] = None,
-    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
+    at: Optional[ast.AST | Execution] = None,
 ) -> tuple[str, bool]:
     """*term* with its bind replaced by the value, and whether that happened.
 
@@ -1991,17 +2269,21 @@ def bound_values(
     key: str,
     window: Optional[tuple[int, int]] = None,
     across: bool = False,
-    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
+    at: Optional[ast.AST | Execution] = None,
 ) -> list[Bind]:
     """Return the assignments filling ``<varmap>[<key>]`` in *func*.
 
     Several are normal and correct: a method that runs the same statement twice
     with different values has two, and both are outcomes of that write.
 
-    *at* is the execution the binds are read for -- a call, or the calls that
-    run one statement (:attr:`Execution.run_at`) -- and only the binds the map
-    it runs with can still hold are returned; see :func:`_live_at`.  Every
-    reader of a run asks this way, in both call forms.  Reading every bind of
+    *at* is the execution the binds are read for -- the run itself, or a bare
+    call -- and only the binds the map it runs with can still hold are
+    returned; see :func:`_live_at`.  Every reader of a run asks this way, in
+    both call forms.  Given the run, they are also its own branch's: one text
+    of the statement is built on some passes and another on others, and a bind
+    only a pass building another text fills is not this one's
+    (:func:`_not_its_text`), nor one every pass building this text writes
+    again before the call (:func:`_not_on_its_passes`).  Reading every bind of
     the key instead was once thought safe for ``execute``, on the argument that
     the binds reachable by key are exactly the values that write site can
     produce.  They are not: one function binds ``:status`` for statements on
@@ -2077,7 +2359,7 @@ def scan_binds(
     window: Optional[tuple[int, int]] = None,
     across: bool = False,
     hops: int = 0,
-    at: Optional[ast.AST | tuple[ast.AST, ...]] = None,
+    at: Optional[ast.AST | Execution] = None,
 ) -> BindScan:
     """:func:`bound_values`, with the census of what the walk passed over.
 
@@ -2196,8 +2478,12 @@ def scan_binds(
     if gated:
         writes = [gate for _bind, gate in gated]
         live: set[int] = set()
-        for one in at if isinstance(at, tuple) else (at,):
+        run = at if isinstance(at, Execution) else None
+        for one in run.run_at if run is not None else (at,):
             live |= _live_at(func, varmap, writes, one)
+        if run is not None:
+            live -= _not_its_text(func, varmap, run, [gate for gate in writes if id(gate) in live], writes)
+            live -= _not_on_its_passes(func, varmap, run, [gate for gate in writes if id(gate) in live], writes)
         for bind, gate in gated:
             if id(gate) in live:
                 found.append(bind)
@@ -2301,16 +2587,288 @@ def _live_at(
         return {id(site) for site in surviving_writes(sites, run, rereads, as_run=True)}
 
     live = surviving(at)
-    for loop in renewals:
-        if (
-            isinstance(loop, (ast.For, ast.AsyncFor))
-            and id(loop) in live
-            and isinstance(loop.iter, ast.Name)
-            and any(ancestor is loop for ancestor in ancestors(at))
-        ):
-            for append in _appended(func, loop.iter.id, varmap):
+    for loop, appends in _listed_maps(func, varmap, renewals, at):
+        if id(loop) in live:
+            for append in appends:
                 live |= surviving(append)
     return live
+
+
+def _listed_maps(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str, renewals: list[ast.stmt], at: ast.AST
+) -> list[tuple[ast.stmt, list[ast.stmt]]]:
+    """Each ``for <varmap> in <list>:`` among *renewals* holding *at*, with the statements appending a map to the list."""
+    return [
+        (loop, _appended(func, loop.iter.id, varmap))
+        for loop in renewals
+        if isinstance(loop, (ast.For, ast.AsyncFor))
+        and isinstance(loop.iter, ast.Name)
+        and any(ancestor is loop for ancestor in ancestors(at))
+    ]
+
+
+def _not_its_text(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: str,
+    run: Execution,
+    live: list[ast.AST],
+    writes: list[ast.AST],
+) -> set[int]:
+    """The ``id`` of each of *live* that no pass building *run*'s text fills.
+
+    :func:`_live_at` reads the binds the map can hold at the call, whatever
+    the text; one call can run several texts of one statement, and each is
+    built on some passes and not others.  ``updateTaskStatusByContFeeder_JEDI``
+    adds ``,oldStatus=:oldStatus,splitRule=:splitRule`` to its ``UPDATE`` only
+    when it is given a task, fills ``:status`` from the task in that case and
+    ``'assigning'`` or ``'ready'`` otherwise, and runs whichever it built at
+    one call: read by the call alone, the text with the clause wrote
+    ``assigning``.  ``insertNewJob`` fills a file's ``:status`` and appends
+    its ``is_waiting`` clause under two tests of one flag.
+
+    A bind is not the text's where it cannot be on one pass with a statement
+    that put a piece of the text there (:func:`pathcond.parted`) -- unless a
+    loop carries it to the call from an earlier pass that the conditions let
+    differ (:func:`pathcond.carried_round`) -- or where it runs only through
+    the arm of a piece another text at the call adds to all of this one's
+    (:func:`pathcond.only_through`): the pass that built this text skipped
+    that arm.  A text written twice the same -- ``archiveJob`` writes
+    ``sqlFMod`` before its loop and again in one arm -- is built two ways and
+    no statement is on both (:func:`_text_reading`), so it parts nothing.
+    """
+    calls, mine, added = _text_reading(func, run)
+    if not mine:
+        return set()
+    held = _pairs_read(func)
+    renewals = _renews(func, varmap)
+    sites = list({id(site): site for site in [*writes, *renewals]}.values())
+    rereads = [write for write in writes if _rereads(write, varmap)]
+    found: set[int] = set()
+    for write in live:
+        if enclosing_function(write) is not func:
+            continue
+        if any(
+            piece is not write
+            and held(parted, piece, write)
+            and not any(carried_round(write, call, piece, sites, rereads) for call in calls)
+            for piece in mine
+        ) or any(held(only_through, write, piece) for piece in added):
+            found.add(id(write))
+    return found
+
+
+def _not_on_its_passes(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: str,
+    run: Execution,
+    live: list[ast.AST],
+    writes: list[ast.AST],
+) -> set[int]:
+    """The ``id`` of each of *live* that no pass building *run*'s text carries to a call of it.
+
+    :func:`_not_its_text` reads where a bind is written; a pass writing it can
+    build the text and still write the key again before the call.
+    ``updateTaskStatusByContFeeder_JEDI`` sets ``:updateTime`` to now before
+    its ``if``, and the two arms building the text without the ``oldStatus``
+    clause each set it six hours back: the one pass keeping now builds the
+    text with the clause.  So the statements no pass building the text runs
+    (:func:`_not_building`) are cut from the way, as writes that are no
+    answer, and a bind is the text's where it still reaches a call.
+
+    A loop holding the call reads each pass afresh: an earlier pass can be one
+    not building the text and a later one one that does, so what the map
+    carries into a pass is read apart -- kept where it reaches the top of the
+    innermost loop holding the call and a value there reaches the call, cut
+    so.  A ``for`` writes its target at the top of each pass, where
+    :func:`~bamboo.codemap.panda.reaching.reaching` puts it, so the loop
+    stands for that value; a ``while`` has no such write, and what it carries
+    is kept.  A map taken from a list is the one built where it was appended
+    (:func:`_live_at`): its binds are kept where that ``for`` reaches the call.
+    """
+    killers = [one for one in _not_building(func, run) if all(one is not write for write in writes)]
+    if not killers:
+        return set()
+    renewals = _renews(func, varmap)
+    sites = list({id(site): site for site in [*writes, *renewals]}.values())
+    rereads = [write for write in writes if _rereads(write, varmap)]
+
+    def reaching_ids(targets: list[ast.AST], at: ast.AST, cut: list[ast.AST]) -> set[int]:
+        return {id(site) for site in surviving_writes(targets, at, rereads, as_run=True, killers=cut)}
+
+    kept: set[int] = set()
+    for call in (site_of(one) for one in run.run_at):
+        loop = _innermost_loop(func, call)
+        marked = sites
+        if isinstance(loop, (ast.For, ast.AsyncFor)) and all(loop is not site for site in sites):
+            marked = [*sites, loop]
+        reached = reaching_ids(marked, call, killers)
+        kept |= reached
+        if isinstance(loop, ast.While) or (loop is not None and id(loop) in reached):
+            kept |= reaching_ids(sites, loop.body[0], [])
+        for listed, appends in _listed_maps(func, varmap, renewals, call):
+            if id(listed) in reached:
+                for append in appends:
+                    kept |= reaching_ids(sites, append, [])
+    return {id(write) for write in live if enclosing_function(write) is func and id(write) not in kept}
+
+
+def _not_building(func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution) -> list[ast.stmt]:
+    """The simple statements of *func* no pass building *run*'s text runs -- read once per run.
+
+    :func:`_not_its_text`'s two readings, of a statement on the way rather
+    than of a bind: parted from a statement every way of building the text
+    runs, or run only through the arm of a piece another text at its calls
+    adds to all of this one's.
+    """
+    store = _held_on(func, "_sql_not_building")
+    key = (reading_context(), run.sql, tuple(id(call) for call in run.run_at), _piece_ids(run))
+    if key not in store:
+        _calls, mine, added = _text_reading(func, run)
+        held = _pairs_read(func)
+        store[key] = [
+            node
+            for node in (_simple_statements(func) if mine else ())
+            if any(piece is not node and held(parted, piece, node) for piece in mine)
+            or any(held(only_through, node, piece) for piece in added)
+        ]
+    return store[key]
+
+
+def _simple_statements(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
+    """The statements of *func* itself holding no body: each runs whole, where it stands."""
+    store = _held_on(func, "_sql_simple_statements")
+    if not store:
+        store[0] = [
+            node
+            for node in ast.walk(func)
+            if isinstance(node, ast.stmt)
+            and "body" not in node._fields
+            and "cases" not in node._fields
+            and enclosing_function(node) is func
+        ]
+    return store[0]
+
+
+def _innermost_loop(func: ast.AST, node: ast.AST) -> Optional[ast.For | ast.AsyncFor | ast.While]:
+    """The innermost loop of *func* whose body holds *node*; None in none."""
+    previous = node
+    for ancestor in ancestors(node):
+        if ancestor is func:
+            return None
+        if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)) and any(previous is one for one in ancestor.body):
+            return ancestor
+        previous = ancestor
+    return None
+
+
+def _text_reading(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution
+) -> tuple[list[ast.AST], list[ast.AST], list[ast.AST]]:
+    """*run*'s calls as statements, the statements every way of building its text runs, and the pieces other texts at
+    those calls add to all of its own -- read once per run, as every key of the run asks.
+
+    A text is built by every way that renders it (:func:`_text_ways`), and a
+    statement only some of them run decides nothing: the same text written in
+    each arm of an ``if`` and run once after it is one run, its pieces naming
+    one arm.  Where the ways are not all known, no statement is taken.
+    """
+    store = _held_on(func, "_sql_text_reading")
+    key = (reading_context(), run.sql, tuple(id(call) for call in run.run_at), _piece_ids(run))
+    if key not in store:
+        calls = [site_of(call) for call in run.run_at]
+        ways = _text_ways(func, run, calls)
+        mine = _every_way(ways)
+        anywhere = {one for way in ways or () for one in way}
+        own = {id(one) for one in mine}
+        added: list[ast.AST] = []
+        for other in executions(func) if mine else ():
+            if not any(call is one for call in other.run_at for one in run.run_at):
+                continue
+            theirs = _every_way(_text_ways(func, other, calls))
+            if not own <= {id(one) for one in theirs}:
+                continue
+            added += [
+                one for one in theirs if id(one) not in anywhere and not any(only_through(held, one) for held in mine)
+            ]
+        store[key] = (calls, mine, added)
+    return store[key]
+
+
+#: How many ways of building one text are read; past them, the ways are not all known.
+TEXT_WAYS_CAP = 16
+
+
+def _text_ways(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution, calls: list[ast.AST]
+) -> Optional[list[dict[int, ast.AST]]]:
+    """Each way *run*'s text is built at its calls, as the statements of *func* putting its pieces; None where the ways
+    are not all known -- more than :data:`TEXT_WAYS_CAP`, or the text not rendered again from what reaches a call."""
+    store = _held_on(func, "_sql_text_ways")
+    key = (reading_context(), run.sql, tuple(id(call) for call in run.run_at), _piece_ids(run))
+    if key not in store:
+        reading = _evaluation(func)
+        drawn = [run.pieces]
+        for call in run.run_at:
+            found = sqleval.rendered_as(list(reading.values.get(call.lineno, {})), run.sql, limit=TEXT_WAYS_CAP + 1)
+            if not found or len(found) > TEXT_WAYS_CAP:
+                drawn = []
+                break
+            drawn += [one.pieces for one in found]
+        store[key] = [_text_statements(func, pieces, calls) for pieces in drawn] or None
+    return store[key]
+
+
+def _every_way(ways: Optional[list[dict[int, ast.AST]]]) -> list[ast.AST]:
+    """The statements every one of *ways* runs."""
+    if not ways:
+        return []
+    return [node for key, node in ways[0].items() if all(key in way for way in ways[1:])]
+
+
+def _piece_ids(run: Execution) -> tuple[int, ...]:
+    return tuple(id(one) for _start, _end, way in run.pieces for one in way if isinstance(one, ast.AST))
+
+
+def _held_on(func: ast.AST, name: str) -> dict:
+    store = getattr(func, name, None)
+    if store is None:
+        store = {}
+        setattr(func, name, store)
+    return store
+
+
+def _pairs_read(func: ast.FunctionDef | ast.AsyncFunctionDef):
+    """A reader of a test on two statements of *func* (``parted``, ``only_through``), each pair read once."""
+    store = _held_on(func, "_sql_pairs_read")
+
+    def held(test, one: ast.AST, other: ast.AST) -> bool:
+        key = (test.__name__, id(one), id(other))
+        if key not in store:
+            store[key] = test(one, other)
+        return store[key]
+
+    return held
+
+
+def _text_statements(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, pieces: tuple, calls: list[ast.AST]
+) -> dict[int, ast.AST]:
+    """The statements of *func* that put one of *pieces*, by ``id``, where one can be on a pass through *calls*.
+
+    One run holds every call that runs its text, and two calls can run one
+    text from two assignments in two arms -- ``activateJob`` writes ``sqlJob``
+    for its call in each arm -- while the pieces name one of them.
+    """
+    found: dict[int, ast.AST] = {}
+    for _start, _end, way in pieces:
+        for one in way:
+            if not isinstance(one, ast.AST):
+                continue
+            node = one if isinstance(one, ast.stmt) else site_of(one)
+            if enclosing_function(node) is not func or all(parted(node, call) for call in calls):
+                continue
+            found.setdefault(id(node), node)
+    return found
 
 
 def _rereads(write: ast.AST, varmap: str) -> bool:
@@ -2468,7 +3026,8 @@ def assembled_texts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, l
 
 
 def _placed_callees():
-    """The calls a run follows: the map's own placing of each (:func:`across_calls`), every target, nothing open."""
+    """The calls a run follows: the map's own placing of each (:func:`across_calls`), every target, nothing open,
+    nothing whose value is not what the targets return (:attr:`calls.Placed.returns_none`)."""
     calls = _CALLS
     if calls is None:
         return None
@@ -2478,7 +3037,7 @@ def _placed_callees():
         if file is None:
             return None
         placed = calls.callees(file, func, call)
-        if placed.unplaced or not placed.targets:
+        if placed.unplaced or not placed.targets or placed.returns_none:
             return None
         return [target.func for target in placed.targets]
 
@@ -2586,16 +3145,6 @@ def _every_statement(
     return kept
 
 
-def _texts_at(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, reading: "sqleval.Reading", line: int
-) -> tuple[str, ...]:
-    """What the runner call on *line* runs, as the run read it: nothing where no path reaches it."""
-    if line not in reading.reached:
-        return ()
-    texts = (_fragments_out(one, func).text for one in reading.cover(line)[0])
-    return tuple(text for text in dict.fromkeys(texts) if not _says_nothing(text))
-
-
 def _unrendered(hole: "sqleval.HoleAt", func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """A hole that is a whole ``+=`` fragment with no text of its own (:data:`FRAGMENT_NOT_RENDERED`), appended
     by *func* itself.
@@ -2698,20 +3247,16 @@ def _executions_read(
     reading = _evaluation(func)
     found: list[Execution] = []
     skips: list[Skip] = []
+    names = runners()
     for node in ast.walk(func):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        forwarded = node.func.attr in _FORWARDED
-        if not forwarded and node.func.attr not in {"execute", "executemany"}:
+        if node.func.attr not in names:
             continue
+        forwarded = node.func.attr not in _CURSOR
         if _AT_CALL and ruled_out(node):
             continue
         if not node.args:
-            continue
-        if len(node.args) < 2:
-            skip = _skip_without_binds(func, node, _texts_at(func, reading, node.lineno))
-            if skip is not None:
-                skips.append(skip)
             continue
         # The name the call runs, as written: ``sql_exe = (sql_jt + comment) %
         # table`` is read where ``sql_exe`` runs.
@@ -2736,7 +3281,9 @@ def _executions_read(
             if skip is not None:
                 skips.append(skip)
             continue
-        varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
+        # ``execute(sql)`` runs with no map: a run with no binds, as one whose map is written into the call has
+        # none by a name.
+        varmap = node.args[1].id if len(node.args) > 1 and isinstance(node.args[1], ast.Name) else None
         window = binding_window(func, varmap, line) if forwarded and varmap is not None else None
         for one, heads in drawn:
             run = _fragments_out(one, func)

@@ -74,21 +74,22 @@ reasons on each read site, with the part not read.
 
 The five reasons about the columns a write names (`the INSERT names ...` to `a SET item ...`)
 are `reading_stops` only: they are not about the rows a statement picks, so no read site carries
-them. Counted on `2cd8c424` with the change that added them, on bamboo `9ee52f6`.
+them. Counted on `2cd8c424` with the change that added them, on bamboo `9ee52f6`. The rows the
+change reading statements run with no bind map and statements handed to a runner moved
+(F2 S1) are counted on `2cd8c424` with it.
 
 | Reason | Count | What it usually is |
 |---|---|---|
 | `the row precondition names a bind nothing here fills` | 91 | a precondition whose bind the function does not fill: `status IN (:ost1,:ost2)`, `locked_by=:locked_by` |
-| `the WHERE names its bind variables through an interpolation` | 50 | binds or a bind's name built at run time: `jediTaskID IN ({})`, `:w_{}`, `rownum<={}` |
-| `the statement runs with no bind map, and this build reads a statement only with its binds` | 29 | |
+| `the WHERE names its bind variables through an interpolation` | 52 | binds or a bind's name built at run time: `jediTaskID IN ({})`, `:w_{}`, `rownum<={}` |
 | `the WHERE names its column through an interpolation` | 11 | columns from a caller's dict — `criteria`, `map`, `data` — in 7 functions (`updateTask_JEDI`, `getTasksWithCriteria_JEDI`, `queryDatasetWithMap` …). In all, 21 loops in 15 functions build columns from a parameter's keys — in `SET` lists too, said below, and in `SELECT` lists, where nothing is said — and no reading is handed the caller's dict (counted at `f9ca59f`) |
 | `no statement this function builds reaches this call` | 11 | right once; see *Said wrongly* |
-| `the statement is handed in by the caller, so its text is not in this function` | 7 | |
+| `the statement is its callers', read where they run it` | 19 | not a gap: a function running the statement it is handed (`getClobObj`, `querySQLS`, `executemanySQL`, the two JEDI queries, `WrappedCursor.execute`) — the statement is read at each call of it, where its text is |
 | `the WHERE takes whole conditions through an interpolation` | 2 | |
 | `the INSERT names its columns through an interpolation` | 50 | a spec's `columnNames()`: `archiveJob`'s `INSERT INTO jobsArchived4 ({}) VALUES({})`, every column of the class and none of them in the text; the list once per statement, a run of holes as one `{}` |
 | `the SET names its column through an interpolation` | 21 | a column per key: `updateJobStatus`'s `param` (the pilot's every update), `harvesterIsAlive`'s `data`, `updateDatasetAttributes_JEDI`'s `attributes`; `SET {}=:{}` |
 | `the SET takes whole assignments through an interpolation` | 10 | a spec's `bindUpdateChangesExpression()`: the object's changed attributes (`updateJob`, `retryJob`, `updateTask_JEDI`, `updateWorkers`); `SET {}` |
-| `the statement writes a table and no column of it is read` | 3 | an `INSERT` naming no columns (`INSERT INTO Metrics VALUES (...)`, `Task_Evaluation`, `copy_file_records`): said only where no build of the statement read a column of the table or said why |
+| `the statement writes a table and no column of it is read` | 4 | an `INSERT` naming no columns (`INSERT INTO Metrics VALUES (...)`, `Task_Evaluation` twice, `copy_file_records`): said only where no build of the statement read a column of the table or said why |
 | `a SET item is not column = value` | 2 | `log_task_attempt_start` and `_end`: `SET (endtime, endstatus) = (SELECT ...)` |
 | `the statement is a name bound here to text this build cannot render` | 1 | |
 | `a path into a JSON column, which this build does not read` | 26 read sites | `read_sites[].unresolved` only |
@@ -113,12 +114,12 @@ Counted as distinct (function, table, column).
 | `bound outside the window this execution owns` | 2 | |
 
 Statements a function builds that the read side did not see run. `build-map` prints them under
-`sql-read candidates not accounted for`. Counted as statements, at bamboo `d158203`.
+`sql-read candidates not accounted for`. Counted as statements, on `2cd8c424` with F2 S1: a
+statement run with no bind map, and one handed to a function that runs it (`getClobObj`,
+`query_column_sql`, the JEDI queries), are read now, and only this is left.
 
 | Reason | Count | What it usually is |
 |---|---|---|
-| `run through an accepted call with no varmap argument` | 27 | `execute(sql)`: not read, and the call is said under *Said* (`the statement runs with no bind map, ...`); this list counts its statements |
-| `run through a call form the reader does not accept` | 15 | the text handed to a helper that runs it: `getClobObj` (most), `queryTasksToPreassign_JEDI`, `queryTasksToBePending_JEDI`, `query_column_sql` |
 | `assembled here and not run here` | 6 | not a gap: a statement no path runs (`getEventRanges`'s `sqlGD`, `sqlLK`), or one returned to a caller (`WorkQueueMapper.getSqlQuery`) |
 
 Calls the walk cannot enter. `build-map` prints them under `where calls could not be followed`:

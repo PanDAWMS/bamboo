@@ -422,6 +422,183 @@ class MustName(BaseModel):
     why: str = Field(default="", description="Why the hole is not known to hold the written row's column.")
 
 
+#: :attr:`HistoryPair.row` where the history row is the arm's row: the writer
+#: is handed an attribute of the object the arm writes, bound alike at both.
+HISTORY_ROW_SAME = "same"
+#: :attr:`HistoryPair.row` where the history row can be the arm's row: the
+#: arm's object, or its key, followed into the call reaches the writer's key.
+HISTORY_ROW_CAN = "can"
+#: :attr:`HistoryPair.order`: where the history call runs from the point.
+HISTORY_AFTER = "after"
+HISTORY_BEFORE = "before"
+HISTORY_EITHER = "either"
+
+
+class HistoryRekey(BaseModel):
+    """Where a pair's object is given its key again between the point and the call (:attr:`HistoryPair.rekeyed`)."""
+
+    at: str = Field(description="``owner:line`` of the assignment: the caller, or a function on the pair's way.")
+    path: str = Field(description="The key assigned, in that function's names: ``job@3917.PandaID``.")
+    value: str = Field(
+        default="",
+        description="What it is given, where that is a literal -- ``None`` --; empty where the value is not read.",
+    )
+    kept_in: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The object's attributes given the old key before the new one, in that function: ``parentID`` from "
+            "``job.parentID = job.PandaID`` on a way to the assignment, the object not bound again and the attribute "
+            "not given another value between.  The row written whole holds the old key there."
+        ),
+    )
+    printed_at: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of that function's prints that print the new key: on a way from the assignment, the object "
+            "not bound again between, a hole spelling the key's path.  The line prints in its statement's runs, "
+            "whose mark was made with the old key where the run started before.  With ``kept_in``, empty where "
+            "nothing names the old key and the new together."
+        ),
+    )
+
+
+class HistoryPair(BaseModel):
+    """A call that writes a history row in the same pass of a function as an arm.
+
+    The question is bamboo-68's (h2-value-time-design.md §3): a value the map
+    sees set has no time of its own, and PanDA keeps a job's and a task's
+    past statuses in tables of their own -- ``jobs_StatusLog``,
+    ``TASKS_STATUSLOG``, one row per change, stamped when it was written.  A
+    history row written in the same pass as the arm gives the arm a time,
+    and the run that pass is in -- a logger bound with a key -- says which
+    lines of the log are that pass's.
+
+    ``level`` 0 is the arm's own function and ``point`` the arm's line; level
+    n+1 is a caller of a level-n function and ``point`` the line of its call
+    on the way to the arm.  The call at ``call`` is in one pass with the
+    point: one runs after the other with no run started between them and no
+    turn of a loop holding both, read by
+    :func:`~bamboo.codemap.panda.reaching.reaching`.  The walk up stops on
+    each way at the first level with a pair, and does not take a way the
+    values its calls hand rule out (``setErrDiag(diag)`` leaves ``append``
+    False, so its append arm pairs only with callers handing it True); the
+    caller's own parameters are read as any value.
+
+    **Reachable, not taken.**  A call made on some paths only --
+    ``updateTask_JEDI`` records a task's status only when it changed -- pairs
+    as if made on every path, and a function running one of several actions
+    per pass pairs each action's arms with the others' history calls.
+    ``writes`` names every history write the call can lead to, not the one it
+    made.  Whether the row is the arm's own (``row``) is read in place where
+    both are in one function and the arm writes an attribute; otherwise the
+    arm's object -- or its key, for an SQL arm -- is followed from the caller
+    into the call (:func:`bamboo.codemap.objects.follow`), and ``can`` says it
+    reaches the writer's key: on some way, an element of a list among the
+    others, the bindings read without order and without what the calls on the
+    way down hand -- a row the pass can write, not one it wrote.  Where the
+    object is given a new key between the point and the call (``retryJob``'s
+    new ``PandaID``), the row is the new key's while the run's mark holds the
+    old one: ``rekeyed`` says where.
+    """
+
+    level: int = Field(description="0 for the arm's own function; n+1 for a caller of a level-n one.")
+    caller: str = Field(description="The function the point and the call are in: a :attr:`ReachNode.owner`.")
+    point: int = Field(description="The arm's line at level 0; else the line of the call on the way to the arm.")
+    call: int = Field(description="The line of the call that leads to a history row.")
+    callee: str = Field(description="The called expression, as source, cut at 80 characters.")
+    order: str = Field(
+        description=(
+            f"{HISTORY_AFTER!r}, {HISTORY_BEFORE!r} or {HISTORY_EITHER!r}: "
+            "whether the call runs after the point, before it, or either, in the pass."
+        )
+    )
+    history: list[str] = Field(
+        default_factory=list,
+        description="The subjects whose history the call can write: ``JobSpec.jobStatus``, ``JediTaskSpec.status``.",
+    )
+    writes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``owner:line`` of each history write the call can lead to: a "
+            ":class:`HistoryCall` on that owner's :class:`ReachNode`, which "
+            "holds the values its row can record.  The call itself where it "
+            "is the writer's."
+        ),
+    )
+    row: str = Field(
+        default="",
+        description=(
+            f"{HISTORY_ROW_SAME!r} read in place; {HISTORY_ROW_CAN!r} where the "
+            "arm's object followed into the call reaches the writer's key by a "
+            "way that runs in one pass (``object``, ``row_via``) -- each "
+            "interval of it, between two events of the walk, held by a run "
+            "with the path the object is held by not bound again; where the "
+            "object reaches the key by no such way, empty with ``row_why`` "
+            "naming an interval; ``another: <expression>`` where the "
+            "writer is handed its key as another expression the object is not "
+            "followed to -- ``other.PandaID``, or a job's ``job.jediTaskID`` "
+            "for the task's history -- whose row is not read.  Empty with "
+            "``row_why``."
+        ),
+    )
+    row_why: str = Field(default="", description="Why ``row`` is empty.")
+    object: str = Field(
+        default="",
+        description=(
+            "The path of the caller holding the arm's object -- ``self.job`` "
+            "in the adder's ``process_job_report`` -- or, for an SQL arm, the "
+            "row's key: what a reader asks of the pass's run (may_change's "
+            "path).  Set with ``same`` and ``can``."
+        ),
+    )
+    row_via: list[str] = Field(
+        default_factory=list,
+        description=(
+            "With ``can``, one way that runs in one pass, by which the object "
+            "goes from the caller's "
+            "``object`` to the writer's key, a step each: ``owner:line how "
+            "path`` for a binding of a function it passes (``element job`` "
+            "for ``for job in jobs``, ``fill updatedJobList[]`` for an "
+            "append, ``... back`` from a name to what is bound to it), "
+            "``caller:line -> callee path`` for a call it is handed into, "
+            "``owner:line <- callee path`` for a call that hands it back "
+            "(kept on the callee's ``self``, or returned), and last "
+            "``owner:line key`` -- the history write and the path it is "
+            "handed as its key."
+        ),
+    )
+    rekeyed: list[HistoryRekey] = Field(
+        default_factory=list,
+        description=(
+            "With ``same`` and ``can``, each assignment of the object's key "
+            "that runs between the point and the call, either way round, with "
+            "the path the object is held by not bound again on the way: in "
+            "the caller, in each function on ``row_via``, or in a call made "
+            "between that is handed the object.  Only an assignment on a path "
+            "the record follows the object by is seen, as with ``can`` itself."
+            "  The entries are in the order of their ``at`` texts, compared as "
+            "strings, not the order they run in."
+        ),
+    )
+    runs: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the runs (:attr:`FunctionPrintsNode.runs`) the point "
+            "is in: the caller's, or ``runs_in``'s.  Empty with ``run_hole``."
+        ),
+    )
+    runs_in: str = Field(
+        default="",
+        description=(
+            "The function whose runs ``runs`` are, where the caller prints "
+            "through a logger it is handed: the one that builds it -- "
+            "``PostProcessorThread.post_process_tasks`` for the ``tmpLog`` "
+            "``doPostProcess`` is handed.  Empty for the caller's own."
+        ),
+    )
+    run_hole: str = Field(default="", description="Why ``runs`` is empty.")
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -589,6 +766,25 @@ class Branch(BaseModel):
     must_hole: str = Field(
         default="",
         description="Why ``must_prints`` or ``must_names`` is ``None``.",
+    )
+    history: Optional[list[HistoryPair]] = Field(
+        default=None,
+        description=(
+            "The calls that write a history row in the same pass as this "
+            "branch's write, at its function or at the first caller on each "
+            "way up that has one -- see :mod:`bamboo.codemap.panda.runs`.  "
+            "``[]`` when read and none is; ``None`` when not read, with "
+            "``history_hole``: a subject no history table records."
+        ),
+    )
+    history_hole: str = Field(
+        default="",
+        description=(
+            "Why ``history`` is ``None``; beside a list, where the walk up "
+            "stopped short of an end, so the list may hold less than every pair; "
+            "beside an empty list, also a way up it did not take because what "
+            "the calls on it hand rule it out."
+        ),
     )
 
 
@@ -2326,6 +2522,10 @@ class MapFragment(BaseModel):
 
     map_id: str
     derived_from: str
+    #: The instance record the calls were read with -- ``<path>: <instance>, <n> value(s), <digest>``
+    #: (:func:`~bamboo.codemap.calls.read_recorded`) -- or ``""``, the code alone.  A reader computing at query
+    #: time reads module names the same way only with the same record.
+    instance_record: str = ""
     subjects: list[SubjectNode] = Field(default_factory=list)
     entities: list[EntityNode] = Field(default_factory=list)
     junctions: list[JunctionNode] = Field(default_factory=list)
@@ -2405,12 +2605,13 @@ class MapFragment(BaseModel):
     def extend(self, other: "MapFragment") -> None:
         """Merge *other* into this fragment in place.
 
-        Every part but the two that name the build, read off the model rather
-        than listed here: a list of fields written out by hand is a second
-        copy of the model, and the part added next is the one it drops.
+        Every part but the three that name the build and its inputs, read off
+        the model rather than listed here: a list of fields written out by hand
+        is a second copy of the model, and the part added next is the one it
+        drops.
         """
         for part in type(self).model_fields:
-            if part in ("map_id", "derived_from"):
+            if part in ("map_id", "derived_from", "instance_record"):
                 continue
             held = getattr(self, part)
             if isinstance(held, dict):
@@ -3963,6 +4164,159 @@ class PrintStatement(BaseModel):
             f"{LOG_FILES_PARTLY!r} or {LOG_FILES_OF_MODULE!r}."
         ),
     )
+    runs: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the owner's runs (:attr:`FunctionPrintsNode.runs`) "
+            "whose logger this call can print through.  Empty where its "
+            "logger is none of them -- a parameter, the module's logger -- "
+            "and then the rows' ``prefix_hole`` says how it is bound."
+        ),
+    )
+
+
+#: :attr:`RunKey.columns` for a mark the logger stamps with the time it was made.
+RUN_KEY_TIME = "time"
+
+#: Each :attr:`KeyStop.kind`, and how :meth:`KeyStop.said` says it.  The
+#: wording is here rather than in the dump: a reader gets this module's, and
+#: rewording it rebuilds no map.
+KEY_STOPS: dict[str, str] = {
+    "parameter": "{name} is a parameter of {at}: what the callers hand is not read",
+    "outside": "{name} is bound outside {at}",
+    "bound": "{name} is {what} at {at}",
+    "element": "{name} is an element of {what} at {at}",
+    "value": "it is {what}",
+    "undeclared": "the class of {name} is not declared at {at}",
+    "several": "{name} is declared as several classes at {at}: {what}",
+    "declaration_failed": "reading the declaration of {name} failed: {what}",
+    "no_row": "{name} holds no row",
+    "spread": "handed to *args or **kwargs at {at}",
+    "hole": "handed to a call not placed at {at}",
+    "cut": "following it from {at} stopped at its cap on {what}, so it can be used further than read",
+    "capped": "a path holding it, {name}, has too many parts to be followed, at {at}",
+    "no_class": "keys {name}, a table no class holds, at {at}",
+    "not_declared": "keys {name}, which {what} does not declare, at {at}",
+    "no_use": "no use of it in {at} or the calls it is handed to names a column",
+    "failed": "reading its uses failed: {what}",
+}
+
+
+class KeyStop(BaseModel):
+    """Where one reading of a run key's value ended without a column of a class holding rows (:attr:`RunKey.stops`).
+
+    ``pandaID`` handed to ``Watcher.__init__`` is a parameter there, and what
+    the callers hand is not read: ``KeyStop(kind="parameter", name="pandaID",
+    at=["Watcher.__init__"])``.  One stop said at several sites is one, with
+    each site.
+    """
+
+    kind: str = Field(description=f"What ended it: one of {', '.join(KEY_STOPS)}.")
+    name: str = Field(
+        default="",
+        description=(
+            "What it is said of: the value read there (``pandaID``, "
+            "``self.masterIndexName``), the class (``AdderGen``), or the "
+            "table's column (``T_TASK.taskID``)."
+        ),
+    )
+    what: str = Field(
+        default="",
+        description=(
+            "What that is there: ``what destination_blocks.items() returns``, "
+            "``a literal``; the classes or the class a column is not declared "
+            "by; an error's name."
+        ),
+    )
+    at: list[str] = Field(
+        default_factory=list,
+        description="``owner:line`` of each site, or the function, in the order met.",
+    )
+
+    def said(self) -> str:
+        return KEY_STOPS[self.kind].format(name=self.name, what=self.what, at=", ".join(self.at))
+
+
+class RunKey(BaseModel):
+    """One hole of a run's mark, and the columns the value it holds is.
+
+    A reader matching a history row to a run (the querier's F1) asks which
+    column of the row's class the run's key is.  A declaration says it where
+    the hole is an attribute of a name declared as one class.  Elsewhere the
+    value is read where it is used -- the key of a row a statement writes, a
+    term a statement picks its rows by, in the function and wherever it is
+    followed from there (:func:`bamboo.codemap.objects.follow`: the calls it
+    is handed to, whole or inside a list) -- and where a binding in the
+    function gives it an attribute of a declared name
+    (:mod:`bamboo.codemap.panda.keycolumns`).  ``TaskRefinerThread.runImpl``'s
+    ``jediTaskID`` is the key of the rows ``getTaskParamsWithID_JEDI`` reads;
+    ``killJob``'s ``pandaID`` the key of the job rows it updates.
+
+    **Each column is one use, not every one.**  A column is what the value
+    is at the use it was read at, so the columns can name two attributes of
+    one class -- ``retryTask_JEDI``'s ``jediTaskID`` keys the task and picks
+    its children by ``parent_tid`` -- and a value used nowhere the reading
+    goes may be a column it does not name.  What the callers hand is not
+    read.
+    """
+
+    expression: str = Field(description="What fills the hole, as source; empty for a time stamp.")
+    columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``Class.attribute`` for each column the value is read to be, sorted: "
+            "the declared attribute, then those its uses say, spelled as the "
+            "class declares the attribute; a table no class holds gives none.  "
+            f"[{RUN_KEY_TIME!r}] for a time stamp."
+        ),
+    )
+    stops: list[KeyStop] = Field(
+        default_factory=list,
+        description=(
+            "Where ``columns`` names no column of a class holding rows, where "
+            "each reading stopped: what the value is bound to first, then its "
+            "uses.  Empty wherever one is named, and for a time stamp."
+        ),
+    )
+
+    @property
+    def why(self) -> str:
+        """Why ``columns`` names no column of a class holding rows: ``stops``, said (:data:`KEY_STOPS`)."""
+        return "; ".join(stop.said() for stop in self.stops)
+
+
+class RunStart(BaseModel):
+    """Where a run starts: a logger bound with the mark every line printed through it carries.
+
+    ``tmpLog = MsgWrapper(logger, f"<jediTaskID={taskSpec.jediTaskID}>")``
+    starts one.  The lines printed through ``tmpLog`` until it is bound again
+    are that run's, and the mark says which task they are about -- the key a
+    reader picks one run's lines out of a log by.  The builders, and which
+    argument each takes its mark from, are PanDA's logger factories
+    (:data:`bamboo.codemap.panda.runs.BUILDERS`).  An object's run is a
+    logger the class's ``__init__`` binds to ``self`` -- ``Watcher`` and
+    ``AdderGen`` keep one per job -- and holds the lines of every method.
+    """
+
+    line: int = Field(description="The line of the statement that binds the logger.")
+    at: str = Field(
+        description=(
+            "The function that statement is in: the owner itself, or the "
+            "class's ``__init__`` for an object's run."
+        )
+    )
+    logger: str = Field(description="The name bound: ``tmpLog``, ``self.logger``.")
+    builder: str = Field(description="The factory called: ``LogWrapper``, ``MsgWrapper``, ``create_tagged_logger``, ``make_logger``.")
+    mark: str = Field(
+        default="",
+        description=(
+            "The argument the mark is made from, holes as ``{}``: "
+            "``<jediTaskID={}>``, ``PandaID={}``.  Empty for none and for a "
+            "time stamp."
+        ),
+    )
+    key: list[RunKey] = Field(default_factory=list, description="One per hole of the mark, in order; a time stamp's one.")
+    object: bool = Field(default=False, description="Whether it is an object's run, bound to ``self`` in ``__init__``.")
 
 
 class FunctionPrintsNode(BaseNode):
@@ -4033,6 +4387,13 @@ class FunctionPrintsNode(BaseNode):
         description=(
             "Every file one of the function's statements lands in: the union "
             "of the statements' ``log_files``."
+        ),
+    )
+    runs: list[RunStart] = Field(
+        default_factory=list,
+        description=(
+            "The runs the function's lines can be in: each logger it binds by "
+            "a factory, and its object's run -- see :class:`RunStart`."
         ),
     )
     anchor: Optional[Anchor] = None
@@ -4118,6 +4479,277 @@ class ReachHole(BaseModel):
     )
 
 
+class HistoryCall(BaseModel):
+    """A call of a history writer, and the values the row it writes can record.
+
+    Read once per call: every :class:`HistoryPair` whose call can lead here
+    names it in ``writes``.  ``values`` are the outcomes of the function's
+    arms of ``subject`` whose write can reach the call; ``passed`` is a way
+    to the call on which no such arm writes, so the row can record the value
+    the object came in with or was given elsewhere.  ``TASKS_STATUSLOG``
+    copies the task row's status as it stands (``INSERT ... SELECT``), and a
+    task arm written by SQL has the line of the statement that decides it,
+    not of the execute: there the values are as near as the arms' lines are.
+    """
+
+    line: int = Field(description="The call's line.")
+    subject: str = Field(description="The subject whose history the writer records: ``JobSpec.jobStatus``.")
+    values: list[str] = Field(default_factory=list, description="The outcomes of the arms that reach the call, sorted.")
+    passed: bool = Field(default=False, description="Whether a way to the call passes no arm of the subject.")
+    hole: str = Field(default="", description="Why ``values`` is not read; empty where it is.")
+
+
+#: How :class:`PathBinding` ties a name to a path: ``x = p`` (or ``self.f = p``), ``for x in p``,
+#: ``x.append(p)``, ``x = f(...)`` and ``return p``.  A label of the statement: what the binding means is
+#: in its name and path, which say where each holds the object.
+BIND_ALIAS = "alias"
+BIND_ELEMENT = "element"
+BIND_FILL = "fill"
+BIND_RESULT = "result"
+BIND_RETURN = "return"
+
+
+class PathAssign(BaseModel):
+    """An attribute assigned on an object a function names by a path -- read by :mod:`bamboo.codemap.objects`.
+
+    A path is a name of the function -- a parameter, ``self`` or a local --
+    then attributes and subscripts: ``[]`` for an element at a position not
+    known, ``[i]`` for a tuple's i-th, ``['k']`` for the value under a
+    literal key: ``self.job``, ``jobs[]``, ``varMap[':PandaID']``.  What a
+    call returns where no name takes it is named by the call,
+    ``<result@line:col>``.
+    Only an attribute some spec declares a column of is kept (``attrs``),
+    and a write whose name is computed -- ``setattr(job, name, v)``, a
+    spec's own ``pack`` -- carries the role :mod:`bamboo.codemap.panda.specwrites`
+    gives it.
+    """
+
+    line: int
+    path: str = Field(description="The object assigned on, in this function's names.")
+    attrs: list[str] = Field(description="The attributes it can set; ``*`` for any the class declares.")
+    how: str = Field(
+        description=(
+            "``=`` or ``+=``; for a computed name the specwrites role -- ``row_read`` sets the row's own "
+            "values, ``construct`` a new object's first ones."
+        )
+    )
+
+
+class PathBinding(BaseModel):
+    """A name of a function that holds what a path holds: ``name`` holds, where it says, what ``path`` holds where it says.
+
+    ``updated = [job]`` is ``updated[]`` holding ``job``; ``for job in jobs``
+    is ``job`` holding ``jobs[]``; ``status, job = f()`` is ``job`` holding
+    what is at ``[1]`` of what ``f`` returns.
+    """
+
+    line: int
+    name: str = Field(
+        description=(
+            "The name bound, and where in it: a local, or a path written to (``self.job`` in ``self.job = job``); "
+            "``<return>`` for what the function returns."
+        )
+    )
+    path: str = Field(
+        description=(
+            "The path it holds; for :data:`BIND_RESULT` where in what the call returns: empty for all of it, "
+            "``[1]``, ``[]``, ``.job``."
+        )
+    )
+    how: str = Field(
+        description=(
+            ":data:`BIND_ALIAS` -- an assignment; :data:`BIND_ELEMENT` -- a loop over path; :data:`BIND_FILL` -- "
+            "the statement puts path into name (a literal, ``append``); :data:`BIND_RESULT` -- name is what the "
+            "call at the line returns; :data:`BIND_RETURN` -- the function returns path."
+        )
+    )
+    to: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For :data:`BIND_RESULT`: the :attr:`ReachNode.owner` of each function the call lands in; empty for "
+            "one outside the corpus."
+        ),
+    )
+
+
+class CallBinding(BaseModel):
+    """A path a call hands on, and the parameter of the function it lands in that takes it."""
+
+    line: int
+    to: str = Field(description="The :attr:`ReachNode.owner` the call lands in; empty where it is a hole.")
+    parameter: str = Field(
+        description="``self`` for the receiver; empty where the call does not say which parameter takes it (``*args``)."
+    )
+    path: str
+    at: str = Field(
+        default="",
+        description=(
+            "Where in what the parameter takes the path is: empty for all of it; ``[]`` for an element of a list "
+            "handed, ``['jediTaskID']`` for a dict's value."
+        ),
+    )
+    why: str = Field(default="", description="Why a hole is one, where :attr:`ReachNode.holes` does not say.")
+
+
+#: The column of a key a loop over a mapping names by the mapping's key: ``WHERE {k}=:cr_{k}`` for each ``k`` of
+#: ``criteria``, its value ``criteria[k]``.  Its :attr:`WrittenValue.path` is the mapping's element, ``criteria[]``:
+#: the row is named, for each key the mapping holds, by the column of that name.
+MAP_KEY = "[]"
+
+
+class WrittenValue(BaseModel):
+    """Where one column a statement writes takes its value from, or one key it picks its row by."""
+
+    column: str = Field(description="The column; for a key, :data:`MAP_KEY` where the column is a mapping's key.")
+    path: str = Field(
+        default="",
+        description="The value as a path of the function -- ``job.jobStatus``, ``pandaID`` -- where it is one.",
+    )
+    value: str = Field(
+        default="",
+        description="Otherwise the value as the code or the statement spells it: ``literal:'failed'``, ``expression:CURRENT_DATE``.",
+    )
+    why: str = Field(default="", description="Why neither is read; empty where one is.")
+
+
+class DbWrite(BaseModel):
+    """A statement a function runs that writes rows: the columns it writes from what, and the row it picks.
+
+    The record :func:`bamboo.codemap.objects.may_change` reads beside the
+    objects': a write takes its values from an object the function holds --
+    the whole row of one (``job.valuesMap()``), its changed attributes
+    (``onlyChanged=True``), one attribute bound by name -- or from another
+    value, and lands on the row its keys name.
+    """
+
+    lines: list[int] = Field(
+        description=(
+            "The lines of the calls that run it with these values and keys: a statement run from two places"
+            " with other ones is two writes."
+        )
+    )
+    table: str
+    kind: str = Field(description="``insert`` or ``update``.")
+    columns: list[WrittenValue] = Field(default_factory=list, description="Each column it writes by name, a bind read once per value.")
+    whole: str = Field(
+        default="",
+        description="The path whose ``valuesMap()`` is the bind map: every column of the row comes from that object.",
+    )
+    changed: bool = Field(default=False, description="The map holds only the attributes changed since the object was read.")
+    unread: bool = Field(
+        default=False, description="It names columns at run time that are not read: which of the row's columns it writes is not known."
+    )
+    keys: list[WrittenValue] = Field(
+        default_factory=list, description="The ``WHERE`` terms that name its row: ``PandaID=:PandaID``."
+    )
+    new_row: bool = Field(
+        default=False, description="An ``INSERT`` whose row is new: its key comes from a sequence (``useSeq=True``)."
+    )
+
+
+#: The lines :class:`ClearedLines` reads a function's entry and its normal exit as.
+ENTRY_LINE = 0
+EXIT_LINE = -1
+
+
+class LoopLines(BaseModel):
+    """A loop of a function whose body holds lines of its record: the line of its header and its body's first and last."""
+
+    line: int
+    start: int
+    end: int
+    again: bool = Field(default=False, description="A ``while``: its test runs again after each pass of its body.")
+
+
+class LineStart(BaseModel):
+    """A line of the record whose statement starts on another: a call on the second line of a statement."""
+
+    line: int
+    start: int
+
+
+class LinesApart(BaseModel):
+    """A line of a function and lines of others the order of its lines says it can run before, and it cannot."""
+
+    line: int
+    lines: list[int]
+
+
+class Renewed(BaseModel):
+    """A name a loop binds to another object between a line and a later pass's line, on every way.
+
+    Another object: an element of what the loop or a ``with`` holds, a
+    call's result, a literal, or a path rooted at a name the loop binds so
+    -- ``TaskRefinerThread.runImpl`` binds ``impl`` to a new refiner for each
+    task, and ``tmpTaskSpec`` to its ``impl.taskSpec``; ``job = self.job``
+    gives ``job`` the object every pass holds.  A way from a line to a line
+    of a later pass goes round the loop's top, so every way passes such a
+    binding where every way from the first line to the top does
+    (:attr:`after`) or every way from the top to the second does
+    (:attr:`before`).
+    """
+
+    loop: int = Field(description="The :attr:`LoopLines.line` of the loop.")
+    name: str = Field(description="The name, without its version: ``impl`` of ``impl@166``.")
+    after: list[int] = Field(default_factory=list)
+    before: list[int] = Field(default_factory=list)
+
+
+class LineOrder(BaseModel):
+    """Which lines of a function's assignments, writes and calls can run before which: :attr:`ReachNode.order`.
+
+    Before on one run: on one pass, by a way through the function with no
+    jump away from the second line (``continue``, ``return``, ``break``) and
+    no test parting the two (:func:`bamboo.codemap.panda.pathcond.parted`);
+    or on a later pass of a loop holding both, by a way round it whose
+    passes no test parts.  Most of it the lines' order says, and only the
+    rest is here.  A line can run before another on one pass where its
+    statement starts no later; one starting later can run before it only on
+    a later pass of a loop holding both, or before a ``while``'s test on its
+    next pass.  :attr:`apart`, :attr:`rounds` and :attr:`before` are the
+    pairs where that is not so: ``retryJob`` writes the job back at 4146 under ``if not
+    getNewPandaID`` and sets its ``parentID`` at 4171 in the ``else`` (4171
+    apart from 4146); ``TaskRefinerThread.runImpl`` updates the task at 226
+    and goes on to the next task, so its register at 597 follows only on a
+    later pass (226 round to 597).
+    """
+
+    loops: list[LoopLines] = Field(default_factory=list)
+    starts: list[LineStart] = Field(default_factory=list)
+    apart: list[LinesApart] = Field(
+        default_factory=list, description="The lines it cannot run before on one run, although their order says it can."
+    )
+    rounds: list[LinesApart] = Field(
+        default_factory=list,
+        description="The lines it runs before only on a later pass of a loop holding both, although it starts no later.",
+    )
+    before: list[LinesApart] = Field(
+        default_factory=list,
+        description="The lines it can run before on one pass, although their order says it cannot (none expected).",
+    )
+    renewed: list[Renewed] = Field(default_factory=list)
+
+
+class ClearedLines(BaseModel):
+    """Lines of a function every way between which passes a reset of what changed on an object.
+
+    A spec's changed attributes are what ``bindUpdateChangesExpression`` and
+    ``valuesMap(onlyChanged=True)`` write, and ``resetChangedAttr`` /
+    ``resetChangedList`` take them back out.  ``registerTaskInOneShot_JEDI``
+    resets ``jediTaskID`` on ``taskSpec`` at 5800, before its ``UPDATE`` at
+    5832: every way from its entry to 5832 passes it.  A call of a function
+    that resets what it is handed on every way to its normal exit is a reset
+    where it is called (``resetRefinedAttrs``).
+    """
+
+    path: str = Field(description="The object reset, as a path of the function.")
+    columns: list[str] = Field(
+        description="The attributes reset, each by these resets; ``*`` for all of them (``resetChangedList``)."
+    )
+    line: int = Field(description=f"Where the change was made: a line, or {ENTRY_LINE} for before the function was entered.")
+    lines: list[int] = Field(description=f"Each line, or {EXIT_LINE} for its normal exit, every way to which from :attr:`line` passes the reset.")
+
+
 class ReachNode(BaseNode):
     """Where one function can go on to, for every function in the corpus: the record ``reach`` is answered from.
 
@@ -4174,6 +4806,46 @@ class ReachNode(BaseNode):
             "ones its closure relied on, so a reader dropping a mover can "
             "say what that rests on."
         ),
+    )
+    history: list[HistoryCall] = Field(
+        default_factory=list,
+        description=(
+            "The calls it makes of a function that writes a history row, each "
+            "with the values the row can record -- see "
+            ":mod:`bamboo.codemap.panda.runs`.  Not where the closure goes: "
+            "the calls are in :attr:`calls` too."
+        ),
+    )
+    assigns: list[PathAssign] = Field(
+        default_factory=list,
+        description="The columns it assigns on an object it names by a path (:mod:`bamboo.codemap.objects`).",
+    )
+    bindings: list[PathBinding] = Field(
+        default_factory=list, description="Its names that hold what a path holds."
+    )
+    call_bindings: list[CallBinding] = Field(
+        default_factory=list,
+        description=(
+            "The paths its calls hand on, receivers included, and the parameter each lands in.  "
+            "A call into code outside the corpus is not here: that code assigns no attribute of what it is handed "
+            "(:data:`bamboo.codemap.objects.PREMISES`)."
+        ),
+    )
+    writes: list[DbWrite] = Field(
+        default_factory=list,
+        description="The statements it runs that write rows, with where each value and key comes from.",
+    )
+    order: Optional[LineOrder] = Field(
+        default=None,
+        description=(
+            "Which lines of its assignments, writes and calls can run before which: read by "
+            ":func:`bamboo.codemap.objects.may_change`, an assignment changes a row at a write only before it.  "
+            "None for a function with fewer than two."
+        ),
+    )
+    cleared: list[ClearedLines] = Field(
+        default_factory=list,
+        description="The lines every way between which passes a reset of an object's changed attributes.",
     )
     anchor: Optional[Anchor] = None
 

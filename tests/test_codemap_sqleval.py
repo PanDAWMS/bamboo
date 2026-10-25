@@ -495,6 +495,62 @@ def f(self, a, b):
     )
 
 
+OPPOSITES = """
+def f(self, kind):
+    if FIRST:
+        sql = "UPDATE T SET a=:a"
+    else:
+        sql = "UPDATE T SET b=:b"
+    if SECOND:
+        sql += ",c=:c"
+    self.cur.execute(sql, varMap)
+"""
+
+
+@pytest.mark.parametrize(
+    "first, second, apart",
+    [
+        ('kind not in ["output", "log"]', 'kind in ["output", "log"]', True),
+        ('kind in ["output", "log"]', 'kind not in ["output", "log"]', True),
+        ("kind != 'log'", "kind == 'log'", True),
+        ("kind is None", "kind is not None", True),
+        ("kind < 1", "kind >= 1", False),
+    ],
+)
+def test_a_test_and_its_opposite_are_taken_the_opposite_way(first, second, apart):
+    """``insertNewJob`` sets its flag under ``if file.type not in ["output", "log"]``
+    and adds ``,outPandaID=:PandaID`` under ``if file.type in ["output", "log"]``.
+    Spelled apart, they were two tests each spelled once, and the clause met the
+    flag's in a text no pass builds.  ``<`` and ``>=`` are not each other's
+    negation for every value (a set's order, a NaN) and stay two tests."""
+    got, _ = _texts(OPPOSITES.replace("FIRST", first).replace("SECOND", second))
+    both = ["UPDATE T SET a=:a", "UPDATE T SET b=:b,c=:c"]
+    if apart:
+        assert got.get(9) == both
+    else:
+        assert got.get(9) == sorted(both + ["UPDATE T SET a=:a,c=:c", "UPDATE T SET b=:b"])
+
+
+@pytest.mark.parametrize("test", ["numSlots == -1", "numSlots == +1", 'numSlots in {"a", "b"}'])
+def test_a_signed_number_and_a_set_display_are_values_a_test_is_remembered_on(test):
+    """``setNumSlotsForWP`` builds its ``DELETE`` under ``if numSlots == -1`` and
+    runs it under the ``else`` of ``if numSlots != -1``: a test comparing with a
+    signed number or a set display is a fact as one with a list is."""
+    src = f"""
+def f(self, numSlots):
+    if {test}:
+        sql = "DELETE FROM T"
+    else:
+        sql = "UPDATE T SET n=:n"
+    if {test}:
+        self.cur.execute(sql + " WHERE a=:a", varMap)
+    else:
+        self.cur.execute(sql, varMap)
+"""
+    got, _ = _texts(src)
+    assert (got.get(8), got.get(10)) == (["DELETE FROM T WHERE a=:a"], ["UPDATE T SET n=:n"])
+
+
 def test_a_container_changed_through_a_chain_of_calls_is_not_empty():
     """``_read_unprocessed_inputs``: ``m.setdefault(k, set()).add(v)``."""
     src = """
@@ -772,6 +828,30 @@ def f(self, criteria):
     passes = marked.split(sqltext.REPEAT_OPEN)[1].split(sqltext.REPEAT_CLOSE)[0]
     assert sorted(passes.split(" AND ")) == ["{} IS NULL", "{}=:cr_{}"]
     assert sqltext.plain(marked) == run.text
+
+
+def test_a_part_a_loop_repeats_keeps_what_each_hole_of_its_passes_is():
+    """``updateTask_JEDI`` names a column and a bind by the key of ``criteria`` in each pass: ``{k}=:cr_{k}``.  A pass's
+    holes were rendered ``{}`` and what they were was dropped, so no reader could tell the term names its column by
+    the loop's key.  The part keeps them (:attr:`sqleval.HoleAt.inner`), and the reading says what each ``{}`` of it
+    is, counted as sqltext names them (:func:`sql.reading_holes`): the schema's, then the pass's two."""
+    src = """
+def f(self, criteria):
+    sql = "UPDATE {}.T SET a=:a WHERE ".format(schema)
+    for k, v in criteria.items():
+        crKey = f":cr_{k}"
+        sql += f"{k}={crKey} AND "
+    sql = sql[:-4]
+    self.cur.execute(sql, varMap)
+"""
+    _got, reading = _texts(src)
+    run = reading.cover(8)[0][0]
+    assert sql.reading_text(run.text, run.holes).endswith(
+        f"WHERE {sqltext.REPEAT_OPEN}{{}}=:cr_{{}}{sqltext.REPEAT_CLOSE} "
+    )
+    first, column, bind = sql.reading_holes(run.text, run.holes)
+    assert first.source == "schema"
+    assert [(hole.source, hole.stmt.lineno) for hole in (column, bind)] == [("k", 6), ("k", 5)]
 
 
 def test_a_list_of_objects_a_loop_appends_to_is_not_one_part():

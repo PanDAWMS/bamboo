@@ -31,6 +31,8 @@ built on, and reads the same trees -- :func:`parsed`.
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
@@ -94,6 +96,52 @@ _LIBRARY_CONTAINERS = {
 #: placed there (:attr:`Placed.thread`).  ``pandacommon``'s ``GenericThread``
 #: is one too, but outside the corpus nothing says so.
 _STARTERS = {("threading", "Thread"), ("multiprocessing", "Process")}
+#: The standard library's copies, and the method a class defines to copy
+#: itself some other way.  ``copy.copy(x)`` is an object of ``x``'s class --
+#: typeshed states ``def copy(x: _T) -> _T`` -- unless that class defines the
+#: hook, and then it is what the hook returns.  The map reads the corpus's
+#: annotations and not typeshed's, so it is said here.
+_COPIES = {("copy", "copy"): "__copy__", ("copy", "deepcopy"): "__deepcopy__"}
+
+
+class RecordedClass(NamedTuple):
+    """A class in an instance's record, by the dotted path Python prints it with."""
+
+    dotted: str
+
+
+#: An instance's recorded run-time values of module names, ``{(file, name): value}`` -- what a configuration made of
+#: them, which the code alone cannot say: ``panda_config.g_pluginMap`` is filled by importing the classes the
+#: configuration names, and a name that does not import is passed over (:func:`read_recorded`).
+Recorded = dict[tuple[str, str], object]
+
+
+def _recorded_value(value: object) -> object:
+    if isinstance(value, dict):
+        if set(value) == {"class"}:
+            return RecordedClass(str(value["class"]))
+        return {key: _recorded_value(one) for key, one in value.items()}
+    if isinstance(value, list):
+        return [_recorded_value(one) for one in value]
+    return value
+
+
+def read_recorded(path: Path) -> tuple[Recorded, str]:
+    """The record of an instance at *path*, and its stamp ``<path>: <instance>, <n> value(s), <digest>``.
+
+    A JSON object: ``instance`` (which deployment), ``taken`` (by whom, when, by what command) and ``values``, a list
+    of ``{"file", "name", "value"}`` -- the name's value in that module once the code's own setup has run, a class
+    written ``{"class": "<dotted path>"}``.  Another instance, another experiment's included, may configure other
+    classes: a build without a record reads the names as the code alone says them.  A name no module-level
+    assignment of the corpus binds stops :class:`Types`: a record of another tree.
+    """
+    raw = path.read_bytes()
+    held = json.loads(raw)
+    recorded: Recorded = {
+        (str(one["file"]), str(one["name"])): _recorded_value(one["value"]) for one in held.get("values", [])
+    }
+    stamp = f"{path}: {held.get('instance', 'an instance not named')}, {len(recorded)} value(s), "
+    return recorded, stamp + hashlib.sha256(raw).hexdigest()[:16]
 
 
 #: Parsed modules shared by every reading of the same files.  A walk is made
@@ -165,6 +213,10 @@ def _roots_key(roots: dict[str, Path]) -> tuple:
     return tuple(sorted((package, str(root)) for package, root in roots.items()))
 
 
+#: What :meth:`Calls.route_constant` answers where the route fixes no constant.
+UNSET = object()
+
+
 class Target(NamedTuple):
     """One function definition a call can land in, and the classes its object can be when it runs there.
 
@@ -201,12 +253,28 @@ class Placed(NamedTuple):
     there (:data:`_STARTERS`).  It returns at once, and nothing a definition
     returns comes back through it: a reader of what a call returns takes
     nothing from these.
+
+    *forwarded*: the call is made on an object built with a function, and the
+    method called hands that function its own arguments
+    (:meth:`Calls.forwarding`) -- ``timed_method.run(job_id, ...)`` after
+    ``timed_method = TimedMethod(global_task_buffer.updateJobStatus, t)``.
+    The targets are the function's, handed the call's arguments as a call of
+    it would (:func:`bind`); these are the expressions the function was
+    handed as, whose receiver is the object it runs on (:meth:`Calls.made_on`).
+    The method returns nothing, and nothing the function returns comes back
+    through the call.
     """
 
     targets: tuple[Target, ...] = ()
     unplaced: str = ""
     on_class: bool = False
     thread: bool = False
+    forwarded: tuple[ast.expr, ...] = ()
+
+    @property
+    def returns_none(self) -> bool:
+        """Whether the call's value is ``None`` whatever the targets return: *thread* or *forwarded*."""
+        return self.thread or bool(self.forwarded)
 
 
 #: The owner of a call in a module's own body -- the walk's spelling of the
@@ -387,6 +455,15 @@ class Calls:
         #: The parameters :meth:`handed_classes` is reading now: one asked
         #: again on the way is a cycle, and says nothing.
         self._handing: set[tuple[str, int, str]] = set()
+        #: :meth:`forwarding` by class, the locals :meth:`_wrapped` reads, and
+        #: what :meth:`_wrappings` finds across the corpus.
+        self._forwarders: dict[tuple[str, int], dict[str, tuple[str, str]]] = {}
+        self._wraps: dict[tuple[int, str], Optional[tuple[list[tuple[tuple[str, ast.ClassDef], ast.Call]], list[ast.Call]]]] = {}
+        self._wrapping_names: Optional[set[str]] = None
+        self._wrapping_classes: Optional[set[str]] = None
+        self._wrapped_by: Optional[list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]]] = None
+        self._wrapped_spellings: Optional[dict[str, set[str]]] = None
+        self._forwarded_reads: Optional[set[int]] = None
         types.handed_to = self.handed_classes
 
     # -- where a call lands -------------------------------------------------
@@ -498,6 +575,10 @@ class Calls:
         if named is not None:
             placed = self._method_of(named, called.attr)._replace(on_class=True)
             return placed._replace(targets=tuple(one._replace(bound=self._handed_self(file, func, call, bound)) for one in placed.targets))
+        # ``timed_method.run(job_id, ...)``: the function it was built with, called with them.
+        forwarded = self._handed_on(file, func, call)
+        if forwarded is not None:
+            return forwarded
         declared = self.types.declared(file, func, receiver)
         if declared is not None:
             # ``self.conn: WrappedOracleConn | WrappedPostgresConn`` -- each
@@ -653,6 +734,331 @@ class Calls:
                     return True
         return False
 
+    # -- a call a wrapper hands on -------------------------------------------
+
+    def forwarding(self, declared: tuple[str, ast.ClassDef], name: str) -> Optional[str]:
+        """The parameter of *declared*'s ``__init__`` holding the function its method *name* calls with its own arguments.
+
+        ``TimedMethod(method, timeout)`` keeps ``self.method = method``; its
+        ``run(self, *var, **kwargs)`` starts ``threading.Thread(target=self,
+        args=var, kwargs=kwargs)`` and joins it, and the thread calls
+        ``__call__(self, *var, **kwargs)``, which sets ``self.result =
+        self.method(*var, **kwargs)``: ``run(a, b)`` calls ``method(a, b)``
+        and returns, with nothing, once it has returned.  Python's rules, read
+        where every step is said: the method takes its object, ``*var`` and
+        maybe ``**kw`` and nothing else, returns no value, and one statement
+        of its own body hands them on, read nowhere else -- a call
+        ``self.<field>(*var, **kw)``, a call ``self(*var, **kw)``, or a
+        ``Thread`` or ``Process`` (:data:`_STARTERS`) built with
+        ``target=self, args=var, kwargs=kw``, started and joined by the next
+        two statements, the last two read through ``__call__`` the same way;
+        ``__init__`` binds the field to the parameter and reads the parameter
+        nowhere else; and no method of the class or its bases binds the field
+        again or reads it but to make that call.  ``None`` otherwise.
+        """
+        found = self._forwarding_methods(declared).get(name)
+        return found[1] if found is not None else None
+
+    def _forwarding_methods(self, declared: tuple[str, ast.ClassDef]) -> dict[str, tuple[str, str]]:
+        """``{method: (field, parameter)}`` for each method of *declared* :meth:`forwarding` reads."""
+        key = (declared[0], declared[1].lineno)
+        if key not in self._forwarders:
+            names = {
+                node.name
+                for _where, holder in self.types.mro(*declared)
+                for node in holder.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.args.vararg is not None
+            }
+            self._forwarders[key] = {
+                name: found for name in sorted(names) if (found := self._forwarder(declared, name)) is not None
+            }
+        return self._forwarders[key]
+
+    def _forwarder(self, declared: tuple[str, ast.ClassDef], name: str) -> Optional[tuple[str, str]]:
+        """``(field, parameter)`` where :meth:`forwarding` reads *declared*'s method *name*."""
+        found = self._handing_on(declared, name, 0)
+        init = self._method_of(declared, "__init__").targets
+        if found is None or len(init) != 1:
+            return None
+        field, made = found
+        stores = [
+            statement
+            for statement in init[0].func.body  # type: ignore[attr-defined]
+            if isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Attribute)
+            and _self_field(statement.targets[0]) == field
+            and isinstance(statement.value, ast.Name)
+        ]
+        if len(stores) != 1:
+            return None
+        parameter = stores[0].value.id  # type: ignore[attr-defined]
+        if parameter not in {one.arg for one in _positional(init[0], False)} | {
+            one.arg for one in init[0].func.args.kwonlyargs  # type: ignore[attr-defined]
+        }:
+            return None
+        if sum(isinstance(node, ast.Name) and node.id == parameter for node in ast.walk(init[0].func)) != 1:
+            return None
+        for _where, holder in self.types.mro(*declared):
+            for node in ast.walk(holder):
+                if not (isinstance(node, ast.Attribute) and node.attr == field and _self_field(node) == field):
+                    continue
+                if node is stores[0].targets[0]:
+                    continue
+                if not (isinstance(node.ctx, ast.Load) and any(node is call.func for call in made)):
+                    return None
+        return field, parameter
+
+    def _handing_on(
+        self, declared: tuple[str, ast.ClassDef], name: str, depth: int
+    ) -> Optional[tuple[str, list[ast.Call]]]:
+        """``(field, the calls of it)`` where *declared*'s method *name* hands its own arguments to ``self.<field>``."""
+        targets = self._method_of(declared, name).targets
+        if len(targets) != 1 or depth > 1:
+            return None
+        func = targets[0].func
+        args = func.args  # type: ignore[attr-defined]
+        if (
+            args.posonlyargs
+            or len(args.args) != 1
+            or args.kwonlyargs
+            or args.vararg is None
+            or _is_static(func)
+            or _is_classmethod(func)
+            or any(isinstance(node, ast.Return) and node.value is not None for node in own_nodes(func))
+        ):
+            return None
+        own, var = args.args[0].arg, args.vararg.arg
+        kw = args.kwarg.arg if args.kwarg is not None else None
+        body = func.body  # type: ignore[attr-defined]
+        for index, statement in enumerate(body):
+            value = statement.value if isinstance(statement, (ast.Expr, ast.Assign)) else None
+            if not isinstance(value, ast.Call):
+                continue
+            called = value.func
+            found: Optional[tuple[str, list[ast.Call]]]
+            if (
+                _hands_on(value, var, kw)
+                and isinstance(called, ast.Attribute)
+                and isinstance(called.value, ast.Name)
+                and called.value.id == own
+            ):
+                found = (called.attr, [value])
+            elif (_hands_on(value, var, kw) and isinstance(called, ast.Name) and called.id == own) or (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and self.types.library_class(targets[0].file, called) in _STARTERS
+                and not value.args
+                and {one.arg: getattr(one.value, "id", None) for one in value.keywords}
+                == {"target": own, "args": var, **({"kwargs": kw} if kw else {})}
+                and [_called_on(one) for one in body[index + 1 : index + 3]]
+                == [(statement.targets[0].id, "start"), (statement.targets[0].id, "join")]
+            ):
+                found = self._handing_on(declared, "__call__", depth + 1)
+            else:
+                continue
+            inside = {id(node) for node in ast.walk(statement)}
+            if found is None or any(
+                isinstance(node, ast.Name) and node.id in (var, kw) and id(node) not in inside
+                for node in own_nodes(func)
+            ):
+                return None
+            return found
+        return None
+
+    def _wrapped(
+        self, file: str, func: ast.AST, name: str
+    ) -> Optional[tuple[list[tuple[tuple[str, ast.ClassDef], ast.Call]], list[ast.Call]]]:
+        """``(each (class, construction) the local *name* is bound to, the calls made on it)`` where every use is read.
+
+        Every binding of *name* in *func* is ``name = C(...)``, ``C`` a class
+        of the corpus with a method :meth:`forwarding` reads; every other use
+        is an attribute read off it -- a call of such a method, or a field that
+        does not hold the function; it is not a parameter, not declared
+        ``global`` or ``nonlocal``, and no nested scope uses it.  So the
+        function the object was built with is called by those calls alone.
+        ``None`` otherwise.
+        """
+        key = (id(func), name)
+        if key in self._wraps:
+            return self._wraps[key]
+        self._wraps[key] = None
+        args = getattr(func, "args", None)
+        if args is None or name in {
+            one.arg for one in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if one is not None
+        }:
+            return None
+        own = {id(node) for node in own_nodes(func)}
+        built: list[tuple[tuple[str, ast.ClassDef], ast.Call]] = []
+        read: list[tuple[str, Optional[ast.Call]]] = []
+        for node in ast.walk(func):
+            if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+                return None
+            if not (isinstance(node, ast.Name) and node.id == name):
+                continue
+            parent = getattr(node, "parent", None)
+            if id(node) not in own:
+                return None
+            if isinstance(node.ctx, ast.Store):
+                if not (
+                    isinstance(parent, ast.Assign) and parent.targets == [node] and isinstance(parent.value, ast.Call)
+                ):
+                    return None
+                cls = self.types.class_named(file, parent.value.func)
+                if cls is None or not self._forwarding_methods(cls):
+                    return None
+                built.append((cls, parent.value))
+            elif isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Attribute) and isinstance(parent.ctx, ast.Load):
+                above = getattr(parent, "parent", None)
+                read.append((parent.attr, above if isinstance(above, ast.Call) and above.func is parent else None))
+            else:
+                return None
+        if not built:
+            return None
+        for cls, _construction in built:
+            methods = self._forwarding_methods(cls)
+            fields = {field for field, _parameter in methods.values()}
+            if any((attr not in methods) if call is not None else (attr in fields) for attr, call in read):
+                return None
+        found = (built, [call for _attr, call in read if call is not None])
+        self._wraps[key] = found
+        return found
+
+    def _handed_on(self, file: str, func: ast.AST, call: ast.Call) -> Optional[Placed]:
+        """Where *call*, made on a local :meth:`_wrapped` reads, lands: the functions it was built with (:attr:`Placed.forwarded`)."""
+        called = call.func
+        if not (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Name)
+            and called.attr in self._wrapping_methods()
+        ):
+            return None
+        wrapped = self._wrapped(file, func, called.value.id)
+        if wrapped is None:
+            return None
+        handed: list[ast.expr] = []
+        for cls, construction in wrapped[0]:
+            value = self._built_with(cls, construction, called.attr)
+            if value is None:
+                return None
+            handed.append(value)
+        targets: list[Target] = []
+        on_class: set[bool] = set()
+        for value in handed:
+            landed = self.named_callables(file, func, value)
+            if not landed:
+                return None
+            targets += [one for one in landed if one not in targets]
+            on_class.add(isinstance(value, ast.Attribute) and self.types.class_named(file, value.value) is not None)
+        if len(on_class) != 1:
+            return None
+        return Placed(tuple(targets), on_class=on_class.pop(), forwarded=tuple(handed))
+
+    def _built_with(self, cls: tuple[str, ast.ClassDef], construction: ast.Call, method: str) -> Optional[ast.expr]:
+        """What *construction* hands the parameter whose function *cls*'s *method* calls; ``None`` where it does not say."""
+        found = self._forwarding_methods(cls).get(method)
+        init = self._method_of(cls, "__init__").targets
+        if found is None or len(init) != 1 or found[1] not in said(construction, init[0]):
+            return None
+        return bind(construction, init[0]).get(found[1])
+
+    def _wrapping_methods(self) -> set[str]:
+        """The names of the methods :meth:`forwarding` reads, on any class of the corpus."""
+        return self._wrappers()[0]
+
+    def _wrappers(self) -> tuple[set[str], set[str]]:
+        """``(the methods' names, the classes' names)`` of every class of the corpus with a method :meth:`forwarding` reads."""
+        if self._wrapping_names is None or self._wrapping_classes is None:
+            methods: set[str] = set()
+            classes: set[str] = set()
+            for file in self.types.corpus_files():
+                tree = self.types.tree(file)
+                for node in ast.walk(tree) if tree is not None else ():
+                    if isinstance(node, ast.ClassDef) and (found := self._forwarding_methods((file, node))):
+                        methods |= set(found)
+                        classes.add(node.name)
+            self._wrapping_names, self._wrapping_classes = methods, classes
+        return self._wrapping_names, self._wrapping_classes
+
+    def _wrappings(self) -> list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]]:
+        """``(file, function, construction, the function it is built with, the calls made on it)`` across the corpus.
+
+        Each ``name = C(...)`` in a function, where :meth:`_wrapped` reads
+        *name*, for each method called on it -- a candidate list: what a call
+        lands at is :meth:`callees`'.
+        """
+        if self._wrapped_by is not None:
+            return self._wrapped_by
+        classes = self._wrappers()[1]
+        aliases = self._aliases()
+        names = classes | {other for one in classes for other in aliases.get(one, ())}
+        found: list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]] = []
+        for file in self.types.corpus_files() if names else []:
+            tree = self.types.tree(file)
+            for func in ast.walk(tree) if tree is not None else ():
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in own_nodes(func):
+                    if not (
+                        isinstance(node, ast.Assign)
+                        and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)
+                        and isinstance(node.value, ast.Call)
+                        and _head_name(node.value.func) in names
+                    ):
+                        continue
+                    wrapped = self._wrapped(file, func, node.targets[0].id)
+                    if wrapped is None:
+                        continue
+                    for cls, construction in wrapped[0]:
+                        if construction is not node.value:
+                            continue
+                        for method in dict.fromkeys(one.func.attr for one in wrapped[1]):  # type: ignore[attr-defined]
+                            value = self._built_with(cls, construction, method)
+                            if value is not None:
+                                found.append((file, func, construction, value, wrapped[1]))
+        self._wrapped_by = found
+        return found
+
+    def _forwarding_spellings(self, target: Target) -> list[str]:
+        """The names of the methods called on an object built with a function spelt as *target* (:meth:`_wrappings`)."""
+        if self._wrapped_spellings is None:
+            spelt: dict[str, set[str]] = {}
+            for _file, _func, _construction, value, made in self._wrappings():
+                held = value.attr if isinstance(value, ast.Attribute) else value.id if isinstance(value, ast.Name) else ""
+                if held:
+                    spelt.setdefault(held, set()).update(one.func.attr for one in made)  # type: ignore[attr-defined]
+            self._wrapped_spellings = spelt
+        return sorted({one for name in self.spellings(target) for one in self._wrapped_spellings.get(name, ())})
+
+    def forwarded_reads(self) -> set[int]:
+        """``id`` of each function read as a value only to build an object whose every call hands it on (:attr:`Placed.forwarded`).
+
+        ``global_task_buffer.updateJobStatus`` in ``TimedMethod(global_task_buffer.updateJobStatus, t)``:
+        nothing calls it but ``timed_method.run(...)``, placed there with its arguments.
+        """
+        if self._forwarded_reads is None:
+            self._forwarded_reads = {
+                id(value)
+                for file, func, _construction, value, made in self._wrappings()
+                if all(value in self.callees(file, func, one).forwarded for one in made)
+            }
+        return self._forwarded_reads
+
+    def made_on(self, file: str, func: ast.AST, call: ast.Call) -> Optional[ast.expr]:
+        """The expression whose object the method *call*, made in *func*, runs on; ``None`` where it says none.
+
+        The receiver it is called on -- or, for a call :attr:`Placed.forwarded`
+        a function read off an object, that object: ``timed_method.run(...)``
+        runs ``updateJobStatus`` on ``global_task_buffer``.
+        """
+        forwarded = self.callees(file, func, call).forwarded
+        if forwarded:
+            (handed, *more) = forwarded
+            return handed.value if not more and isinstance(handed, ast.Attribute) else None
+        return call.func.value if isinstance(call.func, ast.Attribute) else None
+
     def _constructed(self, file: str, func: ast.AST, holder: ast.expr) -> Optional[Placed]:
         """Where a call on a local or a ``self.<field>`` holding a class lands: that class's ``__init__``.
 
@@ -796,9 +1202,10 @@ class Calls:
 
         Every call :meth:`callees` places at *target* is here -- the
         consistency the tests and the census hold it to.  The candidates are
-        the calls spelled with any of :meth:`spellings`; the target's own
-        name comes first, so a list that was whole under that name alone
-        keeps its order.
+        the calls spelled with any of :meth:`spellings`, then with a method
+        called on an object built with a function spelt so
+        (:meth:`_forwarding_spellings`); the target's own name comes first,
+        so a list that was whole under that name alone keeps its order.
 
         A *target* bound to classes (:attr:`Target.bound`) is called by the
         calls that run it on an object of one of them: ``WorkerThread.run``
@@ -830,7 +1237,7 @@ class Calls:
             return _CALLERS[shared]
         kept = [
             site
-            for name in self.spellings(target)
+            for name in dict.fromkeys([*self.spellings(target), *self._forwarding_spellings(target)])
             for site in self._index().get(name, [])
             if any(
                 (placed.file, placed.func.lineno) == key  # type: ignore[attr-defined]
@@ -1134,6 +1541,65 @@ class Calls:
             if not outer and values:
                 found.append(((at,), values))
         return found
+
+    def route_constant(self, name: str, target: Target, sites: tuple) -> object:
+        """The constant the route *sites* hands *target*'s parameter *name*, or :data:`UNSET`.
+
+        *sites* is the call into *target* first, then outward.  Followed out
+        through each forwarder that hands the parameter on unchanged; a call
+        that does not pass it hands the default it states.  A value the
+        route's outermost caller takes as its own parameter is not fixed:
+        that caller's callers are not asked.  Nor is a forwarder's caller
+        asked for a parameter the forwarder may bind again on the route
+        before handing it on (:meth:`bound_again`): ``getTasksToBeProcessed_JEDI``
+        sets ``is_dry_run = True`` whenever ``simTasks`` is given, whatever its
+        caller passed -- on a route that gives it, not on one that leaves it
+        ``None``.
+        """
+        site = sites[0]
+        handed = self.handed(site, target).get(name)
+        if isinstance(handed, ast.Constant):
+            return handed.value
+        if (
+            isinstance(handed, ast.Name)
+            and name in self.filled(site, target)
+            and len(sites) > 1
+            and handed.id in _parameter_names(site.func)
+        ):
+            owned = self.types.method_class(site.file, site.func)
+            outer = Target(site.file, site.func, owned[1] if owned else None)
+            if self.bound_again(handed.id, outer, sites[1:]):
+                return UNSET
+            return self.route_constant(handed.id, outer, sites[1:])
+        return UNSET
+
+    def bound_again(self, name: str, target: Target, sites: tuple) -> bool:
+        """Whether *target*'s function may bind its parameter *name* again when the route *sites* calls it.
+
+        A binding the function's own tests rule out, with the constants the
+        route hands the parameters they test, is not on the route
+        (:func:`pathcond.ruled_out_by`) -- the parameter itself among them:
+        ``maxNumJobs -= ...`` under ``if maxNumJobs is not None`` never runs
+        on a route handing ``None``, and where no binding runs the name holds
+        what it was handed.  A ``del`` always may.
+        """
+        func = target.func
+        if not _rebinds(func, name):
+            return False
+        if any(isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del) for node in ast.walk(func)):
+            return True
+        again = [binding.site for binding in pathcond.bindings(func, name) if not binding.nested]
+        tested = {
+            one.id
+            for site in again
+            for test in pathcond.tests_on(site, func)
+            for one in ast.walk(test)
+            if isinstance(one, ast.Name) and one.id in _parameter_names(func)
+        }
+        constants = {
+            one: value for one in sorted(tested) if (value := self.route_constant(one, target, sites)) is not UNSET
+        }
+        return any(not pathcond.ruled_out_by(site, func, constants) for site in again)
 
     #: How many calls out a route goes, the call into the function counted.
     ROUTE_HOPS = 4
@@ -1477,6 +1943,20 @@ _YIELDING = frozenset(
 #: The classes a declaration states -- one, or each member of a union.
 Classes = frozenset[tuple[str, ast.ClassDef]]
 
+#: What a declaration binds type parameters to: (``id`` of the class taking it, its name) -> (file, the argument).
+Bound = dict[tuple[int, str], tuple[str, ast.expr]]
+
+
+def _head_name(expression: ast.expr) -> str:
+    """The name a ``Name`` or the last part of an ``Attribute`` spells: ``Generic`` for ``typing.Generic``."""
+    return expression.attr if isinstance(expression, ast.Attribute) else getattr(expression, "id", "")
+
+
+def _subscript_args(annotation: ast.Subscript) -> list[ast.expr]:
+    """The arguments of ``X[A]`` or ``X[A, B]``."""
+    inner = annotation.slice
+    return list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+
 
 def _one(classes: Optional[Classes]) -> Optional[tuple[str, ast.ClassDef]]:
     """The class of a declaration that states exactly one."""
@@ -1491,6 +1971,31 @@ def _class_key(one: tuple[str, ast.ClassDef]) -> tuple[str, str, int]:
 
 def _bound_key(bound: tuple[tuple[str, ast.ClassDef], ...]) -> tuple[tuple[str, int], ...]:
     return tuple((file, cls.lineno) for file, cls in bound)
+
+
+def _hands_on(call: ast.Call, var: str, kw: Optional[str]) -> bool:
+    """Whether *call* hands ``*var`` and ``**kw`` and nothing else -- ``*var`` alone where *kw* is ``None``."""
+    star = call.args[0] if len(call.args) == 1 else None
+    return (
+        isinstance(star, ast.Starred)
+        and isinstance(star.value, ast.Name)
+        and star.value.id == var
+        and [(one.arg, getattr(one.value, "id", None)) for one in call.keywords] == ([(None, kw)] if kw else [])
+    )
+
+
+def _called_on(statement: ast.stmt) -> Optional[tuple[str, str]]:
+    """``("thr", "start")`` for the statement ``thr.start()``; ``None`` for any other."""
+    call = statement.value if isinstance(statement, ast.Expr) else None
+    if (
+        isinstance(call, ast.Call)
+        and not call.args
+        and not call.keywords
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+    ):
+        return call.func.value.id, call.func.attr
+    return None
 
 
 def _reads_self(call: ast.Call) -> bool:
@@ -1593,13 +2098,23 @@ class Types:
     #: method".
     LINEAGE = 40
 
-    def __init__(self, roots: dict[str, Path], walked: dict[str, tuple[str, ast.Module]]):
+    def __init__(
+        self,
+        roots: dict[str, Path],
+        walked: dict[str, tuple[str, ast.Module]],
+        recorded: Optional[Recorded] = None,
+    ):
         self.roots = roots
         self.walked = walked
+        #: The instance's recorded values of module names (:func:`read_recorded`); empty reads the code alone.
+        self.recorded: Recorded = recorded or {}
         self.parsed: dict[str, Optional[ast.Module]] = {}
         self._imports: dict[str, dict[str, tuple[str, str]]] = {}
-        self._bound: dict[str, dict[str, list[ast.expr]]] = {}
+        #: :meth:`_module_bound` per file.
+        self._module_bindings: dict[str, dict[str, list[ast.expr]]] = {}
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
+        #: :meth:`bound` per function.
+        self._bound: dict[int, dict[str, list[ast.expr]]] = {}
         # (file, id(func), name, depth) -> (func, classes): see ``declared``.
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
@@ -1608,12 +2123,52 @@ class Types:
         #: ``Any`` -- :meth:`Calls.handed_classes`, set by the :class:`Calls`
         #: that reads this tree; ``None`` reads the declaration alone.
         self.handed_to: Optional[Callable[[str, ast.AST, str, int], Optional[Classes]]] = None
+        unbound = [f"{file} {name}" for file, name in sorted(self.recorded) if name not in self._module_names(file)]
+        if unbound:
+            # A record whose name the corpus does not bind would be read nowhere, and the build would read the
+            # code alone under the record's stamp: a module moved or a name renamed since the record was taken.
+            raise ValueError(f"the instance record names what no module-level assignment binds: {', '.join(unbound)}")
+
+    def _module_names(self, file: str) -> set[str]:
+        """The names an assignment at *file*'s module level binds, whatever the value."""
+        tree = self.tree(file)
+        names: set[str] = set()
+        for node in _module_statements(tree.body) if tree is not None else ():
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            names.update(target.id for target in targets if isinstance(target, ast.Name))
+        return names
 
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
         """``pathcond.assigned_expressions``, once per function."""
         if id(func) not in self._assigned:
             self._assigned[id(func)] = pathcond.assigned_expressions(func)
         return self._assigned[id(func)]
+
+    def bound(self, func: ast.AST) -> dict[str, list[ast.expr]]:
+        """The values a name is bound to, read for what it is: :meth:`assigned` less the right side of ``x op= y``.
+
+        An augmented assignment leaves a name what it was: a builtin's in-place
+        operator returns the object itself (a list's ``+=``) or a value of its
+        type, and no class of the corpus defines one; its right side is a piece
+        the text readers want (``errMsg += ...``), not a value the name takes.
+        ``candidateSpecList = []`` ... ``candidateSpecList += sitesWithWeight``
+        is a list.  A class of the corpus defining the binary operator would be
+        read past -- ``x *= y`` on a ``GlobalShares`` is a float, its
+        ``__mul__``'s -- as leaving ``x`` what it was.
+        """
+        if id(func) not in self._bound:
+            augmented = {id(node.value) for node in ast.walk(func) if isinstance(node, ast.AugAssign)}
+            self._bound[id(func)] = {
+                name: kept
+                for name, values in self.assigned(func).items()
+                if (kept := [value for value in values if id(value) not in augmented])
+            }
+        return self._bound[id(func)]
 
     # -- modules -----------------------------------------------------------
 
@@ -1816,7 +2371,7 @@ class Types:
 
     def _module_bound(self, file: str) -> dict[str, list[ast.expr]]:
         """``{name: [value]}`` for each ``name = value`` / ``name: T = value`` run at module level, the value a name or ``a.b``."""
-        if file not in self._bound:
+        if file not in self._module_bindings:
             found: dict[str, list[ast.expr]] = {}
             tree = self.tree(file)
             for node in _module_statements(tree.body) if tree is not None else ():
@@ -1829,8 +2384,8 @@ class Types:
                 if isinstance(node.value, (ast.Name, ast.Attribute)):
                     for one in names:
                         found.setdefault(one, []).append(node.value)
-            self._bound[file] = found
-        return self._bound[file]
+            self._module_bindings[file] = found
+        return self._module_bindings[file]
 
     def annotated(self, file: str, annotation: Optional[ast.expr]) -> Optional[tuple[str, ast.ClassDef]]:
         """The class an annotation states, where it states exactly one -- :meth:`annotated_all`."""
@@ -1855,9 +2410,147 @@ class Types:
                 found |= self.annotated_all(file, member) or frozenset()
             return frozenset(found) or None
         if isinstance(annotation, ast.Subscript):
-            return None
+            # ``FactoryBase[PostProcessorBase]``: a class of the corpus taking
+            # type parameters, given them, is that class (what it binds them
+            # to, :meth:`_binds`).  ``list[X]`` states no class: a container.
+            head = annotation.value
+            named = self.class_named(file, head) if isinstance(head, (ast.Name, ast.Attribute)) else None
+            return frozenset({named}) if named is not None and self.type_parameters(*named) else None
         named = self.class_named(file, annotation)
         return frozenset({named}) if named is not None else None
+
+    def type_parameters(self, file: str, cls: ast.ClassDef) -> tuple[str, ...]:
+        """The type parameters *cls* takes, as its ``Generic[...]`` base names them: ``("T",)`` for ``FactoryBase``.
+
+        Read off the class itself: a class handing its base a parameter of
+        its own (``class Sub(Base[T])``) takes none here, and the corpus has
+        none -- its two generic classes, ``FactoryBase`` and ``SpecColumn``,
+        are subclassed with a class given (``FactoryBase[WatchDogBase]``).
+        """
+        for base in cls.bases:
+            if isinstance(base, ast.Subscript) and _head_name(base.value) == "Generic":
+                return tuple(one.id for one in _subscript_args(base) if isinstance(one, ast.Name))
+        return ()
+
+    def _binds(self, file: str, annotation: Optional[ast.expr]) -> Bound:
+        """What *annotation* binds type parameters to: ``FactoryBase[PostProcessorBase]`` binds ``FactoryBase``'s ``T``."""
+        if annotation is None:
+            return {}
+        annotation = _unquoted(annotation)
+        members = _union_members(annotation)
+        if members is not None:
+            bound: Bound = {}
+            for member in members:
+                bound.update(self._binds(file, member))
+            return bound
+        if not isinstance(annotation, ast.Subscript) or not isinstance(annotation.value, (ast.Name, ast.Attribute)):
+            return {}
+        named = self.class_named(file, annotation.value)
+        if named is None:
+            return {}
+        parameters = self.type_parameters(*named)
+        arguments = _subscript_args(annotation)
+        if not parameters or len(parameters) != len(arguments):
+            return {}
+        return {(id(named[1]), name): (file, argument) for name, argument in zip(parameters, arguments, strict=True)}
+
+    def _binds_of_class(self, file: str, cls: ast.ClassDef) -> Bound:
+        """What *cls*'s bases bind type parameters to, the nearest first: ``class WatchDog(JediKnight, FactoryBase[WatchDogBase])``."""
+        bound: Bound = {}
+        for where, holder in self.lineage(file, cls):
+            for base in holder.bases:
+                for key, value in self._binds(where, base).items():
+                    bound.setdefault(key, value)
+        return bound
+
+    def _annotated_bound(
+        self, file: str, annotation: Optional[ast.expr], holder: ast.ClassDef, bound: Bound
+    ) -> Optional[Classes]:
+        """:meth:`annotated_all` of an annotation written in *holder*, each of its type parameters read as *bound* binds it.
+
+        ``instantiateImpl(...) -> T | None`` in ``FactoryBase``, on a
+        ``FactoryBase[PostProcessorBase]``, is a ``PostProcessorBase``.  A
+        parameter nothing binds names no class, as before.
+        """
+        if annotation is None:
+            return None
+        annotation = _unquoted(annotation)
+        members = _union_members(annotation)
+        if members is not None:
+            found: set[tuple[str, ast.ClassDef]] = set()
+            for member in members:
+                if isinstance(member, ast.Constant) and member.value is None:
+                    continue
+                found |= self._annotated_bound(file, member, holder, bound) or frozenset()
+            return frozenset(found) or None
+        if isinstance(annotation, ast.Name) and (id(holder), annotation.id) in bound:
+            return self.annotated_all(*bound[(id(holder), annotation.id)])
+        return self.annotated_all(file, annotation)
+
+    def _receiver_binds(
+        self, file: str, func: ast.AST, receiver: ast.expr, owner: tuple[str, ast.ClassDef]
+    ) -> Bound:
+        """What a call's receiver binds type parameters to: its class's bases, then its own declaration's arguments.
+
+        ``jobBroker.requireImpl(...)`` on a ``JobBroker(FactoryBase[JobBrokerBase])``;
+        ``self.implFactory.instantiateImpl(...)`` where ``implFactory: FactoryBase[PostProcessorBase]``.
+        """
+        bound = self._binds_of_class(*owner)
+        if not (isinstance(receiver, ast.Name) and receiver.id == "self"):
+            held = self._declaring_annotation(file, func, receiver)
+            if held is not None:
+                bound = {**bound, **self._binds(*held)}
+        return bound
+
+    def _declaring_annotation(self, file: str, func: ast.AST, expression: ast.expr) -> Optional[tuple[str, ast.expr]]:
+        """:meth:`_annotation_of`, a field read through what every assignment of it was declared as.
+
+        ``self.implFactory = implFactory`` in ``__init__``, the parameter
+        declared ``FactoryBase[PostProcessorBase]``: the field carries that
+        declaration, as an alias does in :meth:`_annotation_of`.  Asked only
+        for what a receiver binds type parameters to.
+        """
+        held = self._annotation_of(file, func, expression)
+        if held is not None or not (
+            isinstance(expression, ast.Attribute)
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id == "self"
+        ):
+            return held
+        owner = self.method_class(file, func)
+        if owner is None:
+            return None
+        found: list[Optional[tuple[str, ast.expr]]] = []
+        for where, cls in self.lineage(*owner):
+            for method in pathcond.methods_of(cls):
+                for value in pathcond.attribute_expressions(method, expression.attr):
+                    if isinstance(value, ast.Constant) and value.value is None:
+                        continue
+                    found.append(self._annotation_of(where, method, value))
+        texts = {ast.unparse(one[1]) for one in found if one is not None}
+        if found and len(texts) == 1 and all(one is not None for one in found):
+            return found[0]
+        return None
+
+    def _field_read(self, file: str, annotation: ast.expr) -> Optional[Classes]:
+        """The classes an instance's field declared *annotation* reads as: a descriptor's (one defining ``__get__``) by what ``__get__`` returns.
+
+        ``PandaID: SpecColumn[int]`` reads as ``_T | Null`` with ``_T`` the
+        ``int`` (``spec_column.py``): no class of the corpus, as it read
+        before a subscripted annotation stated a class.
+        """
+        declared = self.annotated_all(file, annotation)
+        if declared is None:
+            return None
+        found: set[tuple[str, ast.ClassDef]] = set()
+        for where, cls in declared:
+            getter = self._method_in(where, cls, "__get__")
+            if getter is None:
+                found.add((where, cls))
+                continue
+            got = self._annotated_bound(getter[0], getter[2].returns, getter[1], self._binds(file, annotation))
+            found |= got or frozenset()
+        return frozenset(found) or None
 
     def states_any(self, file: str, annotation: Optional[ast.expr], depth: int = 0) -> bool:
         """Whether *annotation* declares ``Any`` and nothing else, ``| None`` aside -- spelled so, or by an alias of it.
@@ -1965,10 +2658,17 @@ class Types:
         return [held[one] for one in merged if one in held]
 
     def method(self, file: str, cls: ast.ClassDef, name: str):
+        found = self._method_in(file, cls, name)
+        return (found[0], found[2]) if found is not None else None
+
+    def _method_in(
+        self, file: str, cls: ast.ClassDef, name: str
+    ) -> Optional[tuple[str, ast.ClassDef, ast.FunctionDef | ast.AsyncFunctionDef]]:
+        """:meth:`method`, with the class of the lineage that defines it."""
         for where, holder in self.lineage(file, cls):
             for node in holder.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                    return where, node
+                    return where, holder, node
         return None
 
     # -- declarations ------------------------------------------------------
@@ -1983,7 +2683,7 @@ class Types:
                     and isinstance(node.target, ast.Name)
                     and node.target.id == field
                 ):
-                    return self.annotated_all(where, node.annotation)
+                    return self._field_read(where, node.annotation)
             for method in pathcond.methods_of(holder):
                 for node in ast.walk(method):
                     if (
@@ -1993,7 +2693,7 @@ class Types:
                         and node.target.value.id == "self"
                         and node.target.attr == field
                     ):
-                        return self.annotated_all(where, node.annotation)
+                        return self._field_read(where, node.annotation)
         if depth >= self.DEPTH:
             return None
         found: set[Classes] = set()
@@ -2070,7 +2770,7 @@ class Types:
                     return file, node.annotation
             # ``target = self.nuclei`` or ``target = self.satellites``: an
             # alias carries what every value it is bound to was declared as.
-            bound = self.assigned(func).get(expression.id, [])
+            bound = self.bound(func).get(expression.id, [])
             if bound and expression.id not in seen:
                 found = [
                     self._annotation_of(file, func, value, seen | {expression.id}) for value in bound
@@ -2141,11 +2841,13 @@ class Types:
                 declared = self.annotated_all(file, node.annotation)
                 if declared is not None:
                     return declared
+        # ``x: Any = Foo()``: an annotation that declares nothing leaves the value to read, as ``x = Foo()``.
         values = [
             node.value
             for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and node.value is not None
+            and any(isinstance(target, ast.Name) and target.id == name for target in pathcond.targets_of(node))
         ]
         if values:
             found = {self.declared(file, tree, value, depth + 1) for value in values}
@@ -2200,7 +2902,7 @@ class Types:
         return found.pop() if len(found) == 1 else None
 
     def _assigned_here(self, func: ast.AST, name: str) -> list[ast.expr]:
-        """What *func*'s own assignments bind *name* to, less the ``None`` it is cleared with.
+        """What *func*'s own assignments bind *name* to (:meth:`bound`: an augmented one adds nothing), less the ``None`` it is cleared with.
 
         Not a function's, lambda's or class's nested in it: ``taskBuffer =
         ...`` inside ``add_main.main``'s inner function binds that function's
@@ -2209,7 +2911,7 @@ class Types:
         nested = {id(one.value) for one in pathcond.bindings(func, name) if one.nested and one.value is not None}
         return [
             value
-            for value in self.assigned(func).get(name, [])
+            for value in self.bound(func).get(name, [])
             if not (isinstance(value, ast.Constant) and value.value is None) and id(value) not in nested
         ]
 
@@ -2339,6 +3041,8 @@ class Types:
             declared = self._field_annotation(owner, source.attr) if owner is not None else None
         if declared is None:
             declared = self._returned(file, func, source, depth)
+        if declared is None and isinstance(source, ast.Name):
+            declared = self._bound_to_calls(file, func, source.id, depth)
         if declared is None:
             return None
         where, annotation = declared
@@ -2362,6 +3066,26 @@ class Types:
         else:
             element = None
         return self.annotated_all(where, element) if element is not None else None
+
+    def _bound_to_calls(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[tuple[str, ast.expr]]:
+        """What the calls a local *name* is bound to are declared to return, where every binding of it is one and they
+        say one thing: ``taskList = self.taskBufferIF.getTasksToReassign_JEDI(...)`` then ``for taskSpec in taskList``.
+
+        For a loop over the name (:meth:`_iterated`); a parameter, or a name bound any other way -- unpacked, by a
+        loop or a ``with`` -- says nothing here.
+        """
+        if name in _parameter_names(func):
+            return None
+        sites = [one for one in pathcond.bindings(func, name) if not one.nested and one.kind != pathcond.BIND_AUGMENTED]
+        if not sites or any(
+            one.kind != pathcond.BIND_ASSIGN or one.unpacked or not isinstance(one.value, ast.Call) for one in sites
+        ):
+            return None
+        found = [self._returned(file, func, one.value, depth) for one in sites]
+        held = [one for one in found if one is not None]
+        if len(held) != len(found) or len({ast.unparse(annotation) for _where, annotation in held}) != 1:
+            return None
+        return held[0]
 
     def of_expression(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[tuple[str, ast.ClassDef]]:
         """The class *expression*, read in *func* of *file*, is declared to be, where it is declared one.
@@ -2421,6 +3145,11 @@ class Types:
             constructed = self.class_named(file, called) if isinstance(called, (ast.Name, ast.Attribute)) else None
             if constructed is not None:
                 return frozenset({constructed})
+            hook = self._copy_hook(file, called)
+            if hook is not None:
+                # ``jobSpec = copy.copy(job)``: what ``job`` is declared to be.
+                copied = self.declared(file, func, expression.args[0], depth + 1) if expression.args else None
+                return self._copied(copied, hook)
             if isinstance(called, ast.Name):
                 # ``get_task_utils_module(self)``, declared ``-> TaskUtilsModule``.
                 function = self._function_named(file, called.id)
@@ -2436,11 +3165,14 @@ class Types:
                     owner = self.of_expression(file, func, receiver, depth + 1)
                 if owner is None:
                     return None
-                found = self.method(owner[0], owner[1], called.attr)
-                if found is None:
+                held = self._method_in(owner[0], owner[1], called.attr)
+                if held is None:
                     return None
-                where, method = found
-                return self.annotated_all(where, method.returns)
+                where, holder, method = held
+                if not self.type_parameters(where, holder):
+                    return self.annotated_all(where, method.returns)
+                bound = self._receiver_binds(file, func, receiver, owner)
+                return self._annotated_bound(where, method.returns, holder, bound)
         return None
 
     # -- what a value can be, where nothing declares it --------------------
@@ -2497,9 +3229,27 @@ class Types:
 
         if isinstance(expression, ast.Constant) and expression.value is None:
             return frozenset(), False
+        if not instances and isinstance(expression, ast.Subscript):
+            recorded = self._recorded_at(file, func, expression)
+            if recorded is not None:
+                return recorded
         if instances and (builtin := self._builtin_instance(file, func, expression)):
             return frozenset({(BUILTIN, builtin)}), False
         if isinstance(expression, ast.Call):
+            hook = self._copy_hook(file, expression.func) if instances else None
+            if hook is not None:
+                # A copy is an instance of what it copies; a class that copies
+                # itself with the hook is what the hook returns, unread here.
+                if not expression.args:
+                    return frozenset(), True
+                copied, opened = self._values(file, func, expression.args[0], depth + 1, instances=True, seen=seen)
+                for where, name in copied:
+                    cls = self.class_def(where, name) if where != BUILTIN else None
+                    if cls is not None and self.method(where, cls, hook) is not None:
+                        opened = True
+                    else:
+                        found.add((where, name))
+                return frozenset(found), opened
             if instances:
                 # An instance of whatever class the callee is: ``Cls(...)``,
                 # or ``self.plugin_class(...)`` holding a class.
@@ -2622,7 +3372,7 @@ class Types:
             for node in tree.body if tree is not None else ():
                 defined = (
                     [node.name] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                    else [one.id for one in getattr(node, "targets", []) if isinstance(one, ast.Name)]
+                    else [one.id for one in pathcond.targets_of(node) if isinstance(one, ast.Name)]
                 )
                 if called.id in defined:
                     return ""
@@ -2633,8 +3383,44 @@ class Types:
                 return called.attr
         return ""
 
+    def _copy_hook(self, file: str, called: ast.expr) -> Optional[str]:
+        """The hook a class would copy itself with, where *called* is one of :data:`_COPIES`."""
+        imported = self.imports(file)
+        if isinstance(called, ast.Name):
+            held = imported.get(called.id)
+            return _COPIES.get(held) if held is not None else None
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            held = imported.get(called.value.id)
+            if held is not None and not held[1]:
+                return _COPIES.get((held[0], called.attr))
+        return None
+
+    def _copied(self, copied: Optional[Classes], hook: str) -> Optional[Classes]:
+        """What a copy of an object of the classes *copied* is declared to be.
+
+        The same classes; where one defines *hook*, what the hook is declared
+        to return, and nothing where it declares nothing.
+        """
+        if copied is None:
+            return None
+        found: set[tuple[str, ast.ClassDef]] = set()
+        for where, cls in copied:
+            hooked = self.method(where, cls, hook)
+            if hooked is None:
+                found.add((where, cls))
+                continue
+            returned = self.annotated_all(hooked[0], hooked[1].returns)
+            if returned is None:
+                return None
+            found |= returned
+        return frozenset(found)
+
     def _owner_of(self, file: str, func: ast.AST, called: ast.expr) -> Optional[tuple[str, ast.AST]]:
-        """The function *called* names, for a call on ``self`` or a plain name."""
+        """The function *called* names: a method on ``self``, a module's function by a plain name, or ``module.f``.
+
+        ``panda_config.getPlugin(...)`` returns the class ``setupper_plugin_class`` builds; read as nothing, the call
+        left the holder open before getPlugin's body was read.
+        """
         if (
             isinstance(called, ast.Attribute)
             and isinstance(called.value, ast.Name)
@@ -2644,5 +3430,58 @@ class Types:
             if holder is None:
                 return None
             return self.method(holder[0], holder[1], called.attr)
+        if isinstance(called, ast.Name):
+            return None if self._local(func, called.id) else self._function_named(file, called.id)
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            module = None if self._local(func, called.value.id) else self.module_named(file, called.value)
+            return self._function_named(module, called.attr) if module is not None else None
         return None
+
+    def _recorded_at(
+        self, file: str, func: ast.AST, expression: ast.Subscript
+    ) -> Optional[tuple[frozenset[tuple[str, str]], bool]]:
+        """The classes at ``m[k1]...[kn]``, where *m* is a name of *file*'s module the instance's record gives.
+
+        Every value the record holds that many keys down, at any key: the keys are read at run time.  A class of the
+        corpus is a class found; one outside it, a value not a class, or a key into a value not a mapping leaves the
+        reading open.  ``None`` where the record says nothing of the name, or *func* binds it itself -- read as the
+        code says it.  ``getPlugin``'s ``g_pluginMap[modConfigName][vo]`` holds nothing on ATLAS's production
+        instance, so the call returns ``None`` alone.
+        """
+        root: ast.expr = expression
+        depth = 0
+        while isinstance(root, ast.Subscript):
+            root, depth = root.value, depth + 1
+        if not isinstance(root, ast.Name) or (file, root.id) not in self.recorded or self._local(func, root.id):
+            return None
+        values = [self.recorded[(file, root.id)]]
+        for _ in range(depth):
+            if not all(isinstance(one, dict) for one in values):
+                return frozenset(), True
+            values = [one for held in values for one in held.values()]  # type: ignore[attr-defined]
+        found: set[tuple[str, str]] = set()
+        opened = False
+        for one in values:
+            placed = self._recorded_class(one) if isinstance(one, RecordedClass) else None
+            if placed is None:
+                opened = opened or one is not None
+            else:
+                found.add(placed)
+        return frozenset(found), opened
+
+    def _recorded_class(self, one: RecordedClass) -> Optional[tuple[str, str]]:
+        """``(file, name)`` of the corpus class a record names by its dotted path, or ``None``."""
+        module, _, name = one.dotted.rpartition(".")
+        where = self.module_file(module) if module else None
+        return (where, name) if where is not None and self.class_def(where, name) is not None else None
+
+    def _local(self, func: ast.AST, name: str) -> bool:
+        """Whether *func* binds *name* itself -- assigned there or a parameter --, so it names no module's."""
+        arguments = getattr(func, "args", None)
+        every = (
+            [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
+            if arguments is not None
+            else []
+        )
+        return name in self.assigned(func) or any(one is not None and one.arg == name for one in every)
 

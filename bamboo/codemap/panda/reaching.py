@@ -32,8 +32,15 @@ this does not -- 31 pairs where a value is offered that only an impossible
 path delivers.  That is the safe side: a value offered in excess is one a
 later step can rule out, and a value dropped is one nothing brings back.  The
 loop that runs no times is real Python (``i = -1; for i in items: ...; use(i)``)
-and stays.  :func:`pathcond.can_reach` still filters the answer by the
-conditions on the write and the read, as before.
+and stays -- except a ``for`` over a list or tuple literal with an element and
+no ``*``, which runs at least once: ``reserve_old_attributes`` resets each of
+nine names it spells, and the way past the loop with none reset is not one.
+And a ``for`` over ``range(1)``, or ``range(n)`` with ``n`` a name its scope
+binds only to the literal ``1``, runs exactly once, with no way round:
+``updateJobStatus``'s ``nTry = 1; for iTry in range(nTry):`` tries once, and
+the bind map its corrupted-files arm fills is not read by a next try's write.
+:func:`pathcond.can_reach` still filters the answer by the conditions on the
+write and the read, as before.
 
 **One variable at a time, and the caller says what it is.**  The writes are
 handed in, not found: a name's assignments, a map's key, the names a row
@@ -120,29 +127,86 @@ def reaching(
     scope, the name is one an enclosing scope binds, read whenever this one
     runs, and every enclosing write comes back.
     """
-    scope = _scope_of(target)
-    if scope is None:
-        return list(sites)
-    statement = (
-        target
-        if isinstance(target, (ast.stmt, ast.ExceptHandler))
-        else _statement_of(target)
-    )
-    if statement is None:
-        return list(sites)
+    return reaching_each([target], sites, killers, rereads)[0]
+
+
+def reaching_each(
+    targets: Sequence[ast.AST],
+    sites: Sequence[ast.AST],
+    killers: Sequence[ast.AST] = (),
+    rereads: Sequence[ast.AST] = (),
+) -> list[list[ast.AST]]:
+    """:func:`reaching` for each of *targets*, the writes read once per scope: what a reader asking of many
+    statements with the same writes asks."""
+    found: list[list[ast.AST]] = []
+    read: dict[int, Optional[tuple[_Flow, dict[int, int]]]] = {}
+    for target in targets:
+        scope = _scope_of(target)
+        if scope is None:
+            found.append(list(sites))
+            continue
+        statement = (
+            target
+            if isinstance(target, (ast.stmt, ast.ExceptHandler))
+            else _statement_of(target)
+        )
+        if statement is None:
+            found.append(list(sites))
+            continue
+        if id(scope) not in read:
+            read[id(scope)] = _writes(scope, sites, killers, rereads)
+        held = read[id(scope)]
+        if held is None:
+            found.append([site for site in sites if _encloses(_scope_of(site), scope)])
+            continue
+        flow, bits = held
+        state = flow.entry.get(id(statement))
+        found.append(
+            [site for site in sites if state and state & bits.get(id(site), 0)]
+        )
+    return found
+
+
+def _writes(
+    scope: ast.AST,
+    sites: Sequence[ast.AST],
+    killers: Sequence[ast.AST],
+    rereads: Sequence[ast.AST],
+) -> Optional[tuple[_Flow, dict[int, int]]]:
+    """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own."""
     own = [node for node in (*sites, *killers) if _scope_of(node) is scope]
     if not own:
-        return [site for site in sites if _encloses(_scope_of(site), scope)]
-    ids = sorted(
-        {id(node) for node in own}
-        | {id(node) for node in rereads if _scope_of(node) is scope}
-    )
+        return None
+    again = {id(node) for node in rereads if _scope_of(node) is scope}
+    ids = sorted({id(node) for node in own} | again)
     bits = {key: 1 << index for index, key in enumerate(ids)}
     keeps = 0
-    for node in (*own, *rereads):
-        if isinstance(node, ast.AugAssign) or any(node is one for one in rereads):
-            keeps |= bits.get(id(node), 0)
-    state = _flow(scope, bits, keeps).entry.get(id(statement))
+    for node in own:
+        if isinstance(node, ast.AugAssign) or id(node) in again:
+            keeps |= bits[id(node)]
+    for key in again:
+        keeps |= bits[key]
+    return _flow(scope, bits, keeps), bits
+
+
+def reaching_exit(
+    scope: ast.AST,
+    sites: Sequence[ast.AST],
+    killers: Sequence[ast.AST] = (),
+    rereads: Sequence[ast.AST] = (),
+) -> list[ast.AST]:
+    """Of *sites*, the writes that can be live where *scope* returns normally: at a ``return``, or off its end.
+
+    As :func:`reaching` reads them, a function's own.  A raise out of the
+    function is not a normal return: the caller goes on from there only
+    through a handler of its own, which its flow reads from the state before
+    the call.
+    """
+    held = _writes(scope, sites, killers, rereads)
+    if held is None:
+        return []
+    flow, bits = held
+    state = flow.exit
     if not state:
         return []
     return [site for site in sites if state & bits.get(id(site), 0)]
@@ -248,6 +312,100 @@ def _raises(statement: ast.AST) -> bool:
     return held
 
 
+def _runs_once(node: ast.For | ast.AsyncFor) -> bool:
+    """Whether the loop runs at least once: over a list or tuple literal with an element and no ``*``."""
+    items = node.iter
+    return (
+        isinstance(items, (ast.List, ast.Tuple))
+        and bool(items.elts)
+        and not any(isinstance(one, ast.Starred) for one in items.elts)
+    )
+
+
+def _runs_exactly_once(node: ast.For | ast.AsyncFor) -> bool:
+    """Whether the loop runs its body exactly once: over ``range(1)``, or ``range(n)`` with *n* a name its scope
+    binds only to the literal ``1`` -- and ``range`` not one the scope binds."""
+    held = getattr(node, "_reaching_once", None)
+    if held is None:
+        items = node.iter
+        scope = _scope_of(node)
+        held = (
+            scope is not None
+            and isinstance(items, ast.Call)
+            and isinstance(items.func, ast.Name)
+            and items.func.id == "range"
+            and len(items.args) == 1
+            and not items.keywords
+            and not _binds(scope, "range")
+            and (
+                _is_one(items.args[0])
+                or (
+                    isinstance(items.args[0], ast.Name)
+                    and _bound_only_to_one(scope, items.args[0].id)
+                )
+            )
+        )
+        node._reaching_once = held  # type: ignore[attr-defined]
+    return held
+
+
+def _is_one(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant) and type(node.value) is int and node.value == 1
+    )
+
+
+def _bound_only_to_one(scope: ast.AST, name: str) -> bool:
+    """Whether *scope* binds *name*, and only by plain assignments of the literal ``1`` -- in its nested scopes
+    neither, nor declared global or nonlocal."""
+    allowed = {
+        id(one)
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Assign) and _is_one(node.value)
+        for one in node.targets
+        if isinstance(one, ast.Name) and one.id == name
+    }
+    return bool(allowed) and not _binds(scope, name, allowed)
+
+
+def _binds(
+    scope: ast.AST, name: str, allowed: frozenset[int] | set[int] = frozenset()
+) -> bool:
+    """Whether anything inside *scope* -- its nested scopes too -- binds *name*, besides the nodes in *allowed*."""
+    for node in ast.walk(scope):
+        if id(node) in allowed:
+            continue
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and not isinstance(node.ctx, ast.Load)
+        ):
+            return True
+        if isinstance(node, ast.arg) and node.arg == name:
+            return True
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            return True
+        if (
+            isinstance(node, ast.alias)
+            and (node.asname or node.name.split(".")[0]) == name
+        ):
+            return True
+        if (
+            isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
+            and node.name == name
+        ):
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+        if (
+            node is not scope
+            and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == name
+        ):
+            return True
+    return False
+
+
 def _catches_all(handler: ast.ExceptHandler) -> bool:
     kind = handler.type
     if kind is None:
@@ -310,10 +468,13 @@ class _Flow:
         self.bits = bits
         self.keeps = keeps
         self.entry: dict[int, int] = {}
+        #: The state where the scope returns normally: each ``return`` that leaves it, and off its end.
+        self.exit: Optional[int] = None
         self._catchers: list[_Handlers | _Finally] = []
         self._loops: list[_Loop] = []
         # A parameter list among the writes holds at entry: the call wrote it.
-        self._block(scope.body, bits.get(id(getattr(scope, "args", None)), 0))  # type: ignore[attr-defined]
+        end = self._block(scope.body, bits.get(id(getattr(scope, "args", None)), 0))  # type: ignore[attr-defined]
+        self.exit = _join(self.exit, end)
 
     # -- plumbing -------------------------------------------------------------
     def _gen(self, state: Optional[int], node: ast.AST) -> Optional[int]:
@@ -346,6 +507,7 @@ class _Flow:
             if isinstance(catcher, _Finally):
                 catcher.returned = _join(catcher.returned, state)
                 return
+        self.exit = _join(self.exit, state)
 
     def _jump(self, state: Optional[int], loop: _Loop, which: int) -> None:
         """A ``break`` (0) or ``continue`` (1): through any ``finally`` inside the loop first."""
@@ -408,33 +570,38 @@ class _Flow:
     _AsyncWith = _With
 
     def _loop(
-        self, node: ast.For | ast.AsyncFor | ast.While, before: int
-    ) -> tuple[int, Optional[int]]:
-        """Iterate the body to a fixpoint: (the state at the head, the ``break`` paths)."""
+        self, node: ast.For | ast.AsyncFor | ast.While, before: int, rounds: bool = True
+    ) -> tuple[int, Optional[int], Optional[int]]:
+        """Iterate the body to a fixpoint, or once where it has no way round: (the state at the head, the
+        ``break`` paths, the state after a pass)."""
         head = before
         while True:
             loop = _Loop(len(self._catchers))
             self._loops.append(loop)
             end = self._block(node.body, self._gen(head, node))
             self._loops.pop()
-            again = before | (end or 0) | (loop.continues or 0)
-            if again == head:
-                return head, loop.breaks
+            passed = _join(end, loop.continues)
+            again = before | (passed or 0)
+            if again == head or not rounds:
+                return head, loop.breaks, passed
             head = again
 
     def _For(self, node: ast.For | ast.AsyncFor, state: Optional[int]) -> Optional[int]:
         if state is None:
             return None
-        head, breaks = self._loop(node, state)
+        once = _runs_exactly_once(node)
+        head, breaks, passed = self._loop(node, state, rounds=not once)
         self._raise(head)  # ``next()`` on the iterator, every time round
-        return _join(self._block(node.orelse, head), breaks)
+        # Over a literal with an element, or range(1), the loop ends after a pass, never before the first.
+        done = passed if once or _runs_once(node) else head
+        return _join(self._block(node.orelse, done), breaks)
 
     _AsyncFor = _For
 
     def _While(self, node: ast.While, state: Optional[int]) -> Optional[int]:
         if state is None:
             return None
-        head, breaks = self._loop(node, state)
+        head, breaks, _passed = self._loop(node, state)
         self._record(node, head)  # the test is read at the head, every time round
         if _raises(node):
             self._raise(head)

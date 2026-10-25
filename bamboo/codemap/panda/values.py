@@ -849,9 +849,8 @@ def handed(resolve, calls: Optional["Calls"]):
         """
         tested = {
             name.id
-            for ancestor in pathcond.ancestors(expression)
-            if isinstance(ancestor, ast.If) and pathcond.enclosing_function(ancestor) is func
-            for name in ast.walk(ancestor.test)
+            for test in pathcond.tests_on(expression, func)
+            for name in ast.walk(test)
             if isinstance(name, ast.Name)
         }
         if expression.id not in tested or calls is None:
@@ -867,7 +866,7 @@ def handed(resolve, calls: Optional["Calls"]):
         if calls is None or depth >= HANDED_DEPTH:
             return []
         placed = calls.callees(file, func, call)
-        if not placed.targets or placed.unplaced or placed.thread:
+        if not placed.targets or placed.unplaced or placed.returns_none:
             return []
         found: list[Handed] = []
         for target in placed.targets:
@@ -1052,7 +1051,7 @@ def _scaled(left: Stated, right: Stated, op: ast.operator, node: ast.AST) -> Sta
 
 def _timedelta(call: ast.Call, func, at: ast.AST, depth: int, handed) -> Stated:
     """``datetime.timedelta(...)`` as seconds, or the parameters its amounts wait for."""
-    amounts = [*zip(_TIMEDELTA_POSITIONS, call.args), *((one.arg, one.value) for one in call.keywords)]
+    amounts = [*zip(_TIMEDELTA_POSITIONS, call.args, strict=False), *((one.arg, one.value) for one in call.keywords)]
     total, needs = 0.0, ()
     for unit, amount in amounts:
         if unit not in TIMEDELTA_UNITS:

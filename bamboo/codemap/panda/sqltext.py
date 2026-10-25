@@ -177,6 +177,24 @@ class SqlWrite(BaseModel):
             "statement was read off its text rather than its tree."
         ),
     )
+    key_holes: list[tuple[int, str, tuple[int, ...]]] = Field(
+        default_factory=list,
+        description=(
+            "The ``WHERE`` terms ``{}=:cr_{}`` -- a column that is a hole, equated to a bind whose name holds one: "
+            "the column's hole number (``__h3`` is 3), the bind spelt with ``{}`` for its holes (``:cr_{}``), and "
+            "their numbers.  Kept out of *keys*, which name a column: what the holes are says whether the term "
+            "names its row (``sql.map_key``), and that is the run's to read."
+        ),
+    )
+    column_holes: list[tuple[int, str, tuple[int, ...]]] = Field(
+        default_factory=list,
+        description=(
+            "The ``SET`` items ``{}=:{}`` -- a column that is a hole, given a bind whose name holds one -- as "
+            "*key_holes* spells a term: ``updateJobStatus``' ``,{key}=:{key}`` for each key of ``param``.  Not in "
+            "*columns*, and each still a :data:`SET_COLUMN_IS_A_HOLE`: which columns the holes are is the run's "
+            "to read."
+        ),
+    )
 
 
 #: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
@@ -723,12 +741,18 @@ def _supplied(node: exp.Expression, spelled: str, insert: bool) -> ColumnValue:
 
 
 def _update_pairs(
-    node: exp.Update, sql: str, tokens: list, passed: Optional[list[tuple[str, str]]] = None
+    node: exp.Update,
+    sql: str,
+    tokens: list,
+    passed: Optional[list[tuple[str, str]]] = None,
+    holes: Optional[list[tuple[int, str, tuple[int, ...]]]] = None,
 ) -> Optional[list[tuple[str, int, ColumnValue]]]:
     """``(column, end offset, value)`` for each ``SET`` item of *node*, or ``None`` where the two readings disagree.
 
     An item it cannot pair goes into *passed*, where given, as ``(the item as
-    the statement spells it, why)`` -- see :func:`unread_columns`.
+    the statement spells it, why)`` -- see :func:`unread_columns`; one whose
+    column is a hole and whose bind holds one goes into *holes* as well, where
+    given (:attr:`SqlWrite.column_holes`).
     """
     update = _at_depth(tokens, 0, {_T.UPDATE})
     assign = _at_depth(tokens, update + 1, {_T.SET}) if update is not None else None
@@ -757,6 +781,8 @@ def _update_pairs(
                 passed.append(
                     ("SET " + _spelled(sql, tokens, lo, hi, written=True), SET_COLUMN_IS_A_HOLE if equals is not None else SET_ITEM_NOT_READ)
                 )
+            if holes is not None and equals is not None and (held := _key_hole(item)) is not None:
+                holes.append(held)
             continue
         found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi, written=True), False)))
     return found
@@ -847,8 +873,10 @@ def _conjunct_spans(tokens: list, lo: int, hi: int) -> list[tuple[int, int]]:
 
 def _guards(
     node: exp.Update, sql: str, tokens: list, written: set[str]
-) -> Optional[tuple[dict[str, str], dict[str, str], dict[str, list[tuple[int, int]]]]]:
-    """``(preconditions, keys, spans)`` of an ``UPDATE``, off its tree and in its own spelling.
+) -> Optional[
+    tuple[dict[str, str], dict[str, str], dict[str, list[tuple[int, int]]], list[tuple[int, str, tuple[int, ...]]]]
+]:
+    """``(preconditions, keys, spans, key_holes)`` of an ``UPDATE``, off its tree and in its own spelling.
 
     A term counts only where every row has to meet it -- a conjunct of the
     ``WHERE`` -- and only its own columns do: the text reading took a term
@@ -858,14 +886,17 @@ def _guards(
     precondition, kept whole -- ``(lockedBy IS NULL OR lockedTime<:t)`` is the
     lock a compare-and-set takes, and neither half of it is.  ``None`` where
     the two readings of the clause disagree on its terms.  *spans* says where
-    in *sql* each precondition's conjuncts are.
+    in *sql* each precondition's conjuncts are.  A term naming its column and
+    its bind by holes, ``{}=:cr_{}``, is in *key_holes* (:attr:`SqlWrite.key_holes`),
+    a loop's passes' or not: what the holes are says whether it names the row.
     """
     where = node.args.get("where")
     preconditions: dict[str, str] = {}
     keys: dict[str, str] = {}
     spans_of: dict[str, list[tuple[int, int]]] = {}
+    key_holes: list[tuple[int, str, tuple[int, ...]]] = []
     if where is None:
-        return preconditions, keys, spans_of
+        return preconditions, keys, spans_of, key_holes
     at = _at_depth(tokens, (_at_depth(tokens, 0, {_T.SET}) or 0) + 1, {_T.WHERE})
     if at is None:
         return None
@@ -878,6 +909,10 @@ def _guards(
     testing: dict[str, list[str]] = {}
     repeated = _source(sql)[1]
     for (a, b), term in zip(spans, terms, strict=True):
+        held = _key_hole(term)
+        if held is not None:
+            key_holes.append(held)
+            continue
         # A term only a loop's passes append is on no row the loop gave no pass: required of none.
         if any(lo <= tokens[a].start and tokens[b - 1].end < hi for lo, hi in repeated):
             continue
@@ -899,7 +934,18 @@ def _guards(
         ):
             keys.setdefault(term.this.name, f":{term.expression.name}")
     preconditions.update((owner, " AND ".join(dict.fromkeys(said))) for owner, said in testing.items())
-    return preconditions, keys, spans_of
+    return preconditions, keys, spans_of, key_holes
+
+
+def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
+    """``(column hole, bind, bind holes)`` of a term ``{}=:cr_{}`` (:attr:`SqlWrite.key_holes`); ``None`` for any other."""
+    if not (isinstance(term, exp.EQ) and _is_hole(term.this) and isinstance(term.expression, exp.Placeholder)):
+        return None
+    column = _HOLE_NUMBER.fullmatch(term.this.name)
+    numbers = tuple(int(number) for number in _HOLE_NUMBER.findall(term.expression.name))
+    if column is None or not numbers:
+        return None
+    return int(column.group(1)), ":" + _NAMED_HOLE.sub("{}", term.expression.name), numbers
 
 
 #: Why a column a statement writes is not in what :func:`writes` returns.  Each
@@ -942,6 +988,11 @@ def writes(sql: str) -> list[SqlWrite]:
     nested parentheses, and took a subquery's terms for the row's.  A
     statement that does not parse, or whose two readings disagree on its
     parts, is read off its text as before -- see :func:`_writes_in_text`.
+
+    An ``UPDATE`` whose ``SET`` gives no column it can read -- ``SET {}``, a
+    spec's ``bindUpdateChangesExpression()`` -- is returned with no columns
+    and its ``WHERE``'s keys: the row it writes is read whether or not what
+    it writes there is (:data:`SET_ITEM_IS_A_HOLE` says the columns are not).
     """
     read = _statement(sql)
     if read is None:
@@ -949,16 +1000,17 @@ def writes(sql: str) -> list[SqlWrite]:
     node, tokens = read
     table = _named_table(node.this.this if isinstance(node.this, exp.Schema) else node.this, set())
     if isinstance(node, exp.Update):
-        pairs = _update_pairs(node, sql, tokens)
+        column_holes: list[tuple[int, str, tuple[int, ...]]] = []
+        pairs = _update_pairs(node, sql, tokens, holes=column_holes)
         if pairs is None:
             return _writes_in_text(plain(sql))
         columns = {name: value for name, _end, value in pairs}
-        if not columns or table is None:
+        if table is None:
             return []
         guarded = _guards(node, sql, tokens, set(columns))
         if guarded is None:
-            return _writes_in_text(plain(sql))
-        preconditions, keys, spans = guarded
+            return _writes_in_text(plain(sql)) if columns else []
+        preconditions, keys, spans, key_holes = guarded
         return [
             SqlWrite(
                 kind="update",
@@ -966,6 +1018,8 @@ def writes(sql: str) -> list[SqlWrite]:
                 columns=columns,
                 preconditions=preconditions,
                 keys=keys,
+                key_holes=key_holes,
+                column_holes=column_holes,
                 precondition_spans={
                     owner: [(_at_plain(sql, a), _at_plain(sql, b, end=True)) for a, b in found]
                     for owner, found in spans.items()
@@ -1001,7 +1055,7 @@ def unread_columns(sql: str) -> list[tuple[str, str]]:
             _insert_pairs(node, sql, tokens, passed)
         found.update(dict.fromkeys(passed))
     if not found:
-        written = {write.table.lower() for write in writes(sql)}
+        written = {write.table.lower() for write in writes(sql) if write.columns}
         for table in [*creates(sql), *updates(sql)]:
             if table.lower() not in written:
                 found[(table, COLUMNS_NOT_READ)] = None
@@ -2151,7 +2205,7 @@ def _split(tokens: list, lo: int, hi: int):
         cuts = _cuts(tokens, lo, hi, keyword)
         if cuts:
             bounds = [lo - 1, *cuts, hi]
-            return (kind, [_split(tokens, a + 1, b) for a, b in zip(bounds, bounds[1:])])
+            return (kind, [_split(tokens, a + 1, b) for a, b in zip(bounds, bounds[1:], strict=False)])
     return ("leaf", lo, hi)
 
 
@@ -2660,6 +2714,35 @@ def conjoined(sql: str) -> tuple[Condition, ...]:
 def _required(sql: str, held: bool) -> tuple[Condition, ...]:
     """:func:`conditions`, and with *held* :func:`conjoined`."""
     return tuple(read[0] for read in _readings(sql, held))
+
+
+def returns_rows(sql: str) -> Optional[bool]:
+    """Whether *sql* is a query, whose rows a ``fetch*`` reads: ``None`` where it does not parse."""
+    tree = parsed(sql).tree
+    return None if tree is None else isinstance(tree, exp.Query)
+
+
+@functools.lru_cache(maxsize=None)
+def row_tests(sql: str) -> tuple[Test, ...]:
+    """The tests every row *sql* returns holds: each term of an entry of :func:`conjoined` with one branch.
+
+    A row a query returns met its ``WHERE``, so ``PandaID=:PandaID`` holds
+    of each one, and its ``PandaID`` is what the bind was filled with.  An
+    entry of two branches or more, an ``OR``, holds of no one column, and
+    neither does an ``OR`` nested in a term.  A statement that is not a
+    query (:func:`returns_rows`) returns no rows and has none.
+    """
+    if not returns_rows(sql):
+        return ()
+
+    def held(twin: Twin) -> list[Test]:
+        if twin.node == "test":
+            return [twin.test] if twin.test is not None else []
+        if twin.node == "all" or len(twin.items) == 1:
+            return [test for item in twin.items for test in held(item)]
+        return []
+
+    return tuple(test for _condition, twin, _at in _readings(sql, True) for test in held(twin))
 
 
 @functools.lru_cache(maxsize=None)
@@ -3362,7 +3445,7 @@ def _printed_map(text: str) -> Optional[dict[object, object]]:
         return None
     if not isinstance(tree.body, ast.Dict) or any(key is None for key in tree.body.keys):
         return None
-    return {_printed_value(key): _printed_value(value) for key, value in zip(tree.body.keys, tree.body.values)}
+    return {_printed_value(key): _printed_value(value) for key, value in zip(tree.body.keys, tree.body.values, strict=True)}
 
 
 def cut(message: str, lead: str = "", gap: str = "") -> Optional[tuple[str, dict[object, object]]]:

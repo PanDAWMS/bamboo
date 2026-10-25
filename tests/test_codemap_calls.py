@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from bamboo.codemap import calls as calls_mod
 
 PACKAGE = "pkg"
@@ -1318,7 +1320,6 @@ def test_order_and_limit_are_read_off_the_statement():
 
 
 def test_a_statement_composed_under_a_name_is_read_where_it_runs(tmp_path):
-    from bamboo.codemap.panda import sql
 
     roots = _tree(
         tmp_path,
@@ -2521,8 +2522,6 @@ def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_n
 
 def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path):
     """Renamed and passed by position, it is the caller's; bound again on the route, it is no one's; a literal or a default is the forwarder's."""
-    from bamboo.codemap.panda.recognizers import sqlwrite
-
     roots = _tree(
         tmp_path,
         db="def lock(flag, other=False, more=None):\n    if flag or other or more:\n        return 1\n",
@@ -2551,8 +2550,8 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
 
     def constants(owner):
         (route,) = [one for one in routes if one.sites[0].func.name == owner]
-        found = {name: sqlwrite._route_constant(name, target, route.sites, calls) for name in ("flag", "other", "more")}
-        return {name: value for name, value in found.items() if value is not sqlwrite._UNSET}
+        found = {name: calls.route_constant(name, target, route.sites) for name in ("flag", "other", "more")}
+        return {name: value for name, value in found.items() if value is not calls_mod.UNSET}
 
     assert constants("renamed") == {"flag": False, "other": False, "more": None}
     # ``sim`` is handed on as it came, so the route goes on out to ``run``; ``flag``
@@ -2774,6 +2773,52 @@ def test_a_call_on_a_local_holding_a_plugin_class_lands_at_the_constructors_of_i
         assert [site.call.lineno for site in calls.callers(_method(calls, file, cls_name, "__init__")) if site.file == "pkg/m.py"] == [8]
 
 
+def test_a_plugin_class_is_read_from_an_instance_s_record_of_the_map_getplugin_returns_from(tmp_path):
+    """``getPlugin`` returns ``g_map[name]``, which the code alone cannot say: a configuration fills it.  With one
+    instance's record of ``g_map`` the call lands at what the record holds at any key, closed -- nothing (as on
+    ATLAS's production server, ``{'adder_plugins': {}, 'setupper_plugins': {}}`` two keys down), so the default alone;
+    DummyPlugin, on an instance configuring it, built by PluginBase's ``__init__`` --; a record naming a class
+    outside the corpus, or a value not a class, leaves it open; without a record, as the code alone says.  The
+    record is read from its file with a stamp; one naming what no module-level assignment of the corpus binds -- a
+    module moved, a name renamed -- stops the reading rather than be read nowhere."""
+    roots = _tree(
+        tmp_path,
+        **_PLUGINS,
+        m=(
+            "from pkg import config\n"
+            "\n"
+            "def run(job, logger):\n"
+            "    plugin_class = config.getPlugin('x')\n"
+            "    if plugin_class is None:\n"
+            "        from pkg.atlas import AtlasPlugin\n"
+            "        plugin_class = AtlasPlugin\n"
+            "    plugin_class(job, logger)\n"
+        ),
+    )
+    record = tmp_path / "record.json"
+    record.write_text(
+        '{"instance": "one", "values": [{"file": "pkg/config.py", "name": "g_map",'
+        ' "value": {"x": {"class": "pkg.dummy.DummyPlugin"}}}]}'
+    )
+
+    def placed(recorded):
+        one = _placed(calls_mod.Calls(calls_mod.Types(roots, {}, recorded)), "m", "run", "plugin_class")
+        return sorted(t.cls.name for t in one.targets), one.unplaced
+
+    read, stamp = calls_mod.read_recorded(record)
+    key = ("pkg/config.py", "g_map")
+    assert read == {key: {"x": calls_mod.RecordedClass("pkg.dummy.DummyPlugin")}}
+    assert stamp.startswith(f"{record}: one, 1 value(s), ")
+    assert placed({key: {}}) == (["AtlasPlugin"], "")
+    assert placed(read) == (["AtlasPlugin", "PluginBase"], "")
+    assert placed({key: {"x": calls_mod.RecordedClass("elsewhere.Plugin")}})[1] == calls_mod.UNPLACED_OPEN
+    assert placed({key: {"x": {}}})[1] == calls_mod.UNPLACED_OPEN
+    assert placed(None) == (["AtlasPlugin", "PluginBase"], calls_mod.UNPLACED_OPEN)
+    for stale in (("pkg/config.py", "g_other"), ("pkg/moved.py", "g_map")):
+        with pytest.raises(ValueError, match="no module-level assignment binds"):
+            calls_mod.Types(roots, {}, {stale: {}})
+
+
 def test_a_field_holding_a_plugin_class_is_read_through_the_method_that_returns_it(tmp_path):
     """``AdderGen`` keeps its class in ``self.adder_plugin_class``, set from
     ``get_plugin_class()``, which returns that field."""
@@ -2938,3 +2983,301 @@ def test_a_call_on_self_in_a_mixin_lands_at_the_sibling_base_that_defines_it(tmp
 
     assert _landed(placed) == [("B", "fetch", ["P"])]
     assert placed.unplaced == ""
+
+
+def test_a_copy_is_an_object_of_the_class_it_copies_unless_the_class_copies_itself(tmp_path):
+    """``copy.copy(x)`` is what ``x`` is; a class defining ``__copy__`` is what that returns."""
+    roots = _tree(
+        tmp_path,
+        m=(
+            "import copy\n"
+            "from copy import deepcopy\n"
+            "\n"
+            "class Job:\n"
+            "    def run(self):\n"
+            "        pass\n"
+            "\n"
+            "class Other:\n"
+            "    pass\n"
+            "\n"
+            "class Selfish:\n"
+            "    def __copy__(self) -> Other:\n"
+            "        return Other()\n"
+            "\n"
+            "def shallow(job: Job):\n"
+            "    clone = copy.copy(job)\n"
+            "    clone.run()\n"
+            "\n"
+            "def deep(job: Job):\n"
+            "    return deepcopy(job)\n"
+            "\n"
+            "def hooked(thing: Selfish):\n"
+            "    return copy.copy(thing)\n"
+            "\n"
+            "def untyped(job):\n"
+            "    held = Job()\n"
+            "    clone = copy.copy(held)\n"
+            "    clone.run()\n"
+        ),
+    )
+    calls = _calls(roots)
+    types = calls.types
+
+    def declared(name, text):
+        func = _function(calls, "m", name)
+        node = next(n for n in ast.walk(func) if isinstance(n, ast.Call) and ast.unparse(n) == text)
+        return sorted(cls.name for _file, cls in types.declared("pkg/m.py", func, node) or ())
+
+    assert declared("shallow", "copy.copy(job)") == ["Job"]
+    assert declared("deep", "deepcopy(job)") == ["Job"]
+    assert declared("hooked", "copy.copy(thing)") == ["Other"]
+    # Where nothing declares the copied value, it is read from the values.
+    assert [t.cls.name for t in _placed(calls, "m", "untyped", "clone.run").targets] == ["Job"]
+    assert [t.cls.name for t in _placed(calls, "m", "shallow", "clone.run").targets] == ["Job"]
+
+
+_GENERIC_FACTORY = '''\
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+
+class FactoryBase(Generic[T]):
+    def getImpl(self, vo: str) -> T | None:
+        return None
+
+    def requireImpl(self, vo: str) -> T:
+        raise NotImplementedError
+'''
+
+_GENERIC_PLUGINS = '''\
+class PluginBase:
+    def doAction(self):
+        return 1
+
+
+class AtlasPlugin(PluginBase):
+    def doAction(self):
+        return 2
+'''
+
+
+def test_a_generic_class_given_a_class_hands_it_back_where_its_methods_return_the_parameter(tmp_path):
+    """``class WatchDog(JediKnight, FactoryBase[WatchDogBase])`` and ``implFactory:
+    FactoryBase[PostProcessorBase]``: ``getImpl(...) -> T | None`` is the plugin family, as PanDA
+    says ("FactoryBase[WatchDogBase] lets the knight call it").  Read without the parameter, the
+    impl's calls were holes ("declared T, not read")."""
+    roots = _tree(
+        tmp_path,
+        factory=_GENERIC_FACTORY,
+        plugins=_GENERIC_PLUGINS,
+        m='''\
+from pkg.factory import FactoryBase
+from pkg.plugins import PluginBase
+
+
+class Knight(FactoryBase[PluginBase]):
+    def start(self):
+        impl = self.getImpl("atlas")
+        impl.doAction()
+
+
+class Broker(FactoryBase[PluginBase]):
+    pass
+
+
+class Thread:
+    def __init__(self, implFactory: FactoryBase[PluginBase]):
+        self.implFactory = implFactory
+
+    def run(self):
+        impl = self.implFactory.getImpl("atlas")
+        impl.doAction()
+
+
+def build(factory: FactoryBase[PluginBase], broker: Broker):
+    factory.requireImpl("atlas").doAction()
+    broker.requireImpl("atlas").doAction()
+
+
+def unbound(factory: FactoryBase):
+    factory.requireImpl("atlas").doAction()
+''',
+    )
+    calls = _calls(roots)
+
+    def landed(func, text):
+        return sorted(t.cls.name for t in _placed(calls, "m", func, text).targets)
+
+    plugins = ["AtlasPlugin", "PluginBase"]
+    assert landed("start", "impl.doAction") == plugins
+    assert landed("run", "self.implFactory.getImpl") == ["FactoryBase"]
+    assert landed("run", "impl.doAction") == plugins
+    assert landed("build", "factory.requireImpl('atlas').doAction") == plugins
+    assert landed("build", "broker.requireImpl('atlas').doAction") == plugins
+    # A parameter nothing binds names no class, as before.
+    assert landed("unbound", "factory.requireImpl") == ["FactoryBase"]
+    assert landed("unbound", "factory.requireImpl('atlas').doAction") == []
+
+
+def test_a_field_declared_with_a_descriptor_reads_as_what_its_get_returns(tmp_path):
+    """``PandaID: SpecColumn[int]`` (spec_column.py) is an ``int`` or ``"NULL"`` on an instance, not
+    a ``SpecColumn``: a subscripted generic stating its class must not make every spec column one."""
+    roots = _tree(
+        tmp_path,
+        col='''\
+from typing import Generic, Literal, TypeVar
+
+_T = TypeVar("_T")
+Null = Literal["NULL"]
+
+
+class SpecColumn(Generic[_T]):
+    def __get__(self, obj: object, objtype: "type | None" = None) -> "_T | Null":
+        raise NotImplementedError
+''',
+        m='''\
+from pkg.col import SpecColumn
+
+
+class Site:
+    def go(self):
+        return 1
+
+
+class JobSpec:
+    PandaID: SpecColumn[int]
+    site: SpecColumn[Site]
+    plain: Site
+''',
+    )
+    calls = _calls(roots)
+    file = f"{PACKAGE}/m.py"
+    spec = calls.types.class_def(file, "JobSpec")
+
+    def read(field):
+        found = calls.types.of_field(file, spec, field, 0)
+        return sorted(cls.name for _where, cls in found) if found else None
+
+    assert read("PandaID") is None
+    assert read("site") == ["Site"]
+    assert read("plain") == ["Site"]
+
+
+_TIMED = (
+    "import threading\n\n"
+    "class Timed:\n"
+    "    def __init__(self, method, timeout):\n"
+    "        self.method = method\n"
+    "        self.result = None\n\n"
+    "    def __call__(self, *var, **kwargs):\n"
+    "        self.result = self.method(*var, **kwargs)\n\n"
+    "    def run(self, *var, **kwargs):\n"
+    "        thr = threading.Thread(target=self, args=var, kwargs=kwargs)\n"
+    "        thr.start()\n"
+    "        thr.join()\n"
+)
+_UPDATING = "class Buffer:\n    def update(self, job_id, param):\n        return 1\n"
+
+
+def _api(body: str = "") -> str:
+    return (
+        "from pkg.timed import Timed\n"
+        "from pkg.buffer import Buffer\n\n"
+        "buffer: Buffer = None\n\n"
+        "def log(value):\n"
+        "    return value\n\n"
+        "def update(job_id, param):\n"
+        "    timed = Timed(buffer.update, 10)\n"
+        "    timed.run(job_id, param)\n"
+        f"{body}"
+        "    return timed.result\n"
+    )
+
+
+def test_a_call_on_an_object_built_with_a_function_it_hands_its_arguments_to_lands_at_the_function(tmp_path):
+    """``Timed`` keeps ``method``; ``run`` starts a thread on the object with its own arguments and joins it, and the
+    thread's ``__call__`` calls ``method`` with them: ``timed.run(job_id, param)`` calls ``buffer.update(job_id,
+    param)`` and returns nothing.  It is placed there, handed its arguments as a call of it is, run on ``buffer``,
+    and is among ``update``'s callers -- which leave nothing missed -- and the read of ``buffer.update`` that built
+    the object is one whose every call hands it on."""
+    roots = _tree(tmp_path, timed=_TIMED, buffer=_UPDATING, api=_api())
+    calls = _calls(roots)
+    func = _function(calls, "api", "update")
+    call = _call_in(func, "timed.run")
+
+    placed = calls.callees("pkg/api.py", func, call)
+
+    (target,) = placed.targets
+    assert (target.file, target.func.name) == ("pkg/buffer.py", "update")
+    assert [ast.unparse(one) for one in placed.forwarded] == ["buffer.update"]
+    assert (placed.thread, placed.on_class, placed.returns_none) == (False, False, True)
+    assert ast.unparse(calls.made_on("pkg/api.py", func, call)) == "buffer"
+    (site,) = calls.callers(target)
+    assert site.call is call
+    assert {name: ast.unparse(value) for name, value in calls.handed(site, target).items()} == {
+        "job_id": "job_id",
+        "param": "param",
+    }
+    assert calls.missed(target) == []
+    timed = calls.types.class_named("pkg/api.py", ast.Name(id="Timed", ctx=ast.Load()))
+    assert (calls.forwarding(timed, "run"), calls.forwarding(timed, "__call__")) == ("method", "method")
+    assert calls.forwarded_reads() == {id(placed.forwarded[0])}
+
+
+def test_a_wrapper_hands_its_arguments_on_by_calling_the_function_or_itself(tmp_path):
+    """The three ways a method hands its own arguments to the function the object keeps: calling it, calling the
+    object -- whose ``__call__`` calls it --, or a thread started on the object and joined."""
+    forms = {
+        "direct": "    def run(self, *var, **kwargs):\n        self.method(*var, **kwargs)\n",
+        "called": (
+            "    def __call__(self, *var):\n        self.method(*var)\n\n"
+            "    def run(self, *var):\n        self(*var)\n"
+        ),
+    }
+    for name, body in forms.items():
+        wrapper = f"class Timed:\n    def __init__(self, method, timeout):\n        self.method = method\n\n{body}"
+        calls = _calls(_tree(tmp_path / name, timed=wrapper, buffer=_UPDATING, api=_api()))
+        placed = _placed(calls, "api", "update", "timed.run")
+        assert [(one.file, one.func.name) for one in placed.targets] == [("pkg/buffer.py", "update")], name
+
+
+def test_a_wrapper_or_an_object_whose_function_may_be_called_some_other_way_is_not_read_through(tmp_path):
+    """Not read through, and the call stays on the wrapper's method: a method returning what the function returns (the
+    call's value is no longer None), a thread not joined, a field read some other way in the class, an argument
+    added; and an object handed on, its field read, or bound otherwise.  The function built in is then read as a
+    value, as any function handed is."""
+    wrappers = {
+        "returns": "    def run(self, *var, **kwargs):\n        return self.method(*var, **kwargs)\n",
+        "unjoined": (
+            "    def __call__(self, *var, **kwargs):\n        self.result = self.method(*var, **kwargs)\n\n"
+            "    def run(self, *var, **kwargs):\n"
+            "        thr = threading.Thread(target=self, args=var, kwargs=kwargs)\n"
+            "        thr.start()\n"
+        ),
+        "peeked": (
+            "    def run(self, *var, **kwargs):\n        self.method(*var, **kwargs)\n\n"
+            "    def peek(self):\n        return self.method\n"
+        ),
+        "added": "    def run(self, *var, **kwargs):\n        self.method(*var, 1, **kwargs)\n",
+    }
+    for name, body in wrappers.items():
+        wrapper = (
+            "import threading\n\n"
+            f"class Timed:\n    def __init__(self, method, timeout):\n        self.method = method\n\n{body}"
+        )
+        calls = _calls(_tree(tmp_path / name, timed=wrapper, buffer=_UPDATING, api=_api()))
+        placed = _placed(calls, "api", "update", "timed.run")
+        assert placed.forwarded == (), name
+        assert [one.func.name for one in placed.targets] == ["run"], name
+        assert calls.forwarded_reads() == set(), name
+    uses = {
+        "handed": "    log(timed)\n",
+        "field": "    log(timed.method)\n",
+        "rebound": "    timed = log(None)\n",
+    }
+    for name, body in uses.items():
+        calls = _calls(_tree(tmp_path / f"use_{name}", timed=_TIMED, buffer=_UPDATING, api=_api(body)))
+        placed = _placed(calls, "api", "update", "timed.run")
+        assert placed.forwarded == (), name
+        assert calls.forwarded_reads() == set(), name

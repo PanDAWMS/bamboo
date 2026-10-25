@@ -14,7 +14,7 @@ import re
 import pytest
 
 from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.panda.reaching import reaching, reaching_exit
 
 SHAPES = '''
 def s1_if_else_cover(c):
@@ -349,6 +349,76 @@ def s38_assignment_reading_itself_in_a_loop(items):
     for i in items:
         total = total + i  # r:total a b  w:b
     use(total)  # r:total a b
+
+
+def s39_loop_over_a_literal_runs_once():
+    x = 0  # w:a
+    for name in ["ramCount", "walltime"]:
+        x = name  # w:b
+    use(x)  # r:x b
+
+
+def s40_loop_over_a_starred_or_empty_literal(rest):
+    x = 0  # w:a
+    for name in [*rest]:
+        x = name  # w:b
+    for name in ():
+        x = name  # w:c
+    use(x)  # r:x a b c
+
+
+def s41_loop_over_range_of_a_name_bound_to_one_runs_once(spec):
+    x = 0  # w:a
+    nTry = 1
+    for iTry in range(nTry):
+        use(x)  # r:x a
+        if spec:
+            x = spec  # w:b
+            continue
+        x = None  # w:c
+    else:
+        use(x)  # r:x b c
+    use(x)  # r:x b c
+
+
+def s42_loop_over_range_one_breaks_or_ends(spec):
+    x = 0  # w:a
+    for _ in range(1):
+        use(x)  # r:x a
+        if spec:
+            x = 1  # w:b
+            break
+        x = 2  # w:c
+    else:
+        use(x)  # r:x c
+    use(x)  # r:x b c
+
+
+def s43_loop_over_range_of_a_name_bound_otherwise(spec, c):
+    x = 0  # w:a
+    nTry = 1
+    if c:
+        nTry = 3
+    for iTry in range(nTry):
+        use(x)  # r:x a b
+        x = spec  # w:b
+    use(x)  # r:x a b
+
+
+def s44_loop_over_range_of_a_parameter(spec, nTry=1):
+    x = 0  # w:a
+    for iTry in range(nTry):
+        use(x)  # r:x a b
+        x = spec  # w:b
+    use(x)  # r:x a b
+
+
+def s45_loop_over_a_range_the_function_rebinds(spec):
+    range = list
+    x = 0  # w:a
+    for _ in range(1):
+        x = spec  # w:b
+    use(x)  # r:x a b
 '''
 
 
@@ -562,3 +632,33 @@ def test_a_parameter_list_is_written_on_entry():
 
     assert reaching(reread, [func.args, default]) == [func.args, default]
     assert reaching(read, [func.args, rebound]) == [rebound]
+
+
+def test_the_writes_live_at_a_normal_exit_are_those_a_return_or_the_end_sees():
+    """A ``return`` -- through a ``finally`` too -- and the end of the body are where the function returns normally;
+    a ``raise`` out of it is not one."""
+    source = (
+        "def f(c, d):\n"
+        "    x = 1\n"
+        "    if c:\n"
+        "        x = 2\n"
+        "        return\n"
+        "    if d:\n"
+        "        x = 3\n"
+        "        raise ValueError\n"
+        "    try:\n"
+        "        x = 4\n"
+        "        return\n"
+        "    finally:\n"
+        "        x = 5\n"
+    )
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    first, second = func.body[0], func.body[1].body[0]
+    third, fourth = func.body[2].body[0], func.body[3].body[0]
+    last = func.body[3].finalbody[0]
+    sites = [func.args, first, second, third, fourth, last]
+
+    assert reaching_exit(func, sites) == [second, last]
+    assert reaching_exit(func, [func.args, first], [second, last]) == []

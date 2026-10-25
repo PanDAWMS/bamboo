@@ -3110,12 +3110,8 @@ def test_a_function_some_call_entered_open_says_so_on_every_return_whichever_cal
     assert entering.detail == f"returns from {PACKAGE}/m::getTask; {calls_mod.UNPLACED_OPEN}"
 
 
-def test_a_guard_that_asks_a_method_names_the_calls_that_changed_its_answer(tmp_path):
-    """``not self.result.is_succeeded()`` is decided by which ``set_*()`` ran --
-    listed at the calls that made them, with what printed beside each."""
-    roots = _tree(
-        tmp_path,
-        **{"result.py": '''\
+_SET_BY_A_SETTER = {
+    "result.py": '''\
 class Result:
     rc_ok = 0
     rc_fatal = 2
@@ -3129,7 +3125,7 @@ class Result:
     def is_succeeded(self):
         return self.status_code == self.rc_ok
 ''',
-        "plugin.py": '''\
+    "plugin.py": '''\
 from pandajedi.result import Result
 
 class Plugin:
@@ -3141,7 +3137,7 @@ class Plugin:
             log.error("registration failed for good")
             self.result.set_fatal()
 ''',
-        "gen.py": '''\
+    "gen.py": '''\
 from pandajedi.plugin import Plugin
 
 class Gen:
@@ -3150,8 +3146,14 @@ class Gen:
         self.add_result = self.plugin.result
         if not self.add_result.is_succeeded():
             job.status = "failed"
-'''},
-    )
+''',
+}
+
+
+def test_a_guard_that_asks_a_method_names_the_calls_that_changed_its_answer(tmp_path):
+    """``not self.result.is_succeeded()`` is decided by which ``set_*()`` ran --
+    listed at the calls that made them, with what printed beside each."""
+    roots = _tree(tmp_path, **_SET_BY_A_SETTER)
 
     walked = _walked_in(roots, "gen.py", "run", [8])
     said = _said(walked)
@@ -4512,3 +4514,227 @@ def go(spec):
     said = _said(_walked_in(roots, "m", "go", [10]))
 
     assert not [one for one in said if one[2] == "run"]
+
+
+def test_a_function_a_wrapper_hands_its_arguments_to_runs_on_the_object_it_was_read_off(tmp_path):
+    """``timed.run()`` calls ``Spec.columns()`` (``calls.Placed.forwarded``): ``cls`` holds ``Spec``, the object the
+    function was read off, not the ``Timed`` the call is made on."""
+    roots = _tree(
+        tmp_path,
+        **{"m.py": '''\
+class Timed:
+    def __init__(self, method, timeout):
+        self.method = method
+
+    def run(self, *var, **kwargs):
+        self.method(*var, **kwargs)
+
+
+class Spec:
+    @classmethod
+    def columns(cls, prefix=None):
+        if prefix:
+            names = prefix
+        else:
+            names = cls.attributes
+        spec.status = names
+
+
+def build():
+    timed = Timed(Spec.columns, 10)
+    timed.run()
+'''},
+    )
+
+    walked = _walked_in(roots, "m.py", "columns", [16])
+    handed = {s.name: s for s in walked.steps if s.kind == "handover"}
+
+    assert handed["cls"].detail == "the object columns is called on"
+    assert handed["cls"].value == "Spec"
+
+
+def _asker_in(roots, file, owner, lines, **kwargs):
+    return trace_mod.Asker(
+        roots,
+        file=f"{PACKAGE}/{file}",
+        owner=f"{PACKAGE}/{file}::{owner}",
+        lines=lines,
+        classify=provenance.classify,
+        reaching=True,
+        **kwargs,
+    )
+
+
+def _asked_through(asker):
+    """``{question: answer}``: the start's under ``None``, then each frontier question's once, breadth first."""
+    answers = {None: asker.start()}
+    queue = list(answers[None].frontier)
+    while queue:
+        question = queue.pop(0)
+        if question not in answers:
+            answers[question] = asker.ask(question)
+            queue.extend(answers[question].frontier)
+    return answers
+
+
+def _step_keys(steps):
+    return {(s.kind, s.file, s.owner, s.line, s.name, s.value) for s in steps}
+
+
+def test_a_question_is_answered_one_hop_and_every_question_asked_once_is_the_walk(tmp_path):
+    """The querier's trace questions.  The start is the arm alone, what it reads and calls its frontier; each
+    answer is one depth and hands back what it did not follow; the calls of the setter of a field are a question
+    of their own.  Every question asked once, the answers hold the walk's steps."""
+    roots = _tree(tmp_path, **_SET_BY_A_SETTER)
+
+    answers = _asked_through(_asker_in(roots, "gen.py", "run", [8]))
+
+    start = answers[None]
+    assert [(s.kind, s.line) for s in start.steps] == [(TRACE_WRITE, 8)]
+    assert {(q.kind, q.name, q.line) for q in start.frontier} == {
+        (trace_mod.ASK_BINDINGS, "self.add_result", 7),
+        (trace_mod.ASK_RETURNS, "self.add_result.is_succeeded()", 7),
+    }
+    assert all(len({s.depth for s in answer.steps}) <= 1 for answer in answers.values())
+    (setter,) = [q for q in answers if q is not None and q.kind == trace_mod.ASK_SETTER_CALLS]
+    assert (setter.name, setter.owner.rsplit("::", 1)[-1], [m.kind for m in setter.chain]) == (
+        "self.status_code",
+        "set_fatal",
+        [trace_mod.MOVE_DOWN, trace_mod.MOVE_INTO],
+    )
+    assert [(s.owner.rsplit("::", 1)[-1], s.line, s.value) for s in answers[setter].steps] == [
+        ("register", 10, "self.result.set_fatal()")
+    ]
+    walked = _walked_in(roots, "gen.py", "run", [8])
+    assert _step_keys(s for answer in answers.values() for s in answer.steps) == _step_keys(walked.steps)
+
+
+def test_a_question_s_answer_is_the_same_whatever_was_asked_before(tmp_path):
+    """The querier keeps an answer per question and asks in its own order: each is a walk of its own."""
+    roots = _tree(tmp_path, **_SET_BY_A_SETTER)
+    answers = _asked_through(_asker_in(roots, "gen.py", "run", [8]))
+    other = _asker_in(roots, "gen.py", "run", [8])
+
+    for question in reversed([q for q in answers if q is not None]):
+        again = other.ask(question)
+        assert (again.steps, again.frontier) == (answers[question].steps, answers[question].frontier)
+
+
+def test_a_question_in_a_function_the_walk_went_into_carries_the_call_it_came_by(tmp_path):
+    """``helper``'s ``x`` is what ``f``'s call hands it, as the walk reads it there, and not ``g``'s ``7``: the
+    question's chain names the call."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def helper(x):
+    return x + 1
+
+def f(a):
+    b = helper(a)
+    spec.status = b
+
+def g():
+    return helper(7)
+''',
+    )
+
+    answers = _asked_through(_asker_in(roots, "m", "f", [6]))
+
+    (asked,) = [q for q in answers if q is not None and q.name == "x"]
+    assert [(m.kind, m.owner.rsplit("::", 1)[-1]) for m in asked.chain] == [(trace_mod.MOVE_DOWN, "helper")]
+    assert [(s.kind, s.owner.rsplit("::", 1)[-1], s.value) for s in answers[asked].steps] == [(TRACE_HANDOVER, "f", "a")]
+
+
+def test_a_name_the_arms_read_is_their_question_however_the_walk_comes_back_to_it(tmp_path):
+    """``f``'s ``a`` is what the arm reads, and what ``f`` hands ``count``'s ``n``.  The walk answers it once, as
+    the arm's read; asked again from ``n``, it is the arms' question still, not a second one."""
+    roots = _tree(tmp_path, m="def count(n):\n    return n + 1\n\ndef f(a):\n    spec.status = count(a)\n")
+
+    answers = _asked_through(_asker_in(roots, "m", "f", [5]))
+
+    assert [q.armed for q in answers if q is not None and q.name == "a"] == [True]
+    assert {(q.name, q.armed) for q in answers if q is not None and q.name == "n"} == {("n", False)}
+
+
+def test_a_question_s_chain_stops_at_the_depth_budget_where_a_recursion_grows_it(tmp_path):
+    """``count`` calls itself, and its ``n`` is what each call hands it: going up through that call comes back to
+    ``count`` one move longer each time.  A question has no depth; the depth budget caps its chain's moves, and
+    asked through, the questions end.  The start keeps the empty chain where a move comes back to it, so ``f``,
+    one call up from the start, is one move away."""
+    roots = _tree(
+        tmp_path,
+        **{
+            "m.py": '''\
+def count(n, spec):
+    if n > 0:
+        count(n - 1, spec)
+    spec.status = n
+
+def f(spec, k):
+    count(k, spec)
+'''
+        },
+    )
+    budget = trace_mod.Budget(depth=3, crossed_depth=0)
+
+    answers = _asked_through(_asker_in(roots, "m.py", "count", [4], budget=budget))
+
+    assert max(len(q.chain) for q in answers if q is not None) == 2
+    assert any("depth budget" in answer.note for answer in answers.values())
+    assert {tuple(one.owner.rsplit("::", 1)[-1] for one in q.chain) for q in answers if q is not None and q.name == "k"} == {
+        ("f",),
+        ("count", "f"),
+    }
+    walked = _walked_in(roots, "m.py", "count", [4], budget=budget)
+    assert _step_keys(s for answer in answers.values() for s in answer.steps) == _step_keys(walked.steps)
+
+
+def test_a_question_about_what_a_call_returns_answers_for_that_call(tmp_path):
+    """``getTask`` is entered by a call placed open and by one placed closed.  The walk marks its return open
+    once any call placed open entered it; the question about the closed call answers for that call alone."""
+    roots = _tree(
+        tmp_path, m=_OPEN_ENTRY.format(first="self.source.getTask(a)", second="self.buffer.getTask(a)")
+    )
+
+    answers = _asked_through(_asker_in(roots, "m", "run", [26]))
+
+    marks = {
+        q.name: {s.open for s in answer.steps}
+        for q, answer in answers.items()
+        if q is not None and q.kind == trace_mod.ASK_RETURNS and q.name.endswith("getTask(a)")
+    }
+    assert marks == {"self.source.getTask(a)": {calls_mod.UNPLACED_OPEN}, "self.buffer.getTask(a)": {""}}
+
+
+def test_a_question_says_on_the_field_s_step_that_no_setter_call_is_on_the_object(tmp_path):
+    """Every ``add`` is on another box: the walk says so on the step of what ``add`` assigns, and the question
+    about ``self.items`` does too -- there is no call of the setter to ask about."""
+    knight = "    def start(self):\n        box = Box([])\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _filled(knight, _JUNK)})
+
+    answers = _asked_through(_asker_in(roots, "m.py", "Worker.run", [19]))
+
+    (filled,) = [
+        s for answer in answers.values() for s in answer.steps if s.kind == TRACE_BINDING and s.owner.endswith("::add")
+    ]
+    assert filled.detail.endswith("; none of the 1 call(s) of add is made on the object the walk came in on")
+    assert not [q for q in answers if q is not None and q.kind == trace_mod.ASK_SETTER_CALLS]
+
+
+def test_a_question_spells_a_function_by_its_file_whichever_frame_came_first(tmp_path):
+    """``Box`` and ``Worker`` each have an ``__init__``.  The walk spells the first frame it makes plainly and the
+    second with its class, so a question that makes only one would say ``__init__`` where another answer says
+    ``Box.__init__`` -- and the querier joins answers by the owner.  A question spells both with the class, and
+    a function whose name is the file's alone plainly."""
+    knight = "    def start(self):\n        box = Box([])\n        Worker(box)\n"
+    roots = _tree(tmp_path, **{"m.py": _filled(knight, _JUNK)})
+
+    answers = _asked_through(_asker_in(roots, "m.py", "Worker.run", [19]))
+
+    owners = {s.owner for answer in answers.values() for s in answer.steps}
+    owners |= {one.owner for q in answers if q is not None for one in (q, *q.chain)}
+    assert {owner.rsplit("::", 1)[-1] for owner in owners if owner.endswith("__init__")} == {
+        "Box.__init__",
+        "Worker.__init__",
+    }
+    assert f"{PACKAGE}/m.py::start" in owners

@@ -54,7 +54,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
-from bamboo.codemap.calls import FILLERS, Calls, Route, Target, Types, _rebinds
+from bamboo.codemap.calls import FILLERS, UNSET, Calls, Recorded, Target, Types
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     AddedTerm,
@@ -97,6 +97,7 @@ from bamboo.codemap.panda.pathcond import (
     reaching_definitions,
     site_of,
     surviving_writes,
+    targets_of,
 )
 
 # The block a decision records about itself reads the same way whichever slice
@@ -128,10 +129,10 @@ NO_DECIDING_FRAGMENT = "the fragment that wrote this value could not be located"
 
 #: The read side counts statements, not columns, so its reasons are about how
 #: a query is run rather than where a value came from.  ``sql.executions``
-#: accepts ``execute``/``executemany``/``querySQL``/``querySQLS`` with at least
-#: two arguments; each reason below is one of the ways a statement this slice
+#: accepts a call by a runner's name (``sql.runners``: the cursor's
+#: ``execute`` / ``executemany`` and the functions handing their statement on
+#: to one); each reason below is one of the ways a statement this slice
 #: assembled fails to reach it.
-RUN_WITHOUT_VARMAP = "run through an accepted call with no varmap argument"
 RUN_BUT_TEXT_DIFFERS = "run through an accepted call, but the call is never handed this text"
 RUN_THROUGH_OTHER_FORM = "run through a call form the reader does not accept"
 NOT_RUN_HERE = "assembled here and not run here"
@@ -286,29 +287,22 @@ def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingSto
 def _skip_stops(skipped: list[sql.Skip], rel_path: str, owner: str) -> list[ReadingStop]:
     """An execution nothing was read out of, as a stop on the statement it runs.
 
-    Left out where the text is known and names no table: ``ALTER SESSION`` and
-    ``SET`` run through the same cursor and are about no rows.  Where the text
-    is not known at all the tables are not either, and the stop says so rather
-    than reading as a write.
+    Its text is not known, so its tables are not either, and the stop says so
+    rather than reading as a write.
     """
-    found: list[ReadingStop] = []
-    for skip in skipped:
-        verbs = [pair for text in skip.texts for pair in _table_verbs(text)]
-        if skip.texts and not verbs:
-            continue
-        found.append(
-            ReadingStop(
-                reason=skip.reason,
-                detail=skip.detail,
-                file=rel_path,
-                owner=owner,
-                line=skip.line,
-                statement=skip.line,
-                reads=sorted({table for verb, table in verbs if verb == "read"}),
-                reads_known=bool(skip.texts),
-            )
+    return [
+        ReadingStop(
+            reason=skip.reason,
+            detail=skip.detail,
+            file=rel_path,
+            owner=owner,
+            line=skip.line,
+            statement=skip.line,
+            reads=[],
+            reads_known=False,
         )
-    return found
+        for skip in skipped
+    ]
 
 
 def distinct_stops(stops: list[ReadingStop]) -> list[ReadingStop]:
@@ -367,7 +361,7 @@ def _row_key_source(
     handed = ""
     if run.varmap is not None:
         for _column, bind in sorted(statement.keys.items()):
-            for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run.run_at):
+            for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run):
                 handed = handed_in(func, filled.value)
                 if handed:
                     break
@@ -472,7 +466,7 @@ def extract(
                     preconditions = []
                     for term in sorted(statement.preconditions.values()):
                         settled, done = sql.settled_precondition(
-                            term, func, run.varmap, run.window, settle, at=run.run_at
+                            term, func, run.varmap, run.window, settle, at=run
                         )
                         preconditions.append(settled)
                         if not done and ":" in term:
@@ -585,9 +579,10 @@ def extract(
                             column=column,
                             carriers=carriers,
                             setters=setters,
-                            beside=lambda node, terms=sorted(statement.preconditions.values()): [
+                            # Called by _record before the loop moves on; the defaults keep this pass's run if it ever is not.
+                            beside=lambda node, terms=sorted(statement.preconditions.values()), func=func, run=run: [
                                 sql.settled_precondition(
-                                    term, func, run.varmap, run.window, settle, beside=node, at=run.run_at
+                                    term, func, run.varmap, run.window, settle, beside=node, at=run
                                 )[0]
                                 for term in terms
                             ],
@@ -635,17 +630,16 @@ def extract(
 
 
 def _runs_many(run: sql.Execution) -> bool:
-    """Is this execution ``executemany``, whose varmap argument is a sequence?
+    """Is this execution ``executemany``, or a runner handing its map on to it, whose varmap argument is a sequence?
 
     Asked of the call the reader already paired with the statement, so the
     answer cannot disagree with the pairing.
     """
     call = getattr(run, "call", None)
-    return bool(
-        call is not None
-        and isinstance(getattr(call, "func", None), ast.Attribute)
-        and call.func.attr == "executemany"
-    )
+    if call is None or not isinstance(getattr(call, "func", None), ast.Attribute):
+        return False
+    runner = sql.runners().get(call.func.attr)
+    return bool(runner is not None and runner.many)
 
 
 def _deciding_fragment(
@@ -746,7 +740,7 @@ def _outcomes(
         if run.varmap is None:
             why.append(NO_VARMAP)
             return []
-        scan = sql.scan_binds(func, run.varmap, supplied.text, run.window, at=run.run_at)
+        scan = sql.scan_binds(func, run.varmap, supplied.text, run.window, at=run)
         found = []
         for bind in scan.binds:
             value, site = bind.value, bind.site
@@ -934,6 +928,15 @@ def _record(
             ),
         )
         junctions[name] = junction
+    else:
+        # And over every statement's: one text of a statement writes only the
+        # outcomes its own branch binds (``sql.bound_values``), so the first
+        # statement read is not every arm.
+        junction.anchor.line_start = min(junction.anchor.line_start, *(found.node.lineno for found in outcomes))
+        junction.anchor.line_end = max(
+            junction.anchor.line_end or junction.anchor.line_start,
+            *(found.node.end_lineno or found.node.lineno for found in outcomes),
+        )
 
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
     for outcome, tier, node, extra, decided_at, frames in outcomes:
@@ -1604,7 +1607,7 @@ def _condition_seeds(
             if key in seeds:
                 continue
             at_lines = sorted(
-                {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window, at=run.run_at)}
+                {bind.site.lineno for bind in sql.bound_values(func, run.varmap or "", key, window, at=run)}
             )
             if at_lines:
                 seeds[key] = at_lines
@@ -1706,6 +1709,20 @@ def _render_condition(condition: "sqltext.Condition", seeds: dict[str, list[int]
     return " OR ".join(parts)
 
 
+def _text_run(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution, drawn: "sqleval.Rendered"
+) -> sql.Execution:
+    """*run* holding *drawn*'s text, holes and pieces: one object per text, so what a reader holds by the run is read
+    once -- a site's conditions are folded more than once, and ``bound_sites`` keeps what it read by the run."""
+    store = getattr(func, "_sqlwrite_text_runs", None)
+    if store is None:
+        store = func._sqlwrite_text_runs = {}  # type: ignore[union-attr]
+    held = store.get((id(run), id(drawn)))
+    if held is None or held[0] is not run or held[1] is not drawn:
+        held = store[(id(run), id(drawn))] = (run, drawn, run._replace(sql=drawn.text, holes=drawn.holes, pieces=drawn.pieces))
+    return held[2]
+
+
 def _folded(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     line: int,
@@ -1739,22 +1756,24 @@ def _folded(
     # whose statements are not every way a run can go, so no disjunction of
     # theirs is said.
     open_ended = False
-    # ``(run, its texts)``: a run's binds are read once, whichever of the
-    # call's statements is folded -- they are the call's, not the text's.
+    # ``(run, its texts)``: each statement of the call read as a run of its
+    # own text and pieces, since a bind is the text's (:func:`sql.bound_values`):
+    # ``getJobStatisticsForExtIF`` fills ``:prodSourceLabel1`` with ``user`` for
+    # the analysis text and ``managed`` for the production one.
     texts_of: list[tuple[sql.Execution, list[str]]] = []
     if variants:
-        every = sql.every_statement(func, line)
-        if every is None:
+        drawn = sql.every_rendering(func, line)
+        if drawn is None:
             open_ended = True
             texts_of = [(run, [run.reading]) for run in variants]
         else:
-            texts_of = [(variants[0], every)]
+            texts_of = [(_text_run(func, variants[0], one), [sql.reading_text(one.text, one.holes)]) for one in drawn]
     for run, texts in texts_of:
         window = run.window
         if window is None and run.varmap:
             window = sql.binding_window(func, run.varmap, line)
         for text in texts:
-            found = list(zip(sqltext.conditions(text), sqltext.condition_twins(text)))
+            found = list(zip(sqltext.conditions(text), sqltext.condition_twins(text), strict=True))
             seeds: dict[str, list[int]] = {}
             for condition, _twin in found:
                 for key in condition.binds:
@@ -1763,7 +1782,7 @@ def _folded(
                     at_lines = sorted(
                         {
                             bind.site.lineno
-                            for bind in sql.bound_values(func, run.varmap or "", key, window, at=run.run_at)
+                            for bind in sql.bound_values(func, run.varmap or "", key, window, at=run)
                         }
                     )
                     if at_lines:
@@ -1810,7 +1829,7 @@ def _merged_tree(one: Optional[ConditionNode], other: Optional[ConditionNode]) -
         return one
     return one.model_copy(
         update={
-            "items": [_merged_tree(a, b) for a, b in zip(one.items, other.items)],
+            "items": [_merged_tree(a, b) for a, b in zip(one.items, other.items, strict=True)],
             "values": one.values + [value for value in other.values if value not in one.values],
             "settled": one.settled and other.settled,
         }
@@ -2036,71 +2055,6 @@ def _on_route(via: tuple[str, ...], chain: tuple[str, ...], into: frozenset[str]
     return rest[:shared] == chain[:shared]
 
 
-#: A parameter a route fixes no constant for.
-_UNSET = object()
-
-
-def _route_constant(name: str, target: Target, sites: tuple, calls: Calls) -> object:
-    """The constant the route *sites* hands *target*'s parameter *name*, or :data:`_UNSET`.
-
-    Followed out through each forwarder that hands the parameter on
-    unchanged; a call that does not pass it hands the default it states.  A
-    value the route's outermost caller takes as its own parameter is not
-    fixed: that caller's callers are not asked.  Nor is a forwarder's caller
-    asked for a parameter the forwarder may bind again on the route before
-    handing it on (:func:`_bound_again`): ``getTasksToBeProcessed_JEDI`` sets
-    ``is_dry_run = True`` whenever ``simTasks`` is given, whatever its caller
-    passed -- on a route that gives it, not on one that leaves it ``None``.
-    """
-    site = sites[0]
-    handed = calls.handed(site, target).get(name)
-    if isinstance(handed, ast.Constant):
-        return handed.value
-    if (
-        isinstance(handed, ast.Name)
-        and name in calls.filled(site, target)
-        and len(sites) > 1
-        and handed.id in _parameters(site.func)
-    ):
-        owned = calls.types.method_class(site.file, site.func)
-        outer = Target(site.file, site.func, owned[1] if owned else None)
-        if _bound_again(handed.id, outer, sites[1:], calls):
-            return _UNSET
-        return _route_constant(handed.id, outer, sites[1:], calls)
-    return _UNSET
-
-
-def _bound_again(name: str, target: Target, sites: tuple, calls: Calls) -> bool:
-    """Whether *target*'s function may bind its parameter *name* again when the route *sites* calls it.
-
-    A binding the function's own tests rule out, with the constants the route
-    hands the parameters they test, is not on the route
-    (:func:`pathcond.ruled_out_by`) -- the reading :func:`values.handed` gives
-    a call whose constant rules out a bind.  The parameter itself among them:
-    ``maxNumJobs -= ...`` under ``if maxNumJobs is not None`` never runs on a
-    route handing ``None``, and where no binding runs the name holds what it
-    was handed.  A ``del`` always may.
-    """
-    func = target.func
-    if not _rebinds(func, name):
-        return False
-    if any(isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del) for node in ast.walk(func)):
-        return True
-    again = [binding.site for binding in pathcond.bindings(func, name) if not binding.nested]
-    tested = {
-        one.id
-        for site in again
-        for ancestor in ancestors(site)
-        if isinstance(ancestor, ast.If) and enclosing_function(ancestor) is func
-        for one in ast.walk(ancestor.test)
-        if isinstance(one, ast.Name) and one.id in _parameters(func)
-    }
-    constants = {
-        one: value for one in sorted(tested) if (value := _route_constant(one, target, sites, calls)) is not _UNSET
-    }
-    return any(not pathcond.ruled_out_by(site, func, constants) for site in again)
-
-
 def _route_handed(target: Target, sites: tuple, calls: Calls) -> dict[str, "values.Stated"]:
     """What the route *sites* hands each of *target*'s parameters, read as an amount in the caller (:func:`values.stated`).
 
@@ -2315,9 +2269,7 @@ def _why_not_run(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str
         attr = node.func.attr if isinstance(node.func, ast.Attribute) else (
             node.func.id if isinstance(node.func, ast.Name) else "?"
         )
-        if attr in sql.RUNNERS:
-            if len(node.args) < 2:
-                return RUN_WITHOUT_VARMAP
+        if attr in sql.runners():
             # Accepted form, yet no run there holds the text: what the name
             # holds where it is used is not what reaches the call, which is a
             # different finding from an unrecognised call.
@@ -2355,12 +2307,6 @@ def _assembled_queries(
     }
 
 
-#: Where a statement's rows arrive.  The ``execute`` form binds nothing at the
-#: call -- ``self.cur.execute(sql, varMap)`` and then ``res =
-#: self.cur.fetchall()`` -- so reading the call line alone finds the rows for
-#: 48 of the corpus's 264 statements and misses every exit taken because none
-#: came back.
-_FETCH = ("fetchall", "fetchone", "fetchmany")
 #: ``ExceptHandler`` is not an ``ast.stmt``, which is why it is named rather
 #: than reached through one.
 _EXITS = (ast.Continue, ast.Break, ast.Return, ast.Raise, ast.ExceptHandler)
@@ -2417,29 +2363,30 @@ def _leaves(handler: ast.ExceptHandler) -> bool:
     return any(isinstance(inner, _LEAVES) for inner in ast.walk(handler))
 
 
-def _assigned_names(node: ast.Assign) -> set[str]:
-    return {name for target in node.targets for name, _slot, _unpacked in names_bound_by(target)}
+def _assigned_names(node: ast.AST) -> set[str]:
+    return {name for target in targets_of(node) for name, _slot, _unpacked in names_bound_by(target)}
 
 
 def _rows_written(
     func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
-) -> list[ast.Assign]:
+) -> list[ast.Assign | ast.AnnAssign]:
     """The assignments this statement's rows land in, within the stretch it owns.
 
     The call line first, for the forwarded form that returns them; otherwise
     the first ``fetch*`` under it.  Reading only the call would leave most of
-    the corpus with no rows to test an exit against -- see :data:`_FETCH`.
+    the corpus with no rows to test an exit against -- see :data:`sql.FETCHES`.
     """
-    named: list[ast.Assign] = []
-    fetched: list[ast.Assign] = []
+    named: list[ast.Assign | ast.AnnAssign] = []
+    fetched: list[ast.Assign | ast.AnnAssign] = []
     for node in ast.walk(func):
-        if not isinstance(node, ast.Assign) or not _assigned_names(node):
+        # ``res: list = self.cur.fetchall()`` lands the rows as ``res = ...`` does.
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not _assigned_names(node):
             continue
         if node.lineno == line:
             named.append(node)
         elif line < node.lineno <= last and isinstance(node.value, ast.Call):
             callee = node.value.func
-            if isinstance(callee, ast.Attribute) and callee.attr in _FETCH:
+            if isinstance(callee, ast.Attribute) and callee.attr in sql.FETCHES:
                 fetched.append(node)
     return named or fetched
 
@@ -2476,11 +2423,14 @@ def _module_of(node: ast.AST) -> Optional[ast.Module]:
     return node if isinstance(node, ast.Module) else None
 
 
-def corpus_calls(modules: list[SourceModule], roots: Optional[dict[str, Path]]) -> Optional[Calls]:
+def corpus_calls(
+    modules: list[SourceModule], roots: Optional[dict[str, Path]], recorded: Optional[Recorded] = None
+) -> Optional[Calls]:
     """The corpus's calls, read over the build's own trees; ``None`` without *roots*.
 
     The trees are the modules' so that a caller :meth:`Calls.callers` finds is
     a function the build has already parsed and attached parents to.
+    *recorded* is the instance's record, where the build has one (:func:`~bamboo.codemap.calls.read_recorded`).
     """
     if not roots:
         return None
@@ -2488,7 +2438,7 @@ def corpus_calls(modules: list[SourceModule], roots: Optional[dict[str, Path]]) 
     for module in modules:
         attach_parents(module.tree)
         walked[module.rel_path] = (module.blob_sha, module.tree)
-    return Calls(Types(roots, walked))
+    return Calls(Types(roots, walked, recorded))
 
 
 def read_side(
@@ -2661,7 +2611,7 @@ def read_side(
         held = settled.get((id(run), key, file))
         if held is None or held[0] is not run:
             found: list[tuple[str, ast.stmt, tuple[str, ...], bool]] = []
-            binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
+            binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run)
             if not run.varmap:
                 binds = binds + sql.inline_binds(run.call, key)
             for bind in binds:
@@ -2731,7 +2681,7 @@ def read_side(
             if not settled_values:
                 return [ConditionValue(kind="bind", text=side.text, said=f"nothing in the map settles {key}")]
             return [ConditionValue(kind="bind", text=side.text, constant=value) for value in settled_values]
-        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run)
         if not run.varmap:
             binds = binds + sql.inline_binds(run.call, key)
         if not binds:
@@ -2850,7 +2800,7 @@ def read_side(
         caller hands, where different calls hand different lists and the
         union is no run's.
         """
-        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run.run_at)
+        binds = sql.bound_values(func, run.varmap or "", key, run.window, across=True, at=run)
         if len(binds) != 1:
             return None
         value = binds[0].value
@@ -2903,7 +2853,7 @@ def read_side(
         records: dict[int, list[CallReading]] = {line: [] for line in lines}
         for route in found:
             constants = {
-                name: value for name in sorted(tested) if (value := _route_constant(name, target, route.sites, calls)) is not _UNSET
+                name: value for name in sorted(tested) if (value := calls.route_constant(name, target, route.sites)) is not UNSET
             }
             routing.update(chain=route.chain, into=into, func=func, handed=_route_handed(target, route.sites, calls))
             try:
@@ -3148,7 +3098,7 @@ def read_side(
             found = sqltext.conditions(run.reading)
             seeds = _condition_seeds(func, run, line, found)
             own_conditions[id(run)] = [(plain(one), tuple(dict.fromkeys(one.binds))) for one in found]
-            for one, twin in zip(found, sqltext.condition_twins(run.reading)):
+            for one, twin in zip(found, sqltext.condition_twins(run.reading), strict=True):
                 spelled.setdefault(("conditions", plain(one)), _render_condition(one, seeds))
                 key = ("conditions", plain(one))
                 trees[key] = _merged_tree(trees.get(key), tree_of(func, run, file, twin))
@@ -3368,48 +3318,17 @@ def read_side(
     def place_regions(
         func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str, executions: list
     ) -> None:
-        """Give each of *func*'s statements the stretch of it that it owns.
+        """Give each of *func*'s statements the stretch of it that it owns (:func:`sql.regions`).
 
-        From where this run's binds start being filled to just before the next
-        run's do.  Every run of the function is laid out, not only the stored
-        ones: the statement that ends a region may be one no read site was
-        built from, and stopping at the next *stored* one would hand a reader
-        the following query's logging as well.
-
-        Where two statements share one ``var_map = {}`` the later one's binds
-        start filling *above* the earlier one's call, so the next run's window
-        is no edge at all: it would end a region before the statement it
-        belongs to ran, taking that statement's own ``fetchall`` with it.  A
-        statement's territory cannot close at or before it ran, so where the
-        windows overlap the next *call* is the edge.
-
-        Keyed by the call line because a branchy statement is emitted as
-        several runs at one ``execute``, and a read site is one ``(owner,
-        line)``: without the key the region ends at the statement's own second
-        variant, which is itself.
+        Every run of the function is laid out, not only the stored ones: the
+        statement that ends a region may be one no read site was built from,
+        and stopping at the next *stored* one would hand a reader the
+        following query's logging as well.
         """
-        starts: dict[int, int] = {}
-        for run in executions:
-            line = run.call.lineno
-            window = run.window
-            if window is None and run.varmap:
-                window = sql.binding_window(func, run.varmap, line)
-            begins = window[0] if window else line
-            starts[line] = min(starts.get(line, begins), begins)
-        last = func.end_lineno or func.lineno
-        ordered = sorted(starts.items())
-        for index, (line, begins) in enumerate(ordered):
+        for line, region in sql.regions(func, executions).items():
             kept = statements.get((owner, line))
-            if kept is None:
-                continue
-            if index + 1 < len(ordered):
-                next_line, next_begins = ordered[index + 1]
-                following = next_begins if next_begins > line else next_line
-            else:
-                following = last + 1
-            statements[(owner, line)] = kept._replace(
-                region=(begins, max(line, following - 1))
-            )
+            if kept is not None:
+                statements[(owner, line)] = kept._replace(region=region)
 
     def place_exits(func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str) -> None:
         """Give each statement the ways a row it asked for stops being followed.
@@ -3984,12 +3903,12 @@ def _reached_by(
     reached: set[str] = set()
     built: dict[str, ast.AST] = {}
     for node in ast.walk(caller):
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
             continue
         callee = node.value.func
         made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
         if made in by_class and any(carry.reaches(a, node) for a in node.value.args):
-            for target in node.targets:
+            for target in targets_of(node):
                 if isinstance(target, ast.Name):
                     built[target.id] = made
     for node in ast.walk(caller):
@@ -4089,7 +4008,7 @@ def attach_crossings(
         # handed the same two false leads, which is the shape the crossing pass
         # was written to avoid and had been avoiding by accident, because until
         # ``JobSpec.ddmErrorDiag`` was promoted no ``execute`` owned a junction.
-        if name in sql.RUNNERS:
+        if name in sql.CURSOR_RUNNERS:
             continue
         by_func.setdefault(name, set()).add(owner)
     trees = {module.rel_path: module.tree for module in modules}
@@ -4154,11 +4073,11 @@ def attach_crossings(
         for node in ast.walk(func):
             if not isinstance(node, ast.stmt) or not first <= node.lineno <= last:
                 continue
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call):
                 callee = node.value.func
                 made = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
                 if made in by_class:
-                    for target in node.targets:
+                    for target in targets_of(node):
                         if isinstance(target, ast.Name):
                             built[target.id] = made
             for inner in ast.walk(node):
@@ -4220,7 +4139,7 @@ def _handed_back(
     reached: set[str] = set()
     for _rel, call, caller in _consumers_of(wanted, calls, site.anchor.file, func):
         statement = _enclosing(call, (ast.stmt,))
-        if not isinstance(statement, ast.Assign):
+        if not targets_of(statement):
             # Returned on again, or thrown away.  The first is the proxy shape
             # under another name and the second has no rows to follow.
             continue

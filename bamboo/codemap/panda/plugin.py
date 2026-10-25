@@ -39,15 +39,18 @@ from bamboo.codemap.models import (
     SubjectNode,
     pooled_frames,
 )
-from bamboo.codemap.panda import mustprints, promotion, sql, sqltext
+from bamboo.codemap.panda import mustprints, objects, promotion, runs, sql, sqltext
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
     class_bases,
     spec_annotation_forms,
 )
-from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner, qualified_name
-from bamboo.codemap.panda.recognizers import outbound
+from bamboo.codemap.panda.pathcond import (
+    attach_parents,
+    functions_with_owner,
+    qualified_name,
+)
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -56,6 +59,7 @@ from bamboo.codemap.panda.recognizers import (
     flush,
     logfile,
     loopcut,
+    outbound,
     progress,
     selection,
     sqlwrite,
@@ -201,18 +205,25 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._stop_disagreements: list[str] = []
         self._schema: Optional[dict[str, frozenset[str]]] = None
         self._schema_stamp = "none"
+        self._recorded: Optional[calls_mod.Recorded] = None
+        self._record_stamp = "none"
 
     @property
     def map_id(self) -> str:
         return "panda"
 
     def prepare(
-        self, source_root: Optional[Path] = None, schema_root: Optional[Path] = None
+        self,
+        source_root: Optional[Path] = None,
+        schema_root: Optional[Path] = None,
+        instance_record: Optional[Path] = None,
     ) -> str:
         """Resolve the source snapshot, parse it, and return the version stamp."""
         if schema_root is not None:
             self._schema = sqltext.read_schema(schema_root)
             self._schema_stamp = _schema_stamp(Path(schema_root), self._schema)
+        if instance_record is not None:
+            self._recorded, self._record_stamp = calls_mod.read_recorded(Path(instance_record))
         self._roots = self._resolve_roots(source_root)
         if not self._roots:
             raise FileNotFoundError(
@@ -237,7 +248,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         """
         if not self._modules:
             raise RuntimeError("prepare() must be called before run()")
-        self._calls = sqlwrite.corpus_calls(self._modules, self._roots)
+        self._calls = sqlwrite.corpus_calls(self._modules, self._roots, self._recorded)
         with sql.across_calls(self._calls), sqltext.with_schema(self._schema):
             return self._run()
 
@@ -246,9 +257,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         """Which table definitions decided the unqualified columns, or ``none``."""
         return self._schema_stamp
 
+    @property
+    def record_stamp(self) -> str:
+        """Which instance's record the calls read module names by (:func:`calls.read_recorded`), or ``none``."""
+        return self._record_stamp
+
     def _run(self) -> MapFragment:
 
-        fragment = MapFragment(map_id=self.map_id, derived_from=self._version)
+        fragment = MapFragment(
+            map_id=self.map_id,
+            derived_from=self._version,
+            instance_record="" if self._recorded is None else self._record_stamp,
+        )
         enums, enum_coverage = errorcode.extract(self._modules, self.map_id, self._version)
         fragment.value_enums.extend(enums)
         fragment.coverage.extend(enum_coverage)
@@ -666,6 +686,29 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             fragment.junctions, fragment.function_prints, self._modules, self._declarations
         )
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
+        if self._calls is not None:
+            # Where each function puts the objects it names and which of their
+            # columns it assigns: what bamboo.codemap.objects.follow answers
+            # from, and what a history pair's row below is read with.
+            assigned, bound, handed, written = objects.attach(fragment, self._modules, self._calls)
+            logger.info(
+                "PandaCodeMapPlugin: %d assign(s), %d binding(s), %d call binding(s) of objects, %d write(s)",
+                assigned,
+                bound,
+                handed,
+                written,
+            )
+            # Where each function's runs start, what each call of a history writer
+            # can record, and the calls that write a history row in the same pass
+            # as an arm: what gives a value the map sees set a time, and the log
+            # lines of the run it was set in.
+            started, recorded, paired = runs.attach(fragment, self._modules, self._calls)
+            logger.info(
+                "PandaCodeMapPlugin: %d function(s) start a run, %d history call(s), %d branch(es) with a history pair",
+                started,
+                recorded,
+                paired,
+            )
 
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
@@ -1033,7 +1076,12 @@ class _DatabaseLeaves:
 
     A statement the map reads is read at the call that runs it
     (:func:`sql.executions`), and a write's arms are in the function making
-    that call: the call is the database, and the closure goes no further.
+    that call: the call is the database, and the closure goes no further --
+    unless the runner runs statements of its own as well (:attr:`sql.Runner.own`:
+    ``queryTasksToBePending_JEDI`` updates the tasks the ``SELECT`` it is handed
+    picks), and is followed as any call.  A runner handing on the statement
+    its function was handed is the database too: the statement is its
+    callers', read where they run it (:data:`sql.SKIP_CALLERS`).
     A runner call it read nothing out of may be a write, and is a hole.  A
     call on the driver -- a cursor or a connection, ``fetchall``,
     ``commit`` -- goes only to the database; but a runner call on it whose
@@ -1045,11 +1093,18 @@ class _DatabaseLeaves:
 
     def __call__(self, file: str, func: ast.AST, call: ast.Call, placed) -> Optional[tuple[str, str]]:
         called = call.func
-        if isinstance(called, ast.Attribute) and called.attr in sql.RUNNERS:
+        runners = sql.runners()
+        if isinstance(called, ast.Attribute) and called.attr in runners:
             executed, skipped = self._of(func)
             if id(call) in executed:
+                if runners[called.attr].own:
+                    return None
                 return "database", "runner_runs_only_sql"
             if call.lineno in skipped:
+                if skipped[call.lineno] == sql.SKIP_CALLERS:
+                    # ``JediTaskBuffer.queryTasksToPreassign_JEDI`` hands its caller's statement on to the proxy's,
+                    # which updates the tasks it picks: followed, as a run of it is.
+                    return None if runners[called.attr].own else ("database", "runner_runs_callers_sql")
                 return "hole", f"the statement is not read: {skipped[call.lineno]}"
             if _on_driver(call, placed):
                 return "hole", "the statement this runs is read nowhere"

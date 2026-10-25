@@ -28,7 +28,7 @@ import ast
 from typing import Optional
 
 from bamboo.codemap.calls import Calls, Target, own_nodes
-from bamboo.codemap.models import BoundaryNode, Anchor, SourceModule
+from bamboo.codemap.models import Anchor, BoundaryNode, SourceModule
 from bamboo.codemap.panda.provenance import INTERFACE_CLASSES, OUTSIDE_PACKAGES
 
 #: ``(prefix, verb)`` in the order they are tried: ``add_files_to_dataset``

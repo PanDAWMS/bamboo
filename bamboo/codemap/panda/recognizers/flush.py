@@ -53,7 +53,13 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
-from bamboo.codemap.models import Emit, JunctionNode, RowKeySource, SourceModule, SubjectNode
+from bamboo.codemap.models import (
+    Emit,
+    JunctionNode,
+    RowKeySource,
+    SourceModule,
+    SubjectNode,
+)
 from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
@@ -244,7 +250,7 @@ def flush_methods(
                         # list unreadable and the gate comparing it against a
                         # reader's values half blind.
                         settled, _done = sql.settled_precondition(
-                            term, func, run.varmap, run.window, settle, at=run.run_at
+                            term, func, run.varmap, run.window, settle, at=run
                         )
                         guards[column] = (settled, gating)
             found[func.name] = Flush(

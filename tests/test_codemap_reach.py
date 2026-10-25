@@ -266,22 +266,27 @@ def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_
 def test_what_outside_code_returns_from_a_corpus_object_it_was_handed_is_not_taken_as_outside(
     tmp_path,
 ):
-    """``copy.deepcopy(job)`` returns a copy of the corpus object: a call on it is a hole, not an outside call."""
+    """``random.choice(job)`` may return the corpus object it is handed: a call on it is a hole, not an outside call.
+
+    ``copy.copy`` and ``copy.deepcopy`` were the example once; they are read
+    as the class they copy now (``calls._COPIES``), and a call on a copy is
+    placed.
+    """
     record = _record(
         tmp_path,
         mod=(
-            "import copy\n\n"
+            "import random\n\n"
             "class Job:\n"
             "    def flush(self):\n"
             "        pass\n\n"
             "def clone(job: Job):\n"
-            "    copy.deepcopy(job).flush()\n"
+            "    random.choice(job).flush()\n"
         ),
     )
 
     (hole,) = record.rows["pkg/mod.py::clone"].holes
 
-    assert hole.callee == "copy.deepcopy(job).flush"
+    assert hole.callee == "random.choice(job).flush"
     assert "handed job" in hole.why
 
 
@@ -595,7 +600,8 @@ def _database(tmp_path, text: str) -> reach.ReachGraph:
 def test_a_statement_the_map_reads_is_the_database_and_one_it_cannot_read_is_a_hole(
     tmp_path,
 ):
-    """The read statement and the driver's ``commit`` are leaves; a statement handed in by the caller is not read here."""
+    """The read statement and the driver's ``commit`` are leaves, and so is a statement handed in by the caller,
+    read at the callers; one whose text is nowhere here is a hole."""
     record = _database(
         tmp_path,
         (
@@ -605,20 +611,85 @@ def test_a_statement_the_map_reads_is_the_database_and_one_it_cannot_read_is_a_h
             "        self.cur.execute('UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:status', varMap)\n"
             "        self.conn.commit()\n\n"
             "    def run_any(self, sql, varMap):\n"
-            "        self.cur.execute(sql, varMap)\n"
+            "        self.cur.execute(sql, varMap)\n\n"
+            "    def run_elsewhere(self, varMap):\n"
+            "        self.cur.execute(SQL_FROM_ELSEWHERE, varMap)\n"
         ),
     )
 
     update = record.rows["pkg/db.py::Proxy.update"]
     run_any = record.rows["pkg/db.py::Proxy.run_any"]
+    run_elsewhere = record.rows["pkg/db.py::Proxy.run_elsewhere"]
 
     assert update.database == [4, 5]
     assert update.settled == {"driver_talks_only_to_db": 1, "runner_runs_only_sql": 1}
     assert update.holes == []
+    assert (run_any.database, run_any.settled, run_any.holes) == (
+        [8],
+        {"runner_runs_callers_sql": 1},
+        [],
+    )
     # The driver call is no leaf here: what it runs is read nowhere.
-    assert run_any.database == []
-    assert [hole.line for hole in run_any.holes] == [8]
-    assert run_any.holes[0].why.startswith("the statement is not read")
+    assert run_elsewhere.database == []
+    assert [hole.line for hole in run_elsewhere.holes] == [11]
+    assert run_elsewhere.holes[0].why.startswith("the statement is not read")
+
+
+def test_a_call_handing_a_runner_its_statement_is_the_database_unless_the_runner_runs_its_own(
+    tmp_path,
+):
+    """``getSiteInfo`` hands ``getClobObj`` its ``SELECT``: the statement is read at the call, and the call is the
+    database.  ``queryTasksToBePending_JEDI`` runs the ``SELECT`` it is handed and updates the tasks it picks: the
+    call is followed, and the update stays in the closure."""
+    record = _database(
+        tmp_path,
+        (
+            "class Proxy:\n"
+            "    def getClobObj(self, sql, varMap):\n"
+            "        self.cur.execute(sql, varMap)\n\n"
+            "    def queryTasksToBePending_JEDI(self, sql_query, params_map):\n"
+            "        self.cur.execute(sql_query, params_map)\n"
+            "        self.cur.execute('UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:s', {':s': 'pending'})\n\n"
+            "    def getSiteInfo(self):\n"
+            "        self.getClobObj('SELECT siteid FROM ATLAS_PANDA.schedconfig', {})\n\n"
+            "    def pend(self):\n"
+            "        self.queryTasksToBePending_JEDI('SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks', {})\n\n\n"
+            "class Buffer:\n"
+            "    def __init__(self):\n"
+            "        self.proxy = Proxy()\n\n"
+            "    def queryTasksToBePending_JEDI(self, sql_query, params_map):\n"
+            "        return self.proxy.queryTasksToBePending_JEDI(sql_query, params_map)\n"
+        ),
+    )
+
+    site_info = record.rows["pkg/db.py::Proxy.getSiteInfo"]
+    pend = record.rows["pkg/db.py::Proxy.pend"]
+    handing = record.rows["pkg/db.py::Buffer.queryTasksToBePending_JEDI"]
+
+    assert (
+        site_info.database,
+        site_info.settled,
+        _to(record, "pkg/db.py::Proxy.getSiteInfo"),
+    ) == (
+        [10],
+        {"runner_runs_only_sql": 1},
+        [],
+    )
+    assert (pend.database, _to(record, "pkg/db.py::Proxy.pend")) == (
+        [],
+        ["pkg/db.py::Proxy.queryTasksToBePending_JEDI"],
+    )
+    assert record.rows["pkg/db.py::Proxy.getClobObj"].settled == {
+        "runner_runs_callers_sql": 1
+    }
+    # Handing its caller's statement on to a runner that updates the tasks it picks is followed too.
+    assert (
+        handing.database,
+        _to(record, "pkg/db.py::Buffer.queryTasksToBePending_JEDI"),
+    ) == (
+        [],
+        ["pkg/db.py::Proxy.queryTasksToBePending_JEDI"],
+    )
 
 
 def _fragment(record: reach.ReachGraph, junctions=()):
@@ -690,3 +761,364 @@ def test_a_dunder_python_runs_unasked_that_reaches_a_write_fails_the_gate(tmp_pa
     assert result.failures == [
         "pkg/mod.py::Lock.__enter__ reaches ['pkg/mod.py::write']"
     ]
+
+
+#: A class defining the methods the tests below call, so that a call on an unknown receiver is a hole, not settled as
+#: a method no class of the corpus defines.
+_TAKER = (
+    "class Taker:\n"
+    "    def update(self, x):\n"
+    "        pass\n\n"
+    "    def append(self, x):\n"
+    "        pass\n\n"
+    "    def move(self):\n"
+    "        pass\n\n"
+)
+
+
+def _callees(record: reach.ReachGraph, owner: str) -> list[str]:
+    return [hole.callee for hole in record.rows[owner].holes]
+
+
+def test_a_container_s_copy_is_the_container_and_an_augmented_assignment_leaves_a_name_what_it_was(
+    tmp_path,
+):
+    """``msg_dict = update_msg_dict.copy()`` is a dict; ``found = []`` ... ``found += other()`` is a list.
+
+    Read before as one of what the dict holds, and as what ``other()`` is: push_job_status_message's ``.update`` and
+    retryTask_JEDI's ``retried_tasks.append`` were holes.  A value the dict holds is still one of what it holds.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def other():\n"
+            "    return 1\n\n"
+            "def push(orig: dict):\n"
+            "    msg = orig.copy()\n"
+            "    msg.update({'a': 1})\n"
+            "    found = []\n"
+            "    found += other()\n"
+            "    found.append(1)\n"
+            "    held = orig.get('k')\n"
+            "    held.update({})\n"
+        ),
+    )
+
+    assert _callees(record, "pkg/mod.py::push") == ["held.update"]
+
+
+def test_a_name_unpacked_from_a_call_is_the_slot_its_tuple_is_declared_with(tmp_path):
+    """``ok, data = pair()`` on ``-> tuple[bool, dict]``: ``data`` is a dict, where the record found no binding of it.
+
+    A slot declared ``Any`` says nothing; a row the database hands back is what code outside the corpus made.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "from typing import Any\n\n"
+            "def pair() -> tuple[bool, dict]:\n"
+            "    return True, {}\n\n"
+            "def anything() -> tuple[bool, Any]:\n"
+            "    return True, None\n\n"
+            "def use():\n"
+            "    ok, data = pair()\n"
+            "    data.update({})\n"
+            "    ok, held = anything()\n"
+            "    held.update({})\n"
+            "    first, second = (1, {})\n"
+            "    second.update({})\n"
+        ),
+    )
+
+    assert _callees(record, "pkg/mod.py::use") == ["held.update"]
+
+
+def test_a_local_container_s_values_are_what_the_function_puts_into_it(tmp_path):
+    """``files[name] = {'lfns': []}`` then ``files[name]['lfns'].append(name)``: a list, put there by the function.
+
+    Not where the container goes where other code can fill it -- handed to a call outside the corpus --, nor where
+    a put is not read (``update`` with a mapping handed in from nowhere the corpus calls), nor where nothing the
+    function puts is at that place.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            "import json\n\n" + _TAKER + "def fill(names: list, more: dict):\n"
+            "    files = {}\n"
+            "    for name in names:\n"
+            "        files[name] = {'lfns': [], 'job': None}\n"
+            "        files[name]['lfns'].append(name)\n"
+            "    by_weight = {}\n"
+            "    by_weight[1] = []\n"
+            "    by_weight[1].append(2)\n"
+            "    shared = {}\n"
+            "    shared['x'] = []\n"
+            "    json.dump(shared, None)\n"
+            "    shared['x'].append(1)\n"
+            "    merged = {}\n"
+            "    merged['x'] = []\n"
+            "    merged.update(more)\n"
+            "    merged['x'].append(1)\n"
+            "    files[name]['job'].move()\n"
+        ),
+    )
+
+    assert sorted(_callees(record, "pkg/mod.py::fill")) == [
+        "merged['x'].append",
+        "shared['x'].append",
+    ]
+
+
+def test_a_container_s_values_are_read_from_every_name_holding_it(tmp_path):
+    """What ``d[k]...`` is, read from every name holding d's container: across calls, through parts, aliases, loops.
+
+    ``record`` is handed ``extracted`` by ``insert``; ``insert`` by ``bulk``'s ``insert(*args, **kwargs)`` after
+    ``kwargs.update(new_kwargs)`` -- the ``**`` holds the key on every way, so the ``*`` does not fill it -- and by
+    ``store`` with the default: ``extracted['state']['vars']`` is the list ``setdefault`` puts there.  Where the
+    update is on some ways only (``bulk2``), the ``*`` may fill it and the call stays a hole.  A value put through a
+    part (``setdefault(...).append``, ``get(...).append``), an alias (``e = d or more``), a loop over the values or
+    items or a builtin's copy of them, or by a callee handed the container, is one of what it holds there: the
+    undeclared one leaves ``d['a'][-1].move`` a hole.  A callee that only reads it leaves it closed.
+    """
+    shapes = {
+        "chain_setdefault": "    d.setdefault('a', []).append(undeclared())\n",
+        "chain_get": "    d.get('a').append(undeclared())\n",
+        "loop_values": "    for v in d.values():\n        v.append(undeclared())\n",
+        "loop_items": "    for k, v in d.items():\n        v.append(undeclared())\n",
+        "alias": "    e = d or {}\n    e['a'].append(undeclared())\n",
+        "copy_values": "    for v in list(d.values()):\n        v.append(undeclared())\n",
+        "callee_puts": "    puts(d)\n",
+        "callee_reads": "    looks(d)\n",
+    }
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def record(job, extracted: dict | None = None):\n"
+            "    if extracted is not None:\n"
+            "        extracted.setdefault('state', {'sql': 's', 'vars': []})\n"
+            "        extracted['state']['vars'].append(job)\n\n"
+            "def insert(job, user, flag=True, extracted: dict | None = None):\n"
+            "    record(job, extracted=extracted)\n\n"
+            "def bulk(arg_list: list):\n"
+            "    for args, kwargs in arg_list:\n"
+            "        tmp = {}\n"
+            "        new_kwargs = {'extracted': tmp}\n"
+            "        kwargs.update(new_kwargs)\n"
+            "        insert(*args, **kwargs)\n\n"
+            "def store(jobs: list):\n"
+            "    params = []\n"
+            "    for job in jobs:\n"
+            "        params.append([[job, 'u'], {'flag': False}])\n"
+            "    bulk(params)\n"
+            "    insert(jobs[0], 'u')\n\n"
+            "def record2(job, extracted: dict | None = None):\n"
+            "    extracted.setdefault('state', {'vars': []})\n"
+            "    extracted['state']['vars'].append(job)\n\n"
+            "def insert2(job, extracted: dict | None = None):\n"
+            "    record2(job, extracted=extracted)\n\n"
+            "def bulk2(arg_list: list, c):\n"
+            "    for args, kwargs in arg_list:\n"
+            "        if c:\n"
+            "            kwargs.update({'extracted': {}})\n"
+            "        insert2(*args, **kwargs)\n\n"
+            "def store2(jobs: list):\n"
+            "    bulk2([[[job], {}] for job in jobs], True)\n\n"
+            "def puts(d):\n"
+            "    d['a'].append(undeclared())\n\n"
+            "def looks(d):\n"
+            "    print(len(d))\n\n"
+            + "".join(
+                f"def {name}():\n    d = {{'a': [1]}}\n{body}    d['a'][-1].move()\n\n"
+                for name, body in shapes.items()
+            )
+        ),
+    )
+
+    def holes(owner: str) -> list[str]:
+        return sorted(_callees(record, f"pkg/mod.py::{owner}"))
+
+    assert "extracted['state']['vars'].append" not in holes("record")
+    assert "extracted['state']['vars'].append" in holes("record2")
+    for name in shapes:
+        assert ("d['a'][-1].move" in holes(name)) is (name != "callee_reads"), name
+
+
+def test_a_container_the_function_makes_and_returns_holds_what_the_function_puts_there(
+    tmp_path,
+):
+    """``files = {}`` ... ``files[name]['specs'].append(name)`` ... ``return files``: a list the function put there.
+
+    The caller gets the container when the call ends, after every read of the call (collect_existing_files'
+    dataset_file_map).  A caller that fills what was returned and hands it in again is read where it hands it in,
+    up through the parameter (getOutputFiles_JEDI's parallelOutMap): ``handed_back``'s stays a hole.  A callee that
+    returns what it was handed gives the caller the container under another name, which is not read.
+    """
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def made(names: list):\n"
+            "    files = {}\n"
+            "    for name in names:\n"
+            "        files[name] = {'specs': []}\n"
+            "        files[name]['specs'].append(name)\n"
+            "    return files\n\n"
+            "def handed_back(files: dict) -> dict:\n"
+            "    files.setdefault('a', [Taker()])\n"
+            "    files['a'][-1].move()\n"
+            "    return files\n\n"
+            "def again():\n"
+            "    held = {}\n"
+            "    for _ in range(2):\n"
+            "        held = handed_back(held)\n"
+            "        held['a'].append(undeclared())\n\n"
+            "def keep(d: dict) -> dict:\n"
+            "    return d\n\n"
+            "def aliased():\n"
+            "    d = {'a': [Taker()]}\n"
+            "    same = keep(d)\n"
+            "    same['a'].append(undeclared())\n"
+            "    d['a'][-1].move()\n"
+            "    return d\n"
+        ),
+    )
+
+    assert _callees(record, "pkg/mod.py::made") == []
+    assert "files['a'][-1].move" in _callees(record, "pkg/mod.py::handed_back")
+    assert "d['a'][-1].move" in _callees(record, "pkg/mod.py::aliased")
+
+
+def test_a_value_unpacked_into_a_container_s_place_is_the_slot_the_call_is_declared_to_return(
+    tmp_path,
+):
+    """``(fetched[site], held[site]) = buffer.outputs()``, declared ``tuple[list, Any]``: ``fetched[site]`` is a list
+    (doGenerate's ``fetched_out_sub_chunks[site_name]``, put by getOutputFiles_JEDI's first slot), ``held[site]``
+    what the second slot is declared -- not one of what the tuple holds."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "from typing import Any\n\n" + _TAKER + "class Buffer:\n"
+            "    def outputs(self) -> tuple[list, Any]:\n"
+            "        return [], None\n\n"
+            "def generate(buffer: Buffer, site):\n"
+            "    fetched = {}\n"
+            "    held = {}\n"
+            "    (fetched[site], held[site]) = buffer.outputs()\n"
+            "    fetched[site].append(1)\n"
+            "    held[site].move()\n"
+        ),
+    )
+    holes = record.rows["pkg/mod.py::generate"].holes
+    assert [hole.callee for hole in holes] == ["held[site].move"]
+    assert holes[0].why.endswith("declared Any")
+
+
+def test_a_loop_over_a_name_bound_to_a_call_is_over_what_the_call_is_declared_to_return(
+    tmp_path,
+):
+    """``taskList = buffer.tasks()`` then ``for task in taskList``: each a ``Task`` (doActionForReassign's)."""
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "class Task:\n"
+            "    def move(self):\n"
+            "        pass\n\n"
+            "class Buffer:\n"
+            "    def tasks(self) -> list[Task]:\n"
+            "        return []\n\n"
+            "def reassign(buffer: Buffer):\n"
+            "    found = buffer.tasks()\n"
+            "    for task in found:\n"
+            "        task.move()\n"
+        ),
+    )
+
+    assert record.rows["pkg/mod.py::reassign"].holes == []
+    assert "pkg/mod.py::Task.move" in _to(record, "pkg/mod.py::reassign")
+
+
+def test_a_hole_names_what_its_receiver_is_one_of_with_its_article(tmp_path):
+    """``for idx, item in enumerate(items)``: one of what an iterator holds -- "an iterator", not "a iterator"."""
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def run(items):\n"
+            "    for idx, item in enumerate(items):\n"
+            "        item.move()\n"
+        ),
+    )
+
+    assert [hole.why for hole in record.rows["pkg/mod.py::run"].holes] == [
+        "the receiver's class is not declared: an element of an iterator"
+    ]
+
+
+def test_the_keys_a_mapping_may_hold_are_read_from_every_put_into_every_name_holding_it(
+    tmp_path,
+):
+    """``update``'s ``param`` holds the keys every caller puts into what it hands: ``first``, through a wrapper whose
+    ``run`` hands the function it was built with its own arguments (the read of ``update`` that built it is no read
+    as a value), puts at a literal list's first slots, at a literal loop's, at a literal; ``second`` hands a dict
+    literal.  ``update``'s own put at a key taken from ``param`` adds none.  Both ways, as every holder is read:
+    ``first``'s mapping is ``update``'s ``param``, which ``second`` fills too -- more than ``first`` puts, never
+    less.  Not read: a key no literal is (an f-string, a parameter), a mapping handed outside the corpus, one a
+    call returns."""
+    timed = (
+        "class Timed:\n"
+        "    def __init__(self, method, timeout):\n"
+        "        self.method = method\n\n"
+        "    def run(self, *var, **kwargs):\n"
+        "        self.method(*var, **kwargs)\n"
+    )
+    mod = (
+        "import json\n"
+        "from pkg.timed import Timed\n\n"
+        "def update(job_id, param):\n"
+        "    for key in list(param):\n"
+        "        param[key] = str(param[key])\n\n"
+        "def first(job_id, metrics):\n"
+        "    param = {}\n"
+        "    fields = [('jobMetrics', metrics, int), ('nEvents', 1, int)]\n"
+        "    for key, value, cast in fields:\n"
+        "        param[key] = cast(value)\n"
+        "    for key, value in [('startTime', 1), ('endTime', 2)]:\n"
+        "        param[key] = value\n"
+        "    param['diag'] = None\n"
+        "    timed = Timed(update, 10)\n"
+        "    timed.run(job_id, param)\n\n"
+        "def second(job_id):\n"
+        "    update(job_id, {'cloud': 'x'})\n\n"
+        "def by_fstring(param, n):\n"
+        "    param[f'x{n}'] = 1\n\n"
+        "def by_parameter(param, name):\n"
+        "    param[name] = 1\n\n"
+        "def outside(param):\n"
+        "    json.dumps(param)\n\n"
+        "def made():\n"
+        "    return json.loads('{}')\n\n"
+        "def returned():\n"
+        "    param = made()\n"
+        "    param['a'] = 1\n"
+    )
+    calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, timed=timed, mod=mod), {}))
+    receivers = reach._Receivers(calls, None)
+    tree = calls.types.tree("pkg/mod.py")
+
+    def keys(owner: str):
+        func = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == owner
+        )
+        return receivers.keys("pkg/mod.py", func, "param")
+
+    assert keys("update") == {
+        "jobMetrics",
+        "nEvents",
+        "startTime",
+        "endTime",
+        "diag",
+        "cloud",
+    }
+    assert keys("first") == keys("update")
+    for owner in ("by_fstring", "by_parameter", "outside", "returned"):
+        assert keys(owner) is None, owner

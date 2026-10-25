@@ -38,8 +38,8 @@ from bamboo.codemap.models import (
     LoopCutNode,
     MapFragment,
     ReadingStop,
-    RowKeySource,
     ReadSiteNode,
+    RowKeySource,
     SourceModule,
     SubjectNode,
     ValueEnumNode,
@@ -1557,6 +1557,32 @@ class TaskModule:
     ]
     # The span covers both of them anyway.
     assert (junction.anchor.line_start, junction.anchor.line_end) == (10, 12)
+
+
+def test_a_junction_spans_the_arms_of_every_text_a_call_runs():
+    """One call runs two texts of a statement, each with its own branch's
+    status (``sql.bound_values`` pairs a text with its own branch's binds), so
+    the first text read is not every arm: the span is over all of them."""
+    _subjects, junctions, *_rest = _sql_extract('''
+class TaskModule:
+    def setStatus(self, jediTaskID, taskSpec):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET status=:status"
+        if taskSpec is not None:
+            sqlU += ",splitRule=:splitRule"
+        sqlU += " WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        if taskSpec is not None:
+            varMap[":status"] = "pending"
+            varMap[":splitRule"] = taskSpec.splitRule
+        else:
+            varMap[":status"] = "ready"
+        self.cur.execute(sqlU + comment, varMap)
+''')
+
+    (junction,) = [one for one in junctions if one.subject == "JEDI_Tasks.status"]
+    assert sorted((b.outcome, b.line) for b in junction.branches) == [("pending", 11), ("ready", 14)]
+    assert (junction.anchor.line_start, junction.anchor.line_end) == (11, 14)
 
 
 def test_statement_is_read_from_its_concatenation():
@@ -3312,8 +3338,8 @@ def test_a_run_statement_is_held_by_the_name_the_call_runs():
     """Run, ``sql_exe = (sql_jt + comment) % table`` is read where ``sql_exe`` runs, under that name.
 
     The reassembly that came before could not read the ``%`` and looked past ``sql_exe`` to
-    ``sql_jt``; the run reads it.  A call with no bind map is said with what
-    it runs, and the schema an f-string interpolates is a hole of the run.
+    ``sql_jt``; the run reads it.  A call with no bind map is a run with none,
+    and the schema an f-string interpolates is a hole of the run.
     """
     source = (
         "def f(self, table):\n"
@@ -3325,13 +3351,12 @@ def test_a_run_statement_is_held_by_the_name_the_call_runs():
     )
     func = _func(source)
 
-    (run,) = sql.executions(func, skipped := [])
+    run, plain = sql.executions(func, skipped := [])
     interpolated = sql.interpolations(func, "sql_exe")
 
     assert (run.variable, run.head) == ("sql_exe", run.sql)
-    assert [(skip.reason, skip.detail, skip.texts) for skip in skipped] == [
-        (sql.SKIP_NO_VARMAP, "sqlN", ("SELECT c FROM ATLAS_PANDA.jobsActive4",))
-    ]
+    assert (plain.variable, plain.varmap, plain.sql) == ("sqlN", None, "SELECT c FROM ATLAS_PANDA.jobsActive4")
+    assert skipped == []
     assert "panda_config.schemaPANDA" in interpolated
 
 
@@ -9485,6 +9510,26 @@ def test_rows_given_back_cross_to_what_the_caller_does_with_them():
     assert (census.handing_back, census.resolved) == (1, 1)
 
 
+def test_rows_landing_in_an_annotated_name_are_given_back_as_well():
+    """``res_list: list[tuple[Any, ...]] = self.cur.fetchall()`` lands the rows as ``res = ...`` does
+    (``_get_tasks_datasets_with_unprocessed_inputs``)."""
+    caller = (
+        "class Commando:\n"
+        "    def start(self):\n"
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        self.retryTask(tasks)\n"
+    )
+    annotated = ROWS_HANDED_BACK.replace(
+        "        res = self.cur.fetchall()\n", "        res: list = self.cur.fetchall()\n"
+    )
+    assert annotated != ROWS_HANDED_BACK
+    nodes, census = _crossed(annotated, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["c.py::retryTask"]
+    assert (census.handing_back, census.resolved) == (1, 1)
+
+
 def test_the_proxy_layer_is_not_where_the_rows_went():
     """``JediTaskBuffer.getTasksToExecCommand_JEDI`` is ``return proxy.<same>``.
 
@@ -9996,6 +10041,30 @@ def test_a_statement_the_caller_hands_in_is_a_gap_and_fails_the_gate():
     assert not result.passed
     assert difference.reason == gates.MOVER_HANDED_IN
     assert difference.where == "@12 sql_query"
+
+
+def test_a_statement_read_at_the_callers_sends_the_reader_there_and_passes_the_gate():
+    """Read through a corpus, ``queryTasksToBePending_JEDI`` is a runner: the ``SELECT`` it is handed is read where
+    its callers run it.  Not a gap, and not "no query here reads these rows" either -- one does, and it is theirs."""
+    fragment = _movers("jobStatus=activated", selects=[], tables=["JEDI_Tasks"])
+    fragment.read_sites.clear()
+    fragment.reading_stops.append(
+        ReadingStop(
+            reason=sql.SKIP_CALLERS,
+            detail="sql_query",
+            file="x.py",
+            owner="x.py::getJobs",
+            line=12,
+            statement=12,
+            reads_known=False,
+        )
+    )
+
+    result = gates.movers_of_a_value_agree(fragment)
+    (difference,) = gates.mover_differences(fragment)
+
+    assert result.passed
+    assert (difference.reason, difference.where) == (gates.MOVER_CALLERS_QUERY, "@12 sql_query")
 
 
 def test_rows_named_by_what_the_caller_hands_in_send_the_reader_to_the_caller():
@@ -11909,7 +11978,7 @@ def test_a_dumped_build_reads_back_as_the_same_map(tmp_path, monkeypatch):
         _stage_for_diff("-disk", ["a < b"], 100),
         _stage_for_diff("-rse", ["c"], 200),
     )
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: built)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema, record: built)
 
     target = _dumped(tmp_path)
 
@@ -11919,11 +11988,11 @@ def test_a_dumped_build_reads_back_as_the_same_map(tmp_path, monkeypatch):
 def test_a_baseline_file_stands_in_for_the_older_build(tmp_path, monkeypatch):
     """The point of the pair: the source is fixed and the map moved anyway."""
     before = _fragment_of(_stage_for_diff("-disk", ["a < b"], 100))
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: before)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema, record: before)
     target = _dumped(tmp_path)
 
     after = _fragment_of(_stage_for_diff("-disk", ["a <= b"], 100))
-    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema: after)
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root, schema, record: after)
     result = click.testing.CliRunner().invoke(
         diff_map.main, ["--baseline", str(target)]
     )
@@ -11941,7 +12010,7 @@ def test_comparing_a_baseline_with_a_source_tree_is_refused(tmp_path, monkeypatc
     source by the same code, reported as no difference at all.
     """
     monkeypatch.setattr(
-        diff_map, "_build", lambda map_id, root, schema: _fragment_of(_stage_for_diff("-d", ["a"], 1))
+        diff_map, "_build", lambda map_id, root, schema, record: _fragment_of(_stage_for_diff("-d", ["a"], 1))
     )
     target = _dumped(tmp_path)
     runner = click.testing.CliRunner()
@@ -15096,6 +15165,260 @@ def test_an_execute_run_reads_only_the_binds_its_map_holds():
     assert [r.window for r in sql.executions(func)] == [None, None]
 
 
+def _bound_by_text(func, key: str) -> list[tuple[int, str, list[str]]]:
+    """For each run of *func* at each of its calls: the call's line, the text's ``SET``, and the values read for *key*."""
+    return sorted(
+        (
+            call.lineno,
+            run.sql.partition(" SET ")[2].partition(" WHERE ")[0],
+            sorted(
+                ast.unparse(b.value)
+                for b in sql.bound_values(func, run.varmap, key, run.window, at=run._replace(calls=(call,)))
+            ),
+        )
+        for run in sql.executions(func)
+        for call in run.run_at
+    )
+
+
+def test_a_text_reads_only_the_binds_of_the_passes_that_build_it():
+    """``updateTaskStatusByContFeeder_JEDI`` adds ``splitRule`` to its ``UPDATE``
+    only when it is given a task, fills ``:status`` from the task in that case
+    and ``'assigning'`` or ``'ready'`` otherwise, and runs whichever text it
+    built at one call.  Read by the call alone, both texts wrote all three.
+    The text with the clause is built only in the arm adding it; the text
+    without it only where that arm was skipped, so not under the second ``if``
+    testing the same thing."""
+    source = (
+        "def f(self, taskSpec, cloud):\n"
+        "    sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status'\n"
+        "    if taskSpec is not None:\n"
+        "        sql += ',splitRule=:splitRule'\n"
+        "    sql += ' WHERE jediTaskID=:jediTaskID'\n"
+        "    varMap = {}\n"
+        "    varMap[':jediTaskID'] = 1\n"
+        "    if taskSpec is not None:\n"
+        "        varMap[':status'] = taskSpec.status\n"
+        "        varMap[':splitRule'] = taskSpec.splitRule\n"
+        "    elif cloud is None:\n"
+        "        varMap[':status'] = 'assigning'\n"
+        "    else:\n"
+        "        varMap[':status'] = 'ready'\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":status") == [
+        (15, "status=:status", ["'assigning'", "'ready'"]),
+        (15, "status=:status,splitRule=:splitRule", ["taskSpec.status"]),
+    ]
+    at_the_call = sql.bound_values(func, "varMap", ":status", at=func.body[-1].value)
+    assert sorted(ast.unparse(b.value) for b in at_the_call) == ["'assigning'", "'ready'", "taskSpec.status"]
+
+
+def test_a_map_made_afresh_each_pass_carries_no_other_arm_to_the_text():
+    """``insertNewJob`` makes ``varMap`` afresh for each file, sets
+    ``:status`` in the two arms of one test and ``is_waiting`` in the two arms
+    of another testing the same: the other arm's status, of this file or the
+    one before, is in no map the text runs with."""
+    source = (
+        "def f(self, files):\n"
+        "    for file in files:\n"
+        "        varMap = {}\n"
+        "        varMap[':fileID'] = file.fileID\n"
+        "        if file.waiting:\n"
+        "            varMap[':status'] = 'picked'\n"
+        "        else:\n"
+        "            varMap[':status'] = 'running'\n"
+        "        sql = 'UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status'\n"
+        "        if file.waiting:\n"
+        "            sql += ',is_waiting=:is_waiting'\n"
+        "            varMap[':is_waiting'] = 'Y'\n"
+        "        else:\n"
+        "            sql += ',is_waiting=NULL'\n"
+        "        sql += ' WHERE fileID=:fileID'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":status") == [
+        (16, "status=:status,is_waiting=:is_waiting", ["'picked'"]),
+        (16, "status=:status,is_waiting=NULL", ["'running'"]),
+    ]
+
+
+def test_a_map_kept_across_passes_carries_an_earlier_pass_bind_to_the_text():
+    """A map made before the loop keeps what an earlier pass bound: the text
+    the ``else`` builds names ``:a``, which only the other arm fills, and on a
+    pass after one through that arm the map still holds it."""
+    source = (
+        "def f(self, items):\n"
+        "    varMap = {}\n"
+        "    varMap[':id'] = 1\n"
+        "    for item in items:\n"
+        "        if item.first:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a WHERE id=:id'\n"
+        "            varMap[':a'] = item.a\n"
+        "        else:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a,b=1 WHERE id=:id'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":a") == [(10, "a=:a", ["item.a"]), (10, "a=:a,b=1", ["item.a"])]
+
+
+def test_a_bind_every_pass_building_the_text_writes_again_is_not_the_texts():
+    """``updateTaskStatusByContFeeder_JEDI`` sets ``:updateTime`` to now and
+    ``:errorDialog`` to None before its ``if``; the two arms building the text
+    without the clause set the time six hours back, and the arm building the
+    one with it sets the task's diagnostic.  Now reaches the call only on the
+    pass building the clause, None only on the passes building none."""
+    source = (
+        "def f(self, taskSpec, cloud):\n"
+        "    sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,modificationTime=:updateTime,errorDialog=:errorDialog'\n"
+        "    if taskSpec is not None:\n"
+        "        sql += ',splitRule=:splitRule'\n"
+        "    sql += ' WHERE jediTaskID=:jediTaskID'\n"
+        "    varMap = {}\n"
+        "    varMap[':jediTaskID'] = 1\n"
+        "    varMap[':updateTime'] = timeNow\n"
+        "    varMap[':errorDialog'] = None\n"
+        "    if taskSpec is not None:\n"
+        "        varMap[':status'] = taskSpec.status\n"
+        "        varMap[':errorDialog'] = taskSpec.errorDialog\n"
+        "        varMap[':splitRule'] = taskSpec.splitRule\n"
+        "    elif cloud is None:\n"
+        "        varMap[':status'] = 'assigning'\n"
+        "        varMap[':updateTime'] = sixHoursAgo\n"
+        "    else:\n"
+        "        varMap[':status'] = 'ready'\n"
+        "        varMap[':updateTime'] = sixHoursAgo\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+    plain = "status=:status,modificationTime=:updateTime,errorDialog=:errorDialog"
+
+    assert _bound_by_text(func, ":updateTime") == [
+        (20, plain, ["sixHoursAgo", "sixHoursAgo"]),
+        (20, plain + ",splitRule=:splitRule", ["timeNow"]),
+    ]
+    assert _bound_by_text(func, ":errorDialog") == [
+        (20, plain, ["None"]),
+        (20, plain + ",splitRule=:splitRule", ["taskSpec.errorDialog"]),
+    ]
+    at_the_call = sql.bound_values(func, "varMap", ":updateTime", at=func.body[-1].value)
+    assert sorted(ast.unparse(b.value) for b in at_the_call) == ["sixHoursAgo", "sixHoursAgo", "timeNow"]
+
+
+def test_a_pass_not_building_the_text_does_not_cut_what_it_carries_to_a_later_pass():
+    """A pass through the arm filling ``:a`` runs on past the fill and builds
+    the other text; the next pass builds this one with the map still holding
+    ``:a``.  The arm's statements are no pass of this text's, but the value
+    goes round the loop."""
+    source = (
+        "def f(self, items):\n"
+        "    varMap = {}\n"
+        "    varMap[':id'] = 1\n"
+        "    for item in items:\n"
+        "        if item.first:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a WHERE id=:id'\n"
+        "            varMap[':a'] = item.a\n"
+        "            self.log(item)\n"
+        "        else:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a,b=1 WHERE id=:id'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":a") == [(11, "a=:a", ["item.a"]), (11, "a=:a,b=1", ["item.a"])]
+
+
+def test_a_bind_from_before_the_loop_every_pass_building_the_text_writes_again_is_not_the_texts():
+    """``:a`` is 0 before the loop; every pass building the first text sets it
+    again, and a pass building the second does not, so the second runs with 0
+    or with what an earlier pass set."""
+    source = (
+        "def f(self, items):\n"
+        "    varMap = {}\n"
+        "    varMap[':id'] = 1\n"
+        "    varMap[':a'] = 0\n"
+        "    for item in items:\n"
+        "        if item.first:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a WHERE id=:id'\n"
+        "            varMap[':a'] = item.a\n"
+        "        else:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.t SET a=:a,b=1 WHERE id=:id'\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":a") == [(11, "a=:a", ["item.a"]), (11, "a=:a,b=1", ["0", "item.a"])]
+
+
+def test_one_text_run_from_two_arms_keeps_each_call_its_own_binds():
+    """``activateJob`` writes the same ``sqlJob`` in each arm and runs it there:
+    one run holds both calls, and its pieces name one of the two assignments,
+    so a piece is read only where it can be on a pass through the call.  And
+    ``archiveJob`` writes ``sqlFMod`` before its loop and the same text again
+    in one arm: a text written twice adds no clause."""
+    source = (
+        "def f(self, job, ok, jobs):\n"
+        "    if ok:\n"
+        "        sqlJob = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.jobParameters\n"
+        "        self.cur.execute(sqlJob, varMap)\n"
+        "    else:\n"
+        "        sqlJob = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.newParameters\n"
+        "        self.cur.execute(sqlJob, varMap)\n"
+        "    sqlF = 'UPDATE ATLAS_PANDA.filesTable4 SET modificationTime=:modificationTime WHERE PandaID=:PandaID'\n"
+        "    for one in jobs:\n"
+        "        if one.failed:\n"
+        "            sqlF = 'UPDATE ATLAS_PANDA.filesTable4 SET modificationTime=:modificationTime WHERE PandaID=:PandaID'\n"
+        "            varMap = {}\n"
+        "            varMap[':PandaID'] = one.PandaID\n"
+        "            varMap[':modificationTime'] = one.modificationTime\n"
+        "            self.cur.execute(sqlF, varMap)\n"
+    )
+    func = _func(source)
+
+    # Each assignment of the text is a run of its own, holding both calls.
+    assert {(line, tuple(values)) for line, _set, values in _bound_by_text(func, ":param") if line != 21} == {
+        (7, ("job.jobParameters",)),
+        (13, ("job.newParameters",)),
+    }
+    in_the_loop = {tuple(values) for line, _set, values in _bound_by_text(func, ":PandaID") if line == 21}
+    assert in_the_loop == {("one.PandaID",)}
+
+
+def test_one_text_built_in_two_arms_for_one_call_keeps_both_arms_binds():
+    """The same text written in each arm and run once after the ``if`` is one
+    run, its pieces naming one arm's assignment: a text is built by every way
+    that renders it, and a statement only some ways run decides nothing."""
+    source = (
+        "def f(self, ok, job):\n"
+        "    if ok:\n"
+        "        sql = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.jobParameters\n"
+        "    else:\n"
+        "        sql = 'UPDATE ATLAS_PANDA.jobParamsTable SET jobParameters=:param WHERE PandaID=:PandaID'\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = job.PandaID\n"
+        "        varMap[':param'] = job.newParameters\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+    func = _func(source)
+
+    assert _bound_by_text(func, ":param") == [(12, "jobParameters=:param", ["job.jobParameters", "job.newParameters"])]
+
+
 def test_a_map_rebuilt_in_each_arm_keeps_both_values():
     """The window cannot say this: it opens at the nearest ``varMap = {}``,
     which is the second arm's, and loses the first."""
@@ -15771,6 +16094,136 @@ def test_a_new_value_in_an_arm_the_pass_does_not_enter_leaves_two_tests_contradi
     assert pathcond.parted(assigned["new"], assigned["unlock"], exits=False)
 
 
+def test_a_test_and_its_negation_are_matched_as_they_mean_not_as_spelled():
+    """``ppEventServiceJob``: ``if noNewJob:`` and, further down, ``if not noNewJob:`` cannot both hold.
+
+    Their conditions are written ``noNewJob`` and ``not noNewJob``, and only an
+    ``else`` writes ``not (noNewJob)``, so compared as spelled the two read as
+    one run.  A bare name's annotation is left out the same way; a name given a
+    new value between the two tests still parts nothing.
+    """
+    func = _func(
+        "def f(noNewJob):\n"
+        "    if noNewJob:\n"
+        "        a = 1\n"
+        "    if not noNewJob:\n"
+        "        b = 2\n"
+    )
+    first, second = (n for n in ast.walk(func) if isinstance(n, ast.Assign))
+
+    assert pathcond.parted(first, second, exits=False)
+    assert pathcond.exclusive(["noNewJob"], ["not noNewJob"])
+    assert pathcond.exclusive(["done  [done := n > 0]"], ["not (done)  [done := n > 0]"])
+    assert pathcond.negates("x == 1", "not x == 1")
+    assert not pathcond.negates("x == 1", "not x == 2")
+    assert not pathcond.exclusive(["noNewJob"], ["noNewJob"])
+
+    func = _func(
+        "def f(items):\n"
+        "    if not items:\n"
+        "        return\n"
+        "    a = 1\n"
+        "    items = [one for one in items if one]\n"
+        "    if not items:\n"
+        "        b = 2\n"
+    )
+    first, second = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id in "ab")
+
+    assert pathcond.exclusive(pathcond.reachable_when(first), pathcond.reachable_when(second))
+    assert not pathcond.parted(first, second)
+
+
+def test_a_comparison_is_the_negation_of_its_opposite():
+    """``AdderAtlasPlugin.update_outputs`` fills a value under the ``else`` of ``if
+    file.lfn not in alt`` and reads it under ``if file.lfn in alt``: the two arms
+    cannot meet.  ``==`` / ``!=``, ``in`` / ``not in`` and ``is`` / ``is not`` are
+    each other's negation, read either way round, and ``not not x`` is ``x``;
+    ``<`` and ``>=`` are not (a set's order, a NaN).
+    """
+    assert pathcond.negates("numSlots == -1", "numSlots != -1")
+    assert pathcond.negates("numSlots != -1", "numSlots == -1")
+    assert pathcond.negates("x in L", "x not in L")
+    assert pathcond.negates("x not in L", "x in L")
+    assert pathcond.negates("x is None", "x is not None")
+    assert pathcond.negates("x", "not not not x")
+    assert pathcond.exclusive(["x not in L"], ["x in L"])
+    assert not pathcond.negates("x < 1", "x >= 1")
+    assert not pathcond.negates("x == 1", "x != 2")
+
+    func = _func(
+        "def f(lfn, alt):\n"
+        "    if lfn not in alt:\n"
+        "        a = 1\n"
+        "    else:\n"
+        "        b = 2\n"
+        "    if lfn in alt:\n"
+        "        c = 3\n"
+    )
+    assigned = {n.targets[0].id: n for n in ast.walk(func) if isinstance(n, ast.Assign)}
+
+    assert pathcond.parted(assigned["a"], assigned["c"], exits=False)
+    assert not pathcond.parted(assigned["b"], assigned["c"], exits=False)
+
+
+def test_a_write_reaches_a_read_round_a_loop_whose_arms_one_pass_keeps_apart():
+    """``parse_condition_string``: the ``else`` of ``if not items`` replaces ``s``, and the next pass's ``if`` hands it on.
+
+    One pass runs one arm, so the two arms part within it, and a reader asking
+    what one pass runs still hears that.  The loop binds ``items`` afresh, so
+    the next pass can take the other arm and read the replaced string.  Only
+    the way round counts: where every arm binds the name again before the
+    read, the write the first test chose does not reach the second test's
+    ``else``; and a flag no pass changes keeps every pass in its arm.
+    """
+    func = _func(
+        "def f(start):\n"
+        "    s = start\n"
+        "    while True:\n"
+        "        items = find(s)\n"
+        "        if not items:\n"
+        "            return convert(s)\n"
+        "        else:\n"
+        "            s = s.replace(items[0], 'x')\n"
+    )
+    first, replaced = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "s")
+    use = next(n for n in ast.walk(func) if isinstance(n, ast.Return))
+
+    assert pathcond.surviving_writes([first, replaced], use, as_run=True) == [first, replaced]
+    assert pathcond.parted(replaced, use)
+    assert not pathcond.compatible(replaced, use, current=True)
+
+    func = _func(
+        "def f(specs):\n"
+        "    for spec in specs:\n"
+        "        if spec.isMaster():\n"
+        "            n = 1\n"
+        "        else:\n"
+        "            n = 2\n"
+        "        if spec.isMaster():\n"
+        "            m = 0\n"
+        "        else:\n"
+        "            m = n\n"
+    )
+    one, two = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "n")
+    use = next(n for n in ast.walk(func) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Name))
+
+    assert pathcond.surviving_writes([one, two], use, as_run=True) == [two]
+
+    func = _func(
+        "def f(items, flag):\n"
+        "    a = None\n"
+        "    for item in items:\n"
+        "        if flag:\n"
+        "            a = item\n"
+        "        else:\n"
+        "            b = a\n"
+    )
+    before, inner = (n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "a")
+    use = next(n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.targets[0].id == "b")
+
+    assert pathcond.surviving_writes([before, inner], use, as_run=True) == [before]
+
+
 def test_a_call_carrying_its_own_statement_has_no_fragment_to_place():
     """"No fragment reaches this call" and "there is no fragment" are
     different answers.  Thirty pairs in the corpus write the statement into
@@ -16379,7 +16832,6 @@ def _skips(source: str, name: str) -> list:
     "name, reason, detail",
     [
         ("queryTasksToBePending_JEDI", sql.SKIP_HANDED_IN, "sql_query"),
-        ("getSiteInfo", sql.SKIP_NO_VARMAP, "sql"),
         ("unbound", sql.SKIP_UNBOUND, "SQL_FROM_ELSEWHERE"),
         ("peekJob", sql.SKIP_UNREAD_NAME, "sql"),
     ],
@@ -16392,17 +16844,86 @@ def test_an_execution_nothing_is_read_out_of_is_said_with_its_reason(name, reaso
     assert [(s.reason, s.detail) for s in skipped] == [(reason, detail)]
 
 
-def test_a_wrapper_handing_on_its_callers_statement_is_not_a_skip():
+def test_a_wrapper_handing_on_its_callers_statement_is_said_as_theirs():
     """``WrappedCursor.execute`` runs what every caller wrote, and the callers
-    are where it is read -- handing it on is not a gap."""
+    are where it is read -- handing it on is not a gap, and is said so."""
     runs, skipped = _skips(_WRAPPER, "execute")
 
-    assert runs == [] and skipped == []
+    assert runs == []
+    assert [(s.reason, s.detail) for s in skipped] == [(sql.SKIP_CALLERS, "sql")]
+
+
+_RUNNERS = '''
+class Proxy:
+    def getClobObj(self, sql, varMap):
+        self.cur.execute(sql + comment, varMap)
+
+    def executemanySQL(self, sql, varMaps):
+        self.cur.executemany(sql, varMaps)
+
+    def queryTasksToBePending_JEDI(self, sql_query, params_map):
+        self.cur.execute(sql_query, params_map)
+        self.cur.execute("UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:s", {":s": "pending"})
+
+
+class TaskBuffer:
+    def executemanySQL(self, sql, varMaps):
+        return self.proxy.executemanySQL(sql, varMaps)
+
+    def getSiteInfo(self):
+        sql = "SELECT siteid FROM ATLAS_PANDA.schedconfig"
+        return self.proxy.getClobObj(sql, {})
+
+    def clean(self, maps):
+        self.executemanySQL("DELETE FROM ATLAS_PANDA.Metrics WHERE id=:id", maps)
+'''
+
+
+def test_a_function_running_its_own_parameter_as_the_statement_is_a_runner_read_at_its_callers(tmp_path):
+    """``getClobObj(sql, varMap)`` runs ``self.cur.execute(sql, varMap)``: a call of it runs the statement its caller
+    writes, and is read there, as ``execute`` is; ``TaskBuffer.executemanySQL`` hands its own on to the proxy's, a
+    list of maps as ``executemany`` takes.  A reading with no corpus knows the cursor's and the task buffer's."""
+    from bamboo.codemap.gitsource import blob_sha
+
+    root = tmp_path / "pandaserver"
+    root.mkdir()
+    (root / "db.py").write_text(_RUNNERS)
+    tree = ast.parse(_RUNNERS)
+    pathcond.attach_parents(tree)
+    module = SourceModule(
+        package="pandaserver", rel_path="pandaserver/db.py", tree=tree, source=_RUNNERS, blob_sha=blob_sha(_RUNNERS)
+    )
+    functions = {
+        f"{cls.name}.{func.name}": func
+        for cls in tree.body
+        if isinstance(cls, ast.ClassDef)
+        for func in cls.body
+        if isinstance(func, ast.FunctionDef)
+    }
+
+    assert set(sql.runners()) == {"execute", "executemany", "querySQL", "querySQLS"}
+    with sql.across_calls(sqlwrite.corpus_calls([module], {"pandaserver": root})):
+        runners = sql.runners()
+        (site_info,) = sql.executions(functions["TaskBuffer.getSiteInfo"])
+        (clean,) = sql.executions(functions["TaskBuffer.clean"])
+        sql.executions(functions["Proxy.getClobObj"], handing := [])
+        many = sqlwrite._runs_many(clean)
+
+    assert {name: (one.many, one.own) for name, one in runners.items()} == {
+        "execute": (False, False),
+        "executemany": (True, False),
+        "getClobObj": (False, False),
+        "executemanySQL": (True, False),
+        "queryTasksToBePending_JEDI": (False, True),
+    }
+    assert (site_info.sql, site_info.varmap) == ("SELECT siteid FROM ATLAS_PANDA.schedconfig", None)
+    assert (clean.sql, clean.varmap, many) == ("DELETE FROM ATLAS_PANDA.Metrics WHERE id=:id", "maps", True)
+    assert [(s.reason, s.line) for s in handing] == [(sql.SKIP_CALLERS, 4)]
 
 
 def test_the_skipped_statements_become_stops_with_what_they_read():
-    """A known text keeps its tables; an unknown one says its tables are unknown,
-    and a statement about no rows -- ``ALTER SESSION`` -- is no stop at all."""
+    """A statement not read says its tables are unknown; one run with no bind map
+    is read, and a statement about no rows -- ``ALTER SESSION`` -- is no stop at all."""
     tree = ast.parse(_SKIPPING)
     stops = {
         func.name: sqlwrite.statement_stops(func, "pandaserver/x.py")
@@ -16412,11 +16933,9 @@ def test_the_skipped_statements_become_stops_with_what_they_read():
 
     (handed,) = stops["queryTasksToBePending_JEDI"]
     (unbound,) = stops["unbound"]
-    (plain,) = stops["getSiteInfo"]
     assert (handed.reads, handed.reads_known) == ([], False)
     assert (unbound.reads, unbound.reads_known) == ([], False)
-    assert (plain.reads, plain.reads_known) == (["schedconfig"], True)
-    assert plain.statement == 10 and plain.owner == "pandaserver/x.py::getSiteInfo"
+    assert stops["getSiteInfo"] == []
     assert stops["setSession"] == []
 
 
