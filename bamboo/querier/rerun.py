@@ -54,7 +54,8 @@ A value that does not move (``--stuck``):
                                         row (rule 20); in each, ``which_ran`` over the arms that write
                                         another value and every exit of the function
 ``Blocked``    S3  what kept it from moving  the exit's path condition, solved true; per arm, the guards
-                                        the pass made false; the arm with fewest is the nearest (rule 21)
+                                        the pass made false (not a callee's, ``E.in_callee``); the arm
+                                        with fewest is the nearest (rule 21); its guard's ``if`` (``guard_if``)
 ``Input``      S4  where the guard's name was bound  ``asked.walk`` from the guard's ``if``, the binding
                                         the pass's values leave (``E.taken``); a stop -> its question
 ``Rows``       S5  what the call returned  a call that returns rows by a key: the call, its
@@ -328,6 +329,23 @@ def arms_of(writers: list, owner: str, subject: str, observed: str) -> dict[int,
             arm = found.setdefault(b.line, Arm(b.line, [], list(b.path_condition)))
             arm.outcomes.append(b.outcome)
     return found
+
+
+def guard_if(arm_stmt: ast.AST, guard: str) -> ast.If | ast.While | None:
+    """The innermost ``if`` (or ``while``) above *arm_stmt* that an arm's *guard* is the test of, as
+    ``pathcond.path_condition`` spells it: the test, the arm in its body, or ``not (<the test>)``, the arm in an
+    ``if``'s ``else``.  None for a guard no test above the arm says (KNOWN_ISSUES.md K24)."""
+    test = E.strip_annotation(guard)
+    previous = arm_stmt
+    for a in pathcond.ancestors(arm_stmt):
+        if isinstance(a, (ast.If, ast.While)):
+            said = ast.unparse(a.test)
+            if previous in a.body and test == said:
+                return a
+            if isinstance(a, ast.If) and previous in a.orelse and test == f"not ({said})":
+                return a
+        previous = a
+    return None
 
 
 def _reached(follow, writers: list, subject: str, observed: str):
@@ -2089,7 +2107,8 @@ class Rerun:
             for arm in q.arms:
                 blocking[arm.line] = [
                     g for g in arm.guards
-                    if E._truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
+                    if not E.in_callee(g)
+                    and E._truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
                 ]
             per_pass.append((fixed, blocking))
         fixed, blocking = per_pass[0]
@@ -2108,11 +2127,7 @@ class Rerun:
                 self.say(f"  not followed: arm {a.line} also needs {[g for g in blocking[a.line] if g != guard]}")
         self.say(f"the nearest arm(s) {[a.line for a in nearest]} were kept off by: {guard!r} (rule 21)")
         arm_stmt = R.statement_at(fn.node, nearest[0].line)
-        test = E.strip_annotation(guard)
-        where = next(
-            (a for a in pathcond.ancestors(arm_stmt) if isinstance(a, (ast.If, ast.While)) and ast.unparse(a.test) == test),
-            None,
-        )
+        where = guard_if(arm_stmt, guard)
         where = self.need(f"the if whose test is {guard!r}", where)
         return Input(fn, guard, where.lineno, q.passes, q.envs, sorted({o for a in nearest for o in a.outcomes}))
 

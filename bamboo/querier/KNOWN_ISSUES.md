@@ -290,3 +290,24 @@ step meets the limit today (2026-10-24).
 *Shows:* said: "<function>'s rows land in different files [...]: a row is read only in a run of a file it lands in (KNOWN_ISSUES.md K23)".
 *Revisit:* when a writer's rows land in several files (compare `rows.split_files` with the writers when the pin
 moves); when one pass's runs in several files can be joined by the key, the time and the machine.
+
+### K24. S3 names no guard that no test above the arm says, and reads no callee's test
+
+S3 (`Rerun.blocked`) names the guard the passes made false against the nearest arm, then goes on from the `if` that
+tests it (`guard_if`): one above the arm whose test is the guard, or for `not (t)` one testing t with the arm in its
+`else`.  A branch's path condition also holds guards no test above the arm says.  A local's branch carries the
+bind's guards beside the assignment's, its line the assignment.  A later write that replaces the value adds the
+negation of its test (`pathcond.literal_values`; the map's PC adds more for fields, setter calls and map keys).  Named,
+such a guard stops S3 at "the if whose test is ...", so S3 withholds, never answers wrong.  The dump holds each entry
+as text only, and one function can hold several `if`s of the same text (`storeJobs`' `match is not None` at 267, 288
+and 305), so the querier cannot place them itself.  A guard the map marks `  [in f()]` (`alias._produced`) is tested
+in a method the function calls, in that method's names: S3 counts it neither false nor true (`E.in_callee`), as any
+guard the passes leave unknown.  On 5e84330's dump (`tools/s3_guards.py`, 1,202 branches, 2,803 entries) 80 entries
+of about 31 branches have no test above the arm, and 207 of 43 branches are marked; S3 meets marked guards on
+JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), none of them in a case of mine
+(2026-10-25).
+
+*Shows:* stopped: "the if whose test is '<guard>'" for a guard with no test above the arm; a marked guard in an arm's
+"needs [...]" and never in "false in the passes".
+*Revisit:* when S3 must go on from such a guard: the map would record each entry's place (its `if`'s line, or the
+replacing write's, and for a callee's test the method and how its names map to the caller's).

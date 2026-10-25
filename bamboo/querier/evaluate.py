@@ -153,6 +153,12 @@ def strip_annotation(text: str) -> str:
     return re.sub(r"\s+\[\w+ := .*\]$", "", text)
 
 
+def in_callee(text: str) -> bool:
+    """Whether a path condition is tested in a method the function calls: the map marks it ``  [in f()]``
+    (``alias._produced``).  Its names are the callee's, so the caller's passes cannot say it."""
+    return re.search(r"\s+\[in \w+\(\)\]$", text) is not None
+
+
 def _call(node: ast.Call, env: Env) -> Any:
     if not PURE:
         PURE.update(_pure())
