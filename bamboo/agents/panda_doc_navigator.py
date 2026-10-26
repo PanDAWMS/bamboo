@@ -74,7 +74,7 @@ def _predict_silently(model, pairs: list[tuple[str, str]]) -> list[float]:
 # Constants
 # ---------------------------------------------------------------------------
 
-_PANDA_DOCS_ORG = "tmaeno"
+_PANDA_DOCS_ORG = "PanDAWMS"
 _PANDA_DOCS_TREE_URL = (
     f"https://api.github.com/repos/{_PANDA_DOCS_ORG}/panda-docs/git/trees/main?recursive=1"
 )

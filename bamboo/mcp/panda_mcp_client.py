@@ -39,7 +39,7 @@ _MAX_ERROR_DIALOG_LOGS = 5
 _RETRY_CHAIN_FIELDS = ("jediTaskID", "status", "errorDialog", "retryID", "transUses")
 
 # PanDA WMS documentation GitHub repository (source enumeration + task_params fetch).
-_PANDA_DOCS_ORG = "tmaeno"
+_PANDA_DOCS_ORG = "PanDAWMS"
 _PANDA_DOCS_RAW_BASE = f"https://raw.githubusercontent.com/{_PANDA_DOCS_ORG}/panda-docs/main"
 _TASK_PARAMS_RST_PATH = "docs/source/advanced/task_params.rst"
 _GDPCONFIG_RST_PATH = "docs/source/advanced/gdpconfig.rst"
