@@ -202,6 +202,21 @@ value of `JobSpec.jobStatus`).
 verdict `prints-nothing`.
 *Revisit:* where a caller's junction does not place the function's write.
 
+### K26. S3 reads what an arm that ran wrote only from a row after it in its own block
+
+Where every pass leaves by an arm that writes the subject (S2 takes the arm itself), no guard kept the passes off
+it, and S3 reads what the arm wrote: a `runtime(<name>)` outcome, by a row after the arm in its block that prints
+`<name>`, nothing binding it between (`lines_after`).  The value observed in every pass ends the answer: the mover
+ran and wrote it again -- Fr2's updateJobStatus, arm 241 in 12 passes, "old=running new=running", the pilot's
+reports.  A literal outcome, several outcomes at the line, a name printed only before the arm or past a binding, or a
+value other than the one observed stops S3 and says which.  The pass-wide printed values leave such a name out on
+purpose (`stable_holes`, rule 17): updateJobStatus binds `jobStatus` again at 228, between 51's `status={jobStatus}`
+and the arm.
+
+*Shows:* END "...:241 ran in every pass (12) and wrote jobStatus = 'running', the value observed: the mover kept the
+value"; else stopped, with what is not read.
+*Revisit:* when an arm that ran writes a name no row after it prints.
+
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
 ### K15. A writer that takes a row by its key is not ruled out

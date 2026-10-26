@@ -385,6 +385,23 @@ def guard_if(arm_stmt: ast.AST, guard: str) -> ast.If | ast.While | None:
     return None
 
 
+def lines_after(func: ast.AST, arm_stmt: ast.stmt, name: str) -> list[tuple[int, int]]:
+    """The spans of the statements after *arm_stmt* in its own block, up to the first that binds *name*: a row printed
+    there holds *name* as the arm read it (updateJobStatus' ``varMap[":jobStatus"] = jobStatus`` at 241, then ``new=
+    {jobStatus}`` at 244).  A row before the arm, or past a binding, may print another value (228's ``jobStatus =
+    oldJobStatus`` lies between 51's ``status={jobStatus}`` and the arm)."""
+    for node in ast.walk(func):
+        for block in (getattr(node, f, None) for f in ("body", "orelse", "finalbody")):
+            if isinstance(block, list) and any(s is arm_stmt for s in block):
+                spans = []
+                for s in block[block.index(arm_stmt) + 1:]:
+                    if any(isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Load) for n in ast.walk(s)):
+                        break
+                    spans.append((s.lineno, s.end_lineno or s.lineno))
+                return spans
+    return []
+
+
 def _reached(follow, writers: list, subject: str, observed: str):
     """``(owner, why, statement)`` for each way the map gives a function rows of *subject* holding *observed*, in the
     order S1 asks them; *statement* is None for a writer whose write requires the value.  A statement that selects
@@ -2168,6 +2185,9 @@ class Rerun:
     def blocked(self, q: Blocked):
         self.start("S3", "what kept it from moving")
         fn = q.fn
+        arm = next((a for a in q.arms if a.line == q.exit_line), None)
+        if arm is not None:
+            return self._arm_taken(q, arm)
         exit_stmt = R.statement_at(fn.node, q.exit_line)
         path = pathcond.path_condition(exit_stmt)
         self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
@@ -2205,6 +2225,35 @@ class Rerun:
         where = guard_if(arm_stmt, guard)
         where = self.need(f"the if whose test is {guard!r}", where)
         return Input(fn, guard, where.lineno, q.passes, q.envs, sorted({o for a in nearest for o in a.outcomes}))
+
+    def _arm_taken(self, q: Blocked, arm: Arm) -> None:
+        """S3 where every pass left by an arm that writes the subject: no guard kept the passes off it, so what kept the
+        value is what the arm wrote -- a value known at run time (``runtime(<name>)``), read off a row after the arm in
+        its block that prints it, nothing binding the name between (``lines_after``; KNOWN_ISSUES.md K26).  The value
+        observed in every pass: the mover ran and wrote it again, an END (Fr2's updateJobStatus: "old=running
+        new=running", the pilot's reports).  Anything else stops, saying what is not read."""
+        fn = q.fn
+        self.say(f"{fn.name}:{arm.line} is an arm that writes {arm.outcomes}: every pass ({len(q.passes)}) went through it")
+        names = {o[len("runtime("):-1] for o in arm.outcomes if o.startswith("runtime(") and o.endswith(")")}
+        name = self.need(f"what arm {arm.line} wrote, yet the value stayed {self.args.observed!r}: one value known at run time "
+                         f"(it writes {arm.outcomes})", names.pop() if len(names) == 1 and len(arm.outcomes) == 1 else None)
+        spans = lines_after(fn.node, R.statement_at(fn.node, arm.line), name)
+        wrote = []
+        for n, p in enumerate(q.passes, 1):
+            seen = R.claim([R.seen(fn, p, self.mode)])[0]
+            values = sorted({row.capture(p.records[i])[name].strip()
+                             for row in fn.rows if any(a <= row.line <= b for a, b in spans)
+                             for i, _, _ in seen.hits.get(row.line, ()) if name in row.capture(p.records[i])})
+            self.say(f"  pass {n} ({p.first}): {name} printed after it {values or 'nowhere'}")
+            wrote.append(values)
+        self.need(f"the value of {name} arm {arm.line} wrote in every pass: a row after it in its block that prints it, "
+                  f"nothing binding {name} between", all(len(v) == 1 for v in wrote))
+        values = sorted({v[0] for v in wrote})
+        self.need(f"arm {arm.line} wrote {values} in the passes, not the value observed alone, yet the value stayed "
+                  f"{self.args.observed!r}: not read", values == [self.args.observed])
+        self.end(f"{fn.name}:{arm.line} ran in every pass ({len(q.passes)}) and wrote {name} = {self.args.observed!r}, the "
+                 f"value observed: the mover kept the value")
+        return None
 
     # ------------------------------------------------------------ Input: where the guard's name was bound
     def input(self, q: Input):

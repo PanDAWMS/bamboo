@@ -1402,6 +1402,42 @@ def test_judgement_3s_prints_premise_holds_only_where_a_line_before_every_arm_na
     assert got["no key column"][0] is None and got["no arm"][0] is None
 
 
+def test_s3_reads_what_an_arm_wrote_only_after_it_in_its_block_before_the_name_is_bound_again(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+    import ast, json
+    from bamboo.querier import rerun as RR
+
+    tree = ast.parse("\\n".join([
+        "def update(status, old):",
+        "    log(f'status={status}')",
+        "    if old == 'failed':",
+        "        status = old",
+        "    if ok:",
+        "        row['status'] = status",
+        "        n = execute(row)",
+        "        log(f'old={old} new={status}')",
+        "        if n:",
+        "            log(f'again {status}')",
+        "        status = 'x'",
+        "        log(f'later {status}')",
+        "    log(f'end {status}')",
+    ]))
+    fn = tree.body[0]
+    arm = next(n for n in ast.walk(fn) if isinstance(n, ast.stmt) and n.lineno == 6)
+    print(json.dumps([RR.lines_after(fn, arm, "status"), RR.lines_after(fn, arm, "n")]))
+    """,
+        )
+    )
+    status, n = json.loads(out.splitlines()[-1])
+    # after the arm in its block: 7, 8 and the if at 9-10; 11 binds status again, so 12 and the end at 13 are not read
+    assert status == [[7, 7], [8, 8], [9, 10]]
+    # a statement binding the name ends the spans at once: 7 binds n
+    assert n == []
+
+
 def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_guard_read_elsewhere(tmp_path):
     out = _ok(
         _run(
