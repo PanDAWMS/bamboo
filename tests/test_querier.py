@@ -473,6 +473,9 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
     for name in ["ran-late", "ran-early", "silent", "holes", "unanswered", "another's"]:
         found, missed, holes, searched = r._ask_mover(s, "a.py::mover", [name], first)
         got[name] = [searched.window, r._runs_of(found, "a.py::mover", searched)]
+    # a writer that takes a row by its key: the last part alone, a run before it not looked for
+    found, missed, holes, searched = r._ask_mover(s, "a.py::mover", ["ran-early"], first, rest=False)
+    got["by key"] = [searched.window, r._runs_of(found, "a.py::mover", searched)]
     # a window that starts at the row has no rest
     r.data["statuslog"]["as_of"] = "2026-10-13 05:00:00"
     short = W.stuck(r.data["statuslog"], "finishing")
@@ -497,6 +500,8 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
     assert got["holes"][0] == got["unanswered"][0] == last
     assert got["short"] == [["2026-10-13 00:50:00", "2026-10-13 05:00:00"], None]
     assert got["files"] == [last]
+    assert got["by key"] == [last, []]
+    assert [w for n, w in asked if n == "ran-early"] == [last, rest, last]
     assert [w for n, w in asked if n == "silent"] == [last, rest, ["2026-10-13 00:50:00", "2026-10-13 05:00:00"], last]
     assert "  mover: no run of its own from 2026-10-13 14:00:00: asking the rest of the window" in lines
 
@@ -539,16 +544,20 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
         ("logger", ["a.log", "b.log"]), ("module", ["a.log", "c.log"]), ("none", ["a.log"]), ("nowhere", ["a.log"]),
         ("missing", ["a.log"])]}
     logs["one not asked"] = held(rerun.every_log_asked("x.py::logger", [], ["a.log"]))
+    logs["prints nothing"] = [rerun.prints_nothing(f"x.py::{name}", []) for name in ("logger", "none", "missing")]
     rerun.R.ROWS_FROM = "walk"
     logs["walk"] = held(rerun.every_log_asked("x.py::logger", [], ["a.log", "b.log"]))
     rerun.R.ROWS_FROM = "graph"
     r.logs = N(needs_window=True)
     premises = r._premises(s, "x.py::logger", [], ["a.log", "b.log"], short, short, [], {})
-    print(json.dumps([got, logs, premises]))
+    keys = [sorted(r._key_columns("JobSpec.jobStatus", "1")), sorted(r._key_columns("JobSpec.jobStatus", "2"))]
+    print(json.dumps([got, logs, premises, keys]))
     """,
         )
     )
-    got, logs, premises = json.loads(out.splitlines()[-1])
+    got, logs, premises, keys = json.loads(out.splitlines()[-1])
+    # the row's key is the column holding the key asked, as held.split reads it
+    assert keys == [["JobSpec.PandaID"], []]
     # the whole window: the rest asked, or a last part that starts at the row, every ask answered, nothing unsearched
     assert got["whole"] == [True, "2026-10-13 00:50:00 .. 2026-10-13 20:00:00 searched in ['a.log'], none of it unsearched"]
     assert got["short"] == [True, "2026-10-13 00:50:00 .. 2026-10-13 05:00:00 searched in ['a.log'], none of it unsearched"]
@@ -561,13 +570,16 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
     # every file the map places the prints in, by their logger, asked
     assert logs["logger"] == [True, "every file the map places its prints in was asked: ['a.log', 'b.log']"]
     assert logs["one not asked"] == [False, "not asked: ['b.log']"]
+    # no prints of its own, none at all or no statement: no run in a log is its own (K25)
+    assert logs["prints nothing"] == [False, True, True]
     assert logs["module"][0] is False and "['module']" in logs["module"][1]
     assert logs["none"] == logs["missing"] == [False, "the map has no prints of its own for it"]
     assert logs["nowhere"] == [False, "the map places its prints in no file"]
     assert logs["walk"][0] is None
-    # the third is the map's to say: never known yet
+    # the third, prints_naming: a mover with no arm of its own prints, if at all, through what it calls
     assert list(premises) == ["window", "logs", "prints"]
-    assert premises["window"]["held"] is True and premises["logs"]["held"] is True and premises["prints"]["held"] is None
+    assert premises["window"]["held"] is True and premises["logs"]["held"] is True
+    assert premises["prints"] == {"held": None, "why": "no arm of its own: what it calls prints, if anything"}
 
 
 _RECORDED = """
@@ -1327,6 +1339,67 @@ def test_an_arm_moves_the_value_unless_its_write_requires_another(tmp_path):
     # 31); a bind no one settled keeps execCommand's 462; touch's precondition is of another column
     assert arms == {"getJobs": {}, "killJob": {"30": ["cancelled"]}, "execCommand": {"459": ["aborting"], "462": ["ready"]},
                     "unThrottle": {}, "touch": {"12": ["failed"]}}
+
+
+def test_a_writer_no_statement_gives_rows_takes_a_row_by_its_key(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier.rerun import by_key_of
+
+    print(json.dumps(by_key_of(writers, {"p/jobs.py::killJob": "x@1 selects the value"}, "JobSpec.jobStatus", "running")))
+    """,
+        )
+    )
+    # a mover already is not again; one with no arm moving the value off is no writer of it
+    assert json.loads(out.splitlines()[-1]) == ["p/cmd.py::execCommand", "p/jobs.py::touch"]
+
+
+def test_judgement_3s_prints_premise_holds_only_where_a_line_before_every_arm_names_the_written_rows_key(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+    import json
+    from types import SimpleNamespace as N
+    from bamboo.querier.rerun import prints_naming
+
+    def name(line, column, row="written"):
+        return N(line=line, expression="job.x", column=column, row=row, why="" if row else "rebound")
+
+    def branch(line, prints, names=None, hole=""):
+        return N(line=line, must_prints=prints, must_names=names, must_hole=hole)
+
+    key = name(5, "JobSpec.PandaID")
+    writers = [N(owner="p/w.py::w", branches=[
+        branch(10, [5], [key]),
+        branch(11, [5], [key, name(5, "JobSpec.jobStatus")]),
+        branch(20, [5], [name(5, "JobSpec.jobStatus")]),
+        branch(21, [5], [name(5, "JobSpec.PandaID", row="")]),
+        branch(22, [5], None, "names: the arm does not write the subject as an attribute of an object"),
+        branch(30, []),
+        branch(40, None, None, "not read: a lambda"),
+    ])]
+    cols = {"JobSpec.PandaID"}
+    held = lambda lines, columns=cols: (lambda p: [p["held"], p["why"]])(prints_naming(writers, "p/w.py::w", lines, columns))
+    print(json.dumps({"named": held([10, 11]), "another column": held([10, 20]), "not the row": held([21]),
+                      "sql": held([22]), "none before": held([10, 30, 20]), "unread": held([10, 40]),
+                      "no key column": held([10], set()), "no arm": held([])}))
+    """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # a line before every arm names the written row's key: a run that wrote it printed what the asks search by
+    assert got["named"] == [True, "a line before every arm at [10, 11] names the written row's ['JobSpec.PandaID']"]
+    # a name of another column, of a row not known to be the written one, or none read (an SQL arm): not known
+    for case in ("another column", "not the row", "sql"):
+        assert got[case][0] is None and "the map pairs neither a run's mark nor an SQL statement's key bind" in got[case][1]
+    assert "[20]" in got["another column"][1] and "[22]" in got["sql"][1]
+    # an arm no line comes before on every path: a run need print nothing, whatever the other arms say
+    assert got["none before"] == [False, "no line runs before the arm(s) at [30] on every path"]
+    assert got["unread"] == [None, "the map did not read the lines before ['40: not read: a lambda']"]
+    assert got["no key column"][0] is None and got["no arm"][0] is None
 
 
 def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_guard_read_elsewhere(tmp_path):

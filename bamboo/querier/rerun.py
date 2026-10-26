@@ -85,7 +85,7 @@ from pathlib import Path
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types
 from bamboo.codemap.lookup import CodeMap
-from bamboo.codemap.models import Symptom, required_values
+from bamboo.codemap.models import MUST_ROW_WRITTEN, Symptom, required_values
 from bamboo.codemap.panda import pathcond, sqltext
 from bamboo.codemap.panda import sql as sql_mod
 from bamboo.codemap.panda.provenance import facade_calls
@@ -287,9 +287,45 @@ def reach_said(reach: dict | None, gapped: bool) -> tuple[bool, str | None]:
                   f"{reach['closure']}; assuming {sorted(reach['assumptions'])}): dropped")
 
 
-#: judgement 3's third premise, which nothing the querier reads says yet (KNOWN_ISSUES.md K19)
-PRINTS_NOT_KNOWN = ("not known yet: the prints every path to an arm passes are the map's to say (asked 2026-10-16), and the "
-                    "asks search by the question's key, which a run need not print (KNOWN_ISSUES.md K19)")
+def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
+    """Judgement 3's third premise for *owner*: every run that reaches one of its arms at *lines* prints the key the
+    asks search by -- a line the map says runs before the arm on every path (``Branch.must_prints``) with a hole it
+    says holds a column among *columns* of the row the arm writes (``Branch.must_names``).  The map pairs neither a
+    run's mark nor an SQL statement's key bind with the written row (``mustprints``): an arm with must prints and no
+    such name is not known either way; one with none, no run need print anything before it.  ``{"held": True | False |
+    None, "why": ...}``, False where any arm says so, None where any is not known, as ``every_log_asked``."""
+    if not columns:
+        return {"held": None, "why": "the rows file says no column of the row holds the key"}
+    if not lines:
+        return {"held": None, "why": "no arm of its own: what it calls prints, if anything"}
+    unread, bare, unnamed = [], [], []
+    for line in sorted(lines):
+        for b in (b for j in writers if j.owner == owner for b in j.branches if b.line == line):
+            if b.must_prints is None:
+                unread.append(f"{line}: {b.must_hole or 'not read'}")
+            elif not b.must_prints:
+                bare.append(line)
+            elif not any(n.row == MUST_ROW_WRITTEN and n.column in columns for n in b.must_names or []):
+                unnamed.append(line)
+    if bare:
+        return {"held": False, "why": f"no line runs before the arm(s) at {sorted(set(bare))} on every path"}
+    if unread:
+        return {"held": None, "why": f"the map did not read the lines before {unread}"}
+    if unnamed:
+        return {"held": None, "why": f"no line before the arm(s) at {sorted(set(unnamed))} is known to name the written row's "
+                                     f"{sorted(columns)}: the map pairs neither a run's mark nor an SQL statement's key bind "
+                                     f"with it (KNOWN_ISSUES.md K19)"}
+    return {"held": True, "why": f"a line before every arm at {sorted(lines)} names the written row's {sorted(columns)}"}
+
+
+def prints_nothing(owner: str, lines) -> bool:
+    """Whether the map has no prints of *owner*'s own (``rows._prints_of``, as ``every_log_asked`` reads it).  Such a
+    function has no run of its own in any log: a run found where it is looked for is a caller's, or not even that --
+    S1 looks for one with no logs of its own in the selecting statements' -- and its lines say nothing of whether it
+    was called (JediTaskSpec.setOnHold, read on TaskCommando's run, which never calls it; KNOWN_ISSUES.md K25).  Where
+    its write is read, it is as an arm its callers' junctions place at each call of it."""
+    found = R._prints_of(owner, lines)
+    return found is None or not found.statements
 
 
 def every_log_asked(owner: str, lines, asked: list[str]) -> dict:
@@ -384,6 +420,14 @@ def movers_of(follow, writers: list, subject: str, observed: str) -> dict[str, s
     for owner, why, _ in _reached(follow, writers, subject, observed):
         found.setdefault(owner, why)
     return found
+
+
+def by_key_of(writers: list, movers, subject: str, observed: str) -> list[str]:
+    """The writers with an arm that can move *subject* on from *observed* that no way of ``_reached`` gives rows: each
+    takes a row by its key, as far as the map says (the pilot's report into ``updateJobStatus``, a kill command into
+    ``killJob``; KNOWN_ISSUES.md K15 / K16), in the writers' order."""
+    owners = dict.fromkeys(j.owner for j in writers)
+    return [o for o in owners if o not in movers and arms_of(writers, o, subject, observed)]
 
 
 def paths_of(follow, writers: list, subject: str, observed: str) -> dict[str, list]:
@@ -1782,9 +1826,13 @@ class Rerun:
         strategy_mod.attach_mover_gaps(strategy, R.ROOTS)
         writers = asyncio.run(self._writers_of(q.subject))
         movers = movers_of(follow, writers, q.subject, q.observed)
+        # a writer that takes a row by its key: asked over the window's last part alone (KNOWN_ISSUES.md K16)
+        keyed = by_key_of(writers, movers, q.subject, q.observed)
         self.say(f"selected by {follow.selected_by}; guarded by {[g.owner for g in follow.guarded_by]}")
         for owner, why in movers.items():
             self.say(f"  mover {owner}: {why}")
+        for owner in keyed:
+            self.say(f"  mover {owner}: a writer that takes a row by its key")
         gaps = {**follow.reader_gaps, **{g.owner: g.gaps for g in follow.guarded_by if g.gaps}}
         self.say(f"where the map could not read them: {gaps or 'nowhere'}" + (f" ({follow.gaps_note})" if follow.gaps_note else ""))
         readings = self._read_at_as_of(q, follow, writers, movers)
@@ -1793,11 +1841,12 @@ class Rerun:
         handers = {rs.owner for rs in follow.reader_statements if rs.crosses_to and asked in rs.selects}
         ran, unanswered, unsearched = [], [], []
         entries = []
-        for owner in movers:
+        for owner in [*movers, *keyed]:
             arms = arms_of(writers, owner, q.subject, q.observed)
             files = [f for j in writers if j.owner == owner for f in j.log_files]
             mine = [(s, v) for o, s, v in readings if o == owner]
-            entry = {"owner": owner, "reached": "guard" if movers[owner] == GUARDED else "select",
+            way = "key" if owner in keyed else "guard" if movers[owner] == GUARDED else "select"
+            entry = {"owner": owner, "reached": way,
                      "statements": [s for s, _ in mine if s], "verdict": None, "reasons": [],
                      "readings": [{"statement": s or None, "verdict": v} for s, v in mine], "premises": None}
             entries.append(entry)
@@ -1827,6 +1876,13 @@ class Rerun:
                     self.say(f"  {func}: {said}")
             if gaps.get(owner):
                 entry["reasons"].append({"code": "map-gap", "text": f"the map could not read all of it ({'; '.join(gaps[owner])})"})
+            if prints_nothing(owner, list(arms)):
+                said = (f"{len(arms)} arm(s) that write another value {[(a.line, a.outcomes) for a in arms.values()]}; the map "
+                        f"has no prints of its own for it, so no run in a log is its own: not followed (KNOWN_ISSUES.md K25)")
+                self.say(f"  {owner.split('::')[-1]}: {said}")
+                entry["verdict"] = "prints-nothing"
+                entry["reasons"].append({"code": "K25", "text": said})
+                continue
             files = self.files_of(owner, list(dict.fromkeys(files or follow.reader_log_files)), list(arms))
             to_hand = self.logs.names(files)
             if to_hand:
@@ -1835,11 +1891,14 @@ class Rerun:
                      f"{[(a.line, a.outcomes) for a in arms.values()]}; logs {files} ({'to hand: ' + str(to_hand) if to_hand else 'none to hand'})")
             if not to_hand:
                 entry["verdict"] = "no-log"
-                entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, asking, [], {})
+                entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, asking, [], {}, writers)
                 continue
-            found, missed, holes, searched = self._ask_mover(q, owner, to_hand, asking)
+            found, missed, holes, searched = self._ask_mover(q, owner, to_hand, asking, rest=way != "key")
             unanswered += missed
-            if logs := self._runs_of(found, owner, searched):
+            logs = self._runs_of(found, owner, searched)
+            if not logs:
+                entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, searched, missed, holes, writers)
+            if logs:
                 ran.append(Passes(owner, logs, list(arms.values()), q.key, searched))
                 entry["verdict"] = "ran"
             elif holes:
@@ -1850,14 +1909,20 @@ class Rerun:
             elif missed:
                 entry["verdict"] = "asks-unanswered"
             else:
-                # not followed, and not ruled out either: absence is judgement 3's, with its rule (build order 2)
+                # not followed; ruled out only where judgement 3's premises all hold (build order 2)
                 over = " over the whole window" if searched is not asking else ""
-                said = f"no run of its own found in {to_hand}{over}: not followed, though not ruled out (KNOWN_ISSUES.md K19)"
+                if way == "key" and self.logs.needs_window and W.rest(statuslog, q.observed) is not None:
+                    over = (f" from {asking.window[0]}, the window's last part, which alone is asked of a writer that "
+                            f"takes a row by its key (KNOWN_ISSUES.md K16)")
+                if all(p["held"] for p in entry["premises"].values()):
+                    said = f"no run of its own found in {to_hand}{over}: it did not run (judgement 3)"
+                    entry["verdict"] = "did-not-run"
+                    entry["reasons"].append({"code": "judgement-3", "text": said})
+                else:
+                    said = f"no run of its own found in {to_hand}{over}: not followed, though not ruled out (KNOWN_ISSUES.md K19)"
+                    entry["verdict"] = "no-run-found"
+                    entry["reasons"].append({"code": "K19", "text": said})
                 self.say(f"  {owner.split('::')[-1]}: {said}")
-                entry["verdict"] = "no-run-found"
-                entry["reasons"].append({"code": "K19", "text": said})
-            if entry["verdict"] != "ran":
-                entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, searched, missed, holes)
         self.result["movers"] = entries
         self._stop_unanswered(unanswered)
         # every mover that ran and left the value is part of the answer: each goes on alone (tmaeno, 2026-10-13)
@@ -1953,15 +2018,17 @@ class Rerun:
                 "holes": len(answer.holes), "first_holes": answer.holes[:3], "assumptions": answer.assumptions,
                 "closure": answer.closure, "own_arms": [s for s in starts if s in destination.arms]}
 
-    def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking):
+    def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking, rest: bool = True):
         """S1's asks for one mover: the window's last part first (*asking*, ``STUCK_SPAN``), and the rest of the window
         (``W.rest``) only where every ask of the last part was answered whole and held no run of its own -- no pass in
         six hours is not no pass in the window, and a mover that ran and stopped is the one a stuck value most needs
-        named (build order 2a; tmaeno, 2026-10-16).  The door over files reads each file whole and asks once.
+        named (build order 2a; tmaeno, 2026-10-16).  Not *rest* for a writer that takes a row by its key: its logs are
+        mostly the DB proxy's, grepped whole over days (KNOWN_ISSUES.md K16; tmaeno, 2026-10-26).  The door over files
+        reads each file whole and asks once.
 
         Returns what ``_ask`` does, and the asking the runs were looked for over."""
         found, missed, holes = self._ask(q.key, to_hand, asking)
-        if missed or holes or not self.logs.needs_window or self._runs_of(found, owner, asking):
+        if not rest or missed or holes or not self.logs.needs_window or self._runs_of(found, owner, asking):
             return found, missed, holes, asking
         rest = W.rest(self.data.get("statuslog", {}), q.observed)
         if rest is None:
@@ -1975,17 +2042,24 @@ class Rerun:
         return [name for name, rs in found.items() if any((window is None or _overlaps(r, window)) and _of_mover(r, owner) for r in rs)]
 
     def _premises(self, q: Stuck, owner: str, lines, to_hand: list[str], asking: W.Asking, searched: W.Asking,
-                  missed: list, holes: dict) -> dict:
+                  missed: list, holes: dict, writers: list = ()) -> dict:
         """Judgement 3's premises for a mover with no run of its own found: absence rules it out only where all three
         hold (build order 2a; KNOWN_ISSUES.md K19).  ``window``: the whole window was searched; ``logs``: every log its
-        runs print to was asked (``every_log_asked``); ``prints``: every run that reaches an arm prints a string the asks
-        search by.  Each is ``{"held": True | False | None, "why": ...}``, None where it is not known yet.
+        runs print to was asked (``every_log_asked``); ``prints``: every run that reaches an arm prints the key the asks
+        search by (``prints_naming``, over *writers*).  Each is ``{"held": True | False | None, "why": ...}``, None where
+        it is not known.
 
         *asking* is the window's last part (``W.stuck``), *searched* the part ``_ask_mover`` asked last, and *missed*
         and *holes* what that ask returned."""
         return {"window": self._searched_whole(q, to_hand, asking, searched, missed, holes),
                 "logs": every_log_asked(owner, lines, to_hand),
-                "prints": {"held": None, "why": PRINTS_NOT_KNOWN}}
+                "prints": prints_naming(list(writers), owner, lines, self._key_columns(q.subject, q.key))}
+
+    def _key_columns(self, subject: str, key: str) -> set[str]:
+        """The columns of *subject*'s class whose value in the rows file is *key* -- the row's key, as ``held.split``
+        reads it -- spelled ``Class.attribute`` as the map's names are."""
+        cls = subject.partition(".")[0]
+        return {f"{cls}.{c}" for c, cell in self._row_of(cls).items() if isinstance(cell, dict) and str(cell.get("value")) == key}
 
     def _searched_whole(self, q: Stuck, to_hand: list[str], asking: W.Asking, searched: W.Asking, missed: list,
                         holes: dict) -> dict:
@@ -2332,7 +2406,7 @@ class Rerun:
         writers = asyncio.run(self._writers_of(q.subject))
         movers = movers_of(follow, writers, q.subject, q.observed)
         owners = list(dict.fromkeys(j.owner for j in writers))
-        by_key = [o for o in owners if o not in movers and arms_of(writers, o, q.subject, q.observed)]
+        by_key = by_key_of(writers, movers, q.subject, q.observed)
         refusing = [o for o in owners if o not in movers and o not in by_key and refused_arms(writers, o, q.subject, q.observed)]
         return Missed(q.subject, q.observed, after["status"], since, moved, statements, owner, w.question,
                       movers=movers, paths=paths_of(follow, writers, q.subject, q.observed), by_key=by_key,

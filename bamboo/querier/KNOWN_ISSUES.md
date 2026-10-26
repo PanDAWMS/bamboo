@@ -127,15 +127,23 @@ dropped one's line, and its `reach` in result.json.
 *Revisit:* following a mover's calls to their arms (S2 per callee).  The map closing holes (its precision items after
 reach v1) moves movers from kept to dropped with no change here.
 
-### K16. S1 lists no writer that takes a row by its key alone
+### K16. S1 asks a writer that takes a row by its key over the window's last part only
 
 S1's movers are the statements' (`movers_of`): the functions the rows of a statement selecting the value reach, and
 the writers whose write requires the value (`guarded_by`).  A writer called with the key -- the pilot's report into
 `updateJobStatus`, a kill command into `killJob` -- is in neither for `JobSpec.jobStatus=running`, whose
-`guarded_by` is empty.  L2 lists them (`by key`, K15).
+`guarded_by` is empty.  S1 takes them as L2 does (`by_key_of`: a writer with an arm moving the value off that no
+statement gives rows) and follows the runs found, but asks their logs over the window's last part (`STUCK_SPAN`)
+alone, not the rest a mover's is asked over: they are mostly the DB proxy's, and the rest is days of
+`panda-DBProxy.log` on every server machine -- Fr2's 3.7 days on 8 machines about 35 GB grepped (tmaeno, 2026-10-26).
+So a writer that ran and stopped before the last part is not named, and none of them is ruled out (K19's window).
+`by_key_of` is every writer no statement gives rows, not only the per-key ones: on pin k (dce1e07's dump) 32 for
+`jobStatus=running` and 28 for `status=finishing`, bulk methods whose selection the map does not link and the
+setupper's helpers among them, against 3 and 1 movers.
 
-*Shows:* silent in S1 (such a writer is not asked).
-*Revisit:* build order 2: S1 takes them too, with the absence rule of K15 deciding which of them did not run.
+*Shows:* said ("... from <the last part's start>, the window's last part, which alone is asked of a writer that takes
+a row by its key"); result.json's `reached` `key`.
+*Revisit:* when a stuck value needs the writer that ran and stopped: the rest asked, the smaller logs first.
 
 ### K17. Stuck reads the movers' statements at one moment only
 
@@ -157,17 +165,42 @@ runImpl sets modificationtime on each pass, so at G's as_of the row is refused, 
 S1 follows a mover only where a log asked for it holds a run of the key in the window asked (`_of_mover`).  One whose
 every ask was answered and none held such a run is not followed -- but not ruled out either: absence needs the rule
 of K15 (the whole window searched, every log its process writes to, and every run that reaches the arm bound to
-print a string the asks search by).  Since build order 2a S1 searches the whole window for such a mover (K5); the
-third premise needs the map's prints that every path to an arm passes (asked 2026-10-16), and the asks search by the
-question's key, which a mover's runs need not print (the setupper names datasets, not PandaIDs).  result.json says, for
-each mover with no run found, which of the three hold (`premises`: `window`, `logs`, `prints`); `prints` is never known
-yet, so none is ruled out.
+print a string the asks search by).  Since build order 2a S1 searches the whole window for such a mover (K5).  The
+third premise (`prints_naming`) holds where, before every arm, a line the map says runs on every path
+(`Branch.must_prints`) has a hole it says holds the written row's key (`must_names`, the row's key being the rows
+file's column holding the key asked).  The map reads such names off an attribute write's message only: it pairs
+neither a run's mark (`PandaID={}`) nor an SQL arm's key bind with the written row (`mustprints`), so an arm with must
+prints and no such name leaves the premise unknown.  On pin k (dce1e07's dump, out/p3 of the analyzer handover) the
+premise can hold for 2 of the 22 arms of the movers S1 keeps for `JobSpec.jobStatus` (datasetManager's run 735,
+retryJob 4016) and none of the 57 for `JediTaskSpec.status`; a mark holds a key column of the class on 7 and 39, the
+written row's or not -- retryChildTasks_JEDI's is the parent's, its arm writes the children.  And most of the owners
+S1 keeps (11 of 18, 9 of 13) have an arm whose runs print no row's key -- a bulk run marked `vo={} label={}` or by
+time, or no line before it on every path: a search by the key cannot show such a mover absent at all.  result.json
+says, for each mover with no run found, which of the three hold (`premises`: `window`, `logs`, `prints`), and
+`did-not-run` where all do.
 `JobSpec.jobStatus=running` (Fr2) had five such over the last 6 h: `Watcher.run`, `copyArchive.main`,
 `TaskBuffer.killJobs`, `analy_pmerge_jobs_wait_time` and `get_site_strr_stats`.
 
-*Shows:* said ("no run of its own found in [...] over the whole window: not followed, though not ruled out");
-result.json's verdict `no-run-found`, with its `premises`.
-*Revisit:* build order 2a: judgement 3, the absence rule, replaces it once the map answers.
+*Shows:* said ("no run of its own found in [...] over the whole window: not followed, though not ruled out", or "...:
+it did not run (judgement 3)"); result.json's verdict `no-run-found` or `did-not-run`, with its `premises`.
+*Revisit:* when the map pairs a run's mark and an SQL statement's key bind with the written row.
+
+### K25. S1 does not follow a function that prints nothing of its own
+
+A function the map has no prints of its own for (`prints_nothing`) has no run of its own in a log, so S1 does not
+follow it.  Before, a run found in its logs was read as its own wherever the run's mark named no method (`_of_mover`),
+and S2 then took the function's one arm by elimination with nothing read: `JediTaskSpec.setOnHold`, no logs of its own,
+was looked for in the selecting statements' -- TaskCommando's, which never calls it -- and Fo's TaskCommando run became
+"every pass left by setOnHold:807".  Where such a function's write moves the value, the map places it at each call as
+an arm of the caller's (JobGenerator.runImpl's 642 `pending`, setOnHold's own test in its path condition marked
+`[in setOnHold()]`, K24), and the caller's run is read for it.  One whose write no caller's junction places is not
+read at all.  On pin k (dce1e07's dump): 2 of the 60 writers that take a row by its key in Fr2's and G's values
+(setOnHold, adder_gen's finalize_job_status) and 1 of the movers S1 keeps over the census (TaskBuffer.updateJobs, one
+value of `JobSpec.jobStatus`).
+
+*Shows:* said ("the map has no prints of its own for it, so no run in a log is its own: not followed"); result.json's
+verdict `prints-nothing`.
+*Revisit:* where a caller's junction does not place the function's write.
 
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
