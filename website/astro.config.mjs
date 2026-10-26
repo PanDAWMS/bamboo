@@ -6,7 +6,7 @@ import starlightLinksValidator from 'starlight-links-validator';
 
 // https://astro.build/config
 export default defineConfig({
-	site: 'https://tmaeno.github.io',
+	site: 'https://pandawms.github.io',
 	base: '/bamboo/',
 	integrations: [
 		// astro-mermaid must be registered BEFORE starlight so it processes ```mermaid fences first
@@ -30,10 +30,10 @@ export default defineConfig({
 				}),
 			],
 			social: [
-				{ icon: 'github', label: 'GitHub', href: 'https://github.com/tmaeno/bamboo' },
+				{ icon: 'github', label: 'GitHub', href: 'https://github.com/PanDAWMS/bamboo' },
 			],
 			editLink: {
-				baseUrl: 'https://github.com/tmaeno/bamboo/edit/master/website/',
+				baseUrl: 'https://github.com/PanDAWMS/bamboo/edit/master/website/',
 			},
 			sidebar: [
 				{ label: 'Getting Started', slug: 'quickstart' },

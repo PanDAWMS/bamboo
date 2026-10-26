@@ -103,13 +103,13 @@ to edit for each kind of extension — read the current code there for the exact
 
 | To add… | Edit | Notes |
 |---|---|---|
-| A node or relationship type | [`bamboo/models/graph_element.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/models/graph_element.py) | Defines the `NodeType` and `RelationType` enums and node models. See [Graph Schema](/bamboo/architecture/schema/) for the existing catalogue. |
-| Extraction behaviour for a node type | [`bamboo/agents/extractors/knowledge_graph_extractor.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/agents/extractors/knowledge_graph_extractor.py) | The dispatcher that selects the active strategy and assigns node UUIDs. |
+| A node or relationship type | [`bamboo/models/graph_element.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/models/graph_element.py) | Defines the `NodeType` and `RelationType` enums and node models. See [Graph Schema](/bamboo/architecture/schema/) for the existing catalogue. |
+| Extraction behaviour for a node type | [`bamboo/agents/extractors/knowledge_graph_extractor.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/agents/extractors/knowledge_graph_extractor.py) | The dispatcher that selects the active strategy and assigns node UUIDs. |
 | A new extraction **strategy** | see [Extraction Strategy Plugin System](/bamboo/architecture/extraction-plugin-system/) | Register a custom extractor (`panda`, `llm`, `rule_based`, …) without touching the dispatcher. |
-| Custom LLM prompts | [`bamboo/llm/prompts.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/llm/prompts.py) | Includes the extraction prompt with the canonical relationship list. |
-| Custom database queries | [`bamboo/database/backends/neo4j_backend.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/database/backends/neo4j_backend.py) | Backend implementation; the higher-level client is `bamboo/database/graph_database_client.py`. See [Database Plugin System](/bamboo/database-plugins/) to add a whole new backend. |
+| Custom LLM prompts | [`bamboo/llm/prompts.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/llm/prompts.py) | Includes the extraction prompt with the canonical relationship list. |
+| Custom database queries | [`bamboo/database/backends/neo4j_backend.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/database/backends/neo4j_backend.py) | Backend implementation; the higher-level client is `bamboo/database/graph_database_client.py`. See [Database Plugin System](/bamboo/database-plugins/) to add a whole new backend. |
 | A new database backend | see [Database Plugin System](/bamboo/database-plugins/) | Plugin architecture for graph/vector backends. |
-| A LangGraph workflow | [`bamboo/workflows/`](https://github.com/tmaeno/bamboo/tree/master/bamboo/workflows) | Existing workflows are the best template. |
+| A LangGraph workflow | [`bamboo/workflows/`](https://github.com/PanDAWMS/bamboo/tree/master/bamboo/workflows) | Existing workflows are the best template. |
 | A new agent pipeline, tool, or sub-agent | see [Extending the Agent System](/bamboo/architecture/extending/) | Choose the thin vs full pipeline shape, then add an MCP tool/sub-agent or wire a new CLI command. |
 
 ## Testing
