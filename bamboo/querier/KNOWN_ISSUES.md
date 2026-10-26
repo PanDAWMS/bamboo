@@ -104,6 +104,13 @@ a run that goes on longer than `EDGE` past its last record of the key -- the cas
 (a run that names the key at its start and writes the row at its end).  How long such runs last is not
 measured.
 *Revisit:* measure, per log, how long a mark's run goes on past its last record of the key.
+For S1 (and S2 after it) the round is narrower (`recorded._partial`, 2026-10-26): S1 names the functions whose runs it
+reads, and a DB proxy method's mark of none of them is not asked, nor one of theirs whose key records come in
+pieces `EDGE` or more apart -- a mark the method's calls share (`getTasksToExecCommand_JEDI < vo=None label=None >`),
+whose run is every call in the window: G's round asked 492 marks, 9 of them a writer's, and that one was cut at
+1 MB in all 18 files (bamboo-e1).  Such a mark's key records are read as a run cut at both ends (`Log.partial`: rule
+8 reads no row missing from it), so a mover whose run it is is followed on positive evidence only.  A shared mark
+seen in one piece is still asked, and comes back cut.
 
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 

@@ -458,7 +458,7 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
         "another's": {first.window: [run("2026-10-13 19:00:00", "otherMethod < PandaID=1 >")]},
     }
 
-    def ask(key, names, asking):
+    def ask(key, names, asking, owners=None):
         asked.append((names[0], asking.window))
         if names[0] == "holes":
             return {}, [], {"holes": ["2026-10-13 15:00:00 .. 2026-10-13 16:00:00"]}
@@ -658,6 +658,50 @@ def test_the_record_door_asks_the_marks_that_do_not_hold_the_key_a_round_later(t
     assert notes == ["1 fragment(s) of records whose head was not returned"]
     assert would_print is True
     assert "a second record for the ask" in twice
+
+
+def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared_one_as_cut(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            K, W = "52977211", ("2026-09-28 08:21:12", "2026-09-28 08:41:13")
+            SHARED, OWN, OTHER, WORKER = "getX < vo=None label=None >", "upd < 2026-09-28/08:31:10.1 >", "push < 2026-09-28/08:33:00.0 >", "STAMP1"
+            NESTED = "chk <  < jediTaskID=52977211 > >"
+            hits = [{**line("08:22:00", f"task {K}", SHARED), "offset": 10}, {**line("08:31:12", f"task {K}", OWN), "offset": 20},
+                    {**line("08:33:01", f"job of {K}", OTHER), "offset": 30}, {**line("08:35:00", f"for {K}", WORKER), "offset": 40},
+                    {**line("08:36:00", "in finishing with True", NESTED), "offset": 50}, {**line("08:40:00", f"task {K}", SHARED), "offset": 60}]
+            key_rec = record(Ask("panda-x.log", (K,), W), {M1: answered({**TODAY, "records": hits})})
+            Path("k.jsonl").write_text(json.dumps(key_rec) + "\\n")
+            asked = {}
+            for label, owners in (("s1", frozenset({"getX", "upd"})), ("any", None)):
+                try:
+                    RecordedLogs(["k.jsonl"]).log("panda-x.log", K, W, owners=owners)
+                except Unrecorded as e:
+                    asked[label] = [a.canonical()["strings"] for a, _ in e.asks]
+            tok_ask = Ask("panda-x.log", tuple(sorted([OWN, WORKER])), W, M1)
+            tok_rec = record(tok_ask, {M1: answered({**TODAY, "records": [hits[1], {**line("08:31:13", "done", OWN), "offset": 21},
+                                                                           hits[3], {**line("08:35:01", "end", WORKER), "offset": 41}]})})
+            Path("t.jsonl").write_text(json.dumps(tok_rec) + "\\n")
+            log = RecordedLogs(["k.jsonl", "t.jsonl"]).log("panda-x.log", K, W, owners=frozenset({"getX", "upd"}))
+            runs = {r.token: [len(r.records), r.would_print("DEBUG"), r.describe()] for r in runs_for(log, K)}
+            print(json.dumps([asked, runs, log.notes]))
+            """),
+        )
+    )
+    asked, runs, notes = json.loads(out)
+    # S1's movers own getX and upd: upd's mark, in one piece, and the worker's are asked; getX's, its key records 18 min
+    # apart, is shared by calls, push's is no mover's; chk's tag holds brackets and the key, so it needs no round
+    assert asked["s1"] == [["STAMP1", "upd < 2026-09-28/08:31:10.1 >"]]
+    # without owners, every mark that does not hold the key, as before
+    assert asked["any"] == [["STAMP1", "getX < vo=None label=None >", "push < 2026-09-28/08:33:00.0 >", "upd < 2026-09-28/08:31:10.1 >"]]
+    assert runs["upd < 2026-09-28/08:31:10.1 >"][:2] == [2, True] and runs["STAMP1"][:2] == [2, True]
+    assert runs["chk <  < jediTaskID=52977211 > >"][:2] == [1, True]
+    # a mark not asked whole: its key records alone, read as cut -- no row missing from it is read as not printed
+    assert runs["getX < vo=None label=None >"][:2] == [2, False] and "a mark the method's calls share" in runs["getX < vo=None label=None >"][2]
+    assert runs["push < 2026-09-28/08:33:00.0 >"][:2] == [1, False] and "a method no step asked reads" in runs["push < 2026-09-28/08:33:00.0 >"][2]
+    assert notes == ["2 mark(s) read from the key's records alone, as cut: a mark the method's calls share; a method no step asked reads"]
 
 
 def test_the_record_door_widens_once_past_an_end_and_reads_a_run_still_there_as_cut(tmp_path):
@@ -1827,7 +1871,7 @@ def test_f1_asks_for_every_row_after_the_run_before_one_stop_and_then_reads_each
     r.files_of = lambda owner, today, lines: list(today)
     answered = False
 
-    def ask(key, names, asking):
+    def ask(key, names, asking, owners=None):
         if answered:
             return {}, [], {}
         return {}, [(N(key=f"{names[0]}@{asking.machine}"), asking.why)], {}

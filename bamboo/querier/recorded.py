@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -250,12 +251,14 @@ class RecordedLogs:
     def names(self, wanted: list[str]) -> list[str]:
         return list(dict.fromkeys(wanted))
 
-    def log(self, name: str, key: str, window: Window | None = None, *, machine: str | None = None) -> Log:
+    def log(
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+    ) -> Log:
         if window is None:
             raise ValueError(f"{name}: the recorded logs are asked over a window")
-        at = (name, key, window, machine)
+        at = (name, key, window, machine, owners)
         if at not in self._logs:
-            self._logs[at] = self._read(name, key, window, machine)
+            self._logs[at] = self._read(name, key, window, machine, owners)
         return self._logs[at]
 
     def _get(self, asks: list[tuple[Ask, str]]) -> list[dict]:
@@ -265,7 +268,7 @@ class RecordedLogs:
             raise Unrecorded(missing)
         return [self._records[a.key] for a, _ in asks]
 
-    def _read(self, name: str, key: str, window: Window, machine: str | None) -> Log:
+    def _read(self, name: str, key: str, window: Window, machine: str | None, owners: frozenset[str] | None = None) -> Log:
         notes = []
         (first,) = self._get([(Ask(name, (key,), window, machine), "")])
         if machine is not None and first.get("machines", {}).get(machine, {}).get("status") == "not listed":
@@ -275,12 +278,15 @@ class RecordedLogs:
         got.add(first)
 
         # the marks that do not hold the key: their records need not -- every such mark, near the window or not
-        # (KNOWN_ISSUES.md K13)
+        # (KNOWN_ISSUES.md K13); for an asker that reads some functions' runs alone, a DB proxy method's mark is asked
+        # only where it is one of theirs and its run can be made whole by it (_partial)
         pattern = keyed(key)
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
             if r.token and pattern.search(r.message) and not pattern.search(r.token):
                 marks.setdefault(r.machine, set()).add(r.token)
+        partial = _partial(got, marks, owners)
+        marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
         why = "the records of the key's runs whose mark does not hold the key"
         for record in self._get([(Ask(name, tuple(sorted(t)), window, m), why) for m, t in sorted(marks.items())]):
             got.add(record)
@@ -288,6 +294,8 @@ class RecordedLogs:
         # the ends of what was searched: widened past once, where a part of a run that reaches the window lies near one
         widen: dict[tuple[str, Window], set[str]] = {}
         for (m, token), lo, hi in _runs(got, pattern, window):
+            if (m, token) in partial:
+                continue
             strings = {key} if pattern.search(token) else {token}
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
             # again), nor past today's file's end: the run is read as cut there
@@ -302,6 +310,10 @@ class RecordedLogs:
         log.holes = got.holes(window)
         log.whole = _whole_in(got)
         log.edges = _edges_in(got)
+        log.partial = partial
+        if partial:
+            kinds = sorted(set(partial.values()))
+            notes.append(f"{len(partial)} mark(s) read from the key's records alone, as cut: {'; '.join(kinds)}")
         if not got.asked:
             notes.append("no machine lists it: the log is on none")
         if got.without:
@@ -310,6 +322,34 @@ class RecordedLogs:
             notes.append(f"JEDI's machine(s) {jedi}: {JEDI_CLOCKS}")
         log.notes = notes + ([f"{got.fragments} fragment(s) of records whose head was not returned"] if got.fragments else [])
         return log
+
+
+#: a DB proxy method's mark: the method's name, then its tag (``records.PREFIX``), as ``rerun._of_mover`` reads it
+_METHOD_MARK = re.compile(r"([A-Za-z_]\w*) <")
+
+
+def _partial(got: _Gathered, marks: dict[str, set[str]], owners: frozenset[str] | None) -> dict[tuple[str, str], str]:
+    """The marks among *marks* (``machine -> the marks not holding the key``) not asked for whole, each with why, for
+    an asker that reads the runs of *owners* alone (None: every mark is asked).  A mark naming no method is a worker's,
+    any function's of it, and is asked.  A DB proxy method's mark of no owner is not: no run of it is read.  Nor is an
+    owner's whose key records come in pieces EDGE or more apart: the calls share it (``getTasksToExecCommand_JEDI <
+    vo=None label=None >``), so its run is every call in the window, which no ask makes whole -- more than 1 MB a file
+    and cut (bamboo-e1's round of 2026-10-26).  Such a mark's key records are read as a run cut at both ends."""
+    if owners is None:
+        return {}
+    out = {}
+    for machine, tokens in marks.items():
+        for token in tokens:
+            method = _METHOD_MARK.match(token)
+            if method is None:
+                continue
+            if method[1] not in owners:
+                out[(machine, token)] = "a method no step asked reads"
+                continue
+            stamps = sorted(_t(r.stamp) for r in got.records.values() if (r.machine, r.token) == (machine, token))
+            if any(b - a >= EDGE for a, b in zip(stamps, stamps[1:], strict=False)):
+                out[(machine, token)] = "a mark the method's calls share"
+    return out
 
 
 def _runs(got: _Gathered, pattern, window: Window) -> list[tuple[tuple[str, str], tuple | None, tuple | None]]:

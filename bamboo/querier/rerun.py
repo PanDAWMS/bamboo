@@ -612,13 +612,15 @@ class Arm:
 
 @dataclass
 class Passes:
-    """Which way each pass of a mover went: its runs of the key in *logs*, over *asking*'s window."""
+    """Which way each pass of a mover went: its runs of the key in *logs*, over *asking*'s window, asked with S1's
+    *owners* (so the door answers as it answered S1)."""
 
     owner: str
     logs: list[str]
     arms: list[Arm]
     key: str
     asking: W.Asking
+    owners: frozenset[str] | None = None
 
 
 @dataclass
@@ -1062,23 +1064,23 @@ class Rerun:
             if key not in before and "<" in key:
                 self.row_facts[expr] = (printed, env.values[key].source)
 
-    def runs(self, key: str, names: list[str], asking: W.Asking) -> dict[str, list]:
+    def runs(self, key: str, names: list[str], asking: W.Asking, owners: frozenset[str] | None = None) -> dict[str, list]:
         """The key's runs in each of the logs *names* the door can be asked for, over *asking*'s window and machine.
 
         Every log is asked before a stop, so that a door short of answers names all the step's asks at once.
         """
-        out, unanswered, _ = self._ask(key, names, asking)
+        out, unanswered, _ = self._ask(key, names, asking, owners)
         self._stop_unanswered(unanswered)
         return out
 
-    def _ask(self, key: str, names: list[str], asking: W.Asking) -> tuple[dict[str, list], list, dict[str, list[str]]]:
+    def _ask(self, key: str, names: list[str], asking: W.Asking, owners: frozenset[str] | None = None) -> tuple[dict[str, list], list, dict[str, list[str]]]:
         """``runs()`` without the stop: the runs found, the asks the door had no answer for, and what of the window each
         log was not searched for (``Log.holes``)."""
         window = self.window(asking)
         out, unanswered, holes = {}, [], {}
         for name in self.logs.names(names):
             try:
-                log = self.logs.log(name, key, window, machine=asking.machine)
+                log = self.logs.log(name, key, window, machine=asking.machine, owners=owners)
             except Unrecorded as e:
                 unanswered += [(ask, why or asking.why) for ask, why in e.asks]
                 continue
@@ -1845,6 +1847,8 @@ class Rerun:
         movers = movers_of(follow, writers, q.subject, q.observed)
         # a writer that takes a row by its key: asked over the window's last part alone (KNOWN_ISSUES.md K16)
         keyed = by_key_of(writers, movers, q.subject, q.observed)
+        # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark
+        owners = frozenset(o.split("::")[-1] for o in [*movers, *keyed])
         self.say(f"selected by {follow.selected_by}; guarded by {[g.owner for g in follow.guarded_by]}")
         for owner, why in movers.items():
             self.say(f"  mover {owner}: {why}")
@@ -1910,13 +1914,13 @@ class Rerun:
                 entry["verdict"] = "no-log"
                 entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, asking, [], {}, writers)
                 continue
-            found, missed, holes, searched = self._ask_mover(q, owner, to_hand, asking, rest=way != "key")
+            found, missed, holes, searched = self._ask_mover(q, owner, to_hand, asking, rest=way != "key", owners=owners)
             unanswered += missed
             logs = self._runs_of(found, owner, searched)
             if not logs:
                 entry["premises"] = self._premises(q, owner, list(arms), to_hand, asking, searched, missed, holes, writers)
             if logs:
-                ran.append(Passes(owner, logs, list(arms.values()), q.key, searched))
+                ran.append(Passes(owner, logs, list(arms.values()), q.key, searched, owners))
                 entry["verdict"] = "ran"
             elif holes:
                 # not found is not "did not run" where the search did not reach
@@ -2035,7 +2039,8 @@ class Rerun:
                 "holes": len(answer.holes), "first_holes": answer.holes[:3], "assumptions": answer.assumptions,
                 "closure": answer.closure, "own_arms": [s for s in starts if s in destination.arms]}
 
-    def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking, rest: bool = True):
+    def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking, rest: bool = True,
+                   owners: frozenset[str] | None = None):
         """S1's asks for one mover: the window's last part first (*asking*, ``STUCK_SPAN``), and the rest of the window
         (``W.rest``) only where every ask of the last part was answered whole and held no run of its own -- no pass in
         six hours is not no pass in the window, and a mover that ran and stopped is the one a stuck value most needs
@@ -2044,14 +2049,14 @@ class Rerun:
         reads each file whole and asks once.
 
         Returns what ``_ask`` does, and the asking the runs were looked for over."""
-        found, missed, holes = self._ask(q.key, to_hand, asking)
+        found, missed, holes = self._ask(q.key, to_hand, asking, owners)
         if not rest or missed or holes or not self.logs.needs_window or self._runs_of(found, owner, asking):
             return found, missed, holes, asking
         rest = W.rest(self.data.get("statuslog", {}), q.observed)
         if rest is None:
             return found, missed, holes, asking
         self.say(f"  {owner.split('::')[-1]}: no run of its own from {asking.window[0]}: asking the rest of the window")
-        return *self._ask(q.key, to_hand, rest), rest
+        return *self._ask(q.key, to_hand, rest, owners), rest
 
     def _runs_of(self, found: dict[str, list], owner: str, asking: W.Asking) -> list[str]:
         """The logs among *found* holding a run of *owner* in *asking*'s window (any run, for the door over files)."""
@@ -2115,7 +2120,7 @@ class Rerun:
         # the arms S2 and S3 judge are the mover's own; a mover that writes through what it calls has none here
         self.need(f"an arm of {func}'s own that writes another value (S2 reads no arm of what it calls: KNOWN_ISSUES.md K14)", q.arms)
         fn = R.function(rel, func, [a.line for a in q.arms])
-        runs = self.runs(q.key, q.logs, q.asking)
+        runs = self.runs(q.key, q.logs, q.asking, q.owners)
         found = []
         for name in q.logs:
             for run in runs.get(name, []):
