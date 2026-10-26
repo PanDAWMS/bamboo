@@ -127,6 +127,19 @@ dropped one's line, and its `reach` in result.json.
 *Revisit:* following a mover's calls to their arms (S2 per callee).  The map closing holes (its precision items after
 reach v1) moves movers from kept to dropped with no change here.
 
+### K27. A value computed from a statement's rows in Python is read as the rows
+
+S1 takes no mover from a statement the map says aggregates (`ReadSiteNode.result`), but that fact is the SQL's own.
+A function that selects rows and computes from them in Python hands on values, yet its statement's `result` says rows,
+and the map's carry holds a value computed from a part as the part, so its crossings are read as handing rows (the
+map's U1, 2026-10-26).  `getScoutJobData_JEDI` 658 / 670 select one row per finished scout job and return medians,
+maxima and averages of their fields; the callers reading them, `setScoutJobData_JEDI` and `retryTask_JEDI`, are
+crossings, and S1 keeps both as movers of `JobSpec.jobStatus=finished` (K14), though neither moves a job's status.  No
+case of mine asks `finished` (2026-10-26); not counted map-wide.
+
+*Shows:* a kept mover in S1 that the rows reach only as a value computed from them.
+*Revisit:* when the map says per crossing whether it hands rows or values computed from them (its U1).
+
 ### K16. S1 lists no writer that takes a row by its key alone
 
 S1's movers are the statements' (`movers_of`): the functions the rows of a statement selecting the value reach, and

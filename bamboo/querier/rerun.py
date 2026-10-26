@@ -85,7 +85,7 @@ from pathlib import Path
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types
 from bamboo.codemap.lookup import CodeMap
-from bamboo.codemap.models import Symptom, required_values
+from bamboo.codemap.models import RESULT_AGGREGATE, Symptom, required_values
 from bamboo.codemap.panda import pathcond, sqltext
 from bamboo.codemap.panda import sql as sql_mod
 from bamboo.codemap.panda.provenance import facade_calls
@@ -356,12 +356,15 @@ def _reached(follow, writers: list, subject: str, observed: str):
     hands its rows to its owner when an arm of the owner's lies in the statement's ``region``, the span the map reads
     where the rows go next, and to the writers among what the owner calls there (``crosses_to``); a statement whose
     owner has no arm there hands them to what it calls there, or keeps them (a mover with no arm of its own:
-    KNOWN_ISSUES.md K14).  Then each writer whose write requires the value (``guarded_by``).  A writer that takes a row
-    by its key alone is in neither (KNOWN_ISSUES.md K16)."""
+    KNOWN_ISSUES.md K14).  A statement that aggregates (the map's ``result``) gives none: what it hands on is a value
+    computed from the rows, not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator, which picks
+    none of them up); one that varies, or whose result the map did not read, is read as returning rows.  Then each
+    writer whose write requires the value (``guarded_by``).  A writer that takes a row by its key alone is in neither
+    (KNOWN_ISSUES.md K16)."""
     asked = f"{subject}={observed}"
     writing = {j.owner for j in writers if arms_of(writers, j.owner, subject, observed)}
     for rs in follow.reader_statements:
-        if asked not in rs.selects:
+        if asked not in rs.selects or rs.result == RESULT_AGGREGATE:
             continue
         reader = f"{rs.owner.split('::')[-1]}@{rs.line}"
         lo, hi = (list(rs.region) or [rs.line, rs.line])[:2]
@@ -1790,7 +1793,9 @@ class Rerun:
         readings = self._read_at_as_of(q, follow, writers, movers)
         asking = W.stuck(self.data.get("statuslog", {}), q.observed)
         asked = f"{q.subject}={q.observed}"
-        handers = {rs.owner for rs in follow.reader_statements if rs.crosses_to and asked in rs.selects}
+        # the statements that give rows (_reached): an aggregate hands on none
+        giving = [rs for rs in follow.reader_statements if asked in rs.selects and rs.result != RESULT_AGGREGATE]
+        handers = {rs.owner for rs in giving if rs.crosses_to}
         ran, unanswered, unsearched = [], [], []
         entries = []
         for owner in movers:
@@ -1807,7 +1812,7 @@ class Rerun:
                 # with no arm of its own, a mover moves the value, if at all, through what it calls or the rows it hands
                 # on: kept, and said why
                 rel, func = owner.split("::", 1)
-                lines = [rs.line for rs in follow.reader_statements if rs.owner == owner and asked in rs.selects]
+                lines = [rs.line for rs in giving if rs.owner == owner]
                 defs = defs_holding(rel, func, lines)
                 reached, cut = through_calls(rel, [(f.lineno, f.end_lineno) for f in defs], writers, q.subject, q.observed)
                 kept = kept_without_arms(bool(defs), reached, cut, owner in handers, owner in gaps)
@@ -2352,8 +2357,13 @@ class Rerun:
             if took:
                 kind = f"took it at {q.moved}"
             kinds[(st.owner, st.line)] = kind
-            rows_to = ", ".join(c.split("::")[-1] for c in st.crosses_to) or "itself"
-            self.say(f"  {st.owner.split('::')[-1]}@{st.line}: {kind} (rows to {rows_to})")
+            goes_to = ", ".join(c.split("::")[-1] for c in st.crosses_to)
+            if st.result == RESULT_AGGREGATE:
+                # an aggregate takes no row: what goes on is a value computed from them
+                goes = f"a value to {goes_to}" if goes_to else "a value, kept"
+            else:
+                goes = f"rows to {goes_to or 'itself'}"
+            self.say(f"  {st.owner.split('::')[-1]}@{st.line}: {kind} ({goes})")
             for line in said:
                 self.say(f"      {line}")
             if (kind in ("not settled", "refused on a call", "refused when") or took) and st.order_by and st.limits:

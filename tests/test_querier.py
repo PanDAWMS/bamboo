@@ -1299,8 +1299,8 @@ _MOVERS_MAP = """
     def writer(owner, *branches):
         return N(owner=owner, branches=list(branches), log_files=[])
 
-    def stmt(owner, line, selects, region, crosses_to=()):
-        return N(owner=owner, line=line, selects=selects, region=region, crosses_to=list(crosses_to))
+    def stmt(owner, line, selects, region, crosses_to=(), result="rows"):
+        return N(owner=owner, line=line, selects=selects, region=region, crosses_to=list(crosses_to), result=result)
 
     writers = [
         writer("p/jobs.py::getJobs", branch(242, "sent", ["jobStatus='activated'"])),
@@ -1421,15 +1421,22 @@ def test_only_a_statement_that_selects_the_value_gives_movers(tmp_path):
         # the map keeps an UPDATE-only owner's statements of other values: they give no mover
         stmt("p/jobs.py::unThrottle", 80, [], [78, 90]),
         stmt("p/cmd.py::execCommand", 368, ["PRODSYS_COMM.comm_owner=DEFT"], [362, 378], ["d/cmd.py::runImpl"]),
-        stmt("d/metrics.py::count", 109, ["JobSpec.jobStatus=running", "JobSpec.VO=atlas"], [100, 120]),
+        stmt("d/metrics.py::scan", 109, ["JobSpec.jobStatus=running", "JobSpec.VO=atlas"], [100, 120]),
+        # a count hands on a value computed from the rows, kept or handed to what the owner calls: no row, no mover
+        stmt("d/metrics.py::count", 130, ["JobSpec.jobStatus=running"], [128, 140], result="aggregate"),
+        stmt("d/stats.py::rate", 200, ["JobSpec.jobStatus=running"], [198, 210], ["d/gen.py::doGenerate"], "aggregate"),
+        # one whose result the map did not read may return rows
+        stmt("d/metrics.py::unread", 150, ["JobSpec.jobStatus=running"], [148, 160], result=""),
     ])
     print(json.dumps(movers_of(follow, writers, "JobSpec.jobStatus", "running")))
     """,
         )
     )
-    # a counting statement keeps its rows (a mover with no arm of its own); the guarded writer comes last
+    # a statement returning rows with no arm of its owner's keeps them (a mover with no arm of its own); the guarded
+    # writer comes last
     assert json.loads(out.splitlines()[-1]) == {
-        "d/metrics.py::count": "count@109 selects the value",
+        "d/metrics.py::scan": "scan@109 selects the value",
+        "d/metrics.py::unread": "unread@150 selects the value",
         "p/jobs.py::getJobs": "its write requires the value",
     }
 
