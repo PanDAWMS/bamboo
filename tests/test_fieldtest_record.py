@@ -589,3 +589,58 @@ async def test_an_ask_whose_machine_list_failed_is_deferred(tmp_path):
     panda = FakePanda(lists, {})
     path, records, (d,) = await run_round(tmp_path, panda, [_adder_on(SERVER[0])])
     assert path is None and d["why"] == [f"{SERVER[0]}: list failed: no answer"]
+
+
+DROPPED = (
+    "PanDA connection error for 'async_process/submit_grep_request': ('Connection"
+    " aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+)
+
+
+def dropped(*_):
+    raise RuntimeError(DROPPED)
+
+
+async def test_an_ask_whose_grep_got_no_response_is_deferred_and_the_round_goes_on(
+    tmp_path,
+):
+    # 2026-10-26: a connection dropped on a grep's submit raised out of the round, which wrote nothing
+    day = "panda-adder.log-20261014.gz"
+    greps = {
+        (SERVER[0], day): [dropped, found(rec(1, "2026-10-14 06:00:00,1 a 7339"))],
+        (SERVER[1], day): [found(rec(2, "2026-10-14 06:00:00,2 b 7339"))],
+    }
+    lists = lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: ADDER_FILES})
+    panda = FakePanda(lists, greps)
+    failing, fine = _adder_on(SERVER[0]), _adder_on(SERVER[1])
+
+    p1, records, (d,) = await run_round(tmp_path, panda, [failing, fine])
+    assert p1.name == "records-r1.jsonl" and [r["ask"] for r in records] == [
+        fine["ask"]
+    ]
+    assert d["ask"] == failing["ask"] and d["why"] == [
+        f"{SERVER[0]} {day}: failed: no response: {DROPPED}"
+    ]
+
+    p2, (r,) = await run(tmp_path, panda, [failing])
+    assert p2.name == "records-r2.jsonl" and r["ask"] == failing["ask"]
+
+
+async def test_an_ask_whose_list_got_no_response_is_deferred(tmp_path):
+    panda = FakePanda(lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {})
+    parts = panda.parts()
+
+    async def list_dropped(**_):
+        raise RuntimeError(DROPPED)
+
+    parts.list_logs = list_dropped
+    asking = ask(ADDER, ["7339"], ("2026-10-14 06:00:00", "2026-10-14 06:00:00"))
+    path, records, (d,) = await R.record_round(
+        [asking], tmp_path, parts, datetime.timedelta(seconds=3600)
+    )
+    assert path is None and records == [] and d["ask"] == asking["ask"]
+    assert all(f"list failed: no response: {DROPPED}" in w for w in d["why"])
+    assert {w.split(":")[0] for w in d["why"]} == {
+        "every jedi machine",
+        "every server machine",
+    }
