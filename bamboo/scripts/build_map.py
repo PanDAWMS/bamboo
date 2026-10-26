@@ -558,6 +558,13 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
                 f"junction; {crossings.opened} statement(s) have a call on the "
                 "way, or a caller back, their calls cannot place"
             )
+        # What each statement returns, so that an aggregate's crossings are
+        # read as a value going on and an empty result as one not read.
+        results = Counter(r.result or "not read" for r in reads)
+        click.echo(
+            "    returning "
+            + ", ".join(f"{kind} {count}" for kind, count in sorted(results.items()))
+        )
         # The write side's version of the same silence: a column name built
         # from a mapping key leaves the statement naming no column, which reads
         # as a statement that writes none.

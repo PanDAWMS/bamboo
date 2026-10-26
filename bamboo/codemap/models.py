@@ -1811,6 +1811,11 @@ class CallReading(BaseModel):
 #: :class:`CallReading`'s fields that say which route, not what it reads.
 CALL_READING_ROUTE = frozenset({"chain", "constants", "not_run", "as_statement", "open"})
 
+#: :attr:`ReadSiteNode.result`: rows of the statement's tables, values computed from them, or the one and the other.
+RESULT_ROWS = "rows"
+RESULT_AGGREGATE = "aggregate"
+RESULT_VARIES = "varies"
+
 
 class ReadSiteNode(BaseNode):
     """One statement that asks the database for rows by a value.
@@ -1936,6 +1941,26 @@ class ReadSiteNode(BaseNode):
         description=(
             "``<= 10`` / ``<= :njobs`` -- how many rows come back at most, with "
             "a bind's value where the map settles it."
+        ),
+    )
+    result: str = Field(
+        default="",
+        description=(
+            f"``{RESULT_ROWS}`` | ``{RESULT_AGGREGATE}`` | ``{RESULT_VARIES}`` | "
+            "empty -- what the statement returns, read off every way it is "
+            "built and each arm of a ``UNION``: rows of its tables, or values "
+            "computed from them -- an expression it projects calls an "
+            "aggregate (``COUNT``, ``MAX`` ..., not under ``OVER``, not in a "
+            "subquery), one row per group or one in all.  ``varies``: some "
+            "ways aggregate and some do not.  Empty where a way is not read: "
+            "past the count of ways every one is drawn for, or a text that "
+            "does not parse as a ``SELECT``.\n\n"
+            "Said beside ``crosses_to``, not instead of it: an aggregate's "
+            "value goes on -- ``increaseRamLimitJobJEDI``'s ``SELECT ramCount, "
+            "count(*) ... GROUP BY`` hands the largest ``ramCount`` to "
+            "``increaseRamLimitJEDI``, which writes it -- and where it goes is "
+            "still the next place to look.  What an aggregate cannot hand on "
+            "is a row of a table."
         ),
     )
     call_readings: list[CallReading] = Field(
@@ -2136,6 +2161,11 @@ class ReadSiteNode(BaseNode):
             "the result itself and the answer is that nothing came back at "
             "all, which points at the ``conditions`` rather than at the "
             "handling.\n\n"
+            "The rows are where the statement's run lands them: an assignment "
+            "on its line, one that fetches them or reads ``rowcount`` however "
+            "it computes from them (``has_merging = self.cur.fetchone() is not "
+            "None``), and a loop over the cursor that ran it (``for (pandaID,) "
+            "in self.cur:``), which is a loop over its rows.\n\n"
             "**An ``except`` counts only when the handler leaves.** "
             "``except Exception: pass`` is written so the row is *not* "
             "stopped, and a handler assigning a fallback says the same at "
@@ -5313,6 +5343,14 @@ class StatementReading(BaseModel):
     crosses_open: list[OpenCrossing] = Field(
         default_factory=list,
         description=":attr:`ReadSiteNode.crosses_open`: the calls on the way, and the callers back, this reading cannot place.",
+    )
+    result: str = Field(
+        default="",
+        description=(
+            ":attr:`ReadSiteNode.result`: rows of its tables, values computed "
+            "from them, or the one and the other; empty where a way it is "
+            "built is not read."
+        ),
     )
 
 

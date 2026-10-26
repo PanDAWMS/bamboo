@@ -114,6 +114,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "exits",
         "crosses_to",
         "crosses_open",
+        "result",
     ),
     # ``calls``, ``joined_entities`` and ``dispatch`` are what the owner
     # consults, reads beside its rows and constructs to run, and the two log

@@ -3716,6 +3716,41 @@ def test_a_statement_that_hands_its_rows_on_is_a_lead():
     assert lead.opened_by.endswith("copyArchive.py::main@381")
 
 
+@pytest.mark.parametrize(
+    ("result", "led"),
+    [(models.RESULT_AGGREGATE, False), (models.RESULT_ROWS, True), (models.RESULT_VARIES, True), ("", True)],
+    ids=["aggregate", "rows", "varies", "not-read"],
+)
+def test_a_statement_that_aggregates_opens_no_reader_lead(result, led):
+    """It keeps no row: ``getSiteToRunRateStats`` counts a site's jobs and ``JobGenerator`` picks none of them up.
+
+    One that varies, or whose result is not read, may return rows, and is read as one that does.
+    """
+    site = models.ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="r:3",
+        owner="pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::getSiteToRunRateStats",
+        anchor=Anchor(
+            package="pandaserver",
+            file="pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py",
+            line_start=4677,
+            line_end=4677,
+        ),
+        selects=["JobSpec.jobStatus=running"],
+        crosses_to=["pandajedi/jediorder/JobGenerator.py::doGenerate"],
+        result=result,
+    )
+
+    leads = strategy_mod._reader_leads(
+        Symptom(subject="JobSpec.jobStatus", observed="running"),
+        {site.owner: [site]},
+        {"pandajedi/jediorder/JobGenerator.py::doGenerate": ["JobSpec.computingSite"]},
+    )
+
+    assert [lead.field for lead in leads] == (["JobSpec.computingSite"] if led else [])
+
+
 def test_a_statement_asking_on_another_value_opens_no_lead():
     """``copyArchive.py::main`` runs thirty statements and three ask on this value.
 

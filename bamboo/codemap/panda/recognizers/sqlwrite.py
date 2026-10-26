@@ -71,6 +71,9 @@ from bamboo.codemap.calls import (
 )
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
+    RESULT_AGGREGATE,
+    RESULT_ROWS,
+    RESULT_VARIES,
     AddedTerm,
     Anchor,
     Branch,
@@ -1313,6 +1316,9 @@ class ReadStatement(NamedTuple):
     printed_by: tuple[PrintedBy, ...] = ()
     #: Each blanked order item and what builds it -- :attr:`ReadSiteNode.order_holes`.
     order_holes: tuple[OrderHole, ...] = ()
+    #: What the statement returns -- :attr:`ReadSiteNode.result`.  Read off
+    #: every run, so it arrives by ``_replace``.
+    result: str = ""
 
 
 class _Hop(NamedTuple):
@@ -2395,33 +2401,50 @@ def _assigned_names(node: ast.AST) -> set[str]:
 
 def _rows_written(
     func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
-) -> list[ast.Assign | ast.AnnAssign]:
-    """The assignments this statement's rows land in, within the stretch it owns.
+) -> list[ast.Assign | ast.AnnAssign | ast.For | ast.AsyncFor]:
+    """Where this statement's rows land, within the stretch it owns.
 
-    The call line first, for the forwarded form that returns them; otherwise
-    the first ``fetch*`` under it.  Reading only the call would leave most of
-    the corpus with no rows to test an exit against -- see :data:`sql.FETCHES`.
+    An assignment on the call line, for the forwarded form that returns them;
+    one in the stretch that fetches them or reads ``rowcount``, however its
+    value computes from them -- ``res = self.cur.fetchall()``, ``has_merging =
+    self.cur.fetchone() is not None``, ``nRow = self.cur.rowcount``; and a loop
+    over the cursor that ran the statement (``for (pandaID,) in self.cur:``,
+    the receiver of the call line's ``execute``), whose target takes each row.
+    Reading only the call would leave most of the corpus with no rows to test
+    an exit against -- see :data:`sql.FETCHES`.
+
+    A fetch was read only as the whole value, and only where the call line
+    bound nothing: ``has_merging`` and ``nRow`` held no rows, so ``if not
+    has_merging: return`` was no exit and nothing they decide or are handed
+    to a crossing, and a loop over the cursor was no loop over the rows.
     """
-    named: list[ast.Assign | ast.AnnAssign] = []
-    fetched: list[ast.Assign | ast.AnnAssign] = []
+    cursors = {
+        ast.dump(node.func.value)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+        and node.lineno == line
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("execute", "executemany")
+    }
+    found: list[ast.Assign | ast.AnnAssign | ast.For | ast.AsyncFor] = []
     for node in ast.walk(func):
-        # ``res: list = self.cur.fetchall()`` lands the rows as ``res = ...`` does.
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not _assigned_names(node):
+        if not line <= getattr(node, "lineno", 0) <= last:
             continue
-        if node.lineno == line:
-            named.append(node)
-        elif line < node.lineno <= last and isinstance(node.value, ast.Call):
-            callee = node.value.func
-            if isinstance(callee, ast.Attribute) and callee.attr in sql.FETCHES:
-                fetched.append(node)
-    return named or fetched
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            if ast.dump(node.iter) in cursors:
+                found.append(node)
+        # ``res: list = self.cur.fetchall()`` lands the rows as ``res = ...`` does.
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and _assigned_names(node):
+            if node.lineno == line or any(_fetches(inner) for inner in ast.walk(node.value)):
+                found.append(node)
+    return found
 
 
-def _rows_of(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
-) -> set[str]:
-    """The names :func:`_rows_written` binds."""
-    return {name for node in _rows_written(func, line, last) for name in _assigned_names(node)}
+def _fetches(node: ast.AST) -> bool:
+    """Whether *node* fetches a statement's rows or reads how many there were: ``x.fetchall()``, ``x.rowcount``."""
+    if isinstance(node, ast.Call):
+        return isinstance(node.func, ast.Attribute) and node.func.attr in sql.FETCHES
+    return isinstance(node, ast.Attribute) and node.attr == "rowcount"
 
 
 def _flag_parameters(func: ast.AST) -> set[str]:
@@ -3381,7 +3404,11 @@ def read_side(
             if own != owner or kept.region is None:
                 continue
             _first, last = kept.region
-            names = _rows_of(func, line, last)
+            seeds = _rows_written(func, line, last)
+            names = {name for node in seeds for name in _assigned_names(node)}
+            # A loop over the cursor is over the rows itself; its target is a
+            # row, and a loop over that is one nested in it.
+            cursor_loops = {id(node) for node in seeds if isinstance(node, (ast.For, ast.AsyncFor))}
             enclosing = _enclosing_loops(func)
             spans: list[tuple[int, int]] = []
             over_rows: set[int] = set()
@@ -3402,7 +3429,7 @@ def read_side(
                     node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
                 )
                 over = {n.id for n in ast.walk(header) if isinstance(n, ast.Name)}
-                if over & names:
+                if over & names or id(node) in cursor_loops:
                     spans.append((node.lineno, node.end_lineno or node.lineno))
                     over_rows.add(id(node))
             # Where the rows are worked through.  Kept as a field of its own
@@ -3452,6 +3479,24 @@ def read_side(
             statements[(owner, line)] = kept._replace(
                 exits=tuple(sorted(found)), rows_handled=handled
             )
+
+    def place_result(func: ast.FunctionDef | ast.AsyncFunctionDef, owner: str) -> None:
+        """Say what each of *func*'s statements returns, read off every way it is built (:func:`sql.every_rendering`).
+
+        One answer of every way and arm (:func:`sqltext.aggregated`), else
+        ``varies``; none where a way is not read -- past the cap, or a text
+        that does not parse as a ``SELECT``: a way not read could be either.
+        """
+        for (own, line), kept in list(statements.items()):
+            if own != owner:
+                continue
+            drawn = sql.every_rendering(func, line)
+            arms = [sqltext.aggregated(one.text) for one in drawn] if drawn else [None]
+            if any(one is None for one in arms):
+                continue
+            got = frozenset().union(*arms)  # type: ignore[arg-type]
+            result = RESULT_VARIES if len(got) > 1 else RESULT_AGGREGATE if True in got else RESULT_ROWS
+            statements[(own, line)] = kept._replace(result=result)
 
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
@@ -3604,6 +3649,7 @@ def read_side(
             # Regions first: the exits are read inside the stretch it settles.
             place_regions(func, owner, executions)
             place_exits(func, owner)
+            place_result(func, owner)
             place_routes(func, owner, module.rel_path, executions)
     for site, at in statements.items():
         statements[site] = at._replace(
@@ -3673,6 +3719,7 @@ def read_site_nodes(
                 region=list(at.region) if at.region else [],
                 exits=list(at.exits),
                 rows_handled=list(at.rows_handled) if at.rows_handled else [],
+                result=at.result,
                 anchor=Anchor(
                     package=at.package,
                     file=at.file,
@@ -3775,12 +3822,25 @@ class _Carry:
     loops over ``.items()``.  The names never saw it -- 6 crossings over 3
     statements.
 
-    Not followed, here or before: rows put into an object by a method and the
-    object into an element of what is returned --
-    ``_get_datasets_with_unprocessed_inputs`` packs ``tmp_res`` into
-    ``dataset_spec`` and adds it to an ``input_chunk`` of the list it returns.
-    The names reached that ``return`` only because ``tmp_res`` was used again;
-    following every method call would carry rows into ``tmp_log``.
+    **Rows put into an object are held by it**: ``x.attr = v`` and ``x.a[k]
+    = v``, ``setattr(x, n, v)`` / ``object.__setattr__(x, n, v)``, and, given
+    *stores*, ``x.m(v)`` where ``m`` keeps what it is handed in its receiver
+    (:class:`_Stores`) -- ``_get_datasets_with_unprocessed_inputs`` packs
+    ``tmp_res`` into ``dataset_spec``, whose ``pack`` sets each value on
+    ``self``, and adds it to an ``input_chunk`` of the list it returns.  The
+    names had reached that ``return`` only because ``tmp_res`` was used
+    again.  The object holds them as a whole: every later use of ``x`` reads
+    them, not only of the field they went into.  Not the function's own
+    receiver: rows put into ``self.f`` and read back by another method are
+    not followed (:class:`_Crossings`).
+
+    A method keeps what it is handed only where it stores it itself, one
+    level: one handing it to another method of its receiver that stores it
+    is not read so -- 28 methods of the corpus, 661 calls of them.
+    ``MsgWrapper.info`` hands its message to ``self.keepMsg``; read through,
+    ``tmp_log.info(rows)`` would put the rows into every log they are written
+    to, and on into each function the log is handed to.  An object held per
+    field would read both.
 
     The rows can also come in with the call (*parameters*): the parameters
     the call handed them to hold them on entry, as ``pathcond.reaching``
@@ -3788,10 +3848,17 @@ class _Carry:
     them.
     """
 
-    def __init__(self, func: ast.AST, start: Iterable[ast.AST], parameters: Iterable[str] = ()):
+    def __init__(
+        self,
+        func: ast.AST,
+        start: Iterable[ast.AST],
+        parameters: Iterable[str] = (),
+        stores: Optional[Callable[[ast.Call], list[ast.expr]]] = None,
+    ):
         self._writes: dict[str, dict[int, ast.AST]] = {}
         self._adds: dict[str, dict[int, ast.AST]] = {}
         self._takes: list[tuple[ast.AST, list[ast.AST]]] = []
+        self._stores = stores
         self._read(func)
         self._holding = {id(node) for node in start}
         arguments = getattr(func, "args", None)
@@ -3839,6 +3906,45 @@ class _Carry:
                 statement = site_of(node)
                 self._write(node.func.value.id, statement, True)
                 self._takes.append((statement, list(node.args)))
+        self._read_objects(func)
+
+    def _read_objects(self, func: ast.AST) -> None:
+        """The writes that put something into an object named here, the function's own receiver aside."""
+        receiver = _own_receiver(func)
+        for node in own_nodes(func):
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                filled = {
+                    holder
+                    for target in targets
+                    for one in (target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target])
+                    if (holder := _object_filled(one)) is not None and holder != receiver
+                }
+                for holder in filled:
+                    self._write(holder, node, True)
+                if filled and not _bound_by(node):
+                    self._takes.append((node, [node.value]))
+            elif isinstance(node, ast.Call):
+                parts = _setattr_parts(node)
+                if parts is not None:
+                    holder, value = parts
+                    if isinstance(holder, ast.Name) and holder.id != receiver:
+                        statement = site_of(node)
+                        self._write(holder.id, statement, True)
+                        self._takes.append((statement, [value]))
+                    continue
+                if (
+                    self._stores is not None
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id != receiver
+                    and node.func.attr not in _CARRIERS
+                ):
+                    kept = self._stores(node)
+                    if kept:
+                        statement = site_of(node)
+                        self._write(node.func.value.id, statement, True)
+                        self._takes.append((statement, kept))
 
     def _holds(self, name: str, statement: ast.AST) -> bool:
         writes = self._writes.get(name)
@@ -3878,6 +3984,109 @@ def _hands_rows_back(func: ast.AST, carry: _Carry) -> bool:
     )
 
 
+def _object_filled(target: ast.AST) -> Optional[str]:
+    """The name at the bottom of ``x.a``, ``x.a[k]`` or ``x[k].a`` -- an object a write puts something into."""
+    through = False
+    while isinstance(target, (ast.Attribute, ast.Subscript)):
+        through = through or isinstance(target, ast.Attribute)
+        target = target.value
+    return target.id if through and isinstance(target, ast.Name) else None
+
+
+def _setattr_parts(call: ast.Call) -> Optional[tuple[ast.expr, ast.expr]]:
+    """The object and the value of ``setattr(x, n, v)`` / ``object.__setattr__(x, n, v)``."""
+    callee = call.func
+    name = callee.id if isinstance(callee, ast.Name) else callee.attr if isinstance(callee, ast.Attribute) else None
+    if name not in ("setattr", "__setattr__") or len(call.args) != 3:
+        return None
+    return call.args[0], call.args[2]
+
+
+def _own_receiver(func: ast.AST) -> Optional[str]:
+    """``self`` / ``cls``: the parameter a method of a class is called on; ``None`` for any other function."""
+    holder = getattr(func, "parent", None)
+    if not isinstance(holder, ast.ClassDef) or not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    return receiver_parameter(Target("", func, holder))
+
+
+class _Stores:
+    """What a method keeps in its receiver of what it is handed, a call placed by :meth:`Calls.callees`.
+
+    Kept: a parameter it stores itself -- ``self.f = p``, ``self.f[k] = p``,
+    ``self.f.append(p)`` (a :data:`_CARRIERS` call on a field of ``self``),
+    ``object.__setattr__(self, n, p)``: ``JobSpec.addFile`` appends to
+    ``self.Files``, ``JediDatasetSpec.pack`` sets each of its values.  Read
+    with the plain carry, once a definition.
+    """
+
+    def __init__(self, calls: Calls):
+        self.calls = calls
+        self._parameters: dict[tuple[str, int], set[str]] = {}
+
+    def made_in(self, file: str, func: ast.AST, bound: tuple = ()) -> Callable[[ast.Call], list[ast.expr]]:
+        """:meth:`arguments` of a call made in *func*, for a :class:`_Carry` of it."""
+        return lambda call: self.arguments(file, func, call, bound)
+
+    def arguments(self, file: str, func: ast.AST, call: ast.Call, bound: tuple = ()) -> list[ast.expr]:
+        """What *call*, made in *func*, hands to a parameter a method it lands at keeps."""
+        try:
+            placed = self.calls.callees(file, func, call, bound)
+        except Exception:  # noqa: BLE001 -- the record has the call as a hole
+            return []
+        found: list[ast.expr] = []
+        for target in placed.targets:
+            kept = self.parameters(target)
+            if not kept:
+                continue
+            handed = self.calls.handed(CallSite(file, func, call), target)
+            found.extend(value for name in sorted(kept) if (value := handed.get(name)) is not None)
+        return found
+
+    def parameters(self, target: Target) -> set[str]:
+        """The parameters method *target* stores in its receiver itself."""
+        key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
+        held = self._parameters.get(key)
+        if held is not None:
+            return held
+        receiver = receiver_parameter(target)
+        found: set[str] = set()
+        if receiver is not None:
+            arguments = target.func.args  # type: ignore[attr-defined]
+            names = [one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)]
+            names += [one.arg for one in (arguments.vararg, arguments.kwarg) if one is not None]
+            own = list(own_nodes(target.func))
+            for name in names:
+                if name != receiver and _kept_in(own, receiver, _Carry(target.func, [], [name])):
+                    found.add(name)
+        self._parameters[key] = found
+        return found
+
+
+def _kept_in(nodes: list[ast.AST], receiver: str, carry: _Carry) -> bool:
+    """Whether one of *nodes* stores what *carry* holds in a field of *receiver*."""
+    for node in nodes:
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(_object_filled(one) == receiver for one in targets) and carry.reaches(node.value, node):
+                return True
+        elif isinstance(node, ast.Call):
+            parts = _setattr_parts(node)
+            if parts is not None:
+                holder, value = parts
+                if isinstance(holder, ast.Name) and holder.id == receiver and carry.reaches(value, node):
+                    return True
+            callee = node.func
+            if (
+                isinstance(callee, ast.Attribute)
+                and callee.attr in _CARRIERS
+                and _object_filled(callee.value) == receiver
+                and any(carry.reaches(one, node) for one in node.args)
+            ):
+                return True
+    return False
+
+
 def _enclosing(node: ast.AST, kinds: tuple) -> Optional[ast.AST]:
     while node is not None and not isinstance(node, kinds):
         node = getattr(node, "parent", None)
@@ -3899,7 +4108,7 @@ def _takes(carry: _Carry, call: ast.Call) -> bool:
 
 
 class _Everything:
-    """What a call of a statement's region hands: all of it -- the region is the statement's own stretch."""
+    """What the call running a statement hands: all of it -- its rows are what the call makes."""
 
     def reaches(self, expression: ast.AST, at: ast.AST) -> bool:
         return True
@@ -3949,8 +4158,16 @@ class _Crossings:
     ``proxy.getConfigValue`` returned, and ``AtlasAnalJobBroker`` is where the
     value goes.  The name had found both, through the one name the layers
     share; the placed calls stop at the layer.  Each definition is entered
-    once a statement, and a call the record reads as the database is not
-    followed: what a statement hands the database is another run's input.
+    once a statement for what it is handed -- the class it is bound to, the
+    parameters given the rows and the holder -- and a call the record reads
+    as the database is not followed: what a statement hands the database is
+    another run's input.  Keyed by the definition alone, a second way in
+    with other parameters given was not taken, and which way came first
+    decided the answer: read with every list reversed, 2 crossings of 824 on
+    pin k went (``getConfigValue@313`` and
+    ``_get_tasks_datasets_with_unprocessed_inputs@1898`` to
+    ``JobGenerator.runImpl``, through a thread's ``run`` bound to another
+    class first).
 
     A call on the way that this reading cannot place -- a hole of the reach
     record -- is kept in :attr:`open`, as the record names it, where it could
@@ -3973,14 +4190,15 @@ class _Crossings:
     any function's caller.
     """
 
-    def __init__(self, calls: Calls, owners: set[str], record: "ReachGraph"):
+    def __init__(self, calls: Calls, owners: set[str], record: "ReachGraph", stores: Optional[_Stores] = None):
         self.calls = calls
         self.owners = owners
         self.record = record
+        self.stores = stores if stores is not None else _Stores(calls)
         self._owner_names = {owner.rsplit("::", 1)[-1] for owner in owners}
         #: ``(owner, line, callee)`` of each hole on the way, as the reach record spells it.
         self.open: dict[tuple[str, int, str], None] = {}
-        self._entered: set[tuple[str, int]] = set()
+        self._entered: set[tuple] = set()
         self._returned: set[tuple[str, int]] = set()
 
     def into(
@@ -4017,9 +4235,6 @@ class _Crossings:
     ) -> set[str]:
         """The junctions reached through *target*, which owns none, from the parameters *site* hands the rows to and
         the object it is made on, where that holds them."""
-        key = (target.file, target.func.lineno)  # type: ignore[attr-defined]
-        if key in self._entered:
-            return set()
         call = site.call
         handed = self.calls.handed(site, target)
         given = {
@@ -4042,8 +4257,11 @@ class _Crossings:
         given.discard(inner_holder or "")
         if not given and inner_holder is None:
             return set()
+        key = (target.file, target.func.lineno, target.bound, frozenset(given), inner_holder)  # type: ignore[attr-defined]
+        if key in self._entered:
+            return set()
         self._entered.add(key)
-        inner = _Carry(target.func, [], given)
+        inner = _Carry(target.func, [], given, self.stores.made_in(target.file, target.func, target.bound))
         reached: set[str] = set()
         for one in _own_calls(target.func):
             if _takes(inner, one) or _made_on(one, inner_holder):
@@ -4067,7 +4285,7 @@ class _Crossings:
                 continue
             statement = _enclosing(site.call, (ast.stmt,))
             carry = (
-                _Carry(site.func, [statement])
+                _Carry(site.func, [statement], (), self.stores.made_in(site.file, site.func))
                 if statement is not None and targets_of(statement) and _bound_by(statement)
                 else None
             )
@@ -4078,18 +4296,6 @@ class _Crossings:
             if isinstance(statement, ast.Return) or (carry is not None and _hands_rows_back(site.func, carry)):
                 reached |= self.back(site.file, site.func)
         return reached
-
-
-def _region_calls(func: ast.AST, first: int, last: int) -> list[ast.Call]:
-    """The calls *func* makes itself in the statements that start between *first* and *last*."""
-    own = {id(call) for call in _own_calls(func)}
-    found: dict[int, ast.Call] = {}
-    for node in ast.walk(func):
-        if isinstance(node, ast.stmt) and first <= node.lineno <= last:
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.Call) and id(inner) in own:
-                    found[id(inner)] = inner
-    return sorted(found.values(), key=lambda call: (call.lineno, call.col_offset))
 
 
 def attach_crossings(
@@ -4110,11 +4316,12 @@ def attach_crossings(
     Two shapes, both stored, every call placed as :class:`_Crossings` reads
     it (*calls*, and *record* for the holes and the database's calls):
 
-    * a call in the statement's region lands in a function the map owns a
-      junction in, or, handed the rows, goes through functions owning none to
-      one -- ``copyArchive.py::main``'s ``holding`` query hands each job to
-      ``Watcher(...)`` and calls ``.start()``, so the next thing that happens
-      to a held job is ``Watcher.run``;
+    * the call running the statement, and each call the function hands the
+      rows to (:class:`_Carry`, an object they were put into among them),
+      lands in a function the map owns a junction in, or goes through
+      functions owning none to one -- ``copyArchive.py::main``'s ``holding``
+      query hands each job to ``Watcher(...)`` and calls ``.start()``, so the
+      next thing that happens to a held job is ``Watcher.run``;
     * the rows are handed back to a caller, and what it does with them is
       read the same way -- the flagship, ``getTasksToExecCommand_JEDI@4591``,
       returns its tasks to the ``JediTaskBuffer`` layer and ``TaskCommando``
@@ -4133,6 +4340,25 @@ def attach_crossings(
     the way could not be placed, or a hole may be a caller the rows go back
     to, the statement says so (``crosses_open``): what ``crosses_to`` names is
     then what this reading knows, not all of it.
+
+    **Every call of the statement's region was followed once, handed all of
+    it**, and none after it: the region was taken for what the rows reach.
+    It is the stretch the statement's binds are filled in and its rows first
+    worked through, so a call there may run whatever the rows are, and one
+    handed them below it was not followed at all.  Placed by what the rows
+    reach instead, the 376 crossings of pin k (dce1e07) are 824, 284 of them
+    kept; of the 80 that only the region reached, read one by one, 25 are
+    handed the rows, 16 decided by them and 8 only by a ``raise``, one runs
+    the statement, and 30 neither -- ``copyArchive.py::main@696``'s
+    ``taskBuffer.lockJobsForReassign`` among them.
+
+    **A call the rows only decide is not followed**: one under a test on
+    them, in a loop over them, in a later operand of an ``and`` / ``or`` or
+    after an exit they choose, but handed nothing they hold.  Read so, a
+    write a test on the rows chose would hold them too, and the reading
+    grows with every caller: 2136 crossings, 1181 at the statement's own
+    function alone, against 824 -- the decision is in the junction's own
+    guards, and no reader asks a statement for it.
 
     A lead has to name somewhere the map will answer for, and read by name it
     did not: before promotion filtered the junctions, every
@@ -4154,6 +4380,7 @@ def attach_crossings(
         return CrossingCensus(0, 0, 0, 0)
     owners = {junction.owner for junction in junctions}
     trees = {module.rel_path: module.tree for module in modules}
+    stores = _Stores(calls)
     stored = handing_back = resolved = opened = 0
     for site in read_sites:
         if not site.region:
@@ -4175,22 +4402,23 @@ def attach_crossings(
         )
         if func is None:
             continue
-        first, last = site.region
+        line = site.anchor.line_start
+        _first, last = site.region
         handled = site.rows_handled
         through = max(last, handled[1] if len(handled) >= 2 else last)
-        rows = _rows_written(func, site.anchor.line_start, through)
-        carry = _Carry(func, rows) if rows else None
-        crossings = _Crossings(calls, owners, record)
+        rows = _rows_written(func, line, through)
+        carry = _Carry(func, rows, (), stores.made_in(file, func)) if rows else None
+        crossings = _Crossings(calls, owners, record, stores)
         reached: set[str] = set()
-        for call in _region_calls(func, first, last):
-            # Every call of the region is the statement's own stretch, and is
-            # followed through a function owning no junction with all it hands:
-            # ``do_preassign`` hands its statement to ``JediTaskBuffer.
-            # queryTasksToPreassign_JEDI``, which hands it to the proxy that
-            # updates the tasks it picks, and ``copyArchive.py::main`` counts a
-            # destination's jobs and calls ``taskBuffer.updateUnmergedDatasets``
-            # when none is left -- what runs because of the rows, given none.
-            reached |= crossings.into(file, func, call, _Everything())
+        for call in _own_calls(func):
+            if call.lineno == line:
+                # The call running the statement, followed with all it hands:
+                # ``do_preassign`` hands its statement to ``JediTaskBuffer.
+                # queryTasksToPreassign_JEDI``, which hands it to the proxy that
+                # updates the tasks it picks.
+                reached |= crossings.into(file, func, call, _Everything())
+            elif carry is not None and _takes(carry, call):
+                reached |= crossings.into(file, func, call, carry)
         hands = carry is not None and _hands_rows_back(func, carry)
         back = crossings.back(file, func) if hands else set()
         # Not itself: a statement is not somewhere its own rows go next.  Done

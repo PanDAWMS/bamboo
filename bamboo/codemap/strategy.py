@@ -93,6 +93,7 @@ from bamboo.codemap.models import (
     READS_ONLY_FOR_A_CALLER,
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
+    RESULT_AGGREGATE,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
     SKELETON_PRINT,
@@ -523,6 +524,7 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         exits=[_statement_exit(text) for text in site.exits],
         crosses_to=list(site.crosses_to),
         crosses_open=list(site.crosses_open),
+        result=site.result,
     )
 
 
@@ -1824,11 +1826,19 @@ def _reader_leads(
     Stops rather than continues.  The map names where the row went; what it
     became there is an observation, and a lead carrying a made-up value would
     be a question the evidence cannot fail.
+
+    Not from a statement that aggregates (:attr:`ReadSiteNode.result`): it
+    keeps no row, and what it hands on is a value computed from the rows --
+    ``getSiteToRunRateStats``'s count of a site's jobs goes to
+    ``JobGenerator``, which picks none of them up.  One that varies, or whose
+    result is not read, may return rows, and is read as one that does.
     """
     leads: list[Lead] = []
     seen: set[tuple[str, str]] = set()
     for owner, sites in sorted(read_sites.items()):
         for site in sites:
+            if site.result == RESULT_AGGREGATE:
+                continue
             if not any(pair.endswith(f"={symptom.observed}") for pair in site.selects):
                 continue
             for reached in site.crosses_to:

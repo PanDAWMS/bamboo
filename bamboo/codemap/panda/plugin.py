@@ -182,13 +182,13 @@ PACKAGES = ("pandaserver", "pandajedi")
 _is_test_module = calls_mod.is_test_module
 
 
-def _schema_stamp(root: Path, schema: dict[str, frozenset[str]]) -> str:
-    """``<root>: <n> table(s), <digest>`` -- the digest over the definition files, as read."""
+def _schema_stamp(root: Path, schema: dict[str, frozenset[str]], keys: dict[str, frozenset[str]]) -> str:
+    """``<root>: <n> table(s), <k> key(s), <digest>`` -- the digest over the definition files, as read."""
     digest = hashlib.sha256()
     for path in sorted(root.glob("*.sql")):
         digest.update(path.name.encode())
         digest.update(path.read_bytes())
-    return f"{root}: {len(schema)} table(s), {digest.hexdigest()[:16]}"
+    return f"{root}: {len(schema)} table(s), {len(keys)} key(s), {digest.hexdigest()[:16]}"
 
 
 class PandaCodeMapPlugin(CodeMapPlugin):
@@ -204,6 +204,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._calls = None
         self._stop_disagreements: list[str] = []
         self._schema: Optional[dict[str, frozenset[str]]] = None
+        self._keys: Optional[dict[str, frozenset[str]]] = None
         self._schema_stamp = "none"
         self._recorded: Optional[calls_mod.Recorded] = None
         self._record_stamp = "none"
@@ -221,7 +222,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         """Resolve the source snapshot, parse it, and return the version stamp."""
         if schema_root is not None:
             self._schema = sqltext.read_schema(schema_root)
-            self._schema_stamp = _schema_stamp(Path(schema_root), self._schema)
+            self._keys = sqltext.read_keys(schema_root)
+            self._schema_stamp = _schema_stamp(Path(schema_root), self._schema, self._keys)
         if instance_record is not None:
             self._recorded, self._record_stamp = calls_mod.read_recorded(Path(instance_record))
         self._roots = self._resolve_roots(source_root)
@@ -249,7 +251,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if not self._modules:
             raise RuntimeError("prepare() must be called before run()")
         self._calls = sqlwrite.corpus_calls(self._modules, self._roots, self._recorded)
-        with sql.across_calls(self._calls), sqltext.with_schema(self._schema):
+        with sql.across_calls(self._calls), sqltext.with_schema(self._schema, self._keys):
             return self._run()
 
     @property
