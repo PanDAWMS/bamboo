@@ -9544,9 +9544,10 @@ def test_a_statement_says_which_junction_its_rows_are_carried_to(tmp_path):
         "        threading.Thread.__init__(self)\n"
         "        self.task_id = task_id\n\n"
         "    def run(self):\n"
-        "        pass\n"
+        "        if self.task_id:\n"
+        "            pass\n"
     )
-    retrier = "class Retry:\n    def retryTask(self, t):\n        pass\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
     nodes, census = _crossed(
         tmp_path, source, ["w.py::run", "r.py::retryTask"], others=[(watcher, "w.py"), (retrier, "r.py")]
     )
@@ -9589,7 +9590,7 @@ def test_a_call_crosses_where_the_rows_reach_it_not_where_it_stands(tmp_path):
         ("retrier", "Retry", "r"),
         ("counter", "Counter", "k"),
     )
-    retrier = "class Retry:\n    def retryTask(self, t):\n        pass\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
     counter = "class Counter:\n    def tick(self):\n        pass\n"
     nodes, _census = _crossed(
         tmp_path, source, ["r.py::retryTask", "k.py::tick"], others=[(retrier, "r.py"), (counter, "k.py")]
@@ -9606,15 +9607,18 @@ def test_a_call_crosses_where_the_rows_reach_it_not_where_it_stands(tmp_path):
         ("        spec.rows = res\n", True),
         ("        setattr(spec, 'rows', res)\n", True),
         ("        spec.pack(res)\n", True),
-        ("        spec.note(res)\n", False),
+        ("        spec.note(res)\n", True),
+        ("        spec.info(res)\n", False),
+        ("        spec.label = res\n", False),
     ],
-    ids=["attribute", "setattr", "a-method-keeping-it", "a-method-handing-it-to-another"],
+    ids=["attribute", "setattr", "a-method-keeping-it", "a-method-handing-it-to-another", "a-log-line", "another-field"],
 )
 def test_rows_put_into_an_object_are_held_by_it(tmp_path, fill, crosses):
     """``dataset_spec.pack(tmp_res)`` keeps the rows in ``dataset_spec``: ``pack`` sets each value on ``self``.
 
-    One level: a method handing what it is given to another method of its receiver is not read as keeping it --
-    ``MsgWrapper.info`` hands its message to ``self.keepMsg``.
+    In the field it puts them into: ``retryTask`` reads ``t.rows``, so rows put into ``spec.label`` are not what it
+    reads.  At any depth, through another method of the receiver too (``note`` hands them to ``self.keep``), but not
+    by a log line: ``MsgWrapper.info`` hands its message to ``self.keepMsg``, a log's buffer.
     """
     source = _typed(
         (
@@ -9640,10 +9644,12 @@ def test_rows_put_into_an_object_are_held_by_it(tmp_path, fill, crosses):
         "        object.__setattr__(self, 'rows', values)\n\n"
         "    def note(self, message):\n"
         "        self.keep(message)\n\n"
+        "    def info(self, message):\n"
+        "        self.keep(message)\n\n"
         "    def keep(self, message):\n"
-        "        self.kept.append(message)\n"
+        "        self.rows = message\n"
     )
-    retrier = "class Retry:\n    def retryTask(self, t):\n        pass\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t.rows:\n            pass\n"
     nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(holder, "h.py"), (retrier, "r.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
@@ -9679,8 +9685,8 @@ def test_a_function_gone_through_is_read_for_each_way_in(tmp_path):
         ("retrier", "Retry", "r"),
         ("finisher", "Finisher", "f"),
     )
-    retrier = "class Retry:\n    def retryTask(self, t):\n        pass\n"
-    finisher = "class Finisher:\n    def finish(self, t):\n        pass\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    finisher = "class Finisher:\n    def finish(self, t):\n        if t:\n            pass\n"
     nodes, _census = _crossed(
         tmp_path,
         source,
@@ -9719,7 +9725,7 @@ def test_a_statement_does_not_cross_to_a_name_no_call_lands_at(tmp_path):
         ("helper", "Helper", "h"),
     )
     helper = "class Helper:\n    def retryTask(self, t):\n        pass\n"
-    retrier = "class Retry:\n    def retryTask(self, t):\n        pass\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
     nodes, _census = _crossed(
         tmp_path, source, ["x.py::sweep", "r.py::retryTask"], others=[(helper, "h.py"), (retrier, "r.py")]
     )
@@ -9760,8 +9766,8 @@ def test_a_call_of_the_region_is_followed_through_a_function_owning_no_junction(
     )
     retrier = (
         "class Retry:\n"
-        "    def retryTask(self, t):\n        pass\n\n"
-        "    def finishTask(self, t):\n        pass\n"
+        "    def retryTask(self, t):\n        if t:\n            pass\n\n"
+        "    def finishTask(self, t):\n        if t:\n            pass\n"
     )
     nodes, _census = _crossed(
         tmp_path,
@@ -9772,6 +9778,157 @@ def test_a_call_of_the_region_is_followed_through_a_function_owning_no_junction(
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == ["pandaserver/r.py::retryTask"]
+
+
+def _sweep(body: str) -> str:
+    """``TaskModule.sweep``: the statement on line 7, its rows fetched into ``res`` on line 8, then *body*."""
+    return (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+    ) + body
+
+
+_EACH_TASK_RETRIED = "        for (taskID,) in res:\n            self.retrier.retryTask(taskID)\n"
+_READS_EACH = "class Retry:\n    def retryTask(self, t):\n        for one in t:\n            if one:\n                pass\n"
+
+
+def test_an_owner_that_does_not_read_what_it_is_handed_is_gone_through(tmp_path):
+    """A junction's owner is a crossing where it reads the part of the rows it is handed; one that only logs it and
+    hands it on is gone through, as a function owning none is.  ``Retry.retryTask`` logs ``t`` and hands it to
+    ``Finisher.finish``, which tests it."""
+    source = _typed(_sweep(_EACH_TASK_RETRIED) + _EXIT_TAIL, ("retrier", "Retry", "r"))
+    retrier = _typed(
+        "class Retry:\n"
+        "    def retryTask(self, t):\n"
+        "        tmpLog.debug(t)\n"
+        "        self.finisher.finish(t)\n\n",
+        ("finisher", "Finisher", "f"),
+    )
+    finisher = "class Finisher:\n    def finish(self, t):\n        if t:\n            pass\n"
+    nodes, _census = _crossed(
+        tmp_path, source, ["r.py::retryTask", "f.py::finish"], others=[(retrier, "r.py"), (finisher, "f.py")]
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/f.py::finish"]
+
+
+@pytest.mark.parametrize(("maker", "crosses"), [("MsgWrapper", False), ("Note", True)], ids=["a-logger", "a-class"])
+def test_a_logger_made_from_the_rows_does_not_read_them(tmp_path, maker, crosses):
+    """``tmpLog = MsgWrapper(logger, token)``: the token is a log line's tag, though ``MsgWrapper.__init__`` tests it
+    (as ``create_tagged_logger`` tests ``if tag is None``).  Read as a use, 7 crossings of pin k came by a tag alone.
+    The same ``__init__`` under another name reads it."""
+    source = _typed(_sweep(_EACH_TASK_RETRIED) + _EXIT_TAIL, ("retrier", "Retry", "r"))
+    retrier = (
+        f"from pandaserver.m import {maker}\n\n\n"
+        "class Retry:\n"
+        "    def retryTask(self, t):\n"
+        f"        tmpLog = {maker}(None, t)\n"
+        "        tmpLog.info('retried')\n"
+    )
+    wrapper = (
+        f"class {maker}:\n"
+        "    def __init__(self, logger, token=None):\n"
+        "        if token is None:\n"
+        "            token = ''\n"
+        "        self.token = token\n"
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py"), (wrapper, "m.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+@pytest.mark.parametrize(
+    ("lookup", "crosses"),
+    [("limits.get(taskID)", False), ("limits.get(taskID, taskID)", True)],
+    ids=["the-key", "a-default"],
+)
+def test_a_key_the_rows_hold_chooses_a_value_that_is_not_theirs(tmp_path, lookup, crosses):
+    """``d.get(k)`` on a dict holding none of the rows, ``k`` one of them: the value is one ``d`` held already, the
+    rows only choose it -- as ``d[k]`` reads.  A default handed beside the key may be the value."""
+    source = _typed(
+        _sweep(f"        limits = {{}}\n        for (taskID,) in res:\n            self.retrier.retryTask({lookup})\n")
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+def test_rows_appended_to_a_dicts_default_are_held_by_the_dict(tmp_path):
+    """``d.setdefault(k, []).append(v)``: the list ``setdefault`` hands back is one of ``d``'s values, so ``v`` is in
+    ``d`` (``getDatasetsWithJediTaskID_JEDI@4049`` -> ``insertFilesForDataset_JEDI``)."""
+    source = _typed(
+        _sweep(
+            "        byStatus = {}\n"
+            "        for (taskID,) in res:\n"
+            "            byStatus.setdefault('pending', []).append(taskID)\n"
+            "        self.retrier.retryTask(byStatus['pending'])\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(_READS_EACH, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/r.py::retryTask"]
+
+
+@pytest.mark.parametrize(
+    ("read", "crosses"), [("t.a.b.c.d.e.f", True), ("t.a.b.c.d.e.g", True), ("t.a.x", False)], ids=["it", "cut", "other"]
+)
+def test_a_path_past_five_steps_is_anything_below_the_cut(tmp_path, read, crosses):
+    """A holding tells apart five steps of an access path: below them, any part may hold the rows, so a read of
+    ``.g`` past the cut is a read of what was put at ``.f``; one parting from the path above the cut is not."""
+    source = _typed(
+        _sweep(
+            "        spec = Holder()\n"
+            "        for (taskID,) in res:\n"
+            "            spec.a.b.c.d.e.f = taskID\n"
+            "        self.retrier.retryTask(spec)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    retrier = f"class Retry:\n    def retryTask(self, t):\n        if {read}:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+def test_a_fetch_after_the_next_execute_takes_that_statements_rows(tmp_path):
+    """In the loop over the rows the next ``execute`` runs another statement, and what is fetched after it is that
+    one's, though the first one's rows are still being handled: the seeds end with the region, as the exits do
+    (``ppEventServiceJob`` 5654 / 5660; census task 3: 144 seeds of pin k took another statement's rows)."""
+    source = _typed(
+        _sweep(
+            "        for (taskID,) in res:\n"
+            "            varMap2 = {}\n"
+            "            varMap2[':status'] = 'ready'\n"
+            "            sqlB = f'SELECT datasetID FROM {schema}.JEDI_Datasets '\n"
+            "            sqlB += 'WHERE status=:status '\n"
+            "            self.cur.execute(sqlB + comment, varMap2)\n"
+            "            other = self.cur.fetchall()\n"
+            "            self.retrier.retryTask(other)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(_READS_EACH, "r.py")])
+
+    crossed = {n.anchor.line_start: n.crosses_to for n in nodes if n.anchor.line_start in (7, 14)}
+    assert crossed == {7: [], 14: ["pandaserver/r.py::retryTask"]}
 
 
 ROWS_HANDED_BACK = (
@@ -9792,8 +9949,11 @@ ROWS_HANDED_BACK = (
 
 def _caller(cls: str, body: str, *methods: str, buffer: tuple[str, str] = ("TaskModule", "x")) -> str:
     """``class <cls>`` whose ``start`` is *body*, its ``taskBufferIF`` a *buffer* ``(class, module)``, and *methods*
-    defined on it, each doing nothing."""
-    defined = "".join(f"    def {name}(self, *args):\n        pass\n\n" for name in methods)
+    defined on it, each reading every element of what it is handed."""
+    defined = "".join(
+        f"    def {name}(self, value=None):\n        for one in value:\n            if one:\n                pass\n\n"
+        for name in methods
+    )
     return _typed(f"class {cls}:\n    def start(self):\n{body}\n{defined}", ("taskBufferIF", *buffer))
 
 
@@ -9813,6 +9973,19 @@ def test_rows_given_back_cross_to_what_the_caller_does_with_them(tmp_path):
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == ["pandaserver/c.py::retryTask"]
+    assert (census.handing_back, census.resolved) == (1, 1)
+
+
+def test_a_caller_reading_the_rows_given_back_is_a_crossing(tmp_path):
+    """The tasks go back to ``Commando.start``, a junction's owner, which tests each: that is where they are read
+    next, though it hands them to nothing (q052: ``getJobStatisticsByGlobalShare`` back into its caller's check)."""
+    caller = _caller(
+        "Commando", "        tasks = self.taskBufferIF.getTasks()\n        for one in tasks:\n            if one:\n                pass\n"
+    )
+    nodes, census = _crossed(tmp_path, ROWS_HANDED_BACK, ["c.py::start"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/c.py::start"]
     assert (census.handing_back, census.resolved) == (1, 1)
 
 
@@ -9880,15 +10053,21 @@ def test_rows_handed_to_a_started_thread_reach_what_its_run_calls_on_it(tmp_path
         "        WorkerThread.__init__(self)\n"
         "        self.tasks = tasks\n\n"
         "    def runImpl(self):\n"
-        "        pass\n\n"
+        "        for one in self.tasks:\n"
+        "            if one:\n"
+        "                pass\n\n"
         "    def finish(self):\n"
-        "        pass\n"
+        "        for one in self.tasks:\n"
+        "            if one:\n"
+        "                pass\n"
     )
     other = (
         "from pandaserver.t import WorkerThread\n\n\n"
         "class Other(WorkerThread):\n"
         "    def runImpl(self):\n"
-        "        pass\n"
+        "        for one in self.tasks:\n"
+        "            if one:\n"
+        "                pass\n"
     )
     caller = _caller(
         "Starter",
