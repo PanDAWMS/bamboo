@@ -458,7 +458,7 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
         "another's": {first.window: [run("2026-10-13 19:00:00", "otherMethod < PandaID=1 >")]},
     }
 
-    def ask(key, names, asking):
+    def ask(key, names, asking, owners=None):
         asked.append((names[0], asking.window))
         if names[0] == "holes":
             return {}, [], {"holes": ["2026-10-13 15:00:00 .. 2026-10-13 16:00:00"]}
@@ -473,6 +473,9 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
     for name in ["ran-late", "ran-early", "silent", "holes", "unanswered", "another's"]:
         found, missed, holes, searched = r._ask_mover(s, "a.py::mover", [name], first)
         got[name] = [searched.window, r._runs_of(found, "a.py::mover", searched)]
+    # a writer that takes a row by its key: the last part alone, a run before it not looked for
+    found, missed, holes, searched = r._ask_mover(s, "a.py::mover", ["ran-early"], first, rest=False)
+    got["by key"] = [searched.window, r._runs_of(found, "a.py::mover", searched)]
     # a window that starts at the row has no rest
     r.data["statuslog"]["as_of"] = "2026-10-13 05:00:00"
     short = W.stuck(r.data["statuslog"], "finishing")
@@ -497,6 +500,8 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
     assert got["holes"][0] == got["unanswered"][0] == last
     assert got["short"] == [["2026-10-13 00:50:00", "2026-10-13 05:00:00"], None]
     assert got["files"] == [last]
+    assert got["by key"] == [last, []]
+    assert [w for n, w in asked if n == "ran-early"] == [last, rest, last]
     assert [w for n, w in asked if n == "silent"] == [last, rest, ["2026-10-13 00:50:00", "2026-10-13 05:00:00"], last]
     assert "  mover: no run of its own from 2026-10-13 14:00:00: asking the rest of the window" in lines
 
@@ -539,16 +544,20 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
         ("logger", ["a.log", "b.log"]), ("module", ["a.log", "c.log"]), ("none", ["a.log"]), ("nowhere", ["a.log"]),
         ("missing", ["a.log"])]}
     logs["one not asked"] = held(rerun.every_log_asked("x.py::logger", [], ["a.log"]))
+    logs["prints nothing"] = [rerun.prints_nothing(f"x.py::{name}", []) for name in ("logger", "none", "missing")]
     rerun.R.ROWS_FROM = "walk"
     logs["walk"] = held(rerun.every_log_asked("x.py::logger", [], ["a.log", "b.log"]))
     rerun.R.ROWS_FROM = "graph"
     r.logs = N(needs_window=True)
     premises = r._premises(s, "x.py::logger", [], ["a.log", "b.log"], short, short, [], {})
-    print(json.dumps([got, logs, premises]))
+    keys = [sorted(r._key_columns("JobSpec.jobStatus", "1")), sorted(r._key_columns("JobSpec.jobStatus", "2"))]
+    print(json.dumps([got, logs, premises, keys]))
     """,
         )
     )
-    got, logs, premises = json.loads(out.splitlines()[-1])
+    got, logs, premises, keys = json.loads(out.splitlines()[-1])
+    # the row's key is the column holding the key asked, as held.split reads it
+    assert keys == [["JobSpec.PandaID"], []]
     # the whole window: the rest asked, or a last part that starts at the row, every ask answered, nothing unsearched
     assert got["whole"] == [True, "2026-10-13 00:50:00 .. 2026-10-13 20:00:00 searched in ['a.log'], none of it unsearched"]
     assert got["short"] == [True, "2026-10-13 00:50:00 .. 2026-10-13 05:00:00 searched in ['a.log'], none of it unsearched"]
@@ -561,13 +570,16 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
     # every file the map places the prints in, by their logger, asked
     assert logs["logger"] == [True, "every file the map places its prints in was asked: ['a.log', 'b.log']"]
     assert logs["one not asked"] == [False, "not asked: ['b.log']"]
+    # no prints of its own, none at all or no statement: no run in a log is its own (K25)
+    assert logs["prints nothing"] == [False, True, True]
     assert logs["module"][0] is False and "['module']" in logs["module"][1]
     assert logs["none"] == logs["missing"] == [False, "the map has no prints of its own for it"]
     assert logs["nowhere"] == [False, "the map places its prints in no file"]
     assert logs["walk"][0] is None
-    # the third is the map's to say: never known yet
+    # the third, prints_naming: a mover with no arm of its own prints, if at all, through what it calls
     assert list(premises) == ["window", "logs", "prints"]
-    assert premises["window"]["held"] is True and premises["logs"]["held"] is True and premises["prints"]["held"] is None
+    assert premises["window"]["held"] is True and premises["logs"]["held"] is True
+    assert premises["prints"] == {"held": None, "why": "no arm of its own: what it calls prints, if anything"}
 
 
 _RECORDED = """
@@ -646,6 +658,50 @@ def test_the_record_door_asks_the_marks_that_do_not_hold_the_key_a_round_later(t
     assert notes == ["1 fragment(s) of records whose head was not returned"]
     assert would_print is True
     assert "a second record for the ask" in twice
+
+
+def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared_one_as_cut(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            K, W = "52977211", ("2026-09-28 08:21:12", "2026-09-28 08:41:13")
+            SHARED, OWN, OTHER, WORKER = "getX < vo=None label=None >", "upd < 2026-09-28/08:31:10.1 >", "push < 2026-09-28/08:33:00.0 >", "STAMP1"
+            NESTED = "chk <  < jediTaskID=52977211 > >"
+            hits = [{**line("08:22:00", f"task {K}", SHARED), "offset": 10}, {**line("08:31:12", f"task {K}", OWN), "offset": 20},
+                    {**line("08:33:01", f"job of {K}", OTHER), "offset": 30}, {**line("08:35:00", f"for {K}", WORKER), "offset": 40},
+                    {**line("08:36:00", "in finishing with True", NESTED), "offset": 50}, {**line("08:40:00", f"task {K}", SHARED), "offset": 60}]
+            key_rec = record(Ask("panda-x.log", (K,), W), {M1: answered({**TODAY, "records": hits})})
+            Path("k.jsonl").write_text(json.dumps(key_rec) + "\\n")
+            asked = {}
+            for label, owners in (("s1", frozenset({"getX", "upd"})), ("any", None)):
+                try:
+                    RecordedLogs(["k.jsonl"]).log("panda-x.log", K, W, owners=owners)
+                except Unrecorded as e:
+                    asked[label] = [a.canonical()["strings"] for a, _ in e.asks]
+            tok_ask = Ask("panda-x.log", tuple(sorted([OWN, WORKER])), W, M1)
+            tok_rec = record(tok_ask, {M1: answered({**TODAY, "records": [hits[1], {**line("08:31:13", "done", OWN), "offset": 21},
+                                                                           hits[3], {**line("08:35:01", "end", WORKER), "offset": 41}]})})
+            Path("t.jsonl").write_text(json.dumps(tok_rec) + "\\n")
+            log = RecordedLogs(["k.jsonl", "t.jsonl"]).log("panda-x.log", K, W, owners=frozenset({"getX", "upd"}))
+            runs = {r.token: [len(r.records), r.would_print("DEBUG"), r.describe()] for r in runs_for(log, K)}
+            print(json.dumps([asked, runs, log.notes]))
+            """),
+        )
+    )
+    asked, runs, notes = json.loads(out)
+    # S1's movers own getX and upd: upd's mark, in one piece, and the worker's are asked; getX's, its key records 18 min
+    # apart, is shared by calls, push's is no mover's; chk's tag holds brackets and the key, so it needs no round
+    assert asked["s1"] == [["STAMP1", "upd < 2026-09-28/08:31:10.1 >"]]
+    # without owners, every mark that does not hold the key, as before
+    assert asked["any"] == [["STAMP1", "getX < vo=None label=None >", "push < 2026-09-28/08:33:00.0 >", "upd < 2026-09-28/08:31:10.1 >"]]
+    assert runs["upd < 2026-09-28/08:31:10.1 >"][:2] == [2, True] and runs["STAMP1"][:2] == [2, True]
+    assert runs["chk <  < jediTaskID=52977211 > >"][:2] == [1, True]
+    # a mark not asked whole: its key records alone, read as cut -- no row missing from it is read as not printed
+    assert runs["getX < vo=None label=None >"][:2] == [2, False] and "a mark the method's calls share" in runs["getX < vo=None label=None >"][2]
+    assert runs["push < 2026-09-28/08:33:00.0 >"][:2] == [1, False] and "a method no step asked reads" in runs["push < 2026-09-28/08:33:00.0 >"][2]
+    assert notes == ["2 mark(s) read from the key's records alone, as cut: a mark the method's calls share; a method no step asked reads"]
 
 
 def test_the_record_door_widens_once_past_an_end_and_reads_a_run_still_there_as_cut(tmp_path):
@@ -1329,6 +1385,103 @@ def test_an_arm_moves_the_value_unless_its_write_requires_another(tmp_path):
                     "unThrottle": {}, "touch": {"12": ["failed"]}}
 
 
+def test_a_writer_no_statement_gives_rows_takes_a_row_by_its_key(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier.rerun import by_key_of
+
+    print(json.dumps(by_key_of(writers, {"p/jobs.py::killJob": "x@1 selects the value"}, "JobSpec.jobStatus", "running")))
+    """,
+        )
+    )
+    # a mover already is not again; one with no arm moving the value off is no writer of it
+    assert json.loads(out.splitlines()[-1]) == ["p/cmd.py::execCommand", "p/jobs.py::touch"]
+
+
+def test_judgement_3s_prints_premise_holds_only_where_a_line_before_every_arm_names_the_written_rows_key(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+    import json
+    from types import SimpleNamespace as N
+    from bamboo.querier.rerun import prints_naming
+
+    def name(line, column, row="written"):
+        return N(line=line, expression="job.x", column=column, row=row, why="" if row else "rebound")
+
+    def branch(line, prints, names=None, hole=""):
+        return N(line=line, must_prints=prints, must_names=names, must_hole=hole)
+
+    key = name(5, "JobSpec.PandaID")
+    writers = [N(owner="p/w.py::w", branches=[
+        branch(10, [5], [key]),
+        branch(11, [5], [key, name(5, "JobSpec.jobStatus")]),
+        branch(20, [5], [name(5, "JobSpec.jobStatus")]),
+        branch(21, [5], [name(5, "JobSpec.PandaID", row="")]),
+        branch(22, [5], None, "names: the arm does not write the subject as an attribute of an object"),
+        branch(30, []),
+        branch(40, None, None, "not read: a lambda"),
+    ])]
+    cols = {"JobSpec.PandaID"}
+    held = lambda lines, columns=cols: (lambda p: [p["held"], p["why"]])(prints_naming(writers, "p/w.py::w", lines, columns))
+    print(json.dumps({"named": held([10, 11]), "another column": held([10, 20]), "not the row": held([21]),
+                      "sql": held([22]), "none before": held([10, 30, 20]), "unread": held([10, 40]),
+                      "no key column": held([10], set()), "no arm": held([])}))
+    """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # a line before every arm names the written row's key: a run that wrote it printed what the asks search by
+    assert got["named"] == [True, "a line before every arm at [10, 11] names the written row's ['JobSpec.PandaID']"]
+    # a name of another column, of a row not known to be the written one, or none read (an SQL arm): not known
+    for case in ("another column", "not the row", "sql"):
+        assert got[case][0] is None and "the map pairs neither a run's mark nor an SQL statement's key bind" in got[case][1]
+    assert "[20]" in got["another column"][1] and "[22]" in got["sql"][1]
+    # an arm no line comes before on every path: a run need print nothing, whatever the other arms say
+    assert got["none before"] == [False, "no line runs before the arm(s) at [30] on every path"]
+    assert got["unread"] == [None, "the map did not read the lines before ['40: not read: a lambda']"]
+    assert got["no key column"][0] is None and got["no arm"][0] is None
+
+
+def test_s3_reads_what_an_arm_wrote_only_after_it_in_its_block_before_the_name_is_bound_again(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+    import ast, json
+    from bamboo.querier import rerun as RR
+
+    tree = ast.parse("\\n".join([
+        "def update(status, old):",
+        "    log(f'status={status}')",
+        "    if old == 'failed':",
+        "        status = old",
+        "    if ok:",
+        "        row['status'] = status",
+        "        n = execute(row)",
+        "        log(f'old={old} new={status}')",
+        "        if n:",
+        "            log(f'again {status}')",
+        "        status = 'x'",
+        "        log(f'later {status}')",
+        "    log(f'end {status}')",
+    ]))
+    fn = tree.body[0]
+    arm = next(n for n in ast.walk(fn) if isinstance(n, ast.stmt) and n.lineno == 6)
+    print(json.dumps([RR.lines_after(fn, arm, "status"), RR.lines_after(fn, arm, "n")]))
+    """,
+        )
+    )
+    status, n = json.loads(out.splitlines()[-1])
+    # after the arm in its block: 7, 8 and the if at 9-10; 11 binds status again, so 12 and the end at 13 are not read
+    assert status == [[7, 7], [8, 8], [9, 10]]
+    # a statement binding the name ends the spans at once: 7 binds n
+    assert n == []
+
+
 def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_guard_read_elsewhere(tmp_path):
     out = _ok(
         _run(
@@ -1725,7 +1878,7 @@ def test_f1_asks_for_every_row_after_the_run_before_one_stop_and_then_reads_each
     r.files_of = lambda owner, today, lines: list(today)
     answered = False
 
-    def ask(key, names, asking):
+    def ask(key, names, asking, owners=None):
         if answered:
             return {}, [], {}
         return {}, [(N(key=f"{names[0]}@{asking.machine}"), asking.why)], {}

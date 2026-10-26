@@ -44,11 +44,12 @@ STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 #: method name and a bracketed tag, which a DB proxy's ``create_tagged_logger`` writes
 #: (``getJobs < SITE_NAME 2026-01-01T00:00:00.000000 >``, ``updateJobStatus <
 #: PandaID=12345678 >``): the name alone would make one run of every call of the
-#: method, for every job
+#: method, for every job.  A tag may hold brackets of its own, one level
+#: (``checkTaskStatusJEDI <  < jediTaskID=12345 > >``: seven tags in the corpus)
 PREFIX = re.compile(
     r"^(?P<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) (?P<logger>\S+): "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+"
-    r"(?P<token>[A-Za-z_]\w* <[^<>\n]*>|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
+    r"(?P<token>[A-Za-z_]\w* <(?:[^<>\n]|<[^<>\n]*>)*>|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
 )
 TRACEBACK = "Traceback (most recent call last):"
 FRAME = re.compile(r'^\s*File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<func>\S+)')
@@ -238,6 +239,9 @@ class Log:
     #: why a run ``whole`` is false for may go on past what was searched, ``(machine, first stamp, last stamp) -> str``,
     #: empty where it is whole: said on the run's line (:meth:`Run.describe`; None in a file handed in)
     edges: Callable[[str, str, str], str] | None = None
+    #: ``(machine, mark) -> why`` for the marks whose records are the key's alone, the rest not asked: a run of one is
+    #: read as cut at both ends, and rule 8 reads no row missing from it (a recorded search asked for S1's movers)
+    partial: dict[tuple[str, str], str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -309,7 +313,11 @@ class Logs(Protocol):
         """Of the logs *wanted*, the ones this door can be asked for, in its order."""
         ...
 
-    def log(self, name: str, key: str, window: Window | None = None, *, machine: str | None = None) -> Log: ...
+    def log(
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+    ) -> Log:
+        """*owners*: the functions the asker reads runs of, as ``rerun._of_mover`` names them, or None for any."""
+        ...
 
 
 class FileLogs:
@@ -333,7 +341,9 @@ class FileLogs:
     def names(self, wanted: list[str]) -> list[str]:
         return [name for name in self._logs if name in wanted]
 
-    def log(self, name: str, key: str, window: Window | None = None, *, machine: str | None = None) -> Log:
+    def log(
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+    ) -> Log:
         return self._logs[name]
 
 
@@ -390,9 +400,12 @@ class Run:
         grep kept such a run only from its first line holding the key on, so a
         row that prints before it is missing whether it printed or not (a
         getJobs call's ``Start`` read as absent, and the call that sent the
-        job was excluded).  A run whose mark holds the key is whole in it.
+        job was excluded).  A run whose mark holds the key is whole in it.  Nor in a run of a mark whose other records
+        were not asked (``Log.partial``).
         """
         if self.log.extract_key and not keyed(self.log.extract_key).search(self.token):
+            return False
+        if (self.machine, self.token) in self.log.partial:
             return False
         if self.log.whole is not None and not self.log.whole(self.machine, self.first, self.last):
             return False
@@ -418,6 +431,7 @@ class Run:
         cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
         where = f"{self.log.name}@{self.machine.split('.')[0]}" if self.machine else self.log.name
         cut = self.log.edges(self.machine, self.first, self.last) if self.log.edges is not None and self.machine else ""
+        cut = self.log.partial.get((self.machine, self.token), cut)
         return (
             f"{where} token={self.token} {len(self.records)} record(s) "
             f"{self.first} .. {self.last} (key on {len(self.found_by)}{'; read as cut: ' + cut if cut else ''})"
