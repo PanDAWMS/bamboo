@@ -29,7 +29,7 @@ flowchart LR
   Reference [MCP Client Layer](/bamboo/architecture/agents/#mcp-client-layer).
 - **reason** — one or more LLM calls. Use `get_llm()` for prose and `get_extraction_llm()`
   (temperature 0) for deterministic JSON — see
-  [`bamboo/llm/llm_client.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/llm/llm_client.py).
+  [`bamboo/llm/llm_client.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/llm/llm_client.py).
 - **emit** — do something with the result: post to Mattermost, draft an email, or persist to the
   knowledge databases.
 
@@ -76,7 +76,7 @@ produce an `AnalysisResult`; its internals are in the
 ## Add or modify a sub-agent / MCP tool
 
 A **sub-agent** is a small, focused LLM helper with its own data access (e.g. `PandaSourceNavigator`
-in [`bamboo/agents/panda_source_navigator.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/agents/panda_source_navigator.py),
+in [`bamboo/agents/panda_source_navigator.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/agents/panda_source_navigator.py),
 which navigates panda-server source to answer a code question). Sub-agents are surfaced to the rest
 of the system as **MCP tools** — named, described, schema-bearing callables the LLM can invoke during
 the `acquire` stage.
@@ -85,8 +85,8 @@ the `acquire` stage.
 
 | Path | Use when | Where |
 |---|---|---|
-| Add a tool to the **built-in** client | the capability is PanDA-adjacent and lives in this repo | `PandaMcpClient` ([`bamboo/mcp/panda_mcp_client.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/mcp/panda_mcp_client.py)) |
-| A **new built-in client** via a strategy | a self-contained in-repo capability tied to an extraction strategy | `ExtractionStrategy.builtin_mcp_clients()` ([`bamboo/agents/extractors/base.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/agents/extractors/base.py)); see [Extraction Strategy Plugin System](/bamboo/architecture/extraction-plugin-system/) |
+| Add a tool to the **built-in** client | the capability is PanDA-adjacent and lives in this repo | `PandaMcpClient` ([`bamboo/mcp/panda_mcp_client.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/mcp/panda_mcp_client.py)) |
+| A **new built-in client** via a strategy | a self-contained in-repo capability tied to an extraction strategy | `ExtractionStrategy.builtin_mcp_clients()` ([`bamboo/agents/extractors/base.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/agents/extractors/base.py)); see [Extraction Strategy Plugin System](/bamboo/architecture/extraction-plugin-system/) |
 | An **external MCP server** | the capability is owned/hosted elsewhere (another service, another team) | `MCP_SERVERS_CONFIG` — already documented under [Configuring external MCP servers](/bamboo/architecture/agents/#configuring-external-mcp-servers) |
 
 ### Adding a tool to the built-in client
@@ -101,10 +101,10 @@ Two things to get right:
 
 - **`task_data` is auto-injected.** If your handler declares a `task_data` parameter, the current
   subject's data is passed in automatically — `task_data_tools()` discovers this by inspecting
-  handler signatures ([`panda_mcp_client.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/mcp/panda_mcp_client.py)),
+  handler signatures ([`panda_mcp_client.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/mcp/panda_mcp_client.py)),
   so you never thread an id through generated code.
 - **Set the trust flags.** `McpTool` carries `read_only` and `external_access`
-  ([`bamboo/mcp/base.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/mcp/base.py)).
+  ([`bamboo/mcp/base.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/mcp/base.py)).
   Automatic, unattended phases run **only** `read_only=True` tools — a state-changing tool will be
   refused outside the interactive loop. Read [Execution Trust](/bamboo/architecture/execution-trust/)
   before adding anything that mutates state.
@@ -120,10 +120,10 @@ depending on which search you mean:
 
 - The MCP tool handler `_search_panda_server_source` greps a single package root located via
   `importlib.util.find_spec("pandaserver")`
-  ([`panda_mcp_client.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/mcp/panda_mcp_client.py)) —
+  ([`panda_mcp_client.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/mcp/panda_mcp_client.py)) —
   generalise it to also locate and search the pilot package, and update the tool `description`.
 - The richer `PandaSourceNavigator` searches `_PANDA_PACKAGES = ["pandaserver", "pandajedi"]`
-  ([`panda_source_navigator.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/agents/panda_source_navigator.py)) —
+  ([`panda_source_navigator.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/agents/panda_source_navigator.py)) —
   add the pilot package there for the navigator path.
 
 In both cases the pilot source must be installed/declared as a dependency.
@@ -132,7 +132,7 @@ In both cases the pilot source must be installed/declared as a dependency.
 
 Example: a JIRA-ticket sub-agent. Mirror `PandaSourceNavigator` (a stateless class with a lazy
 `get_extraction_llm()` and its own data access — here a JIRA REST client plus new `JIRA_*` settings
-in [`bamboo/config.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/config.py)). Surface it
+in [`bamboo/config.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/config.py)). Surface it
 as a tool (e.g. `search_jira_tickets`, `read_only=True`, `external_access=True`). Pick the
 registration path from the table above: a new built-in client via `builtin_mcp_clients()` if it lives
 in this repo, or an external MCP server if JIRA access is owned elsewhere.
@@ -143,23 +143,23 @@ The existing pipelines documented in the Agent Reference are *full*; here is how
 *thin* one. It is just the skeleton wired to existing primitives.
 
 1. **A command.** Add a `@click.command()` `main()` in a new `bamboo/scripts/<name>.py`, then wire it
-   at the bottom of [`bamboo/cli.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/cli.py)
+   at the bottom of [`bamboo/cli.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/cli.py)
    with `cli.add_command(main, "<name>")`. Use
-   [`bamboo/scripts/analyze_task.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/scripts/analyze_task.py)
+   [`bamboo/scripts/analyze_task.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/scripts/analyze_task.py)
    as a template for option parsing and `asyncio.run`.
 2. **Collaborators.** Get the MCP client from `build_mcp_client(get_settings())`
-   ([`bamboo/mcp/factory.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/mcp/factory.py)) —
+   ([`bamboo/mcp/factory.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/mcp/factory.py)) —
    a thin pipeline usually needs nothing more. (`build_deps()` in
-   [`bamboo/agents/helpers/deps.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/agents/helpers/deps.py)
+   [`bamboo/agents/helpers/deps.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/agents/helpers/deps.py)
    is the heavier bundle the full pipelines use; reach for it only if you need the graph/vector DBs.)
 3. **Acquire + reason.** Call tools with `await client.execute("<tool>", **kwargs)`, then ask the
    LLM. For deterministic structured output use `get_extraction_llm()` and parse the JSON;
-   [`bamboo/agents/prescription_composer.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/agents/prescription_composer.py)
+   [`bamboo/agents/prescription_composer.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/agents/prescription_composer.py)
    is the smallest agent to copy the pattern from (`ainvoke([SystemMessage, HumanMessage])` +
    `_parse_json`). Keep prompts in
-   [`bamboo/llm/prompts.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/llm/prompts.py).
+   [`bamboo/llm/prompts.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/llm/prompts.py).
 4. **Emit.** Post to Mattermost by reusing `post_analysis()` / the pure `render` builders in
-   [`bamboo/frontends/mattermost/poster.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/frontends/mattermost/poster.py).
+   [`bamboo/frontends/mattermost/poster.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/frontends/mattermost/poster.py).
 
 A thin command is roughly:
 

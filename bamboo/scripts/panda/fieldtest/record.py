@@ -59,7 +59,8 @@ whose lines hold one of the ask's strings: not cut to the window.
 **A deferred ask.**  The querier never asks again what a record answers, so a
 file a record says ``failed`` would stay unsearched though the failure passed
 (a grep cut by a server's timeout, 2026-10-14).  An ask any of whose greps or
-lists failed gets no record: it is written to the round's
+lists failed -- refused, failed on a machine, or got no response at all (a
+connection dropped, 2026-10-26) -- gets no record: it is written to the round's
 ``answers-r<n>-<time>/deferred.jsonl`` with why, and the querier asks it again.
 The next round reads the rotated files this one answered from this round's
 answers.  ``unreadable``, ``truncated``, ``list cut``, ``not listed`` and ``no
@@ -124,6 +125,22 @@ class Parts:
     grep_log: Callable[..., Awaitable[dict]] = PC.grep_log
     now: Callable[[], datetime.datetime] = utc_now
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
+
+
+async def responded(
+    call: Callable[..., Awaitable[dict]], *args: Any, **kwargs: Any
+) -> dict:
+    """*call*'s response, or a refusal saying why when it had none to return.
+
+    panda_client raises ``RuntimeError`` only when there is no response: the
+    connection dropped, or what came back was no response object (2026-10-26:
+    RemoteDisconnected on a grep's submit, 210 greps into a round, and the
+    round wrote nothing).  Read as a refusal, the call's ask is deferred as a
+    refused one is."""
+    try:
+        return await call(*args, **kwargs)
+    except RuntimeError as exc:
+        return {"success": False, "message": f"no response: {exc}"}
 
 
 class NotSettled(Exception):
@@ -279,7 +296,11 @@ async def list_machines(
     asked_at = parts.now()
 
     async def one(service: str, chunk: list[str]) -> tuple[str, list[str], dict]:
-        return service, chunk, await parts.list_logs(service=service, log_names=chunk)
+        return (
+            service,
+            chunk,
+            await responded(parts.list_logs, service=service, log_names=chunk),
+        )
 
     chunks = [
         names[i : i + PC.LIST_MAX_NAMES]
@@ -503,8 +524,8 @@ class Grepper:
                 )
             if f.kind == "compressing":
                 await self.parts.sleep(COMPRESS_POLL.total_seconds())
-                response = await self.parts.list_logs(
-                    machine=f.machine, log_names=[f.log]
+                response = await responded(
+                    self.parts.list_logs, machine=f.machine, log_names=[f.log]
                 )
                 kept = self.answers.keep(
                     "relist", f"{f.machine}-{f.log}", {"response": response}
@@ -551,8 +572,8 @@ class Grepper:
     async def leaf(self, job: Job, strings: list[str], tail: int | None) -> str:
         f = job.file
         asked = self.parts.now()
-        response = await self.parts.grep_log(
-            f.name, strings, machine=f.machine, tail_bytes=tail
+        response = await responded(
+            self.parts.grep_log, f.name, strings, machine=f.machine, tail_bytes=tail
         )
         answered = self.parts.now()
         kept = self.answers.keep(
