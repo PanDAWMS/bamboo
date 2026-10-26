@@ -1,11 +1,23 @@
-"""Which attributes are worth asking "why is it this?" about.
+"""Which attributes are worth asking "why is it this?" about -- said on each subject, not a filter on the map.
 
 The spec classes declare 421 attributes and the tables add more, but most are
-identifiers, timestamps and counters.  A map that made every one of them a
-subject would answer "where is this written" for things nobody investigates,
-and bury the dozen that matter.
+identifiers, timestamps and counters.  The criteria below say which of them the
+code treats as deciding something, and :func:`apply` writes them on the subject
+(``SubjectNode.criteria``).  A subject no criterion marks is kept with none, and
+so are the junctions writing it: a reader that wants the deciding fields reads
+the criteria, and one asking about any field the code writes finds it.
 
-Three criteria promote, and at least one must fire.  They were derived by
+**It was a filter once**: only the subjects a criterion marked, and the
+junctions writing them, were kept -- on pin k 131 of 676 candidate subjects and
+679 of 2001 junctions.  Keeping every candidate showed two defects the filter
+had hidden: crossings resolved by a callee's bare name (266 became 450, 98 of
+them to ``WorkQueue.pack``) and no edge into ``JobSpec.__setattr__``, which sets
+``stateChangeTime``.  And a filter sees only what the criteria see: criterion 3
+dropped ``JediTaskSpec.ramCount`` once a ``None`` it counted stopped landing,
+and criterion 5, reading a filter stage's input names, does not see
+``JobSpec.cloud`` reach a stage by its value.
+
+Three criteria mark a subject as deciding, any one enough.  They were derived by
 census over the whole corpus, and each was narrowed by watching something
 absurd come out on top:
 
@@ -43,10 +55,10 @@ Two further signals (the field is mentioned in logs; it is written under a
 guard) fire on 69% and 79% of everything and so corroborate rather than
 promote.
 
-A fourth criterion promotes nothing on its own: it closes the set under the
-passthrough edge, so a subject a promoted one copies its value from comes along.
-Without it the backward walk's first hop out of ``JediTaskSpec.status`` lands on
-a subject the map does not contain.
+A fourth criterion marks nothing on its own: it closes the set under the
+passthrough edge, so a subject a marked one copies its value from is marked as
+well.  Without it the backward walk's first hop out of ``JediTaskSpec.status``
+lands on a subject no criterion says decides anything.
 
 A fifth restates the first where the first cannot see.  Criterion 1 reads SQL
 predicates, and brokerage gates in Python: ``nucleus``, ``minRamCount``,
@@ -54,8 +66,7 @@ predicates, and brokerage gates in Python: ``nucleus``, ``minRamCount``,
 without appearing in any ``WHERE``.  Taking them from the selection slice keeps
 the evidence as strong -- the code tagged the rejection and counted the cut.
 
-Applied to junctions as well as subjects: a junction writing an attribute
-nobody investigates is the same noise one level down.
+A junction carries no criteria of its own: it is read through its subject's.
 """
 
 from __future__ import annotations
@@ -213,23 +224,21 @@ def close_over_passthrough(
 
 
 def apply(fragment: MapFragment, criteria: dict[str, list[str]]) -> tuple[int, int]:
-    """Keep only promoted subjects and the junctions that write them.
+    """Write on each subject the criteria that fire on it -- none where none does -- and keep every one.
 
-    Returns ``(subjects dropped, junctions dropped)``.  Dropping is the point:
-    an unpromoted subject is not a gap in extraction, it is a field nobody
-    investigates, and reporting it as coverage would make the map look larger
-    and less useful at once.
+    Returns ``(subjects, junctions)`` no criterion marks: the subjects with
+    empty ``criteria`` and the junctions writing them.  A junction whose
+    subject could not be settled is not among them: it has no subject to
+    judge, and is a gap the attribution reports.
     """
-    before = (len(fragment.subjects), len(fragment.junctions))
     for subject in fragment.subjects:
-        subject.criteria = criteria.get(subject.name, subject.criteria)
-    fragment.subjects = [s for s in fragment.subjects if s.name in criteria]
-    fragment.junctions = [
-        junction
-        for junction in fragment.junctions
-        # A junction whose subject could not be settled is kept regardless: it
-        # has no subject to judge, and dropping it would turn a known and
-        # reported gap into a silent one.
-        if junction.subject in criteria or junction.attribution == UNRESOLVED
-    ]
-    return before[0] - len(fragment.subjects), before[1] - len(fragment.junctions)
+        subject.criteria = criteria.get(subject.name, [])
+    marked = {subject.name for subject in fragment.subjects if subject.criteria}
+    return (
+        sum(1 for subject in fragment.subjects if not subject.criteria),
+        sum(
+            1
+            for junction in fragment.junctions
+            if junction.subject not in marked and junction.attribution != UNRESOLVED
+        ),
+    )

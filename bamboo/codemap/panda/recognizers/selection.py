@@ -46,6 +46,7 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     literal_values,
     path_condition,
+    site_of,
 )
 
 SLICE_NAME = "selection"
@@ -148,9 +149,9 @@ def _interpolated_tag_name(node: ast.AST) -> Optional[str]:
 
 
 def _tag_values(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: Optional[str]
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: Optional[str], at: ast.AST
 ) -> list[tuple[str, list[str], int]]:
-    """The tags *name* can hold, with the conditions that leave it holding each.
+    """The tags *name* can hold at *at*, the message, with the conditions that leave it holding each.
 
     Filtered to signed words so that an unrelated string assigned to the same
     variable is not read as a rejection reason.
@@ -159,7 +160,7 @@ def _tag_values(
         return []
     return [
         (literal, conditions, line)
-        for literal, conditions, line in literal_values(func, name)
+        for literal, conditions, line in literal_values(func, name, at=at)
         if _TAG_LITERAL.match(literal)
     ]
 
@@ -391,7 +392,7 @@ def extract(
                     # look for would confirm nothing.
                     tagged = [
                         (tag, conditions, "", line)
-                        for tag, conditions, line in _tag_values(func, name)
+                        for tag, conditions, line in _tag_values(func, name, site_of(node))
                     ]
                 step = _step_at(steps, node.lineno)
                 label = step.label if step else ""

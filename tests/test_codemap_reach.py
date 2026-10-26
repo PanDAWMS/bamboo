@@ -763,6 +763,64 @@ def test_a_dunder_python_runs_unasked_that_reaches_a_write_fails_the_gate(tmp_pa
     ]
 
 
+_SPEC = (
+    "def now():\n"
+    "    return 1\n\n"
+    "class Spec:\n"
+    "    def __setattr__(self, name, value):\n"
+    "        object.__setattr__(self, name, value)\n"
+    "        if name == 'status':\n"
+    "            self.changed = now()\n\n"
+    "class SubSpec(Spec):\n"
+    "    pass\n\n"
+    "class Plain:\n"
+    "    pass\n\n"
+    "def close(job: Spec, sub: SubSpec, plain: Plain, other):\n"
+    "    job.status = 'closed'\n"
+    "    sub.status += 'x'\n"
+    "    plain.status = 'closed'\n"
+    "    other.status = 'closed'\n"
+    "    setattr(job, 'status', 'done')\n"
+)
+
+
+def test_an_attribute_store_runs_the_object_s_setattr_where_its_class_has_one(tmp_path):
+    """``job.jobStatus = "closed"`` runs ``JobSpec.__setattr__``, which sets ``stateChangeTime``: an edge, ``setattr``.
+
+    A store on a subclass runs the base's, as a call would; one on a class taking ``object``'s runs nothing of the
+    corpus, and one on an object nothing says anything of is no edge and no hole.  ``setattr(x, name, v)`` is the
+    same call.  Inside ``__setattr__``, its own ``self.changed = ...`` runs it again.
+    """
+    record = _record(tmp_path, mod=_SPEC)
+
+    stores = [call for call in record.rows["pkg/mod.py::close"].calls if call.how == reach.HOW_SETATTR]
+
+    assert [(call.to, call.lines, call.runs_as, call.callee) for call in stores] == [
+        ("pkg/mod.py::Spec.__setattr__", [17, 21], ["pkg/mod.py::Spec", "pkg/mod.py::SubSpec"], "job.status"),
+        ("pkg/mod.py::Spec.__setattr__", [18], ["pkg/mod.py::SubSpec"], "sub.status"),
+    ]
+    assert record.rows["pkg/mod.py::close"].holes == []
+    # Once for each class ``self`` can be there, as a call on ``self`` is.
+    assert _to(record, "pkg/mod.py::Spec.__setattr__", reach.HOW_SETATTR) == ["pkg/mod.py::Spec.__setattr__"] * 2
+    assert [one.function for one in record.reach(["pkg/mod.py::close"], _writing("pkg/mod.py::now")).writes] == [
+        "pkg/mod.py::now"
+    ]
+
+
+def test_a_dunder_the_record_has_edges_into_is_asked_as_any_function_is(tmp_path):
+    """``JobSpec.__setattr__`` sets ``stateChangeTime``, and every store on a ``JobSpec`` enters it: not unasked."""
+    from bamboo.codemap import gates
+
+    record = _record(tmp_path, mod=_SPEC)
+    result = gates.implicit_dunders_reach_no_write(
+        _fragment(record, [_junction("pkg/mod.py::now", 2, [("done", [])])])
+    )
+
+    assert result.passed
+    assert result.checked == 0
+    assert "1 more have edges into them" in result.note
+
+
 #: A class defining the methods the tests below call, so that a call on an unknown receiver is a hole, not settled as
 #: a method no class of the corpus defines.
 _TAKER = (

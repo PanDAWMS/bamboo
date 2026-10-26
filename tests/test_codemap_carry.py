@@ -1,9 +1,10 @@
 """Which writes hold a statement's rows, carried through the function as it runs.
 
 Each shape marks the statements the rows arrive in ``# rows`` and a statement
-whose call arguments (or returned value) should or should not hold them
-``# holds`` / ``# not``.  ``sqlwrite._Carry`` is asked, starting from the
-marked statements, as the crossing pass asks it.
+whose call arguments (or returned value) should or should not hold a part of
+them ``# holds`` / ``# not``.  ``sqlwrite._PathCarry`` is asked, starting from
+the marked statements, as the crossing pass asks it -- over no corpus, so no
+call is placed and none keeps or returns anything of what it is handed.
 """
 
 from __future__ import annotations
@@ -13,8 +14,10 @@ import textwrap
 
 import pytest
 
+from bamboo.codemap import reach
+from bamboo.codemap.calls import Calls, Types
 from bamboo.codemap.panda.pathcond import attach_parents
-from bamboo.codemap.panda.recognizers.sqlwrite import _Carry
+from bamboo.codemap.panda.recognizers.sqlwrite import _PathCarry, _Reading
 
 SHAPES = {
     "a link written before the rows arrived": """
@@ -155,8 +158,9 @@ SHAPES = {
                 out.append(r)
             return out  # holds
     """,
-    # Not followed: rows packed into an object by a method, and the object
-    # into an element of what is returned (``_get_datasets_with_unprocessed_inputs``).
+    # Over no corpus no method is placed, so what ``pack`` keeps of its
+    # argument is not read (``_get_datasets_with_unprocessed_inputs``; placed,
+    # it is -- test_codemap's rows put into an object).
     "packed into an element by a method": """
         def f(self, chunks):
             for chunk in chunks:
@@ -193,9 +197,10 @@ def test_a_write_holds_the_rows_where_some_run_brings_them(title, line):
     lines = text.splitlines()
     statements = {node.lineno: node for node in ast.walk(tree) if isinstance(node, ast.stmt)}
     rows = [statements[n] for n, text_line in enumerate(lines, 1) if text_line.rstrip().endswith("# rows")]
-    carry = _Carry(tree.body[0], rows)
+    reading = _Reading(Calls(Types({}, {})), set(), reach.ReachGraph([]))
+    carry = _PathCarry(reading, "f.py", tree.body[0], start=rows)
 
     use = statements[line]
-    held = any(carry.reaches(taken, use) for taken in _taken(use))
+    held = any(carry.held(taken, use) for taken in _taken(use))
 
     assert held == lines[line - 1].rstrip().endswith("# holds")
