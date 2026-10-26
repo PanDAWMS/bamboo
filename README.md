@@ -10,7 +10,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 
 ## Documentation
 
-📖 **[Read the documentation site](https://tmaeno.github.io/bamboo/)** — full index, navigation, and search.
+📖 **[Read the documentation site](https://pandawms.github.io/bamboo/)** — full index, navigation, and search.
 
 ## License
 

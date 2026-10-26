@@ -7,7 +7,7 @@ This page is for contributors changing the extraction or mapping a new system. I
 assumes the vocabulary from the [Code Map overview](/bamboo/architecture/code-map/) and
 teaches the shape of the extraction; the reasoning behind each individual rule is in the
 module docstrings, which are unusually long on purpose — 28% of
-[`bamboo/codemap/`](https://github.com/tmaeno/bamboo/tree/master/bamboo/codemap) is
+[`bamboo/codemap/`](https://github.com/PanDAWMS/bamboo/tree/master/bamboo/codemap) is
 docstring, and it is where the measurements that justified each rule live. This page
 links to them rather than restating them.
 
@@ -48,15 +48,15 @@ move; the command is the authority.
 
 | Slice | What it recognizes | Coverage |
 |---|---|---|
-| [`progress`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/progress.py) | `spec.attr = <value>` — the junctions the backward walk starts from | 1461/1534 |
-| [`sqlwrite`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/sqlwrite.py) | `UPDATE … SET col=:bind` — the dominant write form; a knight decides and a proxy writes | 808/1162 |
-| [`selection`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/selection.py) | `criteria=-diskIO` and `candidates passed <step>` — the filter chain | 109/109 |
-| [`loopcut`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/loopcut.py) | A guard in a loop, a `continue`, and a sentence — the same cut where nothing is declared | 149 cuts, no ratio |
-| [`boundary`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/boundary.py) | `@request_validation` endpoints, and shared tables PanDA talks to DEFT through | 99/108 and 31/31 |
-| [`errorcode`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/errorcode.py) | `EC_Kill = 100` — the constants that decode a value seen in a record | 178/194 |
-| [`alias`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/alias.py) | `setOnHold()` seen from its callers, and helpers that *return* a value | 33/33 and 2/7 |
-| [`trigger`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/trigger.py) | What makes a junction run, and whether missing it repairs itself | 273/498 reached |
-| [`logfile`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/logfile.py) | Which log file a module's diagnostics land in | 315/368 resolved |
+| [`progress`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/progress.py) | `spec.attr = <value>` — the junctions the backward walk starts from | 1461/1534 |
+| [`sqlwrite`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/sqlwrite.py) | `UPDATE … SET col=:bind` — the dominant write form; a knight decides and a proxy writes | 808/1162 |
+| [`selection`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/selection.py) | `criteria=-diskIO` and `candidates passed <step>` — the filter chain | 109/109 |
+| [`loopcut`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/loopcut.py) | A guard in a loop, a `continue`, and a sentence — the same cut where nothing is declared | 149 cuts, no ratio |
+| [`boundary`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/boundary.py) | `@request_validation` endpoints, and shared tables PanDA talks to DEFT through | 99/108 and 31/31 |
+| [`errorcode`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/errorcode.py) | `EC_Kill = 100` — the constants that decode a value seen in a record | 178/194 |
+| [`alias`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/alias.py) | `setOnHold()` seen from its callers, and helpers that *return* a value | 33/33 and 2/7 |
+| [`trigger`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/trigger.py) | What makes a junction run, and whether missing it repairs itself | 273/498 reached |
+| [`logfile`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/recognizers/logfile.py) | Which log file a module's diagnostics land in | 315/368 resolved |
 
 A slice reporting less than 100% is reporting honestly, not failing. `return-alias` at
 2/7 is the clearest case: the other five helpers return computed values, and *"the map
@@ -105,7 +105,7 @@ candidate was dropped; the sentence is only its name.
 
 `x.status = "cached"` settles nothing until you know what `x` is — eight PanDA classes
 declare `status`.
-[`attribution.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/attribution.py)
+[`attribution.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/attribution.py)
 answers that, and it lives outside the recognizers because two slices need the same
 answer and would otherwise each implement it.
 
@@ -138,7 +138,7 @@ structural attribution and container element learning.
 
 The spec classes declare 421 attributes and most are identifiers, timestamps and
 counters. Promotion keeps the ones a diagnosis would ask *why* about.
-[`promotion.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/promotion.py)
+[`promotion.py`](https://github.com/PanDAWMS/bamboo/blob/master/bamboo/codemap/panda/promotion.py)
 applies five criteria; **any one of them promotes**, so they are a disjunction and adding
 one cannot invalidate an existing answer.
 
