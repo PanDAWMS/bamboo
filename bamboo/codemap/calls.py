@@ -35,7 +35,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Callable, Iterator, NamedTuple, Optional
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
 from bamboo.codemap.panda import pathcond
 
@@ -341,6 +341,42 @@ def bound_defs(scope: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDe
             yield child
         elif not isinstance(child, ast.Lambda):
             yield from bound_defs(child)
+
+
+def binding(
+    defs: Iterable[ast.stmt], name: str
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
+    """The ``def`` or ``class`` among *defs* -- one scope's statements, in source order -- that *name* is bound to
+    once the scope has run: the last that defines it, as Python binds it.
+
+    ``@overload`` stubs come before the definition that replaces them (``CoreUtils.clean_user_id``'s three,
+    ``_make_dicts_tasks_datasets_with_unprocessed_inputs``' two).  A property's ``@<name>.setter`` makes a property
+    from the one before, so it stands for that one, the getter.  Defined in both arms of an ``if`` or a ``try``,
+    the name is the one that ran; the last in source order is taken.
+    """
+    found = None
+    for node in defs:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or node.name != name:
+            continue
+        if found is None or not _extends_property(node):
+            found = node
+    return found
+
+
+def _extends_property(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> bool:
+    return any(
+        isinstance(decorator, ast.Attribute)
+        and decorator.attr in ("setter", "getter", "deleter")
+        and isinstance(decorator.value, ast.Name)
+        and decorator.value.id == node.name
+        for decorator in node.decorator_list
+    )
+
+
+def _function_binding(defs: Iterable[ast.stmt], name: str) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """:func:`binding` among the function definitions of *defs*."""
+    found = binding((node for node in defs if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), name)
+    return found if isinstance(found, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
 
 
 def returns(func: ast.AST) -> list[ast.expr]:
@@ -670,10 +706,8 @@ class Calls:
         return tuple(sorted(bound or self.objects_of(owned), key=_class_key))
 
     def _declared_in(self, file: str, cls: ast.ClassDef, name: str) -> Optional[Target]:
-        for node in cls.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                return Target(file, node, cls)
-        return None
+        node = _function_binding(cls.body, name)
+        return Target(file, node, cls) if node is not None else None
 
     def _method_of(self, declared: tuple[str, ast.ClassDef], name: str) -> Placed:
         """Where *name* lands on an object whose class is *declared* itself: the first definition in its method resolution order."""
@@ -1144,20 +1178,19 @@ class Calls:
         # ``FinisherThr``, and builds one with ``FinisherThr(...)``.
         scope: Optional[ast.AST] = func
         while scope is not None:
-            for node in bound_defs(scope):
-                if node.name != name:
-                    continue
-                if isinstance(node, ast.ClassDef):
-                    init = self._method_of((file, node), "__init__")
-                    return init if init.targets else Placed((), UNPLACED_NO_INIT)
+            node = binding(bound_defs(scope), name)
+            if isinstance(node, ast.ClassDef):
+                init = self._method_of((file, node), "__init__")
+                return init if init.targets else Placed((), UNPLACED_NO_INIT)
+            if node is not None:
                 return Placed((Target(file, node, None),))
             scope = self.types.enclosing_function(file, scope)
         tree = self.types.tree(file)
         if tree is None:
             return Placed((), UNPLACED_OUTSIDE)
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                return Placed((Target(file, node, None),))
+        defined = _function_binding(tree.body, name)
+        if defined is not None:
+            return Placed((Target(file, defined, None),))
         constructed = self.types.class_named(file, ast.Name(id=name, ctx=ast.Load()))
         if constructed is not None:
             init = self._method_of(constructed, "__init__")
@@ -1175,12 +1208,12 @@ class Calls:
         tree = self.types.tree(file)
         if tree is None:
             return Placed((), UNPLACED_OUTSIDE)
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                return Placed((Target(file, node, None),))
-            if isinstance(node, ast.ClassDef) and node.name == name:
-                init = self._method_of((file, node), "__init__")
-                return init if init.targets else Placed((), UNPLACED_NO_INIT)
+        node = binding(tree.body, name)
+        if isinstance(node, ast.ClassDef):
+            init = self._method_of((file, node), "__init__")
+            return init if init.targets else Placed((), UNPLACED_NO_INIT)
+        if node is not None:
+            return Placed((Target(file, node, None),))
         held = self.types.imports(file).get(name)
         if held is not None and held[0]:
             target = self.types.module_file(held[0])
@@ -2385,13 +2418,13 @@ class Types:
             # place, and is the module's.
             scope = self.enclosing_function(file, expression)
             while scope is not None:
-                for node in bound_defs(scope):
-                    if node.name == expression.id:
-                        return (file, node) if isinstance(node, ast.ClassDef) else None
+                node = binding(bound_defs(scope), expression.id)
+                if node is not None:
+                    return (file, node) if isinstance(node, ast.ClassDef) else None
                 scope = self.enclosing_function(file, scope)
-            for node in tree.body:
-                if isinstance(node, ast.ClassDef) and node.name == expression.id:
-                    return file, node
+            node = binding((one for one in tree.body if isinstance(one, ast.ClassDef)), expression.id)
+            if isinstance(node, ast.ClassDef):
+                return file, node
             held = self.imports(file).get(expression.id)
             if held is None:
                 return self._aliased(file, expression.id, depth)
@@ -2722,9 +2755,9 @@ class Types:
     ) -> Optional[tuple[str, ast.ClassDef, ast.FunctionDef | ast.AsyncFunctionDef]]:
         """:meth:`method`, with the class of the lineage that defines it."""
         for where, holder in self.lineage(file, cls):
-            for node in holder.body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                    return where, holder, node
+            node = _function_binding(holder.body, name)
+            if node is not None:
+                return where, holder, node
         return None
 
     # -- declarations ------------------------------------------------------
@@ -2859,9 +2892,9 @@ class Types:
         tree = self.tree(file)
         if tree is None:
             return None
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                return file, node
+        node = _function_binding(tree.body, name)
+        if node is not None:
+            return file, node
         held = self.imports(file).get(name)
         if held is None or not held[1]:
             return None
@@ -2869,10 +2902,8 @@ class Types:
         if target is None or target == file:
             return None
         other = self.tree(target)
-        for node in other.body if other is not None else ():
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == held[1]:
-                return target, node
-        return None
+        node = _function_binding(other.body, held[1]) if other is not None else None
+        return (target, node) if node is not None else None
 
     def _outside_instance(self, file: str, name: str, depth: int) -> Optional[Classes]:
         """The classes of a name this function does not bind: a module's own instance.

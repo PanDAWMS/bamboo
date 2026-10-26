@@ -180,6 +180,100 @@ def main(rows):
     assert (noted.func.name, noted.func.lineno) == ("note", 6)
 
 
+def test_a_name_defined_more_than_once_lands_where_python_binds_it(tmp_path):
+    """``CoreUtils.clean_user_id`` and ``TaskComplexModule._make_dicts_tasks_datasets_with_unprocessed_inputs``: the
+    ``@overload`` stubs come first and the definition with the body last, which the name is bound to.
+
+    Read as the first definition of the name, each call landed at a stub (49 calls on pin k, 46 of them
+    ``clean_user_id``'s), and nothing the body returns or hands on was followed.
+    """
+    roots = _tree(
+        tmp_path,
+        core='''\
+from typing import overload
+
+
+@overload
+def clean(dn: str) -> str: ...
+@overload
+def clean(dn: None) -> None: ...
+def clean(dn):
+    return dn
+
+
+def again():
+    return 1
+
+
+def again():
+    return 2
+
+
+def local():
+    return clean(None), again()
+''',
+        m='''\
+from typing import overload
+
+from pkg.core import clean
+
+
+class Module:
+    @overload
+    def make(self, peek: bool) -> int: ...
+
+    def make(self, peek):
+        return peek
+
+    def run(self, dn):
+        self.make(True)
+        return clean(dn)
+''',
+    )
+    calls = _calls(roots)
+
+    (made,) = _placed(calls, "m", "run", "self.make").targets
+    (cleaned,) = _placed(calls, "m", "run", "clean").targets
+    (local,) = _placed(calls, "core", "local", "clean").targets
+    (again,) = _placed(calls, "core", "local", "again").targets
+    stub = next(
+        node
+        for node in ast.walk(calls.types.tree("pkg/core.py"))
+        if isinstance(node, ast.FunctionDef) and node.lineno == 5
+    )
+
+    assert (made.func.lineno, cleaned.func.lineno, local.func.lineno, again.func.lineno) == (10, 8, 8, 16)
+    assert calls.callers(calls_mod.Target("pkg/core.py", stub, None)) == []
+    assert sorted((site.file, site.call.lineno) for site in calls.callers(cleaned)) == [
+        ("pkg/core.py", 21),
+        ("pkg/m.py", 15),
+    ]
+
+
+def test_a_propertys_setter_stands_for_the_property_its_getter_made(tmp_path):
+    """``DataCarouselRequestSpec.parameter_map`` and workflow_base's ``*_map``: ``@parameter_map.setter`` comes last,
+    but it makes a property from the getter, so the name is read at the getter."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+class Spec:
+    @property
+    def parameter_map(self) -> dict:
+        return {}
+
+    @parameter_map.setter
+    def parameter_map(self, value) -> None:
+        pass
+''',
+    )
+    calls = _calls(roots)
+    file, cls = calls.types.class_named("pkg/m.py", ast.Name(id="Spec", ctx=ast.Load()))
+
+    _where, getter = calls.types.method(file, cls, "parameter_map")
+
+    assert getter.lineno == 3
+
+
 def test_a_receiver_is_placed_by_what_it_is_declared_to_be_not_by_its_name(tmp_path):
     roots = _tree(
         tmp_path,
