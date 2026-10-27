@@ -105,7 +105,6 @@ from bamboo.codemap.panda.pathcond import (
     enclosing_function,
     entries,
     functions_with_owner,
-    handed_in,
     literal_values,
     names_bound_by,
     path_condition,
@@ -375,24 +374,26 @@ def _row_key_source(
     statement: sqltext.SqlWrite,
     rel_path: str,
 ) -> RowKeySource:
-    """Where a guarded write's row keys were filled from -- see :class:`RowKeySource`."""
-    handed = ""
+    """Where a guarded write's row keys were filled from -- see :class:`RowKeySource`.
+
+    The values only: who handed them is read after the reach record, by the carry (:func:`attach_key_sources`).
+    """
+    values = []
     if run.varmap is not None:
         for _column, bind in sorted(statement.keys.items()):
-            for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run):
-                handed = handed_in(func, filled.value)
-                if handed:
-                    break
-            if handed:
-                break
-    return RowKeySource(
+            values.extend(
+                (filled.value, filled.site, frozenset())
+                for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run)
+            )
+    source = RowKeySource(
         owner=f"{rel_path}::{func.name}",
         file=rel_path,
         statement=run.call.lineno,
         columns=sorted(statement.preconditions),
         keys=[f"{column}={bind}" for column, bind in sorted(statement.keys.items())],
-        handed_by=handed,
     )
+    source._filled = (func, rel_path, values)
+    return source
 
 
 def extract(
@@ -3764,6 +3765,8 @@ _DEPTH = 5
 #: ``[*]`` any element of a list, a set or a dict's values, ``[key]`` a dict's keys, ``.*`` any field (a field
 #: named by a value: ``setattr(x, n, v)``), ``...`` anything below the cut.
 _ALL, _KEY, _MORE, _ANY_FIELD = "[*]", "[key]", "...", ".*"
+#: The step for any field of an object: what a call filling it by name (``spec.pack(row)``) puts its value at.
+ANY_FIELD = _ANY_FIELD
 _Paths = frozenset[tuple[str, ...]]
 #: The value itself holds the rows.
 _WHOLE: _Paths = frozenset({()})
@@ -4874,6 +4877,111 @@ def attach_crossings(
         stored += len(site.crosses_to)
         opened += 1 if site.crosses_open else 0
     return CrossingCensus(stored, handing_back, resolved, opened)
+
+
+class _Filled:
+    """Which of a function's parameters and fields of ``self`` a value it binds was filled from, as the carry reads it.
+
+    Each way in is seeded on its own -- a parameter whole, ``self`` at one field's step -- and the value is filled
+    from each whose carry reaches it, by the rule every value is carried by: the writes of a name that survive to
+    where it is read (:func:`pathcond.surviving_writes`).  A name was once followed by its spelling over every loop
+    of the function, the nested scopes' among them: ``datasetManager.main`` bound ``:name`` from its own rows (``for
+    (name,) in resReset:``) and was said to be handed it by ``self.datasets``, a loop of a class it defines; and
+    ``lockJobOutputReport``'s ``for panda_id, attempt_nr in resGL:`` rebinds the parameters' names with its own rows,
+    which read as the caller's ``panda_id``.
+
+    A field of ``self`` is an attribute of it the function reads and does not call: ``self.cur.rowcount`` is the
+    cursor's, ``self.getNext(jediTaskID)`` hands on what it is given.  A call the reach record reads as the database
+    gives nothing back of what it is handed (:meth:`_PathCarry._call_value`), so a fetch from ``self.cur`` is not
+    the field's.
+    """
+
+    def __init__(self, reading: _Reading, file: str, func: ast.FunctionDef | ast.AsyncFunctionDef):
+        self.reading, self.file, self.func = reading, file, func
+        arguments = func.args
+        given = [one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)]
+        self.parameters = [name for name in given if name not in ("self", "cls")]
+        called = {id(node.func) for node in own_nodes(func) if isinstance(node, ast.Call)}
+        self.fields = (
+            sorted(
+                {
+                    node.attr
+                    for node in own_nodes(func)
+                    if isinstance(node, ast.Attribute)
+                    and isinstance(node.ctx, ast.Load)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                    and id(node) not in called
+                }
+            )
+            if given[:1] == ["self"]
+            else []
+        )
+        self._carries: dict[str, _PathCarry] = {}
+
+    def _carry(self, name: str, seeds: dict[str, _Paths]) -> _PathCarry:
+        carry = self._carries.get(name)
+        if carry is None:
+            carry = self._carries[name] = _PathCarry(self.reading, self.file, self.func, (), seeds=seeds)
+        return carry
+
+    def handed(self, value: ast.AST, at: ast.AST, steps: frozenset[str] = frozenset()) -> list[str]:
+        """The parameters, then the ``self.<field>`` s, that fill *value* itself where *at* runs -- or, for an
+        object, one of *steps* of it: the fields naming its row.
+
+        Not one that fills only a part: ``tmpTaskSpec`` in ``TaskRefinerThread.runImpl`` holds
+        ``self.data_carousel_interface``'s message at ``.errorDialog`` and ``self.taskList``'s task at
+        ``.jediTaskID``, and only the second names the row its flush writes.
+        """
+        return [
+            name
+            for name, paths in self._handed(value, at)
+            if _whole(paths) or any(_bare(path)[:1] and _bare(path)[0] in steps for path in paths)
+        ]
+
+    def _handed(self, value: ast.AST, at: ast.AST) -> list[tuple[str, _Paths]]:
+        found = [
+            (name, paths) for name in self.parameters if (paths := self._carry(name, {name: _WHOLE}).held(value, at))
+        ]
+        found += [
+            (f"self.{field}", paths)
+            for field in self.fields
+            if (paths := self._carry(f"self.{field}", {"self": frozenset({(f".{field}",)})}).held(value, at))
+        ]
+        return found
+
+
+def attach_key_sources(
+    row_keys: list[RowKeySource],
+    junctions: list[JunctionNode],
+    calls: Optional[Calls],
+    record: Optional["ReachGraph"],
+) -> int:
+    """Say which parameter or field of ``self`` handed each guarded write its row keys (:attr:`RowKeySource.handed_by`).
+
+    After the reach record, because the carry reads a call by where it lands and by what the record reads as the
+    database, and over the values the write's reader kept (``RowKeySource._filled``): the first, in the keys' order,
+    that a parameter or a field fills -- the key's value itself, or the field of a flushed spec naming its row
+    (:meth:`_Filled.handed`).  Returns how many were read; without *calls* or *record* none is, and every
+    ``handed_by`` stays empty.
+    """
+    if calls is None or record is None:
+        return 0
+    reading = _Reading(calls, {junction.owner for junction in junctions}, record)
+    filled: dict[int, tuple[ast.AST, _Filled]] = {}
+    read = 0
+    for source in row_keys:
+        if source._filled is None:
+            continue
+        func, file, values = source._filled
+        held = filled.get(id(func))
+        if held is None:
+            held = filled[id(func)] = (func, _Filled(reading, file, func))
+        source.handed_by = next(
+            (names[0] for value, at, steps in values if (names := held[1].handed(value, at, steps))), ""
+        )
+        read += 1
+    return read
 
 
 def entity_nodes(

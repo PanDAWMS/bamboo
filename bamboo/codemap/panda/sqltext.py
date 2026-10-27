@@ -1564,6 +1564,11 @@ _INLINE_PRIMARY_KEY = re.compile(r'^\s*(?:CONSTRAINT\s+"?\w+"?\s+)?PRIMARY\s+KEY
 _COLUMN_PRIMARY_KEY = re.compile(r"\bPRIMARY\s+KEY\b(?!\s*\()", re.IGNORECASE)
 
 
+def table_key(table: str) -> frozenset[str]:
+    """*table*'s primary key's columns, lowered, as :func:`with_schema` was given them; empty outside it."""
+    return (_KEYS or {}).get(table.lower(), frozenset())
+
+
 def read_keys(directory: Path) -> dict[str, frozenset[str]]:
     """``{table: its primary key's columns}``, both lowered, from the DDL :func:`read_schema` reads.
 

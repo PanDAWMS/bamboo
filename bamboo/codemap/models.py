@@ -44,7 +44,7 @@ import json
 import re
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_validator
 
 from bamboo.models.graph_element import BaseNode, NodeType
 
@@ -2566,9 +2566,19 @@ class RowKeySource(BaseModel):
         default="",
         description=(
             "The parameter or ``self`` field a key was filled from, or empty "
-            "when every key was filled here."
+            "when every key was filled here.  Read as the carry reads any "
+            "value, each parameter and each field of ``self`` seeded on its "
+            "own, after the reach record: ``for panda_id, attempt_nr in "
+            "resGL:`` rebinds the parameters' names with the function's own "
+            "rows, and a key bound from ``panda_id`` below is not the "
+            "caller's.  Empty, too, where the build had no corpus calls to "
+            "read it with."
         ),
     )
+    #: The key values to read *handed_by* from, ``(func, file, [(value, statement, steps)])`` in the keys' order --
+    #: *steps* the fields of an object that name its row; the step
+    #: after the reach record reads them (:func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_key_sources`).
+    _filled: Optional[tuple] = PrivateAttr(default=None)
 
 
 class CoverageStat(BaseModel):

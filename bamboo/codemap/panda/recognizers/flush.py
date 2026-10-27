@@ -65,7 +65,6 @@ from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
-    handed_in,
     targets_of,
 )
 from bamboo.codemap.panda.recognizers import logfile, sqlwrite
@@ -310,6 +309,7 @@ def attach(
     modules: list[SourceModule],
     attributor: SpecAttributor,
     row_keys: Optional[list[RowKeySource]] = None,
+    key_fields: Optional[dict[str, frozenset[str]]] = None,
 ) -> int:
     """Give each caller's branches the row its flush needed.  Returns how many.
 
@@ -318,6 +318,7 @@ def attach(
     from -- a parameter, a field, or this function's own query -- is who named
     the row.  ``TaskBuffer.updateJobs`` flushes each of the ``jobs`` its caller
     passed, and its guard requires ``defined`` of rows it never selected.
+    *key_fields* says which fields of each spec name its row (:func:`row_key_fields`).
 
     Applied to every branch of a matching junction rather than to the writes
     that provably reach the flush call: a method that changes a spec and then
@@ -357,7 +358,9 @@ def attach(
                     if not guards and not flush.rows_emits:
                         continue
                     if row_keys is not None and guards:
-                        row_keys.append(_row_key_source(node, func, owner, spec, flush, guards, module, attributor))
+                        row_keys.append(
+                            _row_key_source(node, func, owner, spec, flush, guards, module, attributor, key_fields or {})
+                        )
                     for junction in here:
                         if junction.subject not in {
                             SubjectNode.make_name(spec, attribute) for attribute in written
@@ -389,20 +392,41 @@ def _row_key_source(
     guards: list[str],
     module: SourceModule,
     attributor: SpecAttributor,
+    key_fields: dict[str, frozenset[str]],
 ) -> RowKeySource:
-    """The spec a guarded flush is handed, and whether the caller handed it here."""
-    handed = ""
-    passed: list[str] = []
-    for argument in (*call.args, *(keyword.value for keyword in call.keywords)):
-        if attributor.class_of(argument, func, owner) != spec:
-            continue
-        passed.append(ast.unparse(argument))
-        handed = handed or handed_in(func, argument)
-    return RowKeySource(
+    """The spec a guarded flush is handed; whether the caller handed it here is read after the reach record
+    (:func:`sqlwrite.attach_key_sources`)."""
+    passed: list[ast.expr] = [
+        argument
+        for argument in (*call.args, *(keyword.value for keyword in call.keywords))
+        if attributor.class_of(argument, func, owner) == spec
+    ]
+    source = RowKeySource(
         owner=f"{module.rel_path}::{func.name}",
         file=module.rel_path,
         statement=call.lineno,
         columns=sorted(column for column, (term, _gating) in flush.guards.items() if term in guards),
-        keys=passed,
-        handed_by=handed,
+        keys=[ast.unparse(argument) for argument in passed],
     )
+    # What names the spec's row: the object itself, or a field holding its table's key (``.jediTaskID``) -- or any
+    # field, where something fills the object by name (``taskSpec.pack(row)``).
+    steps = key_fields.get(spec, frozenset()) | {sqlwrite.ANY_FIELD}
+    source._filled = (func, module.rel_path, [(argument, call, steps) for argument in passed])
+    return source
+
+
+def row_key_fields(attributor: SpecAttributor) -> dict[str, frozenset[str]]:
+    """``{spec class: the steps of its fields that name its row}`` -- its tables' key columns as the class spells
+    them, ``{"JediTaskSpec": {".jediTaskID"}}``.
+
+    Off an attributor that learned which tables hold which class (:meth:`SpecAttributor.learn_table_classes`) and
+    inside :func:`sqltext.with_schema` (:func:`sqltext.table_key`).  The one :func:`attach` reads callers with does
+    not learn the tables, and a spec with none learned names its row by no field.
+    """
+    found: dict[str, frozenset[str]] = {}
+    for spec in attributor.declared_classes():
+        keyed = set().union(*(sqltext.table_key(table) for table in attributor.tables_of(spec)))
+        steps = frozenset("." + attribute for attribute in attributor.declared_attributes(spec) if attribute.lower() in keyed)
+        if steps:
+            found[spec] = steps
+    return found
