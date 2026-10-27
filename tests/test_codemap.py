@@ -18039,3 +18039,241 @@ def test_a_key_filled_from_a_batch_is_the_batched_values_not_the_batch_size(tmp_
     (key_from,) = [one for one in froms if one.term == "jediTaskID=:jediTaskID"]
     assert key_from.unread == ""
     assert {(source.kind, source.name) for source in key_from.sources} == {("parameter", "task_dict")}
+
+
+_BORN = '''
+class JobModule:
+    def holdJob(self, pandaID):
+        sqlH = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID "
+        self.cur.execute(sqlH + comment, {":jobStatus": "holding", ":PandaID": pandaID})
+
+    def killJob(self, pandaID):
+        sqlS = "SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID "
+        self.cur.execute(sqlS + comment, {":PandaID": pandaID})
+        res = self.cur.fetchone()
+        job = JobSpec()
+        job.PandaID = res[0]
+        job.jobStatus = "cancelled"
+        sqlA = f"INSERT INTO ATLAS_PANDA.jobsArchived4 ({JobSpec.columnNames()}) "
+        sqlA += JobSpec.bindValuesExpression()
+        self.cur.execute(sqlA + comment, job.valuesMap())
+
+    def archiveJob(self, job: JobSpec):
+        job.jobStatus = "finished"
+        sqlA = f"INSERT INTO ATLAS_PANDA.jobsArchived4 ({JobSpec.columnNames()}) "
+        sqlA += JobSpec.bindValuesExpression()
+        self.cur.execute(sqlA + comment, job.valuesMap())
+
+    def addReport(self, pandaID, attemptNr):
+        sqlR = "INSERT INTO ATLAS_PANDA.Job_Output_Report (PandaID,attemptNr,status) VALUES (:PandaID,:attemptNr,:status) "
+        self.cur.execute(sqlR + comment, {":PandaID": pandaID, ":attemptNr": attemptNr, ":status": "new"})
+
+    def lockProcess(self, vo):
+        sqlD = "DELETE FROM ATLAS_PANDA.Process_Lock WHERE vo=:vo "
+        self.cur.execute(sqlD + comment, {":vo": vo})
+        sqlI = "INSERT INTO ATLAS_PANDA.Process_Lock (vo,lockedBy) VALUES (:vo,:lockedBy) "
+        self.cur.execute(sqlI + comment, {":vo": vo, ":lockedBy": "me"})
+
+    def addEvents(self, pandaID, nEvents):
+        sqlE = "INSERT INTO ATLAS_PANDA.Events (PandaID,eventID,status) VALUES (:PandaID,:eventID,:status) "
+        varMaps = []
+        for i in range(nEvents):
+            varMaps.append({":PandaID": pandaID, ":eventID": i + 1, ":status": "ready"})
+        self.cur.executemany(sqlE + comment, varMaps)
+
+    def addStdOut(self, pandaID, stdOut, exists):
+        sqlU = "UPDATE ATLAS_PANDA.jobsDebug SET stdOut=:stdOut WHERE PandaID=:PandaID "
+        sqlI = "INSERT INTO ATLAS_PANDA.jobsDebug (PandaID,stdOut) VALUES (:PandaID,:stdOut) "
+        if exists:
+            sql = sqlU
+        else:
+            sql = sqlI
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        varMap[":stdOut"] = stdOut
+        self.cur.execute(sql + comment, varMap)
+
+    def moveJob(self, pandaID, spare: JobSpec):
+        varMap = spare.valuesMap()
+        sqlS = "SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID "
+        self.cur.execute(sqlS + comment, {":PandaID": pandaID})
+        res = self.cur.fetchone()
+        job = JobSpec()
+        job.PandaID = res[0]
+        sqlA = f"INSERT INTO ATLAS_PANDA.jobsArchived4 ({JobSpec.columnNames()}) "
+        sqlA += JobSpec.bindValuesExpression()
+        varMap = job.valuesMap()
+        self.cur.execute(sqlA + comment, varMap)
+
+    def addFiles(self, files):
+        varMaps = []
+        for lfn in files:
+            fileSpec = FileSpec()
+            fileSpec.lfn = lfn
+            varMaps.append(fileSpec.valuesMap())
+        sqlF = f"INSERT INTO ATLAS_PANDA.filesTable4 ({FileSpec.columnNames()}) "
+        sqlF += FileSpec.bindValuesExpression()
+        self.cur.executemany(sqlF + comment, varMaps)
+
+    def newTask(self):
+        sqlT = "INSERT INTO ATLAS_PANDA.JEDI_Tasks (jediTaskID,status) "
+        sqlT += "VALUES (ATLAS_PANDA.JEDI_TASK_ID_SEQ.nextval,:status) RETURNING jediTaskID INTO :newID "
+        self.cur.execute(sqlT + comment, {":status": "defined", ":newID": None})
+
+    def retryJob(self, pandaID):
+        sql1 = "SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID "
+        for iTry in range(3):
+            try:
+                varMap = {}
+                varMap[":PandaID"] = pandaID
+                self.cur.execute(sql1 + comment, varMap)
+                res = self.cur.fetchone()
+                job = JobSpec()
+                job.PandaID = res[0]
+                sql1 = f"INSERT INTO ATLAS_PANDA.jobsActive4 ({JobSpec.columnNames()}) "
+                sql1 += JobSpec.bindValuesExpression() + " RETURNING PandaID INTO :newPandaID"
+                varMap = job.valuesMap()
+                varMap[":newPandaID"] = self.cur.var(varNUMBER)
+                self.cur.execute(sql1 + comment, varMap)
+                return True
+            except Exception:
+                continue
+
+    def addContents(self, nFiles):
+        sqlFID = "SELECT ATLAS_PANDA.JEDI_DATASET_CONT_FILEID_SEQ.nextval FROM "
+        sqlFID += "(SELECT level FROM dual CONNECT BY level<=:nIDs) "
+        self.cur.execute(sqlFID + comment, {":nIDs": nFiles})
+        resFID = self.cur.fetchall()
+        newFileIDs = []
+        for (fileID,) in resFID:
+            newFileIDs.append(fileID)
+        varMaps = []
+        for fileID in newFileIDs:
+            fileSpec = JediFileSpec()
+            fileSpec.fileID = None
+            if fileID is not None:
+                fileSpec.fileID = fileID
+                varMaps.append(fileSpec.valuesMap())
+        sqlC = f"INSERT INTO ATLAS_PANDA.JEDI_Dataset_Contents ({JediFileSpec.columnNames()}) "
+        sqlC += JediFileSpec.bindValuesExpression()
+        self.cur.executemany(sqlC + comment, varMaps)
+
+    def copyContents(self, jediTaskID, fileID):
+        sqlGI = "SELECT * FROM ATLAS_PANDA.JEDI_Dataset_Contents WHERE jediTaskID=:jediTaskID AND fileID=:fileID "
+        self.cur.execute(sqlGI + comment, {":jediTaskID": jediTaskID, ":fileID": fileID})
+        resGI = self.cur.fetchone()
+        sqlJI = "INSERT INTO ATLAS_PANDA.JEDI_Dataset_Contents VALUES ("
+        varMap = {}
+        for columDesc, columVal in zip(self.cur.description, resGI):
+            keyName = f":{columDesc[0]}"
+            varMap[keyName] = columVal
+            sqlJI += f"{keyName},"
+        sqlJI = sqlJI[:-1] + ") "
+        self.cur.execute(sqlJI + comment, varMap)
+
+    def linkJobs(self, workerID, pandaIDs, stale):
+        for pandaID in pandaIDs:
+            sqlL = "INSERT INTO ATLAS_PANDA.Rel_Jobs (workerID,PandaID) VALUES (:workerID,:PandaID) "
+            self.cur.execute(sqlL + comment, {":workerID": workerID, ":PandaID": pandaID})
+        for pandaID in stale:
+            sqlX = "DELETE FROM ATLAS_PANDA.Rel_Jobs WHERE workerID=:workerID AND PandaID=:PandaID "
+            self.cur.execute(sqlX + comment, {":workerID": workerID, ":PandaID": pandaID})
+
+    def addRequests(self, dc_req_specs):
+        for dc_req_spec in dc_req_specs:
+            sqlR = f"INSERT INTO ATLAS_PANDA.data_carousel_requests ({dc_req_spec.columnNames()}) "
+            sqlR += f"{dc_req_spec.bindValuesExpression()} RETURNING request_id INTO :new_request_id "
+            var_map = dc_req_spec.valuesMap(useSeq=True)
+            var_map[":new_request_id"] = self.cur.var(varNUMBER)
+            self.cur.execute(sqlR + comment, var_map)
+'''
+
+
+def test_an_insert_says_whether_it_makes_its_row_or_moves_one_of_its_class(tmp_path):
+    """BI, with the querier: an INSERT always makes a row of its table; S1 asks whether the entity was a row of its
+    class before.  Moved: its key carried from a row of the class read here (killJob's archive); rewritten: the
+    function deletes the row its whole key names first; new: a key column filled by RETURNING or a sequence, computed
+    here, or carried from something not of the class (a scalar handed in, a table no class maps); not said: an object
+    of the class handed in (who made its key is the caller's).  A key's dated columns time a version, and are left
+    out (jobsArchived4's MODIFICATIONTIME).  An object's INSERT writes the subjects the function assigns on it.
+    A run that updates the row or inserts it is not said; the object is the one whose map reaches a call of the run,
+    or whose maps the list ``executemany`` takes holds; its field is what the function assigns to it where the map
+    is made, read through the value assigned -- a sequence's next values are a source of their own.  An INSERT
+    spelling no columns gets one record per key column all the same: ``RETURNING``'s is new, the others not read.
+    (``holdJob`` is there for the class ``jobsActive4`` holds: the attributor learns it from a write's columns.)"""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _BORN})
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    keys = {
+        "jobsarchived4": frozenset({"pandaid", "modificationtime"}),
+        "jobsactive4": frozenset({"pandaid"}),
+        "job_output_report": frozenset({"pandaid", "attemptnr"}),
+        "process_lock": frozenset({"vo"}),
+        "events": frozenset({"pandaid", "eventid"}),
+        "jedi_tasks": frozenset({"jeditaskid"}),
+        "jobsdebug": frozenset({"pandaid"}),
+        "filestable4": frozenset({"row_id"}),
+        "jedi_dataset_contents": frozenset({"fileid"}),
+        "data_carousel_requests": frozenset({"request_id"}),
+        "rel_jobs": frozenset({"workerid", "pandaid"}),
+    }
+    froms: list[KeyFrom] = []
+    _s, attribute_junctions, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    with sql.across_calls(calls), sqltext.with_schema(None, keys, {"jobsarchived4": frozenset({"modificationtime"})}):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions + attribute_junctions, calls, record, key_froms=froms, read_sites=sites,
+            table_class=attributor.class_for_table,
+        )
+
+    marks = {
+        (one.owner.rpartition("::")[2], one.table.lower(), one.term): (one.new_row, one.new_row_by)
+        for one in froms
+        if one.new_row is not None or one.new_row_by
+    }
+    assert marks == {
+        ("killJob", "jobsarchived4", "PandaID=job.PandaID"): (False, "moved within its class"),
+        ("archiveJob", "jobsarchived4", "PandaID=job.PandaID"): (None, "handed in as its class"),
+        ("addReport", "job_output_report", "PandaID=:PandaID"): (True, "not of its class"),
+        ("addReport", "job_output_report", "attemptNr=:attemptNr"): (True, "not of its class"),
+        ("lockProcess", "process_lock", "vo=:vo"): (False, "rewritten"),
+        ("addEvents", "events", "PandaID=:PandaID"): (True, "computed"),
+        ("addEvents", "events", "eventID=:eventID"): (True, "computed"),
+        ("newTask", "jedi_tasks", "jediTaskID RETURNING"): (True, "returning"),
+        ("addStdOut", "jobsdebug", "PandaID=:PandaID"): (None, "updates or inserts"),
+        ("moveJob", "jobsarchived4", "PandaID=job.PandaID"): (False, "moved within its class"),
+        ("addFiles", "filestable4", "row_id"): (None, "not read"),
+        # sql1 holds the INSERT at the SELECT's call too, round the retry loop: one run of two calls, the object's map
+        # reaching the second.  The text before its RETURNING reaches the first as well; it shares the mark.
+        ("retryJob", "jobsactive4", "PandaID RETURNING"): (True, "returning"),
+        ("retryJob", "jobsactive4", "pandaid"): (True, "returning"),
+        # The field as assigned where the map is made -- not its reset to None above -- from the sequence's values.
+        ("addContents", "jedi_dataset_contents", "fileID=fileSpec.fileID"): (True, "sequence"),
+        ("copyContents", "jedi_dataset_contents", "fileid"): (None, "not read"),
+        ("addRequests", "data_carousel_requests", "request_id RETURNING"): (True, "returning"),
+        # A DELETE of the whole key after the INSERT deletes other rows: the one inserted is still new.
+        ("linkJobs", "rel_jobs", "workerID=:workerID"): (True, "not of its class"),
+        ("linkJobs", "rel_jobs", "PandaID=:PandaID"): (True, "not of its class"),
+    }
+    # The map reaching the run is job's, not the spare's assigned above it; the files' maps are the list's.
+    assert {one.object for one in froms if one.owner.endswith(("::moveJob", "::addFiles")) and one.new_row_by} == {
+        "job",
+        "fileSpec",
+    }
+    assert {one.object for one in froms if one.owner.endswith(("::retryJob", "::addRequests")) and one.object} == {
+        "job",
+        "dc_req_spec",
+    }
+    (filled,) = [one for one in froms if one.owner.endswith("::addContents")]
+    assert [(source.kind, source.name) for source in filled.sources] == [("sequence", "JEDI_DATASET_CONT_FILEID_SEQ")]
+    lines = _BORN.split("\n")
+    (killed,) = [one for one in froms if one.owner.endswith("::killJob") and one.table.lower() == "jobsarchived4"]
+    assert killed.object == "job"
+    assert killed.writes == {
+        "JobSpec.PandaID": [next(n for n, line in enumerate(lines, 1) if "job.PandaID = res[0]" in line)],
+        "JobSpec.jobStatus": [next(n for n, line in enumerate(lines, 1) if '"cancelled"' in line)],
+    }

@@ -205,6 +205,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._stop_disagreements: list[str] = []
         self._schema: Optional[dict[str, frozenset[str]]] = None
         self._keys: Optional[dict[str, frozenset[str]]] = None
+        self._dated: Optional[dict[str, frozenset[str]]] = None
         self._schema_stamp = "none"
         self._recorded: Optional[calls_mod.Recorded] = None
         self._record_stamp = "none"
@@ -223,6 +224,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if schema_root is not None:
             self._schema = sqltext.read_schema(schema_root)
             self._keys = sqltext.read_keys(schema_root)
+            self._dated = sqltext.read_dated(schema_root)
             self._schema_stamp = _schema_stamp(Path(schema_root), self._schema, self._keys)
         if instance_record is not None:
             self._recorded, self._record_stamp = calls_mod.read_recorded(Path(instance_record))
@@ -251,7 +253,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if not self._modules:
             raise RuntimeError("prepare() must be called before run()")
         self._calls = sqlwrite.corpus_calls(self._modules, self._roots, self._recorded)
-        with sql.across_calls(self._calls), sqltext.with_schema(self._schema, self._keys):
+        with sql.across_calls(self._calls), sqltext.with_schema(self._schema, self._keys, self._dated):
             return self._run()
 
     @property
@@ -663,6 +665,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             record,
             key_froms=fragment.key_froms,
             read_sites=fragment.read_sites,
+            # Whose rows a read site's tables hold, for an INSERT's mark: off the attributor that learned the tables.
+            table_class=attributor.class_for_table,
         )
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a

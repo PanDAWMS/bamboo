@@ -2582,18 +2582,41 @@ class RowKeySource(BaseModel):
 
 
 #: Where a value filling a write's row-naming bind came from (:attr:`KeySource.kind`): the rows of a statement of
-#: the same function, a parameter, a field of ``self`` -- each read by the carry -- or, where none of those reaches
-#: it, a literal, an attribute of something else, or a value the map does not follow.
+#: the same function, a sequence's next values a statement of it selects (``SELECT ...FILEID_SEQ.nextval FROM
+#: dual``, which reads no table and so is no read site), a parameter, a field of ``self`` -- each read by the carry
+#: -- or, where none of those reaches it, a literal, an attribute of something else, or a value the map does not
+#: follow.
 KEY_ROWS = "rows"
+KEY_SEQUENCE = "sequence"
 KEY_PARAMETER = "parameter"
 KEY_SELF_FIELD = "self_field"
 KEY_CONSTANT = "constant"
 KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
-KEY_KINDS = (KEY_ROWS, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
+KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
 #: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`).
 KEY_NO_MAP = "no bind map"
 KEY_NO_BIND = "no bind found"
+#: Why an ``INSERT`` makes a row or writes one that was a row of its class before (:attr:`KeyFrom.new_row_by`).
+#: New: a key column filled from a sequence, by ``RETURNING``, with a literal, with a value computed here, or with
+#: one carried from something not of the table's class (a scalar handed in, a parent's row).
+NEW_ROW_SEQUENCE = "sequence"
+NEW_ROW_RETURNING = "returning"
+NEW_ROW_LITERAL = "literal"
+NEW_ROW_COMPUTED = "computed"
+NEW_ROW_OTHER_CLASS = "not of its class"
+#: Not new: every key column carried from a row of the table's class read here, or the function deletes the row
+#: its whole key names from the same table first.
+NEW_ROW_MOVED = "moved within its class"
+NEW_ROW_REWRITTEN = "rewritten"
+#: Not said: a key column carried from an object of the table's class handed in (who made its key is the
+#: caller's), the table has no key in the schema (or only dated columns), or a key column's value is not read.
+NEW_ROW_HANDED = "handed in as its class"
+NEW_ROW_NO_KEY = "no key"
+NEW_ROW_UNREAD = "not read"
+#: Not said either: the run updates the row or inserts it -- one text or the other of one statement
+#: (``addStdOut``'s ``sqlU`` / ``sqlI``) -- so the row it writes may have been there.
+NEW_ROW_UPSERT = "updates or inserts"
 
 
 class KeySource(BaseModel):
@@ -2605,18 +2628,21 @@ class KeySource(BaseModel):
         default="",
         description=(
             "``rows``: the :class:`ReadSiteNode`'s name (``panda:<owner>@<line>``, also as *site_owner* and "
-            "*site_line*); ``parameter``: its name; ``self_field``: ``self.<field>``; ``constant``: its repr; "
-            "``attribute`` / ``unknown``: the value as written."
+            "*site_line*); ``sequence``: the sequence's (``JEDI_DATASET_CONT_FILEID_SEQ``); ``parameter``: its "
+            "name; ``self_field``: ``self.<field>``; ``constant``: its repr; ``attribute`` / ``unknown``: the value "
+            "as written."
         ),
     )
-    site_owner: str = Field(default="", description="``rows``: the read site's owner.")
-    site_line: Optional[int] = Field(default=None, description="``rows``: the line the read site's statement runs on.")
+    site_owner: str = Field(default="", description="``rows`` / ``sequence``: the statement's owner.")
+    site_line: Optional[int] = Field(
+        default=None, description="``rows`` / ``sequence``: the line the statement runs on."
+    )
     paths: list[str] = Field(
         default_factory=list,
         description=(
-            "``rows`` / ``parameter`` / ``self_field``: where in the bind's value they sit -- ``()`` the value "
-            "itself, else its steps (``[0]``, ``.f``, ``[*]``).  Which column of a row fills the key is not said: "
-            "the carry says where the rows sit in a value, and a part of them reads as them."
+            "``rows`` / ``sequence`` / ``parameter`` / ``self_field``: where in the bind's value they sit -- ``()`` "
+            "the value itself, else its steps (``[0]``, ``.f``, ``[*]``).  Which column of a row fills the key is not "
+            "said: the carry says where the rows sit in a value, and a part of them reads as them."
         ),
     )
 
@@ -2664,8 +2690,46 @@ class KeyFrom(BaseModel):
         description=f"Empty, or why the term's values were not read: ``{KEY_NO_MAP}`` / ``{KEY_NO_BIND}``.",
     )
     sources: list[KeySource] = Field(default_factory=list)
+    object: str = Field(
+        default="",
+        description=(
+            "The object whose fields the write persists -- ``job`` of ``execute(sql, job.valuesMap())`` -- or empty "
+            "for a term of a bind map; its fields' values are the term's, and *writes* has the subjects the function "
+            "assigns on it."
+        ),
+    )
+    new_row: Optional[bool] = Field(
+        default=None,
+        description=(
+            "On every KeyFrom of an ``INSERT`` (one per key column of its table, dated ones left out): ``True`` where "
+            "the statement makes the row, ``False`` where it writes one that was a row of the table's class before "
+            "(moved within its class, or rewritten), ``None`` where that is not read; always ``None`` for any "
+            "other statement.  Its why is *new_row_by*."
+        ),
+    )
+    new_row_by: str = Field(
+        default="",
+        description=(
+            f"``{NEW_ROW_SEQUENCE}`` / ``{NEW_ROW_RETURNING}`` / ``{NEW_ROW_LITERAL}`` / ``{NEW_ROW_COMPUTED}`` / "
+            f"``{NEW_ROW_OTHER_CLASS}`` (new); ``{NEW_ROW_MOVED}`` / ``{NEW_ROW_REWRITTEN}`` (not new); "
+            f"``{NEW_ROW_HANDED}`` / ``{NEW_ROW_UPSERT}`` / ``{NEW_ROW_NO_KEY}`` / ``{NEW_ROW_UNREAD}`` (not said)."
+        ),
+    )
+    new_row_line: Optional[int] = Field(
+        default=None,
+        description=(
+            "Where *new_row_by* is read: the statement selecting the sequence, the one returning the key, the value "
+            "computed or carried, the delete -- or the ``INSERT`` itself."
+        ),
+    )
     #: The binds to read *sources* from, ``(func, file, [sql.Bind])``; the step after the reach record reads them.
     _binds: Optional[tuple] = PrivateAttr(default=None)
+    #: An ``INSERT``'s, what decides *new_row* beside the sources: see :class:`~bamboo.codemap.panda.recognizers.
+    #: sqlwrite._Insert`.
+    _insert: Optional[Any] = PrivateAttr(default=None)
+    #: ``(object as spelled, its class)`` where *object* is set: the step after the reach record adds to *writes* the
+    #: subjects the function assigns on it.
+    _object: Optional[tuple] = PrivateAttr(default=None)
 
 
 class CoverageStat(BaseModel):
