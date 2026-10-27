@@ -86,6 +86,11 @@ from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
+    KEY_BOUND,
+    KEY_HANDED,
+    KEY_KEPT,
+    KEY_NO_USE,
+    KEY_RETURNED,
     KEY_ROWS,
     KEY_UNKNOWN,
     MUST_ROW_WRITTEN,
@@ -491,16 +496,32 @@ def births_of(writers: list, owner: str, subject: str, observed: str) -> list[in
                    if b.line is not None and b.outcome != observed and born(b, marks)})
 
 
-def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]]]:
-    """``(keyed, unread)`` over *arms*, the arms of *rs*'s owner by line.  *keyed*: those whose write the map says
-    names its row by a key filled from *rs*'s rows -- a ``KeyFrom`` of the owner's writing *subject* on a line of the
-    arm's branch (its ``line`` or ``other_lines``), with a ``rows`` source of *rs*'s owner and line
+def born_lines(writers: list, owner: str, subject: str) -> set[int]:
+    """*owner*'s branch lines of *subject* that are births (``born``), whatever they write: a write that makes the row
+    writes no row that was there before (KNOWN_ISSUES.md K29)."""
+    marks = birth_marks(owner, subject)
+    return {b.line for j in writers if j.owner == owner for b in j.branches if b.line is not None and born(b, marks)}
+
+
+#: what the fields of an object no write in its function persists reach, as the map's KeyFrom of no term says
+UNPERSISTED = (KEY_HANDED, KEY_BOUND, KEY_RETURNED, KEY_KEPT, KEY_NO_USE)
+
+
+def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]], dict[int, list[str]]]:
+    """``(keyed, unread, unpersisted)`` over *arms*, the arms of *rs*'s owner by line.  *keyed*: those whose write the
+    map says names its row by a key filled from *rs*'s rows -- a ``KeyFrom`` of the owner's writing *subject* on a
+    line of the arm's branch (its ``line`` or ``other_lines``), with a ``rows`` source of *rs*'s owner and line
     (prepareTasksToBeFinished_JEDI keys the writes of its later loop by the jediTaskID its statements at 3723 and 3768
     select, past their region).  Whatever column of the rows fills the key counts: the map does not say which
     (KNOWN_ISSUES.md K28).  *unread*: the others with a row-naming term the map did not read -- its ``unread``, or a
-    value it did not follow -- each with the terms and why: their rows may be *rs*'s too."""
+    value it did not follow -- each with the terms and why: their rows may be *rs*'s too.  *unpersisted*: the others
+    set on an object no write in the function persists -- a KeyFrom of no term, its ``unread`` what the object's
+    fields reach (``UNPERSISTED``) -- each with the object and where its fields go: there is no key here to read,
+    and the write that persists the value, if any, is the caller's or a callee's (datasetManager.run's ``file.status
+    = "failed"`` at 713, a file of the job it hands on)."""
     keyed: set[int] = set()
     unread: dict[int, list[str]] = {}
+    unpersisted: dict[int, list[str]] = {}
     for kf in key_froms():
         if kf.owner != rs.owner or subject not in kf.writes:
             continue
@@ -510,10 +531,21 @@ def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[i
         if any(s.kind == KEY_ROWS and s.site_owner == rs.owner and s.site_line == rs.line for s in kf.sources):
             keyed |= at
             continue
+        if not kf.term and kf.unread in UNPERSISTED:
+            to = ", ".join(h.split("::")[-1] for h in getattr(kf, "handed_to", None) or [])
+            for line in at:
+                unpersisted.setdefault(line, []).append(f"{kf.object} ({kf.unread}{': ' + to if to else ''})")
+            continue
         why = [kf.unread] if kf.unread else [f"not followed: {s.name}" for s in kf.sources if s.kind == KEY_UNKNOWN]
         for line in at if why else ():
             unread.setdefault(line, []).append(f"{kf.term} ({'; '.join(why)})")
-    return sorted(keyed), {line: said for line, said in sorted(unread.items()) if line not in keyed}
+    return (sorted(keyed), {line: said for line, said in sorted(unread.items()) if line not in keyed},
+            {line: said for line, said in sorted(unpersisted.items()) if line not in keyed})
+
+
+def _by_line(said: dict[int, list[str]]) -> str:
+    """``keyed_arms``' *unread* or *unpersisted* as a mover's line says it: "4300: PandaID=:PandaID (no bind found)"."""
+    return "; ".join(f"{line}: {', '.join(what)}" for line, what in said.items())
 
 
 def _reached(follow, writers: list, subject: str, observed: str):
@@ -523,7 +555,8 @@ def _reached(follow, writers: list, subject: str, observed: str):
     hands its rows to its owner when an arm of the owner's lies in the statement's ``region``, the span the map reads
     where the rows go next, and to the writers among what the owner calls there (``crosses_to``).  Past the region, an
     arm of the owner's whose write names its row by a key the statement's rows fill is the statement's too, and one
-    whose key the map did not read keeps the owner, said (``keyed_arms``); either way the statement hands its rows on
+    whose key the map did not read, or whose value no write in the function persists, keeps the owner, said
+    (``keyed_arms``); either way the statement hands its rows on
     as one whose owner has no arm in the region does: to what it calls there, or it keeps them (a mover with no arm of
     its own: KNOWN_ISSUES.md K14).  A statement that aggregates (the map's ``result``) gives none: what it hands on is
     a value computed from the rows, not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator,
@@ -544,13 +577,18 @@ def _reached(follow, writers: list, subject: str, observed: str):
                 if callee in writing:
                     yield callee, f"{reader} hands the rows it selects to it", rs
             continue
-        keyed, unread = keyed_arms(writers, rs, subject, arms)
+        keyed, unread, unpersisted = keyed_arms(writers, rs, subject, arms)
         if keyed:
             yield rs.owner, f"{reader} selects the value, and its rows fill the key of the write(s) at {keyed}", rs
-        elif unread:
-            said = "; ".join(f"{line}: {', '.join(terms)}" for line, terms in unread.items())
-            yield rs.owner, (f"{reader} selects the value, and the map could not read what fills the key of the "
-                             f"write(s) at {list(unread)} ({said}): kept"), rs
+        elif unread or unpersisted:
+            why = []
+            if unread:
+                why.append(f"the map could not read what fills the key of the write(s) at {list(unread)} "
+                           f"({_by_line(unread)})")
+            if unpersisted:
+                why.append(f"no write in the function persists the value(s) set at {list(unpersisted)} "
+                           f"({_by_line(unpersisted)})")
+            yield rs.owner, f"{reader} selects the value, and {', and '.join(why)}: kept", rs
         for owner in rs.crosses_to or [rs.owner]:
             yield owner, f"{reader} hands the rows it selects to it" if rs.crosses_to else f"{reader} selects the value", rs
     for g in follow.guarded_by:
@@ -1423,6 +1461,9 @@ class Rerun:
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
             asking = W.at_transition(state)
+        readings, said = self._unborn(readings, subject, state)
+        if said:
+            self.say(said)
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._candidates(readings)
@@ -1471,6 +1512,31 @@ class Rerun:
             self._readings[(subject, value)] = inv.hops[0].strategy.readings
         return self._readings[(subject, value)]
 
+    def _unborn(self, readings: list, subject: str, state: dict | None) -> tuple[list, str]:
+        """``(readings, said)``: *readings* less their lines that make the row (births, K29) where the statuslog holds
+        a row of the key before *state*.  The row was there, and a write that makes a row writes none that was:
+        ppEventServiceJob's new jobs, INSERTed activated with a sequence's PandaID, did not write a job's 'activated'
+        after its 'defined'.  A reading left with no line goes; *said* names what went.  With no row before *state*
+        (the row's first, a tie, no state) every reading stays: the birth may be the row's."""
+        states = (self.data.get("statuslog") or {}).get("states") or []
+        marked = {id(r) for r in readings if any(m and all(is_birth(kf) for kf in m)
+                                                 for m in map(birth_marks(r.owner, subject).get, r.lines))}
+        if not marked or state is None or not HD.row_before(states, state):
+            return readings, ""
+        writers = asyncio.run(self._writers_of(subject))
+        kept, left = [], []
+        for r in readings:
+            made = born_lines(writers, r.owner, subject) & set(r.lines) if id(r) in marked else set()
+            if not made:
+                kept.append(r)
+                continue
+            left.append(f"{r.owner.split('::')[-1]} {sorted(made)} (births: {birth_why(r.owner, subject, sorted(made))})")
+            if rest := [line for line in r.lines if line not in made]:
+                kept.append(r.model_copy(update={"lines": rest}))
+        said = (f"the key's row was there before {state['status']!r} at {state['time']}, so its writes that make a row "
+                f"are no candidates: {'; '.join(left)} (KNOWN_ISSUES.md K29)") if left else ""
+        return kept, said
+
     def _candidates(self, readings: list) -> list[Candidate]:
         return [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
 
@@ -1501,18 +1567,20 @@ class Rerun:
         key, attr = self.args.key, history.subject.split(".")[-1]
         asked, unanswered = [], []
         for state in states:
-            readings = self._writers(history.subject, state["status"], key)
+            readings, said = self._unborn(self._writers(history.subject, state["status"], key), history.subject, state)
             cands = self._candidates(readings)
             asking = W.at_transition(state)
             names = list(dict.fromkeys(f for c in cands for f in c.log_files))
             runs, missed, holes = self._ask(key, names, asking)
             unanswered += missed
-            asked.append((state, readings, cands, asking, names, runs, holes))
+            asked.append((state, readings, cands, asking, names, runs, holes, said))
         self._stop_unanswered(unanswered)
         chosen = 0
-        for state, readings, cands, asking, names, runs, holes in asked:
+        for state, readings, cands, asking, names, runs, holes, said in asked:
             lo, hi = asking.window
             self.say(f"-- {state['status']!r} at {hi}: {len(readings)} reading(s) from the map, logs {names}")
+            if said:
+                self.say(f"   {said}")
             at_row = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
             if not at_row:
                 unsearched = "".join(f"; {name} not searched: {'; '.join(h)}" for name, h in holes.items())
