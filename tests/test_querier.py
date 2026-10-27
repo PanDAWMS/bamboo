@@ -1735,7 +1735,7 @@ def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_an
     )
     unread = ["PandaID=:PandaID (no bind found)", "jobsetID=:jobsetID (not followed: jsid)"]
     # 3800's rows fill no key: only the unread one may be its
-    assert json.loads(out.splitlines()[-2]) == [[[3913, 4059], {"4300": unread}], [[], {"4300": unread}]]
+    assert json.loads(out.splitlines()[-2]) == [[[3913, 4059], {"4300": unread}, {}], [[], {"4300": unread}, {}]]
     before, keyed, kept = json.loads(out.splitlines()[-1])
     # no arm in the region: before KeyFrom only the helper took the rows; now the owner is a mover by its keyed arms
     # too, and one whose key was not read is kept, said; the helper takes them as before
@@ -1745,6 +1745,64 @@ def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_an
     assert kept == {"p/fin.py::prepare": f"prepare@3800 selects the value, and the map could not read what fills "
                                          f"the key of the write(s) at [4300] (4300: {', '.join(unread)}): kept",
                     "p/fin.py::helper3800": "prepare@3800 hands the rows it selects to it"}
+
+
+def test_an_arm_no_write_in_its_function_persists_keeps_the_owner_said_with_where_its_fields_go(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import keyed_arms
+
+    owner = "d/dm.py::run"
+    writers.append(writer(owner, branch(713, "failed"), branch(745, "merging"), branch(958, "failed"),
+                          branch(2786, "output"), branch(4300, "broken"), branch(5000, "lost")))
+
+    def kf(writes, term="", unread="", obj="", handed_to=(), *sources):
+        return N(owner=owner, term=term, writes={"FileSpec.status": writes}, unread=unread, object=obj,
+                 handed_to=list(handed_to), sources=list(sources))
+
+    def follow(line):
+        return N(guarded_by=[], reader_statements=[stmt(owner, line, ["FileSpec.status=running"], [line, line + 10])])
+
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        # an element of a container handed on, which the map does not read as the container's: no use found
+        kf([713, 745], unread="no use found", obj="file"),
+        kf([958], unread="no use found", obj="tmpFile"),
+        # one object's fields handed to two calls and returned: one record per use
+        kf([2786], unread="handed to a call", obj="spec", handed_to=["p/tb.py::updateJobs", "p/spec.py::addFile"]),
+        kf([2786], unread="returned", obj="spec"),
+        # a key the map did not read beside them
+        kf([4300], "PandaID=:PandaID", "no bind found"),
+        # 5000 is persisted by a write keyed by 359's rows, and handed on as well: keyed
+        kf([5000], "PandaID=:PandaID", "", "", (), N(kind="rows", name=f"panda:{owner}@359", site_owner=owner, site_line=359)),
+        kf([5000], unread="kept in what it was handed", obj="job"),
+    ])]
+    arms = arms_of(writers, owner, "FileSpec.status", "running")
+    print(json.dumps(keyed_arms(writers, follow(359).reader_statements[0], "FileSpec.status", arms)))
+    held = mapdump._FRAGMENT[0]
+    held.key_froms = [k for k in held.key_froms if k.sources == []]
+    print(json.dumps(movers_of(follow(359), writers, "FileSpec.status", "running")))
+    held.key_froms = [k for k in held.key_froms if k.term == ""]
+    print(json.dumps(movers_of(follow(359), writers, "FileSpec.status", "running")))
+    """,
+        )
+    )
+    to = ["spec (handed to a call: updateJobs, addFile)", "spec (returned)"]
+    unpersisted = {"713": ["file (no use found)"], "745": ["file (no use found)"], "958": ["tmpFile (no use found)"],
+                   "2786": to}
+    # 5000 is keyed by 359's rows, whatever else its object reaches; the others are no key the map could not read
+    assert json.loads(out.splitlines()[-3]) == [[5000], {"4300": ["PandaID=:PandaID (no bind found)"]}, unpersisted]
+    said = "713: file (no use found); 745: file (no use found); 958: tmpFile (no use found); 2786: " + ", ".join(to)
+    # with no keyed arm both are said, joined; 5000's object is kept by the function, so it is one of them
+    both, alone = (json.loads(line)["d/dm.py::run"] for line in out.splitlines()[-2:])
+    assert both == (f"run@359 selects the value, and the map could not read what fills the key of the write(s) at "
+                    f"[4300] (4300: PandaID=:PandaID (no bind found)), and no write in the function persists the "
+                    f"value(s) set at [713, 745, 958, 2786, 5000] ({said}; 5000: job (kept in what it was handed)): kept")
+    # without the unread key, the unpersisted alone
+    assert alone == (f"run@359 selects the value, and no write in the function persists the value(s) set at "
+                     f"[713, 745, 958, 2786, 5000] ({said}; 5000: job (kept in what it was handed)): kept")
 
 
 def test_a_write_that_makes_the_row_is_no_arm_where_every_key_from_writing_it_there_says_a_new_row(tmp_path):
