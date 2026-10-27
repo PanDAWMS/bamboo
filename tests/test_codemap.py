@@ -37,6 +37,7 @@ from bamboo.codemap.models import (
     EnumerationWrite,
     FilterStageNode,
     JunctionNode,
+    KeyFrom,
     LogSiteNode,
     LoopCutNode,
     MapFragment,
@@ -17619,6 +17620,38 @@ def test_a_writes_row_keys_are_the_where_terms_it_does_not_guard():
 
     assert write.preconditions == {"jobStatus": "jobStatus=:oldStatus"}
     assert write.keys == {"PandaID": ":PandaID", "jediTaskID": ":jediTaskID"}
+    assert write.key_lists == {}
+
+
+def test_a_write_naming_its_rows_by_a_helpers_in_list_keeps_the_list_beside_its_keys():
+    """``fileID IN ({names})`` from ``get_sql_IN_bind_variables`` reads as one bind (``sql.in_lists``); a list on a
+    column the statement writes is still its guard, and a negated one names no row."""
+    (write,) = sqltext.writes(
+        "UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status WHERE jediTaskID=:taskID "
+        "AND fileID IN (:file__in) AND status IN (:old__in) AND NOT datasetID IN (:ds__in)"
+    )
+
+    assert write.keys == {"jediTaskID": ":taskID"}
+    assert write.key_lists == {"fileID": ":file__in"}
+    assert write.preconditions == {"status": "status IN (:old__in)"}
+
+
+def _keyed_corpus(tmp_path, files: dict[str, str]):
+    """Write *files* under *tmp_path*: their modules, the corpus's calls over them and the reach record, as the build
+    reads a guarded write's keys (:func:`sqlwrite.attach_key_sources`)."""
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import plugin
+
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
+    calls = sqlwrite.corpus_calls(modules, {top: tmp_path / top for top in {rel.split("/")[0] for rel in files}})
+    with sql.across_calls(calls):
+        record = reach.ReachGraph(reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves()))
+    return modules, calls, record
 
 
 @pytest.mark.parametrize(
@@ -17633,21 +17666,30 @@ def test_a_writes_row_keys_are_the_where_terms_it_does_not_guard():
         ("self.cur.rowcount", "self.cur"),
     ],
 )
-def test_handed_in_says_which_parameter_or_field_a_value_came_from(expression, expected):
-    """One hop through a local or a loop; a method's result is not handed in,
-    what a method is handed is."""
-    func = ast.parse(
-        "def f(self, jobs, taskCloudMap, jediTaskID):\n"
-        "    for job in jobs:\n"
-        "        pass\n"
-        "    for tid, cloud in taskCloudMap.items():\n"
-        "        pass\n"
-        "    rows = self.cur.fetchall()\n"
-        "    for row_id, _x in rows:\n"
-        "        pass\n"
-    ).body[0]
+def test_a_value_is_filled_from_the_parameter_or_field_of_self_the_carry_brings_it_from(tmp_path, expression, expected):
+    """Through a local or a loop; a fetch from the cursor is the database's, not the field's; what a method is handed
+    is, and the method is no field."""
+    rel = "pandaserver/taskbuffer/proxy.py"
+    source = (
+        "class Proxy:\n"
+        "    def f(self, jobs, taskCloudMap, jediTaskID):\n"
+        "        for job in jobs:\n"
+        "            pass\n"
+        "        for tid, cloud in taskCloudMap.items():\n"
+        "            pass\n"
+        "        rows = self.cur.fetchall()\n"
+        "        for row_id, _x in rows:\n"
+        "            pass\n"
+        f"        value = {expression}\n"
+    )
+    modules, calls, record = _keyed_corpus(tmp_path, {rel: source})
+    func = next(node for node in ast.walk(modules[0].tree) if isinstance(node, ast.FunctionDef) and node.name == "f")
+    assign = func.body[-1]
+    with sql.across_calls(calls):
+        filled = sqlwrite._Filled(sqlwrite._Reading(calls, set(), record), rel, func)
+        handed = filled.handed(assign.value, assign)
 
-    assert pathcond.handed_in(func, ast.parse(expression, mode="eval").body) == expected
+    assert (handed[0] if handed else "") == expected
 
 
 _KEYED = '''
@@ -17672,28 +17714,71 @@ class TaskModule:
             varMap[":newStatus"] = "ready"
             varMap[":oldStatus"] = "picked"
             self.cur.execute(sqlU + comment, varMap)
+
+    def lockJobOutputReport(self, panda_id, attempt_nr, pid):
+        sqlGL = "SELECT PandaID, attemptNr FROM ATLAS_PANDA.Job_Output_Report WHERE lockedBy=:lockedBy "
+        self.cur.execute(sqlGL + comment, {":lockedBy": pid})
+        resGL = self.cur.fetchall()
+        sqlUL = "UPDATE ATLAS_PANDA.Job_Output_Report SET lockedBy=:lockedBy WHERE PandaID=:PandaID AND attemptNr=:attemptNr AND lockedBy IS NULL "
+        for panda_id, attempt_nr in resGL:
+            varMap = {}
+            varMap[":PandaID"] = panda_id
+            varMap[":attemptNr"] = attempt_nr
+            varMap[":lockedBy"] = pid
+            self.cur.execute(sqlUL + comment, varMap)
+
+
+class DatasetModule:
+    def main(self):
+        class Closer:
+            def __init__(self, datasets):
+                self.datasets = datasets
+
+            def run(self):
+                for name in self.datasets:
+                    pass
+
+        sql = "SELECT name FROM ATLAS_PANDA.Datasets WHERE status=:status "
+        self.cur.execute(sql + comment, {":status": "doing"})
+        resReset = self.cur.fetchall()
+        sqlU = "UPDATE ATLAS_PANDA.Datasets SET status=:newStatus WHERE name=:name AND status=:oldStatus "
+        for (name,) in resReset:
+            varMap = {}
+            varMap[":name"] = name
+            varMap[":oldStatus"] = "doing"
+            varMap[":newStatus"] = "running"
+            self.cur.execute(sqlU + comment, varMap)
 '''
 
 
-def test_a_guarded_write_says_whether_its_caller_named_the_rows():
-    """The two shapes the "nothing here reads these rows" answer held."""
+def test_a_guarded_write_says_whether_its_caller_named_the_rows(tmp_path):
+    """The shapes the "nothing here reads these rows" answer held: a parameter's rows, the function's own rows, and
+    two of its own rows that read as handed when a key's name was followed by its spelling -- a parameter's name the
+    rows rebind, and a loop of a class the function defines."""
     rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
-    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_KEYED, rel)]
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _KEYED})
     attributor = attribution.SpecAttributor(
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
     keys: list[RowKeySource] = []
-    sqlwrite.extract(modules, MAP_ID, VERSION, attributor, row_keys=keys)
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, row_keys=keys)
+        assert all(source.handed_by == "" for source in keys)
+        assert sqlwrite.attach_key_sources(keys, junctions, calls, record) == len(keys) == 4
 
     by = {source.owner.rpartition("::")[2]: source for source in keys}
     assert by["setCloudToTasks_JEDI"].handed_by == "taskCloudMap"
     assert by["setCloudToTasks_JEDI"].keys == ["jediTaskID=:jediTaskID"]
     assert by["setCloudToTasks_JEDI"].columns == ["status"]
     assert by["rescuePickedFiles_JEDI"].handed_by == ""
+    assert by["lockJobOutputReport"].keys == ["PandaID=:PandaID", "attemptNr=:attemptNr"]
+    assert by["lockJobOutputReport"].handed_by == ""
+    assert by["main"].keys == ["name=:name"]
+    assert by["main"].handed_by == ""
 
 
-def test_a_guarded_flush_says_whether_its_spec_was_handed_in():
+def test_a_guarded_flush_says_whether_its_spec_was_handed_in(tmp_path):
     """The row a flush writes is the spec it is given, and this one is the
     caller's parameter."""
     caller = '''
@@ -17703,11 +17788,14 @@ class TaskRefiner:
         self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1}, oldStatus=[taskStatus])
 '''
     rel = "pandajedi/jediorder/Knight.py"
-    modules = [
-        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
-        _module(_FLUSH_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
-        _module(caller, rel),
-    ]
+    modules, calls, record = _keyed_corpus(
+        tmp_path,
+        {
+            "pandaserver/taskbuffer/Specs.py": _SPECS,
+            "pandaserver/taskbuffer/db_proxy_mods/task_module.py": _FLUSH_PROXY,
+            rel: caller,
+        },
+    )
     _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
     attributor = attribution.SpecAttributor(
         progress.spec_attributes(modules), attribution.class_bases(modules)
@@ -17717,8 +17805,157 @@ class TaskRefiner:
     attributor.learn_table_classes(modules)
     keys: list[RowKeySource] = []
     flush.attach(junctions, modules, attributor, row_keys=keys)
+    with sql.across_calls(calls):
+        assert sqlwrite.attach_key_sources(keys, junctions, calls, record) == 1
 
     (source,) = keys
     assert source.owner == f"{rel}::runImpl"
     assert source.handed_by == "taskSpec"
     assert source.columns == ["status"]
+
+
+def test_a_guarded_flush_is_handed_its_row_by_what_fills_the_specs_key_not_another_field(tmp_path):
+    """``tmpTaskSpec`` in ``TaskRefinerThread.runImpl`` holds a message at ``.errorDialog`` and the task the thread
+    was handed at ``.jediTaskID``: only what fills the key names the row the flush writes."""
+    caller = '''
+class TaskRefiner:
+    def runImpl(self, errorText, taskStatus):
+        taskSpec = JediTaskSpec()
+        taskSpec.jediTaskID = self.taskID
+        taskSpec.oldStatus = errorText
+        taskSpec.status = "tobroken"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": taskSpec.jediTaskID}, oldStatus=[taskStatus])
+'''
+    # A write whose columns only JediTaskSpec declares, so that JEDI_Tasks is learned to hold it.
+    settles = '''
+class StatusModule:
+    def setOldStatus(self, jediTaskID):
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,oldStatus=:oldStatus WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sql + comment, {":status": "x", ":oldStatus": "y", ":jediTaskID": jediTaskID})
+'''
+    rel = "pandajedi/jediorder/Knight.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path,
+        {
+            "pandaserver/taskbuffer/Specs.py": _SPECS,
+            "pandaserver/taskbuffer/db_proxy_mods/task_module.py": _FLUSH_PROXY,
+            "pandaserver/taskbuffer/db_proxy_mods/status_module.py": settles,
+            rel: caller,
+        },
+    )
+    _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    assert attributor.tables_of("JediTaskSpec") == ["JEDI_Tasks"]
+    keys: list[RowKeySource] = []
+    with sqltext.with_schema(None, {"jedi_tasks": frozenset({"jeditaskid"})}):
+        key_fields = flush.row_key_fields(attributor)
+        flush.attach(junctions, modules, attributor, row_keys=keys, key_fields=key_fields)
+    assert key_fields == {"JediTaskSpec": frozenset({".jediTaskID"})}
+    with sql.across_calls(calls):
+        assert sqlwrite.attach_key_sources(keys, junctions, calls, record) == 1
+
+    (source,) = keys
+    assert source.keys == ["taskSpec"]
+    assert source.handed_by == "self.taskID"
+
+
+_KEY_FROM = '''
+class TaskModule:
+    def throttleTasks(self, vo):
+        sqlS = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status=:status "
+        self.cur.execute(sqlS + comment, {":vo": vo, ":status": "running"})
+        resS = self.cur.fetchall()
+        sqlT = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        for (jediTaskID,) in resS:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":newStatus"] = "throttled"
+            varMap[":oldStatus"] = "running"
+            self.cur.execute(sqlT + comment, varMap)
+
+    def setMaxAttempt(self, taskID, fileIDs):
+        file_var_names_str, file_var_map = get_sql_IN_bind_variables(fileIDs, prefix=":file")
+        varMap = {}
+        varMap[":taskID"] = taskID
+        varMap[":status"] = "ready"
+        varMap.update(file_var_map)
+        sql = f"UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status WHERE jediTaskID=:taskID AND fileID IN ({file_var_names_str}) "
+        self.cur.execute(sql + comment, varMap)
+
+    def resetTask(self, status):
+        varMap = {}
+        varMap[":status"] = status
+        varMap[":jediTaskID"] = 123
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sql + comment, varMap)
+
+    def lostKey(self, status):
+        varMap = {}
+        varMap[":status"] = status
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sql + comment, varMap)
+'''
+
+
+def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_path):
+    """A term each: its run's line, the subjects it writes with their lines, and its sources -- the rows of the
+    function's own statement, a parameter, an IN list's parameter, a literal -- or why none was read."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _KEY_FROM})
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    keys: list[RowKeySource] = []
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(
+            modules, MAP_ID, VERSION, attributor, row_keys=keys, key_froms=froms
+        )
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        assert all(not one.sources for one in froms)
+        read = sqlwrite.attach_key_sources(keys, junctions, calls, record, key_froms=froms, read_sites=sites)
+    assert read == len(froms) + len(keys)
+
+    by = {(one.owner.rpartition("::")[2], one.term): one for one in froms}
+    assert sorted(by) == [
+        ("lostKey", "jediTaskID=:jediTaskID"),
+        ("resetTask", "jediTaskID=:jediTaskID"),
+        ("setMaxAttempt", "fileID IN (:file__in)"),
+        ("setMaxAttempt", "jediTaskID=:taskID"),
+        ("throttleTasks", "jediTaskID=:jediTaskID"),
+    ]
+    lines = _KEY_FROM.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    throttle = by[("throttleTasks", "jediTaskID=:jediTaskID")]
+    (written,) = [j for j in junctions if j.owner == throttle.owner]
+    assert throttle.statement == at("self.cur.execute(sqlT")
+    assert throttle.writes == {written.subject: [at('":newStatus"] = "throttled"')]}
+    (site,) = [s for s in sites if s.owner == throttle.owner]
+    assert site.anchor.line_start == at("self.cur.execute(sqlS")
+    assert [one.model_dump() for one in throttle.sources] == [
+        {
+            "kind": "rows",
+            "line": at('":jediTaskID"] = jediTaskID'),
+            "name": site.name,
+            "site_owner": site.owner,
+            "site_line": site.anchor.line_start,
+            "paths": ["()"],
+        }
+    ]
+    assert throttle.unread == ""
+    assert [(s.kind, s.name) for s in by[("setMaxAttempt", "jediTaskID=:taskID")].sources] == [("parameter", "taskID")]
+    assert [(s.kind, s.name) for s in by[("setMaxAttempt", "fileID IN (:file__in)")].sources] == [
+        ("parameter", "fileIDs")
+    ]
+    assert [(s.kind, s.name) for s in by[("resetTask", "jediTaskID=:jediTaskID")].sources] == [("constant", "123")]
+    lost = by[("lostKey", "jediTaskID=:jediTaskID")]
+    assert (lost.sources, lost.unread) == ([], "no bind found")

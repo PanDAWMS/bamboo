@@ -638,6 +638,10 @@ class SpecAttributor:
         ]
         return matches[0] if len(matches) == 1 else None
 
+    def tables_of(self, spec_class: str) -> list[str]:
+        """The tables learned to hold *spec_class*'s rows, sorted -- :meth:`class_for_table` the other way."""
+        return sorted(table for table, spec in self._table_classes.items() if spec == spec_class)
+
     def class_for_table(self, table: str) -> Optional[str]:
         """Return the spec class *table* holds, if it was learned.
 

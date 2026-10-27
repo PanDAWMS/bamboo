@@ -282,7 +282,7 @@ def _own_lists(scope: ast.AST) -> dict[str, InList]:
             prefix = node.value.args[1].value
         prefix = prefix if isinstance(prefix, str) and prefix else ":in"
         names, values_map = (one.id for one in node.targets[0].elts)  # type: ignore[attr-defined]
-        found[names] = InList(names, values_map, node.value.args[0], f"{prefix}__in", node)
+        found[names] = InList(names, values_map, node.value.args[0], f"{prefix}{sqltext.IN_LIST_SUFFIX}", node)
     scope._in_lists = found  # type: ignore[attr-defined]
     return found
 

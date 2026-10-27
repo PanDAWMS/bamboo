@@ -451,6 +451,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._version,
             attributor,
             row_keys=fragment.row_key_sources,
+            key_froms=fragment.key_froms,
         )
         # On the fragment rather than on the plugin, because a gate reads the
         # fragment: "which junctions guard on a value nothing selects on" is a
@@ -540,7 +541,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # class an attribute write is on, which is the progress slice's own
         # question, and that slice learns element types before asking it.
         self._flush_guards = flush.attach(
-            fragment.junctions, self._modules, audited, row_keys=fragment.row_key_sources
+            fragment.junctions,
+            self._modules,
+            audited,
+            row_keys=fragment.row_key_sources,
+            # Which fields name a spec's row: off the attributor that learned the tables.
+            key_fields=flush.row_key_fields(attributor),
         )
         if self._flush_guards:
             logger.info(
@@ -640,12 +646,23 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # the readers that only check the map.  The gap between the middle two
         # is the finding: an empty ``crosses_to`` on a statement that plainly
         # hands its rows on would otherwise read as "these rows go nowhere".
+        record = reach.ReachGraph(fragment.reach_graph) if self._calls is not None else None
         self.crossings = sqlwrite.attach_crossings(
             fragment.read_sites,
             self._modules,
             fragment.junctions,
             self._calls,
-            reach.ReachGraph(fragment.reach_graph) if self._calls is not None else None,
+            record,
+        )
+        # Where each write's row keys were filled from, and who handed a guarded write its keys: read by the carry,
+        # which reads a call where it lands, so after the reach record and with it.
+        sqlwrite.attach_key_sources(
+            fragment.row_key_sources,
+            fragment.junctions,
+            self._calls,
+            record,
+            key_froms=fragment.key_froms,
+            read_sites=fragment.read_sites,
         )
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a

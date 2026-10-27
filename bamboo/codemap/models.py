@@ -44,7 +44,7 @@ import json
 import re
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_validator
 
 from bamboo.models.graph_element import BaseNode, NodeType
 
@@ -2566,9 +2566,106 @@ class RowKeySource(BaseModel):
         default="",
         description=(
             "The parameter or ``self`` field a key was filled from, or empty "
-            "when every key was filled here."
+            "when every key was filled here.  Read as the carry reads any "
+            "value, each parameter and each field of ``self`` seeded on its "
+            "own, after the reach record: ``for panda_id, attempt_nr in "
+            "resGL:`` rebinds the parameters' names with the function's own "
+            "rows, and a key bound from ``panda_id`` below is not the "
+            "caller's.  Empty, too, where the build had no corpus calls to "
+            "read it with."
         ),
     )
+    #: The key values to read *handed_by* from, ``(func, file, [(value, statement, steps)])`` in the keys' order --
+    #: *steps* the fields of an object that name its row; the step
+    #: after the reach record reads them (:func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_key_sources`).
+    _filled: Optional[tuple] = PrivateAttr(default=None)
+
+
+#: Where a value filling a write's row-naming bind came from (:attr:`KeySource.kind`): the rows of a statement of
+#: the same function, a parameter, a field of ``self`` -- each read by the carry -- or, where none of those reaches
+#: it, a literal, an attribute of something else, or a value the map does not follow.
+KEY_ROWS = "rows"
+KEY_PARAMETER = "parameter"
+KEY_SELF_FIELD = "self_field"
+KEY_CONSTANT = "constant"
+KEY_ATTRIBUTE = "attribute"
+KEY_UNKNOWN = "unknown"
+KEY_KINDS = (KEY_ROWS, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
+#: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`).
+KEY_NO_MAP = "no bind map"
+KEY_NO_BIND = "no bind found"
+
+
+class KeySource(BaseModel):
+    """One place a value filling a write's row-naming bind came from -- see :class:`KeyFrom`."""
+
+    kind: str = Field(description="One of :data:`KEY_KINDS`.")
+    line: Optional[int] = Field(default=None, description="Where the bind is filled.")
+    name: str = Field(
+        default="",
+        description=(
+            "``rows``: the :class:`ReadSiteNode`'s name (``panda:<owner>@<line>``, also as *site_owner* and "
+            "*site_line*); ``parameter``: its name; ``self_field``: ``self.<field>``; ``constant``: its repr; "
+            "``attribute`` / ``unknown``: the value as written."
+        ),
+    )
+    site_owner: str = Field(default="", description="``rows``: the read site's owner.")
+    site_line: Optional[int] = Field(default=None, description="``rows``: the line the read site's statement runs on.")
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``rows`` / ``parameter`` / ``self_field``: where in the bind's value they sit -- ``()`` the value "
+            "itself, else its steps (``[0]``, ``.f``, ``[*]``).  Which column of a row fills the key is not said: "
+            "the carry says where the rows sit in a value, and a part of them reads as them."
+        ),
+    )
+
+
+class KeyFrom(BaseModel):
+    """Where one row-naming term of a write was filled from: the rows it lands on, and who named them.
+
+    Not a node, beside :class:`RowKeySource`.  One per term of a write's ``WHERE`` that names its rows --
+    ``jediTaskID=:jediTaskID``, or an ``IN`` list a helper builds, ``datasetID IN (:dataset__in)`` -- on a column
+    the statement does not write, for every write statement, guarded or not.  Its *sources* are where the bind's
+    values came from, each read by the carry: the rows of a statement of the same function
+    (``prepareTasksToBeFinished_JEDI`` keys the runs of its later loop by the ``jediTaskID`` its statements at 3723
+    and 3768 select), a parameter, a field of ``self``.  A reader asking which of a function's arms the rows of one of its statements
+    reach takes the KeyFroms with a ``rows`` source of that statement, and the branches at *writes*' lines.
+
+    Read in the same step as :attr:`RowKeySource.handed_by`, after the reach record and by the same carries, so the
+    two never disagree.  A statement run with several texts is one KeyFrom per term, its sources every text's.
+    Not followed here: rows reaching the bind through a call (a parameter is where this function was handed them),
+    which column of a row fills it, and the values of the columns the statement writes.
+    """
+
+    owner: str
+    file: str = ""
+    statement: int = Field(
+        default=0,
+        description=(
+            "The line the write runs on -- the first, where the function runs one text with one bind map from "
+            "several places (``setNoRetry`` at 2604 and 2608): one run, its binds every place's "
+            "(``sql.Execution.calls``)."
+        ),
+    )
+    table: str = ""
+    term: str = Field(description="As the map reads it: ``jediTaskID=:jediTaskID``, ``datasetID IN (:dataset__in)``.")
+    writes: dict[str, list[int]] = Field(
+        default_factory=dict,
+        description=(
+            "Each subject the statement writes (``JobSpec.jobStatus``, as a junction's subject), with the lines it "
+            "writes that subject's values on -- a junction's :attr:`Branch.line` or one of its "
+            ":attr:`Branch.other_lines`: a junction is one per subject and owner, its branches gathered from every "
+            "statement writing it, and these say which are this statement's."
+        ),
+    )
+    unread: str = Field(
+        default="",
+        description=f"Empty, or why the term's values were not read: ``{KEY_NO_MAP}`` / ``{KEY_NO_BIND}``.",
+    )
+    sources: list[KeySource] = Field(default_factory=list)
+    #: The binds to read *sources* from, ``(func, file, [sql.Bind])``; the step after the reach record reads them.
+    _binds: Optional[tuple] = PrivateAttr(default=None)
 
 
 class CoverageStat(BaseModel):
@@ -2646,6 +2743,7 @@ class MapFragment(BaseModel):
         ),
     )
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
+    key_froms: list[KeyFrom] = Field(default_factory=list)
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
         description=(

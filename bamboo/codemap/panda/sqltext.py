@@ -168,6 +168,15 @@ class SqlWrite(BaseModel):
             "say who named the rows -- see ``sqlwrite``'s ``RowKeySource``."
         ),
     )
+    key_lists: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Column -> the one bind an ``IN`` list is spelt as, for the ``WHERE`` terms on columns this statement "
+            "does not write that name its rows by a list a helper builds: ``datasetID IN (:dataset__in)`` "
+            "(``sql.in_lists``).  Kept out of *keys*, whose readers take an equality: a list names several rows.  "
+            "Read off the tree only."
+        ),
+    )
     precondition_spans: dict[str, list[tuple[int, int]]] = Field(
         default_factory=dict,
         description=(
@@ -195,6 +204,11 @@ class SqlWrite(BaseModel):
             "to read."
         ),
     )
+
+
+#: The end of the one bind an ``IN`` list built by ``get_sql_IN_bind_variables`` is spelt as: ``:stat__in`` for the
+#: prefix ``:stat`` (``sql.in_lists``).
+IN_LIST_SUFFIX = "__in"
 
 
 #: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
@@ -958,9 +972,15 @@ def _conjunct_spans(tokens: list, lo: int, hi: int) -> list[tuple[int, int]]:
 def _guards(
     node: exp.Update, sql: str, tokens: list, written: set[str]
 ) -> Optional[
-    tuple[dict[str, str], dict[str, str], dict[str, list[tuple[int, int]]], list[tuple[int, str, tuple[int, ...]]]]
+    tuple[
+        dict[str, str],
+        dict[str, str],
+        dict[str, list[tuple[int, int]]],
+        list[tuple[int, str, tuple[int, ...]]],
+        dict[str, str],
+    ]
 ]:
-    """``(preconditions, keys, spans, key_holes)`` of an ``UPDATE``, off its tree and in its own spelling.
+    """``(preconditions, keys, spans, key_holes, key_lists)`` of an ``UPDATE``, off its tree and in its own spelling.
 
     A term counts only where every row has to meet it -- a conjunct of the
     ``WHERE`` -- and only its own columns do: the text reading took a term
@@ -973,14 +993,16 @@ def _guards(
     in *sql* each precondition's conjuncts are.  A term naming its column and
     its bind by holes, ``{}=:cr_{}``, is in *key_holes* (:attr:`SqlWrite.key_holes`),
     a loop's passes' or not: what the holes are says whether it names the row.
+    A term naming its rows by an ``IN`` list a helper builds, ``datasetID IN (:dataset__in)``, is in *key_lists*.
     """
     where = node.args.get("where")
     preconditions: dict[str, str] = {}
     keys: dict[str, str] = {}
     spans_of: dict[str, list[tuple[int, int]]] = {}
     key_holes: list[tuple[int, str, tuple[int, ...]]] = []
+    key_lists: dict[str, str] = {}
     if where is None:
-        return preconditions, keys, spans_of, key_holes
+        return preconditions, keys, spans_of, key_holes, key_lists
     at = _at_depth(tokens, (_at_depth(tokens, 0, {_T.SET}) or 0) + 1, {_T.WHERE})
     if at is None:
         return None
@@ -1017,8 +1039,17 @@ def _guards(
             and not _NAMED_HOLE.search(term.expression.name)
         ):
             keys.setdefault(term.this.name, f":{term.expression.name}")
+        elif (
+            not hits
+            and isinstance(term, exp.In)
+            and isinstance(term.this, exp.Column)
+            and len(term.expressions) == 1
+            and isinstance(term.expressions[0], exp.Placeholder)
+            and term.expressions[0].name.endswith(IN_LIST_SUFFIX)
+        ):
+            key_lists.setdefault(term.this.name, f":{term.expressions[0].name}")
     preconditions.update((owner, " AND ".join(dict.fromkeys(said))) for owner, said in testing.items())
-    return preconditions, keys, spans_of, key_holes
+    return preconditions, keys, spans_of, key_holes, key_lists
 
 
 def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
@@ -1094,7 +1125,7 @@ def writes(sql: str) -> list[SqlWrite]:
         guarded = _guards(node, sql, tokens, set(columns))
         if guarded is None:
             return _writes_in_text(plain(sql)) if columns else []
-        preconditions, keys, spans, key_holes = guarded
+        preconditions, keys, spans, key_holes, key_lists = guarded
         return [
             SqlWrite(
                 kind="update",
@@ -1103,6 +1134,7 @@ def writes(sql: str) -> list[SqlWrite]:
                 preconditions=preconditions,
                 keys=keys,
                 key_holes=key_holes,
+                key_lists=key_lists,
                 column_holes=column_holes,
                 precondition_spans={
                     owner: [(_at_plain(sql, a), _at_plain(sql, b, end=True)) for a, b in found]
@@ -1562,6 +1594,11 @@ _PRIMARY_KEY = re.compile(
 )
 _INLINE_PRIMARY_KEY = re.compile(r'^\s*(?:CONSTRAINT\s+"?\w+"?\s+)?PRIMARY\s+KEY\s*\(([^)]*)\)', re.IGNORECASE)
 _COLUMN_PRIMARY_KEY = re.compile(r"\bPRIMARY\s+KEY\b(?!\s*\()", re.IGNORECASE)
+
+
+def table_key(table: str) -> frozenset[str]:
+    """*table*'s primary key's columns, lowered, as :func:`with_schema` was given them; empty outside it."""
+    return (_KEYS or {}).get(table.lower(), frozenset())
 
 
 def read_keys(directory: Path) -> dict[str, frozenset[str]]:
