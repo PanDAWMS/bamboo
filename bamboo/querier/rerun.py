@@ -491,6 +491,13 @@ def births_of(writers: list, owner: str, subject: str, observed: str) -> list[in
                    if b.line is not None and b.outcome != observed and born(b, marks)})
 
 
+def born_lines(writers: list, owner: str, subject: str) -> set[int]:
+    """*owner*'s branch lines of *subject* that are births (``born``), whatever they write: a write that makes the row
+    writes no row that was there before (KNOWN_ISSUES.md K29)."""
+    marks = birth_marks(owner, subject)
+    return {b.line for j in writers if j.owner == owner for b in j.branches if b.line is not None and born(b, marks)}
+
+
 def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]]]:
     """``(keyed, unread)`` over *arms*, the arms of *rs*'s owner by line.  *keyed*: those whose write the map says
     names its row by a key filled from *rs*'s rows -- a ``KeyFrom`` of the owner's writing *subject* on a line of the
@@ -1423,6 +1430,9 @@ class Rerun:
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
             asking = W.at_transition(state)
+        readings, said = self._unborn(readings, subject, state)
+        if said:
+            self.say(said)
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._candidates(readings)
@@ -1471,6 +1481,31 @@ class Rerun:
             self._readings[(subject, value)] = inv.hops[0].strategy.readings
         return self._readings[(subject, value)]
 
+    def _unborn(self, readings: list, subject: str, state: dict | None) -> tuple[list, str]:
+        """``(readings, said)``: *readings* less their lines that make the row (births, K29) where the statuslog holds
+        a row of the key before *state*.  The row was there, and a write that makes a row writes none that was:
+        ppEventServiceJob's new jobs, INSERTed activated with a sequence's PandaID, did not write a job's 'activated'
+        after its 'defined'.  A reading left with no line goes; *said* names what went.  With no row before *state*
+        (the row's first, a tie, no state) every reading stays: the birth may be the row's."""
+        states = (self.data.get("statuslog") or {}).get("states") or []
+        marked = {id(r) for r in readings if any(m and all(is_birth(kf) for kf in m)
+                                                 for m in map(birth_marks(r.owner, subject).get, r.lines))}
+        if not marked or state is None or not HD.row_before(states, state):
+            return readings, ""
+        writers = asyncio.run(self._writers_of(subject))
+        kept, left = [], []
+        for r in readings:
+            made = born_lines(writers, r.owner, subject) & set(r.lines) if id(r) in marked else set()
+            if not made:
+                kept.append(r)
+                continue
+            left.append(f"{r.owner.split('::')[-1]} {sorted(made)} (births: {birth_why(r.owner, subject, sorted(made))})")
+            if rest := [line for line in r.lines if line not in made]:
+                kept.append(r.model_copy(update={"lines": rest}))
+        said = (f"the key's row was there before {state['status']!r} at {state['time']}, so its writes that make a row "
+                f"are no candidates: {'; '.join(left)} (KNOWN_ISSUES.md K29)") if left else ""
+        return kept, said
+
     def _candidates(self, readings: list) -> list[Candidate]:
         return [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
 
@@ -1501,18 +1536,20 @@ class Rerun:
         key, attr = self.args.key, history.subject.split(".")[-1]
         asked, unanswered = [], []
         for state in states:
-            readings = self._writers(history.subject, state["status"], key)
+            readings, said = self._unborn(self._writers(history.subject, state["status"], key), history.subject, state)
             cands = self._candidates(readings)
             asking = W.at_transition(state)
             names = list(dict.fromkeys(f for c in cands for f in c.log_files))
             runs, missed, holes = self._ask(key, names, asking)
             unanswered += missed
-            asked.append((state, readings, cands, asking, names, runs, holes))
+            asked.append((state, readings, cands, asking, names, runs, holes, said))
         self._stop_unanswered(unanswered)
         chosen = 0
-        for state, readings, cands, asking, names, runs, holes in asked:
+        for state, readings, cands, asking, names, runs, holes, said in asked:
             lo, hi = asking.window
             self.say(f"-- {state['status']!r} at {hi}: {len(readings)} reading(s) from the map, logs {names}")
+            if said:
+                self.say(f"   {said}")
             at_row = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
             if not at_row:
                 unsearched = "".join(f"; {name} not searched: {'; '.join(h)}" for name, h in holes.items())

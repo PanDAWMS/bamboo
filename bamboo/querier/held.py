@@ -20,6 +20,8 @@ no status leaves none (updateJobMetrics_JEDI's jobMetrics).
 """
 from __future__ import annotations
 
+import datetime
+
 from bamboo.querier import windows as W
 
 #: the fields of a rows file's section that are not columns
@@ -77,6 +79,16 @@ def rows_after(states: list[dict], at: str, as_of: str | None) -> list[dict]:
     since = W.when(at)
     return [s for s in states if W.when(s.get("time_extended") or s["time"]) > since
             and (as_of is None or W.when(s["time"]) <= W.when(as_of))]
+
+
+def row_before(states: list[dict], state: dict) -> bool:
+    """Whether the statuslog holds a row of the key before *state*: the key's row was there then, so a write that makes
+    the row did not write *state* (KNOWN_ISSUES.md K29).  Two rows are told apart by ``time_extended`` where both have
+    it, else by the second; a tie is not before."""
+    def at(s: dict, fine: bool) -> datetime.datetime:
+        return W.when(s["time_extended"] if fine else s["time"][:19])
+
+    return any(at(s, f) < at(state, f) for s in states for f in [bool(s.get("time_extended") and state.get("time_extended"))])
 
 
 def _why(as_of: str | None, clock: str | None, states: list[dict], at: str | None) -> str:

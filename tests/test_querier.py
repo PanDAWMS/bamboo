@@ -1805,6 +1805,70 @@ def test_a_write_that_makes_the_row_is_no_arm_where_every_key_from_writing_it_th
     assert after == {"p/make.py::helper": "make@8 hands the rows it selects to it"} and not by_key_after
 
 
+def test_a_write_that_makes_the_row_is_no_candidate_for_a_status_the_row_had_a_row_before(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.codemap.models import Reading
+    from bamboo.querier import held as HD, mapdump
+
+    S = "JobSpec.jobStatus"
+    es, act, mix, half = (f"p/{n}.py::{n}" for n in ("es", "act", "mix", "half"))
+    def branch(line, other=()):
+        return N(line=line, outcome="activated", other_lines=list(other))
+    writers = [N(owner=es, branches=[branch(5556), branch(5558)]), N(owner=act, branches=[branch(71)]),
+               N(owner=mix, branches=[branch(10), branch(20)]), N(owner=half, branches=[branch(30, [31])])]
+    fetched = []
+
+    async def writers_of(subject):
+        fetched.append(subject)
+        return writers
+    r._writers_of = writers_of
+
+    def key(owner, lines, new_row=None):
+        return N(owner=owner, statement=lines[0], term="k=:k", writes={S: lines}, unread="", sources=[],
+                 new_row=new_row, new_row_by="sequence" if new_row else "", new_row_line=5706 if new_row else None)
+
+    def reading(owner, lines):
+        return Reading(owner=owner, file=owner.split("::")[0], lines=lines, log_files=["x.log"])
+
+    readings = [reading(es, [5556, 5558]), reading(act, [71]), reading(mix, [10, 20]), reading(half, [30])]
+    rows = [{"status": "pending", "time": "2026-01-01 00:00:00", "time_extended": "2026-01-01 00:00:00.2"},
+            {"status": "defined", "time": "2026-01-01 00:00:00", "time_extended": "2026-01-01 00:00:00.7"},
+            {"status": "activated", "time": "2026-01-01 00:00:04", "time_extended": "2026-01-01 00:00:04.1"}]
+    r.data["statuslog"] = {"states": rows}
+    def unborn(state):
+        kept, said = r._unborn(readings, S, state)
+        return [[x.owner.split("::")[-1], x.lines] for x in kept], said
+
+    no_marks, fetched_before = unborn(rows[2]), list(fetched)
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        key(es, [5556, 5558], new_row=True), key(act, [71]), key(mix, [10], new_row=True), key(mix, [20]),
+        key(half, [30], new_row=True)])]   # half's 31, another line of the branch, no KeyFrom names
+    later, first = unborn(rows[2]), unborn(rows[0])
+    handed = unborn({"status": "activated", "time": "2026-01-01 00:00:00"})   # a tie at the second: not before
+    print(json.dumps([no_marks, fetched_before, later, first, handed, unborn(None),
+                      HD.row_before(rows, rows[1]), HD.row_before(rows[:1], rows[0])]))
+    """,
+        )
+    )
+    no_marks, fetched, later, first, handed, no_state, defined_after_pending, alone = json.loads(out.splitlines()[-1])
+    every = [["es", [5556, 5558]], ["act", [71]], ["mix", [10, 20]], ["half", [30]]]
+    # with no birth marked the map's writers are not read, and every reading stays
+    assert no_marks == [every, ""] and fetched == []
+    # 'activated' after 'pending' and 'defined': the row was there, so the new jobs' INSERTs are no candidates; a
+    # function keeps its other lines; a branch whose other line is not a birth stays whole; an UPDATE stays
+    kept, said = later
+    assert kept == [["act", [71]], ["mix", [20]], ["half", [30]]]
+    assert said == ("the key's row was there before 'activated' at 2026-01-01 00:00:04, so its writes that make a row are "
+                    "no candidates: es [5556, 5558] (births: sequence at 5706); mix [10] (births: sequence at 5706) "
+                    "(KNOWN_ISSUES.md K29)")
+    # the row's first status, a tie at the second the log keeps, and no state: the birth may be the row's
+    assert first == [every, ""] and handed == [every, ""] and no_state == [every, ""]
+    assert defined_after_pending is True and alone is False
+
+
 _M2_SETUP = """
     import datetime
     import json

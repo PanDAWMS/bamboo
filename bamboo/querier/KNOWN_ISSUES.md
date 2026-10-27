@@ -184,8 +184,15 @@ a row rewritten (DELETE and INSERT of its whole key), a call that updates the ta
 too stay arms: errs on keeping.  An object of the table's class handed in is not followed to where its key was made
 (None): `insertNewJob`'s new jobs, whose PandaID `TaskBuffer.storeJobs` takes from the sequence, stay arms.
 
+The same fact answers who wrote a statuslog row (H2, F1): a write that makes the row writes no row that was there, so
+where the statuslog holds a row of the key before the one asked, a reading's birth lines are no candidates, and a
+reading left with none goes (`_unborn`, `held.row_before`): `ppEventServiceJob`'s new jobs, INSERTed activated with a
+sequence's PandaID, did not write a job's 'activated' after its 'defined'.  For the row's first status, a tie at the
+second the log keeps, or a value held beside the status (`JobSpec.computingSite`), every reading stays.
+
 *Shows:* "<owner>: its writes at [...] make the row (births: sequence at 623): not arms"; result.json's `births`; a
-writer with births alone is absent from the movers.
+writer with births alone is absent from the movers; H2 / F1: "the key's row was there before 'activated' at ..., so
+its writes that make a row are no candidates: ppEventServiceJob [5556, 5558, 5560] (births: sequence at 5706)".
 *Revisit:* when the map follows an object handed in to where its key was made.
 
 ### K16. S1 asks a writer that takes a row by its key over the window's last part only
