@@ -1468,6 +1468,8 @@ ROW, CONSULT, NEGATED, PICKS = "row", "consult", "negated", "picks"
 _SCHEMA: Optional[dict[str, frozenset[str]]] = None
 #: ``{table: its primary key's columns}``, both lowered -- :func:`read_keys`.
 _KEYS: Optional[dict[str, frozenset[str]]] = None
+#: ``{table: its DATE / TIMESTAMP columns}``, both lowered -- :func:`read_dated`.
+_DATED: Optional[dict[str, frozenset[str]]] = None
 
 
 class Parsed(NamedTuple):
@@ -1524,19 +1526,24 @@ class Reading(NamedTuple):
 
 @contextlib.contextmanager
 def with_schema(
-    columns: Optional[dict[str, frozenset[str]]], keys: Optional[dict[str, frozenset[str]]] = None
+    columns: Optional[dict[str, frozenset[str]]],
+    keys: Optional[dict[str, frozenset[str]]] = None,
+    dated: Optional[dict[str, frozenset[str]]] = None,
 ) -> Iterator[None]:
-    """Decide unqualified columns by *columns*, ``{table: columns}`` lowered, inside, and read *keys*.
+    """Decide unqualified columns by *columns*, ``{table: columns}`` lowered, inside, and read *keys* and *dated*.
 
     A statement joining two tables may name a column without saying whose it
     is -- valid only because one of them has it, and which one is not in the
     text.  ``read_schema`` reads the answer from panda-database, and
     ``read_keys`` each table's key, which says whether a grouped statement
-    returns one row per row of a table (:func:`aggregated`).
+    returns one row per row of a table (:func:`aggregated`); ``read_dated``
+    its dated columns, which a key holds to time a version of a row, not to
+    name it (:func:`table_identity`).
     """
-    global _SCHEMA, _KEYS
+    global _SCHEMA, _KEYS, _DATED
     before, _SCHEMA = _SCHEMA, columns
     keys_before, _KEYS = _KEYS, keys
+    dated_before, _DATED = _DATED, dated
     terms.cache_clear()
     conditions.cache_clear()
     conjoined.cache_clear()
@@ -1552,6 +1559,7 @@ def with_schema(
     finally:
         _SCHEMA = before
         _KEYS = keys_before
+        _DATED = dated_before
         terms.cache_clear()
         conditions.cache_clear()
         conjoined.cache_clear()
@@ -1566,6 +1574,7 @@ def with_schema(
 
 _CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
 _COLUMN_DEFINITION = re.compile(r'^\s*"(\w+)"\s+[A-Za-z]')
+_COLUMN_TYPE = re.compile(r'^\s*"(\w+)"\s+([A-Za-z]\w*)')
 
 
 def read_schema(directory: Path) -> dict[str, frozenset[str]]:
@@ -1599,6 +1608,27 @@ _COLUMN_PRIMARY_KEY = re.compile(r"\bPRIMARY\s+KEY\b(?!\s*\()", re.IGNORECASE)
 def table_key(table: str) -> frozenset[str]:
     """*table*'s primary key's columns, lowered, as :func:`with_schema` was given them; empty outside it."""
     return (_KEYS or {}).get(table.lower(), frozenset())
+
+
+def table_identity(table: str) -> frozenset[str]:
+    """*table*'s key without its dated columns: what names a row rather than a version of it --
+    ``jobsArchived4``'s key is ``(PANDAID, MODIFICATIONTIME)``, and an archived job is the job its ``PandaID``
+    names, whenever it was archived.  Empty outside :func:`with_schema`."""
+    return table_key(table) - (_DATED or {}).get(table.lower(), frozenset())
+
+
+def read_dated(directory: Path) -> dict[str, frozenset[str]]:
+    """``{table: its DATE / TIMESTAMP columns}``, both lowered, from the DDL :func:`read_schema` reads."""
+    found: dict[str, set[str]] = {}
+    for path in sorted(Path(directory).glob("*.sql")):
+        text = path.read_text()
+        for match in _CREATE_TABLE.finditer(text):
+            dated = found.setdefault(match.group(2).lower(), set())
+            for part in _top_level_parts(text, match.end()):
+                typed = _COLUMN_TYPE.match(part)
+                if typed is not None and typed.group(2).upper().startswith(("DATE", "TIMESTAMP")):
+                    dated.add(typed.group(1).lower())
+    return {table: frozenset(columns) for table, columns in found.items()}
 
 
 def read_keys(directory: Path) -> dict[str, frozenset[str]]:

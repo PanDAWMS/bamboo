@@ -69,13 +69,30 @@ from bamboo.codemap.calls import (
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     KEY_ATTRIBUTE,
+    KEY_BOUND,
     KEY_CONSTANT,
+    KEY_HANDED,
+    KEY_KEPT,
     KEY_NO_BIND,
     KEY_NO_MAP,
+    KEY_NO_USE,
     KEY_PARAMETER,
+    KEY_RETURNED,
     KEY_ROWS,
     KEY_SELF_FIELD,
+    KEY_SEQUENCE,
     KEY_UNKNOWN,
+    NEW_ROW_COMPUTED,
+    NEW_ROW_HANDED,
+    NEW_ROW_LITERAL,
+    NEW_ROW_MOVED,
+    NEW_ROW_NO_KEY,
+    NEW_ROW_OTHER_CLASS,
+    NEW_ROW_RETURNING,
+    NEW_ROW_REWRITTEN,
+    NEW_ROW_SEQUENCE,
+    NEW_ROW_UNREAD,
+    NEW_ROW_UPSERT,
     RESULT_AGGREGATE,
     RESULT_ROWS,
     RESULT_VARIES,
@@ -150,7 +167,6 @@ VARMAP_FROM_OUTSIDE = "the varmap is not built in this function"
 BOUND_OUTSIDE_WINDOW = "bound outside the window this execution owns"
 PLACEHOLDER_COMPUTED = "the placeholder is spelled by an expression"
 VARMAP_IS_A_LIST = "the varmap is one of a list handed to executemany"
-PLACEHOLDER_MISSING_COLON = "the placeholder is bound without its leading colon"
 NOTHING_BINDS_IT = "nothing in this function binds this placeholder"
 NO_DECIDING_FRAGMENT = "the fragment that wrote this value could not be located"
 
@@ -434,11 +450,494 @@ def _key_froms(
             key_froms.append(record)
         for subject, lines in written.items():
             record.writes[subject] = sorted({*record.writes.get(subject, ()), *lines})
-        if run.varmap is None:
+        # A map written into the call -- ``execute(sql, {":vo": vo})`` -- is a bind map as a named one is.
+        found = (
+            sql.bound_values(func, run.varmap, bind, run.window, at=run)
+            if run.varmap is not None
+            else sql.inline_binds(run.call, bind)
+        )
+        if run.varmap is None and not found:
             continue
         binds = record._binds[2]
-        binds.extend(sql.bound_values(func, run.varmap, bind, run.window, at=run))
+        binds.extend(found)
         record.unread = "" if binds else KEY_NO_BIND
+
+
+_INSERT_INTO = re.compile(r"^\s*INSERT\s+(?:/\*.*?\*/\s*)?INTO\s+([\w.{}$]+)", re.IGNORECASE | re.DOTALL)
+#: A statement selecting a sequence's next values -- ``SELECT ...JEDI_DATASET_CONT_FILEID_SEQ.nextval FROM (SELECT
+#: level FROM dual CONNECT BY level<=:nIDs)`` -- and the sequence.
+_SELECTS_SEQUENCE = re.compile(r"^\s*SELECT\s+(?:/\*.*?\*/\s*)?([\w.{}$]+)\.nextval\b", re.IGNORECASE | re.DOTALL)
+_RETURNING = re.compile(r"\bRETURNING\s+(.*?)\s+INTO\b", re.IGNORECASE | re.DOTALL)
+#: Calls making one value of another without making it new: ``int(row[0])`` is still the row's.
+_CONVERSIONS = frozenset({"int", "str", "float", "long"})
+
+
+@dataclasses.dataclass
+class _Insert:
+    """What decides an ``INSERT`` KeyFrom's :attr:`KeyFrom.new_row` beside its sources (:func:`_new_row`).
+
+    *value* is how the statement fills the key column: settled in it (``literal``, ``expression``, ``sequence``
+    -- a ``nextval`` -- or ``returning``, the column ``RETURNING ... INTO`` hands back), by a bind or an object's
+    field read by the carry (``bind`` / ``object``), or not at all (``absent``, and ``none`` for a table with no
+    key).  *binds* is each bind value as written: ``(literal | computed | returned | plain, line, the class of its
+    root object)`` -- ``returned`` is a cursor variable read back (``varMap[":newPandaID"].getvalue()``).
+    """
+
+    table_class: str
+    value: str
+    text: str = ""
+    binds: list = dataclasses.field(default_factory=list)
+    #: The line of a ``DELETE`` in the function naming the same table's whole key: the row is written again.
+    rewritten: Optional[int] = None
+    #: The function's statements returning a key (a sequence's next values are a source of their own, KEY_SEQUENCE).
+    returning_lines: frozenset = frozenset()
+
+
+@dataclasses.dataclass
+class _Writing:
+    """A function's statements as an ``INSERT``'s mark reads them: which return a key, which delete rows by which
+    columns (``{table: [(columns, call)]}``), and which calls update a table (``{(line, table)}``) -- one call
+    running an ``UPDATE`` text or an ``INSERT`` one is an upsert.  A run's lines are all of its calls'
+    (:attr:`sql.Execution.run_at`)."""
+
+    returning_lines: frozenset
+    deletes: dict
+    updated: frozenset = frozenset()
+
+    @classmethod
+    def of(cls, runs: list[sql.Execution]) -> "_Writing":
+        returning, deletes, updated = set(), {}, set()
+        for run in runs:
+            lines = {call.lineno for call in run.run_at}
+            text = run.sql or ""
+            updated |= {
+                (at, s.table.lower()) for s in sqltext.writes(run.reading) if s.kind == "update" for at in lines
+            }
+            if _RETURNING.search(text):
+                returning |= lines
+            if re.search(r"\bDELETE\s+FROM\b", text, re.IGNORECASE):
+                columns: dict[str, set[str]] = {}
+                for term in sqltext.terms(text).terms:
+                    if term.verb == "deleted" and not term.excluding:
+                        columns.setdefault(term.table.lower(), set()).add(term.column.lower())
+                for table, named in columns.items():
+                    deletes.setdefault(table, []).extend((frozenset(named), call) for call in run.run_at)
+        return cls(frozenset(returning), deletes, frozenset(updated))
+
+    def rewritten(self, table: str, identity: Iterable[str], run: sql.Execution) -> Optional[int]:
+        """The line of a ``DELETE`` of *table* naming its whole key that runs first: above a call of *run* and
+        reaching it -- ``lockProcess_JEDI`` deletes its lock and inserts it again.  One that runs after the
+        ``INSERT`` deletes other rows (``updateWorkers``' relations the worker no longer has) or a broken one the
+        failed ``INSERT`` found (``getTasksToRefine_JEDI``'s ``except``), and the row it makes is still new."""
+        named = set(identity)
+        if not named:
+            return None
+        for columns, call in self.deletes.get(table.lower(), ()):
+            if named <= columns and any(
+                call.lineno < at.lineno and surviving_writes([site_of(call)], site_of(at), as_run=True)
+                for at in run.run_at
+            ):
+                return call.lineno
+        return None
+
+    def upserts(self, run: sql.Execution, table: str) -> bool:
+        """Whether a call of *run* also updates *table*: ``addStdOut``'s ``sqlU`` or ``sqlI``."""
+        return any((call.lineno, table.lower()) in self.updated for call in run.run_at)
+
+
+def _returned(text: str) -> set[str]:
+    """The columns ``RETURNING ... INTO`` hands back, lower-cased."""
+    return {column.strip().lower() for column in m.group(1).split(",")} if (m := _RETURNING.search(text)) else set()
+
+
+def _plain(value: ast.AST) -> bool:
+    """A copy of one value: a name, an attribute or a subscript of one, or a conversion of such."""
+    while isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in _CONVERSIONS:
+        if len(value.args) != 1:
+            return False
+        value = value.args[0]
+    while isinstance(value, (ast.Attribute, ast.Subscript)):
+        value = value.value
+    return isinstance(value, ast.Name)
+
+
+def _root(value: ast.AST) -> Optional[ast.Name]:
+    while (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in _CONVERSIONS
+        and value.args
+    ):
+        value = value.args[0]
+    while isinstance(value, (ast.Attribute, ast.Subscript)):
+        value = value.value
+    return value if isinstance(value, ast.Name) else None
+
+
+def _bind_value(
+    value: ast.AST, line: int, func: ast.AST, owner: Optional[str], attributor: SpecAttributor
+) -> tuple[str, int, Optional[str]]:
+    if isinstance(value, ast.Constant):
+        return ("literal", line, None)
+    if any(isinstance(n, ast.Call) and _callee_name(n) == "getvalue" for n in ast.walk(value)):
+        return ("returned", line, None)
+    if not _plain(value):
+        return ("computed", line, None)
+    root = _root(value)
+    return ("plain", line, attributor.class_of(root, func, owner) if root is not None else None)
+
+
+def _sequenced_attributes(modules: list[SourceModule]) -> dict[str, frozenset[str]]:
+    """``{spec class: the attributes its _seqAttrMap fills from a sequence}`` -- ``JobSpec``'s ``PandaID``, put in
+    its ``INSERT`` as the sequence's ``nextval`` where the class is written with ``useSeq=True``."""
+    found: dict[str, frozenset[str]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for statement in node.body:
+                if (
+                    isinstance(statement, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "_seqAttrMap" for t in statement.targets)
+                    and isinstance(statement.value, ast.Dict)
+                ):
+                    found[node.name] = frozenset(
+                        k.value
+                        for k in statement.value.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                    )
+    return found
+
+
+def _values_map(node: Optional[ast.AST]) -> Optional[tuple[ast.expr, ast.Call]]:
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "valuesMap":
+        return node.func.value, node
+    return None
+
+
+def _objects_in(func: ast.AST, name: str, at: ast.AST) -> list[tuple[ast.expr, ast.Call]]:
+    """The objects the map *name* is made of where *at* runs: each ``name = obj.valuesMap(...)`` that reaches it."""
+    made = [
+        node
+        for node in own_nodes(func)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        and _values_map(node.value) is not None
+    ]
+    if not made:
+        return []
+    live = sql._live_at(func, name, made, at)  # type: ignore[arg-type]
+    return [_values_map(node.value) for node in made if id(node) in live]  # type: ignore[misc]
+
+
+def _objects_of(run: sql.Execution, func: ast.AST) -> list[tuple[ast.expr, ast.Call]]:
+    """The objects a run's bind maps are made of, each with its ``valuesMap`` call -- ``job`` of ``execute(sql,
+    job.valuesMap())``, of a map named ``varMap = job.valuesMap(useSeq=True)`` that reaches a call of the run, or of
+    the maps appended to the list ``executemany`` takes -- the first a call hands over directly, then those by name.
+    Read at every call of the run (:attr:`sql.Execution.run_at`): ``retryJob``'s ``sql1`` holds its ``INSERT`` at the
+    ``SELECT``'s call too, round the retry loop, and the object's map reaches only the second; and
+    ``registerTaskInOneShot_JEDI`` runs one ``INSERT`` of a dataset from five places, each with its own map."""
+    found: list[tuple[ast.expr, ast.Call]] = []
+    for call in run.run_at:
+        one = _values_map(call.args[1] if len(call.args) > 1 else None)
+        if one is not None:
+            found.append(one)
+    if run.varmap:
+        for call in run.run_at:
+            found += _objects_in(func, run.varmap, call)
+        appends = [
+            node
+            for node in own_nodes(func)
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "append"
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == run.varmap
+            and len(node.value.args) == 1
+        ]
+        # Only the appends the list a call runs with still holds, as the bind reader takes them: getRandomSeed_JEDI's
+        # ``var_maps = []`` before its new seeds' maps renews the list its UPDATE of the old seeds ran with.
+        live: set[int] = set()
+        for call in run.run_at if appends else ():
+            live |= sql._live_at(func, run.varmap, appends, call)
+        for node in appends:
+            if id(node) not in live:
+                continue
+            element = node.value.args[0]  # type: ignore[attr-defined]
+            one = _values_map(element)
+            if one is not None:
+                found.append(one)
+            elif isinstance(element, ast.Name):
+                found += _objects_in(func, element.id, node)
+    return list({id(made): (obj, made) for obj, made in found}.values())
+
+
+def _maps_of(found: list[tuple[ast.expr, ast.Call]]) -> list[ast.Call]:
+    """The ``valuesMap`` calls of the first object's spelling among *found*: the maps one record's object is in."""
+    spelled = ast.unparse(found[0][0]) if found else None
+    return [made for obj, made in found if ast.unparse(obj) == spelled]
+
+
+def _insert_from(
+    keyed: dict[tuple[str, int, str, str], KeyFrom],
+    key_froms: list[KeyFrom],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: sql.Execution,
+    table: str,
+    term: str,
+    rel_path: str,
+    written: dict[str, set[int]],
+    insert: _Insert,
+    binds: list[sql.Bind],
+    obj: str = "",
+    obj_class: Optional[str] = None,
+    mades: Optional[list[ast.Call]] = None,
+) -> KeyFrom:
+    owner = f"{rel_path}::{func.name}"
+    # Apart from a WHERE term of the same spelling: a run that updates or inserts the row (``addStdOut``'s
+    # ``sqlU`` or ``sqlI``) has both, and they are not one record.
+    name = (owner, run.call.lineno, table, "\0insert " + term)
+    record = keyed.get(name)
+    if record is None:
+        record = keyed[name] = KeyFrom(
+            owner=owner, file=rel_path, statement=run.call.lineno, table=table, term=term, object=obj
+        )
+        record._binds = (func, rel_path, [])
+        record._insert = insert
+        if obj:
+            record._object = (obj, obj_class, mades or [], frozenset())
+        key_froms.append(record)
+    else:
+        record._insert.binds.extend(insert.binds)
+    for subject, lines in written.items():
+        record.writes[subject] = sorted({*record.writes.get(subject, ()), *lines})
+    record._binds[2].extend(binds)
+    if insert.value in ("bind", "object") and not record._binds[2]:
+        record.unread = KEY_NO_BIND if run.varmap is not None or obj else KEY_NO_MAP
+    else:
+        record.unread = ""
+    return record
+
+
+def _insert_froms(
+    keyed: dict[tuple[str, int, str, str], KeyFrom],
+    key_froms: list[KeyFrom],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner_class: Optional[str],
+    run: sql.Execution,
+    statement: sqltext.SqlWrite,
+    rel_path: str,
+    written: dict[str, set[int]],
+    attributor: SpecAttributor,
+    writing: _Writing,
+    upsert: bool = False,
+) -> None:
+    """An ``INSERT`` whose text spells its columns: a :class:`KeyFrom` per column of its table's key, dated ones
+    left out (:func:`sqltext.table_identity`) -- the value the statement gives it, and what decides whether it
+    makes the row (:attr:`KeyFrom.new_row`).  A table with no key gets one, of no term, to say so."""
+    table = statement.table
+    table_class = attributor.class_for_table(table) or f"table:{table.lower()}"
+    identity = sorted(sqltext.table_identity(table))
+    returned = _returned(run.sql or "")
+    spelled = {column.lower(): (column, supplied) for column, supplied in statement.columns.items()}
+    common = {
+        "table_class": table_class,
+        "rewritten": writing.rewritten(table, identity, run),
+        "returning_lines": writing.returning_lines,
+    }
+    if not identity:
+        _insert_from(keyed, key_froms, func, run, table, "", rel_path, written, _Insert(value="none", **common), [])
+        return
+    for column in identity:
+        name, supplied = spelled.get(column, (column, None))
+        binds: list[sql.Bind] = []
+        if upsert:
+            insert, term = _Insert(value="upsert", **common), f"{name}={supplied.text}" if supplied else name
+        elif column in returned:
+            insert, term = _Insert(value="returning", **common), f"{name} RETURNING"
+        elif supplied is None:
+            insert, term = _Insert(value="absent", **common), name
+        elif supplied.kind == "literal":
+            insert, term = _Insert(value="literal", text=supplied.text, **common), f"{name}={supplied.text}"
+        elif supplied.kind in ("expression", "column"):
+            value = "sequence" if "nextval" in supplied.text.lower() else "expression"
+            insert, term = _Insert(value=value, text=supplied.text, **common), f"{name}={supplied.text}"
+        else:
+            binds = (
+                sql.bound_values(func, run.varmap, supplied.text, run.window, at=run)
+                if run.varmap
+                else sql.inline_binds(run.call, supplied.text)
+            )
+            insert = _Insert(
+                value="bind",
+                binds=[_bind_value(b.value, b.site.lineno, func, owner_class, attributor) for b in binds],
+                **common,
+            )
+            term = f"{name}={supplied.text}"
+        _insert_from(keyed, key_froms, func, run, table, term, rel_path, written, insert, binds)
+
+
+def _fields_at(
+    func: ast.AST, obj: ast.expr, attribute: str, mades: list[ast.Call], obj_class: Optional[str]
+) -> list[ast.stmt]:
+    """The assignments of ``obj.<attribute>`` that reach one of *mades*, the object's ``valuesMap()`` calls: one after
+    the map is made is not in it (getRandomSeed_JEDI's ``tmpFileSpec.status = "ready"``), nor one from a pass before
+    where the name is given a new object of its class on the way (``tmpFileSpec = JediFileSpec()``).  The name taken
+    again from a list or a loop may be the same object -- insertFilesForDataset_JEDI fills its specs, keeps them, and
+    inserts them from ``for fileID, fileSpec in zip(newFileIDs, fileSpecsForInsert)`` -- and cancels nothing."""
+    spelled = ast.unparse(obj)
+    assigned = [
+        node
+        for node in own_nodes(func)
+        for target in targets_of(node)
+        if isinstance(target, ast.Attribute)
+        and target.attr == attribute
+        and ast.unparse(target.value) == spelled
+        and getattr(node, "value", None) is not None
+    ]
+    if not assigned or not mades:
+        return []
+    root = _root(obj)
+    renewed: list[ast.AST] = []
+    if root is not None and obj_class is not None:
+        made_anew = obj_class.rsplit(".", 1)[-1]
+        renewed = [
+            node
+            for node in own_nodes(func)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Call)
+            and _callee_name(node.value) == made_anew
+            and any(
+                name == root.id for target in targets_of(node) for name, _slot, _unpacked in names_bound_by(target)
+            )
+        ]
+    found: dict[int, ast.stmt] = {}
+    for made in mades:
+        for node in surviving_writes(assigned, site_of(made), as_run=True, killers=renewed):
+            found[id(node)] = node  # type: ignore[assignment]
+    return [node for node in assigned if id(node) in found]  # type: ignore[misc]
+
+
+def _unspelled_froms(
+    keyed: dict[tuple[str, int, str, str], KeyFrom],
+    key_froms: list[KeyFrom],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner_class: Optional[str],
+    run: sql.Execution,
+    found: list[tuple[ast.expr, ast.Call]],
+    rel_path: str,
+    attributor: SpecAttributor,
+    writing: _Writing,
+    sequenced: dict[str, frozenset[str]],
+) -> None:
+    """An ``INSERT`` whose text does not spell its columns: a :class:`KeyFrom` per key column of its table (of the
+    object's class's tables where the text names it by a variable).  Run with an object's map --
+    ``INSERT INTO jobsArchived4 ({JobSpec.columnNames()}) ...`` with ``job.valuesMap()`` -- a column's value is the
+    object's field: a sequence's where ``useSeq=True`` fills it, else what the function assigns to it where the map
+    is made, else the field as the object holds it.  A column ``RETURNING`` hands back is new; one no field of the
+    object holds, or any of a map built otherwise (``copy_file_records``' ``VALUES (:col, ...)`` from a cursor's
+    description), is not read."""
+    obj, made = found[0] if found else (None, None)
+    mades = _maps_of(found)
+    matched = _INSERT_INTO.match(run.sql or "")
+    if matched is None:
+        return
+    named = matched.group(1).split(".")[-1]
+    table = "" if "{" in named or "$" in named else named
+    obj_class = attributor.class_of(obj, func, owner_class) if obj is not None else None
+    if not table and obj_class is None:
+        return
+    # The table's class as the subjects map it, else the object's: a table a JobSpec's valuesMap is written into
+    # holds JobSpec rows.
+    table_class = (attributor.class_for_table(table) if table else None) or obj_class or f"table:{table.lower()}"
+    identity = sorted(
+        sqltext.table_identity(table)
+        if table
+        else set().union(
+            *(sqltext.table_identity(t) for t in attributor.tables_of(obj_class))  # type: ignore[arg-type]
+        )
+    )
+    use_seq = made is not None and any(
+        k.arg == "useSeq" and isinstance(k.value, ast.Constant) and k.value.value for k in made.keywords
+    )
+    attributes = {a.lower(): a for a in attributor.declared_attributes(obj_class)} if obj_class else {}
+    spelled_obj = ast.unparse(obj) if obj is not None else ""
+    returned = _returned(run.sql or "")
+    upsert = bool(table) and writing.upserts(run, table)
+    common = {
+        "table_class": table_class,
+        "rewritten": writing.rewritten(table, identity, run) if table else None,
+        "returning_lines": writing.returning_lines,
+    }
+    shown = table or named
+
+    def put(term: str, insert: _Insert, binds: list[sql.Bind]) -> None:
+        _insert_from(
+            keyed, key_froms, func, run, shown, term, rel_path, {}, insert, binds, spelled_obj, obj_class, mades
+        )
+
+    if not identity:
+        put("", _Insert(value="none", **common), [])
+        return
+    for column in identity:
+        attribute = attributes.get(column)
+        term = f"{attribute}={spelled_obj}.{attribute}" if attribute else column
+        if upsert:
+            put(term, _Insert(value="upsert", **common), [])
+        elif attribute and use_seq and attribute in sequenced.get(obj_class, ()):  # type: ignore[arg-type]
+            put(term, _Insert(value="sequence", **common), [])
+        elif column in returned:
+            put(f"{attribute or column} RETURNING", _Insert(value="returning", **common), [])
+        elif attribute is None or obj is None or made is None:
+            put(term, _Insert(value="absent", **common), [])
+        else:
+            # What the function puts in the field where the map is made: insertNewJob's ``file.row_ID = None`` is
+            # replaced by ``fileIDPool[...]`` before its valuesMap(), and insertFilesForDataset_JEDI's fileID is a
+            # sequence's, read through the name it was assigned from, not the field.
+            assigned = _fields_at(func, obj, attribute, mades, obj_class)
+            values = [_bind_value(node.value, node.lineno, func, owner_class, attributor) for node in assigned]
+            binds = [sql.Bind(node.value, site_of(node.value)) for node in assigned]
+            if not assigned:
+                field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
+                field.parent = getattr(obj, "parent", None)  # type: ignore[attr-defined]
+                values, binds = [("plain", run.call.lineno, obj_class)], [sql.Bind(field, site_of(run.call))]
+            put(term, _Insert(value="object", binds=values, **common), binds)
+
+
+def _mark_object(
+    keyed: dict[tuple[str, int, str, str], KeyFrom],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner_class: Optional[str],
+    run: sql.Execution,
+    statement: sqltext.SqlWrite,
+    rel_path: str,
+    found: list[tuple[ast.expr, ast.Call]],
+    attributor: SpecAttributor,
+) -> None:
+    """A statement whose bind map is an object's ``valuesMap`` -- an ``UPDATE`` setting what the function changed on
+    it (``SET {job.bindUpdateChangesExpression()}``): its terms' KeyFroms persist that object, and a term no bind of
+    the map fills is the object's field of the bind's name (``:PandaID``, ``job.PandaID``)."""
+    obj, _made = found[0]
+    obj_class = attributor.class_of(obj, func, owner_class)
+    if obj_class is None:
+        return
+    spelled_obj = ast.unparse(obj)
+    attributes = {a.lower(): a for a in attributor.declared_attributes(obj_class)}
+    owner = f"{rel_path}::{func.name}"
+    terms = [(f"{column}={bind}", bind) for column, bind in statement.keys.items()]
+    terms += [(f"{column} IN ({bind})", bind) for column, bind in statement.key_lists.items()]
+    for term, bind in terms:
+        record = keyed.get((owner, run.call.lineno, statement.table, term))
+        if record is None:
+            continue
+        record.object = spelled_obj
+        record._object = (spelled_obj, obj_class, _maps_of(found), frozenset())
+        attribute = attributes.get(bind.lstrip(":").lower())
+        if not record._binds[2] and attribute is not None:
+            field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
+            record._binds[2].append(sql.Bind(field, site_of(run.call)))
+            record.unread = ""
 
 
 def extract(
@@ -492,6 +991,7 @@ def extract(
     junctions: dict[str, JunctionNode] = {}
     carriers: dict[int, tuple[Branch, list[_Carrier]]] = {}
     keyed: dict[tuple[str, int, str, str], KeyFrom] = {}
+    sequenced = _sequenced_attributes(modules) if key_froms is not None else {}
     stopped: list[ReadingStop] = []
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str, str]] = set()
@@ -519,13 +1019,23 @@ def extract(
             seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
             owner = f"{module.rel_path}::{func.name}"
             skipped: list[sql.Skip] = []
+            writing: Optional[_Writing] = None
             for run in sql.executions(func, skipped):
                 key = (run.variable, run.sql, run.varmap, run.window)
                 if key in seen:
                     continue
                 seen.add(key)
                 stopped.extend(_run_stops(run, module.rel_path, owner))
-                for statement in sqltext.writes(run.reading):
+                statements = sqltext.writes(run.reading)
+                made_of = _objects_of(run, func) if key_froms is not None else []
+                inserting = _INSERT_INTO.match(run.sql or "") is not None
+                if key_froms is not None and (made_of or inserting):
+                    writing = writing or _Writing.of(list(sql.executions(func)))
+                if writing is not None and inserting and not any(s.kind == "insert" for s in statements):
+                    _unspelled_froms(
+                        keyed, key_froms, func, _owner, run, made_of, module.rel_path, attributor, writing, sequenced
+                    )
+                for statement in statements:
                     spec_class = attributor.class_for_table(statement.table)
                     # Settled once per statement, not once per column: every
                     # column of one ``SET`` is bounded by the same ``WHERE``,
@@ -666,6 +1176,14 @@ def extract(
                         )
                     if key_froms is not None:
                         _key_froms(keyed, key_froms, func, run, statement, module.rel_path, written)
+                        if statement.kind == "insert" and writing is not None:
+                            _insert_froms(
+                                keyed, key_froms, func, _owner, run, statement, module.rel_path, written,
+                                attributor, writing,
+                                upsert=writing.upserts(run, statement.table),
+                            )
+                        elif made_of:
+                            _mark_object(keyed, func, _owner, run, statement, module.rel_path, made_of, attributor)
             # The executions nothing was read out of, last: they have no run
             # to hang on, and saying them is what tells "read in full" from
             # "never read".
@@ -877,20 +1395,15 @@ def _outcomes(
             # than from a second walk asking why -- see ``sql.BindScan``.
             if _runs_many(run):
                 # ``executemany(sql, varMaps)`` is handed a *sequence* of maps,
-                # each appended after being filled, so the name in the call
-                # never carries a placeholder as a key.  Read off the call form
+                # and none the scan reads its maps from was appended to it --
+                # one a helper cuts (``for shard in create_shards(maps, 100)``),
+                # one ``list(map(lambda ...))`` builds.  Read off the call form
                 # rather than off the list, which is what makes it exact.
                 why.append(VARMAP_IS_A_LIST)
             elif not scan.varmap_assigned:
                 why.append(VARMAP_FROM_OUTSIDE)
             elif scan.outside_window:
                 why.append(BOUND_OUTSIDE_WINDOW)
-            elif supplied.text.lstrip(":") in scan.constant_keys:
-                # ``hs_scrapers`` writes ``r["source"] = url`` against
-                # ``VALUES (:source)``.  The key is there and the colon is not,
-                # so a reader matching the spelled placeholder misses a value
-                # that was decided right here.
-                why.append(PLACEHOLDER_MISSING_COLON)
             elif scan.computed_keys and supplied.text not in scan.constant_keys:
                 why.append(PLACEHOLDER_COMPUTED)
             else:
@@ -3847,6 +4360,12 @@ _SERIALIZING = frozenset({"dumps", "str", "repr"})
 #: A builtin container's methods handing back the container, and one of its elements.
 _CONTAINER_KEEPING = frozenset({"copy"})
 _CONTAINER_ELEMENT = frozenset({"get", "pop", "popitem", "setdefault"})
+#: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
+#: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
+#: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
+_CHUNKING = frozenset({"batched"})
+_SLICING = frozenset({"islice"})
+_CHAINING = frozenset({"chain"})
 
 
 def _cut(path: tuple[str, ...]) -> tuple[str, ...]:
@@ -3886,8 +4405,106 @@ def _under(step: str, paths: Iterable[tuple[str, ...]]) -> _Paths:
 
 
 def _elements(paths: _Paths) -> _Paths:
-    """What an element a loop or a comprehension takes holds: of a list or a set, or a dict's key."""
+    """What an element a loop or a comprehension takes holds, of a value not known as a dict (:func:`_keys`): of a list
+    or a set, or a dict's key."""
     return _under(_ALL, paths) | _under(_KEY, paths)
+
+
+def _keys(paths: _Paths) -> _Paths:
+    """What an element of a value known as a dict holds: its key, not what its values hold (``[*]`` is both a
+    list's element and the value under a key not known before it runs)."""
+    return _under(_KEY, paths)
+
+
+#: Calls making a dict.
+_DICT_MAKERS = frozenset({"dict", "defaultdict", "OrderedDict", "Counter"})
+#: Annotations naming a dict.
+_DICT_TYPES = _DICT_MAKERS | {"Dict", "DefaultDict", "Mapping", "MutableMapping"}
+
+
+def _dict_type(annotation: Optional[ast.AST]) -> bool:
+    """Whether *annotation* names a dict -- or a dict or ``None``."""
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        sides = [
+            side
+            for side in (annotation.left, annotation.right)
+            if not (isinstance(side, ast.Constant) and side.value is None)
+        ]
+        return len(sides) == 1 and _dict_type(sides[0])
+    head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    name = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", None)
+    if name == "Optional" and isinstance(annotation, ast.Subscript):
+        return _dict_type(annotation.slice)
+    return name in _DICT_TYPES
+
+
+def _is_dict(expression: Optional[ast.AST], dicts: frozenset[str]) -> bool:
+    """Whether *expression*'s value is a dict: made here, or a name of *dicts* (:func:`_dict_names`)."""
+    if isinstance(expression, (ast.Dict, ast.DictComp)):
+        return True
+    if isinstance(expression, ast.Name):
+        return expression.id in dicts
+    if isinstance(expression, ast.Call):
+        name = _callee_name(expression)
+        if name in _DICT_MAKERS:
+            return True
+        return name == "copy" and isinstance(expression.func, ast.Attribute) and _is_dict(expression.func.value, dicts)
+    if isinstance(expression, ast.IfExp):
+        return _is_dict(expression.body, dicts) and _is_dict(expression.orelse, dicts)
+    if isinstance(expression, ast.BoolOp):
+        return all(_is_dict(value, dicts) for value in expression.values)
+    return False
+
+
+def _dict_names(func: ast.AST) -> frozenset[str]:
+    """The names *func* holds dicts in: annotated as one (``**kwargs`` among them), or bound only to values making
+    one."""
+    known: set[str] = set()
+    bound: dict[str, list[Optional[ast.AST]]] = {}
+
+    def binds(target: ast.AST, value: Optional[ast.AST]) -> None:
+        if isinstance(target, ast.Name):
+            bound.setdefault(target.id, []).append(value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                binds(element, None)
+        elif isinstance(target, ast.Starred):
+            binds(target.value, None)
+
+    arguments = getattr(func, "args", None)
+    if arguments is not None:
+        for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg):
+            if one is not None:
+                bound.setdefault(one.arg, []).append(None)
+                if one is not arguments.vararg and _dict_type(one.annotation):
+                    known.add(one.arg)
+        if arguments.kwarg is not None:
+            known.add(arguments.kwarg.arg)
+    for node in own_nodes(func):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                binds(target, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and _dict_type(node.annotation):
+                known.add(node.target.id)
+            if node.value is not None:
+                binds(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            binds(node.target, node.value)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            binds(node.target, None)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            binds(node.optional_vars, None)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.setdefault(node.name, []).append(None)
+    growing = True
+    while growing:
+        growing = False
+        for name, made in bound.items():
+            if name not in known and all(_is_dict(value, frozenset(known)) for value in made):
+                known.add(name)
+                growing = True
+    return frozenset(known)
 
 
 def _index_step(node: ast.AST) -> str:
@@ -4000,18 +4617,22 @@ class _PathCarry:
     hands parts of them to (*seeds*), or the value of a call the function made (*call_values*: the way back).  A
     write holds what its value holds, put at its steps -- ``x.a[k] = v`` puts what ``v`` holds at ``.a[*]`` of ``x``
     -- and taken apart as its target is: ``a, b = v`` gives ``a`` what ``v[0]`` holds, a loop's target what an
-    element does.  A read takes the part it names: ``x.a`` holds what ``.a`` of ``x`` holds, and the whole value
-    holds every part.  Which writes of a name reach a read is ``pathcond.surviving_writes`` as the function runs; a
-    write that puts something into a name (``x.a = v``, ``d[k] = v``, ``x.append(v)``, ``x += v``) adds to it.
+    element does, and an element of a value known as a dict is its key (:func:`_dict_names`), wherever one is taken:
+    ``for k in sorted(d)`` takes what ``d``'s keys hold, not what its values do.  A read takes the part it names:
+    ``x.a`` holds what ``.a`` of ``x`` holds, and the whole value holds every part.  Which writes of a name reach a
+    read is ``pathcond.surviving_writes`` as the function runs; a write that puts something into a name (``x.a = v``,
+    ``d[k] = v``, ``x.append(v)``, ``x += v``) adds to it, and a key it puts in is one of the keys there -- each
+    subscript written through (``d[a][b] = v`` puts ``a`` and ``b``), ``d[k].append(v)``, ``d.setdefault(k, v)``.
 
     A call's value is read from where it lands (:class:`_Reading`): what the definition returns of what it is
     handed, what a constructor keeps in its object.  A call no reading places is a builtin's or a hole: a container
-    method takes the part it names, a builtin of :data:`_KEEPING` keeps its argument, and any other call's value
-    holds the rows where something it is handed holds them whole -- a part of them handed to a hole makes nothing
-    of them.  What the reach record reads as the database gives nothing back of this statement's rows: its answer
-    is another run's (a call inside it, a bind's ``int(row[0])``, is read as any other).  A call placed in the
-    corpus can put what it is handed into an object named here (its summary's *kept*): ``fileSpec.pack(row)`` fills
-    ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.
+    method takes the part it names, a builtin of :data:`_KEEPING` keeps its argument, an iterator helper outside the
+    corpus (``batched``, ``islice``, ``chain``) is made of its iterables' elements -- not of the count beside them --
+    and any other call's value holds the rows where something it is handed holds them whole -- a part of them
+    handed to a hole makes nothing of them.  What the reach record reads as the database gives nothing back of this
+    statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
+    other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
+    *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.
     """
 
     def __init__(
@@ -4026,6 +4647,7 @@ class _PathCarry:
     ):
         self.reading, self.file, self.func, self.bound = reading, file, func, bound
         self.call_values = call_values or {}
+        self.dicts = reading.dicts_of(func)
         self.writes: list[_Write] = []
         self.by_name: dict[str, list[_Write]] = {}
         for write in reading.writes_of(func):
@@ -4047,10 +4669,11 @@ class _PathCarry:
     # -- the writes ----------------------------------------------------------
 
     @staticmethod
-    def read_writes(func: ast.AST) -> list[_Write]:
-        """Every write of a name in *func*, its parameters last, holding nothing yet."""
+    def read_writes(func: ast.AST, dicts: frozenset[str] = frozenset()) -> list[_Write]:
+        """Every write of a name in *func*, its parameters last, holding nothing yet; *dicts* the names it holds
+        dicts in."""
         carry = _PathCarry.__new__(_PathCarry)
-        carry.writes, carry.by_name = [], {}
+        carry.writes, carry.by_name, carry.dicts = [], {}, dicts
         carry._read(func)
         arguments = getattr(func, "args", None)
         if arguments is not None:
@@ -4075,12 +4698,18 @@ class _PathCarry:
             if found is not None:
                 base, steps = found
                 self._add(_Write(base, node, steps, source, take, True))
-            if isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice):
-                # ``d[k] = v``: what ``k`` holds is one of ``d``'s keys.
-                inner = _access_path(target.value)
+            self._keys_put(target, node)
+
+    def _keys_put(self, expression: ast.AST, node: ast.AST) -> None:
+        """What each key of the access *expression* written through holds is one of its container's keys:
+        ``d[k] = v``, ``d[a][b] = v``, ``d[k].append(v)``."""
+        while isinstance(expression, (ast.Attribute, ast.Subscript)):
+            if isinstance(expression, ast.Subscript) and not isinstance(expression.slice, ast.Slice):
+                inner = _access_path(expression.value)
                 if inner is not None:
                     base, steps = inner
-                    self._add(_Write(base, node, steps + (_KEY,), target.slice, _same, True))
+                    self._add(_Write(base, node, steps + (_KEY,), expression.slice, _same, True))
+            expression = expression.value
 
     def _read(self, func: ast.AST) -> None:
         # A comprehension's target is its own scope's, not the function's.
@@ -4096,7 +4725,8 @@ class _PathCarry:
                 for target in targets:
                     self._target(target, node, node.value, _same, isinstance(node, ast.AugAssign))
             elif isinstance(node, (ast.For, ast.AsyncFor)):
-                self._target(node.target, node, node.iter, _elements, False)
+                take = _keys if _is_dict(node.iter, self.dicts) else _elements
+                self._target(node.target, node, node.iter, take, False)
             elif isinstance(node, ast.withitem) and node.optional_vars is not None:
                 for name in ast.walk(node.optional_vars):
                     if isinstance(name, ast.Name):
@@ -4137,6 +4767,9 @@ class _PathCarry:
                     self._add(_Write(base, statement, steps, call.args[0], _same, True))
                 elif name == "setdefault" and len(call.args) >= 2:
                     self._add(_Write(base, statement, steps + (_ALL,), call.args[1], _same, True))
+                if name == "setdefault" and call.args:
+                    self._add(_Write(base, statement, steps + (_KEY,), call.args[0], _same, True))
+                self._keys_put(made, statement)
                 return
         parts = _setattr_parts(call)
         if parts is not None:
@@ -4217,10 +4850,15 @@ class _PathCarry:
                     bound = {n.id for n in ast.walk(generator.target) if isinstance(n, ast.Name)}
                     if name in bound:
                         return self._unpack_into(
-                            generator.target, name, _elements(self.held(generator.iter, generator.iter))
+                            generator.target, name, _elements(self._as_list(generator.iter, generator.iter))
                         )
             scope = getattr(scope, "parent", None)
         return None
+
+    def _as_list(self, expression: ast.AST, at: ast.AST) -> _Paths:
+        """What *expression* holds as what it is iterated for, its elements at ``[*]``: a dict's are its keys."""
+        held = self.held(expression, at)
+        return _below((_ALL,), _keys(held)) if _is_dict(expression, self.dicts) else held
 
     def _unpack_into(self, target: ast.AST, name: str, paths: _Paths) -> Optional[_Paths]:
         if isinstance(target, ast.Name):
@@ -4306,21 +4944,22 @@ class _PathCarry:
         if isinstance(call.func, ast.Name):
             if name in _TELLING_NOTHING:
                 return _NOTHING
+            as_list = self._as_list
             if name in _KEEPING:
-                return held(args[0], at) if args else _NOTHING
+                return (held(args[0], at) if name == "dict" else as_list(args[0], at)) if args else _NOTHING
             if name == "next":
-                return _elements(held(args[0], at)) if args else _NOTHING
+                return _elements(as_list(args[0], at)) if args else _NOTHING
             if name in ("filter", "map") and len(args) >= 2:
-                return held(args[1], at)  # the elements kept, or what is made of each (read as the element)
+                return as_list(args[1], at)  # the elements kept, or what is made of each (read as the element)
             if name in ("min", "max") and len(args) == 1:
-                return _under(_ALL, held(args[0], at))
+                return _under(_ALL, as_list(args[0], at))
             if name == "enumerate" and args:
-                return _below((_ALL, "[1]"), _under(_ALL, held(args[0], at)))
+                return _below((_ALL, "[1]"), _under(_ALL, as_list(args[0], at)))
             if name == "zip":
                 return frozenset(
                     path
                     for index, one in enumerate(args)
-                    for path in _below((_ALL, f"[{index}]"), _under(_ALL, held(one, at)))
+                    for path in _below((_ALL, f"[{index}]"), _under(_ALL, as_list(one, at)))
                 )
             if name == "getattr" and len(args) >= 2:
                 attr = args[1]
@@ -4366,6 +5005,12 @@ class _PathCarry:
                 elif not placed.thread:
                     found |= summary.returns
             return frozenset(found)
+        if args and name in _CHUNKING | _SLICING | _CHAINING:
+            # An iterator helper no reading places: the first argument's elements, or every one's -- not the
+            # count beside them, which the rule below would read as the whole value.
+            taken = args if name in _CHAINING else args[:1]
+            elements = frozenset(path for one in taken for path in _elements(self._as_list(one, at)))
+            return _below((_ALL, _ALL) if name in _CHUNKING else (_ALL,), elements)
         # A call no reading places -- a builtin, a str method, a hole: its value is made from what it is handed, and
         # holds the rows where something handed holds them whole (or an element of it does).
         parts = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
@@ -4429,13 +5074,21 @@ class _Reading:
         self._placed: dict[tuple, Optional[Placed]] = {}
         #: Keyed by node ids, each holding the node, so that no id is reused while the build runs.
         self._writes: dict[int, tuple[ast.AST, list[_Write]]] = {}
+        self._dicts: dict[int, tuple[ast.AST, frozenset[str]]] = {}
         self._surviving: dict[tuple, set[int]] = {}
         self._nested: dict[int, tuple[ast.AST, set[int]]] = {}
 
     def writes_of(self, func: ast.AST) -> list[_Write]:
         held = self._writes.get(id(func))
         if held is None:
-            held = self._writes[id(func)] = (func, _PathCarry.read_writes(func))
+            held = self._writes[id(func)] = (func, _PathCarry.read_writes(func, self.dicts_of(func)))
+        return held[1]
+
+    def dicts_of(self, func: ast.AST) -> frozenset[str]:
+        """The names *func* holds dicts in (:func:`_dict_names`)."""
+        held = self._dicts.get(id(func))
+        if held is None:
+            held = self._dicts[id(func)] = (func, _dict_names(func))
         return held[1]
 
     def surviving(self, func: ast.AST, name: str, statement: ast.AST, writes: list[_Write]) -> set[int]:
@@ -4951,7 +5604,9 @@ class _Filled:
     A field of ``self`` is an attribute of it the function reads and does not call: ``self.cur.rowcount`` is the
     cursor's, ``self.getNext(jediTaskID)`` hands on what it is given.  A call the reach record reads as the database
     gives nothing back of what it is handed (:meth:`_PathCarry._call_value`), so a fetch from ``self.cur`` is not
-    the field's.  A statement's rows are seeded as :func:`attach_crossings` seeds them, to its region's end.
+    the field's.  A statement's rows are seeded as :func:`attach_crossings` seeds them, to its region's end; so are
+    a statement's that selects a sequence's next values, which reads no table and is no read site
+    (:data:`KEY_SEQUENCE`).
     """
 
     def __init__(
@@ -4963,6 +5618,19 @@ class _Filled:
     ):
         self.reading, self.file, self.func = reading, file, func
         self.sites = sorted((site for site in sites if site.region), key=lambda site: site.anchor.line_start)
+        runs = [run for run in sql.executions(func) if _SELECTS_SEQUENCE.match(run.sql or "")]
+        laid = sql.regions(func, list(sql.executions(func))) if runs else {}
+        #: ``(the sequence, the line its statement runs on, its region's last line)``.
+        self.sequences = sorted(
+            {
+                (m.group(1).split(".")[-1], call.lineno, laid[call.lineno][1])
+                for run in runs
+                if (m := _SELECTS_SEQUENCE.match(run.sql or ""))
+                for call in run.run_at
+                if call.lineno in laid
+            },
+            key=lambda one: one[1],
+        )
         arguments = func.args
         given = [one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)]
         self.parameters = [name for name in given if name not in ("self", "cls")]
@@ -5024,9 +5692,17 @@ class _Filled:
             self._carries[key] = _PathCarry(self.reading, self.file, self.func, (), start=seeds) if seeds else None
         return self._carries[key]
 
+    def _sequence(self, line: int, last: int) -> Optional[_PathCarry]:
+        key = f"sequence {line}"
+        if key not in self._carries:
+            seeds = _rows_written(self.func, line, last)
+            self._carries[key] = _PathCarry(self.reading, self.file, self.func, (), start=seeds) if seeds else None
+        return self._carries[key]
+
     def sources(self, value: ast.AST, at: ast.AST) -> list[KeySource]:
-        """Where *value*, filled at *at*, came from: each statement's rows, parameter and field of ``self`` that
-        reaches it, else what it is -- a literal, an attribute of something else, or a value not followed."""
+        """Where *value*, filled at *at*, came from: each statement's rows, sequence's next values, parameter and
+        field of ``self`` that reaches it, else what it is -- a literal, an attribute of something else, or a value
+        not followed."""
         line = getattr(at, "lineno", None)
         found = []
         for site in self.sites:
@@ -5040,6 +5716,20 @@ class _Filled:
                         name=site.name,
                         site_owner=site.owner,
                         site_line=site.anchor.line_start,
+                        paths=_spelled_paths(paths),
+                    )
+                )
+        for sequence, run_line, last in self.sequences:
+            carry = self._sequence(run_line, last)
+            paths = carry.held(value, at) if carry is not None else _NOTHING
+            if paths:
+                found.append(
+                    KeySource(
+                        kind=KEY_SEQUENCE,
+                        line=line,
+                        name=sequence,
+                        site_owner=f"{self.file}::{self.func.name}",
+                        site_line=run_line,
                         paths=_spelled_paths(paths),
                     )
                 )
@@ -5065,11 +5755,18 @@ def attach_key_sources(
     junctions: list[JunctionNode],
     calls: Optional[Calls],
     record: Optional["ReachGraph"],
-    key_froms: Iterable[KeyFrom] = (),
+    key_froms: Optional[list[KeyFrom]] = None,
     read_sites: Iterable[ReadSiteNode] = (),
+    table_class: Optional[Callable[[str], Optional[str]]] = None,
+    modules: Iterable[SourceModule] = (),
+    attributor: Optional[SpecAttributor] = None,
 ) -> int:
     """Say where each write's row keys were filled from: :attr:`KeyFrom.sources`, and which parameter or field of
-    ``self`` handed each guarded write its keys (:attr:`RowKeySource.handed_by`).
+    ``self`` handed each guarded write its keys (:attr:`RowKeySource.handed_by`); then, by those sources, whether each
+    ``INSERT`` makes its row (:attr:`KeyFrom.new_row`, *table_class* saying whose rows a read site's tables hold),
+    and which subjects a write persisting an object writes (:attr:`KeyFrom.writes`, the function's assignments on it);
+    last, with *modules* and *attributor* (the one the attribute slice reads assignments with), a KeyFrom for each
+    object of *modules* whose assigned fields no write persists, added to *key_froms* (:func:`_unpersisted`).
 
     After the reach record, because the carry reads a call by where it lands and by what the record reads as the
     database, and over the values the write's reader kept (``KeyFrom._binds``, ``RowKeySource._filled``), by one
@@ -5100,7 +5797,8 @@ def attach_key_sources(
         return held[1]
 
     read = 0
-    for key_from in key_froms:
+    froms = list(key_froms or ())
+    for key_from in froms:
         if key_from._binds is None:
             continue
         func, file, binds = key_from._binds
@@ -5109,6 +5807,16 @@ def attach_key_sources(
         unique = {id(bind.value): bind for bind in binds}.values()
         key_from.sources = [source for bind in unique for source in reader.sources(bind.value, bind.site)]
         read += 1
+    _object_writes(froms, junctions)
+    sites = {site.name: site for listed in sites_of.values() for site in listed}
+    statements: dict[tuple[str, int, str], list[KeyFrom]] = {}
+    for key_from in froms:
+        if key_from._insert is not None:
+            statements.setdefault((key_from.owner, key_from.statement, key_from.table), []).append(key_from)
+    for together in statements.values():
+        new_row, why, line = _new_row(together, sites, table_class or (lambda _table: None))
+        for key_from in together:
+            key_from.new_row, key_from.new_row_by, key_from.new_row_line = new_row, why, line
     for source in row_keys:
         if source._filled is None:
             continue
@@ -5118,7 +5826,264 @@ def attach_key_sources(
             (names[0] for value, at, steps in values if (names := reader.handed(value, at, steps))), ""
         )
         read += 1
+    if attributor is not None and key_froms is not None:
+        key_froms.extend(_unpersisted(froms, junctions, modules, attributor, reading))
     return read
+
+
+def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> None:
+    """Add to a KeyFrom persisting an object the subjects the function assigns on that object, at the
+    assignments' lines -- ``killJob``'s ``job.jobStatus = ...`` written by its ``INSERT`` of ``job.valuesMap()``.
+    The assignments are the attribute slice's junctions, so their lines are the branches a reader joins on; only
+    those that reach the object's ``valuesMap()``, or the flush call handed it, are in what it writes
+    (:func:`_fields_at`), and not one the write takes back out (``updateTask_JEDI``'s
+    ``resetChangedAttr("jediTaskID")``)."""
+    by_owner: dict[str, list[JunctionNode]] = {}
+    for junction in junctions:
+        by_owner.setdefault(junction.owner, []).append(junction)
+    for key_from in key_froms:
+        if key_from._object is None or key_from._binds is None:
+            continue
+        spelled, obj_class, mades, excluded = key_from._object
+        func = key_from._binds[0]
+        statements: dict[int, list[ast.stmt]] = {}
+        for node in own_nodes(func):
+            if isinstance(node, ast.stmt):
+                statements.setdefault(node.lineno, []).append(node)
+        obj = ast.parse(spelled, mode="eval").body
+        for junction in by_owner.get(key_from.owner, ()):
+            spec, _dot, attribute = junction.subject.rpartition(".")
+            if spec != obj_class or attribute in excluded:
+                continue
+            reaching = {id(node) for node in _fields_at(func, obj, attribute, mades, obj_class)} if mades else None
+            lines = sorted(
+                {
+                    line
+                    for branch in junction.branches
+                    for line in [branch.line, *branch.other_lines]
+                    if line is not None
+                    and any(
+                        isinstance(target, ast.Attribute)
+                        and target.attr == attribute
+                        and ast.unparse(target.value) == spelled
+                        and (reaching is None or id(statement) in reaching)
+                        for statement in statements.get(line, ())
+                        for target in targets_of(statement)
+                    )
+                }
+            )
+            if lines:
+                key_from.writes[junction.subject] = sorted({*key_from.writes.get(junction.subject, ()), *lines})
+
+
+def _unpersisted(
+    key_froms: list[KeyFrom],
+    junctions: list[JunctionNode],
+    modules: Iterable[SourceModule],
+    attributor: SpecAttributor,
+    reading: _Reading,
+) -> list[KeyFrom]:
+    """A KeyFrom for each object of a junction owner whose fields it assigns at an arm no write writes -- no
+    statement's record, nor a flush call's, has the arm's line for its subject -- one per what those fields reach
+    next (:func:`_uses`), with the arms it reaches as *writes*: a reader taking the arms whose write names its row by
+    a statement's rows would otherwise read these as known not to be.  getRandomSeed_JEDI's
+    ``tmpFileSpec.status = "ready"``, set after the spec's ``valuesMap()`` is taken, is returned; datasetManager's
+    ``job.jobStatus = "failed"`` is handed to ``TaskBuffer.updateJobs``, which persists it a call away.  An arm is a
+    junction's line assigning its subject's attribute on an object of its class, by *attributor*."""
+    written = {
+        (key_from.owner, subject, line)
+        for key_from in key_froms
+        for subject, lines in key_from.writes.items()
+        for line in lines
+    }
+    by_owner: dict[str, list[JunctionNode]] = {}
+    for junction in junctions:
+        by_owner.setdefault(junction.owner, []).append(junction)
+    made: list[KeyFrom] = []
+    for module in modules:
+        for func, owner_class in functions_with_owner(module.tree):
+            owner = f"{module.rel_path}::{func.name}"
+            here = by_owner.get(owner)
+            if not here:
+                continue
+            first, last = func.lineno, func.end_lineno or func.lineno
+            statements: dict[int, list[ast.stmt]] = {}
+            for node in own_nodes(func):
+                if isinstance(node, ast.stmt):
+                    statements.setdefault(node.lineno, []).append(node)
+            used: dict[int, list[tuple[str, int, frozenset[str]]]] = {}
+            found: dict[tuple[str, str], tuple[list[int], set[str], dict[str, set[int]]]] = {}
+            for junction in here:
+                spec, _dot, attribute = junction.subject.rpartition(".")
+                lines = {
+                    line
+                    for branch in junction.branches
+                    for line in (branch.line, *branch.other_lines)
+                    if line is not None and first <= line <= last and (owner, junction.subject, line) not in written
+                }
+                for line in sorted(lines):
+                    assigned = [
+                        (statement, target.value)
+                        for statement in statements.get(line, ())
+                        for target in targets_of(statement)
+                        if isinstance(target, ast.Attribute)
+                        and target.attr == attribute
+                        and attributor.class_of(target.value, func, owner_class) == spec
+                    ]
+                    if not assigned:
+                        continue
+                    statement, obj = assigned[0]
+                    if id(statement) not in used:
+                        used[id(statement)] = _uses(reading, module.rel_path, func, statement)
+                    for kind, at, callees in used[id(statement)]:
+                        ats, handed_to, writes = found.setdefault((ast.unparse(obj), kind), ([], set(), {}))
+                        ats.append(at)
+                        handed_to |= callees
+                        writes.setdefault(junction.subject, set()).add(line)
+            for (spelled, kind), (ats, handed_to, writes) in sorted(found.items()):
+                made.append(
+                    KeyFrom(
+                        owner=owner,
+                        file=module.rel_path,
+                        statement=min(ats),
+                        term="",
+                        object=spelled,
+                        unread=kind,
+                        handed_to=sorted(handed_to),
+                        writes={subject: sorted(lines) for subject, lines in sorted(writes.items())},
+                    )
+                )
+    return made
+
+
+def _uses(
+    reading: _Reading, file: str, func: ast.FunctionDef | ast.AsyncFunctionDef, statement: ast.stmt
+) -> list[tuple[str, int, frozenset[str]]]:
+    """What the field *statement* assigns reaches next, as the carry reads it from there: each kind of use --
+    :data:`KEY_HANDED` (calls of the corpus handed a part of it, or made on what holds it, and the functions they land
+    in), :data:`KEY_BOUND` (the database's calls), :data:`KEY_RETURNED`, :data:`KEY_KEPT` (put in what a parameter,
+    ``self`` among them, names: the caller holds it after -- adder's ``self.job.ddmErrorCode = ...`` before it
+    returns) -- with the first line it is used on (the assignment's, kept), else :data:`KEY_NO_USE` at the
+    assignment.  A call no reading places (a log line, a builtin, a hole) is no use."""
+    carry = _PathCarry(reading, file, func, (), start=[statement])
+    handed: list[int] = []
+    callees: set[str] = set()
+    bound: list[int] = []
+    for call in _own_calls(func):
+        if not carry.handed_any(call):
+            continue
+        if reading.record.is_database(file, call):
+            bound.append(call.lineno)
+            continue
+        placed = reading.place(carry, call)
+        if placed is not None and placed.targets:
+            handed.append(call.lineno)
+            callees |= {f"{target.file}::{target.func.name}" for target in placed.targets}  # type: ignore[attr-defined]
+    returned = [
+        node.lineno
+        for node in own_nodes(func)
+        if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
+        and node.value is not None
+        and carry.held(node.value, site_of(node))
+    ]
+    arguments = func.args
+    handed_in = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+    kept = [statement.lineno] if handed_in & set(carry.kept()) else []
+    found = [
+        (kind, min(lines), frozenset(names))
+        for kind, lines, names in (
+            (KEY_HANDED, handed, callees),
+            (KEY_BOUND, bound, set()),
+            (KEY_RETURNED, returned, set()),
+            (KEY_KEPT, kept, set()),
+        )
+        if lines
+    ]
+    return found or [(KEY_NO_USE, statement.lineno, frozenset())]
+
+
+#: The order a statement's why is told in where several of its key columns are new.
+_NEW_ROW_ORDER = (NEW_ROW_SEQUENCE, NEW_ROW_RETURNING, NEW_ROW_LITERAL, NEW_ROW_COMPUTED)
+
+
+def _key_values(
+    key_from: KeyFrom, sites: dict[str, ReadSiteNode], table_class: Callable[[str], Optional[str]]
+) -> list[tuple[str, str, Optional[int]]]:
+    """What one key column of an ``INSERT`` is given: ``(new | carried | handed | other | unread, why, line)`` each."""
+    insert: _Insert = key_from._insert
+    statement = key_from.statement
+    settled = {
+        "returning": NEW_ROW_RETURNING,
+        "sequence": NEW_ROW_SEQUENCE,
+        "literal": NEW_ROW_LITERAL,
+        "expression": NEW_ROW_COMPUTED,
+    }
+    if insert.value in settled:
+        return [("new", settled[insert.value], statement)]
+    if insert.value in ("absent", "none"):
+        return [("unread", NEW_ROW_UNREAD, statement)]
+    if insert.value == "upsert":
+        return [("upsert", NEW_ROW_UPSERT, statement)]
+    found: list[tuple[str, str, Optional[int]]] = []
+    for kind, line, _class in insert.binds:
+        if kind == "literal":
+            found.append(("new", NEW_ROW_LITERAL, line))
+        elif kind == "computed":
+            found.append(("new", NEW_ROW_COMPUTED, line))
+        elif kind == "returned":
+            found.append(("new", NEW_ROW_RETURNING, line))
+    held = {one_class for kind, _line, one_class in insert.binds if kind == "plain"}
+    if not any(kind == "plain" for kind, _line, _class in insert.binds):
+        return found or [("unread", NEW_ROW_UNREAD, statement)]
+    if key_from.unread or not key_from.sources:
+        found.append(("unread", NEW_ROW_UNREAD, statement))
+    for source in key_from.sources:
+        if source.kind == KEY_ROWS:
+            if source.site_line in insert.returning_lines:
+                found.append(("new", NEW_ROW_RETURNING, source.site_line))
+            else:
+                site = sites.get(source.name)
+                classes = {table_class(t) or f"table:{t.lower()}" for t in (site.tables if site is not None else ())}
+                found.append(("carried" if insert.table_class in classes else "other", NEW_ROW_MOVED, source.site_line))
+        elif source.kind == KEY_SEQUENCE:
+            found.append(("new", NEW_ROW_SEQUENCE, source.site_line))
+        elif source.kind in (KEY_PARAMETER, KEY_SELF_FIELD):
+            found.append(("handed" if insert.table_class in held else "other", NEW_ROW_HANDED, source.line))
+        elif source.kind == KEY_CONSTANT:
+            found.append(("new", NEW_ROW_LITERAL, source.line))
+        else:
+            found.append(("unread", NEW_ROW_UNREAD, source.line))
+    return found
+
+
+def _new_row(
+    key_froms: list[KeyFrom], sites: dict[str, ReadSiteNode], table_class: Callable[[str], Optional[str]]
+) -> tuple[Optional[bool], str, Optional[int]]:
+    """An ``INSERT``'s mark, over its key columns (:class:`_Insert`): written again where a ``DELETE`` of the same
+    table names its whole key; new where a column gets a new value -- a sequence's, one ``RETURNING`` hands back, a
+    literal, one computed here (a conversion of one carried value is not); not said where a value is not read or
+    is carried from an object of the table's class handed in (who made its key is the caller's); moved where every
+    one is carried from a row of the table's class read here; else new, its key carried from something not of the
+    table's class -- a scalar handed in, a parent's row.  A table no class maps is a class of its own."""
+    first = key_froms[0]
+    insert: _Insert = first._insert
+    if insert.value == "none":
+        return None, NEW_ROW_NO_KEY, first.statement
+    if insert.rewritten is not None:
+        return False, NEW_ROW_REWRITTEN, insert.rewritten
+    values = [value for key_from in key_froms for value in _key_values(key_from, sites, table_class)]
+    new = [value for value in values if value[0] == "new"]
+    if new:
+        why = min(new, key=lambda value: (_NEW_ROW_ORDER.index(value[1]), value[2] or 0))
+        return True, why[1], why[2]
+    for kind, why in (("upsert", NEW_ROW_UPSERT), ("unread", NEW_ROW_UNREAD), ("handed", NEW_ROW_HANDED)):
+        found = [value for value in values if value[0] == kind]
+        if found:
+            return None, why, found[0][2]
+    other = [value for value in values if value[0] == "other"]
+    if not other:
+        return False, NEW_ROW_MOVED, values[0][2] if values else first.statement
+    return True, NEW_ROW_OTHER_CLASS, other[0][2]
 
 
 def entity_nodes(

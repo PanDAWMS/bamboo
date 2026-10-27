@@ -1747,6 +1747,64 @@ def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_an
                     "p/fin.py::helper3800": "prepare@3800 hands the rows it selects to it"}
 
 
+def test_a_write_that_makes_the_row_is_no_arm_where_every_key_from_writing_it_there_says_a_new_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import birth_why, births_of, by_key_of, refused_arms
+
+    S = "JobSpec.jobStatus"
+    files, archive, mix, unread, make = (f"p/{n}.py::{n}" for n in ("files", "archive", "mix", "unread", "make"))
+    writers += [
+        writer(files, branch(455, "ready"), branch(887, "staging"),
+               N(line=892, outcome="pending", path_condition=[], row_precondition=[], other_lines=[893]), branch(1116, "ready")),
+        writer(archive, branch(50, "cancelled")),
+        writer(mix, branch(70, "done")),
+        writer(unread, branch(90, "done")),
+        writer(make, branch(10, "defined")),
+    ]
+
+    def key(owner, statement, lines, new_row=None, unread="", by="", at=None):
+        kf = N(owner=owner, statement=statement, term="k=:k", writes={S: lines}, unread=unread, sources=[])
+        if new_row is not None:
+            kf.new_row, kf.new_row_by, kf.new_row_line = new_row, by, at
+        return kf
+
+    def follow():
+        return N(guarded_by=[], reader_statements=[stmt(make, 8, [f"{S}=running"], [5, 12], ["p/make.py::helper"])])
+
+    before = [movers_of(follow(), writers, S, "running"), make in by_key_of(writers, {}, S, "running")]
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        # one INSERT (930) of files: a KeyFrom per key column, each with the statement's mark
+        *(key(files, 930, [455, 887, 892], new_row=True, by="sequence", at=623) for _ in range(3)),
+        key(files, 1116, [1116]),                         # an UPDATE
+        key(archive, 55, [50], new_row=False),            # an existing row moved into another table of its class
+        # line 70 written by an INSERT and by an UPDATE run at the same call (one statement)
+        key(mix, 71, [70], new_row=True, by="literal", at=71), key(mix, 71, [70]),
+        key(unread, 91, [90], unread="no bind found"),    # an INSERT the map did not read
+        key(make, 12, [10], new_row=True),
+    ])]
+    arms = {o.split("::")[-1]: sorted(arms_of(writers, o, S, "running")) for o in (files, archive, mix, unread, make)}
+    print(json.dumps([arms, births_of(writers, files, S, "running"), births_of(writers, make, S, "running"),
+                      refused_arms(writers, make, S, "running"), birth_why(files, S, [455, 887])]))
+    print(json.dumps(before + [movers_of(follow(), writers, S, "running"), make in by_key_of(writers, {}, S, "running")]))
+    """,
+        )
+    )
+    arms, births, made, refused, why = json.loads(out.splitlines()[-2])
+    # 455 and 887 are the INSERT's alone; 892's other line no KeyFrom names, so it is not known to be a birth; the
+    # UPDATE, the archive, a line an UPDATE writes too and an unread INSERT stay arms
+    assert arms == {"files": [892, 1116], "archive": [50], "mix": [70], "unread": [90], "make": []}
+    assert births == [455, 887] and made == [10] and refused == [] and why == "sequence at 623"
+    before, by_key_before, after, by_key_after = json.loads(out.splitlines()[-1])
+    # a statement whose region holds only a birth gives its owner no arm there: the rows go to what it calls; and a
+    # writer of births alone is no writer that takes a row by its key
+    assert before == {"p/make.py::make": "make@8 selects the value"} and by_key_before
+    assert after == {"p/make.py::helper": "make@8 hands the rows it selects to it"} and not by_key_after
+
+
 _M2_SETUP = """
     import datetime
     import json
