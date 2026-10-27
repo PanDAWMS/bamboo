@@ -2727,8 +2727,8 @@ class KeyFrom(BaseModel):
     #: An ``INSERT``'s, what decides *new_row* beside the sources: see :class:`~bamboo.codemap.panda.recognizers.
     #: sqlwrite._Insert`.
     _insert: Optional[Any] = PrivateAttr(default=None)
-    #: ``(object as spelled, its class)`` where *object* is set: the step after the reach record adds to *writes* the
-    #: subjects the function assigns on it.
+    #: ``(object as spelled, its class, its valuesMap() call)`` where *object* is set: the step after the reach record
+    #: adds to *writes* the subjects the function assigns on it before the map is made.
     _object: Optional[tuple] = PrivateAttr(default=None)
 
 

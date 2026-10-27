@@ -610,8 +610,8 @@ def _values_map(node: Optional[ast.AST]) -> Optional[tuple[ast.expr, ast.Call]]:
     return None
 
 
-def _object_in(func: ast.AST, name: str, at: ast.AST) -> Optional[tuple[ast.expr, ast.Call]]:
-    """The object the map *name* is made of where *at* runs: the ``name = obj.valuesMap(...)`` that reaches it."""
+def _objects_in(func: ast.AST, name: str, at: ast.AST) -> list[tuple[ast.expr, ast.Call]]:
+    """The objects the map *name* is made of where *at* runs: each ``name = obj.valuesMap(...)`` that reaches it."""
     made = [
         node
         for node in own_nodes(func)
@@ -620,43 +620,58 @@ def _object_in(func: ast.AST, name: str, at: ast.AST) -> Optional[tuple[ast.expr
         and _values_map(node.value) is not None
     ]
     if not made:
-        return None
+        return []
     live = sql._live_at(func, name, made, at)  # type: ignore[arg-type]
-    return next((_values_map(node.value) for node in made if id(node) in live), None)
+    return [_values_map(node.value) for node in made if id(node) in live]  # type: ignore[misc]
 
 
-def _object_of(run: sql.Execution, func: ast.AST) -> Optional[tuple[ast.expr, ast.Call]]:
-    """The object a run's bind map is made of -- ``job`` of ``execute(sql, job.valuesMap())``, of a map named
-    ``varMap = job.valuesMap(useSeq=True)`` that reaches the run, or of the maps appended to the list
-    ``executemany`` takes -- and its ``valuesMap`` call.  Read at every call of the run (:attr:`sql.Execution.run_at`):
-    ``retryJob``'s ``sql1`` holds its ``INSERT`` at the ``SELECT``'s call too, round the retry loop, and the object's
-    map reaches only the second."""
+def _objects_of(run: sql.Execution, func: ast.AST) -> list[tuple[ast.expr, ast.Call]]:
+    """The objects a run's bind maps are made of, each with its ``valuesMap`` call -- ``job`` of ``execute(sql,
+    job.valuesMap())``, of a map named ``varMap = job.valuesMap(useSeq=True)`` that reaches a call of the run, or of
+    the maps appended to the list ``executemany`` takes -- the first a call hands over directly, then those by name.
+    Read at every call of the run (:attr:`sql.Execution.run_at`): ``retryJob``'s ``sql1`` holds its ``INSERT`` at the
+    ``SELECT``'s call too, round the retry loop, and the object's map reaches only the second; and
+    ``registerTaskInOneShot_JEDI`` runs one ``INSERT`` of a dataset from five places, each with its own map."""
+    found: list[tuple[ast.expr, ast.Call]] = []
     for call in run.run_at:
-        found = _values_map(call.args[1] if len(call.args) > 1 else None)
-        if found is not None:
-            return found
-    if not run.varmap:
-        return None
-    for call in run.run_at:
-        found = _object_in(func, run.varmap, call)
-        if found is not None:
-            return found
-    for node in own_nodes(func):
-        if not (
-            isinstance(node, ast.Expr)
+        one = _values_map(call.args[1] if len(call.args) > 1 else None)
+        if one is not None:
+            found.append(one)
+    if run.varmap:
+        for call in run.run_at:
+            found += _objects_in(func, run.varmap, call)
+        appends = [
+            node
+            for node in own_nodes(func)
+            if isinstance(node, ast.Expr)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Attribute)
             and node.value.func.attr == "append"
             and isinstance(node.value.func.value, ast.Name)
             and node.value.func.value.id == run.varmap
             and len(node.value.args) == 1
-        ):
-            continue
-        element = node.value.args[0]
-        found = _values_map(element) or (_object_in(func, element.id, node) if isinstance(element, ast.Name) else None)
-        if found is not None:
-            return found
-    return None
+        ]
+        # Only the appends the list a call runs with still holds, as the bind reader takes them: getRandomSeed_JEDI's
+        # ``var_maps = []`` before its new seeds' maps renews the list its UPDATE of the old seeds ran with.
+        live: set[int] = set()
+        for call in run.run_at if appends else ():
+            live |= sql._live_at(func, run.varmap, appends, call)
+        for node in appends:
+            if id(node) not in live:
+                continue
+            element = node.value.args[0]  # type: ignore[attr-defined]
+            one = _values_map(element)
+            if one is not None:
+                found.append(one)
+            elif isinstance(element, ast.Name):
+                found += _objects_in(func, element.id, node)
+    return list({id(made): (obj, made) for obj, made in found}.values())
+
+
+def _maps_of(found: list[tuple[ast.expr, ast.Call]]) -> list[ast.Call]:
+    """The ``valuesMap`` calls of the first object's spelling among *found*: the maps one record's object is in."""
+    spelled = ast.unparse(found[0][0]) if found else None
+    return [made for obj, made in found if ast.unparse(obj) == spelled]
 
 
 def _insert_from(
@@ -672,6 +687,7 @@ def _insert_from(
     binds: list[sql.Bind],
     obj: str = "",
     obj_class: Optional[str] = None,
+    mades: Optional[list[ast.Call]] = None,
 ) -> KeyFrom:
     owner = f"{rel_path}::{func.name}"
     # Apart from a WHERE term of the same spelling: a run that updates or inserts the row (``addStdOut``'s
@@ -685,7 +701,7 @@ def _insert_from(
         record._binds = (func, rel_path, [])
         record._insert = insert
         if obj:
-            record._object = (obj, obj_class)
+            record._object = (obj, obj_class, mades or [])
         key_froms.append(record)
     else:
         record._insert.binds.extend(insert.binds)
@@ -757,13 +773,54 @@ def _insert_froms(
         _insert_from(keyed, key_froms, func, run, table, term, rel_path, written, insert, binds)
 
 
+def _fields_at(
+    func: ast.AST, obj: ast.expr, attribute: str, mades: list[ast.Call], obj_class: Optional[str]
+) -> list[ast.stmt]:
+    """The assignments of ``obj.<attribute>`` that reach one of *mades*, the object's ``valuesMap()`` calls: one after
+    the map is made is not in it (getRandomSeed_JEDI's ``tmpFileSpec.status = "ready"``), nor one from a pass before
+    where the name is given a new object of its class on the way (``tmpFileSpec = JediFileSpec()``).  The name taken
+    again from a list or a loop may be the same object -- insertFilesForDataset_JEDI fills its specs, keeps them, and
+    inserts them from ``for fileID, fileSpec in zip(newFileIDs, fileSpecsForInsert)`` -- and cancels nothing."""
+    spelled = ast.unparse(obj)
+    assigned = [
+        node
+        for node in own_nodes(func)
+        for target in targets_of(node)
+        if isinstance(target, ast.Attribute)
+        and target.attr == attribute
+        and ast.unparse(target.value) == spelled
+        and getattr(node, "value", None) is not None
+    ]
+    if not assigned or not mades:
+        return []
+    root = _root(obj)
+    renewed: list[ast.AST] = []
+    if root is not None and obj_class is not None:
+        made_anew = obj_class.rsplit(".", 1)[-1]
+        renewed = [
+            node
+            for node in own_nodes(func)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Call)
+            and _callee_name(node.value) == made_anew
+            and any(
+                name == root.id for target in targets_of(node) for name, _slot, _unpacked in names_bound_by(target)
+            )
+        ]
+    found: dict[int, ast.stmt] = {}
+    for made in mades:
+        for node in surviving_writes(assigned, site_of(made), as_run=True, killers=renewed):
+            found[id(node)] = node  # type: ignore[assignment]
+    return [node for node in assigned if id(node) in found]  # type: ignore[misc]
+
+
 def _unspelled_froms(
     keyed: dict[tuple[str, int, str, str], KeyFrom],
     key_froms: list[KeyFrom],
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     owner_class: Optional[str],
     run: sql.Execution,
-    found: Optional[tuple[ast.expr, ast.Call]],
+    found: list[tuple[ast.expr, ast.Call]],
     rel_path: str,
     attributor: SpecAttributor,
     writing: _Writing,
@@ -776,7 +833,8 @@ def _unspelled_froms(
     is made, else the field as the object holds it.  A column ``RETURNING`` hands back is new; one no field of the
     object holds, or any of a map built otherwise (``copy_file_records``' ``VALUES (:col, ...)`` from a cursor's
     description), is not read."""
-    obj, made = found if found is not None else (None, None)
+    obj, made = found[0] if found else (None, None)
+    mades = _maps_of(found)
     matched = _INSERT_INTO.match(run.sql or "")
     if matched is None:
         return
@@ -810,7 +868,9 @@ def _unspelled_froms(
     shown = table or named
 
     def put(term: str, insert: _Insert, binds: list[sql.Bind]) -> None:
-        _insert_from(keyed, key_froms, func, run, shown, term, rel_path, {}, insert, binds, spelled_obj, obj_class)
+        _insert_from(
+            keyed, key_froms, func, run, shown, term, rel_path, {}, insert, binds, spelled_obj, obj_class, mades
+        )
 
     if not identity:
         put("", _Insert(value="none", **common), [])
@@ -830,19 +890,7 @@ def _unspelled_froms(
             # What the function puts in the field where the map is made: insertNewJob's ``file.row_ID = None`` is
             # replaced by ``fileIDPool[...]`` before its valuesMap(), and insertFilesForDataset_JEDI's fileID is a
             # sequence's, read through the name it was assigned from, not the field.
-            assigned = surviving_writes(
-                [
-                    node
-                    for node in own_nodes(func)
-                    for target in targets_of(node)
-                    if isinstance(target, ast.Attribute)
-                    and target.attr == attribute
-                    and ast.unparse(target.value) == spelled_obj
-                    and getattr(node, "value", None) is not None
-                ],
-                site_of(made),
-                as_run=True,
-            )
+            assigned = _fields_at(func, obj, attribute, mades, obj_class)
             values = [_bind_value(node.value, node.lineno, func, owner_class, attributor) for node in assigned]
             binds = [sql.Bind(node.value, site_of(node.value)) for node in assigned]
             if not assigned:
@@ -859,13 +907,13 @@ def _mark_object(
     run: sql.Execution,
     statement: sqltext.SqlWrite,
     rel_path: str,
-    found: tuple[ast.expr, ast.Call],
+    found: list[tuple[ast.expr, ast.Call]],
     attributor: SpecAttributor,
 ) -> None:
     """A statement whose bind map is an object's ``valuesMap`` -- an ``UPDATE`` setting what the function changed on
     it (``SET {job.bindUpdateChangesExpression()}``): its terms' KeyFroms persist that object, and a term no bind of
     the map fills is the object's field of the bind's name (``:PandaID``, ``job.PandaID``)."""
-    obj, _made = found
+    obj, _made = found[0]
     obj_class = attributor.class_of(obj, func, owner_class)
     if obj_class is None:
         return
@@ -879,7 +927,7 @@ def _mark_object(
         if record is None:
             continue
         record.object = spelled_obj
-        record._object = (spelled_obj, obj_class)
+        record._object = (spelled_obj, obj_class, _maps_of(found))
         attribute = attributes.get(bind.lstrip(":").lower())
         if not record._binds[2] and attribute is not None:
             field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
@@ -974,9 +1022,9 @@ def extract(
                 seen.add(key)
                 stopped.extend(_run_stops(run, module.rel_path, owner))
                 statements = sqltext.writes(run.reading)
-                made_of = _object_of(run, func) if key_froms is not None else None
+                made_of = _objects_of(run, func) if key_froms is not None else []
                 inserting = _INSERT_INTO.match(run.sql or "") is not None
-                if key_froms is not None and (made_of is not None or inserting):
+                if key_froms is not None and (made_of or inserting):
                     writing = writing or _Writing.of(list(sql.executions(func)))
                 if writing is not None and inserting and not any(s.kind == "insert" for s in statements):
                     _unspelled_froms(
@@ -1129,7 +1177,7 @@ def extract(
                                 attributor, writing,
                                 upsert=writing.upserts(run, statement.table),
                             )
-                        elif made_of is not None:
+                        elif made_of:
                             _mark_object(keyed, func, _owner, run, statement, module.rel_path, made_of, attributor)
             # The executions nothing was read out of, last: they have no run
             # to hang on, and saying them is what tells "read in full" from
@@ -5775,23 +5823,26 @@ def attach_key_sources(
 def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> None:
     """Add to a KeyFrom persisting an object the subjects the function assigns on that object, at the
     assignments' lines -- ``killJob``'s ``job.jobStatus = ...`` written by its ``INSERT`` of ``job.valuesMap()``.
-    The assignments are the attribute slice's junctions, so their lines are the branches a reader joins on."""
+    The assignments are the attribute slice's junctions, so their lines are the branches a reader joins on; only
+    those that reach the object's ``valuesMap()`` are in what it writes (:func:`_fields_at`)."""
     by_owner: dict[str, list[JunctionNode]] = {}
     for junction in junctions:
         by_owner.setdefault(junction.owner, []).append(junction)
     for key_from in key_froms:
         if key_from._object is None or key_from._binds is None:
             continue
-        spelled, obj_class = key_from._object
+        spelled, obj_class, mades = key_from._object
         func = key_from._binds[0]
         statements: dict[int, list[ast.stmt]] = {}
         for node in own_nodes(func):
             if isinstance(node, ast.stmt):
                 statements.setdefault(node.lineno, []).append(node)
+        obj = ast.parse(spelled, mode="eval").body
         for junction in by_owner.get(key_from.owner, ()):
             spec, _dot, attribute = junction.subject.rpartition(".")
             if spec != obj_class:
                 continue
+            reaching = {id(node) for node in _fields_at(func, obj, attribute, mades, obj_class)} if mades else None
             lines = sorted(
                 {
                     line
@@ -5802,6 +5853,7 @@ def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> N
                         isinstance(target, ast.Attribute)
                         and target.attr == attribute
                         and ast.unparse(target.value) == spelled
+                        and (reaching is None or id(statement) in reaching)
                         for statement in statements.get(line, ())
                         for target in targets_of(statement)
                     )

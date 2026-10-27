@@ -18277,3 +18277,103 @@ def test_an_insert_says_whether_it_makes_its_row_or_moves_one_of_its_class(tmp_p
         "JobSpec.PandaID": [next(n for n, line in enumerate(lines, 1) if "job.PandaID = res[0]" in line)],
         "JobSpec.jobStatus": [next(n for n, line in enumerate(lines, 1) if '"cancelled"' in line)],
     }
+
+
+_SEEDS = '''
+class TaskModule:
+    def getRandomSeed(self, jediTaskID, nNew):
+        sqlFR = "SELECT fileID,status FROM ATLAS_PANDA.JEDI_Dataset_Contents WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlFR + comment, {":jediTaskID": jediTaskID})
+        var_maps = []
+        for resFR in self.cur.fetchall():
+            tmpFileSpec = JediFileSpec()
+            tmpFileSpec.pack(resFR)
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":fileID"] = tmpFileSpec.fileID
+            varMap[":status"] = "picked"
+            var_maps.append(varMap)
+        sqlFU = "UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status "
+        sqlFU += "WHERE jediTaskID=:jediTaskID AND fileID=:fileID "
+        self.cur.executemany(sqlFU + comment, var_maps)
+        var_maps = []
+        for i in range(nNew):
+            tmpFileSpec = JediFileSpec()
+            tmpFileSpec.status = "picked"
+            varMap = tmpFileSpec.valuesMap()
+            var_maps.append(varMap)
+            tmpFileSpec.status = "ready"
+        sqlFI = f"INSERT INTO ATLAS_PANDA.JEDI_Dataset_Contents ({JediFileSpec.columnNames()}) "
+        sqlFI += JediFileSpec.bindValuesExpression()
+        self.cur.executemany(sqlFI + comment, var_maps)
+
+    def addFiles(self, lfns):
+        kept = []
+        for lfn in lfns:
+            fileSpec = JediFileSpec()
+            fileSpec.status = "staging"
+            kept.append(fileSpec)
+        varMaps = []
+        for fileSpec in kept:
+            varMaps.append(fileSpec.valuesMap())
+        sqlFI = f"INSERT INTO ATLAS_PANDA.JEDI_Dataset_Contents ({JediFileSpec.columnNames()}) "
+        sqlFI += JediFileSpec.bindValuesExpression()
+        self.cur.executemany(sqlFI + comment, varMaps)
+
+    def addOne(self, first):
+        sqlFI = f"INSERT INTO ATLAS_PANDA.JEDI_Dataset_Contents ({JediFileSpec.columnNames()}) "
+        sqlFI += JediFileSpec.bindValuesExpression()
+        if first:
+            fileSpec = JediFileSpec()
+            fileSpec.status = "defined"
+            varMap = fileSpec.valuesMap()
+            self.cur.execute(sqlFI + comment, varMap)
+        else:
+            fileSpec = JediFileSpec()
+            fileSpec.status = "pending"
+            varMap = fileSpec.valuesMap()
+            self.cur.execute(sqlFI + comment, varMap)
+'''
+
+
+def test_an_object_write_is_what_its_map_holds_when_it_runs(tmp_path):
+    """getRandomSeed_JEDI's shape, the querier's finding on AK-1: one list name taken by two executemany calls, made
+    again between them, and a field set after the object's valuesMap() is taken.  The UPDATE of the old seeds runs
+    with the first list -- its maps are dicts, no object's -- and the INSERT of the new seeds writes what each map
+    held when it was made: "picked", not the "ready" set on the spec after.  A spec taken again from a list it was
+    kept in is the same spec (insertFilesForDataset_JEDI), and an INSERT run from two places writes both places'
+    (registerTaskInOneShot_JEDI)."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _SEEDS})
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    _s, attribute_junctions, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    with sql.across_calls(calls), sqltext.with_schema(None, {"jedi_dataset_contents": frozenset({"fileid"})}, {}):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions + attribute_junctions, calls, record, key_froms=froms, read_sites=sites,
+            table_class=attributor.class_for_table,
+        )
+
+    lines = _SEEDS.split("\n")
+    picked_bind, picked_field, ready = (
+        next(n for n, line in enumerate(lines, 1) if spelled in line)
+        for spelled in ('":status"] = "picked"', 'tmpFileSpec.status = "picked"', '"ready"')
+    )
+    updated = [one for one in froms if one.term == "fileID=:fileID"]
+    assert [(one.object, one.writes) for one in updated] == [("", {"JediFileSpec.status": [picked_bind]})]
+    (inserted,) = [one for one in froms if one.new_row_by and one.owner.endswith("::getRandomSeed")]
+    assert inserted.object == "tmpFileSpec"
+    assert inserted.writes == {"JediFileSpec.status": [picked_field]}
+    assert ready not in inserted.writes["JediFileSpec.status"]
+    staging, defined, pending = (
+        next(n for n, line in enumerate(lines, 1) if f'fileSpec.status = "{status}"' in line)
+        for status in ("staging", "defined", "pending")
+    )
+    written = {one.owner.rpartition("::")[2]: one.writes for one in froms if one.new_row_by}
+    assert written["addFiles"] == {"JediFileSpec.status": [staging]}
+    assert written["addOne"] == {"JediFileSpec.status": [defined, pending]}
