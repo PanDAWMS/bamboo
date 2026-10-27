@@ -9764,6 +9764,43 @@ def test_a_statement_says_which_junction_its_rows_are_carried_to(tmp_path):
     assert census.stored == 2
 
 
+@pytest.mark.parametrize("unread_kept", [True, False], ids=["the build's", "strict"])
+def test_a_count_of_the_rows_crosses_nowhere_and_another_systems_answer_is_kept(tmp_path, monkeypatch, unread_kept):
+    """U1: what a callee is handed made from the rows is none of them -- ``len(res)`` is a number -- while what the map
+    cannot read, another system's answer made from them, is kept as a crossing in the build's way (and is none read
+    strictly, as the KeyFroms read it)."""
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        self.retrier.retryTask(len(res))\n"
+            "    def sweep_more(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'ready'\n"
+            "        sqlB = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlB += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlB + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        self.retrier.retryTask(self.ddm.lookup(res))\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    real = sqlwrite.attach_crossings
+    monkeypatch.setattr(sqlwrite, "attach_crossings", lambda *a: real(*a, unread_kept=unread_kept))
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py")])
+
+    crossed = {n.anchor.line_start: n.crosses_to for n in nodes if n.anchor.line_start in (7, 15)}
+    assert crossed == {7: [], 15: ["pandaserver/r.py::retryTask"] if unread_kept else []}
+
+
 _NEXT_STATEMENT = (
     "        varMap2 = {}\n"
     "        varMap2[':status'] = 'ready'\n"
@@ -17846,13 +17883,14 @@ def _keyed_corpus(tmp_path, files: dict[str, str]):
         ("row_id", ""),
         ("self.datasets[0].vuid", "self.datasets"),
         ("str(jediTaskID)", "jediTaskID"),
-        ("self.getNext(jediTaskID)", "jediTaskID"),
+        # A method no reading places: what it makes of its argument is its own value (U1), and the method no field.
+        ("self.getNext(jediTaskID)", ""),
         ("self.cur.rowcount", "self.cur"),
     ],
 )
 def test_a_value_is_filled_from_the_parameter_or_field_of_self_the_carry_brings_it_from(tmp_path, expression, expected):
-    """Through a local or a loop; a fetch from the cursor is the database's, not the field's; what a method is handed
-    is, and the method is no field."""
+    """Through a local or a loop; a fetch from the cursor is the database's, not the field's; what a method no reading
+    places makes of what it is handed is not, and the method is no field."""
     rel = "pandaserver/taskbuffer/proxy.py"
     source = (
         "class Proxy:\n"
