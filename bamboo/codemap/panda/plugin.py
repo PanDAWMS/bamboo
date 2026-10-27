@@ -451,6 +451,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._version,
             attributor,
             row_keys=fragment.row_key_sources,
+            key_froms=fragment.key_froms,
         )
         # On the fragment rather than on the plugin, because a gate reads the
         # fragment: "which junctions guard on a value nothing selects on" is a
@@ -653,9 +654,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._calls,
             record,
         )
-        # Who handed each guarded write its row keys: read by the carry, which reads a call where it lands, so after
-        # the reach record and with it.
-        sqlwrite.attach_key_sources(fragment.row_key_sources, fragment.junctions, self._calls, record)
+        # Where each write's row keys were filled from, and who handed a guarded write its keys: read by the carry,
+        # which reads a call where it lands, so after the reach record and with it.
+        sqlwrite.attach_key_sources(
+            fragment.row_key_sources,
+            fragment.junctions,
+            self._calls,
+            record,
+            key_froms=fragment.key_froms,
+            read_sites=fragment.read_sites,
+        )
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the

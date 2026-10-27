@@ -315,6 +315,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "open_calls": "the calls the build placed open -- see MapFragment.open_calls",
     "calls_considered": _REPORT,
     "row_key_sources": _REPORT,
+    "key_froms": (
+        "records beside the nodes, not nodes: where each row-naming bind of a write was filled from -- see KeyFrom; "
+        "a dump's section compare reads them"
+    ),
     "print_calls": "the second reading prints-are-counted checks the stored rows against",
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,

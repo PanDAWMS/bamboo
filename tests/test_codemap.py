@@ -37,6 +37,7 @@ from bamboo.codemap.models import (
     EnumerationWrite,
     FilterStageNode,
     JunctionNode,
+    KeyFrom,
     LogSiteNode,
     LoopCutNode,
     MapFragment,
@@ -17619,6 +17620,20 @@ def test_a_writes_row_keys_are_the_where_terms_it_does_not_guard():
 
     assert write.preconditions == {"jobStatus": "jobStatus=:oldStatus"}
     assert write.keys == {"PandaID": ":PandaID", "jediTaskID": ":jediTaskID"}
+    assert write.key_lists == {}
+
+
+def test_a_write_naming_its_rows_by_a_helpers_in_list_keeps_the_list_beside_its_keys():
+    """``fileID IN ({names})`` from ``get_sql_IN_bind_variables`` reads as one bind (``sql.in_lists``); a list on a
+    column the statement writes is still its guard, and a negated one names no row."""
+    (write,) = sqltext.writes(
+        "UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status WHERE jediTaskID=:taskID "
+        "AND fileID IN (:file__in) AND status IN (:old__in) AND NOT datasetID IN (:ds__in)"
+    )
+
+    assert write.keys == {"jediTaskID": ":taskID"}
+    assert write.key_lists == {"fileID": ":file__in"}
+    assert write.preconditions == {"status": "status IN (:old__in)"}
 
 
 def _keyed_corpus(tmp_path, files: dict[str, str]):
@@ -17848,3 +17863,99 @@ class StatusModule:
     assert source.keys == ["taskSpec"]
     assert source.handed_by == "self.taskID"
 
+
+_KEY_FROM = '''
+class TaskModule:
+    def throttleTasks(self, vo):
+        sqlS = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status=:status "
+        self.cur.execute(sqlS + comment, {":vo": vo, ":status": "running"})
+        resS = self.cur.fetchall()
+        sqlT = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        for (jediTaskID,) in resS:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":newStatus"] = "throttled"
+            varMap[":oldStatus"] = "running"
+            self.cur.execute(sqlT + comment, varMap)
+
+    def setMaxAttempt(self, taskID, fileIDs):
+        file_var_names_str, file_var_map = get_sql_IN_bind_variables(fileIDs, prefix=":file")
+        varMap = {}
+        varMap[":taskID"] = taskID
+        varMap[":status"] = "ready"
+        varMap.update(file_var_map)
+        sql = f"UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status WHERE jediTaskID=:taskID AND fileID IN ({file_var_names_str}) "
+        self.cur.execute(sql + comment, varMap)
+
+    def resetTask(self, status):
+        varMap = {}
+        varMap[":status"] = status
+        varMap[":jediTaskID"] = 123
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sql + comment, varMap)
+
+    def lostKey(self, status):
+        varMap = {}
+        varMap[":status"] = status
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sql + comment, varMap)
+'''
+
+
+def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_path):
+    """A term each: its run's line, the subjects it writes with their lines, and its sources -- the rows of the
+    function's own statement, a parameter, an IN list's parameter, a literal -- or why none was read."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _KEY_FROM})
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    keys: list[RowKeySource] = []
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(
+            modules, MAP_ID, VERSION, attributor, row_keys=keys, key_froms=froms
+        )
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        assert all(not one.sources for one in froms)
+        read = sqlwrite.attach_key_sources(keys, junctions, calls, record, key_froms=froms, read_sites=sites)
+    assert read == len(froms) + len(keys)
+
+    by = {(one.owner.rpartition("::")[2], one.term): one for one in froms}
+    assert sorted(by) == [
+        ("lostKey", "jediTaskID=:jediTaskID"),
+        ("resetTask", "jediTaskID=:jediTaskID"),
+        ("setMaxAttempt", "fileID IN (:file__in)"),
+        ("setMaxAttempt", "jediTaskID=:taskID"),
+        ("throttleTasks", "jediTaskID=:jediTaskID"),
+    ]
+    lines = _KEY_FROM.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    throttle = by[("throttleTasks", "jediTaskID=:jediTaskID")]
+    (written,) = [j for j in junctions if j.owner == throttle.owner]
+    assert throttle.statement == at("self.cur.execute(sqlT")
+    assert throttle.writes == {written.subject: [at('":newStatus"] = "throttled"')]}
+    (site,) = [s for s in sites if s.owner == throttle.owner]
+    assert site.anchor.line_start == at("self.cur.execute(sqlS")
+    assert [one.model_dump() for one in throttle.sources] == [
+        {
+            "kind": "rows",
+            "line": at('":jediTaskID"] = jediTaskID'),
+            "name": site.name,
+            "site_owner": site.owner,
+            "site_line": site.anchor.line_start,
+            "paths": ["()"],
+        }
+    ]
+    assert throttle.unread == ""
+    assert [(s.kind, s.name) for s in by[("setMaxAttempt", "jediTaskID=:taskID")].sources] == [("parameter", "taskID")]
+    assert [(s.kind, s.name) for s in by[("setMaxAttempt", "fileID IN (:file__in)")].sources] == [
+        ("parameter", "fileIDs")
+    ]
+    assert [(s.kind, s.name) for s in by[("resetTask", "jediTaskID=:jediTaskID")].sources] == [("constant", "123")]
+    lost = by[("lostKey", "jediTaskID=:jediTaskID")]
+    assert (lost.sources, lost.unread) == ([], "no bind found")
