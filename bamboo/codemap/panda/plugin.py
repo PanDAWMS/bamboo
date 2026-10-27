@@ -547,8 +547,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._modules,
             audited,
             row_keys=fragment.row_key_sources,
-            # Which fields name a spec's row: off the attributor that learned the tables.
-            key_fields=flush.row_key_fields(attributor),
+            # Each flush call's records, read from the methods' own the SQL slice made.
+            key_froms=fragment.key_froms,
         )
         if self._flush_guards:
             logger.info(
@@ -667,6 +667,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             read_sites=fragment.read_sites,
             # Whose rows a read site's tables hold, for an INSERT's mark: off the attributor that learned the tables.
             table_class=attributor.class_for_table,
+            # The objects no write persists: their arms read as the attribute slice reads them.
+            modules=self._modules,
+            attributor=audited,
         )
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a

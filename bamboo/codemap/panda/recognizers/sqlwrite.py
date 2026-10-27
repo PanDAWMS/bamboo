@@ -69,10 +69,15 @@ from bamboo.codemap.calls import (
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     KEY_ATTRIBUTE,
+    KEY_BOUND,
     KEY_CONSTANT,
+    KEY_HANDED,
+    KEY_KEPT,
     KEY_NO_BIND,
     KEY_NO_MAP,
+    KEY_NO_USE,
     KEY_PARAMETER,
+    KEY_RETURNED,
     KEY_ROWS,
     KEY_SELF_FIELD,
     KEY_SEQUENCE,
@@ -701,7 +706,7 @@ def _insert_from(
         record._binds = (func, rel_path, [])
         record._insert = insert
         if obj:
-            record._object = (obj, obj_class, mades or [])
+            record._object = (obj, obj_class, mades or [], frozenset())
         key_froms.append(record)
     else:
         record._insert.binds.extend(insert.binds)
@@ -927,7 +932,7 @@ def _mark_object(
         if record is None:
             continue
         record.object = spelled_obj
-        record._object = (spelled_obj, obj_class, _maps_of(found))
+        record._object = (spelled_obj, obj_class, _maps_of(found), frozenset())
         attribute = attributes.get(bind.lstrip(":").lower())
         if not record._binds[2] and attribute is not None:
             field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
@@ -5750,14 +5755,18 @@ def attach_key_sources(
     junctions: list[JunctionNode],
     calls: Optional[Calls],
     record: Optional["ReachGraph"],
-    key_froms: Iterable[KeyFrom] = (),
+    key_froms: Optional[list[KeyFrom]] = None,
     read_sites: Iterable[ReadSiteNode] = (),
     table_class: Optional[Callable[[str], Optional[str]]] = None,
+    modules: Iterable[SourceModule] = (),
+    attributor: Optional[SpecAttributor] = None,
 ) -> int:
     """Say where each write's row keys were filled from: :attr:`KeyFrom.sources`, and which parameter or field of
     ``self`` handed each guarded write its keys (:attr:`RowKeySource.handed_by`); then, by those sources, whether each
     ``INSERT`` makes its row (:attr:`KeyFrom.new_row`, *table_class* saying whose rows a read site's tables hold),
-    and which subjects a write persisting an object writes (:attr:`KeyFrom.writes`, the function's assignments on it).
+    and which subjects a write persisting an object writes (:attr:`KeyFrom.writes`, the function's assignments on it);
+    last, with *modules* and *attributor* (the one the attribute slice reads assignments with), a KeyFrom for each
+    object of *modules* whose assigned fields no write persists, added to *key_froms* (:func:`_unpersisted`).
 
     After the reach record, because the carry reads a call by where it lands and by what the record reads as the
     database, and over the values the write's reader kept (``KeyFrom._binds``, ``RowKeySource._filled``), by one
@@ -5788,7 +5797,8 @@ def attach_key_sources(
         return held[1]
 
     read = 0
-    for key_from in key_froms:
+    froms = list(key_froms or ())
+    for key_from in froms:
         if key_from._binds is None:
             continue
         func, file, binds = key_from._binds
@@ -5797,7 +5807,6 @@ def attach_key_sources(
         unique = {id(bind.value): bind for bind in binds}.values()
         key_from.sources = [source for bind in unique for source in reader.sources(bind.value, bind.site)]
         read += 1
-    froms = list(key_froms)
     _object_writes(froms, junctions)
     sites = {site.name: site for listed in sites_of.values() for site in listed}
     statements: dict[tuple[str, int, str], list[KeyFrom]] = {}
@@ -5817,6 +5826,8 @@ def attach_key_sources(
             (names[0] for value, at, steps in values if (names := reader.handed(value, at, steps))), ""
         )
         read += 1
+    if attributor is not None and key_froms is not None:
+        key_froms.extend(_unpersisted(froms, junctions, modules, attributor, reading))
     return read
 
 
@@ -5824,14 +5835,16 @@ def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> N
     """Add to a KeyFrom persisting an object the subjects the function assigns on that object, at the
     assignments' lines -- ``killJob``'s ``job.jobStatus = ...`` written by its ``INSERT`` of ``job.valuesMap()``.
     The assignments are the attribute slice's junctions, so their lines are the branches a reader joins on; only
-    those that reach the object's ``valuesMap()`` are in what it writes (:func:`_fields_at`)."""
+    those that reach the object's ``valuesMap()``, or the flush call handed it, are in what it writes
+    (:func:`_fields_at`), and not one the write takes back out (``updateTask_JEDI``'s
+    ``resetChangedAttr("jediTaskID")``)."""
     by_owner: dict[str, list[JunctionNode]] = {}
     for junction in junctions:
         by_owner.setdefault(junction.owner, []).append(junction)
     for key_from in key_froms:
         if key_from._object is None or key_from._binds is None:
             continue
-        spelled, obj_class, mades = key_from._object
+        spelled, obj_class, mades, excluded = key_from._object
         func = key_from._binds[0]
         statements: dict[int, list[ast.stmt]] = {}
         for node in own_nodes(func):
@@ -5840,7 +5853,7 @@ def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> N
         obj = ast.parse(spelled, mode="eval").body
         for junction in by_owner.get(key_from.owner, ()):
             spec, _dot, attribute = junction.subject.rpartition(".")
-            if spec != obj_class:
+            if spec != obj_class or attribute in excluded:
                 continue
             reaching = {id(node) for node in _fields_at(func, obj, attribute, mades, obj_class)} if mades else None
             lines = sorted(
@@ -5861,6 +5874,132 @@ def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> N
             )
             if lines:
                 key_from.writes[junction.subject] = sorted({*key_from.writes.get(junction.subject, ()), *lines})
+
+
+def _unpersisted(
+    key_froms: list[KeyFrom],
+    junctions: list[JunctionNode],
+    modules: Iterable[SourceModule],
+    attributor: SpecAttributor,
+    reading: _Reading,
+) -> list[KeyFrom]:
+    """A KeyFrom for each object of a junction owner whose fields it assigns at an arm no write writes -- no
+    statement's record, nor a flush call's, has the arm's line for its subject -- one per what those fields reach
+    next (:func:`_uses`), with the arms it reaches as *writes*: a reader taking the arms whose write names its row by
+    a statement's rows would otherwise read these as known not to be.  getRandomSeed_JEDI's
+    ``tmpFileSpec.status = "ready"``, set after the spec's ``valuesMap()`` is taken, is returned; datasetManager's
+    ``job.jobStatus = "failed"`` is handed to ``TaskBuffer.updateJobs``, which persists it a call away.  An arm is a
+    junction's line assigning its subject's attribute on an object of its class, by *attributor*."""
+    written = {
+        (key_from.owner, subject, line)
+        for key_from in key_froms
+        for subject, lines in key_from.writes.items()
+        for line in lines
+    }
+    by_owner: dict[str, list[JunctionNode]] = {}
+    for junction in junctions:
+        by_owner.setdefault(junction.owner, []).append(junction)
+    made: list[KeyFrom] = []
+    for module in modules:
+        for func, owner_class in functions_with_owner(module.tree):
+            owner = f"{module.rel_path}::{func.name}"
+            here = by_owner.get(owner)
+            if not here:
+                continue
+            first, last = func.lineno, func.end_lineno or func.lineno
+            statements: dict[int, list[ast.stmt]] = {}
+            for node in own_nodes(func):
+                if isinstance(node, ast.stmt):
+                    statements.setdefault(node.lineno, []).append(node)
+            used: dict[int, list[tuple[str, int, frozenset[str]]]] = {}
+            found: dict[tuple[str, str], tuple[list[int], set[str], dict[str, set[int]]]] = {}
+            for junction in here:
+                spec, _dot, attribute = junction.subject.rpartition(".")
+                lines = {
+                    line
+                    for branch in junction.branches
+                    for line in (branch.line, *branch.other_lines)
+                    if line is not None and first <= line <= last and (owner, junction.subject, line) not in written
+                }
+                for line in sorted(lines):
+                    assigned = [
+                        (statement, target.value)
+                        for statement in statements.get(line, ())
+                        for target in targets_of(statement)
+                        if isinstance(target, ast.Attribute)
+                        and target.attr == attribute
+                        and attributor.class_of(target.value, func, owner_class) == spec
+                    ]
+                    if not assigned:
+                        continue
+                    statement, obj = assigned[0]
+                    if id(statement) not in used:
+                        used[id(statement)] = _uses(reading, module.rel_path, func, statement)
+                    for kind, at, callees in used[id(statement)]:
+                        ats, handed_to, writes = found.setdefault((ast.unparse(obj), kind), ([], set(), {}))
+                        ats.append(at)
+                        handed_to |= callees
+                        writes.setdefault(junction.subject, set()).add(line)
+            for (spelled, kind), (ats, handed_to, writes) in sorted(found.items()):
+                made.append(
+                    KeyFrom(
+                        owner=owner,
+                        file=module.rel_path,
+                        statement=min(ats),
+                        term="",
+                        object=spelled,
+                        unread=kind,
+                        handed_to=sorted(handed_to),
+                        writes={subject: sorted(lines) for subject, lines in sorted(writes.items())},
+                    )
+                )
+    return made
+
+
+def _uses(
+    reading: _Reading, file: str, func: ast.FunctionDef | ast.AsyncFunctionDef, statement: ast.stmt
+) -> list[tuple[str, int, frozenset[str]]]:
+    """What the field *statement* assigns reaches next, as the carry reads it from there: each kind of use --
+    :data:`KEY_HANDED` (calls of the corpus handed a part of it, or made on what holds it, and the functions they land
+    in), :data:`KEY_BOUND` (the database's calls), :data:`KEY_RETURNED`, :data:`KEY_KEPT` (put in what a parameter,
+    ``self`` among them, names: the caller holds it after -- adder's ``self.job.ddmErrorCode = ...`` before it
+    returns) -- with the first line it is used on (the assignment's, kept), else :data:`KEY_NO_USE` at the
+    assignment.  A call no reading places (a log line, a builtin, a hole) is no use."""
+    carry = _PathCarry(reading, file, func, (), start=[statement])
+    handed: list[int] = []
+    callees: set[str] = set()
+    bound: list[int] = []
+    for call in _own_calls(func):
+        if not carry.handed_any(call):
+            continue
+        if reading.record.is_database(file, call):
+            bound.append(call.lineno)
+            continue
+        placed = reading.place(carry, call)
+        if placed is not None and placed.targets:
+            handed.append(call.lineno)
+            callees |= {f"{target.file}::{target.func.name}" for target in placed.targets}  # type: ignore[attr-defined]
+    returned = [
+        node.lineno
+        for node in own_nodes(func)
+        if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
+        and node.value is not None
+        and carry.held(node.value, site_of(node))
+    ]
+    arguments = func.args
+    handed_in = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+    kept = [statement.lineno] if handed_in & set(carry.kept()) else []
+    found = [
+        (kind, min(lines), frozenset(names))
+        for kind, lines, names in (
+            (KEY_HANDED, handed, callees),
+            (KEY_BOUND, bound, set()),
+            (KEY_RETURNED, returned, set()),
+            (KEY_KEPT, kept, set()),
+        )
+        if lines
+    ]
+    return found or [(KEY_NO_USE, statement.lineno, frozenset())]
 
 
 #: The order a statement's why is told in where several of its key columns are new.

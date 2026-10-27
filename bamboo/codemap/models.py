@@ -2594,9 +2594,20 @@ KEY_CONSTANT = "constant"
 KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
 KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
-#: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`).
+#: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`); the last, a flush call's term the method
+#: fills with values no argument of the call brings -- its own rows, a field of its own ``self``.
 KEY_NO_MAP = "no bind map"
 KEY_NO_BIND = "no bind found"
+KEY_IN_CALLEE = "filled in the callee"
+#: An object the function assigns fields on that no write here persists (:attr:`KeyFrom.unread`, of no term): what
+#: an assigned field reaches next -- a call of the corpus it is handed to or made on, a statement here it is bound
+#: in whose own record does not write it, a return, what the function was handed (a parameter's object, ``self``'s:
+#: the caller holds it after) -- or nothing the map reads.
+KEY_HANDED = "handed to a call"
+KEY_BOUND = "bound in a statement"
+KEY_RETURNED = "returned"
+KEY_KEPT = "kept in what it was handed"
+KEY_NO_USE = "no use found"
 #: Why an ``INSERT`` makes a row or writes one that was a row of its class before (:attr:`KeyFrom.new_row_by`).
 #: New: a key column filled from a sequence, by ``RETURNING``, with a literal, with a value computed here, or with
 #: one carried from something not of the table's class (a scalar handed in, a parent's row).
@@ -2662,6 +2673,19 @@ class KeyFrom(BaseModel):
     two never disagree.  A statement run with several texts is one KeyFrom per term, its sources every text's.
     Not followed here: rows reaching the bind through a call (a parameter is where this function was handed them),
     which column of a row fills it, and the values of the columns the statement writes.
+
+    Two more kinds of record, of an object whose fields the function assigns (*object*).  A call of a method that
+    persists what its caller changed on a spec (a flush: ``self.taskBufferIF.updateJob(job, ...)``) is a write at
+    the call, one KeyFrom per term of the statement the method flushes the object's class into, as the method fills
+    it: each bind of the method's own record of the term whose value is a parameter, or a part of one, read as the
+    call's argument for it -- ``updateJob``'s ``PandaID=:PandaID`` is its ``job``'s field, and
+    ``registerTaskInOneShot_JEDI``'s ``jediTaskID=:jediTaskID`` is its parameter ``jediTaskID``, not the spec's --
+    on a column the caller does not write, where the call appends the term; and, where the method makes its
+    ``WHERE`` in a loop over a dict parameter's items (``updateTask_JEDI``'s *criteria*), one per key of the dict the
+    call hands it, ``jediTaskID=criteria["jediTaskID"]``.  And an object no write here persists gets one record per
+    what its assigned fields reach next (*unread*: :data:`KEY_HANDED`, :data:`KEY_BOUND`, :data:`KEY_RETURNED`,
+    :data:`KEY_KEPT`, :data:`KEY_NO_USE`), of no term and no source: with none, its arms would read as known not to be
+    on a statement's rows.
     """
 
     owner: str
@@ -2671,11 +2695,17 @@ class KeyFrom(BaseModel):
         description=(
             "The line the write runs on -- the first, where the function runs one text with one bind map from "
             "several places (``setNoRetry`` at 2604 and 2608): one run, its binds every place's "
-            "(``sql.Execution.calls``)."
+            "(``sql.Execution.calls``); a flush's, the call.  For an object no write persists, the first line its "
+            "fields reach the use on (the call, the statement, the return), else the first assignment's."
         ),
     )
-    table: str = ""
-    term: str = Field(description="As the map reads it: ``jediTaskID=:jediTaskID``, ``datasetID IN (:dataset__in)``.")
+    table: str = Field(default="", description="The table written; empty for an object no write persists.")
+    term: str = Field(
+        description=(
+            "As the map reads it: ``jediTaskID=:jediTaskID``, ``datasetID IN (:dataset__in)``; empty for an object no "
+            "write persists, and for an ``INSERT`` into a table with no key."
+        )
+    )
     writes: dict[str, list[int]] = Field(
         default_factory=dict,
         description=(
@@ -2687,15 +2717,26 @@ class KeyFrom(BaseModel):
     )
     unread: str = Field(
         default="",
-        description=f"Empty, or why the term's values were not read: ``{KEY_NO_MAP}`` / ``{KEY_NO_BIND}``.",
+        description=(
+            f"Empty, or why the term's values were not read: ``{KEY_NO_MAP}`` / ``{KEY_NO_BIND}`` / "
+            f"``{KEY_IN_CALLEE}``; for an object no write persists, what its fields reach: ``{KEY_HANDED}`` (see "
+            f"*handed_to*) / ``{KEY_BOUND}`` / ``{KEY_RETURNED}`` / ``{KEY_KEPT}`` / ``{KEY_NO_USE}``."
+        ),
     )
     sources: list[KeySource] = Field(default_factory=list)
     object: str = Field(
         default="",
         description=(
-            "The object whose fields the write persists -- ``job`` of ``execute(sql, job.valuesMap())`` -- or empty "
-            "for a term of a bind map; its fields' values are the term's, and *writes* has the subjects the function "
-            "assigns on it."
+            "The object whose fields the write persists -- ``job`` of ``execute(sql, job.valuesMap())``, of "
+            "``updateJob(job, ...)`` -- or none does; empty for a term of a bind map.  *writes* has the subjects the "
+            "function assigns on it that reach the write (the map, the call), or the use *unread* names."
+        ),
+    )
+    handed_to: list[str] = Field(
+        default_factory=list,
+        description=(
+            f"Where *unread* is ``{KEY_HANDED}``: the functions of the corpus the calls land in (``file::name``, as a "
+            "junction's owner) -- where the object may be persisted."
         ),
     )
     new_row: Optional[bool] = Field(
@@ -2727,8 +2768,9 @@ class KeyFrom(BaseModel):
     #: An ``INSERT``'s, what decides *new_row* beside the sources: see :class:`~bamboo.codemap.panda.recognizers.
     #: sqlwrite._Insert`.
     _insert: Optional[Any] = PrivateAttr(default=None)
-    #: ``(object as spelled, its class, its valuesMap() call)`` where *object* is set: the step after the reach record
-    #: adds to *writes* the subjects the function assigns on it before the map is made.
+    #: ``(object as spelled, its class, the calls taking it -- its valuesMap() calls, or the flush call --, the
+    #: attributes the write takes back out)`` where a write persists *object*: the step after the reach record adds to
+    #: *writes* the subjects the function assigns on it that reach one of those calls.
     _object: Optional[tuple] = PrivateAttr(default=None)
 
 

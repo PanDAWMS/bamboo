@@ -53,9 +53,13 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
+from bamboo.codemap.calls import own_nodes
 from bamboo.codemap.models import (
+    KEY_IN_CALLEE,
+    KEY_NO_BIND,
     Emit,
     JunctionNode,
+    KeyFrom,
     RowKeySource,
     SourceModule,
     SubjectNode,
@@ -65,6 +69,7 @@ from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
+    site_of,
     targets_of,
 )
 from bamboo.codemap.panda.recognizers import logfile, sqlwrite
@@ -90,6 +95,12 @@ class Flush(NamedTuple):
     parameters: tuple[str, ...]
     #: lines the method writes about how many rows its write changed
     rows_emits: tuple[Emit, ...] = ()
+    #: the method, ``file::name``
+    owner: str = ""
+    #: ``(class, line, table)`` of each statement flushing a spec of the class: whose own records name its rows
+    flushed: frozenset[tuple[str, int, str]] = frozenset()
+    #: the dict parameter whose items make those statements' ``WHERE`` (``updateTask_JEDI``'s ``criteria``), or ""
+    criteria: str = ""
 
 
 def _parameters(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]:
@@ -147,6 +158,56 @@ def _flushed_set(run: sql.Execution, match: re.Match) -> bool:
         if begin < end and start < finish and any(_is_flush_call(node) for node in way):
             came_from_the_call(begin, finish)
     return called and not "".join(rest).strip()
+
+
+def _flushed_classes(
+    run: sql.Execution,
+    match: re.Match,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner: Optional[str],
+    attributor: SpecAttributor,
+) -> set[str]:
+    """The classes of the specs whose ``bindUpdateChangesExpression()`` the ``SET`` of *match* is: the call's object, in
+    the hole standing for it or on the way of the piece it gave."""
+    start = run.sql.upper().rfind("SET", match.start(), match.start(2))
+    end = match.end(2)
+    made = [
+        ast.parse(hole.source, mode="eval").body.func  # type: ignore[attr-defined]
+        for at, hole in run.holes
+        if start <= at < end and _names_flush_call(hole.source)
+    ]
+    made += [
+        node.func
+        for begin, finish, way in run.pieces
+        if begin < end and start < finish
+        for node in way
+        if _is_flush_call(node)
+    ]
+    return {spec for spelled in made if (spec := attributor.class_of(spelled.value, func, owner))}
+
+
+def _criteria(run: sql.Execution, match: re.Match, parameters: tuple[str, ...], dicts: frozenset[str]) -> str:
+    """The dict parameter whose items the ``WHERE`` of *match* is made of, or ``""``: a hole of the ``WHERE`` written
+    in a loop over it -- ``updateTask_JEDI``'s ``for tmpKey, tmpVal in criteria.items(): sql += f"{tmpKey}={crKey}
+    AND "``, its values bound by the keys.  The row is then the one the dict its caller hands it names, whatever the
+    spec beside it holds."""
+    for at, hole in run.holes:
+        if at < match.end(2):
+            continue
+        node = hole.stmt
+        while isinstance(node, ast.AST) and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                looped, known = node.iter, dicts
+                if (
+                    isinstance(looped, ast.Call)
+                    and isinstance(looped.func, ast.Attribute)
+                    and looped.func.attr in ("items", "keys")
+                ):
+                    looped, known = looped.func.value, frozenset(parameters)
+                if isinstance(looped, ast.Name) and looped.id in parameters and looped.id in known:
+                    return looped.id
+            node = getattr(node, "parent", None)
+    return ""
 
 
 def _gating_parameters(
@@ -228,12 +289,20 @@ def flush_methods(
                 continue
             parameters = _parameters(func)
             guards: dict[str, tuple[str, frozenset[str]]] = {}
+            flushed: set[tuple[str, int, str]] = set()
+            criteria = ""
+            dicts = sqlwrite._dict_names(func)
             for run in sql.executions(func):
                 for match in sqltext._UPDATE.finditer(run.sql):
                     if not _flushed_set(run, match):
                         # A readable ``SET`` is the SQL slice's business; this
                         # reader exists for the clause the spec writes.
                         continue
+                    table = match.group(1).split(".")[-1]
+                    flushed |= {
+                        (spec, run.call.lineno, table) for spec in _flushed_classes(run, match, func, owner, attributor)
+                    }
+                    criteria = criteria or _criteria(run, match, parameters, dicts)
                     for term_match in sqltext._TERM.finditer(run.sql, match.end(2)):
                         raw, column = term_match.group(1), term_match.group(2)
                         if column in guards:
@@ -262,6 +331,9 @@ def flush_methods(
                         func, logfile.files_of(module.rel_path, declared, inherited)
                     )
                 ),
+                owner=f"{module.rel_path}::{func.name}",
+                flushed=frozenset(flushed),
+                criteria=criteria,
             )
     return found
 
@@ -309,16 +381,19 @@ def attach(
     modules: list[SourceModule],
     attributor: SpecAttributor,
     row_keys: Optional[list[RowKeySource]] = None,
-    key_fields: Optional[dict[str, frozenset[str]]] = None,
+    key_froms: Optional[list[KeyFrom]] = None,
 ) -> int:
     """Give each caller's branches the row its flush needed.  Returns how many.
 
     *row_keys*, where given, gets one :class:`RowKeySource` per guarded flush:
-    the row a flush writes is the spec it is handed, so where that spec came
+    the row a flush writes is the one its call names -- the spec it is handed,
+    or a value beside it the method takes the key from -- so where that came
     from -- a parameter, a field, or this function's own query -- is who named
     the row.  ``TaskBuffer.updateJobs`` flushes each of the ``jobs`` its caller
     passed, and its guard requires ``defined`` of rows it never selected.
-    *key_fields* says which fields of each spec name its row (:func:`row_key_fields`).
+    *key_froms*, where given, gets the :class:`KeyFrom` s of every flush call
+    (:func:`_call_key_froms`), which the RowKeySource is read from, and must
+    already hold the flush methods' own (:func:`sqlwrite.extract`).
 
     Applied to every branch of a matching junction rather than to the writes
     that provably reach the flush call: a method that changes a spec and then
@@ -333,6 +408,20 @@ def attach(
     by_owner: dict[str, list[JunctionNode]] = {}
     for junction in junctions:
         by_owner.setdefault(junction.owner, []).append(junction)
+
+    # The calls' records first, every function's: a call is read in the function it is made in, and the annotation
+    # below walks a function's nested ones too.
+    owned: dict[tuple[str, int], list[KeyFrom]] = {}
+    for record in key_froms or ():
+        owned.setdefault((record.owner, record.statement), []).append(record)
+    called: dict[int, list[KeyFrom]] = {}
+    for module in modules:
+        for func, owner in functions_with_owner(module.tree) if key_froms is not None else ():
+            for call in sqlwrite._own_calls(func):
+                flush = flushes.get(call.func.attr) if isinstance(call.func, ast.Attribute) else None
+                if flush is not None:
+                    called[id(call)] = _call_key_froms(call, func, owner, module.rel_path, flush, owned, attributor)
+                    key_froms.extend(called[id(call)])  # type: ignore[union-attr]
 
     annotated = 0
     for module in modules:
@@ -359,7 +448,7 @@ def attach(
                         continue
                     if row_keys is not None and guards:
                         row_keys.append(
-                            _row_key_source(node, func, owner, spec, flush, guards, module, attributor, key_fields or {})
+                            _row_key_source(node, func, spec, flush, guards, module, called.get(id(node), []))
                         )
                     for junction in here:
                         if junction.subject not in {
@@ -383,50 +472,164 @@ def attach(
     return annotated
 
 
-def _row_key_source(
+def _argument(call: ast.Call, parameter: str, parameters: tuple[str, ...]) -> Optional[ast.expr]:
+    """What this call passes *parameter*, or ``None`` -- as :func:`_supplied` finds it."""
+    for keyword in call.keywords:
+        if keyword.arg == parameter:
+            return keyword.value
+    if parameter in parameters:
+        index = parameters.index(parameter) - (1 if parameters and parameters[0] == "self" else 0)
+        if 0 <= index < len(call.args) and not isinstance(call.args[index], ast.Starred):
+            return call.args[index]
+    return None
+
+
+def _rerooted(value: ast.expr, parameter: str, argument: ast.expr) -> Optional[ast.expr]:
+    """*value*, a part of the method's *parameter* (``job.PandaID``), as the caller holds it: the same part of the
+    *argument* the call hands it (``jobSpec.PandaID``) -- the argument's elements, where the part is the whole of a
+    list written into the call (``oldStatus=["assigning"]``, opened into an ``IN`` list) -- or ``None`` where
+    *value* is no part of *parameter*."""
+    steps: list[ast.expr] = []
+    node: ast.expr = value
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        steps.append(node)
+        node = node.value
+    if not (isinstance(node, ast.Name) and node.id == parameter):
+        return None
+    built = argument
+    for step in reversed(steps):
+        if isinstance(step, ast.Attribute):
+            built = ast.copy_location(ast.Attribute(value=built, attr=step.attr, ctx=ast.Load()), argument)
+        else:
+            built = ast.copy_location(ast.Subscript(value=built, slice=step.slice, ctx=ast.Load()), argument)
+        built.parent = getattr(argument, "parent", None)  # type: ignore[attr-defined]
+    return built
+
+
+def _call_key_froms(
     call: ast.Call,
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     owner: Optional[str],
+    rel_path: str,
+    flush: Flush,
+    owned: dict[tuple[str, int], list[KeyFrom]],
+    attributor: SpecAttributor,
+) -> list[KeyFrom]:
+    """The :class:`KeyFrom` s of a flush call, one per term naming the row it writes for each spec it is handed: the
+    method's own records of the statement it flushes the spec's class into (*owned*), each bind of a parameter's
+    part read as the same part of the call's argument for it (:func:`_rerooted`), on a column the caller does not
+    write (a term on one is its compare-and-set) and where the call appends the term; and, where the method's
+    ``WHERE`` is made of a dict parameter's items, one per key of the dict the call hands it.  A term the method
+    fills only with values of its own -- its rows, its ``self`` -- is :data:`KEY_IN_CALLEE`.  Its object is the spec,
+    and what it writes is read after the reach record: the caller's assignments on the spec that reach the call."""
+    caller = f"{rel_path}::{func.name}"
+    found: dict[tuple[str, str, str], KeyFrom] = {}
+
+    def put(table: str, term: str, spelled: str, spec: str, binds: list, unread: str) -> None:
+        record = found.get((table, term, spelled))
+        if record is None:
+            record = found[(table, term, spelled)] = KeyFrom(
+                owner=caller, file=rel_path, statement=call.lineno, table=table, term=term, object=spelled
+            )
+            record._binds = (func, rel_path, [])
+            record._object = (spelled, spec, [call], flush.excluded)
+        record._binds[2].extend(binds)
+        record.unread = "" if record._binds[2] else unread
+
+    at = site_of(call)
+    for spec in sorted(flush.spec_classes):
+        statements = sorted((line, table) for one, line, table in flush.flushed if one == spec)
+        for obj in (
+            argument
+            for argument in (*call.args, *(keyword.value for keyword in call.keywords))
+            if not isinstance(argument, ast.Starred) and attributor.class_of(argument, func, owner) == spec
+        ):
+            spelled = ast.unparse(obj)
+            assigned = {
+                target.attr
+                for node in own_nodes(func)
+                for target in targets_of(node)
+                if isinstance(target, ast.Attribute) and ast.unparse(target.value) == spelled
+            }
+            written = {
+                attribute.lower()
+                for attribute in assigned - flush.excluded
+                if sqlwrite._fields_at(func, obj, attribute, [call], spec)
+            }
+            given = _argument(call, flush.criteria, flush.parameters) if flush.criteria else None
+            for _line, table in statements[:1] if given is not None else ():
+                if not isinstance(given, ast.Dict):
+                    put(table, f"{flush.criteria}={ast.unparse(given)}", spelled, spec, [sql.Bind(given, at)], "")
+                    continue
+                for key, value in zip(given.keys, given.values, strict=True):
+                    named = key.value if isinstance(key, ast.Constant) and isinstance(key.value, str) else None
+                    if named is not None and named.lower() not in written:
+                        put(table, f'{named}={flush.criteria}["{named}"]', spelled, spec, [sql.Bind(value, at)], "")
+            for line, table in statements:
+                for record in owned.get((flush.owner, line), ()):
+                    if record._insert is not None or record.table.lower() != table.lower():
+                        continue
+                    column = re.match(r"\s*(\w+)", record.term)
+                    if column is None or column.group(1).lower() in written:
+                        continue
+                    gating = next(
+                        (
+                            gating
+                            for name, (_term, gating) in flush.guards.items()
+                            if name.lower() == column.group(1).lower()
+                        ),
+                        frozenset(),
+                    )
+                    if not all(_supplied(call, parameter, flush.parameters) for parameter in gating):
+                        continue
+                    binds, own = [], False
+                    for bind in (record._binds or (None, None, []))[2]:
+                        root = sqlwrite._root(bind.value)
+                        handed = (
+                            _argument(call, root.id, flush.parameters)
+                            if root is not None and root.id in flush.parameters[1:]
+                            else None
+                        )
+                        moved = (
+                            _rerooted(bind.value, root.id, handed)  # type: ignore[union-attr]
+                            if handed is not None
+                            else None
+                        )
+                        if moved is None:
+                            own = True
+                            continue
+                        values = moved.elts if isinstance(moved, (ast.List, ast.Tuple, ast.Set)) else [moved]
+                        binds.extend(sql.Bind(one, at) for one in values if not isinstance(one, ast.Starred))
+                    unread = KEY_IN_CALLEE if own else record.unread or KEY_NO_BIND
+                    put(record.table, record.term, spelled, spec, binds, unread)
+    return list(found.values())
+
+
+def _row_key_source(
+    call: ast.Call,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
     spec: str,
     flush: Flush,
     guards: list[str],
     module: SourceModule,
-    attributor: SpecAttributor,
-    key_fields: dict[str, frozenset[str]],
+    records: list[KeyFrom],
 ) -> RowKeySource:
-    """The spec a guarded flush is handed; whether the caller handed it here is read after the reach record
-    (:func:`sqlwrite.attach_key_sources`)."""
-    passed: list[ast.expr] = [
-        argument
-        for argument in (*call.args, *(keyword.value for keyword in call.keywords))
-        if attributor.class_of(argument, func, owner) == spec
-    ]
+    """A guarded flush's row keys, the terms of its call's records for *spec* (:func:`_call_key_froms`); whether the
+    caller handed it them is read after the reach record (:func:`sqlwrite.attach_key_sources`), from the same
+    values: ``updateTask_JEDI`` names its row by the criteria it is handed, not by the spec beside them."""
+    mine = [record for record in records if record._object is not None and record._object[1] == spec]
     source = RowKeySource(
         owner=f"{module.rel_path}::{func.name}",
         file=module.rel_path,
         statement=call.lineno,
         columns=sorted(column for column, (term, _gating) in flush.guards.items() if term in guards),
-        keys=[ast.unparse(argument) for argument in passed],
+        keys=[record.term for record in mine],
     )
-    # What names the spec's row: the object itself, or a field holding its table's key (``.jediTaskID``) -- or any
-    # field, where something fills the object by name (``taskSpec.pack(row)``).
-    steps = key_fields.get(spec, frozenset()) | {sqlwrite.ANY_FIELD}
-    source._filled = (func, module.rel_path, [(argument, call, steps) for argument in passed])
+    # The key's value itself, as the records hold it: a field of the spec handed in (``jobSpec.PandaID``), a value of
+    # the criteria (``taskSpec.jediTaskID``).
+    source._filled = (
+        mine[0]._binds[0] if mine else func,
+        module.rel_path,
+        [(bind.value, call, frozenset()) for record in mine for bind in record._binds[2]],
+    )
     return source
-
-
-def row_key_fields(attributor: SpecAttributor) -> dict[str, frozenset[str]]:
-    """``{spec class: the steps of its fields that name its row}`` -- its tables' key columns as the class spells
-    them, ``{"JediTaskSpec": {".jediTaskID"}}``.
-
-    Off an attributor that learned which tables hold which class (:meth:`SpecAttributor.learn_table_classes`) and
-    inside :func:`sqltext.with_schema` (:func:`sqltext.table_key`).  The one :func:`attach` reads callers with does
-    not learn the tables, and a spec with none learned names its row by no field.
-    """
-    found: dict[str, frozenset[str]] = {}
-    for spec in attributor.declared_classes():
-        keyed = set().union(*(sqltext.table_key(table) for table in attributor.tables_of(spec)))
-        steps = frozenset("." + attribute for attribute in attributor.declared_attributes(spec) if attribute.lower() in keyed)
-        if steps:
-            found[spec] = steps
-    return found
