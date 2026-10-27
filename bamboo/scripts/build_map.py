@@ -545,7 +545,7 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             f"came back; {sum(len(r.crosses_to) for r in reads)} crossing(s) "
             f"over {len(crossed)} statement(s)"
         )
-        # The third crossing shape leaves the file, so what it could not
+        # The handed-back crossing shape leaves the file, so what it could not
         # resolve is not visible in the nodes at all: a statement whose rows
         # reach a ``return`` and whose caller does nothing the map answers for
         # keeps the same empty field as one whose rows go nowhere.  Said here
@@ -555,8 +555,16 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             click.echo(
                 f"    {crossings.handing_back} statement(s) hand their rows "
                 f"back to a caller, {crossings.resolved} of which reach a "
-                "junction"
+                f"junction; {crossings.opened} statement(s) have a call on the "
+                "way, or a caller back, their calls cannot place"
             )
+        # What each statement returns, so that an aggregate's crossings are
+        # read as a value going on and an empty result as one not read.
+        results = Counter(r.result or "not read" for r in reads)
+        click.echo(
+            "    returning "
+            + ", ".join(f"{kind} {count}" for kind, count in sorted(results.items()))
+        )
         # The write side's version of the same silence: a column name built
         # from a mapping key leaves the statement naming no column, which reads
         # as a statement that writes none.
@@ -788,14 +796,15 @@ def main(
         for table, classes in sorted(conflicts.items()):
             click.echo(f"      - {table} reads as {sorted(classes)}")
         click.echo("      note: a table holds one kind of row; two answers means one reading is wrong.")
-    dropped = getattr(plugin, "unpromoted", (0, 0))
-    if any(dropped):
+    unmarked = getattr(plugin, "unpromoted", (0, 0))
+    if any(unmarked):
         # Not a coverage gap: an attribute no predicate gates, no vocabulary
-        # declares and no closed literal set fills is a field nobody
-        # investigates.  Reporting the count keeps the filter visible.
+        # declares and no closed literal set fills is one the code writes and
+        # nothing says decides anything.  Kept, with no criteria; the count
+        # says how much of the map a reader of the criteria leaves out.
         click.echo(
-            f"\nnot promoted: {dropped[0]} subject(s), {dropped[1]} junction(s) "
-            "— no criterion fired"
+            f"\nno criterion marks: {unmarked[0]} subject(s), {unmarked[1]} junction(s) "
+            "— kept, criteria empty"
         )
     disagreeing = getattr(plugin, "stop_disagreements", None)
     if disagreeing is not None:

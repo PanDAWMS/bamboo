@@ -876,9 +876,9 @@ def extract(
     attribute is written here at all.
 
     The diagnostic index comes back alongside rather than as part of the
-    junctions, because it survives promotion and they do not: a message field is
-    not a subject, and the writes that assemble its text are still the answer to
-    "who wrote this line".
+    junctions, because it answers another question: no criterion marks a
+    message field, and the writes that assemble its text are still the answer
+    to "who wrote this line".
     """
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)

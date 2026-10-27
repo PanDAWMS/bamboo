@@ -183,21 +183,32 @@ def _direct_prints(block: list, stop: ast.AST | None = None) -> list[ast.stmt]:
     return out
 
 
+def _holds(stmt: ast.stmt, lines: set[int]) -> bool:
+    return any(stmt.lineno <= line <= (stmt.end_lineno or stmt.lineno) for line in lines)
+
+
 def _raised_prefix(stmt: ast.stmt, raised_at: set[int]) -> list[ast.stmt]:
     """Prints a ``try`` body ran before the line a traceback frame says raised."""
     if not isinstance(stmt, ast.Try):
         return []
     for s in stmt.body:
-        if any(s.lineno <= line <= (s.end_lineno or s.lineno) for line in raised_at):
+        if _holds(s, raised_at):
             return _direct_prints(stmt.body, stop=s)
     return []
 
 
-def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] = frozenset()) -> tuple[list, list]:
-    """``(before, after)``: the prints every path through *site* runs in one call."""
+def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] | None = frozenset()) -> tuple[list, list]:
+    """``(before, after)``: the prints every path through *site* runs in one call.
+
+    *raised_at* is where a traceback of the run shows the function left by an exception (:func:`raised_in`): a
+    ``try`` body before *site* printed up to that line, and no print from the statement holding it on is a must
+    row -- the call may have left there, *site* itself included.  None when a frame of the function cannot be
+    placed: where it left is not known, and no print after *site* is a must row.
+    """
     before: list[ast.stmt] = []
     after: list[ast.stmt] = []
-    open_after = True
+    open_after = raised_at is not None and not _holds(site, raised_at)
+    left_at = raised_at or set()
     node: ast.AST = site
     while node is not func:
         parent = node.parent  # type: ignore[attr-defined]
@@ -210,10 +221,13 @@ def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] = frozenset()) 
         for s in block[:index]:
             if is_print(s):
                 before.append(s)
-            elif raised_at:
-                before.extend(_raised_prefix(s, raised_at))
+            elif left_at:
+                before.extend(_raised_prefix(s, left_at))
         if open_after:
             for s in block[index + 1 :]:
+                if _holds(s, left_at):
+                    open_after = False
+                    break
                 if is_print(s):
                     after.append(s)
                 elif may_divert(s):
@@ -225,6 +239,9 @@ def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] = frozenset()) 
             open_after = False
         if isinstance(parent, ast.Try) and name == "body" and open_after:
             for s in parent.orelse:
+                if _holds(s, left_at):
+                    open_after = False
+                    break
                 if is_print(s):
                     after.append(s)
                 elif may_divert(s):
@@ -607,6 +624,13 @@ class Row:
     capture_shapes: list[list[Part]] = field(default_factory=list)
     #: the map's prefix patterns of this statement's rows, when every row has one (``PREFIX``)
     map_prefixes: list[str] = field(default_factory=list)
+    #: the files the map places this statement's lines in (``PrintStatement.log_files``, its logger followed); None
+    #: where it does not place them (another ``log_files_basis``, no statement, ``ROWS_OWN_FILES=0``)
+    log_files: list[str] | None = None
+
+    def lands_in(self, name: str) -> bool:
+        """Whether a line of this row can be in the log file *name*: yes where the map does not place it."""
+        return self.log_files is None or name in self.log_files
 
     def written_by(self, record: Record) -> bool:
         """Whether *record* can be this row's line by its prefix: always when ``PREFIX`` is off or the map gives
@@ -667,7 +691,9 @@ class Row:
         return best
 
     def capture(self, record: Record) -> dict[str, str]:
-        """Hole values in *record*, keyed by the expression each hole prints."""
+        """Hole values in *record*, keyed by the expression each hole prints; none from a record the search cut."""
+        if record.cut:
+            return {}
         for shape in sorted(self.capture_shapes, key=literal_of, reverse=True):
             if not usable(shape):
                 continue
@@ -762,9 +788,10 @@ def own_log_files(owner: str, today: list[str], lines: Iterable[int] = ()) -> li
 def split_files(owner: str, lines: Iterable[int] = ()) -> list[list[str]]:
     """The distinct file sets *owner*'s placed statements land in, when there is more than one.
 
-    Such a function's rows are all read in one run of one file, so a row that
-    lands only in another file reads as missing there.  Not handled: 2 functions
-    of 1093 (pilot_api's ``acquire_jobs``, ``update_job``), in no baseline.
+    Such a function is read in one run of one file, where a row the map places
+    only in another file is neither shown nor missing (:meth:`Row.lands_in`):
+    its lines are not read (KNOWN_ISSUES.md K23).  2 functions of 1093
+    (pilot_api's ``acquire_jobs``, ``update_job``), in no baseline.
     """
     found = _prints_of(owner, lines) if OWN_FILES and ROWS_FROM == "graph" else None
     if found is None:
@@ -814,8 +841,9 @@ def check_blobs(answer: object, what: str) -> None:
         )
 
 
-def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[int, list], dict[int, list[int]]]:
-    """``(line -> the node's rows, line -> arms)``: the arms as ``trace._Walk._rows_for`` gives them.
+def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[int, list], dict[int, list[int]], dict[int, list[str]]]:
+    """``(line -> the node's rows, line -> arms, line -> files)``: the arms as ``trace._Walk._rows_for`` gives them,
+    the files where the map places a statement's lines by its logger (``log_files_basis`` ``logger``).
 
     An asked line is armed with the statement ``trace._statement_at`` finds for
     it, and is an arm of a print when ``pathcond.compatible(that statement, the
@@ -829,6 +857,7 @@ def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[in
             f"{_blob_sha(rel)[:12]} ({CORPUS}), the map is {mapdump.described()}: run with ROWS_FROM=walk or the map's corpus"
         )
     by_line = {s.line: list(s.rows) for s in found.statements} if found is not None else {}
+    files_of = {s.line: list(s.log_files) for s in found.statements if s.log_files_basis == "logger"} if found is not None else {}
     armed = {}
     for line in list(arms) or [node.lineno]:
         held = trace._statement_at(node, line)
@@ -839,7 +868,7 @@ def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[in
         if is_print(stmt):
             message = stmt.value.args[0]
             arms_of[stmt.lineno] = sorted(a for a, held in armed.items() if pathcond.compatible(held, message, current=True))
-    return by_line, arms_of
+    return by_line, arms_of, files_of
 
 
 @functools.cache
@@ -885,8 +914,9 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
     node = _holding(found, arms or within)
     by_line: dict[int, list] = {}
     arms_of: dict[int, list[int]] = {}
+    files_of: dict[int, list[str]] = {}
     if ROWS_FROM == "graph":
-        by_line, arms_of = _graph_rows(rel, node, arms)
+        by_line, arms_of, files_of = _graph_rows(rel, node, arms)
     else:
         walked = trace.walk(ROOTS, file=rel, owner=f"{rel}::{name}", lines=list(arms) or [node.lineno], classify=classify, reaching=False)
         for sk in walked.skeleton:
@@ -917,6 +947,7 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
                 _alternatives(call.args[0], node, stmt),
                 _capture_shapes(call.args[0], node, stmt),
                 _prefixes(mapped),
+                files_of.get(stmt.lineno) if OWN_FILES else None,
             )
         )
     rows.sort(key=lambda r: r.line)
@@ -958,8 +989,14 @@ def pattern_finds(row: Row, log) -> tuple[int, int]:
     return _LOG_COUNTS[key]
 
 
+#: :func:`absence_trusted`'s reason for a row the map places in other files than the run's
+ANOTHER_FILE = "another file"
+
+
 def absence_trusted(row: Row, log, mode: str) -> tuple[bool, str]:
     """Whether the row missing from a run of *log* is evidence; the reason when not."""
+    if not row.lands_in(log.name):
+        return False, ANOTHER_FILE
     if not row.absence_counts(mode):
         return False, "unreadable"
     if row.map_covers():
@@ -1015,6 +1052,24 @@ def _seen(fn: Function, run: Run, mode: str, hits: dict[int, list[tuple[int, int
         if len(lines) == 1:
             unambiguous.setdefault(next(iter(lines)), []).append(i)
     return Seen(fn, run, mode, hits, unambiguous)
+
+
+def raised_in(fn: Function, run: Run) -> tuple[bool, set[int] | None]:
+    """``(a traceback in *run* names fn, the lines its frames of fn show)``; lines None when a frame of fn
+    is of another version of the code (its source line differs), outside the corpus or of another file of
+    the same name, and cannot be placed."""
+    named, lines = False, set()
+    base = fn.rel.rsplit("/", 1)[-1]
+    for record in run.records:
+        for ch in record.chains():
+            for f in ch.frames:
+                if f.func != fn.name or f.path.rsplit("/", 1)[-1] != base:
+                    continue
+                named = True
+                if not (f.in_corpus and f.same_source and f.rel == fn.rel):
+                    return True, None
+                lines.add(f.line)
+    return named, lines
 
 
 def claim(seens: list[Seen]) -> list[Seen]:

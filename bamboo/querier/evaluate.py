@@ -81,6 +81,11 @@ class Env:
     #: expressions known not to hold what the guard saw, with the reason
     stale: dict[str, str] = field(default_factory=dict)
     used: dict[str, str] = field(default_factory=dict)
+    #: row fields the rows file holds as read at another time than the step's, so not in ``table``, with why
+    #: (``held.at_run``): "<job>.destinationSE" -> why
+    unread: dict[str, str] = field(default_factory=dict)
+    #: when the run the values are read for began (``Rerun.base_env``); None where no run is named
+    at: str | None = None
 
     def canonical(self, text: str) -> str:
         """*text* with every spelling of a row variable replaced by the row's name.
@@ -130,10 +135,30 @@ class Env:
                 return row[m[2]].value
         return UNKNOWN
 
+    def unread_in(self, text: str) -> dict[str, str]:
+        """The row fields *text* reads that nothing here holds and the rows file holds at another time, with why."""
+        out = {}
+        for term in re.findall(r"(?<![\w.])[A-Za-z_][\w.]*\.\w+", text):
+            key = self.canonical(term)
+            m = re.fullmatch(r"<(\w+)>\.(\w+)", key)
+            if not m or key not in self.unread or key in self.values or term in self.stale or key in self.stale:
+                continue
+            if m[2] not in self.table.get(m[1], {}):
+                out[term] = self.unread[key]
+        return out
+
 
 def strip_annotation(text: str) -> str:
     """Drop the ``  [name := expr]`` a path condition carries for a bare local."""
     return re.sub(r"\s+\[\w+ := .*\]$", "", text)
+
+
+def read_elsewhere(text: str) -> bool:
+    """Whether the map marks a path condition as read where the function's passes cannot say it.  ``  [in f()]``
+    (``alias._produced``): tested in a method the function calls, its names the callee's.  ``  [at N]`` (the map's
+    PC): a later write's test, its names as they are when line N's test runs, after the branch's write; a pass holds
+    one value per name for the whole pass, which may have been printed before that write (KNOWN_ISSUES.md K24)."""
+    return re.search(r"\s+\[(in \w+\(\)|at \d+)\]$", text) is not None
 
 
 def _call(node: ast.Call, env: Env) -> Any:
@@ -245,11 +270,19 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
     class cannot be told (a tree before f9b501c, or own steps of two classes),
     such a step is ``foreign`` and no binding is taken, as before.
     """
+    # imported here: evaluate reads no corpus, and asked's rows reads it as it is imported
+    from bamboo.querier import asked as A
+
+    A.bindings(steps, owner, name)
     out = Taken(name)
     walked = {s.cls for s in steps if s.owner == owner and getattr(s, "cls", "")}
     lineage = _lineage(next(iter(walked))) if len(walked) == 1 else None
     for step in steps:
         if step.name != name:
+            continue
+        if getattr(step, "kind", "") == "handover" and step.owner == owner:
+            # the owner's side of a call: it binds the callee's parameter of that name, not the owner's own
+            # (setup_destination 768 hands file.destinationDBlock to make_sub_dataset_name's original_name)
             continue
         if step.owner and step.owner != owner:
             if name.startswith("self."):

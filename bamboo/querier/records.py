@@ -26,7 +26,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 #: the panda-server tree every reading here is taken from: ``PANDA_PIN``, a pinned copy (a ``git archive`` of the
 #: commit the logs were written by), so every run reads a tree no one edits.  Required: a default to a live tree
@@ -44,11 +44,12 @@ STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 #: method name and a bracketed tag, which a DB proxy's ``create_tagged_logger`` writes
 #: (``getJobs < SITE_NAME 2026-01-01T00:00:00.000000 >``, ``updateJobStatus <
 #: PandaID=12345678 >``): the name alone would make one run of every call of the
-#: method, for every job
+#: method, for every job.  A tag may hold brackets of its own, one level
+#: (``checkTaskStatusJEDI <  < jediTaskID=12345 > >``: seven tags in the corpus)
 PREFIX = re.compile(
     r"^(?P<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) (?P<logger>\S+): "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+"
-    r"(?P<token>[A-Za-z_]\w* <[^<>\n]*>|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
+    r"(?P<token>[A-Za-z_]\w* <(?:[^<>\n]|<[^<>\n]*>)*>|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
 )
 TRACEBACK = "Traceback (most recent call last):"
 FRAME = re.compile(r'^\s*File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<func>\S+)')
@@ -143,6 +144,12 @@ class Record:
     token: str
     message: str
     continuation: list[str] = field(default_factory=list)
+    #: where a recorded answer found it (``recorded.RecordedLogs``): the machine and the byte offset in its file;
+    #: "" and -1 in a file handed in, which has line numbers
+    machine: str = ""
+    offset: int = -1
+    #: the search cut the record after 200 lines: its traceback and holes are not whole
+    cut: bool = False
 
     @property
     def text(self) -> str:
@@ -151,6 +158,8 @@ class Record:
 
     @property
     def span(self) -> str:
+        if self.machine:
+            return f"{self.machine.split('.')[0]}:{Path(self.file).name}@{self.offset}"
         last = self.lineno + len(self.continuation)
         return f"{Path(self.file).name}:{self.lineno}" + (f"-{last}" if last != self.lineno else "")
 
@@ -222,6 +231,18 @@ class Log:
     path: str
     records: list[Record]
     extract_key: str = ""  # the key the file was grepped by, when it says it is an extract
+    #: what of the window asked was not searched, and why (a recorded answer; a file handed in says nothing)
+    holes: list[str] = field(default_factory=list)
+    #: a recorded search's test of a run or a pass, ``(machine, first stamp, last stamp) -> bool``: false where it may
+    #: go on past what was searched, and rule 8 reads no row missing from it (None in a file handed in)
+    whole: Callable[[str, str, str], bool] | None = None
+    #: why a run ``whole`` is false for may go on past what was searched, ``(machine, first stamp, last stamp) -> str``,
+    #: empty where it is whole: said on the run's line (:meth:`Run.describe`; None in a file handed in)
+    edges: Callable[[str, str, str], str] | None = None
+    #: ``(machine, mark) -> why`` for the marks whose records are the key's alone, the rest not asked: a run of one is
+    #: read as cut at both ends, and rule 8 reads no row missing from it (a recorded search asked for S1's movers)
+    partial: dict[tuple[str, str], str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -267,26 +288,47 @@ def read_log(path: str) -> Log:
 Window = tuple[str, str]
 
 
+class Unrecorded(Exception):
+    """A door has no answer for these asks yet: ``asks`` is ``[(ask, why)]``, *why* empty when the asker's reason is
+    the ask's.  The asker gathers them from every log of its step before it stops, so they are fetched together."""
+
+    def __init__(self, asks: list) -> None:
+        super().__init__(f"{len(asks)} ask(s) not recorded")
+        self.asks = asks
+
+
 class Logs(Protocol):
-    """The logs a run reads, asked one at a time: (log name, key, window) -> Log.
+    """The logs a run reads, asked one at a time: (log name, key, window, machine) -> Log.
 
     A run asks only through here, so what answers -- files handed over, or a search of the servers' logs -- is the
-    door's business.  *window* is when the asker needs the key's runs, or None for whenever the log holds them.
+    door's business.  The answer holds every run of the key that overlaps *window*, each whole: a run is not cut
+    at the window's ends, and a door may return more runs than those.  *window* is when the asker needs the key's
+    runs, or None for whenever the log holds them; *machine* is the one machine the run must be on, or None for any.
     """
 
-    def names(self) -> list[str]:
-        """The logs to hand, in the order they were given."""
+    #: whether every ask needs a window: a door that searches the servers' logs reads only the files a window reaches
+    needs_window: bool
+
+    def names(self, wanted: list[str]) -> list[str]:
+        """Of the logs *wanted*, the ones this door can be asked for, in its order."""
         ...
 
-    def log(self, name: str, key: str, window: Window | None = None) -> Log: ...
+    def log(
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+    ) -> Log:
+        """*owners*: the functions the asker reads runs of, as ``rerun._of_mover`` names them, or None for any."""
+        ...
 
 
 class FileLogs:
     """The door over files: one file per log, read once.
 
-    A file holds what it holds, so the key and the window select nothing here: every ask of a log returns the same
-    :class:`Log` (``pattern_finds`` caches by it).
+    A file holds what it holds, so the key, the window and the machine select nothing here: every ask of a log
+    returns the same :class:`Log` (``pattern_finds`` caches by it).  A log wanted that was not handed in is not
+    asked at all.
     """
+
+    needs_window = False
 
     def __init__(self, paths: list[str]) -> None:
         self._logs: dict[str, Log] = {}
@@ -296,10 +338,12 @@ class FileLogs:
                 raise SystemExit(f"{path} and {self._logs[log.name].path} are both {log.name}: give one file per log")
             self._logs[log.name] = log
 
-    def names(self) -> list[str]:
-        return list(self._logs)
+    def names(self, wanted: list[str]) -> list[str]:
+        return [name for name in self._logs if name in wanted]
 
-    def log(self, name: str, key: str, window: Window | None = None) -> Log:
+    def log(
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+    ) -> Log:
         return self._logs[name]
 
 
@@ -322,6 +366,10 @@ class Run:
     @property
     def last(self) -> str:
         return self.records[-1].stamp
+
+    @property
+    def machine(self) -> str:
+        return self.records[0].machine
 
     def has_level(self, level: str) -> bool:
         return any(r.level == level for r in self.records)
@@ -346,13 +394,20 @@ class Run:
         extract of one job's lines held no ERROR line, a one-minute
         window held five of other jobs.
 
-        Never in a run of an extract whose mark does not hold the key: the
+        Never in a run or pass a recorded search may have cut at an end of what it searched (``Log.whole``; a pass
+        of a mark that spans days is judged by its own records, not its mark's), and never in a run of an
+        extract whose mark does not hold the key: the
         grep kept such a run only from its first line holding the key on, so a
         row that prints before it is missing whether it printed or not (a
         getJobs call's ``Start`` read as absent, and the call that sent the
-        job was excluded).  A run whose mark holds the key is whole in it.
+        job was excluded).  A run whose mark holds the key is whole in it.  Nor in a run of a mark whose other records
+        were not asked (``Log.partial``).
         """
         if self.log.extract_key and not keyed(self.log.extract_key).search(self.token):
+            return False
+        if (self.machine, self.token) in self.log.partial:
+            return False
+        if self.log.whole is not None and not self.log.whole(self.machine, self.first, self.last):
             return False
         rank = LEVEL_RANK.get(level)
         if rank is None:
@@ -372,19 +427,25 @@ class Run:
         return Run(self.log, self.token, kept, [r for r in self.found_by if r in kept])
 
     def describe(self) -> str:
+        """The run's line: where, its mark, its records' count and stamps; and, for a run a recorded search may have
+        cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
+        where = f"{self.log.name}@{self.machine.split('.')[0]}" if self.machine else self.log.name
+        cut = self.log.edges(self.machine, self.first, self.last) if self.log.edges is not None and self.machine else ""
+        cut = self.log.partial.get((self.machine, self.token), cut)
         return (
-            f"{self.log.name} token={self.token} {len(self.records)} record(s) "
-            f"{self.first} .. {self.last} (key on {len(self.found_by)})"
+            f"{where} token={self.token} {len(self.records)} record(s) "
+            f"{self.first} .. {self.last} (key on {len(self.found_by)}{'; read as cut: ' + cut if cut else ''})"
         )
 
 
 def runs_for(log: Log, key: str) -> list[Run]:
-    """Every run of *log* the key appears in, keyed by the instance token."""
+    """Every run of *log* the key appears in, keyed by the machine and the instance token: one mark on two machines
+    is two runs (a file handed in is one machine's)."""
     pattern = keyed(key)
     hits = [r for r in log.records if pattern.search(r.message) or (r.token and pattern.search(r.token))]
     runs: list[Run] = []
-    for token in dict.fromkeys(r.token for r in hits if r.token):
+    for mark in dict.fromkeys((r.machine, r.token) for r in hits if r.token):
         runs.append(
-            Run(log, token, [r for r in log.records if r.token == token], [r for r in hits if r.token == token])
+            Run(log, mark[1], [r for r in log.records if (r.machine, r.token) == mark], [r for r in hits if (r.machine, r.token) == mark])
         )
     return runs

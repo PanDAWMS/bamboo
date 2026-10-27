@@ -31,6 +31,9 @@ from bamboo.codemap import evidence
 from bamboo.codemap.models import (
     BIND_ALIAS,
     BIND_RESULT,
+    GAP_HANDED_IN,
+    GAP_PARTIAL,
+    GAP_UNNODED,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
     RUN_KEY_TIME,
@@ -38,6 +41,7 @@ from bamboo.codemap.models import (
     HistoryPair,
     MapFragment,
     ReachNode,
+    ReaderGap,
     required_values,
 )
 from bamboo.codemap.objects import STEPPED, _under
@@ -742,6 +746,56 @@ def mover_reason(
     stored.  *row_keys* and *column* decide the answers at the end, and only
     those, so a caller that asks about gaps alone can leave them out.
     """
+    reading = _mover_reading(spec, sites, stops, kind_of_table)
+    unnoded, handed, partial, callers, known = (
+        reading.unnoded, reading.handed, reading.partial, reading.callers, reading.known
+    )
+    if unnoded:
+        return MOVER_UNNODED, _stops_where(unnoded)
+    if handed:
+        return MOVER_HANDED_IN, _stops_where(handed)
+    if partial:
+        return MOVER_PARTIAL, ", ".join(f"@{line}" for line in partial)
+    if callers:
+        return MOVER_CALLERS_QUERY, _stops_where(callers)
+    if known:
+        reason = (
+            MOVER_OTHER_TERMS
+            if any(s.selects or s.conditions or s.keys or s.excludes for s in known)
+            else MOVER_ASKS_NOTHING
+        )
+        return reason, ", ".join(f"@{s.anchor.line_start}" for s in known)
+    guarded = [
+        source
+        for source in row_keys
+        if not column or column.lower() in {one.lower() for one in source.columns}
+    ]
+    by = sorted({source.handed_by for source in guarded if source.handed_by})
+    if by:
+        return MOVER_HANDED_ROWS, "by " + ", ".join(by)
+    if guarded:
+        return MOVER_OWN_WHERE, ", ".join(sorted({f"@{s.statement}" for s in guarded}))
+    return MOVER_UNDECIDED, ""
+
+
+class _MoverReading(NamedTuple):
+    """One function's statements on rows of one class, as the mover judgement reads them -- see :func:`_mover_reading`."""
+
+    maybe: list
+    known: list
+    stopped: list
+    unnoded: list
+    handed: list
+    callers: list
+    partial: list[int]
+
+
+def _mover_reading(spec: str, sites: list, stops: list, kind_of_table: dict[str, Optional[str]]) -> _MoverReading:
+    """The function's read sites and stops that may be on rows of class *spec*, and which of them the map could not read.
+
+    Read once for :func:`mover_reason`, which gives the first reason in its
+    order, and for :func:`mover_gaps`, which gives every statement's.
+    """
 
     def may_be(tables: list[str]) -> bool:
         return any(
@@ -778,32 +832,40 @@ def mover_reason(
         {s.anchor.line_start for s in maybe if s.unresolved}
         | {stop.statement for stop in stopped if stop.statement in noded}
     )
-    if unnoded:
-        return MOVER_UNNODED, _stops_where(unnoded)
-    if handed:
-        return MOVER_HANDED_IN, _stops_where(handed)
-    if partial:
-        return MOVER_PARTIAL, ", ".join(f"@{line}" for line in partial)
-    if callers:
-        return MOVER_CALLERS_QUERY, _stops_where(callers)
-    if known:
-        reason = (
-            MOVER_OTHER_TERMS
-            if any(s.selects or s.conditions or s.keys or s.excludes for s in known)
-            else MOVER_ASKS_NOTHING
+    return _MoverReading(maybe, known, stopped, unnoded, handed, callers, partial)
+
+
+def mover_gaps(
+    spec: str, sites: list, stops: list, kind_of_table: dict[str, Optional[str]], file: str = ""
+) -> list[ReaderGap]:
+    """Every statement of one function the map could not read on rows of class *spec*, a :class:`ReaderGap` each.
+
+    The three gaps :func:`mover_reason` knows (:data:`MOVER_DEFECTS`), each
+    statement under its own: that function gives the first in its order,
+    which is what the gate counts, and a reader of the answer needs the rest
+    as well -- a mover with a statement read in no node and one read in part
+    has both.  A statement handing on its caller's text is no gap: it is read
+    where the callers run it.  What runs on each line (*verbs*) is the
+    caller's to add: it holds the runs.
+    """
+    reading = _mover_reading(spec, sites, stops, kind_of_table)
+    found: list[ReaderGap] = []
+    for kind, held in ((GAP_UNNODED, reading.unnoded), (GAP_HANDED_IN, reading.handed)):
+        by_statement: dict[int, list[tuple[str, str]]] = {}
+        for stop in held:
+            seen = by_statement.setdefault(stop.statement, [])
+            if (stop.reason, stop.detail) not in seen:
+                seen.append((stop.reason, stop.detail))
+        found += [
+            ReaderGap(kind=kind, file=file, line=line, stops=said) for line, said in sorted(by_statement.items())
+        ]
+    for line in reading.partial:
+        said = list(dict.fromkeys((stop.reason, stop.detail) for stop in reading.stopped if stop.statement == line))
+        unresolved = sorted(
+            {term for site in reading.maybe if site.anchor.line_start == line for term in site.unresolved}
         )
-        return reason, ", ".join(f"@{s.anchor.line_start}" for s in known)
-    guarded = [
-        source
-        for source in row_keys
-        if not column or column.lower() in {one.lower() for one in source.columns}
-    ]
-    by = sorted({source.handed_by for source in guarded if source.handed_by})
-    if by:
-        return MOVER_HANDED_ROWS, "by " + ", ".join(by)
-    if guarded:
-        return MOVER_OWN_WHERE, ", ".join(sorted({f"@{s.statement}" for s in guarded}))
-    return MOVER_UNDECIDED, ""
+        found.append(ReaderGap(kind=GAP_PARTIAL, file=file, line=line, stops=said, unresolved=unresolved))
+    return found
 
 
 def _stops_where(stops: list) -> str:
@@ -891,7 +953,10 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
       an adder plugin the map then dropped -- 520 crossings over 239
       statements where 71 over 38 are real, and 176 statements carrying the
       same two leads to nowhere.  Nothing else noticed: the field was
-      populated, the diff reported it as content, and every unit test passed.
+      populated, the diff reported it as content, and every unit test passed;
+    * a ``crosses_open`` entry must name a hole of the reach record, where its
+      why is read: an entry naming none says "this may go further" with no
+      reason anyone can look up.
 
     Not a coverage gate.  Most statements have no exit and no crossing, and
     that is an answer rather than a gap -- "the rows go nowhere in particular"
@@ -899,6 +964,9 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
     all is that the coordinates offered are the map's own.
     """
     owners = {junction.owner for junction in fragment.junctions}
+    holes = {
+        (row.owner, hole.line, hole.callee) for row in fragment.reach_graph for hole in row.holes
+    }
     failures: list[str] = []
     for site in sorted(fragment.read_sites, key=lambda s: s.name):
         spans = [
@@ -920,6 +988,12 @@ def statement_leads_resolve(fragment: MapFragment) -> GateResult:
                 failures.append(
                     f"{site.owner}@{site.anchor.line_start} leads to {reached},"
                     " which the map holds no junction for"
+                )
+        for one in site.crosses_open:
+            if (one.owner, one.line, one.callee) not in holes:
+                failures.append(
+                    f"{site.owner}@{site.anchor.line_start} leaves {one.callee} at {one.owner}:{one.line}"
+                    " open, which the reach record holds no hole for"
                 )
     return GateResult(
         gate="statement-leads-resolve",
@@ -1691,17 +1765,23 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     ``outside_calls_back_only_handed``): no edge says when ``with`` or
     ``for`` runs one, so a closure through one is not taken, and that is
     only safe while none of them reaches a write.  One that does needs its
-    edges.  One whose closure has a hole is not known either way, and is
-    counted in the note, not failed.
+    edges, and one the record has edges into is asked like any function --
+    ``JobSpec.__setattr__``, entered from each store on a ``JobSpec``
+    (``reach.HOW_SETATTR``), sets ``stateChangeTime``.  One whose closure has
+    a hole is not known either way, and is counted in the note, not failed.
     """
     from bamboo.codemap import reach
 
     record = reach.ReachGraph(fragment.reach_graph)
     anywhere = reach.every_write(fragment.junctions, record)
+    entered = {call.to for row in fragment.reach_graph for call in row.calls}
     failures: list[str] = []
-    checked = undecided = 0
+    checked = undecided = asked = 0
     for row in fragment.reach_graph:
         if row.function not in reach.IMPLICIT_DUNDERS:
+            continue
+        if row.owner in entered:
+            asked += 1
             continue
         checked += 1
         answer = record.reach([row.owner], reach.Destination(anywhere.arms, []))
@@ -1717,7 +1797,10 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
         question="does any dunder Python runs unasked reach a write?",
         finding="a dunder no edge enters reaches a write, so closures through it miss the write",
         failures=failures,
-        note=f"{undecided} of them have a hole in their closure and are not known either way.",
+        note=(
+            f"{undecided} of them have a hole in their closure and are not known either way; "
+            f"{asked} more have edges into them and are asked as any function is."
+        ),
     )
 
 

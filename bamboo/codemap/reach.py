@@ -62,8 +62,9 @@ PREMISES: dict[str, str] = {
     "outside_calls_back_only_handed": (
         "Code outside the corpus calls code of the corpus only through a "
         "callable it was handed, ``start()`` running ``run``, or an implicit "
-        "dunder (``with``, ``for``, an operator) -- so a call on a builtin or "
-        "outside object goes on into nothing of the corpus."
+        "dunder (``with``, ``for``, an operator; an attribute store's "
+        "``__setattr__`` is an edge) -- so a call on a builtin or outside "
+        "object goes on into nothing of the corpus."
     ),
     "cross_run_not_reach": (
         "What a run hands on through the database, a command or a message is "
@@ -170,7 +171,14 @@ _OPERATORS: dict[type, tuple[str, ...]] = {
 #: ``in``, ``x[k]``, ``str(x)``, an operator, comparing, hashing, pickling
 #: and copying.  No edge says when they run, so the premise
 #: ``outside_calls_back_only_handed`` takes them to reach no write, and the
-#: build checks it (``implicit-dunders-reach-no-write``).
+#: build checks it (``implicit-dunders-reach-no-write``) -- but for
+#: ``__setattr__``, whose edges are recorded (:data:`HOW_SETATTR`):
+#: ``JobSpec.__setattr__`` sets ``stateChangeTime`` when ``jobStatus``
+#: changes.  Those edges are the reach record's alone -- :meth:`calls.Calls.callers`,
+#: and the walk and the trace with it, do not see the call, so a junction in a
+#: ``__setattr__`` has no ``called_from`` -- and a store on an object no
+#: reading says anything of has none (167 stores on pin k, 9 of them of
+#: ``jobStatus``).
 IMPLICIT_DUNDERS = frozenset(
     {
         "__enter__", "__exit__", "__aenter__", "__aexit__", "__iter__", "__next__", "__aiter__", "__anext__",
@@ -182,6 +190,9 @@ IMPLICIT_DUNDERS = frozenset(
     }
     | {name for names in _OPERATORS.values() for name in names}
 )  # fmt: skip
+
+#: How a reach edge says an attribute store runs its object's ``__setattr__`` (:meth:`calls.Calls.stored`).
+HOW_SETATTR = "setattr"
 
 _BUILTIN, _OUTSIDE, _QUEUE, _UNKNOWN = "builtin", "outside", "queue", "unknown"
 #: What a binding read inside its own reading adds: nothing.  ``diag =
@@ -2212,6 +2223,33 @@ def _calls_in(func: ast.AST) -> Iterator[tuple[ast.Call, str]]:
         pending.extend((child, how) for child in ast.iter_child_nodes(node))
 
 
+def _stores_in(func: ast.AST) -> Iterator[tuple[ast.Attribute | ast.Call, ast.expr, Optional[ast.expr]]]:
+    """``(store, name, value)`` for each attribute *func* stores itself -- ``x.a = v``, ``x.a += v``, ``x.a: T = v``,
+    an ``x.a`` an unpacking or a ``for`` binds (*value* ``None``), and ``setattr(x, name, v)``: where Python calls
+    ``type(x).__setattr__`` (:meth:`calls.Calls.stored`)."""
+    for node in C.own_nodes(func):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+            statement = getattr(node, "parent", None)
+            value = (
+                statement.value
+                if isinstance(statement, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node in _targets(statement)
+                else None
+            )
+            yield node, ast.Constant(value=node.attr), value
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "setattr"
+            and len(node.args) == 3
+            and not node.keywords
+        ):
+            yield node, node.args[1], node.args[2]
+
+
+def _targets(statement: ast.Assign | ast.AugAssign | ast.AnnAssign) -> list[ast.expr]:
+    return list(statement.targets) if isinstance(statement, ast.Assign) else [statement.target]
+
+
 def _handed_values(call: ast.Call) -> Iterator[ast.expr]:
     for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
         value = argument.value if isinstance(argument, ast.Starred) else argument
@@ -2385,6 +2423,26 @@ def graph(
                             row.edge(
                                 value, value, to, "handed", for_classes, runs_as, False
                             )
+        # An attribute store runs its object's ``__setattr__`` with no call
+        # naming it: ``job.jobStatus = "closed"`` runs ``JobSpec.__setattr__``,
+        # which sets ``stateChangeTime``.  Placed as the call Python makes, where
+        # the object can be a class of the corpus that has one; a class taking
+        # ``object``'s, or an object no reading says anything of, has no edge
+        # and no hole (:data:`IMPLICIT_DUNDERS`).
+        for store, name, value in _stores_in(func):
+            implicit = calls.stored(store, name, value)
+            for for_classes, bound in _groups(objects, classes, C._reads_self(implicit)):
+                try:
+                    placed = calls.callees(file, func, implicit, bound)
+                except Exception:  # noqa: BLE001 -- no edge, as for an object nothing says
+                    continue
+                for target in placed.targets:
+                    to = names.of(target.func)
+                    if to is not None and target.func.name == "__setattr__":  # type: ignore[attr-defined]
+                        runs_as = [
+                            spelled for one in target.bound if (spelled := names.of(one[1])) is not None
+                        ]
+                        row.edge(implicit, store, to, HOW_SETATTR, for_classes, runs_as, False)
         settled = Counter(assumption for _line, _column, assumption in row.settled)
         nodes.append(
             ReachNode(
@@ -2556,9 +2614,14 @@ class ReachGraph:
     def __init__(self, rows: list[ReachNode]):
         self.rows = {row.owner: row for row in rows}
         self._by_file: dict[str, list[ReachNode]] = {}
+        self._spelled: dict[str, list[tuple[str, int, str]]] = {}
         for row in rows:
             if row.anchor is not None:
                 self._by_file.setdefault(row.anchor.file, []).append(row)
+            for hole in row.holes:
+                _head, dot, name = hole.callee.rpartition(".")
+                if dot:
+                    self._spelled.setdefault(name, []).append((row.owner, hole.line, hole.callee))
 
     def function_at(self, file: str, line: int) -> Optional[str]:
         """The innermost function of *file* holding *line*."""
@@ -2571,6 +2634,28 @@ class ReachGraph:
                 if best is None or anchor.line_start > best.anchor.line_start:  # type: ignore[union-attr]
                     best = row
         return best.owner if best is not None else None
+
+    def hole_at(self, file: str, call: ast.Call) -> Optional[tuple[str, int, str]]:
+        """``(owner, line, callee)`` where the record holds *call* as a hole (:class:`ReachHole`), else ``None``."""
+        owner = self.function_at(file, call.lineno)
+        row = self.rows.get(owner) if owner is not None else None
+        if row is None:
+            return None
+        callee = _cut(call.func)
+        if any(hole.line == call.lineno and hole.callee == callee for hole in row.holes):
+            return owner, call.lineno, callee  # type: ignore[return-value]
+        return None
+
+    def holes_spelled(self, name: str) -> list[tuple[str, int, str]]:
+        """``(owner, line, callee)`` of each hole spelled ``x.<name>(...)``: a call no reading placed that, if it lands
+        in the corpus at all, lands at a definition named *name*."""
+        return self._spelled.get(name, [])
+
+    def is_database(self, file: str, call: ast.Call) -> bool:
+        """Whether the record reads the call on *call*'s line as PanDA's database (:attr:`ReachNode.database`)."""
+        owner = self.function_at(file, call.lineno)
+        row = self.rows.get(owner) if owner is not None else None
+        return row is not None and call.lineno in row.database
 
     def named(self, owner: str) -> list[str]:
         """Every function a junction owner's ``file::name`` can mean: each definition of that name in the file."""

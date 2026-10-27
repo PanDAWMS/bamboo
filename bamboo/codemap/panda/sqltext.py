@@ -549,6 +549,90 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
     return found
 
 
+def aggregated(sql: str) -> Optional[frozenset[bool]]:
+    """Whether each arm of *sql*'s outermost ``SELECT`` aggregates: ``{True}``, ``{False}``, both, or ``None``.
+
+    An arm aggregates where an expression it projects calls an aggregate --
+    ``COUNT``, ``MAX``, ``SUM`` ... -- not under ``OVER`` and not in a
+    subquery: what it returns is computed from the rows, one per group or one
+    in all, and is no row of a table.  ``SELECT ramCount, count(*) ... GROUP BY
+    ramCount`` aggregates; ``SELECT status ... GROUP BY status`` and ``MAX(x)
+    OVER (...)`` do not.  Each arm a row can come from is read (:func:`_arms`), so
+    one text can answer both.  ``None`` where *sql* does not parse or is not a ``SELECT``.
+
+    Nor does an arm each of whose rows stands for one row of a table it reads
+    (:func:`_one_row_each`), inside :func:`with_schema` with keys: its
+    aggregates are values beside that row.  ``throttleTasks_JEDI`` groups
+    ``JEDI_Tasks`` by ``jediTaskID`` with the files' ``AVG(failedAttempt)``,
+    and throttles each task by its ID.
+    """
+    tree = parsed(sql).tree
+    arms = _arms(tree) if tree is not None else []
+    if not arms:
+        return None
+    return frozenset(
+        any(_aggregates(column) for column in arm.expressions) and not _one_row_each(arm) for arm in arms
+    )
+
+
+def _one_row_each(arm: exp.Select) -> bool:
+    """Whether every column of the key of a table *arm* reads is grouped or fixed to one value by its ``WHERE``.
+
+    Fixed: an ``AND`` of the ``WHERE`` is ``column = :bind`` or ``column =
+    'literal'`` -- ``prepareTasksToBeFinished_JEDI`` counts a task's files per
+    ``tabD.datasetID`` with ``tabD.jediTaskID=:jediTaskID``, one row per
+    dataset of ``JEDI_Datasets``.  A column is the table's where it names the
+    table's alias or name, or no table: then the table is the one that has it,
+    a key column being one of its own.
+    """
+    group = arm.args.get("group")
+    if _KEYS is None or group is None:
+        return False
+    where = arm.args.get("where")
+    conjuncts = list(where.this.flatten()) if where is not None and isinstance(where.this, exp.And) else []
+    if where is not None and not conjuncts:
+        conjuncts = [where.this]
+    fixed = [
+        one.this
+        for one in conjuncts
+        if isinstance(one, exp.EQ)
+        and isinstance(one.this, exp.Column)
+        and isinstance(one.expression, (exp.Placeholder, exp.Literal))
+    ]
+    held = [one for one in group.expressions if isinstance(one, exp.Column)] + fixed
+    for source in _sources(arm):
+        key = _KEYS.get(source.name.lower()) if isinstance(source, exp.Table) else None
+        if not key:
+            continue
+        spelled = {source.name.lower(), source.alias_or_name.lower()}
+        if key <= {column.name.lower() for column in held if not column.table or column.table.lower() in spelled}:
+            return True
+    return False
+
+
+def _arms(tree: exp.Expression) -> list[exp.Select]:
+    """The ``SELECT`` s whose rows a set operation returns, each arm in parentheses or not; ``[]`` where one is
+    something else.  A row of ``A EXCEPT B`` (``MINUS``) or ``A INTERSECT B`` is a row of ``A``; of a ``UNION``, of
+    either arm."""
+    if isinstance(tree, exp.SetOperation):
+        left, right = _arms(tree.left), _arms(tree.right)
+        if not (left and right):
+            return []
+        return left + right if isinstance(tree, exp.Union) else left
+    if isinstance(tree, exp.Subquery):
+        return _arms(tree.this)
+    return [tree] if isinstance(tree, exp.Select) else []
+
+
+def _aggregates(node: exp.Expression) -> bool:
+    """Whether *node* calls an aggregate, not looking under ``OVER`` or into a subquery."""
+    if isinstance(node, (exp.Select, exp.Subquery, exp.Window)):
+        return False
+    if isinstance(node, exp.AggFunc):
+        return True
+    return any(_aggregates(child) for child in node.iter_expressions())
+
+
 def joins(sql: str) -> list[str]:
     """Return the tables *sql* reads beside the first of a ``FROM``.
 
@@ -1350,6 +1434,8 @@ UNKNOWN_QUALIFIER = "the qualifier names no table of the statement"
 ROW, CONSULT, NEGATED, PICKS = "row", "consult", "negated", "picks"
 
 _SCHEMA: Optional[dict[str, frozenset[str]]] = None
+#: ``{table: its primary key's columns}``, both lowered -- :func:`read_keys`.
+_KEYS: Optional[dict[str, frozenset[str]]] = None
 
 
 class Parsed(NamedTuple):
@@ -1405,15 +1491,20 @@ class Reading(NamedTuple):
 
 
 @contextlib.contextmanager
-def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
-    """Decide unqualified columns by *columns*, ``{table: columns}`` lowered, inside.
+def with_schema(
+    columns: Optional[dict[str, frozenset[str]]], keys: Optional[dict[str, frozenset[str]]] = None
+) -> Iterator[None]:
+    """Decide unqualified columns by *columns*, ``{table: columns}`` lowered, inside, and read *keys*.
 
     A statement joining two tables may name a column without saying whose it
     is -- valid only because one of them has it, and which one is not in the
-    text.  ``read_schema`` reads the answer from panda-database.
+    text.  ``read_schema`` reads the answer from panda-database, and
+    ``read_keys`` each table's key, which says whether a grouped statement
+    returns one row per row of a table (:func:`aggregated`).
     """
-    global _SCHEMA
+    global _SCHEMA, _KEYS
     before, _SCHEMA = _SCHEMA, columns
+    keys_before, _KEYS = _KEYS, keys
     terms.cache_clear()
     conditions.cache_clear()
     conjoined.cache_clear()
@@ -1428,6 +1519,7 @@ def with_schema(columns: Optional[dict[str, frozenset[str]]]) -> Iterator[None]:
         yield
     finally:
         _SCHEMA = before
+        _KEYS = keys_before
         terms.cache_clear()
         conditions.cache_clear()
         conjoined.cache_clear()
@@ -1463,6 +1555,42 @@ def read_schema(directory: Path) -> dict[str, frozenset[str]]:
                 if column is not None:
                     columns.add(column.group(1).lower())
     return {table: frozenset(columns) for table, columns in found.items()}
+
+
+_PRIMARY_KEY = re.compile(
+    r'ALTER\s+TABLE\s+"(\w+)"\."(\w+)"\s+ADD\s+(?:CONSTRAINT\s+"?\w+"?\s+)?PRIMARY\s+KEY\s*\(([^)]*)\)', re.IGNORECASE
+)
+_INLINE_PRIMARY_KEY = re.compile(r'^\s*(?:CONSTRAINT\s+"?\w+"?\s+)?PRIMARY\s+KEY\s*\(([^)]*)\)', re.IGNORECASE)
+_COLUMN_PRIMARY_KEY = re.compile(r"\bPRIMARY\s+KEY\b(?!\s*\()", re.IGNORECASE)
+
+
+def read_keys(directory: Path) -> dict[str, frozenset[str]]:
+    """``{table: its primary key's columns}``, both lowered, from the DDL :func:`read_schema` reads.
+
+    panda-database states a key three ways: ``ALTER TABLE "ATLAS_PANDA"."JEDI_TASKS" ADD CONSTRAINT
+    "JEDI_TASKS_PK" PRIMARY KEY ("JEDITASKID")`` after the table, a ``PRIMARY KEY (...)`` part of its body,
+    or a column's own ``PRIMARY KEY`` (``ERROR_DESCRIPTIONS``' ``"ID" NUMBER GENERATED ... PRIMARY KEY``);
+    the constraint named, quoted or not, or unnamed (``GLOBAL_SHARES``, ``SECRETS``, ``TASK_EVALUATION``).
+    A unique index that is no constraint is not read.
+    """
+    found: dict[str, frozenset[str]] = {}
+
+    def columns(listed: str) -> frozenset[str]:
+        return frozenset(one.strip().strip('"').lower() for one in listed.split(","))
+
+    for path in sorted(Path(directory).glob("*.sql")):
+        text = path.read_text()
+        for match in _CREATE_TABLE.finditer(text):
+            for part in _top_level_parts(text, match.end()):
+                inline = _INLINE_PRIMARY_KEY.match(part)
+                column = _COLUMN_DEFINITION.match(part)
+                if inline is not None:
+                    found[match.group(2).lower()] = columns(inline.group(1))
+                elif column is not None and _COLUMN_PRIMARY_KEY.search(part):
+                    found[match.group(2).lower()] = frozenset({column.group(1).lower()})
+        for match in _PRIMARY_KEY.finditer(text):
+            found[match.group(2).lower()] = columns(match.group(3))
+    return found
 
 
 def _top_level_parts(text: str, start: int) -> list[str]:

@@ -85,6 +85,13 @@ from bamboo.codemap.models import (
     ANSWER_NOT_ASKED,
     ANSWER_SEEN,
     ELIMINATED,
+    GAP_HANDED_IN,
+    GAP_KINDS,
+    GAP_OTHER_TREE,
+    GAP_OUTSIDE,
+    GAP_PARTIAL,
+    GAP_UNNODED,
+    GAP_UNREADABLE,
     LEAD_CALLEE,
     LEAD_MAP,
     LEAD_READER,
@@ -93,6 +100,7 @@ from bamboo.codemap.models import (
     READS_ONLY_FOR_A_CALLER,
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
+    RESULT_AGGREGATE,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
     SKELETON_PRINT,
@@ -118,6 +126,7 @@ from bamboo.codemap.models import (
     MapTerm,
     Match,
     Observation,
+    ReaderGap,
     Reading,
     ReadSiteNode,
     StageCut,
@@ -522,6 +531,8 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         rows_handled=list(site.rows_handled),
         exits=[_statement_exit(text) for text in site.exits],
         crosses_to=list(site.crosses_to),
+        crosses_open=list(site.crosses_open),
+        result=site.result,
     )
 
 
@@ -1587,7 +1598,7 @@ def _read_names(
     if len(declaring) <= 1:
         return (declaring[0] if declaring else ""), declaring
     # Only attributes some subject declares can discriminate; the rest are
-    # fields the promotion did not keep and say nothing about the class.
+    # fields no subject declares and say nothing about the class.
     asked = {name for name in reads.get(receiver, set()) if name in by_attr}
     fits = [name for name in declaring if asked <= by_class.get(name.rpartition(".")[0], set())]
     return (fits[0] if len(fits) == 1 else ""), declaring
@@ -1823,11 +1834,19 @@ def _reader_leads(
     Stops rather than continues.  The map names where the row went; what it
     became there is an observation, and a lead carrying a made-up value would
     be a question the evidence cannot fail.
+
+    Not from a statement that aggregates (:attr:`ReadSiteNode.result`): it
+    keeps no row, and what it hands on is a value computed from the rows --
+    ``getSiteToRunRateStats``'s count of a site's jobs goes to
+    ``JobGenerator``, which picks none of them up.  One that varies, or whose
+    result is not read, may return rows, and is read as one that does.
     """
     leads: list[Lead] = []
     seen: set[tuple[str, str]] = set()
     for owner, sites in sorted(read_sites.items()):
         for site in sites:
+            if site.result == RESULT_AGGREGATE:
+                continue
             if not any(pair.endswith(f"={symptom.observed}") for pair in site.selects):
                 continue
             for reached in site.crosses_to:
@@ -2471,13 +2490,16 @@ def attach_mover_gaps(strategy: Strategy, roots: dict) -> None:
     answer reads the stored map, where they are not kept.  So they are read
     again here, from the same source the traces walk and by the build's own
     reading (``sqlwrite.statement_stops``), and judged by the gate's own
-    judgement (``gates.mover_reason``) -- one reading and one judgement, two
-    places they are asked from.
+    judgement (``gates.mover_gaps``, the reading ``gates.mover_reason`` gives
+    its first reason from) -- one reading and one judgement, two places they
+    are asked from.
 
-    Only the gaps are said.  Whether a function's queries ask by other terms
-    is the gate's business; what a reader of the answer needs is where the
-    list of movers may be short.  A tree that is not the map's is refused, on
-    the same terms as :func:`trace.walk`.
+    Only the gaps are said, a :class:`ReaderGap` per statement: the gate counts
+    a function's first, and a reader of the answer needs each, with whether it
+    can hide where the rows go.  Whether a function's queries ask by other
+    terms is the gate's business; what a reader of the answer needs is where
+    the list of movers may be short.  A tree that is not the map's is refused,
+    on the same terms as :func:`trace.walk`.
     """
     follow = strategy.follow_up
     if follow is None:
@@ -2494,8 +2516,8 @@ def attach_mover_gaps(strategy: Strategy, roots: dict) -> None:
     follow.reader_gaps = {owner: judged[owner] for owner in follow.selected_by if judged[owner]}
 
 
-def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[str]:
-    """``["@2391 sql_where_clause, sorting_sql -- <why>"]`` for one function, or none."""
+def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[ReaderGap]:
+    """Every statement of one function the map could not read on these rows, or the function itself not read."""
     from bamboo.codemap import gates
     from bamboo.codemap.calls import Calls, Types, parsed
     from bamboo.codemap.gitsource import blob_sha
@@ -2507,30 +2529,67 @@ def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[str]:
     package, _sep, relative = file.partition("/")
     root = roots.get(package)
     if root is None or not relative:
-        return ["not read: the file is outside the tree the answer was given"]
+        return [ReaderGap(kind=GAP_OUTSIDE, file=file)]
     held = parsed(root / relative)
     if held is None:
-        return ["not read: the file could not be read from this tree"]
+        return [ReaderGap(kind=GAP_UNREADABLE, file=file)]
     source, tree = held
     if sha and blob_sha(source) != sha:
-        return ["not read: this tree is not the one that was mapped"]
+        return [ReaderGap(kind=GAP_OTHER_TREE, file=file)]
     name = owner.rpartition("::")[2]
     # Read through the calls the build read through, or a statement the build
     # followed into a callee reads here as one that stopped.
     calls = Calls(Types(roots, {file: (sha, tree)}))
+    stops = []
+    verbs: dict[int, set[tuple[str, str]]] = {}
     with sql.across_calls(calls):
-        stops = [
-            stop
-            for func, _cls in functions_with_owner(tree)
-            if func.name == name
-            for stop in sqlwrite.statement_stops(func, file)
-        ]
-    reason, where = gates.mover_reason(
-        follow.spec_class, follow.mover_sites.get(owner, []), stops, follow.table_kinds
-    )
-    if reason not in gates.MOVER_DEFECTS:
-        return []
-    return [f"{where} -- {reason}"]
+        for func, _cls in functions_with_owner(tree):
+            if func.name != name:
+                continue
+            stops += sqlwrite.statement_stops(func, file)
+            for run in sql.executions(func):
+                verbs.setdefault(run.call.lineno, set()).update(sqlwrite._table_verbs(run.reading))
+    gaps = gates.mover_gaps(follow.spec_class, follow.mover_sites.get(owner, []), stops, follow.table_kinds, file)
+    for gap in gaps:
+        gap.verbs = sorted(verbs.get(gap.line, ()))
+    return gaps
+
+
+#: What :func:`gap_texts` says each kind with.
+_GAP_SAID = {
+    GAP_OUTSIDE: "not read: the file is outside the tree the answer was given",
+    GAP_UNREADABLE: "not read: the file could not be read from this tree",
+    GAP_OTHER_TREE: "not read: this tree is not the one that was mapped",
+}
+
+
+def gap_texts(gaps: list[ReaderGap]) -> list[str]:
+    """What a reader prints of one function's gaps: a text per kind, in :data:`GAP_KINDS`' order.
+
+    The statements of a kind go in one text, by line, each with what stopped
+    it -- ``@2391 sql_where_clause, sorting_sql -- <why>``, ``@472, @480 --
+    <why>`` for those read in part -- and a function not read is one text.
+    The record is what is kept; the words are made here, so rewording them
+    needs no new answer.
+    """
+    from bamboo.codemap import gates
+
+    why = {GAP_UNNODED: gates.MOVER_UNNODED, GAP_HANDED_IN: gates.MOVER_HANDED_IN, GAP_PARTIAL: gates.MOVER_PARTIAL}
+    texts = []
+    for kind in GAP_KINDS:
+        held = sorted((gap for gap in gaps if gap.kind == kind), key=lambda gap: gap.line or 0)
+        if not held:
+            continue
+        if kind in _GAP_SAID:
+            texts.append(_GAP_SAID[kind])
+        elif kind == GAP_PARTIAL:
+            texts.append(", ".join(f"@{gap.line}" for gap in held) + f" -- {why[kind]}")
+        else:
+            where = "; ".join(
+                f"@{gap.line} {', '.join(dict.fromkeys(detail for _reason, detail in gap.stops))}" for gap in held
+            )
+            texts.append(f"{where} -- {why[kind]}")
+    return texts
 
 
 #: ``:modificationTime@375`` or ``:taskStatus1@1820,1822`` -- the lines a

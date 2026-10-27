@@ -389,7 +389,7 @@ class CodeMap:
         """``{owner: [the subjects its junctions decide]}``.
 
         What a crossing resolves to.  ``ReadSiteNode.crosses_to`` stores an
-        owner, because that is what a name in the source resolves to; what a
+        owner, because that is what a placed call lands at; what a
         reader wants back is the *question* that owner settles, and one owner
         can settle more than one -- ``archiveJob`` writes both a job's status
         and its files'.

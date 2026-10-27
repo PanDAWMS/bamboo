@@ -167,7 +167,7 @@ def test_a_map_is_renewed_by_the_bindings_that_replace_it(form):
 
 @pytest.mark.parametrize("form", sorted(FORMS))
 def test_the_build_takes_a_target_apart_the_same_way(form):
-    """``_Index.definitions``, ``sqlwrite._assigned_names`` and ``sqlwrite._bound_by`` on ``=``."""
+    """``_Index.definitions`` and ``sqlwrite._assigned_names`` on ``=``."""
     func = _func(form)
     statement = func.body[0]
     kinds = {pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED}
@@ -178,5 +178,3 @@ def test_the_build_takes_a_target_apart_the_same_way(form):
     )  # ``single_definition`` counts a nested function's writes, as it always has
     if isinstance(statement, ast.Assign):
         assert ("x" in sqlwrite._assigned_names(statement)) == by_syntax
-    bound = "x" in sqlwrite._bound_by(statement)
-    assert bound == (by_syntax or form in ("augmented", "subscript store", "nested subscript store"))

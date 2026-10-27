@@ -25,6 +25,9 @@ from bamboo.codemap import diff, evidence, gates
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     REPORTS_ROWS_CHANGED,
+    RESULT_AGGREGATE,
+    RESULT_ROWS,
+    RESULT_VARIES,
     Anchor,
     AnnotationAudit,
     BoundaryNode,
@@ -2205,6 +2208,28 @@ def test_a_row_precondition_is_what_every_statement_writing_the_value_requires(g
 
     assert branch.outcome == "Y"
     assert branch.row_precondition == []
+
+
+def test_a_guard_testing_two_written_columns_is_one_term():
+    """``request_lock`` takes the lock where nobody holds it or the holder's time is up -- ``(locked_by IS NULL OR
+    locked_by=:locked_by OR lock_time < :min_lock_time)`` -- and the statement files that one test under each
+    column it names.  Read column by column, a branch held it twice."""
+    source = (
+        "class M:\n"
+        "    def f(self, rse, me, now, limit):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.ddm_endpoint SET locked_by=:locked_by, lock_time=:lock_time '\n"
+        "        sql += 'WHERE rse=:rse AND (locked_by IS NULL OR locked_by=:locked_by OR lock_time < :min_lock_time) '\n"
+        "        varMap = {}\n"
+        "        varMap[':rse'] = rse\n"
+        "        varMap[':locked_by'] = me\n"
+        "        varMap[':lock_time'] = now\n"
+        "        varMap[':min_lock_time'] = limit\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    held = [branch.row_precondition for junction in junctions for branch in junction.branches]
+
+    assert held and all(len(terms) == len(set(terms)) == 1 for terms in held)
 
 
 def test_a_column_one_pass_of_a_loop_writes_is_said_where_its_bind_is_filled():
@@ -4402,21 +4427,29 @@ def test_runtime_writes_do_not_outvote_the_literals():
     assert criteria["JediTaskSpec.errorDialog"] == ["3:closed-literal-set"]
 
 
-def test_unpromoted_subjects_and_their_junctions_are_dropped():
-    """An attribute nobody investigates is noise at both levels."""
+def test_a_subject_no_criterion_marks_is_kept_with_none():
+    """The criteria say which subjects decide something; a reader asking about any written field still finds it.
+
+    Kept as a filter, they hid two map defects -- crossings resolved by a bare name, no edge into
+    ``JobSpec.__setattr__`` -- and dropped what they could not see decide (``JediTaskSpec.ramCount`` under
+    criterion 3).  The count of the unmarked is what the build reports.
+    """
     fragment = _fragment_with(
         ("JediTaskSpec", "status", [("ready", 1), ("done", 1)]),
         ("JobSpec", "modificationTime", [("now", 2)]),
     )
-    dropped = promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
+    unmarked = promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
 
-    assert dropped == (1, 1)
-    assert [s.name for s in fragment.subjects] == ["JediTaskSpec.status"]
-    assert [j.subject for j in fragment.junctions] == ["JediTaskSpec.status"]
+    assert unmarked == (1, 1)
+    assert [(s.name, s.criteria) for s in fragment.subjects] == [
+        ("JediTaskSpec.status", ["3:closed-literal-set"]),
+        ("JobSpec.modificationTime", []),
+    ]
+    assert [j.subject for j in fragment.junctions] == ["JediTaskSpec.status", "JobSpec.modificationTime"]
 
 
 def test_an_unresolved_junction_survives_promotion():
-    """It has no subject to judge, so dropping it would hide a reported gap."""
+    """It has no subject to judge: kept as every junction is, and not counted among the unmarked."""
     fragment = _fragment_with(("JobSpec", "modificationTime", [("now", 2)]))
     fragment.junctions.append(
         JunctionNode(
@@ -4429,9 +4462,10 @@ def test_an_unresolved_junction_survives_promotion():
             branches=[Branch(outcome="failed")],
         )
     )
-    promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
+    unmarked = promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
 
-    assert [j.subject for j in fragment.junctions] == ["?.status"]
+    assert [j.subject for j in fragment.junctions] == ["JobSpec.modificationTime", "?.status"]
+    assert unmarked == (1, 1)
 
 
 def test_a_column_copied_from_another_becomes_a_passthrough_branch():
@@ -4912,12 +4946,12 @@ def test_a_bound_template_is_filed_against_the_column_not_the_bind():
     ]
 
 
-def test_the_index_survives_promotion_dropping_the_field():
+def test_the_index_is_kept_beside_a_field_no_criterion_marks():
     """The whole point.  ``ddmErrorDiag`` satisfies no promotion criterion --
-    correctly, since it has no value set to enumerate -- so its subject and its
-    junctions are dropped.  The writes that assemble its text are still the
-    answer to "who wrote this line", and an index makes no claim about the field
-    that promotion could contradict.
+    correctly, since it has no value set to enumerate -- so its subject carries
+    none.  The writes that assemble its text are still the answer to "who
+    wrote this line", and an index makes no claim about the field that the
+    criteria could contradict.
     """
     source = (
         "class JobSpec(object):\n"
@@ -4938,8 +4972,7 @@ def test_the_index_survives_promotion_dropping_the_field():
 
     promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
 
-    assert "JobSpec.ddmErrorDiag" not in {s.name for s in fragment.subjects}
-    assert "JobSpec.ddmErrorDiag" not in {j.subject for j in fragment.junctions}
+    assert {s.name: s.criteria for s in fragment.subjects}["JobSpec.ddmErrorDiag"] == []
     assert [d.template for d in fragment.diagnostics] == ["failed to get {} files"]
 
 
@@ -5180,12 +5213,12 @@ def test_a_field_is_bound_to_the_enumeration_that_decodes_it():
     ]
 
 
-def test_the_binding_survives_promotion_dropping_the_field():
+def test_the_binding_is_kept_beside_a_field_no_criterion_marks():
     """No criterion fires on an error-code field -- every write is tier 2, the
-    right-hand side being a constant -- so promotion drops it, and rightly.
+    right-hand side being a constant -- so its subject carries none, and rightly.
 
     "Why is this field 100?" is not the question; "what does 100 mean here?"
-    is, and an index makes no claim promotion could contradict.
+    is, and an index makes no claim the criteria could contradict.
     """
     modules = [
         _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
@@ -5201,7 +5234,7 @@ def test_the_binding_survives_promotion_dropping_the_field():
 
     promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
 
-    assert "JobSpec.taskBufferErrorCode" not in {s.name for s in fragment.subjects}
+    assert {s.name: s.criteria for s in fragment.subjects}["JobSpec.taskBufferErrorCode"] == []
     assert [b.constant for b in fragment.enumeration_writes] == ["EC_Kill"]
 
 
@@ -9389,14 +9422,26 @@ def test_the_rows_are_followed_to_the_fetch_that_binds_them():
     assert node.exits == ["break@14", "no-rows:return@11"]
 
 
-def test_a_statement_says_which_junction_its_rows_are_carried_to():
-    """The request's sixth point: a statement is somewhere to lead *from*.
-
-    Two shapes, and the thread one is not decoration -- ``copyArchive.py``'s
-    ``holding`` query hands each job to ``Watcher(...).start()``, so what
-    happens to a held job next is ``Watcher.run``.  ``start`` is not itself a
-    junction owner, so the class the name was built from is what resolves it.
-    """
+@pytest.mark.parametrize(
+    ("rows", "exits", "handled"),
+    [
+        (
+            "        has_task = self.cur.fetchone() is not None\n        if not has_task:\n            return None\n",
+            ["no-rows:return@10"],
+            [],
+        ),
+        ("        n_rows = self.cur.rowcount\n        if n_rows == 0:\n            return None\n", ["no-rows:return@10"], []),
+        (
+            "        for (taskID,) in self.cur:\n            if taskID in skipList:\n                continue\n",
+            ["continue@10"],
+            [8, 10],
+        ),
+    ],
+    ids=["fetch-in-a-value", "rowcount", "loop-over-the-cursor"],
+)
+def test_rows_land_where_a_fetch_computes_from_them_and_in_a_loop_over_the_cursor(rows, exits, handled):
+    """``has_merging = self.cur.fetchone() is not None`` and ``nRow = self.cur.rowcount`` hold the rows, and a loop
+    over the cursor that ran the statement is a loop over them -- read as the whole value only, none was."""
     source = (
         "class TaskModule:\n"
         "    def sweep(self):\n"
@@ -9405,20 +9450,62 @@ def test_a_statement_says_which_junction_its_rows_are_carried_to():
         "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
         "        sqlA += 'WHERE status=:status '\n"
         "        self.cur.execute(sqlA + comment, varMap)\n"
-        "        res = self.cur.fetchall()\n"
-        "        for (taskID,) in res:\n"
-        "            thr = Watcher(taskID)\n"
-        "            thr.start()\n"
-        "            self.retryTask(taskID)\n"
+        f"{rows}"
     ) + _EXIT_TAIL
-    watcher = "class Watcher:\n    def run(self):\n        pass\n"
-    retrier = "class Retry:\n    def retryTask(self, t):\n        pass\n"
-    modules = [
-        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
-        _module(source, "x.py"),
-        _module(watcher, "w.py"),
-        _module(retrier, "r.py"),
-    ]
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert (node.exits, node.rows_handled) == (exits, handled)
+
+
+def test_a_statement_says_whether_it_returns_rows_or_values_computed_from_them():
+    """Read off every way it is built: an ``if`` choosing a ``COUNT(*)`` or the IDs is the one and the other."""
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT COUNT(*) FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        sqlB = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlB += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlB + comment, varMap)\n"
+        "        if self.flag:\n"
+        "            sqlC = f'SELECT MAX(jediTaskID) FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
+        "        else:\n"
+        "            sqlC = f'SELECT jediTaskID, vo FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
+        "        self.cur.execute(sqlC + comment, varMap)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    assert {n.anchor.line_start: n.result for n in nodes} == {
+        7: RESULT_AGGREGATE,
+        10: RESULT_ROWS,
+        15: RESULT_VARIES,
+    }
+
+
+def _crossed(tmp_path, source, junctions, *, others=()):
+    """Write *source* as ``pandaserver/x.py`` and *others* beside it, build the read sites, and resolve them.
+
+    Through the corpus's calls and its reach record, as the build does: a crossing is placed, never named, so the
+    fixtures are a corpus on disk whose receivers say what they are.
+    """
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import plugin
+
+    files = {
+        "pandaserver/taskbuffer/Specs.py": _SPECS,
+        "pandaserver/x.py": source,
+        **{f"pandaserver/{name}": text for text, name in others},
+    }
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
     attributor = attribution.SpecAttributor(
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
@@ -9426,22 +9513,298 @@ def test_a_statement_says_which_junction_its_rows_are_carried_to():
     nodes = sqlwrite.read_site_nodes(
         sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
     )
-    junctions = [_junction("w.py::run"), _junction("r.py::retryTask")]
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    with sql.across_calls(calls):
+        record = reach.ReachGraph(reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves()))
+        census = sqlwrite.attach_crossings(
+            nodes, modules, [_junction(f"pandaserver/{owner}") for owner in junctions], calls, record
+        )
+    return nodes, census
 
-    census = sqlwrite.attach_crossings(nodes, modules, junctions)
+
+def _typed(source: str, *fields: tuple[str, str, str]) -> str:
+    """*source*'s last class given ``self.<field>`` of each class ``(field, class, module)``, and the imports, at its end.
+
+    At the end, so the lines a test names stay where they are.
+    """
+    held = "".join(f", {field}: {cls}" for field, cls, _module_name in fields)
+    sets = "".join(f"        self.{field} = {field}\n" for field, _cls, _module_name in fields)
+    imports = "".join(f"from pandaserver.{module_name} import {cls}\n" for _field, cls, module_name in fields)
+    return f"{source}    def __init__(self{held}):\n{sets}\n\n{imports}"
+
+
+def test_a_statement_says_which_junction_its_rows_are_carried_to(tmp_path):
+    """The request's sixth point: a statement is somewhere to lead *from*.
+
+    Two calls of the region, and the thread one is not decoration --
+    ``copyArchive.py``'s ``holding`` query hands each job to
+    ``Watcher(...).start()``, so what happens to a held job next is
+    ``Watcher.run``: ``start`` runs it on another thread.
+    """
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        for (taskID,) in res:\n"
+            "            thr = Watcher(taskID)\n"
+            "            thr.start()\n"
+            "            self.retrier.retryTask(taskID)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    ) + "from pandaserver.w import Watcher\n"
+    watcher = (
+        "import threading\n\n\n"
+        "class Watcher(threading.Thread):\n"
+        "    def __init__(self, task_id):\n"
+        "        threading.Thread.__init__(self)\n"
+        "        self.task_id = task_id\n\n"
+        "    def run(self):\n"
+        "        if self.task_id:\n"
+        "            pass\n"
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    nodes, census = _crossed(
+        tmp_path, source, ["w.py::run", "r.py::retryTask"], others=[(watcher, "w.py"), (retrier, "r.py")]
+    )
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == ["r.py::retryTask", "w.py::run"]
+    assert node.crosses_to == ["pandaserver/r.py::retryTask", "pandaserver/w.py::run"]
     assert census.stored == 2
 
 
-def test_a_statement_does_not_cross_to_a_name_no_junction_owns():
-    """The resolution is by name against the junctions the map holds.
+_NEXT_STATEMENT = (
+    "        varMap2 = {}\n"
+    "        varMap2[':status'] = 'ready'\n"
+    "        sqlB = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+    "        sqlB += 'WHERE status=:status '\n"
+    "        self.cur.execute(sqlB + comment, varMap2)\n"
+)
 
-    A call to something the map has no answer for is not a lead, and neither
-    is the statement's own owner -- rows do not go next to where they are.
+
+def test_a_call_crosses_where_the_rows_reach_it_not_where_it_stands(tmp_path):
+    """The call running the statement, and each call handed its rows, past its region too.
+
+    A call of the region the rows do not reach is no crossing -- ``copyArchive.py::main@696``'s
+    ``taskBuffer.lockJobsForReassign`` -- nor, for the next statement, a call handed only the first one's rows.
     """
-    source = (
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        self.counter.tick()\n"
+            f"{_NEXT_STATEMENT}"
+            "        self.retrier.retryTask(res)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+        ("counter", "Counter", "k"),
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    counter = "class Counter:\n    def tick(self):\n        pass\n"
+    nodes, _census = _crossed(
+        tmp_path, source, ["r.py::retryTask", "k.py::tick"], others=[(retrier, "r.py"), (counter, "k.py")]
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/r.py::retryTask"]
+    assert [n.crosses_to for n in nodes if n is not node] == [[]] * (len(nodes) - 1)
+
+
+@pytest.mark.parametrize(
+    ("fill", "crosses"),
+    [
+        ("        spec.rows = res\n", True),
+        ("        setattr(spec, 'rows', res)\n", True),
+        ("        spec.pack(res)\n", True),
+        ("        spec.note(res)\n", True),
+        ("        spec.info(res)\n", False),
+        ("        spec.label = res\n", False),
+    ],
+    ids=["attribute", "setattr", "a-method-keeping-it", "a-method-handing-it-to-another", "a-log-line", "another-field"],
+)
+def test_rows_put_into_an_object_are_held_by_it(tmp_path, fill, crosses):
+    """``dataset_spec.pack(tmp_res)`` keeps the rows in ``dataset_spec``: ``pack`` sets each value on ``self``.
+
+    In the field it puts them into: ``retryTask`` reads ``t.rows``, so rows put into ``spec.label`` are not what it
+    reads.  At any depth, through another method of the receiver too (``note`` hands them to ``self.keep``), but not
+    by a log line: ``MsgWrapper.info`` hands its message to ``self.keepMsg``, a log's buffer.
+    """
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        spec = Holder()\n"
+            f"{fill}"
+            f"{_NEXT_STATEMENT}"
+            "        self.retrier.retryTask(spec)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    ) + "from pandaserver.h import Holder\n"
+    holder = (
+        "class Holder:\n"
+        "    def pack(self, values):\n"
+        "        object.__setattr__(self, 'rows', values)\n\n"
+        "    def note(self, message):\n"
+        "        self.keep(message)\n\n"
+        "    def info(self, message):\n"
+        "        self.keep(message)\n\n"
+        "    def keep(self, message):\n"
+        "        self.rows = message\n"
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t.rows:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(holder, "h.py"), (retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+def test_a_function_gone_through_is_read_for_each_way_in(tmp_path):
+    """Entered once a statement for what it is handed, not once: ``handle`` given the rows as ``first`` and then as
+    ``second`` reaches both.  Keyed by the definition alone, the second way in was not taken, and which came first
+    decided the answer."""
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            f"{_NEXT_STATEMENT}"
+            "        self.helper.handle(res, None)\n"
+            "        self.helper.handle(None, res)\n"
+        )
+        + _EXIT_TAIL,
+        ("helper", "Helper", "h"),
+    )
+    helper = _typed(
+        "class Helper:\n"
+        "    def handle(self, first, second):\n"
+        "        self.retrier.retryTask(first)\n"
+        "        self.finisher.finish(second)\n\n",
+        ("retrier", "Retry", "r"),
+        ("finisher", "Finisher", "f"),
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    finisher = "class Finisher:\n    def finish(self, t):\n        if t:\n            pass\n"
+    nodes, _census = _crossed(
+        tmp_path,
+        source,
+        ["r.py::retryTask", "f.py::finish"],
+        others=[(helper, "h.py"), (retrier, "r.py"), (finisher, "f.py")],
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/f.py::finish", "pandaserver/r.py::retryTask"]
+
+
+def test_a_statement_does_not_cross_to_a_name_no_call_lands_at(tmp_path):
+    """A call lands where the corpus's calls place it, not wherever a function of its name owns a junction.
+
+    ``self.helper.retryTask`` is ``Helper``'s, and the junction is ``Retry``'s.  Read by name,
+    ``datasetManager.py::run``'s ``thr.run()`` crossed to five ``run``s and ``RecoverLostFilesCore.main``'s
+    ``main(...)`` to two other files' ``main``.  Nor is the statement's own owner a lead -- rows do not go next to
+    where they are -- or a call to something the map has no answer for.
+    """
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        for (taskID,) in res:\n"
+            "            tmpLog.debug(taskID)\n"
+            "            self.sweep()\n"
+            "            self.helper.retryTask(taskID)\n"
+        )
+        + _EXIT_TAIL,
+        ("helper", "Helper", "h"),
+    )
+    helper = "class Helper:\n    def retryTask(self, t):\n        pass\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    nodes, _census = _crossed(
+        tmp_path, source, ["x.py::sweep", "r.py::retryTask"], others=[(helper, "h.py"), (retrier, "r.py")]
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+
+
+def test_a_call_of_the_region_is_followed_through_a_function_owning_no_junction(tmp_path):
+    """``doForTaskBoost``'s ``self.taskBufferIF.updateTask_JEDI(task_spec, ...)`` lands in ``JediTaskBuffer``, which
+    owns none and hands ``taskSpec`` to ``proxy.updateTask_JEDI``, which does.
+
+    What the function owning none does with what it was handed is read, and only that: ``finishTask(self.other)``
+    is handed nothing the call gave it.
+    """
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        for (taskID,) in res:\n"
+            "            self.helper.retire(taskID)\n"
+        )
+        + _EXIT_TAIL,
+        ("helper", "Helper", "h"),
+    )
+    helper = _typed(
+        "class Helper:\n"
+        "    def retire(self, task_id):\n"
+        "        self.retrier.retryTask(task_id)\n"
+        "        self.retrier.finishTask(self.other)\n",
+        ("retrier", "Retry", "r"),
+    )
+    retrier = (
+        "class Retry:\n"
+        "    def retryTask(self, t):\n        if t:\n            pass\n\n"
+        "    def finishTask(self, t):\n        if t:\n            pass\n"
+    )
+    nodes, _census = _crossed(
+        tmp_path,
+        source,
+        ["r.py::retryTask", "r.py::finishTask"],
+        others=[(helper, "h.py"), (retrier, "r.py")],
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/r.py::retryTask"]
+
+
+def _sweep(body: str) -> str:
+    """``TaskModule.sweep``: the statement on line 7, its rows fetched into ``res`` on line 8, then *body*."""
+    return (
         "class TaskModule:\n"
         "    def sweep(self):\n"
         "        varMap = {}\n"
@@ -9450,17 +9813,144 @@ def test_a_statement_does_not_cross_to_a_name_no_junction_owns():
         "        sqlA += 'WHERE status=:status '\n"
         "        self.cur.execute(sqlA + comment, varMap)\n"
         "        res = self.cur.fetchall()\n"
-        "        for (taskID,) in res:\n"
-        "            tmpLog.debug(taskID)\n"
-        "            self.sweep()\n"
-    ) + _EXIT_TAIL
-    modules, nodes = _read_nodes(source)
-    junctions = [_junction("x.py::sweep")]
+    ) + body
 
-    sqlwrite.attach_crossings(nodes, modules, junctions)
+
+_EACH_TASK_RETRIED = "        for (taskID,) in res:\n            self.retrier.retryTask(taskID)\n"
+_READS_EACH = "class Retry:\n    def retryTask(self, t):\n        for one in t:\n            if one:\n                pass\n"
+
+
+def test_an_owner_that_does_not_read_what_it_is_handed_is_gone_through(tmp_path):
+    """A junction's owner is a crossing where it reads the part of the rows it is handed; one that only logs it and
+    hands it on is gone through, as a function owning none is.  ``Retry.retryTask`` logs ``t`` and hands it to
+    ``Finisher.finish``, which tests it."""
+    source = _typed(_sweep(_EACH_TASK_RETRIED) + _EXIT_TAIL, ("retrier", "Retry", "r"))
+    retrier = _typed(
+        "class Retry:\n"
+        "    def retryTask(self, t):\n"
+        "        tmpLog.debug(t)\n"
+        "        self.finisher.finish(t)\n\n",
+        ("finisher", "Finisher", "f"),
+    )
+    finisher = "class Finisher:\n    def finish(self, t):\n        if t:\n            pass\n"
+    nodes, _census = _crossed(
+        tmp_path, source, ["r.py::retryTask", "f.py::finish"], others=[(retrier, "r.py"), (finisher, "f.py")]
+    )
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == []
+    assert node.crosses_to == ["pandaserver/f.py::finish"]
+
+
+@pytest.mark.parametrize(("maker", "crosses"), [("MsgWrapper", False), ("Note", True)], ids=["a-logger", "a-class"])
+def test_a_logger_made_from_the_rows_does_not_read_them(tmp_path, maker, crosses):
+    """``tmpLog = MsgWrapper(logger, token)``: the token is a log line's tag, though ``MsgWrapper.__init__`` tests it
+    (as ``create_tagged_logger`` tests ``if tag is None``).  Read as a use, 7 crossings of pin k came by a tag alone.
+    The same ``__init__`` under another name reads it."""
+    source = _typed(_sweep(_EACH_TASK_RETRIED) + _EXIT_TAIL, ("retrier", "Retry", "r"))
+    retrier = (
+        f"from pandaserver.m import {maker}\n\n\n"
+        "class Retry:\n"
+        "    def retryTask(self, t):\n"
+        f"        tmpLog = {maker}(None, t)\n"
+        "        tmpLog.info('retried')\n"
+    )
+    wrapper = (
+        f"class {maker}:\n"
+        "    def __init__(self, logger, token=None):\n"
+        "        if token is None:\n"
+        "            token = ''\n"
+        "        self.token = token\n"
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py"), (wrapper, "m.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+@pytest.mark.parametrize(
+    ("lookup", "crosses"),
+    [("limits.get(taskID)", False), ("limits.get(taskID, taskID)", True)],
+    ids=["the-key", "a-default"],
+)
+def test_a_key_the_rows_hold_chooses_a_value_that_is_not_theirs(tmp_path, lookup, crosses):
+    """``d.get(k)`` on a dict holding none of the rows, ``k`` one of them: the value is one ``d`` held already, the
+    rows only choose it -- as ``d[k]`` reads.  A default handed beside the key may be the value."""
+    source = _typed(
+        _sweep(f"        limits = {{}}\n        for (taskID,) in res:\n            self.retrier.retryTask({lookup})\n")
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+def test_rows_appended_to_a_dicts_default_are_held_by_the_dict(tmp_path):
+    """``d.setdefault(k, []).append(v)``: the list ``setdefault`` hands back is one of ``d``'s values, so ``v`` is in
+    ``d`` (``getDatasetsWithJediTaskID_JEDI@4049`` -> ``insertFilesForDataset_JEDI``)."""
+    source = _typed(
+        _sweep(
+            "        byStatus = {}\n"
+            "        for (taskID,) in res:\n"
+            "            byStatus.setdefault('pending', []).append(taskID)\n"
+            "        self.retrier.retryTask(byStatus['pending'])\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(_READS_EACH, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/r.py::retryTask"]
+
+
+@pytest.mark.parametrize(
+    ("read", "crosses"), [("t.a.b.c.d.e.f", True), ("t.a.b.c.d.e.g", True), ("t.a.x", False)], ids=["it", "cut", "other"]
+)
+def test_a_path_past_five_steps_is_anything_below_the_cut(tmp_path, read, crosses):
+    """A holding tells apart five steps of an access path: below them, any part may hold the rows, so a read of
+    ``.g`` past the cut is a read of what was put at ``.f``; one parting from the path above the cut is not."""
+    source = _typed(
+        _sweep(
+            "        spec = Holder()\n"
+            "        for (taskID,) in res:\n"
+            "            spec.a.b.c.d.e.f = taskID\n"
+            "        self.retrier.retryTask(spec)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    retrier = f"class Retry:\n    def retryTask(self, t):\n        if {read}:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+def test_a_fetch_after_the_next_execute_takes_that_statements_rows(tmp_path):
+    """In the loop over the rows the next ``execute`` runs another statement, and what is fetched after it is that
+    one's, though the first one's rows are still being handled: the seeds end with the region, as the exits do
+    (``ppEventServiceJob`` 5654 / 5660; census task 3: 144 seeds of pin k took another statement's rows)."""
+    source = _typed(
+        _sweep(
+            "        for (taskID,) in res:\n"
+            "            varMap2 = {}\n"
+            "            varMap2[':status'] = 'ready'\n"
+            "            sqlB = f'SELECT datasetID FROM {schema}.JEDI_Datasets '\n"
+            "            sqlB += 'WHERE status=:status '\n"
+            "            self.cur.execute(sqlB + comment, varMap2)\n"
+            "            other = self.cur.fetchall()\n"
+            "            self.retrier.retryTask(other)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(_READS_EACH, "r.py")])
+
+    crossed = {n.anchor.line_start: n.crosses_to for n in nodes if n.anchor.line_start in (7, 14)}
+    assert crossed == {7: [], 14: ["pandaserver/r.py::retryTask"]}
 
 
 ROWS_HANDED_BACK = (
@@ -9479,112 +9969,210 @@ ROWS_HANDED_BACK = (
 )
 
 
-def _crossed(source, junctions, *, others=()):
-    """Build the read sites for *source*, resolve, and hand back the nodes."""
-    modules = [
-        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
-        _module(source, "x.py"),
-        *[_module(text, name) for text, name in others],
-    ]
-    attributor = attribution.SpecAttributor(
-        progress.spec_attributes(modules), attribution.class_bases(modules)
+def _caller(cls: str, body: str, *methods: str, buffer: tuple[str, str] = ("TaskModule", "x")) -> str:
+    """``class <cls>`` whose ``start`` is *body*, its ``taskBufferIF`` a *buffer* ``(class, module)``, and *methods*
+    defined on it, each reading every element of what it is handed."""
+    defined = "".join(
+        f"    def {name}(self, value=None):\n        for one in value:\n            if one:\n                pass\n\n"
+        for name in methods
     )
-    attributor.learn_table_classes(modules)
-    nodes = sqlwrite.read_site_nodes(
-        sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
-    )
-    census = sqlwrite.attach_crossings(nodes, modules, [_junction(j) for j in junctions])
-    return nodes, census
+    return _typed(f"class {cls}:\n    def start(self):\n{body}\n{defined}", ("taskBufferIF", *buffer))
 
 
-def test_rows_given_back_cross_to_what_the_caller_does_with_them():
-    """The third shape, and the one the request's first round asked for.
+def test_rows_given_back_cross_to_what_the_caller_does_with_them(tmp_path):
+    """The handed-back shape, and the one the request's first round asked for.
 
     ``getTasksToExecCommand_JEDI@4591`` owns 4573-4603 and works its rows
     through 4600-4621, while the function returns on 4647 -- so "a ``return``
     inside the region", which is how this hole used to be sized, does not
-    include it.  Followed by name, the rows reach the return and the caller is
-    where the investigation goes next.
+    include it.  Followed as the function runs, the rows reach the return and
+    the caller is where the investigation goes next.
     """
-    caller = (
-        "class Commando:\n"
-        "    def start(self):\n"
-        "        tasks = self.taskBufferIF.getTasks()\n"
-        "        self.retryTask(tasks)\n"
+    caller = _caller(
+        "Commando", "        tasks = self.taskBufferIF.getTasks()\n        self.retryTask(tasks)\n", "retryTask"
     )
-    nodes, census = _crossed(
-        ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")]
-    )
+    nodes, census = _crossed(tmp_path, ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == ["c.py::retryTask"]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
     assert (census.handing_back, census.resolved) == (1, 1)
 
 
-def test_rows_landing_in_an_annotated_name_are_given_back_as_well():
+def test_a_caller_reading_the_rows_given_back_is_a_crossing(tmp_path):
+    """The tasks go back to ``Commando.start``, a junction's owner, which tests each: that is where they are read
+    next, though it hands them to nothing (q052: ``getJobStatisticsByGlobalShare`` back into its caller's check)."""
+    caller = _caller(
+        "Commando", "        tasks = self.taskBufferIF.getTasks()\n        for one in tasks:\n            if one:\n                pass\n"
+    )
+    nodes, census = _crossed(tmp_path, ROWS_HANDED_BACK, ["c.py::start"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/c.py::start"]
+    assert (census.handing_back, census.resolved) == (1, 1)
+
+
+def test_rows_landing_in_an_annotated_name_are_given_back_as_well(tmp_path):
     """``res_list: list[tuple[Any, ...]] = self.cur.fetchall()`` lands the rows as ``res = ...`` does
     (``_get_tasks_datasets_with_unprocessed_inputs``)."""
-    caller = (
-        "class Commando:\n"
-        "    def start(self):\n"
-        "        tasks = self.taskBufferIF.getTasks()\n"
-        "        self.retryTask(tasks)\n"
+    caller = _caller(
+        "Commando", "        tasks = self.taskBufferIF.getTasks()\n        self.retryTask(tasks)\n", "retryTask"
     )
     annotated = ROWS_HANDED_BACK.replace(
         "        res = self.cur.fetchall()\n", "        res: list = self.cur.fetchall()\n"
     )
     assert annotated != ROWS_HANDED_BACK
-    nodes, census = _crossed(annotated, ["c.py::retryTask"], others=[(caller, "c.py")])
+    nodes, census = _crossed(tmp_path, annotated, ["c.py::retryTask"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == ["c.py::retryTask"]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
     assert (census.handing_back, census.resolved) == (1, 1)
 
 
-def test_the_proxy_layer_is_not_where_the_rows_went():
-    """``JediTaskBuffer.getTasksToExecCommand_JEDI`` is ``return proxy.<same>``.
+@pytest.mark.parametrize(
+    "layer",
+    ["        return self.module.getTasks()\n", "        res = self.module.getTasks()\n        return res\n"],
+    ids=["returned", "bound-then-returned"],
+)
+def test_rows_handed_back_through_a_layer_reach_the_layers_callers(tmp_path, layer):
+    """``JediTaskBuffer.getTasksToExecCommand_JEDI`` is ``return proxy.<same>``; ``TaskBuffer.getConfigValue`` binds
+    what ``proxy.getConfigValue`` returns and returns that.
 
-    Naming it would stop the reader one hop short of the code that does
-    anything with the rows.  A caller whose own function has the same name and
-    hands the call straight back is that layer by construction -- and dropping
-    it is what makes the rest answerable, not a refinement: 12 statements had
-    exactly one call site before, 53 after.
+    The layer is not where the rows went, and is never named: it hands them back again, and its callers are read.
+    The name had found them through the one name the layers share; placed, the proxy's caller is the layer, and
+    stopping there lost 87 of pin k's 266 crossings.
     """
-    proxy = (
-        "class Buffer:\n"
-        "    def getTasks(self):\n"
-        "        return proxy.getTasks()\n"
+    proxy = _typed(f"class Buffer:\n    def getTasks(self):\n{layer}\n", ("module", "TaskModule", "x"))
+    caller = _caller(
+        "Commando",
+        "        tasks = self.taskBufferIF.getTasks()\n        self.retryTask(tasks)\n",
+        "retryTask",
+        buffer=("Buffer", "p"),
     )
     nodes, census = _crossed(
-        ROWS_HANDED_BACK, ["p.py::getTasks"], others=[(proxy, "p.py")]
+        tmp_path, ROWS_HANDED_BACK, ["p.py::getTasks", "c.py::retryTask"], others=[(proxy, "p.py"), (caller, "c.py")]
     )
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
+    assert (census.handing_back, census.resolved) == (1, 1)
+
+
+def test_rows_handed_to_a_started_thread_reach_what_its_run_calls_on_it(tmp_path):
+    """``TaskCommando`` starts a ``TaskCommandoThread`` with the tasks; its ``run`` is ``WorkerThread``'s, which owns
+    no junction and calls ``self.runImpl()`` -- the thread's.
+
+    Placed for the class the thread was built as, not for every ``WorkerThread``: ``Other.runImpl`` owns one too.
+    Read by name, a started ``JobGeneratorThread`` crossed to all six of its methods owning one; ``runImpl`` is the
+    one ``run`` calls.
+    """
+    threads = (
+        "import threading\n\n\n"
+        "class WorkerThread(threading.Thread):\n"
+        "    def run(self):\n"
+        "        self.runImpl()\n\n\n"
+        "class Commando(WorkerThread):\n"
+        "    def __init__(self, tasks):\n"
+        "        WorkerThread.__init__(self)\n"
+        "        self.tasks = tasks\n\n"
+        "    def runImpl(self):\n"
+        "        for one in self.tasks:\n"
+        "            if one:\n"
+        "                pass\n\n"
+        "    def finish(self):\n"
+        "        for one in self.tasks:\n"
+        "            if one:\n"
+        "                pass\n"
+    )
+    other = (
+        "from pandaserver.t import WorkerThread\n\n\n"
+        "class Other(WorkerThread):\n"
+        "    def runImpl(self):\n"
+        "        for one in self.tasks:\n"
+        "            if one:\n"
+        "                pass\n"
+    )
+    caller = _caller(
+        "Starter",
+        "        tasks = self.taskBufferIF.getTasks()\n        thr = Commando(tasks)\n        thr.start()\n",
+    ) + "from pandaserver.t import Commando\n"
+    nodes, _census = _crossed(
+        tmp_path,
+        ROWS_HANDED_BACK,
+        ["t.py::runImpl", "t.py::finish", "o.py::runImpl"],
+        others=[(threads, "t.py"), (other, "o.py"), (caller, "c.py")],
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/t.py::runImpl"]
+
+
+def test_a_call_on_the_way_no_reading_places_is_said_to_be_open(tmp_path):
+    """``ContentsFeeder``'s ``taskSpec`` is unpacked from a call's result and declared nowhere, so
+    ``taskSpec.setErrDiag(...)`` is a hole of the reach record -- and the rows may go on there.
+
+    Said on the statement, as the record names the hole, so ``crosses_to`` reads as what is known rather than all.
+    A hole whose name no junction owner's function has cannot land at one -- ``spec.debug(tasks)`` -- and is not.
+    """
+    caller = _caller(
+        "Commando",
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        spec = self.unknown\n"
+        "        spec.retryTask(tasks)\n"
+        "        spec.debug(tasks)\n",
+        "retryTask",
+        "debug",
+    )
+    nodes, census = _crossed(tmp_path, ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == []
-    assert (census.handing_back, census.resolved) == (1, 0)
+    assert [(one.owner, one.line, one.callee) for one in node.crosses_open] == [
+        ("pandaserver/c.py::Commando.start", 5, "spec.retryTask")
+    ]
+    assert census.opened == 1
 
 
-def test_a_caller_that_does_nothing_the_map_answers_for_leaves_it_empty():
-    """78 of the 107 statements that hand their rows back end here.
+def test_a_caller_the_rows_go_back_to_that_no_reading_places_is_said_to_be_open(tmp_path):
+    """``insert_step_task``'s task id goes back to ``self.tbif.insert_step_task(...)`` in
+    ``PandaTaskStepHandler.submit_target``, its receiver declared ``Any``: no caller :meth:`Calls.callers` finds, and
+    the statement said nowhere and open nothing.
 
-    The caller is found and does something with the rows, and none of it is
+    A hole spelled with the returning function's name may be the caller, and is open; one spelled otherwise --
+    ``self.unknown.other()`` -- cannot be, nor is a plain name called, which could be any function's caller.
+    """
+    caller = _caller(
+        "Commando",
+        "        tasks = self.unknown.getTasks()\n"
+        "        self.retryTask(tasks)\n"
+        "        self.unknown.other(tasks)\n"
+        "        made = self.factory\n"
+        "        made(tasks)\n",
+        "retryTask",
+    )
+    nodes, census = _crossed(tmp_path, ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+    assert [(one.owner, one.line, one.callee) for one in node.crosses_open] == [
+        ("pandaserver/c.py::Commando.start", 3, "self.unknown.getTasks")
+    ]
+    assert (census.handing_back, census.opened) == (1, 1)
+
+
+def test_a_caller_that_does_nothing_the_map_answers_for_leaves_it_empty(tmp_path):
+    """The caller is found and does something with the rows, and none of it is
     somewhere the map holds a junction.  Naming the caller's own function
     would satisfy the question and not the purpose.
     """
-    caller = (
-        "class Commando:\n"
-        "    def start(self):\n"
-        "        tasks = self.taskBufferIF.getTasks()\n"
-        "        print(tasks)\n"
-    )
-    nodes, census = _crossed(ROWS_HANDED_BACK, ["c.py::somethingElse"], others=[(caller, "c.py")])
+    caller = _caller("Commando", "        tasks = self.taskBufferIF.getTasks()\n        print(tasks)\n")
+    nodes, census = _crossed(tmp_path, ROWS_HANDED_BACK, ["c.py::somethingElse"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == []
     assert (census.handing_back, census.resolved) == (1, 0)
 
 
-def test_rows_that_never_reach_a_return_do_not_cross_to_the_caller():
+def test_rows_that_never_reach_a_return_do_not_cross_to_the_caller(tmp_path):
     """The function returns, and not these rows: a name they never reach is an answer of no."""
     source = (
         "class TaskModule:\n"
@@ -9599,20 +10187,17 @@ def test_rows_that_never_reach_a_return_do_not_cross_to_the_caller():
         "            tmpLog.debug(taskID)\n"
         "        return self.counter\n"
     )
-    caller = (
-        "class Commando:\n"
-        "    def start(self):\n"
-        "        tasks = self.taskBufferIF.getTasks()\n"
-        "        self.retryTask(tasks)\n"
+    caller = _caller(
+        "Commando", "        tasks = self.taskBufferIF.getTasks()\n        self.retryTask(tasks)\n", "retryTask"
     )
-    nodes, census = _crossed(source, ["c.py::retryTask"], others=[(caller, "c.py")])
+    nodes, census = _crossed(tmp_path, source, ["c.py::retryTask"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == []
     assert (census.handing_back, census.resolved) == (0, 0)
 
 
-def test_the_caller_reusing_the_name_gets_only_its_own_rows():
+def test_the_caller_reusing_the_name_gets_only_its_own_rows(tmp_path):
     """``datasetManager.py::main`` runs seven queries into the same ``res``.
 
     Each is handed to a different thread class, so carried by name one
@@ -9620,25 +10205,24 @@ def test_the_caller_reusing_the_name_gets_only_its_own_rows():
     exits, met again a function further out; carried from the line the rows
     arrived on, the second ``tasks`` overwrites the first.
     """
-    caller = (
-        "class Manager:\n"
-        "    def start(self):\n"
+    caller = _caller(
+        "Manager",
         "        tasks = self.taskBufferIF.getTasks()\n"
         "        self.retryTask(tasks)\n"
         "        tasks = self.taskBufferIF.getOtherTasks()\n"
-        "        self.finishTask(tasks)\n"
+        "        self.finishTask(tasks)\n",
+        "retryTask",
+        "finishTask",
     )
     nodes, _census = _crossed(
-        ROWS_HANDED_BACK,
-        ["c.py::retryTask", "c.py::finishTask"],
-        others=[(caller, "c.py")],
+        tmp_path, ROWS_HANDED_BACK, ["c.py::retryTask", "c.py::finishTask"], others=[(caller, "c.py")]
     )
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == ["c.py::retryTask"]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
 
 
-def test_a_status_name_the_next_call_reuses_does_not_take_the_rows_with_it():
+def test_a_status_name_the_next_call_reuses_does_not_take_the_rows_with_it(tmp_path):
     """``ret_val, tasks = ...`` then ``ret_val, other = ...``: ``tasks`` still holds the rows.
 
     ``AtlasAnalJobBroker.doBrokerage`` reuses ``ret_val`` for every call it
@@ -9646,22 +10230,20 @@ def test_a_status_name_the_next_call_reuses_does_not_take_the_rows_with_it():
     writes at once, the second write replaced the first, and the rows that
     arrived in ``analy_sites_class_dict`` crossed nowhere.
     """
-    caller = (
-        "class Manager:\n"
-        "    def start(self):\n"
+    caller = _caller(
+        "Manager",
         "        ret_val, tasks = self.taskBufferIF.getTasks()\n"
         "        ret_val, other = self.taskBufferIF.getOtherTasks()\n"
-        "        self.retryTask(tasks)\n"
+        "        self.retryTask(tasks)\n",
+        "retryTask",
     )
-    nodes, _census = _crossed(
-        ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")]
-    )
+    nodes, _census = _crossed(tmp_path, ROWS_HANDED_BACK, ["c.py::retryTask"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == ["c.py::retryTask"]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
 
 
-def test_a_link_written_before_the_rows_arrived_is_not_a_lead():
+def test_a_link_written_before_the_rows_arrived_is_not_a_lead(tmp_path):
     """``w = x`` above ``x = tasks``: ``w`` holds what ``x`` held then, not the rows.
 
     Carried by name, ``x`` taking the rows on a later line made every name
@@ -9669,27 +10251,27 @@ def test_a_link_written_before_the_rows_arrived_is_not_a_lead():
     was handed ``setErrDiag`` at 496 that way, from ``failureCounts`` read at
     388, by a chain that runs up the function.
     """
-    caller = (
-        "class Manager:\n"
-        "    def start(self):\n"
+    caller = _caller(
+        "Manager",
         "        x = self.make()\n"
         "        w = x\n"
         "        tasks = self.taskBufferIF.getTasks()\n"
         "        x = tasks\n"
         "        self.setErrDiag(w)\n"
-        "        self.retryTask(x)\n"
+        "        self.retryTask(x)\n",
+        "make",
+        "setErrDiag",
+        "retryTask",
     )
     nodes, _census = _crossed(
-        ROWS_HANDED_BACK,
-        ["c.py::retryTask", "c.py::setErrDiag"],
-        others=[(caller, "c.py")],
+        tmp_path, ROWS_HANDED_BACK, ["c.py::retryTask", "c.py::setErrDiag"], others=[(caller, "c.py")]
     )
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == ["c.py::retryTask"]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
 
 
-def test_rows_handed_back_as_a_dicts_keys_cross_to_what_the_caller_does():
+def test_rows_handed_back_as_a_dicts_keys_cross_to_what_the_caller_does(tmp_path):
     """``retMap[jediTaskID] = set()`` and the caller loops over ``.items()``.
 
     ``throttleJobsInPausedTasks_JEDI`` hands its tasks back so, and the
@@ -9710,21 +10292,21 @@ def test_rows_handed_back_as_a_dicts_keys_cross_to_what_the_caller_does():
         "            retMap[taskID] = set()\n"
         "        return retMap\n"
     )
-    caller = (
-        "class Commando:\n"
-        "    def start(self):\n"
+    caller = _caller(
+        "Commando",
         "        tasks = self.taskBufferIF.getTasks()\n"
         "        for taskID, ids in tasks.items():\n"
-        "            self.retryTask(taskID)\n"
+        "            self.retryTask(taskID)\n",
+        "retryTask",
     )
-    nodes, census = _crossed(source, ["c.py::retryTask"], others=[(caller, "c.py")])
+    nodes, census = _crossed(tmp_path, source, ["c.py::retryTask"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
-    assert node.crosses_to == ["c.py::retryTask"]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
     assert (census.handing_back, census.resolved) == (1, 1)
 
 
-def test_rows_used_only_to_choose_are_not_handed_back():
+def test_rows_used_only_to_choose_are_not_handed_back(tmp_path):
     """The rows pick which candidates are kept; the candidates are what is returned.
 
     ``insertFilesForDataset_JEDI`` and ``copyArchive.py::main`` read lists
@@ -9749,13 +10331,10 @@ def test_rows_used_only_to_choose_are_not_handed_back():
         "                kept.append(taskID)\n"
         "        return kept\n"
     )
-    caller = (
-        "class Commando:\n"
-        "    def start(self):\n"
-        "        tasks = self.taskBufferIF.getTasks()\n"
-        "        self.retryTask(tasks)\n"
+    caller = _caller(
+        "Commando", "        tasks = self.taskBufferIF.getTasks()\n        self.retryTask(tasks)\n", "retryTask"
     )
-    nodes, census = _crossed(source, ["c.py::retryTask"], others=[(caller, "c.py")])
+    nodes, census = _crossed(tmp_path, source, ["c.py::retryTask"], others=[(caller, "c.py")])
 
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == []
@@ -10231,6 +10810,34 @@ def test_gate_passes_a_statement_that_leads_nowhere():
 
     assert result.passed
     assert result.checked == 2
+
+
+def test_gate_fails_an_open_crossing_the_reach_record_holds_no_hole_for():
+    """``crosses_open`` says "the rows may go on here", and the why is the reach record's: an entry naming no hole
+    of it is a claim no reader can look up."""
+    from bamboo.codemap.models import OpenCrossing, ReachHole, ReachNode
+
+    hole = ReachHole(line=5, callee="spec.retryTask", why="the receiver's class is not declared")
+    row = ReachNode(
+        name="reach:c", map_id=MAP_ID, derived_from=VERSION, owner="c.py::Commando.start", function="start", holes=[hole]
+    )
+    held = OpenCrossing(owner="c.py::Commando.start", line=5, callee="spec.retryTask")
+    stray = OpenCrossing(owner="c.py::Commando.start", line=6, callee="spec.retryTask")
+
+    passed, failed = (
+        gates.statement_leads_resolve(
+            MapFragment(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                read_sites=[_site_with(crosses_open=[one])],
+                reach_graph=[row],
+            )
+        )
+        for one in (held, stray)
+    )
+
+    assert passed.passed
+    assert not failed.passed and "spec.retryTask at c.py::Commando.start:6" in failed.failures[0]
 
 
 def test_a_read_site_lists_every_value_one_statement_asks_rows_by():
@@ -16979,6 +17586,28 @@ def test_the_answers_stops_are_the_builds_stops():
     key = lambda s: (s.owner, s.statement, s.reason, s.detail)  # noqa: E731
     assert sorted(map(key, again)) == sorted(map(key, built))
     assert any(s.reason == sql.SKIP_HANDED_IN for s in built)
+
+
+def test_a_statement_a_class_defined_in_a_function_runs_is_no_stop_of_that_function():
+    """``datasetManager.main`` defines its threads' classes in its own body, and their ``run`` methods execute the
+    statements.  ``main`` builds none of them, so read as its own calls each was a stop -- "no statement this
+    function builds reaches this call" -- and a gap under ``main`` in the answer; ``run`` is where they are read."""
+    source = (
+        "def main(taskBuffer):\n"
+        "    class CloserThr:\n"
+        "        def run(self):\n"
+        "            sql = 'UPDATE ATLAS_PANDA.Datasets SET status=:status WHERE vuid=:vuid'\n"
+        "            varMap = {':status': 'closed', ':vuid': self.vuid}\n"
+        "            self.proxy.cur.execute(sql, varMap)\n"
+        "    CloserThr().run()\n"
+    )
+    functions = {func.name: func for func in ast.walk(ast.parse(source)) if isinstance(func, ast.FunctionDef)}
+
+    skipped: list = []
+    assert sql.executions(functions["main"], skipped) == []
+    assert skipped == []
+    assert sqlwrite.statement_stops(functions["main"], "pandaserver/daemons/scripts/datasetManager.py") == []
+    assert [run.call.lineno for run in sql.executions(functions["run"])] == [6]
 
 
 def test_a_writes_row_keys_are_the_where_terms_it_does_not_guard():

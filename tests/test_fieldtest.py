@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -201,6 +202,58 @@ def test_a_dump_is_read_with_the_tree_of_its_bamboo_sha(tmp_path):
     _write(home.root / "pairs", "P.json", pair | {"BAMBOO_TREE": str(other)})
     with pytest.raises(F.FieldTestError, match="is read with tree-1234abc"):
         F.load_pair(home, "P")
+
+
+def _commits(repo: Path, *changes: str) -> list[str]:
+    """A git repo at *repo* with one commit per file in *changes*, each writing that file anew; their short shas."""
+    git = [
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.org",
+    ]
+    repo.mkdir()
+    subprocess.run([*git, "init", "-q"], check=True)
+    shas = []
+    for i, rel in enumerate(changes):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        _write(repo / Path(rel).parent, Path(rel).name, {"commit": i})
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", str(i)], check=True)
+        shas.append(
+            subprocess.run(
+                [*git, "rev-parse", "--short=7", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    return shas
+
+
+@pytest.mark.parametrize(
+    ("later", "holds"), [("website/a.md", True), ("bamboo/codemap/a.py", False)]
+)
+def test_a_dump_is_read_with_the_tree_of_a_later_commit_where_the_map_code_is_the_same(
+    tmp_path, monkeypatch, later, holds
+):
+    repo = tmp_path / "repo"
+    built, archived = _commits(repo, "bamboo/codemap/a.py", later)
+    monkeypatch.setattr(F, "HERE", repo)
+    home = _home(tmp_path)
+    pair = _pair(tmp_path, home, map_sha=built)
+    other = tmp_path / f"tree-{archived}-qbeefcaf"
+    other.mkdir()
+    (other / "QUERIER").write_text("beefcafe0")
+    _write(home.root / "pairs", "P.json", pair | {"BAMBOO_TREE": str(other)})
+    if holds:
+        assert F.load_pair(home, "P")["BAMBOO_TREE"] == str(other)
+    else:
+        with pytest.raises(F.FieldTestError, match=f"is read with tree-{built}"):
+            F.load_pair(home, "P")
 
 
 def test_a_case_runs_on_the_pair_current_names_for_its_pin(tmp_path):

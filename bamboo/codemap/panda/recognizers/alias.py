@@ -24,7 +24,7 @@ cannot tell a caller that never ran from a guard that rejected the status.
 declared attribute, the same rule matches 36 methods and 600 call sites, led by
 ``__init__``, ``pack``, ``__setattr__`` and ``setErrDiag`` -- serialization and
 parameter passing, which settle nothing.  Narrowed to literals it matches five
-methods, and promotion keeps the one that matters.
+methods, and the criteria mark the one that matters.
 
 **The same method, seen the other way round.**  A helper can settle a subject by
 *returning* the value instead of writing it, and the caller assigns it::

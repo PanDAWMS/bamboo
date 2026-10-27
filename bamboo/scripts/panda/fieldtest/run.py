@@ -81,6 +81,10 @@ ROUNDS = 3
 #: the files of a case's records directory the querier reads, in this order
 RECORDS_GLOB = "records-r*.jsonl"
 
+#: the code that builds a dump and reads it: a dump goes with a run tree whose commit holds this code as the
+#: dump's own commit does
+MAP_CODE = ("bamboo/codemap", "bamboo/scripts/build_map.py")
+
 DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
 
 #: the shape of result.json read here (agreed with the querier, 2026-10-15)
@@ -169,6 +173,32 @@ def pair_name(home: Home, case: dict, override: str = "") -> str:
     return current[case["pin"]]
 
 
+def same_map_code(built: str, archived: str) -> bool:
+    """Whether commits *built* and *archived* hold the same :data:`MAP_CODE`, by the git of the tree this module is in.
+
+    A dump is named for the commit that built it and a run tree for the commit it was archived from, so the two
+    differ when master moves by files the map does not read: the querier's tree of 9c4019c (PanDAWMS's docs and
+    fieldtest over 1a8e694) reads the dump 1a8e694 built (2026-10-26).  A commit git does not know is not the same.
+    """
+    return (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(HERE),
+                "diff",
+                "--quiet",
+                built,
+                archived,
+                "--",
+                *MAP_CODE,
+            ],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
 def load_pair(home: Home, name: str) -> dict:
     """The pair *name*, checked: the dump's sha256, the run tree it is read with, and the pin it was built from."""
     pair = json.loads((home.root / "pairs" / f"{name}.json").read_text())
@@ -180,9 +210,11 @@ def load_pair(home: Home, name: str) -> dict:
         )
     tree = Path(pair["BAMBOO_TREE"])
     if m := re.search(r"/map-.*-([0-9a-f]{7,40})\.json$", str(dump)):
-        if not re.fullmatch(rf"tree-{m[1]}(-q[0-9a-f]+)?", tree.name):
+        t = re.fullmatch(r"tree-([0-9a-f]{7,40})(-q[0-9a-f]+)?", tree.name)
+        if not t or (t[1] != m[1] and not same_map_code(m[1], t[1])):
             raise FieldTestError(
-                f"{dump} is read with tree-{m[1]}[-q<querier>], not {tree}"
+                f"{dump} is read with tree-{m[1]}[-q<querier>] or the tree of a commit with the same "
+                f"{', '.join(MAP_CODE)}, not {tree}"
             )
     marker = tree / "QUERIER"
     if not marker.exists():

@@ -810,14 +810,46 @@ async def test_the_gaps_are_the_gates_own_judgement(tmp_path):
     )
 
     guarded = {entry.owner: entry for entry in strategy.follow_up.guarded_by}
-    assert guarded[_GET_JOBS].gaps == [f"{where} -- {reason}"]
+    assert strategy_mod.gap_texts(guarded[_GET_JOBS].gaps) == [f"{where} -- {reason}"]
+    (gap,) = guarded[_GET_JOBS].gaps
+    assert (gap.kind, gap.line, gap.verbs, gap.hides_where) == ("unnoded", 6, [("read", "jobsActive4")], True)
 
 
 async def test_a_tree_that_is_not_the_maps_is_refused_rather_than_read(tmp_path):
     strategy = await _gaps_answer(tmp_path, sha="0" * 40)
 
     guarded = {entry.owner: entry for entry in strategy.follow_up.guarded_by}
-    assert guarded[_GET_JOBS].gaps == ["not read: this tree is not the one that was mapped"]
+    assert strategy_mod.gap_texts(guarded[_GET_JOBS].gaps) == ["not read: this tree is not the one that was mapped"]
+    assert [(gap.kind, gap.line, gap.hides_where) for gap in guarded[_GET_JOBS].gaps] == [("other_tree", None, True)]
+
+
+def test_every_statement_the_map_could_not_read_is_said_not_only_the_first():
+    """A mover with a statement read in no node and one read in part has both gaps.  The gate counts the first
+    (``mover_reason``'s order); the answer said that one alone, and a reader keeping a mover for a gap that can hide
+    where the rows go could not tell it from one that hides only which rows a statement takes."""
+    from types import SimpleNamespace
+
+    from bamboo.codemap import gates
+    from bamboo.codemap.panda import sql
+
+    def stop(statement, reason, detail):
+        return SimpleNamespace(statement=statement, reason=reason, detail=detail, reads=["jobsActive4"])
+
+    site = SimpleNamespace(
+        anchor=SimpleNamespace(line_start=40), tables=["jobsActive4"], unresolved=["prodSourceLabel IN ({})"]
+    )
+    stops = [stop(12, sql.SKIP_UNREACHED, "sqlA"), stop(12, sql.SKIP_UNREACHED, "sqlA"), stop(9, "why", "sqlB")]
+    kinds = {"jobsactive4": "JobSpec"}
+
+    gaps = gates.mover_gaps("JobSpec", [site], stops, kinds, "x.py")
+
+    assert [(gap.kind, gap.line, gap.hides_where) for gap in gaps] == [
+        ("unnoded", 9, True), ("unnoded", 12, True), ("partial", 40, False)
+    ]
+    assert gaps[1].stops == [(sql.SKIP_UNREACHED, "sqlA")]
+    assert gaps[2].unresolved == ["prodSourceLabel IN ({})"]
+    reason, where = gates.mover_reason("JobSpec", [site], stops, kinds)
+    assert strategy_mod.gap_texts(gaps) == [f"{where} -- {reason}", f"@40 -- {gates.MOVER_PARTIAL}"]
 
 
 async def test_without_a_tree_the_answer_says_it_did_not_read(tmp_path):
@@ -3714,6 +3746,41 @@ def test_a_statement_that_hands_its_rows_on_is_a_lead():
     assert lead.source == models.LEAD_READER
     assert lead.stop == models.STOP_HANDED_ON
     assert lead.opened_by.endswith("copyArchive.py::main@381")
+
+
+@pytest.mark.parametrize(
+    ("result", "led"),
+    [(models.RESULT_AGGREGATE, False), (models.RESULT_ROWS, True), (models.RESULT_VARIES, True), ("", True)],
+    ids=["aggregate", "rows", "varies", "not-read"],
+)
+def test_a_statement_that_aggregates_opens_no_reader_lead(result, led):
+    """It keeps no row: ``getSiteToRunRateStats`` counts a site's jobs and ``JobGenerator`` picks none of them up.
+
+    One that varies, or whose result is not read, may return rows, and is read as one that does.
+    """
+    site = models.ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="r:3",
+        owner="pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::getSiteToRunRateStats",
+        anchor=Anchor(
+            package="pandaserver",
+            file="pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py",
+            line_start=4677,
+            line_end=4677,
+        ),
+        selects=["JobSpec.jobStatus=running"],
+        crosses_to=["pandajedi/jediorder/JobGenerator.py::doGenerate"],
+        result=result,
+    )
+
+    leads = strategy_mod._reader_leads(
+        Symptom(subject="JobSpec.jobStatus", observed="running"),
+        {site.owner: [site]},
+        {"pandajedi/jediorder/JobGenerator.py::doGenerate": ["JobSpec.computingSite"]},
+    )
+
+    assert [lead.field for lead in leads] == (["JobSpec.computingSite"] if led else [])
 
 
 def test_a_statement_asking_on_another_value_opens_no_lead():

@@ -113,6 +113,167 @@ class Proxy:
     assert inner.func.name == "construct"
 
 
+def test_a_method_of_a_class_a_function_defines_reads_the_functions_names(tmp_path):
+    """``datasetManager.main`` defines ``setTobeDeletedToDis`` and ``CloserThr``, whose ``run`` calls it.
+
+    A class body is no scope for its methods, so the name is the function's; read as stopping at the class, the
+    call was "the name is bound to something that is not a function here".
+    """
+    roots = _tree(
+        tmp_path,
+        m='''\
+def main():
+    def mark(name):
+        return name
+
+    class Closer:
+        def run(self):
+            return mark("sub")
+
+    Closer().run()
+''',
+    )
+    calls = _calls(roots)
+
+    (target,) = _placed(calls, "m", "run", "mark").targets
+
+    assert (target.func.name, target.func.lineno) == ("mark", 2)
+
+
+def test_a_class_a_function_defines_is_built_and_started_by_its_name_there(tmp_path):
+    """``datasetManager.main`` defines ``FinisherThr`` and runs ``finThr = FinisherThr(...)``, ``finThr.start()``.
+
+    A ``class`` statement binds its name where it runs, as a ``def`` does: read off the module's body alone, the
+    construction was "a local or a parameter is called" and the start a receiver no declaration says.
+    """
+    roots = _tree(
+        tmp_path,
+        m='''\
+import threading
+
+
+def main(rows):
+    if rows:
+        def note(row):
+            return row
+
+    class Finisher(threading.Thread):
+        def __init__(self, rows):
+            threading.Thread.__init__(self)
+            self.rows = rows
+
+        def run(self):
+            note(self.rows)
+
+    thread = Finisher(rows)
+    thread.start()
+''',
+    )
+    calls = _calls(roots)
+
+    (built,) = _placed(calls, "m", "main", "Finisher").targets
+    started = _placed(calls, "m", "main", "thread.start")
+    (noted,) = _placed(calls, "m", "run", "note").targets
+
+    assert (built.func.name, built.cls.name) == ("__init__", "Finisher")
+    assert started.thread and [(one.func.name, one.cls.name) for one in started.targets] == [("run", "Finisher")]
+    assert (noted.func.name, noted.func.lineno) == ("note", 6)
+
+
+def test_a_name_defined_more_than_once_lands_where_python_binds_it(tmp_path):
+    """``CoreUtils.clean_user_id`` and ``TaskComplexModule._make_dicts_tasks_datasets_with_unprocessed_inputs``: the
+    ``@overload`` stubs come first and the definition with the body last, which the name is bound to.
+
+    Read as the first definition of the name, each call landed at a stub (49 calls on pin k, 46 of them
+    ``clean_user_id``'s), and nothing the body returns or hands on was followed.
+    """
+    roots = _tree(
+        tmp_path,
+        core='''\
+from typing import overload
+
+
+@overload
+def clean(dn: str) -> str: ...
+@overload
+def clean(dn: None) -> None: ...
+def clean(dn):
+    return dn
+
+
+def again():
+    return 1
+
+
+def again():
+    return 2
+
+
+def local():
+    return clean(None), again()
+''',
+        m='''\
+from typing import overload
+
+from pkg.core import clean
+
+
+class Module:
+    @overload
+    def make(self, peek: bool) -> int: ...
+
+    def make(self, peek):
+        return peek
+
+    def run(self, dn):
+        self.make(True)
+        return clean(dn)
+''',
+    )
+    calls = _calls(roots)
+
+    (made,) = _placed(calls, "m", "run", "self.make").targets
+    (cleaned,) = _placed(calls, "m", "run", "clean").targets
+    (local,) = _placed(calls, "core", "local", "clean").targets
+    (again,) = _placed(calls, "core", "local", "again").targets
+    stub = next(
+        node
+        for node in ast.walk(calls.types.tree("pkg/core.py"))
+        if isinstance(node, ast.FunctionDef) and node.lineno == 5
+    )
+
+    assert (made.func.lineno, cleaned.func.lineno, local.func.lineno, again.func.lineno) == (10, 8, 8, 16)
+    assert calls.callers(calls_mod.Target("pkg/core.py", stub, None)) == []
+    assert sorted((site.file, site.call.lineno) for site in calls.callers(cleaned)) == [
+        ("pkg/core.py", 21),
+        ("pkg/m.py", 15),
+    ]
+
+
+def test_a_propertys_setter_stands_for_the_property_its_getter_made(tmp_path):
+    """``DataCarouselRequestSpec.parameter_map`` and workflow_base's ``*_map``: ``@parameter_map.setter`` comes last,
+    but it makes a property from the getter, so the name is read at the getter."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+class Spec:
+    @property
+    def parameter_map(self) -> dict:
+        return {}
+
+    @parameter_map.setter
+    def parameter_map(self, value) -> None:
+        pass
+''',
+    )
+    calls = _calls(roots)
+    file, cls = calls.types.class_named("pkg/m.py", ast.Name(id="Spec", ctx=ast.Load()))
+
+    _where, getter = calls.types.method(file, cls, "parameter_map")
+
+    assert getter.lineno == 3
+
+
 def test_a_receiver_is_placed_by_what_it_is_declared_to_be_not_by_its_name(tmp_path):
     roots = _tree(
         tmp_path,
