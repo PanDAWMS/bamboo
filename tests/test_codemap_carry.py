@@ -64,6 +64,73 @@ SHAPES = {
                 d[task_id] = set()
             return d  # holds
     """,
+    "a dict's keys iterated, its values holding them": """
+        def f(self, names):
+            res = self.cur.fetchall()  # rows
+            d = {}
+            for name in names:
+                d[name] = res
+            for k in d:
+                g(k)  # not
+            for k in sorted(d):
+                g(k)  # not
+            ks = sorted(d)
+            for k in ks:
+                g(k)  # not
+            g([k for k in d])  # not
+            g(list(d))  # not
+            for i, k in enumerate(d):
+                g(k)  # not
+            for v in d.values():
+                g(v)  # holds
+            for k in d:
+                g(d[k])  # holds
+    """,
+    "a dict's keys iterated, its keys holding them": """
+        def f(self):
+            res = self.cur.fetchall()  # rows
+            d: dict[str, list] = {}
+            for (task_id,) in res:
+                d.setdefault(task_id, []).append(1)
+            for k in sorted(d):
+                g(k)  # holds
+    """,
+    "a defaultdict keyed by them": """
+        def f(self):
+            res = self.cur.fetchall()  # rows
+            d = defaultdict(list)
+            for (task_id,) in res:
+                d[task_id].append(1)
+            for k in d:
+                g(k)  # holds
+    """,
+    "a nested dict keyed by them": """
+        def f(self, names):
+            res = self.cur.fetchall()  # rows
+            d = {}
+            for (task_id,) in res:
+                for name in names:
+                    d[task_id][name] = 1
+            for k in d:
+                g(k)  # holds
+    """,
+    "a parameter annotated as a dict": """
+        def f(self, d: Optional[dict[str, Any]], e):
+            res = self.cur.fetchall()  # rows
+            d[e] = res
+            for k in d:
+                g(k)  # not
+    """,
+    "a name bound to a dict and to a list, iterated": """
+        def f(self, c):
+            res = self.cur.fetchall()  # rows
+            d = {}
+            if c:
+                d = []
+            d.append(res)
+            for k in d:
+                g(k)  # holds
+    """,
     "appended": """
         def f(self):
             out = []

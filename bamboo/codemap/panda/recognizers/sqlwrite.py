@@ -3886,8 +3886,106 @@ def _under(step: str, paths: Iterable[tuple[str, ...]]) -> _Paths:
 
 
 def _elements(paths: _Paths) -> _Paths:
-    """What an element a loop or a comprehension takes holds: of a list or a set, or a dict's key."""
+    """What an element a loop or a comprehension takes holds, of a value not known as a dict (:func:`_keys`): of a list
+    or a set, or a dict's key."""
     return _under(_ALL, paths) | _under(_KEY, paths)
+
+
+def _keys(paths: _Paths) -> _Paths:
+    """What an element of a value known as a dict holds: its key, not what its values hold (``[*]`` is both a
+    list's element and the value under a key not known before it runs)."""
+    return _under(_KEY, paths)
+
+
+#: Calls making a dict.
+_DICT_MAKERS = frozenset({"dict", "defaultdict", "OrderedDict", "Counter"})
+#: Annotations naming a dict.
+_DICT_TYPES = _DICT_MAKERS | {"Dict", "DefaultDict", "Mapping", "MutableMapping"}
+
+
+def _dict_type(annotation: Optional[ast.AST]) -> bool:
+    """Whether *annotation* names a dict -- or a dict or ``None``."""
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        sides = [
+            side
+            for side in (annotation.left, annotation.right)
+            if not (isinstance(side, ast.Constant) and side.value is None)
+        ]
+        return len(sides) == 1 and _dict_type(sides[0])
+    head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    name = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", None)
+    if name == "Optional" and isinstance(annotation, ast.Subscript):
+        return _dict_type(annotation.slice)
+    return name in _DICT_TYPES
+
+
+def _is_dict(expression: Optional[ast.AST], dicts: frozenset[str]) -> bool:
+    """Whether *expression*'s value is a dict: made here, or a name of *dicts* (:func:`_dict_names`)."""
+    if isinstance(expression, (ast.Dict, ast.DictComp)):
+        return True
+    if isinstance(expression, ast.Name):
+        return expression.id in dicts
+    if isinstance(expression, ast.Call):
+        name = _callee_name(expression)
+        if name in _DICT_MAKERS:
+            return True
+        return name == "copy" and isinstance(expression.func, ast.Attribute) and _is_dict(expression.func.value, dicts)
+    if isinstance(expression, ast.IfExp):
+        return _is_dict(expression.body, dicts) and _is_dict(expression.orelse, dicts)
+    if isinstance(expression, ast.BoolOp):
+        return all(_is_dict(value, dicts) for value in expression.values)
+    return False
+
+
+def _dict_names(func: ast.AST) -> frozenset[str]:
+    """The names *func* holds dicts in: annotated as one (``**kwargs`` among them), or bound only to values making
+    one."""
+    known: set[str] = set()
+    bound: dict[str, list[Optional[ast.AST]]] = {}
+
+    def binds(target: ast.AST, value: Optional[ast.AST]) -> None:
+        if isinstance(target, ast.Name):
+            bound.setdefault(target.id, []).append(value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                binds(element, None)
+        elif isinstance(target, ast.Starred):
+            binds(target.value, None)
+
+    arguments = getattr(func, "args", None)
+    if arguments is not None:
+        for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg):
+            if one is not None:
+                bound.setdefault(one.arg, []).append(None)
+                if one is not arguments.vararg and _dict_type(one.annotation):
+                    known.add(one.arg)
+        if arguments.kwarg is not None:
+            known.add(arguments.kwarg.arg)
+    for node in own_nodes(func):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                binds(target, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and _dict_type(node.annotation):
+                known.add(node.target.id)
+            if node.value is not None:
+                binds(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            binds(node.target, node.value)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            binds(node.target, None)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            binds(node.optional_vars, None)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.setdefault(node.name, []).append(None)
+    growing = True
+    while growing:
+        growing = False
+        for name, made in bound.items():
+            if name not in known and all(_is_dict(value, frozenset(known)) for value in made):
+                known.add(name)
+                growing = True
+    return frozenset(known)
 
 
 def _index_step(node: ast.AST) -> str:
@@ -4000,9 +4098,12 @@ class _PathCarry:
     hands parts of them to (*seeds*), or the value of a call the function made (*call_values*: the way back).  A
     write holds what its value holds, put at its steps -- ``x.a[k] = v`` puts what ``v`` holds at ``.a[*]`` of ``x``
     -- and taken apart as its target is: ``a, b = v`` gives ``a`` what ``v[0]`` holds, a loop's target what an
-    element does.  A read takes the part it names: ``x.a`` holds what ``.a`` of ``x`` holds, and the whole value
-    holds every part.  Which writes of a name reach a read is ``pathcond.surviving_writes`` as the function runs; a
-    write that puts something into a name (``x.a = v``, ``d[k] = v``, ``x.append(v)``, ``x += v``) adds to it.
+    element does, and an element of a value known as a dict is its key (:func:`_dict_names`), wherever one is taken:
+    ``for k in sorted(d)`` takes what ``d``'s keys hold, not what its values do.  A read takes the part it names:
+    ``x.a`` holds what ``.a`` of ``x`` holds, and the whole value holds every part.  Which writes of a name reach a
+    read is ``pathcond.surviving_writes`` as the function runs; a write that puts something into a name (``x.a = v``,
+    ``d[k] = v``, ``x.append(v)``, ``x += v``) adds to it, and a key it puts in is one of the keys there -- each
+    subscript written through (``d[a][b] = v`` puts ``a`` and ``b``), ``d[k].append(v)``, ``d.setdefault(k, v)``.
 
     A call's value is read from where it lands (:class:`_Reading`): what the definition returns of what it is
     handed, what a constructor keeps in its object.  A call no reading places is a builtin's or a hole: a container
@@ -4026,6 +4127,7 @@ class _PathCarry:
     ):
         self.reading, self.file, self.func, self.bound = reading, file, func, bound
         self.call_values = call_values or {}
+        self.dicts = reading.dicts_of(func)
         self.writes: list[_Write] = []
         self.by_name: dict[str, list[_Write]] = {}
         for write in reading.writes_of(func):
@@ -4047,10 +4149,11 @@ class _PathCarry:
     # -- the writes ----------------------------------------------------------
 
     @staticmethod
-    def read_writes(func: ast.AST) -> list[_Write]:
-        """Every write of a name in *func*, its parameters last, holding nothing yet."""
+    def read_writes(func: ast.AST, dicts: frozenset[str] = frozenset()) -> list[_Write]:
+        """Every write of a name in *func*, its parameters last, holding nothing yet; *dicts* the names it holds
+        dicts in."""
         carry = _PathCarry.__new__(_PathCarry)
-        carry.writes, carry.by_name = [], {}
+        carry.writes, carry.by_name, carry.dicts = [], {}, dicts
         carry._read(func)
         arguments = getattr(func, "args", None)
         if arguments is not None:
@@ -4075,12 +4178,18 @@ class _PathCarry:
             if found is not None:
                 base, steps = found
                 self._add(_Write(base, node, steps, source, take, True))
-            if isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice):
-                # ``d[k] = v``: what ``k`` holds is one of ``d``'s keys.
-                inner = _access_path(target.value)
+            self._keys_put(target, node)
+
+    def _keys_put(self, expression: ast.AST, node: ast.AST) -> None:
+        """What each key of the access *expression* written through holds is one of its container's keys:
+        ``d[k] = v``, ``d[a][b] = v``, ``d[k].append(v)``."""
+        while isinstance(expression, (ast.Attribute, ast.Subscript)):
+            if isinstance(expression, ast.Subscript) and not isinstance(expression.slice, ast.Slice):
+                inner = _access_path(expression.value)
                 if inner is not None:
                     base, steps = inner
-                    self._add(_Write(base, node, steps + (_KEY,), target.slice, _same, True))
+                    self._add(_Write(base, node, steps + (_KEY,), expression.slice, _same, True))
+            expression = expression.value
 
     def _read(self, func: ast.AST) -> None:
         # A comprehension's target is its own scope's, not the function's.
@@ -4096,7 +4205,8 @@ class _PathCarry:
                 for target in targets:
                     self._target(target, node, node.value, _same, isinstance(node, ast.AugAssign))
             elif isinstance(node, (ast.For, ast.AsyncFor)):
-                self._target(node.target, node, node.iter, _elements, False)
+                take = _keys if _is_dict(node.iter, self.dicts) else _elements
+                self._target(node.target, node, node.iter, take, False)
             elif isinstance(node, ast.withitem) and node.optional_vars is not None:
                 for name in ast.walk(node.optional_vars):
                     if isinstance(name, ast.Name):
@@ -4137,6 +4247,9 @@ class _PathCarry:
                     self._add(_Write(base, statement, steps, call.args[0], _same, True))
                 elif name == "setdefault" and len(call.args) >= 2:
                     self._add(_Write(base, statement, steps + (_ALL,), call.args[1], _same, True))
+                if name == "setdefault" and call.args:
+                    self._add(_Write(base, statement, steps + (_KEY,), call.args[0], _same, True))
+                self._keys_put(made, statement)
                 return
         parts = _setattr_parts(call)
         if parts is not None:
@@ -4217,10 +4330,15 @@ class _PathCarry:
                     bound = {n.id for n in ast.walk(generator.target) if isinstance(n, ast.Name)}
                     if name in bound:
                         return self._unpack_into(
-                            generator.target, name, _elements(self.held(generator.iter, generator.iter))
+                            generator.target, name, _elements(self._as_list(generator.iter, generator.iter))
                         )
             scope = getattr(scope, "parent", None)
         return None
+
+    def _as_list(self, expression: ast.AST, at: ast.AST) -> _Paths:
+        """What *expression* holds as what it is iterated for, its elements at ``[*]``: a dict's are its keys."""
+        held = self.held(expression, at)
+        return _below((_ALL,), _keys(held)) if _is_dict(expression, self.dicts) else held
 
     def _unpack_into(self, target: ast.AST, name: str, paths: _Paths) -> Optional[_Paths]:
         if isinstance(target, ast.Name):
@@ -4306,21 +4424,22 @@ class _PathCarry:
         if isinstance(call.func, ast.Name):
             if name in _TELLING_NOTHING:
                 return _NOTHING
+            as_list = self._as_list
             if name in _KEEPING:
-                return held(args[0], at) if args else _NOTHING
+                return (held(args[0], at) if name == "dict" else as_list(args[0], at)) if args else _NOTHING
             if name == "next":
-                return _elements(held(args[0], at)) if args else _NOTHING
+                return _elements(as_list(args[0], at)) if args else _NOTHING
             if name in ("filter", "map") and len(args) >= 2:
-                return held(args[1], at)  # the elements kept, or what is made of each (read as the element)
+                return as_list(args[1], at)  # the elements kept, or what is made of each (read as the element)
             if name in ("min", "max") and len(args) == 1:
-                return _under(_ALL, held(args[0], at))
+                return _under(_ALL, as_list(args[0], at))
             if name == "enumerate" and args:
-                return _below((_ALL, "[1]"), _under(_ALL, held(args[0], at)))
+                return _below((_ALL, "[1]"), _under(_ALL, as_list(args[0], at)))
             if name == "zip":
                 return frozenset(
                     path
                     for index, one in enumerate(args)
-                    for path in _below((_ALL, f"[{index}]"), _under(_ALL, held(one, at)))
+                    for path in _below((_ALL, f"[{index}]"), _under(_ALL, as_list(one, at)))
                 )
             if name == "getattr" and len(args) >= 2:
                 attr = args[1]
@@ -4429,13 +4548,21 @@ class _Reading:
         self._placed: dict[tuple, Optional[Placed]] = {}
         #: Keyed by node ids, each holding the node, so that no id is reused while the build runs.
         self._writes: dict[int, tuple[ast.AST, list[_Write]]] = {}
+        self._dicts: dict[int, tuple[ast.AST, frozenset[str]]] = {}
         self._surviving: dict[tuple, set[int]] = {}
         self._nested: dict[int, tuple[ast.AST, set[int]]] = {}
 
     def writes_of(self, func: ast.AST) -> list[_Write]:
         held = self._writes.get(id(func))
         if held is None:
-            held = self._writes[id(func)] = (func, _PathCarry.read_writes(func))
+            held = self._writes[id(func)] = (func, _PathCarry.read_writes(func, self.dicts_of(func)))
+        return held[1]
+
+    def dicts_of(self, func: ast.AST) -> frozenset[str]:
+        """The names *func* holds dicts in (:func:`_dict_names`)."""
+        held = self._dicts.get(id(func))
+        if held is None:
+            held = self._dicts[id(func)] = (func, _dict_names(func))
         return held[1]
 
     def surviving(self, func: ast.AST, name: str, statement: ast.AST, writes: list[_Write]) -> set[int]:
