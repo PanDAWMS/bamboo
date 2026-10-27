@@ -149,6 +149,25 @@ case of mine asks `finished` (2026-10-26); not counted map-wide.
 *Shows:* a kept mover in S1 that the rows reach only as a value computed from them.
 *Revisit:* when the map says per crossing whether it hands rows or values computed from them (its U1).
 
+### K28. A write keyed by a statement's rows is the statement's whatever column fills the key
+
+Past a selecting statement's region, S1 takes an arm of the owner's as the statement's where the map says the
+statement's rows fill the key the arm's write names its row by (`keyed_arms`, the map's `KeyFrom`, 2026-10-27):
+`prepareTasksToBeFinished_JEDI` keys the writes of its later loop by the `jediTaskID` its statements at 3723 and 3768
+select.  The map says where in a value the rows sit, not which column of them fills the key (its ii and U1), so a key
+computed from the rows, or filled from a column naming another row, reads as the rows: the owner is kept as a mover
+where it may not be one.  Nor is an arm's path condition read against the rows' values, here as in the region:
+`getTasksToBeFinished_JEDI`'s 1705 runs only for a `scouted` row (`if taskStatus == "scouted":`), yet it is 1676's
+for each value 1676 selects, and the function is kept as a mover of `prepared`, `passed`, `tobroken` and `toabort`,
+which it hands on to the agent that moves them (`post_process_tasks`, through its return; on pin k, 2026-10-27).  An
+arm whose key the map did not read (no bind map, no bind found, a value not followed) keeps the owner too, said.  Not
+seen: rows reaching the key through a call (the map's v), and a write naming its row by an object (the attribute arms,
+a step of the map's own) -- such an arm is the statement's only inside its region, as before.
+
+*Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]", or "...
+the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept".
+*Revisit:* with the map's per-column carry (ii, U1); the attribute arms when the map reads them.
+
 ### K16. S1 asks a writer that takes a row by its key over the window's last part only
 
 S1's movers are the statements' (`movers_of`): the functions the rows of a statement selecting the value reach, and
