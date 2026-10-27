@@ -33,8 +33,8 @@ def _corpus(tmp_path: Path) -> Path:
 
 
 def _run(tmp_path: Path, code: str, **env: str | None) -> subprocess.CompletedProcess[str]:
-    """Run *code* in a child interpreter that imports bamboo from this repository."""
-    child = {k: v for k, v in os.environ.items() if k not in ("BAMBOO_TREE", "PANDA_PIN", "PYTHONPATH")}
+    """Run *code* in a child interpreter that imports bamboo from this repository; rule 8's switch is the test's to set."""
+    child = {k: v for k, v in os.environ.items() if k not in ("BAMBOO_TREE", "PANDA_PIN", "PYTHONPATH", "RULE8_FILE_LEVEL")}
     child |= {"PYTHONPATH": str(REPO), "PYTHONDONTWRITEBYTECODE": "1", "PANDA_PIN": str(_corpus(tmp_path))}
     for k, v in env.items():
         if v is None:
@@ -273,6 +273,48 @@ def test_runs_are_cut_by_the_instance_token_and_the_key_is_a_whole_token(tmp_pat
     assert continuation == ["Traceback (most recent call last):"]
     # a run that printed DEBUG lines had ERROR switched on
     assert would_print is True
+
+
+def test_rule_8_wants_the_level_in_the_file_where_a_filter_may_send_it_elsewhere_or_panda_common_is_not_found(tmp_path):
+    quiet, loud = tmp_path / "panda-x.log", tmp_path / "panda-y.log"
+    quiet.write_text(
+        "2026-01-01 00:00:00,000 panda.log.X: DEBUG    <PandaID=12345> start\n"
+        "2026-01-01 00:00:01,000 panda.log.X: DEBUG    <PandaID=999> start\n"
+    )
+    loud.write_text(quiet.read_text() + "2026-01-01 00:00:02,000 panda.log.X: ERROR    <PandaID=999> failed\n")
+    out = _ok(
+        _run(
+            tmp_path,
+            f"""
+            import importlib.util
+            import json
+            from bamboo.querier import records
+            from bamboo.querier.records import read_log, runs_for
+
+            def prints(path):
+                return runs_for(read_log(path), "12345")[0].would_print("ERROR")
+
+            found = importlib.util.find_spec
+            importlib.util.find_spec = lambda name, *rest: None if name == "pandacommon" else found(name, *rest)
+            missing = records.level_filters()
+            not_found = [prints({str(quiet)!r}), prints({str(loud)!r})]
+            records.level_filters = lambda: []
+            none = prints({str(quiet)!r})
+            records.level_filters = lambda: ["p/logger.py:7"]
+            one = [prints({str(quiet)!r}), prints({str(loud)!r})]
+            print(json.dumps([missing, not_found, none, one]))
+            """,
+        )
+    )
+    missing, not_found, none, one = json.loads(out)
+    # panda-common not found is not "no filter": its loggers were not read
+    assert missing == ["pandacommon: not found, so its loggers were not read"]
+    # so a run's DEBUG lines do not say its ERROR reaches this file: some run's ERROR line in the file must
+    assert not_found == [False, True]
+    # no filter anywhere: the run's own lines say the level was on and the file takes it
+    assert none is True
+    # a filter found is read as panda-common not found
+    assert one == [False, True]
 
 
 def test_the_file_door_answers_each_log_with_its_file(tmp_path):
@@ -585,8 +627,13 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
 _RECORDED = """
     import json
     from pathlib import Path
+    from bamboo.querier import records
     from bamboo.querier.recorded import Ask, RecordedLogs
     from bamboo.querier.records import Unrecorded, runs_for
+
+    # rule 8 where no logging filter sends a level elsewhere, pinned rather than read from this machine: without
+    # panda-common installed (CI) its loggers are "not found" and the stricter rule holds -- a test of its own
+    records.level_filters = lambda: []
 
     M1, M2 = "aipanda093.cern.ch", "aipanda094.cern.ch"
     # rotated at 06:40 each day; a file's covers run 10 min past its rotation (margin_s), so neighbours overlap
