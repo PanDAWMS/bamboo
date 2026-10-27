@@ -253,27 +253,46 @@ def defs_holding(rel: str, func: str, lines: list[int]) -> list[ast.FunctionDef 
     return [f for f in defs if any(f.lineno <= n <= f.end_lineno for n in lines)] if lines else defs
 
 
-def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bool, gapped: bool) -> list[str]:
+def map_gaps(follow) -> dict[str, list]:
+    """``{owner: [ReaderGap]}``: where the map could not read a mover's statements on these rows -- a selecting
+    function's and a guarding one's, one judgement for both (``strategy.attach_mover_gaps``)."""
+    return {**follow.reader_gaps, **{g.owner: g.gaps for g in follow.guarded_by if g.gaps}}
+
+
+def hides_where(gaps: list) -> bool:
+    """Whether a mover's gaps can hide where its rows go, and so a write its reach has no junction for: any gap but a
+    statement read only in part, which hides which rows it takes (``ReaderGap.hides_where``).  Only such a gap keeps a
+    mover with no arm of its own; every gap is said (``gap_said``)."""
+    return any(gap.hides_where for gap in gaps)
+
+
+def gap_said(gaps: list) -> str:
+    """A mover's gaps in the map's words (``strategy.gap_texts``): a text per kind, with every line of the kind."""
+    return "; ".join(strategy_mod.gap_texts(gaps))
+
+
+def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bool, hidden: bool) -> list[str]:
     """Why S1 keeps a mover with no arm of its own: it moves the value, if at all, through what it calls or the rows it
     hands on.  None is dropped: ``called_from`` holds two hops, so a write further down is not seen, and "not listed"
     is not "does not reach" (bamboo-85; tmaeno, 2026-10-14).  Dropping one is the map's reach's to say, with its holes
-    (``reach_said``); these are the reasons of a mover it keeps, or where the dump has no reach (KNOWN_ISSUES.md K14)."""
+    (``reach_said``); these are the reasons of a mover it keeps, or where the dump has no reach (KNOWN_ISSUES.md K14).
+    *hidden*: a gap of the map's may hide where its rows go (``hides_where``)."""
     return [why for why, holds in (
         ("its def is not found", not found),
         (f"it calls into {reached}", reached),
         (f"it may call into {cut}, whose callers the map lists only in part", cut),
         ("it hands its rows on", hands),
-        ("the map could not read all of it", gapped),
+        ("the map could not read where all its rows go", hidden),
     ) if holds] or ["no call it makes reaches a writer of another value within the two hops the map lists, "
                     "and a write further down is not seen (KNOWN_ISSUES.md K14)"]
 
 
-def reach_said(reach: dict | None, gapped: bool) -> tuple[bool, str | None]:
+def reach_said(reach: dict | None, hidden: bool) -> tuple[bool, str | None]:
     """``(dropped, line)``: whether S1 drops a mover with no arm of its own by what the map's reach says of it
     (``Rerun._reach_of``), and the line saying so.  Dropped only where it reaches no write of another value and leaves
     no call on the way open (the map's ``[]``, never its ``None``), its own defs hold no arm the junctions place there,
-    and the map read all of it -- a gap may hide a write the reach has no junction for (build2-design.md 6, R1).  No
-    line where the map was not asked."""
+    and no gap of the map's may hide where its rows go (*hidden*, ``hides_where``) -- such a gap may hide a write the
+    reach has no junction for (build2-design.md 6, R1).  No line where the map was not asked."""
     if reach is None:
         return False, None
     if reach["own_arms"]:
@@ -286,8 +305,9 @@ def reach_said(reach: dict | None, gapped: bool) -> tuple[bool, str | None]:
     if writes is None:
         return False, (f"reach: reaches no write of another value, but {reach['holes']} call(s) on the way are left "
                        f"open, e.g. {reach['first_holes']}")
-    if gapped:
-        return False, "reach: reaches no write of another value and leaves nothing open, but the map could not read all of it: kept"
+    if hidden:
+        return False, ("reach: reaches no write of another value and leaves nothing open, but the map could not read "
+                       "where all its rows go: kept")
     return True, (f"no arm of its own, and reaches no write of another value with nothing left open (closure "
                   f"{reach['closure']}; assuming {sorted(reach['assumptions'])}): dropped")
 
@@ -1862,8 +1882,9 @@ class Rerun:
             self.say(f"  mover {owner}: {why}")
         for owner in keyed:
             self.say(f"  mover {owner}: a writer that takes a row by its key")
-        gaps = {**follow.reader_gaps, **{g.owner: g.gaps for g in follow.guarded_by if g.gaps}}
-        self.say(f"where the map could not read them: {gaps or 'nowhere'}" + (f" ({follow.gaps_note})" if follow.gaps_note else ""))
+        gaps = map_gaps(follow)
+        said_gaps = {owner: strategy_mod.gap_texts(held) for owner, held in gaps.items()}
+        self.say(f"where the map could not read them: {said_gaps or 'nowhere'}" + (f" ({follow.gaps_note})" if follow.gaps_note else ""))
         readings = self._read_at_as_of(q, follow, writers, movers)
         asking = W.stuck(self.data.get("statuslog", {}), q.observed)
         asked = f"{q.subject}={q.observed}"
@@ -1890,10 +1911,11 @@ class Rerun:
                 lines = [rs.line for rs in giving if rs.owner == owner]
                 defs = defs_holding(rel, func, lines)
                 reached, cut = through_calls(rel, [(f.lineno, f.end_lineno) for f in defs], writers, q.subject, q.observed)
-                kept = kept_without_arms(bool(defs), reached, cut, owner in handers, owner in gaps)
+                hidden = hides_where(gaps.get(owner, []))
+                kept = kept_without_arms(bool(defs), reached, cut, owner in handers, hidden)
                 # the map's reach decides, where it can say for certain that nothing it goes on into moves the value
                 reach = self._reach_of(q, owner, lines) if defs else None
-                dropped, said = reach_said(reach, owner in gaps)
+                dropped, said = reach_said(reach, hidden)
                 if reach is not None:
                     entry["reach"] = reach
                 if dropped:
@@ -1906,7 +1928,7 @@ class Rerun:
                 if said:
                     self.say(f"  {func}: {said}")
             if gaps.get(owner):
-                entry["reasons"].append({"code": "map-gap", "text": f"the map could not read all of it ({'; '.join(gaps[owner])})"})
+                entry["reasons"].append({"code": "map-gap", "text": f"the map could not read all of it ({gap_said(gaps[owner])})"})
             if prints_nothing(owner, list(arms)):
                 said = (f"{len(arms)} arm(s) that write another value {[(a.line, a.outcomes) for a in arms.values()]}; the map "
                         f"has no prints of its own for it, so no run in a log is its own: not followed (KNOWN_ISSUES.md K25)")
@@ -2466,7 +2488,7 @@ class Rerun:
         # M2: every mover in the window -- by the statements that select the value, by the writes that require it, and
         # every other writer of another value, which takes a row by its key
         strategy_mod.attach_mover_gaps(inv.hops[0].strategy, R.ROOTS)
-        gaps = {**follow.reader_gaps, **{g.owner: g.gaps for g in follow.guarded_by if g.gaps}}
+        gaps = map_gaps(follow)
         writers = asyncio.run(self._writers_of(q.subject))
         movers = movers_of(follow, writers, q.subject, q.observed)
         owners = list(dict.fromkeys(j.owner for j in writers))
@@ -2617,7 +2639,7 @@ class Rerun:
                 reasons.append({"code": "K15", "text": said[-1]})
             gaps = q.gaps.get(owner) or []
             if gaps:
-                said.append(f"the map could not read all of it ({'; '.join(gaps)})")
+                said.append(f"the map could not read all of it ({gap_said(gaps)})")
                 reasons.append({"code": "map-gap", "text": said[-1]})
             if verdict not in ("moved it", "write refuses", "refused"):
                 # what keeps each statement from a verdict: a value the rows file does not hold, a run-time key

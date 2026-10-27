@@ -124,7 +124,9 @@ S1 counts a mover's arms in its own function only; `TaskBuffer.killJobs` writes 
   its statement -- every def of its name where it takes rows another selects -- does any function it can go on into
   hold an arm moving the value off?  It drops the mover (`reaches-no-write`) only where the answer is `[]`: no write
   reached and no call on the way left open.  It keeps one whose own defs hold an arm the junctions place there though
-  S1 counts none, and one the map could not read all of (a gap may hide a write the reach has no junction for).  A kept
+  S1 counts none, and one where the map could not read where all its rows go (a gap that may hide a write the reach has
+  no junction for: any `ReaderGap` but a statement read only in part, whose gap is which rows it takes -- `hides_where`).
+  Every gap is said, a part-read one too (`map-gap`, in the map's words).  A kept
   mover says why as before (`kept_without_arms`) and what the reach found: the writers reached, or the calls left open.
   A dump with no `reach_graph` keeps them all, and says so once.
 - Kept for a call left open is not "can move it": the answer is `None`, not a write.

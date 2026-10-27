@@ -1251,7 +1251,38 @@ def test_s1_keeps_a_mover_with_no_arm_of_its_own_and_says_why(tmp_path):
                        "and a write further down is not seen (KNOWN_ISSUES.md K14)"]
     assert every == ["its def is not found", "it calls into ['killJob']",
                      "it may call into ['archiveJob'], whose callers the map lists only in part",
-                     "it hands its rows on", "the map could not read all of it"]
+                     "it hands its rows on", "the map could not read where all its rows go"]
+
+
+def test_s1_keeps_a_mover_for_a_gap_only_where_it_may_hide_where_the_rows_go_and_says_every_gap(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace
+            from bamboo.codemap.models import ReaderGap
+            from bamboo.querier.rerun import gap_said, hides_where, map_gaps
+
+            part = ReaderGap(kind="partial", file="p/m.py", line=472)
+            unnoded = ReaderGap(kind="unnoded", file="p/m.py", line=222, stops=[("unreached", "dry_sql_query")])
+            follow = SimpleNamespace(reader_gaps={"p/m.py::f": [part], "p/m.py::g": [part, unnoded]},
+                                     guarded_by=[SimpleNamespace(owner="p/m.py::h", gaps=[unnoded]),
+                                                 SimpleNamespace(owner="p/m.py::k", gaps=[])])
+            gaps = map_gaps(follow)
+            print(json.dumps([sorted(gaps), [hides_where(gaps[o]) for o in sorted(gaps)], hides_where([]),
+                              gap_said(gaps["p/m.py::g"])]))
+            """,
+        )
+    )
+    owners, hidden, none, said = json.loads(out.splitlines()[-1])
+    # a selecting function's gaps and a guarding one's, none for a function the map read all of
+    assert owners == ["p/m.py::f", "p/m.py::g", "p/m.py::h"]
+    # a statement read in part hides which rows it takes, not where they go: it alone keeps no mover
+    assert hidden == [False, True, True] and none is False
+    # every gap is said, a text per kind in the map's order, with its lines
+    assert said == ("@222 dry_sql_query -- a statement here that reads these rows stopped being read, and has no node; "
+                    "@472 -- a statement here that reads these rows was read only in part")
 
 
 def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_nothing_open(tmp_path):
@@ -1282,7 +1313,7 @@ def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_no
                             "['p/m.py::f:3 x.y -- why']"]
     assert writes == [False, "reach: reaches 1 writer(s) of another value: ['killJob']"]
     # a gap in the map's reading may hide a write the reach has no junction for (R1)
-    assert gapped[0] is False and "could not read all of it" in gapped[1]
+    assert gapped[0] is False and "could not read where all its rows go" in gapped[1]
     # an arm the junctions place in its own def, though S1 counts none: the two disagree, so it is kept
     assert own[0] is False and "though S1 counts none" in own[1]
 
