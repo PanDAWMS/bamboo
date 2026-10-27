@@ -480,9 +480,12 @@ def extract(
                     # column of one ``SET`` is bounded by the same ``WHERE``,
                     # and settling inside the column loop would count each
                     # unsettled bind as many times as the statement has
-                    # columns.
+                    # columns.  Each test once: one testing two written columns
+                    # (a lock's ``(locked_by IS NULL OR lock_time < :t)``) is
+                    # filed under both.
+                    terms = sorted(set(statement.preconditions.values()))
                     preconditions = []
-                    for term in sorted(statement.preconditions.values()):
+                    for term in terms:
                         settled, done = sql.settled_precondition(
                             term, func, run.varmap, run.window, settle, at=run
                         )
@@ -509,7 +512,7 @@ def extract(
                     for column, term in sorted(statement.preconditions.items()):
                         if column in carried_when:
                             term_when.setdefault(term, carried_when[column])
-                    whens = [term_when.get(term) for term in sorted(statement.preconditions.values())]
+                    whens = [term_when.get(term) for term in terms]
                     if row_keys is not None and statement.preconditions:
                         row_keys.append(_row_key_source(func, run, statement, module.rel_path))
                     # A name nobody could read is not a table that holds no
@@ -592,13 +595,13 @@ def extract(
                             # they bound this write as much as its own does.
                             row_precondition=preconditions,
                             whens=whens,
-                            row_precondition_spelled=list(statement.preconditions.values()),
+                            row_precondition_spelled=terms,
                             call=run.call,
                             column=column,
                             carriers=carriers,
                             setters=setters,
                             # Called by _record before the loop moves on; the defaults keep this pass's run if it ever is not.
-                            beside=lambda node, terms=sorted(statement.preconditions.values()), func=func, run=run: [
+                            beside=lambda node, terms=terms, func=func, run=run: [
                                 sql.settled_precondition(
                                     term, func, run.varmap, run.window, settle, beside=node, at=run
                                 )[0]

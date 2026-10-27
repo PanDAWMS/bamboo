@@ -2210,6 +2210,28 @@ def test_a_row_precondition_is_what_every_statement_writing_the_value_requires(g
     assert branch.row_precondition == []
 
 
+def test_a_guard_testing_two_written_columns_is_one_term():
+    """``request_lock`` takes the lock where nobody holds it or the holder's time is up -- ``(locked_by IS NULL OR
+    locked_by=:locked_by OR lock_time < :min_lock_time)`` -- and the statement files that one test under each
+    column it names.  Read column by column, a branch held it twice."""
+    source = (
+        "class M:\n"
+        "    def f(self, rse, me, now, limit):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.ddm_endpoint SET locked_by=:locked_by, lock_time=:lock_time '\n"
+        "        sql += 'WHERE rse=:rse AND (locked_by IS NULL OR locked_by=:locked_by OR lock_time < :min_lock_time) '\n"
+        "        varMap = {}\n"
+        "        varMap[':rse'] = rse\n"
+        "        varMap[':locked_by'] = me\n"
+        "        varMap[':lock_time'] = now\n"
+        "        varMap[':min_lock_time'] = limit\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    held = [branch.row_precondition for junction in junctions for branch in junction.branches]
+
+    assert held and all(len(terms) == len(set(terms)) == 1 for terms in held)
+
+
 def test_a_column_one_pass_of_a_loop_writes_is_said_where_its_bind_is_filled():
     """``updateJobStatus`` appends ``,{key}=:{key}`` per parameter, and ``,memory_leak=:memory_leak`` on the pass
     for the job's metrics.  Run, the statement holds a ``{}`` where the passes are, glued to the value before it:
