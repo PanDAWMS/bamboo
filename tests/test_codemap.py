@@ -17566,6 +17566,28 @@ def test_the_answers_stops_are_the_builds_stops():
     assert any(s.reason == sql.SKIP_HANDED_IN for s in built)
 
 
+def test_a_statement_a_class_defined_in_a_function_runs_is_no_stop_of_that_function():
+    """``datasetManager.main`` defines its threads' classes in its own body, and their ``run`` methods execute the
+    statements.  ``main`` builds none of them, so read as its own calls each was a stop -- "no statement this
+    function builds reaches this call" -- and a gap under ``main`` in the answer; ``run`` is where they are read."""
+    source = (
+        "def main(taskBuffer):\n"
+        "    class CloserThr:\n"
+        "        def run(self):\n"
+        "            sql = 'UPDATE ATLAS_PANDA.Datasets SET status=:status WHERE vuid=:vuid'\n"
+        "            varMap = {':status': 'closed', ':vuid': self.vuid}\n"
+        "            self.proxy.cur.execute(sql, varMap)\n"
+        "    CloserThr().run()\n"
+    )
+    functions = {func.name: func for func in ast.walk(ast.parse(source)) if isinstance(func, ast.FunctionDef)}
+
+    skipped: list = []
+    assert sql.executions(functions["main"], skipped) == []
+    assert skipped == []
+    assert sqlwrite.statement_stops(functions["main"], "pandaserver/daemons/scripts/datasetManager.py") == []
+    assert [run.call.lineno for run in sql.executions(functions["run"])] == [6]
+
+
 def test_a_writes_row_keys_are_the_where_terms_it_does_not_guard():
     (write,) = sqltext.writes(
         "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newStatus "

@@ -43,6 +43,7 @@ What the text says -- tables, columns, values, order -- is read by
 from __future__ import annotations
 
 import ast
+import collections
 import contextlib
 import logging
 import re
@@ -3285,6 +3286,25 @@ def _column_stops(reading: str, line: int, unresolved: tuple[Stop, ...]) -> tupl
     )
 
 
+def _own_walk(func: ast.AST) -> Iterator[ast.AST]:
+    """*func*'s nodes in :func:`ast.walk`'s order, without the bodies of the functions and classes it defines.
+
+    Those run elsewhere and are read as their own owners (:func:`bamboo.codemap.calls.own_nodes` reads the same
+    nodes, depth first).  Walked into, ``datasetManager.main``'s thread classes made each of their statements a stop
+    of ``main`` -- "no statement this function builds reaches this call" -- and a gap under ``main`` in the answer.
+    The order is ``ast.walk``'s, because a statement run on two lines is named by the first run read.
+    """
+    todo = collections.deque([func])
+    while todo:
+        node = todo.popleft()
+        todo.extend(
+            child
+            for child in ast.iter_child_nodes(node)
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
+        )
+        yield node
+
+
 def _executions_read(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> tuple[list[Execution], list["Skip"]]:
@@ -3293,7 +3313,7 @@ def _executions_read(
     found: list[Execution] = []
     skips: list[Skip] = []
     names = runners()
-    for node in ast.walk(func):
+    for node in _own_walk(func):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         if node.func.attr not in names:
