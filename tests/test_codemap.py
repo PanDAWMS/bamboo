@@ -1464,13 +1464,7 @@ def _sql_unexplained(
     return unexplained, coverage
 
 
-def test_a_varmap_handed_to_executemany_is_named_as_the_reason():
-    # 104 of the corpus's 140 unaccounted-for written columns are this one
-    # shape, and every number beside it said only "89%".  executemany takes
-    # a *sequence* of maps, so the name in the call is never subscripted with a
-    # placeholder -- looking for one and reporting "nothing binds it" sends a
-    # reader to a function that plainly fills every value.
-    unexplained, coverage = _sql_unexplained('''
+_EXECUTEMANY = '''
 class TaskModule:
     def bulkUpdate(self, ids):
         sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
@@ -1483,25 +1477,61 @@ class TaskModule:
             varMap[":status"] = "finished"
             varMaps.append(varMap)
         self.cur.executemany(sqlU + comment, varMaps)
-''')
 
-    assert [(row.column, row.reason) for row in unexplained] == [
-        ("status", sqlwrite.VARMAP_IS_A_LIST)
-    ]
-    # Read off the call form, so the detail names the list rather than guessing.
-    assert "varmap=varMaps" in unexplained[0].detail
-    # The reason is a gap: every value is decided right here.
-    assert sqlwrite.VARMAP_IS_A_LIST not in sqlwrite.ACCOUNTED_FOR
-    # And naming it does not change what the ratio counts.
+    def stagedUpdate(self, ids):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlU += "SET status=:new_status "
+        sqlU += "WHERE jediTaskID=:jediTaskID AND status=:old_status "
+        varMap = {}
+        varMap[":old_status"] = "defined"
+        varMap[":new_status"] = "ready"
+        varMaps = []
+        for jediTaskID in ids:
+            tmp_varMap = varMap.copy()
+            tmp_varMap[":jediTaskID"] = jediTaskID
+            varMaps.append(tmp_varMap)
+        self.cur.executemany(sqlU + comment, varMaps)
+
+    def literalUpdate(self, ids):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlU += "SET status=:status "
+        sqlU += "WHERE jediTaskID=:jediTaskID "
+        varMaps = []
+        for jediTaskID in ids:
+            varMaps.append({":jediTaskID": jediTaskID, ":status": "running"})
+        self.cur.executemany(sqlU + comment, varMaps)
+'''
+
+
+def test_a_varmap_handed_to_executemany_is_read_through_the_maps_appended_to_it():
+    # 104 of the corpus's 140 unaccounted-for written columns were this one
+    # shape once, and on pin k updateInputFilesStaged_JEDI's staging -> pending
+    # had no junction for it.  executemany takes a *sequence* of maps, so the
+    # name in the call is never subscripted with a placeholder: each map
+    # appended to it holds what it held when it was appended -- one filled in
+    # the loop, a copy of one filled before it, or a dict literal.
+    _subjects, junctions, coverage, _u, _c, _a = _sql_extract(_EXECUTEMANY)
+
+    outcomes = {
+        (junction.owner.rsplit("::", 1)[-1], branch.outcome, tuple(branch.row_precondition))
+        for junction in junctions
+        for branch in junction.branches
+    }
+    assert outcomes == {
+        ("bulkUpdate", "finished", ()),
+        ("stagedUpdate", "ready", ("status=defined",)),
+        ("literalUpdate", "running", ()),
+    }
     written = [c for c in coverage if c.slice_name == sqlwrite.SLICE_NAME]
-    assert [(c.explained, c.candidates) for c in written] == [(0, 1)]
+    assert [(c.explained, c.candidates) for c in written] == [(3, 3)]
 
 
-def test_a_placeholder_bound_without_its_colon_is_told_from_one_nobody_bound():
-    # hs_scrapers writes r["source"] = url against VALUES (:source).
-    # Pooled into "nothing binds this placeholder" it reads as a value the code
-    # does not decide, which is what the same statement's other columns are --
-    # they come from a parsed HTML row.  Two findings, one of them fixable.
+def test_a_placeholder_bound_without_its_colon_binds_it_as_the_cursor_does():
+    # hs_scrapers writes r["source"] = url against VALUES (:source), and
+    # insertFilesForDataset_JEDI varMap["status"] = "lost" against
+    # SET status=:status.  WrappedCursor.execute binds a key without its colon
+    # to the placeholder with it, so the value is decided right here; the
+    # other column is still one nothing binds.
     unexplained, _coverage = _sql_unexplained('''
 class TaskModule:
     def insertRows(self, rows, url):
@@ -1513,7 +1543,6 @@ class TaskModule:
 ''')
 
     assert {row.column: row.reason for row in unexplained} == {
-        "status": sqlwrite.PLACEHOLDER_MISSING_COLON,
         "oldStatus": sqlwrite.NOTHING_BINDS_IT,
     }
 
@@ -17959,3 +17988,54 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
     assert [(s.kind, s.name) for s in by[("resetTask", "jediTaskID=:jediTaskID")].sources] == [("constant", "123")]
     lost = by[("lostKey", "jediTaskID=:jediTaskID")]
     assert (lost.sources, lost.unread) == ([], "no bind found")
+
+
+_BATCHED = '''
+from pandacommon.pandautils.PandaUtils import batched
+
+
+class TaskModule:
+    def updateStaged(self, task_dict, chunk_size=500):
+        sqlU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:new_status "
+        sqlU += "WHERE jediTaskID=:jediTaskID AND status=:old_status "
+        varMap = dict()
+        varMap[":old_status"] = "staging"
+        varMap[":new_status"] = "pending"
+        with_id = {}
+        for name, (task_id, _other) in task_dict.items():
+            with_id[name] = (task_id, _other)
+        for one_batch in batched(with_id.items(), chunk_size):
+            varMaps = []
+            for name, (task_id, _other) in one_batch:
+                tmp_varMap = varMap.copy()
+                tmp_varMap[":jediTaskID"] = task_id
+                varMaps.append(tmp_varMap)
+            self.cur.executemany(sqlU + comment, varMaps)
+'''
+
+
+def test_a_key_filled_from_a_batch_is_the_batched_values_not_the_batch_size(tmp_path):
+    """``updateInputFilesStaged_JEDI``'s shape: a map per file, copied from one filled before the loop, appended to the
+    list ``executemany`` takes, the file's key from a batch of a dict the caller handed.  ``batched`` is not the
+    corpus's, and a call no reading places holds the rows where something handed to it holds them whole -- so the
+    batch size, an int handed whole, read as every key's source, and the dict, handed as items, as none."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _BATCHED})
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    keys: list[RowKeySource] = []
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(
+            modules, MAP_ID, VERSION, attributor, row_keys=keys, key_froms=froms
+        )
+        sqlwrite.attach_key_sources(keys, junctions, calls, record, key_froms=froms, read_sites=[])
+
+    assert {
+        (branch.outcome, tuple(branch.row_precondition)) for junction in junctions for branch in junction.branches
+    } == {("pending", ("status=staging",))}
+    (key_from,) = [one for one in froms if one.term == "jediTaskID=:jediTaskID"]
+    assert key_from.unread == ""
+    assert {(source.kind, source.name) for source in key_from.sources} == {("parameter", "task_dict")}

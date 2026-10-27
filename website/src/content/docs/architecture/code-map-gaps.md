@@ -106,11 +106,10 @@ Counted as distinct (function, table, column).
 
 | Reason | Count | What it usually is |
 |---|---|---|
-| `the varmap is one of a list handed to executemany` | 81 | `configurator_write_ddm_endpoints`, `updateEventRanges`, `insertNewJob`: bind maps filled per row and appended to a list |
+| `the varmap is one of a list handed to executemany` | 36 on `8e24aa1a` (85 before the maps appended to a list were read) | `configurator_write_ddm_endpoints`, `configurator_write_panda_ddm_relations`, `loadSWTags`: a list cut into shards by `create_shards`, or built by `list(map(lambda ...))`, before `executemany` takes it; a map appended to the list, by name or as a literal, is read |
 | `nothing in this function binds this placeholder` | 22 | |
 | `the placeholder is spelled by an expression` | 14 | `propagateResultToJEDI`'s `varMap[f":{tmpKey}"]` over a local list; `updateJobStatus`'s `memory_leak`; `updateJob` |
 | `the execute call names no varmap` | 9 | |
-| `the placeholder is bound without its leading colon` | 4 | |
 | `bound outside the window this execution owns` | 2 | |
 
 Statements a function builds that the read side did not see run. `build-map` prints them under

@@ -2370,9 +2370,13 @@ def scan_binds(
     disagree.  See :class:`BindScan` for what is counted and what ignores
     *window* and *at*.
 
-    *across* also reads a varmap this function copies from another name
-    (``getValMap = copy.copy(getValMapOrig)``) and one a call hands it
-    (``..., getValMapOrig = build_where_clause()``, inside
+    A varmap this function copies from another name (``getValMap =
+    copy.copy(getValMapOrig)``, ``tmp_varMap = varMap.copy()``) holds what the
+    original held when the copy was taken, and a list of maps handed to
+    ``executemany`` what each map appended to it held then -- by name or as a
+    dict literal.  A key binds its placeholder with or without the leading
+    colon (:func:`_same_placeholder`).  *across* also reads one a call hands
+    it (``..., getValMapOrig = build_where_clause()``, inside
     :func:`across_calls`).  A bind found that way sits in the other function,
     so its ``site`` is not a line of *func*: a caller anchoring on the site
     asks for it only where it reads the value and nothing else.
@@ -2421,6 +2425,36 @@ def scan_binds(
             if held.bind == key:
                 keep(Bind(held.values, node), node)
             continue
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "append"
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == varmap
+            and len(node.value.args) == 1
+        ):
+            # A list of maps -- ``executemany(sql, varMaps)`` -- holds what each map appended to it held when it
+            # was appended, as a copy holds what its original held: updateInputFilesStaged_JEDI appends a copy
+            # of a map whose status binds were filled before the loop.
+            element = node.value.args[0]
+            assigned = True
+            if isinstance(element, ast.Name) and hops < RETURN_HOPS:
+                inner = scan_binds(
+                    func, element.id, key, None, across, hops + 1, at=node if at is not None else None
+                )
+                spelled_keys |= inner.constant_keys
+                for bind in inner.binds:
+                    keep(bind, node)
+            elif isinstance(element, ast.Dict):
+                for spelled, value in zip(element.keys, element.values, strict=True):
+                    if not isinstance(spelled, ast.Constant):
+                        computed += 1
+                        continue
+                    spelled_keys.add(spelled.value)
+                    if _same_placeholder(spelled.value, key):
+                        keep(Bind(value, node), node)
+            continue
         targets = targets_of(node)
         if not targets:
             continue
@@ -2444,12 +2478,12 @@ def scan_binds(
                     keep(Bind(node.value, node), node)
                     continue
                 spelled_keys.add(target.slice.value)
-                if target.slice.value != key:
+                if not _same_placeholder(target.slice.value, key):
                     continue
                 keep(Bind(node.value, node), node)
             elif isinstance(target, ast.Name) and target.id == varmap:
                 assigned = True
-                copied = _copied_from(node.value) if across else None
+                copied = _copied_from(node.value)
                 if copied is not None and hops < RETURN_HOPS:
                     # What the copy holds is what the original held when the
                     # copy was taken, so the original's binds are paired with
@@ -2474,7 +2508,7 @@ def scan_binds(
                         computed += 1
                         continue
                     spelled_keys.add(spelled.value)
-                    if spelled.value != key:
+                    if not _same_placeholder(spelled.value, key):
                         continue
                     keep(Bind(value, node), node)
 
@@ -2517,6 +2551,15 @@ def scan_binds(
         constant_keys=frozenset(spelled_keys),
         outside_window=excluded,
     )
+
+
+def _same_placeholder(spelled: object, key: str) -> bool:
+    """Whether a map's key *spelled* binds the placeholder *key* -- with or without its leading colon, as
+    ``WrappedCursor.execute`` binds ``varMap["status"]`` to ``:status`` (``insertFilesForDataset_JEDI``'s lost
+    files, ``hs_scrapers``' ``r["source"]``)."""
+    if isinstance(spelled, str) and isinstance(key, str):
+        return spelled.lstrip(":") == key.lstrip(":")
+    return spelled == key
 
 
 def _renews(func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str) -> list[ast.stmt]:

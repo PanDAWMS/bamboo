@@ -150,7 +150,6 @@ VARMAP_FROM_OUTSIDE = "the varmap is not built in this function"
 BOUND_OUTSIDE_WINDOW = "bound outside the window this execution owns"
 PLACEHOLDER_COMPUTED = "the placeholder is spelled by an expression"
 VARMAP_IS_A_LIST = "the varmap is one of a list handed to executemany"
-PLACEHOLDER_MISSING_COLON = "the placeholder is bound without its leading colon"
 NOTHING_BINDS_IT = "nothing in this function binds this placeholder"
 NO_DECIDING_FRAGMENT = "the fragment that wrote this value could not be located"
 
@@ -877,20 +876,15 @@ def _outcomes(
             # than from a second walk asking why -- see ``sql.BindScan``.
             if _runs_many(run):
                 # ``executemany(sql, varMaps)`` is handed a *sequence* of maps,
-                # each appended after being filled, so the name in the call
-                # never carries a placeholder as a key.  Read off the call form
+                # and none the scan reads its maps from was appended to it --
+                # one a helper cuts (``for shard in create_shards(maps, 100)``),
+                # one ``list(map(lambda ...))`` builds.  Read off the call form
                 # rather than off the list, which is what makes it exact.
                 why.append(VARMAP_IS_A_LIST)
             elif not scan.varmap_assigned:
                 why.append(VARMAP_FROM_OUTSIDE)
             elif scan.outside_window:
                 why.append(BOUND_OUTSIDE_WINDOW)
-            elif supplied.text.lstrip(":") in scan.constant_keys:
-                # ``hs_scrapers`` writes ``r["source"] = url`` against
-                # ``VALUES (:source)``.  The key is there and the colon is not,
-                # so a reader matching the spelled placeholder misses a value
-                # that was decided right here.
-                why.append(PLACEHOLDER_MISSING_COLON)
             elif scan.computed_keys and supplied.text not in scan.constant_keys:
                 why.append(PLACEHOLDER_COMPUTED)
             else:
@@ -3847,6 +3841,12 @@ _SERIALIZING = frozenset({"dumps", "str", "repr"})
 #: A builtin container's methods handing back the container, and one of its elements.
 _CONTAINER_KEEPING = frozenset({"copy"})
 _CONTAINER_ELEMENT = frozenset({"get", "pop", "popitem", "setdefault"})
+#: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
+#: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
+#: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
+_CHUNKING = frozenset({"batched"})
+_SLICING = frozenset({"islice"})
+_CHAINING = frozenset({"chain"})
 
 
 def _cut(path: tuple[str, ...]) -> tuple[str, ...]:
@@ -4107,12 +4107,13 @@ class _PathCarry:
 
     A call's value is read from where it lands (:class:`_Reading`): what the definition returns of what it is
     handed, what a constructor keeps in its object.  A call no reading places is a builtin's or a hole: a container
-    method takes the part it names, a builtin of :data:`_KEEPING` keeps its argument, and any other call's value
-    holds the rows where something it is handed holds them whole -- a part of them handed to a hole makes nothing
-    of them.  What the reach record reads as the database gives nothing back of this statement's rows: its answer
-    is another run's (a call inside it, a bind's ``int(row[0])``, is read as any other).  A call placed in the
-    corpus can put what it is handed into an object named here (its summary's *kept*): ``fileSpec.pack(row)`` fills
-    ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.
+    method takes the part it names, a builtin of :data:`_KEEPING` keeps its argument, an iterator helper outside the
+    corpus (``batched``, ``islice``, ``chain``) is made of its iterables' elements -- not of the count beside them --
+    and any other call's value holds the rows where something it is handed holds them whole -- a part of them
+    handed to a hole makes nothing of them.  What the reach record reads as the database gives nothing back of this
+    statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
+    other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
+    *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.
     """
 
     def __init__(
@@ -4485,6 +4486,12 @@ class _PathCarry:
                 elif not placed.thread:
                     found |= summary.returns
             return frozenset(found)
+        if args and name in _CHUNKING | _SLICING | _CHAINING:
+            # An iterator helper no reading places: the first argument's elements, or every one's -- not the
+            # count beside them, which the rule below would read as the whole value.
+            taken = args if name in _CHAINING else args[:1]
+            elements = frozenset(path for one in taken for path in _elements(self._as_list(one, at)))
+            return _below((_ALL, _ALL) if name in _CHUNKING else (_ALL,), elements)
         # A call no reading places -- a builtin, a str method, a hole: its value is made from what it is handed, and
         # holds the rows where something handed holds them whole (or an element of it does).
         parts = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
