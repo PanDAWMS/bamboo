@@ -168,6 +168,26 @@ a step of the map's own) -- such an arm is the statement's only inside its regio
 the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept".
 *Revisit:* with the map's per-column carry (ii, U1); the attribute arms when the map reads them.
 
+### K29. A birth is no arm only where the map says every write on its lines makes the row
+
+A write that makes the row moves no row off the value, yet the map holds an INSERT's values as junction branches,
+and S1 read each as an arm: `insertFilesForDataset_JEDI` INSERTs files ready, staging or pending (455 / 887 / 892) and
+was kept as a mover of `JediFileSpec.status=finished` and `ready`; births stood among the writers by_key_of asks (the
+movers oracle's rounds 3 and 4, 2026-10-27).  Now `arms_of` leaves out a branch each of whose lines (`line`,
+`other_lines`) is written only by KeyFroms the map marks as making a new row (`births_of`, `is_birth`: the map's
+`new_row`, its statement's mark on each KeyFrom of an INSERT), and says so with the map's why where the owner is
+still listed (K29 in S1's entry and L2's line).  A writer each of whose writes of another value is a birth has no arm
+left: it leaves the movers by key (K16) and L2's list as any writer with no arm does, and no line says it --
+`getTasksToRefine_JEDI` (1184, registered) at `JediTaskSpec.status=finishing`, `ppEventServiceJob` (5556 / 5558 /
+5560) and `makeFakeCoJumbo` (4509) at `JobSpec.jobStatus=activated` and `running`.  A line no KeyFrom names, an INSERT the map did not read, an entity moved within its class (an archive),
+a row rewritten (DELETE and INSERT of its whole key), a call that updates the table too, and a line an UPDATE writes
+too stay arms: errs on keeping.  An object of the table's class handed in is not followed to where its key was made
+(None): `insertNewJob`'s new jobs, whose PandaID `TaskBuffer.storeJobs` takes from the sequence, stay arms.
+
+*Shows:* "<owner>: its writes at [...] make the row (births: sequence at 623): not arms"; result.json's `births`; a
+writer with births alone is absent from the movers.
+*Revisit:* when the map follows an object handed in to where its key was made.
+
 ### K16. S1 asks a writer that takes a row by its key over the window's last part only
 
 S1's movers are the statements' (`movers_of`): the functions the rows of a statement selecting the value reach, and

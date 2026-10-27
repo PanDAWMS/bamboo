@@ -378,14 +378,16 @@ def every_log_asked(owner: str, lines, asked: list[str]) -> dict:
 def arms_of(writers: list, owner: str, subject: str, observed: str) -> dict[int, Arm]:
     """*owner*'s arms that can move *subject* on from *observed*, by line: not one that can only write the observed
     value, nor one whose write requires the row to hold other values of the subject's column -- its
-    ``row_precondition``, read as the map reads a guard (``required_values``); a term it cannot read keeps the arm."""
+    ``row_precondition``, read as the map reads a guard (``required_values``); a term it cannot read keeps the arm --
+    nor a birth, a write that makes the row (``births_of``)."""
     column = subject.partition(".")[2].lower()
+    marks = birth_marks(owner, subject)
     found: dict[int, Arm] = {}
     for j in writers:
         if j.owner != owner:
             continue
         for b in j.branches:
-            if b.line is None or b.outcome == observed:
+            if b.line is None or b.outcome == observed or born(b, marks):
                 continue
             required = [rv for term in b.row_precondition or [] if (rv := required_values(term)) and rv[0] == column]
             if any(observed not in values for _, values in required):
@@ -433,6 +435,60 @@ def key_froms() -> list:
     """The installed dump's ``key_froms``: where each row-naming term of a write was filled from (``KeyFrom``); none
     before an install or from a dump that has none."""
     return getattr(mapdump.fragment(), "key_froms", None) or []
+
+
+def is_birth(kf) -> bool:
+    """Whether the map says *kf*'s write makes a new row (its ``new_row``, BI): an INSERT whose key is new -- a
+    sequence's, RETURNING's, a value made in the function, or one not carried from a row or object of the table's own
+    class -- not the same entity moved within its class (an archive) or rewritten (DELETE and INSERT of the whole
+    key).  The one place S1 reads the mark; an INSERT the map did not read, or a call that updates the table too, says
+    None, and is no birth."""
+    return getattr(kf, "new_row", None) is True
+
+
+#: ``[the key_froms list indexed, its index]`` -- the list is held so that its id is never another list's
+_BIRTHS: list = [None, {}]
+
+
+def birth_marks(owner: str, subject: str) -> dict[int, list]:
+    """``{line: [KeyFrom, ...]}``: for each line *owner* writes *subject* on (a KeyFrom's ``writes``), the KeyFroms
+    writing it there.  The map puts its statement's mark on each KeyFrom of an INSERT, one per key column, so a
+    KeyFrom of another kind of write at the same statement (an UPDATE's term) says no birth for the line."""
+    kfs = key_froms()
+    if _BIRTHS[0] is not kfs:
+        index: dict[tuple, dict[int, list]] = {}
+        for kf in kfs:
+            for subj, lines in kf.writes.items():
+                for line in lines:
+                    index.setdefault((kf.owner, subj), {}).setdefault(line, []).append(kf)
+        _BIRTHS[:] = [kfs, index]
+    return _BIRTHS[1].get((owner, subject), {})
+
+
+def born(branch, marks: dict[int, list]) -> bool:
+    """Whether *branch* is a birth: each of its lines (``line`` and ``other_lines``) is written only by KeyFroms the
+    map marks as making a new row (*marks*, ``birth_marks``).  A line no KeyFrom names is not known to be one, so the
+    branch is not."""
+    lines = [branch.line, *(getattr(branch, "other_lines", None) or [])]
+    return all(marks.get(line) and all(is_birth(kf) for kf in marks[line]) for line in lines)
+
+
+def birth_why(owner: str, subject: str, lines: list[int]) -> str:
+    """Why the map calls *owner*'s writes of *subject* at *lines* births: each statement's ``new_row_by`` and the line
+    that decided it (``new_row_line``), e.g. "sequence at 623"."""
+    marks = birth_marks(owner, subject)
+    said = {(getattr(kf, "new_row_by", "") or "new", getattr(kf, "new_row_line", None))
+            for line in lines for kf in marks.get(line, ())}
+    return ", ".join(f"{by} at {at}" if at else by for by, at in sorted(said, key=str))
+
+
+def births_of(writers: list, owner: str, subject: str, observed: str) -> list[int]:
+    """*owner*'s branches of another value than *observed* that ``arms_of`` leaves out as births, by line: a write that
+    makes the row moves no row off the value (insertFilesForDataset_JEDI's files INSERTed ready, staging or pending;
+    KNOWN_ISSUES.md K29)."""
+    marks = birth_marks(owner, subject)
+    return sorted({b.line for j in writers if j.owner == owner for b in j.branches
+                   if b.line is not None and b.outcome != observed and born(b, marks)})
 
 
 def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]]]:
@@ -533,12 +589,13 @@ def refused_arms(writers: list, owner: str, subject: str, observed: str) -> list
     """*owner*'s writes of another value that ``arms_of`` drops because each requires the row to hold other values of
     the subject's column: ``line writes outcome only on a row holding column in [values]``."""
     column = subject.partition(".")[2].lower()
+    marks = birth_marks(owner, subject)
     out = []
     for j in writers:
         if j.owner != owner:
             continue
         for b in j.branches:
-            if b.line is None or b.outcome == observed:
+            if b.line is None or b.outcome == observed or born(b, marks):
                 continue
             for term in b.row_precondition or []:
                 rv = required_values(term)
@@ -1947,6 +2004,12 @@ class Rerun:
             entries.append(entry)
             if any(v == "refused" for _, v in mine):
                 entry["reasons"].append({"code": "K17", "text": "refused at the moment read, one moment of the window: not dropped"})
+            if made := births_of(writers, owner, q.subject, q.observed):
+                told = (f"its writes at {made} make the row (births: {birth_why(owner, q.subject, made)}): not arms"
+                        " (KNOWN_ISSUES.md K29)")
+                self.say(f"  {owner.split('::')[-1]}: {told}")
+                entry["births"] = made
+                entry["reasons"].append({"code": "K29", "text": told})
             if not arms:
                 # with no arm of its own, a mover moves the value, if at all, through what it calls or the rows it hands
                 # on: kept, and said why
@@ -2658,6 +2721,10 @@ class Rerun:
                     spans[where] = true
                 said.append(f"{where} {kind}" + (f", holds for the row {_spans_words(true, whole)}" if true else ""))
             reasons = []
+            if made := births_of(q.writers, owner, q.subject, q.observed):
+                said.append(f"its writes at {made} make the row (births: {birth_why(owner, q.subject, made)}): not arms"
+                            " (KNOWN_ISSUES.md K29)")
+                reasons.append({"code": "K29", "text": said[-1]})
             if owner == q.mover:
                 verdict = "moved it"
                 said.insert(0, f"at {q.moved} (L1)")
