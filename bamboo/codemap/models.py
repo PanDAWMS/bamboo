@@ -44,7 +44,7 @@ import json
 import re
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from bamboo.models.graph_element import BaseNode, NodeType
 
@@ -3770,12 +3770,14 @@ class FollowUp(BaseModel):
             "and the map does not say whether a field holds messages."
         ),
     )
-    reader_gaps: dict[str, list[str]] = Field(
+    reader_gaps: dict[str, list[ReaderGap]] = Field(
         default_factory=dict,
         description=(
             "``{reader: where the map could not read its statements on these "
-            "rows}``, the same judgement :attr:`GuardReading.gaps` carries for "
-            "the other half.  Only readers with one are listed."
+            "rows}``, a :class:`ReaderGap` per statement -- the same judgement "
+            ":attr:`GuardReading.gaps` carries for the other half.  Only readers "
+            "with one are listed; :func:`bamboo.codemap.strategy.gap_texts` says "
+            "them."
         ),
     )
     gaps_note: str = Field(
@@ -5113,6 +5115,61 @@ class StatementExit(BaseModel):
     trace_note: str = Field(default="", description="Why the walk is short, where it is.")
 
 
+#: The kinds of :class:`ReaderGap`.  A statement of the function: read in no
+#: node, handed in by the caller, or read only in part.  The whole function, not
+#: read from the answer's tree: outside it, unreadable there, or another blob
+#: than the map read.  In this order a reader is told them.
+GAP_UNNODED = "unnoded"
+GAP_HANDED_IN = "handed_in"
+GAP_PARTIAL = "partial"
+GAP_OUTSIDE = "outside"
+GAP_UNREADABLE = "unreadable"
+GAP_OTHER_TREE = "other_tree"
+GAP_KINDS = (GAP_UNNODED, GAP_HANDED_IN, GAP_PARTIAL, GAP_OUTSIDE, GAP_UNREADABLE, GAP_OTHER_TREE)
+
+
+class ReaderGap(BaseModel):
+    """One statement of a mover the map could not read on these rows -- or, with no line, the whole function.
+
+    A record, not a sentence: the kind of gap, where it is, and what the
+    build's reading said there; the text a reader prints is made from it when
+    read (:func:`bamboo.codemap.strategy.gap_texts`).  One per statement, so a
+    function with a statement read in no node and another read in part says
+    both: a sentence per function named the first and hid the second.
+    """
+
+    kind: str = Field(description="One of :data:`GAP_KINDS`.")
+    file: str = ""
+    line: Optional[int] = Field(
+        default=None,
+        description="The line the statement runs on; none where the whole function was not read.",
+    )
+    verbs: list[tuple[str, str]] = Field(
+        default_factory=list,
+        description="``(verb, table)`` of what runs on the line; empty where no text of it was read.",
+    )
+    stops: list[tuple[str, str]] = Field(
+        default_factory=list,
+        description="``(reason, detail)`` of each place the build's reading stopped on the line.",
+    )
+    unresolved: list[str] = Field(
+        default_factory=list,
+        description="What the read site on the line could not read (:attr:`ReadSiteNode.unresolved`).",
+    )
+
+    @computed_field
+    @property
+    def hides_where(self) -> bool:
+        """Whether the gap can hide where the rows go.
+
+        Nothing of the statement, or of the function, was read, so its rows'
+        way on is not either.  A statement read in part keeps its way read and
+        hides only which rows it takes: a term of its ``WHERE`` (an ``IN`` list
+        of binds named by an interpolation, a path into a JSON column).
+        """
+        return self.kind != GAP_PARTIAL
+
+
 class GuardReading(BaseModel):
     """One function whose write requires the observed value of the row it lands on.
 
@@ -5161,15 +5218,16 @@ class GuardReading(BaseModel):
             "listed on both halves of the answer."
         ),
     )
-    gaps: list[str] = Field(
+    gaps: list[ReaderGap] = Field(
         default_factory=list,
         description=(
             "Where the map could not read this function's statements on these "
-            "rows, as ``movers-of-a-value-agree`` judges it: ``@2391 "
-            "sql_where_clause, sorting_sql -- <why>``.  ``getJobs`` is on this "
-            "half because its ``SELECT`` is one the map could not read, and "
-            "without this the answer named it and did not say so.  Filled at "
-            "use time from the source, like the traces -- see "
+            "rows, as ``movers-of-a-value-agree`` judges it, a :class:`ReaderGap` "
+            "per statement (said as ``@2391 sql_where_clause, sorting_sql -- "
+            "<why>`` by :func:`bamboo.codemap.strategy.gap_texts`).  ``getJobs`` "
+            "is on this half because its ``SELECT`` is one the map could not "
+            "read, and without this the answer named it and did not say so.  "
+            "Filled at use time from the source, like the traces -- see "
             ":func:`bamboo.codemap.strategy.attach_mover_gaps`."
         ),
     )

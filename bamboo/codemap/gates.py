@@ -31,6 +31,9 @@ from bamboo.codemap import evidence
 from bamboo.codemap.models import (
     BIND_ALIAS,
     BIND_RESULT,
+    GAP_HANDED_IN,
+    GAP_PARTIAL,
+    GAP_UNNODED,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
     RUN_KEY_TIME,
@@ -38,6 +41,7 @@ from bamboo.codemap.models import (
     HistoryPair,
     MapFragment,
     ReachNode,
+    ReaderGap,
     required_values,
 )
 from bamboo.codemap.objects import STEPPED, _under
@@ -742,6 +746,56 @@ def mover_reason(
     stored.  *row_keys* and *column* decide the answers at the end, and only
     those, so a caller that asks about gaps alone can leave them out.
     """
+    reading = _mover_reading(spec, sites, stops, kind_of_table)
+    unnoded, handed, partial, callers, known = (
+        reading.unnoded, reading.handed, reading.partial, reading.callers, reading.known
+    )
+    if unnoded:
+        return MOVER_UNNODED, _stops_where(unnoded)
+    if handed:
+        return MOVER_HANDED_IN, _stops_where(handed)
+    if partial:
+        return MOVER_PARTIAL, ", ".join(f"@{line}" for line in partial)
+    if callers:
+        return MOVER_CALLERS_QUERY, _stops_where(callers)
+    if known:
+        reason = (
+            MOVER_OTHER_TERMS
+            if any(s.selects or s.conditions or s.keys or s.excludes for s in known)
+            else MOVER_ASKS_NOTHING
+        )
+        return reason, ", ".join(f"@{s.anchor.line_start}" for s in known)
+    guarded = [
+        source
+        for source in row_keys
+        if not column or column.lower() in {one.lower() for one in source.columns}
+    ]
+    by = sorted({source.handed_by for source in guarded if source.handed_by})
+    if by:
+        return MOVER_HANDED_ROWS, "by " + ", ".join(by)
+    if guarded:
+        return MOVER_OWN_WHERE, ", ".join(sorted({f"@{s.statement}" for s in guarded}))
+    return MOVER_UNDECIDED, ""
+
+
+class _MoverReading(NamedTuple):
+    """One function's statements on rows of one class, as the mover judgement reads them -- see :func:`_mover_reading`."""
+
+    maybe: list
+    known: list
+    stopped: list
+    unnoded: list
+    handed: list
+    callers: list
+    partial: list[int]
+
+
+def _mover_reading(spec: str, sites: list, stops: list, kind_of_table: dict[str, Optional[str]]) -> _MoverReading:
+    """The function's read sites and stops that may be on rows of class *spec*, and which of them the map could not read.
+
+    Read once for :func:`mover_reason`, which gives the first reason in its
+    order, and for :func:`mover_gaps`, which gives every statement's.
+    """
 
     def may_be(tables: list[str]) -> bool:
         return any(
@@ -778,32 +832,40 @@ def mover_reason(
         {s.anchor.line_start for s in maybe if s.unresolved}
         | {stop.statement for stop in stopped if stop.statement in noded}
     )
-    if unnoded:
-        return MOVER_UNNODED, _stops_where(unnoded)
-    if handed:
-        return MOVER_HANDED_IN, _stops_where(handed)
-    if partial:
-        return MOVER_PARTIAL, ", ".join(f"@{line}" for line in partial)
-    if callers:
-        return MOVER_CALLERS_QUERY, _stops_where(callers)
-    if known:
-        reason = (
-            MOVER_OTHER_TERMS
-            if any(s.selects or s.conditions or s.keys or s.excludes for s in known)
-            else MOVER_ASKS_NOTHING
+    return _MoverReading(maybe, known, stopped, unnoded, handed, callers, partial)
+
+
+def mover_gaps(
+    spec: str, sites: list, stops: list, kind_of_table: dict[str, Optional[str]], file: str = ""
+) -> list[ReaderGap]:
+    """Every statement of one function the map could not read on rows of class *spec*, a :class:`ReaderGap` each.
+
+    The three gaps :func:`mover_reason` knows (:data:`MOVER_DEFECTS`), each
+    statement under its own: that function gives the first in its order,
+    which is what the gate counts, and a reader of the answer needs the rest
+    as well -- a mover with a statement read in no node and one read in part
+    has both.  A statement handing on its caller's text is no gap: it is read
+    where the callers run it.  What runs on each line (*verbs*) is the
+    caller's to add: it holds the runs.
+    """
+    reading = _mover_reading(spec, sites, stops, kind_of_table)
+    found: list[ReaderGap] = []
+    for kind, held in ((GAP_UNNODED, reading.unnoded), (GAP_HANDED_IN, reading.handed)):
+        by_statement: dict[int, list[tuple[str, str]]] = {}
+        for stop in held:
+            seen = by_statement.setdefault(stop.statement, [])
+            if (stop.reason, stop.detail) not in seen:
+                seen.append((stop.reason, stop.detail))
+        found += [
+            ReaderGap(kind=kind, file=file, line=line, stops=said) for line, said in sorted(by_statement.items())
+        ]
+    for line in reading.partial:
+        said = list(dict.fromkeys((stop.reason, stop.detail) for stop in reading.stopped if stop.statement == line))
+        unresolved = sorted(
+            {term for site in reading.maybe if site.anchor.line_start == line for term in site.unresolved}
         )
-        return reason, ", ".join(f"@{s.anchor.line_start}" for s in known)
-    guarded = [
-        source
-        for source in row_keys
-        if not column or column.lower() in {one.lower() for one in source.columns}
-    ]
-    by = sorted({source.handed_by for source in guarded if source.handed_by})
-    if by:
-        return MOVER_HANDED_ROWS, "by " + ", ".join(by)
-    if guarded:
-        return MOVER_OWN_WHERE, ", ".join(sorted({f"@{s.statement}" for s in guarded}))
-    return MOVER_UNDECIDED, ""
+        found.append(ReaderGap(kind=GAP_PARTIAL, file=file, line=line, stops=said, unresolved=unresolved))
+    return found
 
 
 def _stops_where(stops: list) -> str:
