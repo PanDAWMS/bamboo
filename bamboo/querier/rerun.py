@@ -86,6 +86,8 @@ from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
+    KEY_ROWS,
+    KEY_UNKNOWN,
     MUST_ROW_WRITTEN,
     RESULT_AGGREGATE,
     Symptom,
@@ -427,18 +429,51 @@ def lines_after(func: ast.AST, arm_stmt: ast.stmt, name: str) -> list[tuple[int,
     return []
 
 
+def key_froms() -> list:
+    """The installed dump's ``key_froms``: where each row-naming term of a write was filled from (``KeyFrom``); none
+    before an install or from a dump that has none."""
+    return getattr(mapdump.fragment(), "key_froms", None) or []
+
+
+def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]]]:
+    """``(keyed, unread)`` over *arms*, the arms of *rs*'s owner by line.  *keyed*: those whose write the map says
+    names its row by a key filled from *rs*'s rows -- a ``KeyFrom`` of the owner's writing *subject* on a line of the
+    arm's branch (its ``line`` or ``other_lines``), with a ``rows`` source of *rs*'s owner and line
+    (prepareTasksToBeFinished_JEDI keys the writes of its later loop by the jediTaskID its statements at 3723 and 3768
+    select, past their region).  Whatever column of the rows fills the key counts: the map does not say which
+    (KNOWN_ISSUES.md K28).  *unread*: the others with a row-naming term the map did not read -- its ``unread``, or a
+    value it did not follow -- each with the terms and why: their rows may be *rs*'s too."""
+    keyed: set[int] = set()
+    unread: dict[int, list[str]] = {}
+    for kf in key_froms():
+        if kf.owner != rs.owner or subject not in kf.writes:
+            continue
+        lines = set(kf.writes[subject])
+        at = {b.line for j in writers if j.owner == rs.owner for b in j.branches
+              if b.line in arms and lines & {b.line, *(getattr(b, "other_lines", None) or [])}}
+        if any(s.kind == KEY_ROWS and s.site_owner == rs.owner and s.site_line == rs.line for s in kf.sources):
+            keyed |= at
+            continue
+        why = [kf.unread] if kf.unread else [f"not followed: {s.name}" for s in kf.sources if s.kind == KEY_UNKNOWN]
+        for line in at if why else ():
+            unread.setdefault(line, []).append(f"{kf.term} ({'; '.join(why)})")
+    return sorted(keyed), {line: said for line, said in sorted(unread.items()) if line not in keyed}
+
+
 def _reached(follow, writers: list, subject: str, observed: str):
     """``(owner, why, statement)`` for each way the map gives a function rows of *subject* holding *observed*, in the
     order S1 asks them; *statement* is None for a writer whose write requires the value.  A statement that selects
     the value -- ``reader_statements`` also holds an UPDATE-only owner's statements of other values, which give none --
     hands its rows to its owner when an arm of the owner's lies in the statement's ``region``, the span the map reads
-    where the rows go next, and to the writers among what the owner calls there (``crosses_to``); a statement whose
-    owner has no arm there hands them to what it calls there, or keeps them (a mover with no arm of its own:
-    KNOWN_ISSUES.md K14).  A statement that aggregates (the map's ``result``) gives none: what it hands on is a value
-    computed from the rows, not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator, which picks
-    none of them up); one that varies, or whose result the map did not read, is read as returning rows.  Then each
-    writer whose write requires the value (``guarded_by``).  A writer that takes a row by its key alone is in neither
-    (KNOWN_ISSUES.md K16)."""
+    where the rows go next, and to the writers among what the owner calls there (``crosses_to``).  Past the region, an
+    arm of the owner's whose write names its row by a key the statement's rows fill is the statement's too, and one
+    whose key the map did not read keeps the owner, said (``keyed_arms``); either way the statement hands its rows on
+    as one whose owner has no arm in the region does: to what it calls there, or it keeps them (a mover with no arm of
+    its own: KNOWN_ISSUES.md K14).  A statement that aggregates (the map's ``result``) gives none: what it hands on is
+    a value computed from the rows, not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator,
+    which picks none of them up); one that varies, or whose result the map did not read, is read as returning rows.
+    Then each writer whose write requires the value (``guarded_by``).  A writer that takes a row by its key alone is in
+    neither (KNOWN_ISSUES.md K16)."""
     asked = f"{subject}={observed}"
     writing = {j.owner for j in writers if arms_of(writers, j.owner, subject, observed)}
     for rs in follow.reader_statements:
@@ -446,12 +481,20 @@ def _reached(follow, writers: list, subject: str, observed: str):
             continue
         reader = f"{rs.owner.split('::')[-1]}@{rs.line}"
         lo, hi = (list(rs.region) or [rs.line, rs.line])[:2]
-        if any(lo <= line <= hi for line in arms_of(writers, rs.owner, subject, observed)):
+        arms = arms_of(writers, rs.owner, subject, observed)
+        if any(lo <= line <= hi for line in arms):
             yield rs.owner, f"{reader} selects the value", rs
             for callee in rs.crosses_to:
                 if callee in writing:
                     yield callee, f"{reader} hands the rows it selects to it", rs
             continue
+        keyed, unread = keyed_arms(writers, rs, subject, arms)
+        if keyed:
+            yield rs.owner, f"{reader} selects the value, and its rows fill the key of the write(s) at {keyed}", rs
+        elif unread:
+            said = "; ".join(f"{line}: {', '.join(terms)}" for line, terms in unread.items())
+            yield rs.owner, (f"{reader} selects the value, and the map could not read what fills the key of the "
+                             f"write(s) at {list(unread)} ({said}): kept"), rs
         for owner in rs.crosses_to or [rs.owner]:
             yield owner, f"{reader} hands the rows it selects to it" if rs.crosses_to else f"{reader} selects the value", rs
     for g in follow.guarded_by:

@@ -1691,6 +1691,62 @@ def test_a_statement_whose_owner_writes_none_hands_its_rows_to_all_it_calls(tmp_
     }
 
 
+def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_and_an_unread_key_keeps_the_owner(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import keyed_arms
+
+    owner = "p/fin.py::prepare"
+    writers.append(writer(owner, branch(3913, "finishing"), branch(3995, "failed"),
+                          N(line=4059, outcome="done", path_condition=[], row_precondition=[], other_lines=[4082]),
+                          branch(4300, "broken"), branch(4400, "running")))
+
+    def rows(line):
+        return N(kind="rows", name=f"panda:{owner}@{line}", site_owner=owner, site_line=line)
+
+    def key(term, writes, *sources, unread=""):
+        return N(owner=owner, term=term, writes=writes, unread=unread, sources=list(sources))
+
+    def follow(line):
+        return N(guarded_by=[], reader_statements=[
+            stmt(owner, line, ["JobSpec.jobStatus=running"], [line, line + 10], [f"p/fin.py::helper{line}"])])
+
+    before = movers_of(follow(3723), writers, "JobSpec.jobStatus", "running")
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        # 3723's rows (and 3768's) fill the key of the writes at 3913, and at 4082, a line of the branch at 4059
+        key("jediTaskID=:jediTaskID", {"JobSpec.jobStatus": [3913, 4082]}, rows(3723), rows(3768)),
+        # a parameter fills 3995's; another subject's write keyed by 3723's rows; 4400 writes the value observed
+        key("jediTaskID=:jediTaskID", {"JobSpec.jobStatus": [3995]}, N(kind="parameter", name="taskID")),
+        key("jediTaskID=:jediTaskID", {"JobSpec.lockedBy": [3995]}, rows(3723)),
+        key("jediTaskID=:jediTaskID", {"JobSpec.jobStatus": [4400]}, rows(3723)),
+        # 4300's key was not read, nor followed where it was
+        key("PandaID=:PandaID", {"JobSpec.jobStatus": [4300]}, unread="no bind found"),
+        key("jobsetID=:jobsetID", {"JobSpec.jobStatus": [4300]}, N(kind="unknown", name="jsid")),
+    ])]
+    arms = arms_of(writers, owner, "JobSpec.jobStatus", "running")
+    print(json.dumps([keyed_arms(writers, follow(n).reader_statements[0], "JobSpec.jobStatus", arms) for n in (3723, 3800)]))
+    print(json.dumps([before, movers_of(follow(3723), writers, "JobSpec.jobStatus", "running"),
+                      movers_of(follow(3800), writers, "JobSpec.jobStatus", "running")]))
+    """,
+        )
+    )
+    unread = ["PandaID=:PandaID (no bind found)", "jobsetID=:jobsetID (not followed: jsid)"]
+    # 3800's rows fill no key: only the unread one may be its
+    assert json.loads(out.splitlines()[-2]) == [[[3913, 4059], {"4300": unread}], [[], {"4300": unread}]]
+    before, keyed, kept = json.loads(out.splitlines()[-1])
+    # no arm in the region: before KeyFrom only the helper took the rows; now the owner is a mover by its keyed arms
+    # too, and one whose key was not read is kept, said; the helper takes them as before
+    assert before == {"p/fin.py::helper3723": "prepare@3723 hands the rows it selects to it"}
+    assert keyed == {"p/fin.py::prepare": "prepare@3723 selects the value, and its rows fill the key of the write(s) at [3913, 4059]",
+                     "p/fin.py::helper3723": "prepare@3723 hands the rows it selects to it"}
+    assert kept == {"p/fin.py::prepare": f"prepare@3800 selects the value, and the map could not read what fills "
+                                         f"the key of the write(s) at [4300] (4300: {', '.join(unread)}): kept",
+                    "p/fin.py::helper3800": "prepare@3800 hands the rows it selects to it"}
+
+
 _M2_SETUP = """
     import datetime
     import json
