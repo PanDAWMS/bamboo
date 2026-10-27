@@ -622,9 +622,122 @@ def resolver():
             if isinstance(expression.value, str):
                 return [expression.value]
             return [ast.unparse(expression)]
-        return mapping_values(expression, func=func)
+        return mapping_values(expression, func=func) or declared_constant(expression, func)
 
     return resolve
+
+
+#: How many names a constant is followed through to its literal: ``active_statuses = [queued, staging]``, each a
+#: constant of the same class, is one.
+_CONSTANT_HOPS = 3
+
+
+def declared_constant(
+    expression: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef]
+) -> list[str]:
+    """What a constant of a module or a class holds, where *expression* names one the corpus assigns once, or ``[]``.
+
+    ``EventServiceUtils.ST_ready`` is ``ST_ready = 0`` at the top of its module, and the event service binds every
+    status it writes and requires by such a name: read as no value, a guard on ``JEDI_Events.status`` and the value a
+    write gives it were two spellings of nothing.  ``DataCarouselRequestStatus.active_statuses`` is ``[queued,
+    staging]`` in its class, each a constant of the class.  An attribute of a class (its bases' too) or of an imported
+    module, or a name the function neither binds nor is handed -- the module's own, or one it imports -- assigned once
+    at that level a literal, or a list of them, or such a name.  Assigned twice (under an ``if`` and its ``else``), it
+    is not one value.  Read through the corpus's calls (:func:`sql.across_calls`); outside them, nothing is.
+    """
+    from bamboo.codemap.panda import sql
+
+    calls = sql._CALLS
+    if calls is None or func is None:
+        return []
+    types = calls.types
+    file = types.file_of(func)
+    if file is None:
+        return []
+    if isinstance(expression, ast.Attribute):
+        held = types.class_named(file, expression.value)
+        if held is not None:
+            for _file, cls in types.mro(*held) or [held]:
+                found = _assigned_once(cls.body, expression.attr, False)
+                if found is not None:
+                    return found
+            return []
+        module = types.module_named(file, expression.value)
+        tree = types.tree(module) if module is not None else None
+        return (_assigned_once(tree.body, expression.attr, True) or []) if tree is not None else []
+    if isinstance(expression, ast.Name):
+        arguments = getattr(func, "args", None)
+        handed_in: set[str] = set()
+        if arguments is not None:
+            handed_in = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+        if expression.id in handed_in or pathcond.bindings(func, expression.id):
+            return []
+        imported = types.imports(file).get(expression.id)
+        if imported is not None:
+            module, attribute = imported
+            source = types.module_file(module) if attribute else None
+            tree = types.tree(source) if source is not None else None
+            return (_assigned_once(tree.body, attribute, True) or []) if tree is not None else []
+        tree = types.tree(file)
+        return (_assigned_once(tree.body, expression.id, True) or []) if tree is not None else []
+    return []
+
+
+def _assigned_once(body: list[ast.stmt], name: str, module: bool, hops: int = 0) -> Optional[list[str]]:
+    """The literal *name* is assigned once in *body* -- a class's, or a module's top level and under its ``if`` /
+    ``try`` -- ``[]`` where it is assigned otherwise or more than once, ``None`` where it is not assigned there."""
+    from bamboo.codemap.calls import _module_statements
+
+    statements = list(_module_statements(body)) if module else body
+    values = [
+        node.value
+        for node in statements
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and node.value is not None
+        and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        )
+    ]
+    if not values:
+        return None
+    if len(values) > 1 or hops > _CONSTANT_HOPS:
+        return []
+    return _literal_of(values[0], body, module, hops)
+
+
+def _literal_of(value: ast.expr, body: list[ast.stmt], module: bool, hops: int) -> list[str]:
+    if isinstance(value, ast.Constant):
+        return [value.value] if isinstance(value.value, str) else [ast.unparse(value)]
+    if isinstance(value, ast.Name):
+        return _assigned_once(body, value.id, module, hops + 1) or []
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        found: list[str] = []
+        for element in value.elts:
+            settled = [] if isinstance(element, ast.Starred) else _literal_of(element, body, module, hops)
+            if not settled:
+                return []
+            found.extend(settled)
+        return found
+    return []
+
+
+def bind_settler(calls: Optional["Calls"]):
+    """``(expression, func) -> [value, ...]``: what a bind holds, settled as the read side settles its binds
+    (:func:`handed` over :func:`resolver`) -- its literal or constant, a list's members, what a name is written, what a
+    parameter's callers hand it -- every value, or none where one is not known (:func:`known`).  The write side's row
+    preconditions read the same values the read side's selects do: ``Bound values are settled the same way the write
+    side settles them`` said the read side, while the guards settled a literal alone."""
+    plain = resolver()
+    handing = handed(plain, calls)
+
+    def settle(expression: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef]) -> list[str]:
+        file = calls.types.file_of(func) if calls is not None and func is not None else None
+        if file is None:
+            return plain(expression, func)
+        return sorted({one.value for one in known(handing(expression, func, file))})
+
+    return settle
 
 
 #: How many functions out a value is followed.  ``lockJobsForReassign``'s

@@ -999,6 +999,9 @@ def extract(
     diagnostics: list[DiagnosticTemplate] = []
     unexplained: list[Unexplained] = []
     settle = values.resolver()
+    # A guard's binds as the read side settles its own (values.bind_settler): a list's members, what a parameter's
+    # callers hand it, all of them or none.
+    guard_settle = values.bind_settler(sql._CALLS)
     # The same census the attribute slice makes, for the same reading: which
     # call persists a message into a declared column.  Asked of the attributor
     # rather than recomputed from the source, so the two halves of the map
@@ -1048,7 +1051,7 @@ def extract(
                     preconditions = []
                     for term in terms:
                         settled, done = sql.settled_precondition(
-                            term, func, run.varmap, run.window, settle, at=run
+                            term, func, run.varmap, run.window, guard_settle, at=run
                         )
                         preconditions.append(settled)
                         if not done and ":" in term:
@@ -1166,7 +1169,7 @@ def extract(
                             # Called by _record before the loop moves on; the defaults keep this pass's run if it ever is not.
                             beside=lambda node, terms=terms, func=func, run=run: [
                                 sql.settled_precondition(
-                                    term, func, run.varmap, run.window, settle, beside=node, at=run
+                                    term, func, run.varmap, run.window, guard_settle, beside=node, at=run
                                 )[0]
                                 for term in terms
                             ],
