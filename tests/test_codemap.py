@@ -928,6 +928,40 @@ def test_element_type_comes_from_what_was_put_in_the_container():
     assert written[0].attribution == "container"
 
 
+
+def test_a_name_only_loops_bind_is_what_its_loops_containers_hold():
+    """``propagateResultToJEDI``'s ``for fileSpec in jobSpec.Files`` -- and ``jobSpec.Files + pseudoFiles`` -- holds
+    ``FileSpec`` rows for ``class_of`` too, where the fields the loop uses (a JEDI file's ``status`` as well) could not
+    tell it; a name an assignment binds as well is not read by its loop."""
+    consumer = (
+        "def propagate(jobSpec: JobSpec, pseudoFiles: list[FileSpec]):\n"
+        "    for fileSpec in jobSpec.Files:\n"
+        "        use(fileSpec.status)\n"
+        "    for other in jobSpec.Files + pseudoFiles:\n"
+        "        use(other.status)\n"
+        "    for mixed in jobSpec.Files:\n"
+        "        use(mixed.status)\n"
+        "    mixed = make()\n"
+        "    use(mixed.status)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ADDERS, "pandaserver/taskbuffer/JobSpec.py"),
+        _module(consumer, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_element_types(modules)
+    func = next(node for node in ast.walk(modules[-1].tree) if isinstance(node, ast.FunctionDef))
+
+    def read(name: str):
+        return attributor.class_of(ast.Name(id=name, ctx=ast.Load()), func, None)
+
+    assert {name: read(name) for name in ("fileSpec", "other", "mixed")} == {
+        "fileSpec": "FileSpec",
+        "other": "FileSpec",
+        "mixed": None,
+    }
+
 def test_two_containers_named_files_hold_different_classes():
     """``JobSpec.Files`` and ``JediDatasetSpec.Files`` are the pair naming cannot split.
 
