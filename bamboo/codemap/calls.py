@@ -37,6 +37,7 @@ import re
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import pathcond
 
 #: Why a call could not be placed.  Each is a class of the census, so the
@@ -868,10 +869,10 @@ class Calls:
             one.arg for one in init[0].func.args.kwonlyargs  # type: ignore[attr-defined]
         }:
             return None
-        if sum(isinstance(node, ast.Name) and node.id == parameter for node in ast.walk(init[0].func)) != 1:
+        if sum(isinstance(node, ast.Name) and node.id == parameter for node in walk(init[0].func)) != 1:
             return None
         for _where, holder in self.types.mro(*declared):
-            for node in ast.walk(holder):
+            for node in walk(holder):
                 if not (isinstance(node, ast.Attribute) and node.attr == field and _self_field(node) == field):
                     continue
                 if node is stores[0].targets[0]:
@@ -929,7 +930,7 @@ class Calls:
                 found = self._handing_on(declared, "__call__", depth + 1)
             else:
                 continue
-            inside = {id(node) for node in ast.walk(statement)}
+            inside = {id(node) for node in walk(statement)}
             if found is None or any(
                 isinstance(node, ast.Name) and node.id in (var, kw) and id(node) not in inside
                 for node in own_nodes(func)
@@ -963,7 +964,7 @@ class Calls:
         own = {id(node) for node in own_nodes(func)}
         built: list[tuple[tuple[str, ast.ClassDef], ast.Call]] = []
         read: list[tuple[str, Optional[ast.Call]]] = []
-        for node in ast.walk(func):
+        for node in walk(func):
             if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
                 return None
             if not (isinstance(node, ast.Name) and node.id == name):
@@ -1045,7 +1046,7 @@ class Calls:
             classes: set[str] = set()
             for file in self.types.corpus_files():
                 tree = self.types.tree(file)
-                for node in ast.walk(tree) if tree is not None else ():
+                for node in walk(tree) if tree is not None else ():
                     if isinstance(node, ast.ClassDef) and (found := self._forwarding_methods((file, node))):
                         methods |= set(found)
                         classes.add(node.name)
@@ -1067,7 +1068,7 @@ class Calls:
         found: list[tuple[str, ast.AST, ast.Call, ast.expr, list[ast.Call]]] = []
         for file in self.types.corpus_files() if names else []:
             tree = self.types.tree(file)
-            for func in ast.walk(tree) if tree is not None else ():
+            for func in walk(tree) if tree is not None else ():
                 if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
                 for node in own_nodes(func):
@@ -1261,7 +1262,7 @@ class Calls:
 
         trees = [(file, tree) for file in self.types.corpus_files() if (tree := self.types.tree(file)) is not None]
         for file, tree in trees:
-            for func in ast.walk(tree):
+            for func in walk(tree):
                 if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     add(file, func)
         for file, tree in trees:
@@ -1441,7 +1442,7 @@ class Calls:
             found: dict[str, set[str]] = {}
             for file in self.types.corpus_files():
                 tree = self.types.tree(file)
-                for node in ast.walk(tree) if tree is not None else ():
+                for node in walk(tree) if tree is not None else ():
                     if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, (ast.Name, ast.Attribute)):
                         continue
                     held = node.value.id if isinstance(node.value, ast.Name) else node.value.attr
@@ -1479,7 +1480,7 @@ class Calls:
             found: dict[tuple[str, int], list[tuple[str, ast.ClassDef]]] = {}
             for file in self.types.corpus_files():
                 tree = self.types.tree(file)
-                for node in ast.walk(tree) if tree is not None else ():
+                for node in walk(tree) if tree is not None else ():
                     if isinstance(node, ast.ClassDef):
                         for where, base in self.types.lineage(file, node)[1:]:
                             found.setdefault((where, base.lineno), []).append((file, node))
@@ -1659,14 +1660,14 @@ class Calls:
         func = target.func
         if not _rebinds(func, name):
             return False
-        if any(isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del) for node in ast.walk(func)):
+        if any(isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del) for node in walk(func)):
             return True
         again = [binding.site for binding in pathcond.bindings(func, name) if not binding.nested]
         tested = {
             one.id
             for site in again
             for test in pathcond.tests_on(site, func)
-            for one in ast.walk(test)
+            for one in walk(test)
             if isinstance(one, ast.Name) and one.id in _parameter_names(func)
         }
         constants = {
@@ -1816,7 +1817,7 @@ class Calls:
             found: dict[tuple[str, int], list[str]] = {}
             for file in self.types.corpus_files():
                 tree = self.types.tree(file)
-                for node in ast.walk(tree) if tree is not None else ():
+                for node in walk(tree) if tree is not None else ():
                     if (
                         isinstance(node, (ast.Name, ast.Attribute))
                         and isinstance(node.ctx, ast.Load)
@@ -2235,7 +2236,7 @@ class Types:
         ``__mul__``'s -- as leaving ``x`` what it was.
         """
         if id(func) not in self._bound:
-            augmented = {id(node.value) for node in ast.walk(func) if isinstance(node, ast.AugAssign)}
+            augmented = {id(node.value) for node in walk(func) if isinstance(node, ast.AugAssign)}
             self._bound[id(func)] = {
                 name: kept
                 for name, values in self.assigned(func).items()
@@ -2358,7 +2359,7 @@ class Types:
         found: dict[str, tuple[str, str]] = {}
         tree = self.tree(file)
         package = file[: -len(".py")].split("/")[:-1] if file.endswith(".py") else []
-        for node in ast.walk(tree) if tree is not None else ():
+        for node in walk(tree) if tree is not None else ():
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.asname:
@@ -2774,7 +2775,7 @@ class Types:
                 ):
                     return self._field_read(where, node.annotation)
             for method in pathcond.methods_of(holder):
-                for node in ast.walk(method):
+                for node in walk(method):
                     if (
                         isinstance(node, ast.AnnAssign)
                         and isinstance(node.target, ast.Attribute)
@@ -2805,7 +2806,7 @@ class Types:
         Iterator["DBProxy.DBProxy"]``: the object is the element, not the
         iterator.
         """
-        for node in ast.walk(func):
+        for node in walk(func):
             if not isinstance(node, (ast.With, ast.AsyncWith)):
                 continue
             for item in node.items:
@@ -2854,7 +2855,7 @@ class Types:
             for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
                 if argument.arg == expression.id and argument.annotation is not None:
                     return file, argument.annotation
-            for node in ast.walk(func):
+            for node in walk(func):
                 if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == expression.id:
                     return file, node.annotation
             # ``target = self.nuclei`` or ``target = self.satellites``: an
@@ -2876,7 +2877,7 @@ class Types:
                 if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == field:
                     return where, node.annotation
             for method in pathcond.methods_of(cls):
-                for node in ast.walk(method):
+                for node in walk(method):
                     if (
                         isinstance(node, ast.AnnAssign)
                         and isinstance(node.target, ast.Attribute)
@@ -2959,7 +2960,7 @@ class Types:
                 if self.handed_to is not None and self.states_any(file, argument.annotation):
                     return self.handed_to(file, func, name, depth)
                 return self.annotated_all(file, argument.annotation)
-        for node in ast.walk(func):
+        for node in walk(func):
             if (
                 isinstance(node, ast.AnnAssign)
                 and isinstance(node.target, ast.Name)
@@ -3284,7 +3285,7 @@ class Types:
 
     def class_def(self, file: str, name: str) -> Optional[ast.ClassDef]:
         tree = self.tree(file)
-        for node in ast.walk(tree) if tree is not None else ():
+        for node in walk(tree) if tree is not None else ():
             if isinstance(node, ast.ClassDef) and node.name == name:
                 return node
         return None
@@ -3347,7 +3348,7 @@ class Types:
             if owner is None:
                 return frozenset(), True
             where, method = owner
-            for node in ast.walk(method):
+            for node in walk(method):
                 if isinstance(node, ast.Return) and node.value is not None:
                     add(self._values(where, method, node.value, depth + 1, instances=False, seen=seen))
             return frozenset(found), opened

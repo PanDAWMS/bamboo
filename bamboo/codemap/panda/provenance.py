@@ -35,6 +35,7 @@ import ast
 import builtins
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
 from bamboo.codemap.panda.pathcond import names_bound_by, targets_of, written_value
 
@@ -365,7 +366,7 @@ def borrowed_proxies(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[
     (JediTaskBuffer) and ``proxy = self.proxyPool.getProxy()`` (TaskBuffer).
     """
     bound: set[str] = set()
-    for node in ast.walk(func):
+    for node in walk(func):
         if isinstance(node, ast.With):
             for item in node.items:
                 if item.optional_vars is not None and rooted_at_pool(item.context_expr):
@@ -405,7 +406,7 @@ def facade_calls(types: Types, method: str) -> list[FacadeCall]:
         made = sorted(
             (
                 node
-                for node in ast.walk(func)
+                for node in walk(func)
                 if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)

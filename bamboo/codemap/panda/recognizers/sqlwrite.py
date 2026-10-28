@@ -54,6 +54,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
     FILLERS,
     UNSET,
@@ -579,7 +580,7 @@ def _bind_value(
 ) -> tuple[str, int, Optional[str]]:
     if isinstance(value, ast.Constant):
         return ("literal", line, None)
-    if any(isinstance(n, ast.Call) and _callee_name(n) == "getvalue" for n in ast.walk(value)):
+    if any(isinstance(n, ast.Call) and _callee_name(n) == "getvalue" for n in walk(value)):
         return ("returned", line, None)
     if not _plain(value):
         return ("computed", line, None)
@@ -592,7 +593,7 @@ def _sequenced_attributes(modules: list[SourceModule]) -> dict[str, frozenset[st
     its ``INSERT`` as the sequence's ``nextval`` where the class is written with ``useSeq=True``."""
     found: dict[str, frozenset[str]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             for statement in node.body:
@@ -1455,7 +1456,7 @@ def _statement_at(
     than threaded through because the resolver is shared with the attribute
     slice, which has the node in hand and needs no line at all.
     """
-    for node in ast.walk(func):
+    for node in walk(func):
         if isinstance(node, ast.stmt) and node.lineno == line:
             return node
     return None
@@ -2049,7 +2050,7 @@ def _stretches(leaf: _Leaf) -> list[tuple[int, ast.AST, ast.AST]]:
 def _locals_bound(func: ast.AST, name: str) -> list[str]:
     """``<expression>@<line>`` for each plain assignment of *name* in *func*."""
     found: list[str] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and enclosing_function(node) is func:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(
@@ -2068,7 +2069,7 @@ def _clip(text: str, width: int = 120) -> str:
 def _rebound_at(func: ast.AST, name: str) -> list[int]:
     """Lines where *func* itself -- not a function nested in it -- binds *name* again."""
     lines: list[int] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if node is func or enclosing_function(node) is not func:
             continue
         if isinstance(node, ast.Assign):
@@ -2083,7 +2084,7 @@ def _rebound_at(func: ast.AST, name: str) -> list[int]:
             continue
         else:
             continue
-        if any(isinstance(one, ast.Name) and one.id == name for target in targets for one in ast.walk(target)):
+        if any(isinstance(one, ast.Name) and one.id == name for target in targets for one in walk(target)):
             lines.append(getattr(node, "lineno", 0) or getattr(getattr(node, "context_expr", None), "lineno", 0))
     return sorted(set(lines))
 
@@ -2154,7 +2155,7 @@ def _place(leaf: _Leaf, term: str, file_of, decides: Optional[bool] = None) -> T
     for hop, node, below in reversed(_stretches(leaf)):
         func = leaf.hops[hop].func
         for kind, test, line, expression in _guards_between(node, below):
-            names = sorted({one.id for one in ast.walk(expression) if isinstance(one, ast.Name)}) if expression is not None else []
+            names = sorted({one.id for one in walk(expression) if isinstance(one, ast.Name)}) if expression is not None else []
             tests.append(
                 TermGuard(
                     kind=kind,
@@ -2495,7 +2496,7 @@ def _comment_name(func: ast.AST, part: tuple[str, object], at: ast.AST) -> bool:
 
 def _changed_between(func: ast.AST, names: set[str], low: int, high: int) -> bool:
     """Whether a statement strictly between lines *low* and *high* rebinds or changes one of *names*."""
-    for node in ast.walk(func):
+    for node in walk(func):
         line = getattr(node, "lineno", 0)
         if not low < line < high or enclosing_function(node) is not func:
             continue
@@ -2509,7 +2510,7 @@ def _changed_between(func: ast.AST, names: set[str], low: int, high: int) -> boo
         ):
             targets = [node.func.value]
         for target in targets:
-            for one in ast.walk(target):
+            for one in walk(target):
                 base = one
                 while isinstance(base, (ast.Subscript, ast.Attribute)):
                     base = base.value
@@ -2538,7 +2539,7 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
     whole = len(spelled)
     shorter = whole - 1 if whole > 1 and _comment_name(func, executed[-1], execute) else None
     found: list[PrintedBy] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -2572,7 +2573,7 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
                 lead = str(value) + lead
             printed = _statement_of(node)
             low, high = sorted((printed.lineno, execute.lineno))
-            names = {one.id for _kind, value in executed for one in ast.walk(value) if isinstance(one, ast.Name)}
+            names = {one.id for _kind, value in executed for one in walk(value) if isinstance(one, ast.Name)}
             if _changed_between(func, names | {run.varmap}, low, high):
                 break
             found.append(
@@ -2856,7 +2857,7 @@ def _why_not_run(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str
     a form is missing without saying which one to add.
     """
     others: set[str] = set()
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.Call) or not node.args:
             continue
         first = node.args[0]
@@ -2867,7 +2868,7 @@ def _why_not_run(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str
             # inside an expression still counts as reaching it.
             mentions = any(
                 isinstance(inner, ast.Name) and inner.id == name
-                for inner in ast.walk(first)
+                for inner in walk(first)
             )
         if not mentions:
             continue
@@ -2965,7 +2966,7 @@ def _leaves(handler: ast.ExceptHandler) -> bool:
     every handler made 2 of the 3 statements the map credited with an
     ``except`` say the opposite of what their code does.
     """
-    return any(isinstance(inner, _LEAVES) for inner in ast.walk(handler))
+    return any(isinstance(inner, _LEAVES) for inner in walk(handler))
 
 
 def _assigned_names(node: ast.AST) -> set[str]:
@@ -2993,14 +2994,14 @@ def _rows_written(
     """
     cursors = {
         ast.dump(node.func.value)
-        for node in ast.walk(func)
+        for node in walk(func)
         if isinstance(node, ast.Call)
         and node.lineno == line
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in ("execute", "executemany")
     }
     found: list[ast.Assign | ast.AnnAssign | ast.For | ast.AsyncFor] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if not line <= getattr(node, "lineno", 0) <= last:
             continue
         if isinstance(node, (ast.For, ast.AsyncFor)):
@@ -3008,7 +3009,7 @@ def _rows_written(
                 found.append(node)
         # ``res: list = self.cur.fetchall()`` lands the rows as ``res = ...`` does.
         elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and _assigned_names(node):
-            if node.lineno == line or any(_fetches(inner) for inner in ast.walk(node.value)):
+            if node.lineno == line or any(_fetches(inner) for inner in walk(node.value)):
                 found.append(node)
     return found
 
@@ -3026,14 +3027,14 @@ def _flag_parameters(func: ast.AST) -> set[str]:
     parameters = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)} - {"self", "cls"}
     tested = {
         name.id
-        for node in ast.walk(func)
+        for node in walk(func)
         if isinstance(node, ast.If) and enclosing_function(node) is func
-        for name in ast.walk(node.test)
+        for name in walk(node.test)
         if isinstance(name, ast.Name) and name.id in parameters
     }
     rebound = {
         node.id
-        for node in ast.walk(func)
+        for node in walk(func)
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
     }
     return tested - rebound
@@ -3430,7 +3431,7 @@ def read_side(
         if isinstance(value, ast.Name):
             written = [
                 node
-                for node in ast.walk(where)
+                for node in walk(where)
                 if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
                 and any(
                     isinstance(target, ast.Name) and target.id == value.id
@@ -3869,7 +3870,7 @@ def read_side(
                 if not run.call.args:
                     continue
                 execute = _statement_of(run.call)
-                for node in ast.walk(run.call.args[0]):
+                for node in walk(run.call.args[0]):
                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
                         handed = [*node.args, *(one.value for one in node.keywords)]
                     elif isinstance(node, ast.JoinedStr):
@@ -3985,7 +3986,7 @@ def read_side(
             enclosing = _enclosing_loops(func)
             spans: list[tuple[int, int]] = []
             over_rows: set[int] = set()
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not isinstance(node, _LOOPS):
                     continue
                 # The loop must **open** inside the region; only its end is
@@ -4001,7 +4002,7 @@ def read_side(
                 header = (
                     node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
                 )
-                over = {n.id for n in ast.walk(header) if isinstance(n, ast.Name)}
+                over = {n.id for n in walk(header) if isinstance(n, ast.Name)}
                 if over & names or id(node) in cursor_loops:
                     spans.append((node.lineno, node.end_lineno or node.lineno))
                     over_rows.add(id(node))
@@ -4015,7 +4016,7 @@ def read_side(
                 else None
             )
             found: set[str] = set()
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not isinstance(node, _EXITS):
                     continue
                 # The loop it is *taken in*, not the lines it falls between:
@@ -4029,10 +4030,10 @@ def read_side(
                 if isinstance(node, ast.ExceptHandler) and not _leaves(node):
                     continue
                 found.add(f"{_EXIT_NAMES[type(node)]}@{node.lineno}")
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not isinstance(node, ast.If) or not line < node.lineno <= last:
                     continue
-                tested = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+                tested = {n.id for n in walk(node.test) if isinstance(n, ast.Name)}
                 if not tested & names:
                     continue
                 # The guarded branch only.  A test on the result splits the
@@ -4730,10 +4731,10 @@ class _Write:
         self.paths: _Paths = _NOTHING
         looked = call if call is not None else source
         self.mentions = (
-            frozenset(n.id for n in ast.walk(looked) if isinstance(n, ast.Name)) if looked is not None else frozenset()
+            frozenset(n.id for n in walk(looked) if isinstance(n, ast.Name)) if looked is not None else frozenset()
         )
         self.inner_calls = (
-            frozenset(id(n) for n in ast.walk(looked) if isinstance(n, ast.Call)) if looked is not None else frozenset()
+            frozenset(id(n) for n in walk(looked) if isinstance(n, ast.Call)) if looked is not None else frozenset()
         )
 
     def fresh(self) -> "_Write":
@@ -4811,7 +4812,12 @@ class _PathCarry:
         for write in self.writes:
             if write.node is arguments and write.source is None and write.call is None and write.name in seeds:
                 write.forced = frozenset(seeds[write.name])
-            elif id(write.node) in start_ids and write.call is None and write.source is not None:
+            elif (
+                id(write.node) in start_ids
+                and write.call is None
+                # A ``+=`` started from writes its field with what the reader follows, though it holds no rows.
+                and (write.source is not None or isinstance(write.node, ast.AugAssign))
+            ):
                 write.forced = _below(write.steps, _WHOLE)
         self._grow()
 
@@ -4887,9 +4893,9 @@ class _PathCarry:
         # A comprehension's target is its own scope's, not the function's.
         inner = {
             id(name)
-            for node in ast.walk(func)
+            for node in walk(func)
             if isinstance(node, ast.comprehension)
-            for name in ast.walk(node.target)
+            for name in walk(node.target)
         }
         for node in own_nodes(func):
             if (
@@ -4910,7 +4916,7 @@ class _PathCarry:
                 take = _keys if _is_dict(node.iter, self.dicts) else _elements
                 self._target(node.target, node, node.iter, take, False)
             elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-                for name in ast.walk(node.optional_vars):
+                for name in walk(node.optional_vars):
                     if isinstance(name, ast.Name):
                         self._add(_Write(name.id, site_of(node.optional_vars)))
             elif isinstance(node, ast.ExceptHandler) and node.name:
@@ -5029,7 +5035,7 @@ class _PathCarry:
         while scope is not None and scope is not self.func:
             if isinstance(scope, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
                 for generator in scope.generators:
-                    bound = {n.id for n in ast.walk(generator.target) if isinstance(n, ast.Name)}
+                    bound = {n.id for n in walk(generator.target) if isinstance(n, ast.Name)}
                     if name in bound:
                         return self._unpack_into(
                             generator.target, name, _elements(self._as_list(generator.iter, generator.iter))
@@ -5359,9 +5365,9 @@ class _Reading:
                 statement,
                 {
                     id(inner)
-                    for outer in ast.walk(statement)
+                    for outer in walk(statement)
                     if isinstance(outer, ast.Call)
-                    for inner in ast.walk(outer)
+                    for inner in walk(outer)
                     if inner is not outer and isinstance(inner, ast.Call)
                 },
             )
@@ -5810,7 +5816,7 @@ def attach_crossings(
         func = next(
             (
                 node
-                for node in ast.walk(tree)
+                for node in walk(tree)
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name == wanted
                 and node.lineno <= site.anchor.line_start <= (node.end_lineno or node.lineno)
@@ -6186,10 +6192,13 @@ def _unpersisted(
                     if line is not None and first <= line <= last and (owner, junction.subject, line) not in written
                 }
                 for line in sorted(lines):
+                    # A ``+=`` that adds to a value is an arm of its own (the attribute slice's), as an assignment is.
                     assigned = [
                         (statement, target.value)
                         for statement in statements.get(line, ())
-                        for target in targets_of(statement)
+                        for target in (
+                            [statement.target] if isinstance(statement, ast.AugAssign) else targets_of(statement)
+                        )
                         if isinstance(target, ast.Attribute)
                         and target.attr == attribute
                         and attributor.class_of(target.value, func, owner_class) == spec

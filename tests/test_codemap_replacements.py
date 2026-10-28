@@ -407,6 +407,98 @@ def test_a_return_that_no_read_follows_skips_nothing_the_value_needs():
 
 
 # --------------------------------------------------------------------------- #
+# a test on the way to the read
+# --------------------------------------------------------------------------- #
+
+
+def test_a_value_its_own_test_refuses_never_gets_to_the_write():
+    """``retryJob``: ``longSite = None``, and the write is under ``if longSite is not None``."""
+    func = _func(
+        "def f(sites, job):\n"
+        "    longSite = None\n"
+        "    for site in sites:\n"
+        "        if ok(site):\n"
+        "            longSite = site\n"
+        "            break\n"
+        "    if longSite is not None:\n"
+        "        job.computingSite = longSite\n"
+    )
+
+    values = pathcond.literal_values(
+        func, "longSite", lambda e, _f: [ast.unparse(e)], at=_at(func, 8)
+    )
+
+    assert [(value, line) for value, _conditions, line in values] == [("site", 5)]
+
+
+def test_a_value_its_own_test_sends_to_the_other_arm_never_gets_to_the_write():
+    """``insertFilesForDataset_JEDI``: ``masterStatus = None``, and the write is
+    in the ``else`` of ``if datasetSpec.isMaster() or masterStatus is None``."""
+    func = _func(
+        "def f(spec):\n"
+        "    status = None\n"
+        "    if not spec.isMaster():\n"
+        "        status = spec.read()\n"
+        "    if spec.isMaster() or status is None:\n"
+        "        kept = spec.status\n"
+        "    else:\n"
+        "        write(status)\n"
+    )
+
+    values = pathcond.literal_values(
+        func, "status", lambda e, _f: [ast.unparse(e)], at=_at(func, 8)
+    )
+
+    assert [(value, line) for value, _conditions, line in values] == [
+        ("spec.read()", 4)
+    ]
+
+
+def test_each_value_a_mapping_settles_meets_the_tests_on_the_way():
+    """``getTasksToExecCommand_JEDI``: ``newTaskStatus = commandStatusMap[commandStr]["doing"]``
+    is one of several statuses, and the bind is under ``if newTaskStatus != "dummy"``:
+    ``dummy`` never gets to it, the others do."""
+    func = _func(
+        "def f(command, varMap):\n"
+        "    newTaskStatus = statusMap[command]['doing']\n"
+        "    if newTaskStatus != 'dummy':\n"
+        "        varMap[':status'] = newTaskStatus\n"
+    )
+
+    values = pathcond.literal_values(
+        func,
+        "newTaskStatus",
+        lambda e, _f: ["aborting", "dummy", "paused"],
+        at=_at(func, 4),
+    )
+
+    assert [(value, line) for value, _conditions, line in values] == [
+        ("aborting", 2),
+        ("paused", 2),
+    ]
+
+
+def test_a_value_spelled_as_a_text_is_not_refused_by_a_test_against_a_number():
+    """A settler spells a ``0`` as ``"0"``: ``if n == 0`` is not read with it, or
+    the 0 the code writes would go."""
+    func = _func(
+        "def f(counts, key, varMap):\n"
+        "    n = counts[key]\n"
+        "    if n == 0:\n"
+        "        varMap[':n'] = n\n"
+    )
+
+    values = pathcond.literal_values(
+        func, "n", lambda e, _f: ["0", "pending"], at=_at(func, 4)
+    )
+
+    assert [(value, line) for value, _conditions, line in values] == [
+        ("0", 2),
+        ("pending", 2),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # a reread
 # --------------------------------------------------------------------------- #
 
@@ -430,27 +522,50 @@ def test_an_augmented_binding_replaces_a_locals_literal():
         "    return n\n"
     )
 
-    assert pathcond.literal_values(surely, "max_id", at=_at(surely, 6)) == []
+    assert (
+        pathcond.literal_values(
+            surely, "max_id", lambda e, _f: [ast.unparse(e)], at=_at(surely, 6)
+        )
+        == []
+    )
     assert pathcond.literal_values(
         looped, "n", lambda e, _f: [ast.unparse(e)], at=_at(looped, 5)
     ) == [("0", ["not any(True for one in files)"], 2)]
 
 
 def test_a_test_after_a_reread_is_not_read_with_the_value():
-    """``job.n += c`` between ``job.n = 0`` and ``if job.n == 0``: the test reads
-    what the reread made of it, which the literal does not settle."""
+    """``job.n += c`` under ``if c`` between ``job.n = 0`` and ``if job.n == 0``:
+    the test reads what the reread may have made of it, which the literal does
+    not settle; and the value needs the ``+=`` not to have run."""
     func = _func(
         "def f(job, c):\n"
         "    job.n = 0\n"
-        "    job.n += c\n"
+        "    if c:\n"
+        "        job.n += c\n"
         "    if job.n == 0:\n"
         "        job.n = 5\n"
         "    save(job)\n"
     )
 
     assert _kinds(_field(func, 2)) == [
-        (5, pathcond.REPLACES, "not (job.n == 0)  [at 4]")
+        (4, pathcond.REPLACES, "not (c)"),
+        (6, pathcond.REPLACES, "not (job.n == 0)  [at 5]"),
     ]
+
+
+def test_a_value_a_plus_equals_surely_meets_goes_no_further_as_itself():
+    """``setDatasetAttribute`` sets ``self.attributes = ""`` and then adds to it,
+    ``process_job_report`` counts from ``0``: past a ``+=`` with no test of its
+    own the place holds another value, so the literal never leaves as itself --
+    a field's, and a name's at the statement that reads it."""
+    field = _func("def f(job, c):\n    job.n = 0\n    job.n += c\n    save(job)\n")
+    name = _func("def f(c):\n    n = 'a'\n    n += c\n    return n\n")
+    before = _func("def f(c):\n    n = 'a'\n    run(n)\n    n += c\n    return n\n")
+
+    assert _field(field, 2) is None
+    assert pathcond.literal_values(name, "n", at=_at(name, 4)) == []
+    # A read before the ``+=`` still gets the literal.
+    assert pathcond.literal_values(before, "n", at=_at(before, 3)) == [("a", [], 2)]
 
 
 def test_the_writes_own_next_pass_is_not_a_reread_between():

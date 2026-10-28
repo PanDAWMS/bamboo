@@ -42,6 +42,7 @@ import ast
 import re
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.pathcond import single_definition
 from bamboo.codemap.panda.reaching import reaching
@@ -313,7 +314,7 @@ def _local(func, name: str) -> bool:
         return False
     return not any(
         isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names
-        for node in ast.walk(func)
+        for node in walk(func)
     )
 
 
@@ -345,7 +346,7 @@ def _held_by_name(name: str, func, at: ast.AST, hops: int) -> list[str]:
 
 def _dict_kept_local(name: str, func) -> bool:
     """Whether every use of *name* reads the dict or stores into it, here."""
-    for node in ast.walk(func):
+    for node in walk(func):
         if not (isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)):
             continue
         parent = getattr(node, "parent", None)
@@ -391,7 +392,7 @@ def _held_by_dict(name: str, func, at: ast.AST, hops: int) -> list[str]:
         ):
             continue
         return [_HOLE]
-    for node in ast.walk(func):
+    for node in walk(func):
         if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == name):
             continue
         if isinstance(node.ctx, ast.Load):
@@ -419,7 +420,7 @@ def _held_by_dict(name: str, func, at: ast.AST, hops: int) -> list[str]:
             found += [_HOLE + frame for frame in _frames(statement.value, func, statement, hops - 1)]
         else:
             found += _frames(statement.value, func, statement, hops - 1)
-    for node in ast.walk(func):
+    for node in walk(func):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -519,7 +520,7 @@ def _mapping_iterated(
     """
     if func is None:
         return None
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.For) or not isinstance(node.target, ast.Tuple):
             continue
         bound = [
@@ -851,7 +852,7 @@ def handed(resolve, calls: Optional["Calls"]):
             for name in names:
                 found[name] = None
 
-        for node in ast.walk(func):
+        for node in walk(func):
             if node is func or not in_scope(node, func):
                 continue
             if isinstance(node, ast.Assign):
@@ -859,7 +860,7 @@ def handed(resolve, calls: Optional["Calls"]):
                     if isinstance(target, ast.Name):
                         add(target.id, node.value)
                     else:
-                        spoil(one.id for one in ast.walk(target) if isinstance(one, ast.Name))
+                        spoil(one.id for one in walk(target) if isinstance(one, ast.Name))
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
                 if isinstance(node.target, ast.Name) and node.value is not None:
                     add(node.target.id, node.value)
@@ -880,7 +881,7 @@ def handed(resolve, calls: Optional["Calls"]):
                 )
                 if isinstance(node, ast.ExceptHandler) and node.name:
                     spoil([node.name])
-                spoil(one.id for target in targets for one in ast.walk(target) if isinstance(one, ast.Name))
+                spoil(one.id for target in targets for one in walk(target) if isinstance(one, ast.Name))
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 spoil([alias.asname or alias.name for alias in node.names])
             elif isinstance(node, (ast.Global, ast.Nonlocal)):
@@ -963,7 +964,7 @@ def handed(resolve, calls: Optional["Calls"]):
         tested = {
             name.id
             for test in pathcond.tests_on(expression, func)
-            for name in ast.walk(test)
+            for name in walk(test)
             if isinstance(name, ast.Name)
         }
         if expression.id not in tested or calls is None:
@@ -1036,7 +1037,7 @@ def _resolved(expression: ast.expr) -> str:
     dotted = ast.unparse(expression)
     head, _, rest = dotted.partition(".")
     module = _module_of(expression)
-    for node in ast.walk(module) if module is not None else ():
+    for node in walk(module) if module is not None else ():
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if (alias.asname or alias.name.split(".")[0]) == head:

@@ -75,6 +75,7 @@ import ast
 import re
 from collections import Counter
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import MapFragment, SourceModule
 from bamboo.codemap.panda.attribution import UNRESOLVED
 
@@ -107,7 +108,7 @@ def gated_fields(modules: list[SourceModule]) -> Counter:
     """Count fields a SQL predicate tests against literal values."""
     counts: Counter = Counter()
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                 continue
             if "WHERE" not in node.value.upper():

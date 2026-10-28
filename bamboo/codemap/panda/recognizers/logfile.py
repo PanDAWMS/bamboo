@@ -53,6 +53,7 @@ import ast
 from collections import defaultdict
 from typing import NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import Calls, CallSite, Target, bind
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
@@ -134,7 +135,7 @@ def logger_name(module: SourceModule) -> Optional[str]:
     ``api_pilot``.  The first is the one the module's own calls use; a call
     made on the other is read where it is made, by :class:`LoggerFiles`.
     """
-    for node in ast.walk(module.tree):
+    for node in walk(module.tree):
         if isinstance(node, ast.Call):
             name = _opened_name(node, module.rel_path)
             if name:
@@ -167,7 +168,7 @@ def _subclass_edges(modules: list[SourceModule]) -> dict[str, list[tuple[str, st
 
 
 def _classes_in(module: SourceModule) -> list[str]:
-    return [n.name for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)]
+    return [n.name for n in walk(module.tree) if isinstance(n, ast.ClassDef)]
 
 
 def inherited_files(
@@ -389,7 +390,7 @@ class LoggerFiles:
             return
         returned = [
             node.value
-            for node in ast.walk(target.func)
+            for node in walk(target.func)
             if isinstance(node, ast.Return)
             and node.value is not None
             and pathcond.enclosing_function(node) is target.func
@@ -720,7 +721,7 @@ def _installed_from(func: ast.AST) -> list[str]:
     ``SetupperPluginBase``), which is how an adder plugin gets its logger.
     """
     found: list[str] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if not (
             isinstance(node, ast.For)
             and isinstance(node.target, ast.Tuple)
@@ -739,7 +740,7 @@ def _installed_from(func: ast.AST) -> list[str]:
             isinstance(call, ast.Call)
             and getattr(call.func, "id", "") == "setattr"
             and [ast.unparse(one) for one in call.args] == ["self", key, value]
-            for call in ast.walk(node)
+            for call in walk(node)
         ):
             found.append(node.iter.func.value.id)
     return found

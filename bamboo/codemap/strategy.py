@@ -75,6 +75,7 @@ from collections import Counter
 from typing import NamedTuple, Optional, Sequence
 
 from bamboo.codemap import evidence, trace
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.evidence import GrepQuery
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
@@ -1554,8 +1555,8 @@ def _reads(conditions: list[str]) -> dict[str, set[str]]:
             tree = ast.parse(condition.split("  [")[0], mode="eval")
         except SyntaxError:
             continue
-        called = {node.func for node in ast.walk(tree) if isinstance(node, ast.Call)}
-        for node in ast.walk(tree):
+        called = {node.func for node in walk(tree) if isinstance(node, ast.Call)}
+        for node in walk(tree):
             if not isinstance(node, ast.Attribute) or node in called:
                 continue
             receiver = node.value.id if isinstance(node.value, ast.Name) else ""

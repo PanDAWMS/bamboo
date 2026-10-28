@@ -39,6 +39,7 @@ from __future__ import annotations
 import ast
 from typing import Iterator, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -63,6 +64,7 @@ from bamboo.codemap.panda.pathcond import (
     enclosing_function,
     entries,
     exclusive,
+    field_additions,
     field_replacements,
     functions_with_owner,
     literal_values,
@@ -137,7 +139,7 @@ def declared_vocabularies(
     """
     vocabularies: dict[tuple[str, str], set[str]] = {}
     for module in modules:
-        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
             attributes = declarations.get(cls.name, set())
             if not attributes:
                 continue
@@ -147,7 +149,7 @@ def declared_vocabularies(
                 attribute = _described_attribute(func.name, attributes)
                 if attribute is None:
                     continue
-                for stmt in ast.walk(func):
+                for stmt in walk(func):
                     if not isinstance(stmt, ast.Return) or stmt.value is None:
                         continue
                     literals = _literal_strings(stmt.value)
@@ -171,7 +173,7 @@ def _attribute_writes(
     side is yielded unresolved -- what can be made of it is :func:`_resolve`'s
     question, and it needs the enclosing function this does not have.
     """
-    for node in ast.walk(tree):
+    for node in walk(tree):
         value = written_value(node)
         if value is None:
             continue
@@ -227,7 +229,7 @@ def spec_setters(
             if not parameters:
                 continue
             written: dict[str, set[str]] = {}
-            for node in ast.walk(func):
+            for node in walk(func):
                 targets = targets_of(node)
                 if len(targets) != 1:
                     continue
@@ -240,7 +242,7 @@ def spec_setters(
                 ):
                     continue
                 flowing = {
-                    name.id for name in ast.walk(node.value) if isinstance(name, ast.Name)
+                    name.id for name in walk(node.value) if isinstance(name, ast.Name)
                 } & set(parameters)
                 if flowing:
                     written.setdefault(target.attr, set()).update(flowing)
@@ -294,7 +296,7 @@ def _recorded_in(
     reading it as this branch's message would make the value its own
     description -- a frame that matches any message with the word in it.
     """
-    for node in ast.walk(statement):
+    for node in walk(statement):
         if isinstance(node, ast.Call):
             yield _recorded_argument(node, setters)
         elif (
@@ -339,7 +341,7 @@ def _reaching(
     definitions = sorted(
         (
             node
-            for node in ast.walk(func)
+            for node in walk(func)
             if any(isinstance(t, ast.Name) and t.id == name for t in targets_of(node))
             or (
                 isinstance(node, ast.AugAssign)
@@ -467,7 +469,7 @@ def _persisted_templates(
     seen: set[tuple[str, str, int]] = set()
     for func, _owner in functions_with_owner(module.tree):
         assignments = assigned_expressions(func)
-        for call in ast.walk(func):
+        for call in walk(func):
             if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
                 continue
             setter = setters.get(call.func.attr)
@@ -535,11 +537,11 @@ def unclaimed_tags(
             # renders as the frame, so counting both reports every tag twice.
             inside = {
                 id(part)
-                for node in ast.walk(func)
+                for node in walk(func)
                 if isinstance(node, ast.JoinedStr)
                 for part in node.values
             }
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not isinstance(node, (ast.Constant, ast.JoinedStr)) or id(node) in inside:
                     continue
                 text = values.rendered_text(node)
@@ -755,7 +757,7 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
     """
     found: list[tuple[str, str, set[str]]] = []
     for module in modules:
-        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
                 names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
                 if not names & SPEC_DECLARATION_NAMES:
@@ -800,7 +802,7 @@ def spec_length_limits(modules: list[SourceModule]) -> dict[tuple[str, str], int
     """
     found: dict[tuple[str, str], int] = {}
     for module in modules:
-        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
             declared: dict[str, int] = {}
             for stmt in cls.body:
                 if not any(isinstance(t, ast.Name) and t.id == LENGTH_LIMITS for t in targets_of(stmt)):
@@ -821,7 +823,7 @@ def spec_length_limits(modules: list[SourceModule]) -> dict[tuple[str, str], int
                 and isinstance(node.upper, ast.Subscript)
                 and isinstance(node.upper.value, ast.Attribute)
                 and node.upper.value.attr == LENGTH_LIMITS
-                for node in ast.walk(cls)
+                for node in walk(cls)
             ):
                 found.update(((cls.name, attribute), limit) for attribute, limit in declared.items())
     return found
@@ -891,6 +893,8 @@ def extract(
     settle = values.resolver()
     aliases = find_aliases(modules, declarations)
     memo: dict = {}
+    # The ``+=`` already a branch of a junction, which a value written before in two arms reaches twice.
+    added_at: set[tuple[str, int]] = set()
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --
@@ -981,14 +985,25 @@ def extract(
             # where it never does -- ``remAttribute`` rewrites ``self.attributes``
             # four times before ``if self.attributes == "":`` -- and an entry per
             # later write that can replace it.
+            callee = setters_of(aliases, attributor, target.attr)
             replaced = (
-                field_replacements(
-                    node, target.value, target.attr, value, setters_of(aliases, attributor, target.attr), memo
-                )
+                field_replacements(node, target.value, target.attr, value, callee, memo)
                 if func is not None
                 else []
             )
-            if replaced is None:
+            # And each ``+=`` that adds to the value and leaves: what leaves there is what the
+            # function makes of it -- ``setDatasetAttribute``'s ``self.attributes += attr`` after
+            # ``self.attributes = ""``, a count from ``0``.
+            adding = [
+                one
+                for one in (
+                    field_additions(node, target.value, target.attr, callee, memo)
+                    if func is not None
+                    else []
+                )
+                if (name, id(one)) not in added_at
+            ]
+            if replaced is None and not adding:
                 continue
 
             structural = attributor.structural_class(target, func, owner_class)
@@ -1008,37 +1023,54 @@ def extract(
                 )
                 junctions[name] = junction
 
-            # The write's own guards, shared by every outcome its right-hand
-            # side can produce: reaching a write is necessary for any of them.
-            dominating = path_condition(node)
-            later = entries(replaced, dominating)
-            tags, messages = (
-                recorded_signature(node, func, setters, target.attr)
-                if func is not None
-                else ([], [])
-            )
-            for resolved in _resolve(
-                value,
-                func=func,
-                dominating=dominating,
-                attributor=attributor,
-                owner_class=owner_class,
-                spec_names=spec_attribute_names,
-                settle=settle,
-                at=node,
-            ):
+            if replaced is not None:
+                # The write's own guards, shared by every outcome its right-hand
+                # side can produce: reaching a write is necessary for any of them.
+                dominating = path_condition(node)
+                later = entries(replaced, dominating)
+                tags, messages = (
+                    recorded_signature(node, func, setters, target.attr)
+                    if func is not None
+                    else ([], [])
+                )
+                for resolved in _resolve(
+                    value,
+                    func=func,
+                    dominating=dominating,
+                    attributor=attributor,
+                    owner_class=owner_class,
+                    spec_names=spec_attribute_names,
+                    settle=settle,
+                    at=node,
+                ):
+                    junction.branches.append(
+                        Branch(
+                            outcome=resolved.outcome,
+                            path_condition=dominating
+                            + list(resolved.conditions)
+                            + [entry for entry in later if entry not in resolved.conditions],
+                            order=len(junction.branches),
+                            tier=resolved.tier,
+                            tags=tags,
+                            messages=messages,
+                            line=node.lineno,
+                            value_frames=list(resolved.frames),
+                        )
+                    )
+            for one in adding:
+                added_at.add((name, id(one)))
+                guards = path_condition(one)
+                left = field_replacements(one, target.value, target.attr, None, callee, memo) or []
+                one_tags, one_messages = recorded_signature(one, func, setters, target.attr)
                 junction.branches.append(
                     Branch(
-                        outcome=resolved.outcome,
-                        path_condition=dominating
-                        + list(resolved.conditions)
-                        + [entry for entry in later if entry not in resolved.conditions],
+                        outcome=_runtime(ast.BinOp(left=one.target, op=one.op, right=one.value)),
+                        path_condition=guards + entries(left, guards),
                         order=len(junction.branches),
-                        tier=resolved.tier,
-                        tags=tags,
-                        messages=messages,
-                        line=node.lineno,
-                        value_frames=list(resolved.frames),
+                        tier=2,
+                        tags=one_tags,
+                        messages=one_messages,
+                        line=one.lineno,
                     )
                 )
         if candidates:

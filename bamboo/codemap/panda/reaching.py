@@ -54,6 +54,9 @@ the old rule because they are about the reader, not the flow:
   as an overwrite, ``copyArchive.py``'s holding limit came out as sixty
   minutes and two SQL strings built with ``+=`` lost their ``SELECT``.
   ``x = f(x)`` does overwrite: once it has run, it is the whole answer.
+  Handed in as a killer, a ``+=`` kills like any killer: a reader asking
+  where a literal goes as itself (:func:`pathcond.replacements`) knows that
+  past a ``+=`` it surely meets, the name holds another value.
 * *rereads* are writes the caller knows keep what was there and a statement
   cannot show -- ``keyList.add(tmpKey)``, ``varMap[":diag"] = trunc(varMap[":diag"])``.
 
@@ -72,6 +75,8 @@ from __future__ import annotations
 
 import ast
 from typing import Optional, Sequence
+
+from bamboo.codemap.astwalk import walk
 
 #: The nodes whose body is a scope of its own.
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
@@ -180,9 +185,13 @@ def _writes(
     again = {id(node) for node in rereads if _scope_of(node) is scope}
     ids = sorted({id(node) for node in own} | again)
     bits = {key: 1 << index for index, key in enumerate(ids)}
+    # A ``+=`` handed in as a killer kills, as every killer does: the caller
+    # knows the value goes no further as itself.
+    killed = {id(node) for node in killers} - again
     keeps = 0
     for node in own:
-        if isinstance(node, ast.AugAssign) or id(node) in again:
+        adds = isinstance(node, ast.AugAssign) and id(node) not in killed
+        if adds or id(node) in again:
             keeps |= bits[id(node)]
     for key in again:
         keeps |= bits[key]
@@ -360,7 +369,7 @@ def _bound_only_to_one(scope: ast.AST, name: str) -> bool:
     neither, nor declared global or nonlocal."""
     allowed = {
         id(one)
-        for node in ast.walk(scope)
+        for node in walk(scope)
         if isinstance(node, ast.Assign) and _is_one(node.value)
         for one in node.targets
         if isinstance(one, ast.Name) and one.id == name
@@ -372,7 +381,7 @@ def _binds(
     scope: ast.AST, name: str, allowed: frozenset[int] | set[int] = frozenset()
 ) -> bool:
     """Whether anything inside *scope* -- its nested scopes too -- binds *name*, besides the nodes in *allowed*."""
-    for node in ast.walk(scope):
+    for node in walk(scope):
         if id(node) in allowed:
             continue
         if (

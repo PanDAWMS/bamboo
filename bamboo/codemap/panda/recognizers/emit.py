@@ -47,6 +47,7 @@ import ast
 import re
 from typing import Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
@@ -116,7 +117,7 @@ def logging_arguments(func: ast.AST) -> list[ast.expr]:
     removes.
     """
     found: list[ast.expr] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
         if not node.args:
@@ -165,7 +166,7 @@ def _row_counts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     the one place it is written down is a line like ``updated 0 rows``.
     """
     found: set[str] = set()
-    for node in ast.walk(func):
+    for node in walk(func):
         value = written_value(node)
         if not (isinstance(value, ast.Attribute) and value.attr == "rowcount"):
             continue

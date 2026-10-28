@@ -5534,6 +5534,108 @@ def test_only_literal_writes_make_a_method_an_alias():
     assert alias.find_aliases(modules, progress.spec_attributes(modules)) == {}
 
 
+def test_a_literal_the_alias_adds_to_is_written_at_its_calls_as_what_it_computes():
+    """``setDatasetAttribute`` sets ``self.attributes = ""`` and then adds the label to it.
+
+    Its callers' objects never hold ``""``, and each call still writes the field:
+    what the method computes, ``runtime(setDatasetAttribute())``.  A literal a
+    ``+=`` only may add to leaves where the ``+=`` does not run, and the ``+=``
+    is a write of its own under its test.
+    """
+    spec = (
+        "class JediDatasetSpec(object):\n"
+        "    _attributes = ('datasetID', 'attributes')\n"
+        "\n"
+        "    def setDatasetAttribute(self, attr):\n"
+        "        if self.attributes is None:\n"
+        "            self.attributes = ''\n"
+        "        else:\n"
+        "            self.attributes += ','\n"
+        "        self.attributes += attr\n"
+        "\n"
+        "    def setLabel(self, label, more):\n"
+        "        self.attributes = label\n"
+        "        self.attributes = 'plain'\n"
+        "        if more:\n"
+        "            self.attributes += ',more'\n"
+    )
+    caller = (
+        "def refine(self, datasetSpec):\n"
+        "    datasetSpec.setDatasetAttribute('nosplit')\n"
+        "    save(datasetSpec)\n"
+        "\n"
+        "def label(self, datasetSpec):\n"
+        "    datasetSpec.setLabel('x', True)\n"
+        "    save(datasetSpec)\n"
+    )
+    _subjects, junctions, _cov = _alias_extract(
+        (spec, "pandaserver/taskbuffer/JediDatasetSpec.py"),
+        (caller, "pandajedi/jedirefine/TaskRefinerBase.py"),
+    )
+
+    branches = {
+        j.owner.rsplit("::", 1)[-1]: [(b.outcome, b.tier, b.path_condition) for b in j.branches]
+        for j in junctions
+        if j.subject == "JediDatasetSpec.attributes"
+    }
+    assert branches == {
+        "refine": [("runtime(setDatasetAttribute())", 2, [])],
+        "label": [
+            ("plain", 1, ["not (more)  [in setLabel()]"]),
+            ("runtime(setLabel())", 2, ["more  [in setLabel()]"]),
+        ],
+    }
+
+
+def test_a_plus_equals_that_adds_to_a_value_is_a_write_of_what_it_makes():
+    """The attribute slice's side of the setter: ``self.attributes = ''`` never
+    leaves ``setDatasetAttribute`` as written, and the ``+=`` that adds to it is
+    the method's write -- what it makes, said ``runtime``.  A ``+=`` that may
+    run leaves the value where it does not; a count from ``0`` is ``0`` only
+    where no pass added to it, and the count otherwise.
+    """
+    spec = (
+        "class JediDatasetSpec(object):\n"
+        "    _attributes = ('datasetID', 'attributes', 'nFiles')\n"
+        "\n"
+        "    def setDatasetAttribute(self, attr):\n"
+        "        if self.attributes is None:\n"
+        "            self.attributes = ''\n"
+        "        else:\n"
+        "            self.attributes += ','\n"
+        "        self.attributes += attr\n"
+        "\n"
+        "    def setLabel(self, more):\n"
+        "        self.attributes = 'plain'\n"
+        "        if more:\n"
+        "            self.attributes += ',more'\n"
+        "\n"
+        "    def count(self, files):\n"
+        "        self.nFiles = 0\n"
+        "        for f in files:\n"
+        "            if f.type == 'output':\n"
+        "                self.nFiles += 1\n"
+    )
+    modules = [_module(spec, "pandaserver/taskbuffer/JediDatasetSpec.py")]
+    _subjects, junctions, _c, _d, _e = progress.extract(modules, MAP_ID, VERSION)
+
+    branches = {
+        j.owner.rsplit("::", 1)[-1]: [(b.outcome, b.tier, b.path_condition, b.line) for b in j.branches]
+        for j in junctions
+    }
+    assert branches == {
+        "setDatasetAttribute": [("runtime(self.attributes + attr)", 2, [], 9)],
+        "setLabel": [
+            ("plain", 1, ["not (more)"], 12),
+            ("runtime(self.attributes + ',more')", 2, ["more"], 14),
+        ],
+        "count": [
+            ("0", 1, ["not any(f.type == 'output' for f in files)"], 17),
+            ("runtime(self.nFiles + 1)", 2, ["f.type == 'output'"], 20),
+        ],
+    }
+
+
 # --------------------------------------------------------------------------- #
 # return alias -- a helper that returns the value the caller writes
 # --------------------------------------------------------------------------- #
@@ -18252,6 +18354,25 @@ def test_an_object_no_write_persists_says_what_its_fields_reach(tmp_path):
         ("note", "job", "", KEY_NO_USE, [], [], {"JobSpec.jobStatus": [closed]}),
     ]
 
+
+
+def test_a_plus_equals_arm_says_what_its_field_reaches(tmp_path):
+    """A ``+=`` that adds to a value and leaves is an arm of its own (the attribute slice's runtime branch), and like
+    an assignment's it has a record of what its field reaches next: ``job`` was handed in, so the caller holds it."""
+    rel = "pandajedi/jediorder/Agent.py"
+    source = (
+        "class Agent:\n"
+        "    def tag(self, job: JobSpec):\n"
+        "        job.jobStatus = 'a'\n"
+        "        job.jobStatus += 'b'\n"
+    )
+    froms, _keys = _flushed(tmp_path, source, rel)
+
+    read = sorted(
+        (one.owner.rpartition("::")[2], one.object, one.term, one.unread, one.handed_to, one.sources, one.writes)
+        for one in froms
+    )
+    assert read == [("tag", "job", "", KEY_KEPT, [], [], {"JobSpec.jobStatus": [4]})]
 
 _KEY_FROM = '''
 class TaskModule:

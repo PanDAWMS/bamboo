@@ -49,6 +49,7 @@ import itertools
 import operator
 from typing import Iterator, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import BUILTIN, Types, own_nodes
 from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.recognizers.progress import (
@@ -355,7 +356,7 @@ def _loop_binding(node: ast.AST, func: ast.AST, name: str) -> Optional[ast.For]:
         if ancestor is func:
             return None
         if isinstance(ancestor, ast.For) and name in {
-            one.id for one in ast.walk(ancestor.target) if isinstance(one, ast.Name)
+            one.id for one in walk(ancestor.target) if isinstance(one, ast.Name)
         }:
             return ancestor
     return None

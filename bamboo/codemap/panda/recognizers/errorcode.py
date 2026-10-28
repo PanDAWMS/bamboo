@@ -29,6 +29,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, CoverageStat, SourceModule, ValueEnumNode
 from bamboo.codemap.panda.pathcond import targets_of
 
@@ -148,7 +149,7 @@ def extract(
     # Reference counting runs over every module, not just the defining one:
     # a constant is only meaningfully part of the index if something reads it.
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if isinstance(node, ast.Attribute) and _is_enum_name(node.attr):
                 references[node.attr] += 1
             elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):

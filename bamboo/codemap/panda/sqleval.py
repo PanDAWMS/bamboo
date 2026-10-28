@@ -80,6 +80,8 @@ import re
 import string
 from typing import Callable, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
+
 HOLE = "\x00"
 MAX_ENVS = 512
 CALLEE_ENVS = 64  # paths a callee run keeps before widening: it reads one value for the caller, on a smaller budget
@@ -1028,7 +1030,7 @@ def _statement_literal(value: ast.AST) -> bool:
             or _STATEMENT_START.search(node.value)
             or _STATEMENT_CLAUSE.search(node.value)
         )
-        for node in ast.walk(value)
+        for node in walk(value)
     )
 
 
@@ -1064,7 +1066,7 @@ def _built_names(func: ast.AST) -> frozenset:
     found: set = {
         n.id
         for call in runner_calls(func)
-        for n in ast.walk(call.args[0])
+        for n in walk(call.args[0])
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
     }
     writes: list = []
@@ -1080,10 +1082,7 @@ def _built_names(func: ast.AST) -> frozenset:
         else:
             continue
         names = {
-            n.id
-            for target in targets
-            for n in ast.walk(target)
-            if isinstance(n, ast.Name)
+            n.id for target in targets for n in walk(target) if isinstance(n, ast.Name)
         }
         if not names:
             continue
@@ -1110,7 +1109,7 @@ def _uses(func: ast.AST, names: frozenset) -> list[ast.Name]:
             written = {t.id for t in targets if isinstance(t, ast.Name)}
             building |= {
                 id(n)
-                for n in ast.walk(node.value)
+                for n in walk(node.value)
                 if isinstance(n, ast.Name)
                 and isinstance(n.ctx, ast.Load)
                 and n.id in written
@@ -1154,7 +1153,7 @@ def _pure(test: ast.expr) -> bool:
                 ast.UAdd,
             ),
         )
-        for node in ast.walk(test)
+        for node in walk(test)
     )
     _PURE[id(test)] = (test, answer)
     return answer
@@ -1194,7 +1193,7 @@ def _factual(test: ast.expr) -> bool:
                 ast.UAdd,
             ),
         )
-        for node in ast.walk(test)
+        for node in walk(test)
     )
     _FACTUAL[id(test)] = (test, answer)
     return answer
@@ -1206,7 +1205,7 @@ def _touched_by(test: ast.expr) -> frozenset[str]:
     ``job.x.y == 1`` -> ``job.x.y``, ``job.x``, ``job``.  Empty for a test on names only.
     """
     found: set[str] = set()
-    for node in ast.walk(test):
+    for node in walk(test):
         if isinstance(node, ast.Attribute):
             found.add(_spelled(node))
             found.add(_spelled(node.value))
@@ -1328,7 +1327,7 @@ def _modelled_call(call: ast.Call) -> bool:
 def _pattern_names(pattern) -> list[str]:
     return [
         node.name
-        for node in ast.walk(pattern)
+        for node in walk(pattern)
         if getattr(node, "name", None) and isinstance(node.name, str)
     ]
 
@@ -1399,7 +1398,7 @@ def parent_map(func: ast.AST) -> dict[int, ast.AST]:
         return held[1]
     table = {
         id(child): parent
-        for parent in ast.walk(func)
+        for parent in walk(func)
         for child in ast.iter_child_nodes(parent)
     }
     _PARENTS[id(func)] = (func, table)
@@ -1645,7 +1644,7 @@ def _nested_ids(func) -> frozenset:
             func,
             frozenset(
                 id(n)
-                for n in ast.walk(func)
+                for n in walk(func)
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and n is not func
             ),
@@ -2357,7 +2356,7 @@ class Ref:
                 ast.ClassDef,
             ),
         ) and not isinstance(stmt, getattr(ast, "TryStar", ast.Try)):
-            for node in ast.walk(stmt):
+            for node in walk(stmt):
                 if isinstance(node, ast.IfExp):
                     found |= _names(node.test)
                 elif isinstance(node, ast.BoolOp):
@@ -2586,7 +2585,7 @@ class Ref:
     def tracks(self, stmt: ast.stmt) -> bool:
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
         for target in targets:
-            for node in ast.walk(target):
+            for node in walk(target):
                 if isinstance(node, ast.Name) and node.id in self.relevant:
                     return True
         return False
@@ -2887,7 +2886,7 @@ class Ref:
             names = {
                 n.id
                 for target in targets
-                for n in ast.walk(target)
+                for n in walk(target)
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
             }
             for name in names:
@@ -3065,7 +3064,7 @@ class Ref:
         if key not in self._loop_names:
             nodes = [n for part in stmt.body for n in _expression_nodes(part)]
             if isinstance(stmt, (ast.For, ast.AsyncFor)):
-                nodes += list(ast.walk(stmt.target))
+                nodes += list(walk(stmt.target))
             names = set()
             for n in nodes:
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
@@ -3111,7 +3110,7 @@ class Ref:
                         ):
                             found |= {
                                 m
-                                for e in ast.walk(n.value)
+                                for e in walk(n.value)
                                 if isinstance(e, ast.IfExp)
                                 for m in _names(e.test)
                             }
@@ -3157,7 +3156,7 @@ class Ref:
             appended: set[str] = set()
             allowed: set[int] = set()
             for part in parts:
-                for n in ast.walk(part):
+                for n in walk(part):
                     if (
                         isinstance(n, ast.AugAssign)
                         and isinstance(n.op, ast.Add)
@@ -3177,7 +3176,7 @@ class Ref:
                         allowed.add(id(n.func.value))
             used: set[str] = set()
             for part in parts:
-                for n in ast.walk(part):
+                for n in walk(part):
                     if isinstance(n, ast.Name) and id(n) not in allowed:
                         used.add(n.id)
                     elif isinstance(n, (ast.Global, ast.Nonlocal)):
@@ -3522,7 +3521,7 @@ class Ref:
                 cut = self.built_names & {
                     n.id
                     for part in stmt.body
-                    for n in ast.walk(part)
+                    for n in walk(part)
                     if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
                 }
                 for name in sorted(cut):
@@ -4640,7 +4639,7 @@ class Ref:
             local = (
                 {
                     n.id
-                    for n in ast.walk(target)
+                    for n in walk(target)
                     if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
                 }
                 | set(names)

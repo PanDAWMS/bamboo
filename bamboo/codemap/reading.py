@@ -31,6 +31,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.gitsource import blob_sha as git_blob_sha
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ def containing_function(tree: ast.Module, line: int, owner: str) -> Optional[ast
     wanted = owner.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
     holders = [
         node
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.lineno <= line <= (node.end_lineno or node.lineno)
     ]

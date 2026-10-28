@@ -37,6 +37,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, BoundaryNode, CoverageStat, SourceModule
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.pathcond import (
@@ -121,7 +122,7 @@ def _logged_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     two is what lets the extraction be graded without production data.
     """
     names: set[str] = set()
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.JoinedStr):
             continue
         for value in node.values:
@@ -152,7 +153,7 @@ def extract(
     for module in modules:
         candidates = 0
         explained = 0
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             decorator = endpoint_decorator(node)
@@ -237,7 +238,7 @@ def schema_names(modules: list[SourceModule]) -> dict[str, str]:
     """
     found: dict[str, str] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             value = written_value(node)
             if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
                 continue
