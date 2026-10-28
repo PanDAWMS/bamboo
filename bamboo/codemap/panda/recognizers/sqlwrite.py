@@ -5678,6 +5678,42 @@ class _Reading:
         return bool(carry.held(call, call)) and self._use_reads(carry, call)
 
 
+@dataclasses.dataclass
+class _Landing:
+    """Where the walk carrying a statement's rows (:class:`_Crossings`) reached a call the reach record reads as the
+    database through calls: the call and its function, the way there, and where the rows sit in what it binds."""
+
+    file: str
+    func: ast.AST
+    call: ast.Call
+    #: ``(kind, file, func, call)`` per step, the first in the statement's own function: ``"into"`` a call followed
+    #: down, ``"back"`` a caller's call the rows are returned to.
+    way: tuple
+    #: ``{bind key without its colon: the paths of the rows under it}`` (:func:`_bind_holdings`).
+    held: dict[str, _Paths]
+    #: The same, per select item by its position, from the walks seeded with each (:func:`_item_landings`).
+    items: dict[int, dict[str, _Paths]] = dataclasses.field(default_factory=dict)
+
+    def key(self) -> tuple:
+        """The same landing in another walk of the statement: its call by the same way."""
+        return id(self.call), tuple((kind, id(func), id(call)) for kind, _file, func, call in self.way)
+
+
+def _bind_holdings(carry: _PathCarry, call: ast.Call) -> dict[str, _Paths]:
+    """Where *carry*'s rows sit in each bind *call* hands the database, the text (its first argument) aside: ``{key
+    without its colon: the paths under it}`` of a map, ``""`` for one held whole; each map of a list alike."""
+    found: dict[str, set[tuple[str, ...]]] = {}
+    handed = [one.value if isinstance(one, ast.Starred) else one for one in call.args[1:]]
+    for value in [*handed, *(keyword.value for keyword in call.keywords)]:
+        for path in carry.held(value, call):
+            steps = [step for step in path if step != _ALL] if path[:1] == (_ALL,) else list(path)
+            if not steps:
+                found.setdefault("", set()).add(())
+            elif steps[0].startswith("['") and steps[0].endswith("']"):
+                found.setdefault(steps[0][2:-2].lstrip(":"), set()).add(tuple(steps[1:]))
+    return {key: frozenset(paths) for key, paths in found.items()}
+
+
 class _Crossings:
     """Where the rows one statement keeps reach a junction that reads them, read through the corpus's calls.
 
@@ -5706,8 +5742,10 @@ class _Crossings:
     declared ``Any``.
     """
 
-    def __init__(self, reading: _Reading):
+    def __init__(self, reading: _Reading, landing: bool = False):
         self.reading = reading
+        #: Whether to keep where the rows reach the database through calls (:attr:`landings`).
+        self.landing = landing
         #: The junction owners the rows reach and read them; those found on the way back too.
         self.found: set[str] = set()
         self.found_back: set[str] = set()
@@ -5716,6 +5754,9 @@ class _Crossings:
         self._entered: set[tuple] = set()
         self._returned: set[tuple] = set()
         self._backing = 0
+        #: Where the rows reached the database through calls (:class:`_Landing`), and the way the walk is on now.
+        self.landings: list[_Landing] = []
+        self._way: list[tuple[str, str, ast.AST, ast.Call]] = []
 
     def _cross(self, owner: str) -> None:
         self.found.add(owner)
@@ -5726,6 +5767,10 @@ class _Crossings:
         """Follow *call*, made in *carry*'s function, handed what *carry* holds there -- all of it, *everything*."""
         reading = self.reading
         if reading.record.is_database(carry.file, call):
+            if self.landing and self._way:
+                self.landings.append(
+                    _Landing(carry.file, carry.func, call, tuple(self._way), _bind_holdings(carry, call))
+                )
             return
         hole = reading.record.hole_at(carry.file, call)
         if hole is not None and (not isinstance(call.func, ast.Attribute) or call.func.attr in reading.owner_names):
@@ -5737,10 +5782,31 @@ class _Crossings:
             given = reading.given(carry, call, placed, target, everything)
             if not given:
                 continue
-            if target.owner in reading.owners and reading.reads(target, given):
-                self._cross(target.owner)
-                continue
-            self._through(target, given)
+            self._way.append(("into", carry.file, carry.func, call))
+            try:
+                if target.owner in reading.owners and reading.reads(target, given):
+                    self._cross(target.owner)
+                    if self.landing:
+                        self._land_in(target, given)
+                    continue
+                self._through(target, given)
+            finally:
+                self._way.pop()
+
+    def _land_in(self, target: Target, given: dict[str, _Paths]) -> None:
+        """Where what a junction's owner crossed to is given reaches the database in its own statements: not gone
+        through, the owner's other calls are not followed, but a statement it runs with them in a bind is a
+        :class:`_Landing` as one in a function gone through is."""
+        key = ("landed", self.reading._key(target, given))
+        if key in self._entered:
+            return
+        self._entered.add(key)
+        carry = self.reading.summary(target, given).carry or self.reading.carry(target, given)
+        for call in _own_calls(target.func):
+            if self.reading.record.is_database(target.file, call) and carry.handed_any(call):
+                self.landings.append(
+                    _Landing(target.file, target.func, call, tuple(self._way), _bind_holdings(carry, call))
+                )
 
     def _through(self, target: Target, given: dict[str, _Paths]) -> None:
         key = self.reading._key(target, given)
@@ -5768,17 +5834,112 @@ class _Crossings:
             # not where they go next.
             if site.in_module or (site.file == file and site.func is func):
                 continue
-            carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
-            owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
-            if owner in reading.owners and reading.reads_in(carry):
-                self._cross(owner)
-            for call in _own_calls(site.func):
-                if call is not site.call and carry.handed_any(call):
-                    self.into(carry, call)
-            returned = carry.returns()
-            if returned:
-                self.back(site.file, site.func, returned)
+            self._way.append(("back", site.file, site.func, site.call))
+            try:
+                carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
+                owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
+                if owner in reading.owners and reading.reads_in(carry):
+                    self._cross(owner)
+                for call in _own_calls(site.func):
+                    if call is not site.call and carry.handed_any(call):
+                        self.into(carry, call)
+                returned = carry.returns()
+                if returned:
+                    self.back(site.file, site.func, returned)
+            finally:
+                self._way.pop()
         self._backing -= 1
+
+
+def _walk(
+    reading: _Reading,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    site: ReadSiteNode,
+    item: Optional[int] = None,
+    landing: bool = False,
+) -> tuple[_Crossings, _Paths]:
+    """Carry *site*'s rows on from its statement in *func* (:func:`attach_crossings`) -- with *item*, that select item
+    of them alone (:class:`_PathCarry`), with *landing* keeping where they reach the database through calls: the walk,
+    and what *func* returns of them."""
+    file, line = site.anchor.file, site.anchor.line_start
+    rows = _rows_written(func, line, site.region[1])
+    carry = _PathCarry(reading, file, func, (), start=rows, item=item)
+    crossings = _Crossings(reading, landing)
+    for call in _own_calls(func):
+        if call.lineno == line:
+            # The call running the statement, followed with all it hands:
+            # ``do_preassign`` hands its statement to ``JediTaskBuffer.
+            # queryTasksToPreassign_JEDI``, which hands it to the proxy that
+            # updates the tasks it picks.
+            crossings.into(carry, call, everything=True)
+        elif rows and carry.handed_any(call):
+            crossings.into(carry, call)
+    returned = carry.returns() if rows else _NOTHING
+    if returned:
+        crossings.back(file, func, returned)
+    return crossings, returned
+
+
+def _own_run(landing: _Landing, func: ast.AST, site: ReadSiteNode) -> bool:
+    """Whether *landing* is *site*'s statement's own run, handed on by the call running it."""
+    kind, _file, first, call = landing.way[0]
+    return kind == "into" and first is func and call.lineno == site.anchor.line_start
+
+
+def _item_landings(
+    reading: _Reading, func: ast.FunctionDef | ast.AsyncFunctionDef, site: ReadSiteNode, found: list[_Landing]
+) -> None:
+    """Fill each of *found*'s :attr:`_Landing.items`: *site*'s rows walked again once per select item, each seeded
+    alone, where one holds a bind by key."""
+    if not any(key for landing in found for key in landing.held):
+        return
+    for number, item in enumerate(_select_items(func, site) or ()):
+        if item.kind == sqltext.ITEM_AFTER_HOLE:
+            continue
+        crossings, _returned = _walk(reading, func, site, number, landing=True)
+        by = {landing.key(): landing.held for landing in crossings.landings}
+        for landing in found:
+            held = by.get(landing.key())
+            if held is not None:
+                landing.items[number] = held
+
+
+def _select_items(func: ast.AST, site: ReadSiteNode) -> Optional[tuple[sqltext.SelectItem, ...]]:
+    """*site*'s select items (:func:`sqltext.select_items`), where every text its run has gives the same."""
+    line = site.anchor.line_start
+    read = {sqltext.select_items(run.reading) for run in sql.executions(func) if run.call.lineno == line}  # type: ignore[arg-type]
+    return next(iter(read)) if len(read) == 1 else None
+
+
+def _column_choice(
+    items: Optional[tuple[sqltext.SelectItem, ...]], held: list[int], value: Optional[ast.AST], site: ReadSiteNode
+) -> tuple[str, str]:
+    """``(table.column, "")`` of the one of *site*'s select *items* a bind's *value* is, the items by position whose
+    carry holds it whole being *held*; or ``("", why not)`` (:data:`KEY_COLUMN_STAR` ...).  A field of an object
+    several items fill (``taskSpec.pack(row)``) is the item of its name, or the hole's or ``*``'s: the column of its
+    name where the table has one."""
+    if items is None:
+        return "", KEY_COLUMN_UNREAD
+    field = value.attr.lower() if isinstance(value, ast.Attribute) else None
+    if len(held) > 1 and field is not None:
+        named = [number for number in held if items[number].column == field]
+        spread = [number for number in held if items[number].kind in (sqltext.ITEM_HOLE, sqltext.ITEM_STAR)]
+        held = named or spread or held
+    if not held:
+        unread = any(item.kind in (sqltext.ITEM_HOLE, sqltext.ITEM_AFTER_HOLE) for item in items)
+        return "", KEY_COLUMN_HOLE if unread else KEY_COLUMN_NONE
+    if len(held) > 1:
+        return "", KEY_COLUMN_SEVERAL
+    item = items[held[0]]
+    if item.kind == sqltext.ITEM_COLUMN:
+        return f"{item.table}.{item.column}", ""
+    if item.kind in (sqltext.ITEM_HOLE, sqltext.ITEM_STAR):
+        tables = {table.lower() for table in site.tables}
+        table = item.table or (next(iter(tables)) if len(tables) == 1 else "")
+        if field is not None and table and field in sqltext.table_columns(table):
+            return f"{table}.{field}", ""
+        return "", KEY_COLUMN_HOLE if item.kind == sqltext.ITEM_HOLE else KEY_COLUMN_STAR
+    return "", KEY_COLUMN_EXPRESSION
 
 
 def attach_crossings(
@@ -5788,6 +5949,7 @@ def attach_crossings(
     calls: Optional[Calls],
     record: Optional["ReachGraph"],
     unread_kept: bool = True,
+    landings: Optional[dict[str, list[_Landing]]] = None,
 ) -> CrossingCensus:
     """Say which junction a row handled here is carried on to.
 
@@ -5864,6 +6026,12 @@ def attach_crossings(
     honest size of what is still unresolved, and it is reported rather than
     silently left as an empty field.  Without *calls* or *record* nothing is
     placed and nothing stored.
+
+    With *landings*, where the walk reached the database through calls with
+    the rows in a statement's binds goes into it by the statement's read site
+    (:class:`_Landing`, each select item's too): the key a statement of another
+    function names its rows by, which the KeyFroms read
+    (:func:`attach_key_sources`).  Not the statement's own run handed on.
     """
     if calls is None or record is None:
         return CrossingCensus(0, 0, 0, 0)
@@ -5874,40 +6042,15 @@ def attach_crossings(
     for site in read_sites:
         if not site.region:
             continue
-        file = site.anchor.file
-        tree = trees.get(file)
-        if tree is None:
-            continue
-        wanted = site.owner.rsplit("::", 1)[-1]
-        func = next(
-            (
-                node
-                for node in walk(tree)
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == wanted
-                and node.lineno <= site.anchor.line_start <= (node.end_lineno or node.lineno)
-            ),
-            None,
-        )
+        func = _site_function(trees, site)
         if func is None:
             continue
-        line = site.anchor.line_start
-        _first, last = site.region
-        rows = _rows_written(func, line, last)
-        carry = _PathCarry(reading, file, func, (), start=rows)
-        crossings = _Crossings(reading)
-        for call in _own_calls(func):
-            if call.lineno == line:
-                # The call running the statement, followed with all it hands:
-                # ``do_preassign`` hands its statement to ``JediTaskBuffer.
-                # queryTasksToPreassign_JEDI``, which hands it to the proxy that
-                # updates the tasks it picks.
-                crossings.into(carry, call, everything=True)
-            elif rows and carry.handed_any(call):
-                crossings.into(carry, call)
-        returned = carry.returns() if rows else _NOTHING
-        if returned:
-            crossings.back(file, func, returned)
+        crossings, returned = _walk(reading, func, site, landing=landings is not None)
+        if landings is not None:
+            found = [one for one in crossings.landings if not _own_run(one, func, site)]
+            if found:
+                _item_landings(reading, func, site, found)
+                landings[site.name] = found
         # Not itself: a statement is not somewhere its own rows go next.  Done
         # to the handed-back answer before it is counted as well as to the
         # whole, or the census reports two statements as resolved whose only
@@ -6095,9 +6238,7 @@ class _Filled:
     def items(self, site: ReadSiteNode) -> Optional[tuple[sqltext.SelectItem, ...]]:
         """*site*'s select items, where every text its run has gives the same; ``None`` where none is read."""
         if site.name not in self._items:
-            line = site.anchor.line_start
-            read = {sqltext.select_items(run.reading) for run in sql.executions(self.func) if run.call.lineno == line}
-            self._items[site.name] = next(iter(read)) if len(read) == 1 else None
+            self._items[site.name] = _select_items(self.func, site)
         return self._items[site.name]
 
     def _item(self, site: ReadSiteNode, item: int) -> _PathCarry:
@@ -6111,33 +6252,12 @@ class _Filled:
         """``(table.column, "")`` of the select item of *site*'s rows *value* is where *at* runs, or ``("", why
         not)`` (:data:`KEY_COLUMN_STAR` ...)."""
         items = self.items(site)
-        if items is None:
-            return "", KEY_COLUMN_UNREAD
         held = [
             number
-            for number, item in enumerate(items)
+            for number, item in enumerate(items or ())
             if item.kind != sqltext.ITEM_AFTER_HOLE and _whole(self._item(site, number).held(value, at))
         ]
-        field = value.attr.lower() if isinstance(value, ast.Attribute) else None
-        if len(held) > 1 and field is not None:
-            named = [number for number in held if items[number].column == field]
-            spread = [number for number in held if items[number].kind in (sqltext.ITEM_HOLE, sqltext.ITEM_STAR)]
-            held = named or spread or held
-        if not held:
-            unread = any(item.kind in (sqltext.ITEM_HOLE, sqltext.ITEM_AFTER_HOLE) for item in items)
-            return "", KEY_COLUMN_HOLE if unread else KEY_COLUMN_NONE
-        if len(held) > 1:
-            return "", KEY_COLUMN_SEVERAL
-        item = items[held[0]]
-        if item.kind == sqltext.ITEM_COLUMN:
-            return f"{item.table}.{item.column}", ""
-        if item.kind in (sqltext.ITEM_HOLE, sqltext.ITEM_STAR):
-            tables = {table.lower() for table in site.tables}
-            table = item.table or (next(iter(tables)) if len(tables) == 1 else "")
-            if field is not None and table and field in sqltext.table_columns(table):
-                return f"{table}.{field}", ""
-            return "", KEY_COLUMN_HOLE if item.kind == sqltext.ITEM_HOLE else KEY_COLUMN_STAR
-        return "", KEY_COLUMN_EXPRESSION
+        return _column_choice(items, held, value, site)
 
     def attr(self, column: str) -> str:
         """*column* (``table.column``) as a subject where its table's spec class has it, else ``""``."""
@@ -6283,6 +6403,113 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
     return list(found.values())
 
 
+def _landed_sources(
+    froms: list[KeyFrom],
+    landings: dict[str, list[_Landing]],
+    sites: dict[str, ReadSiteNode],
+    attributor: Optional[SpecAttributor],
+) -> None:
+    """Add to each KeyFrom a ``rows`` source of each statement whose rows the walk carried through calls to a run of
+    its statement with them under one of its term's binds (:class:`_Landing`): the calls on the way
+    (:attr:`KeySource.via`) and the column, by the walks of each select item (:func:`_column_choice`).  One per way."""
+    by_call: dict[int, list[KeyFrom]] = {}
+    for key_from in froms:
+        if key_from.term and key_from._runs is not None:
+            for node in key_from._runs[1]:
+                by_call.setdefault(id(node), []).append(key_from)
+    for name, found in landings.items():
+        site = sites.get(name)
+        if site is None:
+            continue
+        items = _select_items(found[0].way[0][2], site)
+        for landing in found:
+            for key_from in by_call.get(id(landing.call), ()):
+                hit = [key.lstrip(":") for key in re.findall(r":\w+", key_from.term) if key.lstrip(":") in landing.held]
+                if not hit:
+                    continue
+                via = [f"{file}:{call.lineno}" for _kind, file, _func, call in landing.way]
+                if any(one.kind == KEY_ROWS and one.name == site.name and one.via == via for one in key_from.sources):
+                    continue
+                held = sorted(
+                    number
+                    for number, holdings in landing.items.items()
+                    if any(_whole(holdings.get(key, _NOTHING)) for key in hit)
+                )
+                bound = key_from._binds[2] if key_from._binds is not None else []
+                column, unread = _column_choice(items, held, bound[0].value if bound else None, site)
+                source = KeySource(
+                    kind=KEY_ROWS,
+                    line=getattr(bound[0].site, "lineno", None) if bound else landing.call.lineno,
+                    name=site.name,
+                    site_owner=site.owner,
+                    site_line=site.anchor.line_start,
+                    paths=_spelled_paths(frozenset(path for key in hit for path in landing.held[key])),
+                    column=column,
+                    attr=_spec_attr(attributor, *column.split(".", 1)) if column and attributor is not None else "",
+                    column_unread=unread,
+                    via=via,
+                )
+                source._way = landing.way
+                key_from.sources.append(source)
+
+
+def _attach_reaches(froms: list[KeyFrom], sites: dict[str, ReadSiteNode], reading: _Reading) -> None:
+    """Fill :attr:`KeySource.reaches` / :attr:`KeySource.reaches_open` of each *same_rows* source of a read through
+    calls (:func:`_reaches`), *reading* the crossings' own (:func:`attach_crossings`)."""
+    at = {(site.owner, site.anchor.line_start): site for site in sites.values()}
+    held: dict[tuple, tuple[list[str], list[OpenCrossing]]] = {}
+    for key_from in froms:
+        site = at.get((key_from.owner, key_from.statement))
+        if not key_from.reads or site is None or key_from._binds is None:
+            continue
+        for source in key_from.sources:
+            if not (source.same_rows and source.via and source._way):
+                continue
+            key = (site.name, tuple((kind, id(func), id(call)) for kind, _file, func, call in source._way))
+            if key not in held:
+                held[key] = _reaches(reading, site, key_from._binds[0], source._way)
+            source.reaches, source.reaches_open = held[key]
+
+
+def _reaches(
+    reading: _Reading, site: ReadSiteNode, func: ast.AST, way: tuple
+) -> tuple[list[str], list[OpenCrossing]]:
+    """Where the rows of *site*, a read in *func* the walk reached by *way*, go next, going back up *way* alone: the
+    calls *func* hands them to, then in each function up the way what its call there gives back and what it hands
+    on -- to a caller the rows were returned to, and from the source's own function, every caller, as
+    :meth:`_Crossings.back` reads one.  *site*'s owner aside."""
+    crossings = _Crossings(reading)
+    line = site.anchor.line_start
+    rows = _rows_written(func, line, site.region[1]) if site.region else []  # type: ignore[arg-type]
+    carry = _PathCarry(reading, site.anchor.file, func, (), start=rows)
+    for call in _own_calls(func):
+        if call.lineno != line and rows and carry.handed_any(call):
+            crossings.into(carry, call)
+    returned = carry.returns() if rows else _NOTHING
+    for kind, file, step, call in reversed(way):
+        if not returned:
+            break
+        if kind == "back":
+            crossings.back(file, step, returned)
+            returned = _NOTHING
+            break
+        carry = _PathCarry(reading, file, step, (), call_values={id(call): returned})
+        owner = f"{file}::{step.name}"
+        if owner in reading.owners and reading.reads_in(carry):
+            crossings._cross(owner)
+        for other in _own_calls(step):
+            if other is not call and carry.handed_any(other):
+                crossings.into(carry, other)
+        returned = carry.returns()
+    if returned:
+        _kind, file, step, _call = way[0]
+        crossings.back(file, step, returned)
+    crossings.found.discard(site.owner)
+    return sorted(crossings.found), [
+        OpenCrossing(owner=owner, line=at, callee=callee) for owner, at, callee in sorted(crossings.open)
+    ]
+
+
 def _same_rows(froms: list[KeyFrom], sites: dict[str, ReadSiteNode]) -> None:
     """Mark each ``rows`` source of a statement that names its source statement's own rows
     (:attr:`KeySource.same_rows`): the statement's KeyFroms on one of the source's tables fill every column naming a
@@ -6331,13 +6558,17 @@ def attach_key_sources(
     table_class: Optional[Callable[[str], Optional[str]]] = None,
     modules: Iterable[SourceModule] = (),
     attributor: Optional[SpecAttributor] = None,
+    landings: Optional[dict[str, list[_Landing]]] = None,
 ) -> int:
     """Say where each write's row keys were filled from: :attr:`KeyFrom.sources`, and which parameter or field of
     ``self`` handed each guarded write its keys (:attr:`RowKeySource.handed_by`) -- with *modules*, a read
     statement's too, a KeyFrom for each row-naming term of each read site's run added to *key_froms*
     (:func:`_read_key_froms`); of a ``rows`` source, the column of the rows it is (:attr:`KeySource.column`), the
     values the rows' statement selects at which the term's statement never runs (:attr:`KeySource.never_at`) and
-    whether the statement names those very rows (:attr:`KeySource.same_rows`); then, by those sources, whether each
+    whether the statement names those very rows (:attr:`KeySource.same_rows`) -- with *landings*
+    (:func:`attach_crossings`'), a source too of each statement whose rows the walk carried through calls into the
+    term's binds, by the calls on the way (:attr:`KeySource.via`), and where a read of the same rows so reached
+    hands them on back up that way alone (:attr:`KeySource.reaches`); then, by those sources, whether each
     ``INSERT`` makes its row (:attr:`KeyFrom.new_row`, *table_class* saying whose rows a read site's tables hold),
     and which subjects a write persisting an object writes (:attr:`KeyFrom.writes`, the function's assignments on it);
     last, with *modules* and *attributor* (the one the attribute slice reads assignments with), a KeyFrom for each
@@ -6396,9 +6627,13 @@ def attach_key_sources(
         func, file, _values = key_from._binds
         reader = of(func, file)
         for source in key_from.sources:
-            if source.kind == KEY_ROWS and source.name in sites:
+            if source.kind == KEY_ROWS and source.name in sites and not source.via:
                 source.never_at = reader.never_at(sites[source.name], list(key_from._runs[1]))
+    if landings:
+        _landed_sources(froms, landings, sites, attributor)
     _same_rows(froms, sites)
+    if landings:
+        _attach_reaches(froms, sites, _Reading(calls, {junction.owner for junction in junctions}, record, True))
     _object_writes(froms, junctions)
     statements: dict[tuple[str, int, str], list[KeyFrom]] = {}
     for key_from in froms:

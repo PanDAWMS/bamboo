@@ -18550,6 +18550,9 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
             "column_unread": "",
             "same_rows": False,
             "never_at": [],
+            "via": [],
+            "reaches": [],
+            "reaches_open": [],
         }
     ]
     assert throttle.unread == ""
@@ -18880,6 +18883,111 @@ def test_a_rows_source_says_why_it_names_no_column(tmp_path):
         "jediTaskID=:b": [("rows", "", "an expression")],
         "jediTaskID=:c": [("rows", "", "in a hole")],
     }
+
+
+_ACROSS = '''
+from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec
+
+comment = " /* x */"
+
+
+class TaskModule:
+    def toFinish(self):
+        self.cur.execute("SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s" + comment, {":s": "done"})
+        resList = self.cur.fetchall()
+        for jediTaskID, taskStatus in resList:
+            taskSpec = self.readTask(jediTaskID)
+            self.finish(taskSpec)
+            self.lockTask(jediTaskID)
+
+    def elsewhere(self, someID):
+        taskSpec = self.readTask(someID)
+        self.other(taskSpec)
+
+    def readTask(self, jediTaskID):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        sqlTS = "SELECT jediTaskID,status,parent_tid FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlTS + comment, varMap)
+        res = self.cur.fetchone()
+        taskSpec = JediTaskSpec()
+        taskSpec.pack(res)
+        return taskSpec
+
+    def lockTask(self, jediTaskID):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        sqlLK = "SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID FOR UPDATE "
+        self.cur.execute(sqlLK + comment, varMap)
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = "locked"
+        sqlUL = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlUL + comment, varMap)
+
+    def finish(self, taskSpec):
+        varMap = {}
+        varMap[":jediTaskID"] = taskSpec.jediTaskID
+        varMap[":status"] = "finished"
+        sqlF = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlF + comment, varMap)
+
+    def other(self, taskSpec):
+        varMap = {}
+        varMap[":jediTaskID"] = taskSpec.jediTaskID
+        varMap[":status"] = "other"
+        sqlO = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlO + comment, varMap)
+'''
+
+
+def test_rows_reaching_a_key_through_calls_say_the_way_and_where_the_rows_read_again_go(tmp_path):
+    """getTaskWithID_JEDI's shape: a statement's ids handed to a helper reading each task again by its key, the task
+    returned and handed on; and to a junction's owner that reads them in a bind (the walk crosses to it, not through).
+    The source says the call it came by, the column, the same rows -- and where the task read again goes back up that
+    call alone, not to what another caller of the helper hands it to."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/JediTaskSpec.py": _REREAD_SPECS, rel: _ACROSS}
+    )
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    schema = {"jedi_tasks": frozenset({"jeditaskid", "status", "parent_tid"})}
+    froms: list[KeyFrom] = []
+    landings: dict[str, list] = {}
+    with sql.across_calls(calls), sqltext.with_schema(schema, {"jedi_tasks": frozenset({"jeditaskid"})}, {}):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_crossings(sites, modules, junctions, calls, record, landings=landings)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor,
+            landings=landings,
+        )
+    lines = _ACROSS.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (source_site,) = [site for site in sites if site.owner.endswith("::toFinish")]
+
+    def rows(text: str) -> list[tuple]:
+        (key_from,) = [one for one in froms if one.statement == at(text) and one.term == "jediTaskID=:jediTaskID"]
+        return [
+            (one.via, one.column, one.same_rows, [owner.rsplit("::", 1)[1] for owner in one.reaches])
+            for one in key_from.sources
+            if one.kind == "rows" and one.name == source_site.name
+        ]
+
+    assert rows("self.cur.execute(sqlTS") == [
+        ([f"{rel}:{at('taskSpec = self.readTask(jediTaskID)')}"], "jedi_tasks.jeditaskid", True, ["finish"])
+    ]
+    # In an owner crossed to: the read there, and the write.
+    assert rows("self.cur.execute(sqlLK") == [
+        ([f"{rel}:{at('self.lockTask(jediTaskID)')}"], "jedi_tasks.jeditaskid", True, [])
+    ]
+    assert rows("self.cur.execute(sqlUL") == [
+        ([f"{rel}:{at('self.lockTask(jediTaskID)')}"], "jedi_tasks.jeditaskid", True, [])
+    ]
 
 
 def test_a_key_filled_from_a_batch_is_the_batched_values_not_the_batch_size(tmp_path):

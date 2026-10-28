@@ -2702,9 +2702,35 @@ class KeySource(BaseModel):
             "``rows``: the values the source statement selects (``JediTaskSpec.status=scouted``, as its read site's "
             "*selects*) for which the term's statement never runs -- a test on its way (``pathcond.ruled_out_at``) on "
             "a name holding that column of the source's rows: 1731 is in the ``else`` of ``if taskStatus == "
-            "\"scouted\":``, ``taskStatus`` 1676's ``status``."
+            "\"scouted\":``, ``taskStatus`` 1676's ``status``.  Read in the source's own function only: empty "
+            "where the rows come through calls (*via*)."
         ),
     )
+    via: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``rows`` reaching the bind through calls, as the walk carrying the statement's rows "
+            "(``attach_crossings``) took them: each call on the way, ``file:line`` -- one handing them down, or one "
+            "in a caller they are returned to -- from the source's function to the term's; empty in the source's own "
+            "function.  The term's statement may be in a junction's owner the walk crosses to and does not go "
+            "through: its statements are read with what it is handed."
+        ),
+    )
+    reaches: list[str] = Field(
+        default_factory=list,
+        description=(
+            "On a *same_rows* source of a read through calls (*via*): the junction owners the read's rows reach and "
+            "read (as ``ReadSiteNode.crosses_to`` names them), going back up only by the calls of *via* -- not every "
+            "caller of the read's function, as the read site's own ``crosses_to`` is walked; the read's own owner "
+            "aside, the source's own may be one."
+        ),
+    )
+    reaches_open: list[OpenCrossing] = Field(
+        default_factory=list,
+        description="On that way, the calls the walk could not place, as ``ReadSiteNode.crosses_open``.",
+    )
+    #: The walk's way to the bind, ``(kind, file, func, call)`` per step, for *reaches* (``sqlwrite._Landing``).
+    _way: Optional[tuple] = PrivateAttr(default=None)
 
 
 class KeyFrom(BaseModel):
