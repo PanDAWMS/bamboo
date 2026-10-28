@@ -10065,6 +10065,45 @@ def test_rows_put_into_an_object_are_held_by_it(tmp_path, fill, crosses):
     assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
 
 
+@pytest.mark.parametrize(
+    ("bases", "crosses"),
+    [
+        ("from pandacommon.pandautils.base import SpecBase\n\n\nclass Holder(SpecBase):\n", True),
+        ("class Holder:\n", False),
+        ("class Base:\n    pass\n\n\nclass Holder(Base):\n", False),
+    ],
+    ids=["a-base-outside-the-corpus", "no-base", "a-base-of-the-corpus"],
+)
+def test_a_method_an_outside_base_supplies_keeps_what_it_is_handed_in_its_object(tmp_path, bases, crosses):
+    """``dc_req_spec.pack(row)``: ``DataCarouselRequestSpec`` gets ``pack`` from pandacommon's ``SpecBase``, which the
+    corpus does not hold, so nothing says what it does with the row -- it is kept in the spec, which goes on to
+    ``retryTask``.  A class with no base outside the corpus has no such method, and keeps nothing."""
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        spec = Holder()\n"
+            "        spec.pack(res)\n"
+            f"{_NEXT_STATEMENT}"
+            "        self.retrier.retryTask(spec)\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    ) + "from pandaserver.h import Holder\n"
+    holder = f"{bases}    _attributes = ('rows',)\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t.rows:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(holder, "h.py"), (retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
 def test_a_function_gone_through_is_read_for_each_way_in(tmp_path):
     """Entered once a statement for what it is handed, not once: ``handle`` given the rows as ``first`` and then as
     ``second`` reaches both.  Keyed by the definition alone, the second way in was not taken, and which came first

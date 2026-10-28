@@ -2688,6 +2688,23 @@ class Types:
             queue.extend((found[0], one) for one in found[1].bases)
         return order
 
+    def built_outside(self, file: str, cls: ast.ClassDef) -> bool:
+        """Whether a class in *cls*'s order has a base outside the corpus that may supply methods.
+
+        A base is read as :meth:`lineage` reads it, a subscript taken off --
+        ``FactoryBase[JobBrokerBase]`` is FactoryBase.  ``object`` and the
+        typing bases a class is declared generic or a protocol with supply no
+        method.
+        """
+        for where, holder in self.mro(file, cls):
+            for base in holder.bases:
+                head = pathcond.unsubscripted(base)
+                named = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", "")
+                if named in ("object", "Generic", "Protocol") or self.class_named(where, head) is not None:
+                    continue
+                return True
+        return False
+
     def mro(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
         """*cls* and its corpus bases in the order Python resolves a method on an object of *cls*.
 

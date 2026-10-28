@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
     FILLERS,
+    UNPLACED_NO_METHOD,
     UNSET,
     Calls,
     CallSite,
@@ -4884,7 +4885,9 @@ class _PathCarry:
     handed to a hole makes nothing of them.  What the reach record reads as the database gives nothing back of this
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
-    *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.
+    *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.  So
+    does a method the object's class gets from a base outside the corpus, with all it is handed:
+    ``dc_req_spec.pack(row)`` on pandacommon's ``SpecBase`` fills ``dc_req_spec``.
 
     With *item*, the statement's seeds hold its select item of that position where it sits in what they are given,
     not the rows whole (:func:`_item_seed`): a value held whole is that column of a row.
@@ -5573,15 +5576,20 @@ class _Reading:
         return got
 
     def kept_by(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
-        """``{(name, steps): paths}`` the definitions *call* lands at put into the objects *carry*'s function names."""
+        """``{(name, steps): paths}`` the definitions *call* lands at put into the objects *carry*'s function names.
+
+        A method the corpus does not define, on an object whose class gets it from a base outside the corpus, keeps
+        all it is handed in that object (:meth:`_kept_outside`)."""
         name = _callee_name(call)
         if name in _LOG_METHODS or name in _LOG_MAKERS:
             return {}
         if not carry.handed_any(call):
             return {}
         placed = self.place(carry, call)
-        if placed is None or not placed.targets:
+        if placed is None:
             return {}
+        if not placed.targets:
+            return self._kept_outside(carry, call, placed)
         found: dict[tuple[str, tuple[str, ...]], _Paths] = {}
         for target in placed.targets:
             given = self.given(carry, call, placed, target)
@@ -5603,6 +5611,32 @@ class _Reading:
                 if where is not None:
                     found[where] = found.get(where, _NOTHING) | paths
         return found
+
+    def _kept_outside(
+        self, carry: _PathCarry, call: ast.Call, placed: Placed
+    ) -> dict[tuple[str, tuple[str, ...]], _Paths]:
+        """What a method no class of the corpus defines keeps of what *call* hands it: all of it, in the object it is
+        made on, where every class that object can be is built on a base outside the corpus -- the base supplies the
+        method and nothing here says what it does with its arguments.  ``dc_req_spec.pack(row)`` fills a
+        ``DataCarouselRequestSpec``, a ``SpecBase`` of pandacommon's, with the row; a class with no such base has no
+        such method, and nothing is kept."""
+        if placed.unplaced != UNPLACED_NO_METHOD or not isinstance(call.func, ast.Attribute):
+            return {}
+        where = _access_path(call.func.value)
+        if where is None:
+            return {}
+        types = self.calls.types
+        try:
+            declared = types.declared(carry.file, carry.func, call.func.value)
+        except Exception:  # noqa: BLE001 -- the record has the call as a hole
+            return {}
+        classes = [one for each in declared or () for one in self.calls.objects_of(each)]
+        if not classes or not all(types.built_outside(*one) for one in classes):
+            return {}
+        held = _NOTHING
+        for one in [*call.args, *(keyword.value for keyword in call.keywords)]:
+            held |= carry.held(one.value if isinstance(one, ast.Starred) else one, call)
+        return {where: held} if held else {}
 
     # -- whether a definition reads what it is handed ----------------------------
 

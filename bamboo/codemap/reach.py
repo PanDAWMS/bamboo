@@ -2566,7 +2566,7 @@ def _close(
         if (
             called.attr == "start"
             and any(types.method(*one, "run") is not None for one in asked)
-            and any(_built_outside(types, one) for one in asked)
+            and any(types.built_outside(*one) for one in asked)
         ):
             row.hole(call, HOLE_OUTSIDE_START, for_classes)
             return
@@ -2598,28 +2598,7 @@ def _asked(
 def _outside_base(types: C.Types, classes: Iterable[tuple[str, ast.ClassDef]]) -> bool:
     """Whether every one of *classes* is built on a class outside the corpus, whose methods this reading does not see."""
     asked = list(classes)
-    return bool(asked) and all(_built_outside(types, one) for one in asked)
-
-
-def _built_outside(types: C.Types, one: tuple[str, ast.ClassDef]) -> bool:
-    """Whether a class in *one*'s order has a base outside the corpus that may supply methods.
-
-    A base is read as :meth:`calls.Types.lineage` reads it, a subscript
-    taken off -- ``FactoryBase[JobBrokerBase]`` is FactoryBase.
-    """
-    for where, holder in types.mro(*one):
-        for base in holder.bases:
-            head = pathcond.unsubscripted(base)
-            if _supplies_nothing(head) or types.class_named(where, head) is not None:
-                continue
-            return True
-    return False
-
-
-def _supplies_nothing(base: ast.expr) -> bool:
-    """``object`` and the typing bases a class is declared generic or a protocol with: no method comes from them."""
-    named = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
-    return named in ("object", "Generic", "Protocol")
+    return bool(asked) and all(types.built_outside(*one) for one in asked)
 
 
 class Destination:
