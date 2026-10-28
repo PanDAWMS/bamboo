@@ -18165,16 +18165,18 @@ class JobModule:
 '''
 
 
-def _flushed(tmp_path, caller: str, rel: str = "pandajedi/jediorder/Knight.py"):
-    """The build's steps a flush call's records come out of, over *caller* and the proxies: the attribute slice's
-    arms, the SQL slice's records of the methods' own statements, the calls' (flush.attach), then their sources and
-    writes and the objects no write persists (sqlwrite.attach_key_sources).  ``(KeyFroms, RowKeySources)``."""
+def _flushed(tmp_path, caller: str, rel: str = "pandajedi/jediorder/Knight.py", more: dict | None = None):
+    """The build's steps a flush call's records come out of, over *caller* and the proxies (and *more* modules): the
+    attribute slice's arms, the SQL slice's records of the methods' own statements, the calls' (flush.attach), then
+    their sources and writes and the objects no write persists (sqlwrite.attach_key_sources).
+    ``(KeyFroms, RowKeySources)``."""
     modules, calls, record = _keyed_corpus(
         tmp_path,
         {
             "pandaserver/taskbuffer/Specs.py": _SPECS,
             "pandaserver/taskbuffer/db_proxy_mods/task_module.py": _FLUSH_PROXY,
             "pandaserver/taskbuffer/db_proxy_mods/job_module.py": _FLUSH_MORE,
+            **(more or {}),
             rel: caller,
         },
     )
@@ -18388,6 +18390,67 @@ def test_an_object_no_write_persists_says_what_its_fields_reach(tmp_path):
         ("note", "job", "", KEY_NO_USE, [], [], {"JobSpec.jobStatus": [closed]}),
     ]
 
+
+
+_LOOPED_UNSAVED = '''
+def updateJobs(jobs):
+    return len(jobs)
+
+
+class Agent:
+    def activate(self):
+        job = JobSpec()
+        for fileSpec in job.Files:
+            fileSpec.status = "ready"
+        updateJobs([job])
+
+    def build(self):
+        job = JobSpec()
+        for fileSpec in job.Files:
+            fileSpec.status = "built"
+        return job
+
+    def finalize(self, job: JobSpec):
+        for fileSpec in job.Files:
+            fileSpec.status = "merging"
+
+    def fail(self, jobs: list[JobSpec]):
+        for job in jobs:
+            for fileSpec in job.Files:
+                fileSpec.status = "failed"
+
+    def note(self):
+        job = JobSpec()
+        for fileSpec in job.Files:
+            fileSpec.status = "noted"
+'''
+
+
+def test_a_field_set_on_a_loops_element_reaches_where_its_container_goes(tmp_path):
+    """The element a loop takes is its container's: a field set on it goes where what holds the container goes --
+    ``datasetManager.run``'s ``for tmpFile in tmpJob.Files: tmpFile.status = "ready"`` before ``tmpJob`` is handed
+    to ``activateJobs``, ``doGenerateBuild``'s ``jobSpec`` returned, a parameter's files, a parameter's jobs' files
+    (on up through the outer loop) -- and nowhere only where nothing takes the container on."""
+    rel = "pandajedi/jediorder/Agent.py"
+    froms, _keys = _flushed(tmp_path, _LOOPED_UNSAVED, rel, more={"pandaserver/taskbuffer/JobSpec.py": _ADDERS})
+
+    lines = _LOOPED_UNSAVED.split("\n")
+    ready, built, merging, failed, noted = (
+        next(n for n, line in enumerate(lines, 1) if f'= "{value}"' in line)
+        for value in ("ready", "built", "merging", "failed", "noted")
+    )
+    read = sorted(
+        (one.owner.rpartition("::")[2], one.object, one.unread, one.handed_to, one.writes)
+        for one in froms
+        if not one.term
+    )
+    assert read == [
+        ("activate", "fileSpec", KEY_HANDED, [f"{rel}::updateJobs"], {"FileSpec.status": [ready]}),
+        ("build", "fileSpec", KEY_RETURNED, [], {"FileSpec.status": [built]}),
+        ("fail", "fileSpec", KEY_KEPT, [], {"FileSpec.status": [failed]}),
+        ("finalize", "fileSpec", KEY_KEPT, [], {"FileSpec.status": [merging]}),
+        ("note", "fileSpec", KEY_NO_USE, [], {"FileSpec.status": [noted]}),
+    ]
 
 
 def test_a_plus_equals_arm_says_what_its_field_reaches(tmp_path):

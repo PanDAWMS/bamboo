@@ -133,7 +133,7 @@ from bamboo.codemap.models import (
     pooled_frames,
 )
 from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext, values
-from bamboo.codemap.panda.attribution import SpecAttributor
+from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
 from bamboo.codemap.panda.pathcond import (
     ancestors,
     attach_parents,
@@ -4639,6 +4639,27 @@ def _is_dict(expression: Optional[ast.AST], dicts: frozenset[str]) -> bool:
     return False
 
 
+def _loop_iterables(func: ast.AST, dicts: frozenset[str]) -> dict[tuple[int, str], ast.expr]:
+    """``{(id(statement), name): iterable}``: for each assignment inside a loop whose target *name* only loops bind
+    in *func* (:func:`attribution.loop_only_names`), the innermost such loop's iterable -- not one known as a dict,
+    whose element is a key."""
+    names = loop_only_names(func)
+    found: dict[tuple[int, str], ast.expr] = {}
+    for loop in walk(func):
+        if (
+            not isinstance(loop, (ast.For, ast.AsyncFor))
+            or not isinstance(loop.target, ast.Name)
+            or loop.target.id not in names
+            or _is_dict(loop.iter, dicts)
+        ):
+            continue
+        for statement in loop.body:
+            for node in walk(statement):
+                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    found[(id(node), loop.target.id)] = loop.iter
+    return found
+
+
 def _dict_names(func: ast.AST) -> frozenset[str]:
     """The names *func* holds dicts in: annotated as one (``**kwargs`` among them), or bound only to values making
     one."""
@@ -4954,7 +4975,30 @@ class _PathCarry:
             if found is not None:
                 base, steps = found
                 self._add(_Write(base, node, steps, source, take, True))
+                self._into_container(base, steps, node, source, take, {base})
             self._keys_put(target, node)
+
+    def _into_container(
+        self,
+        name: str,
+        steps: tuple[str, ...],
+        node: ast.AST,
+        source: ast.AST,
+        take: Callable[[_Paths], _Paths],
+        seen: set[str],
+    ) -> None:
+        """A field written on an element a loop took is written in the loop's iterable too -- the element is the
+        container's: ``for f in job.Files: f.status = v`` puts what ``v`` holds at ``.Files[*].status`` of ``job``,
+        and on up where ``job`` is a loop's element as well.  Only for a name loops alone bind
+        (:func:`attribution.loop_only_names`), of an iterable not known as a dict that is a name or an access
+        path of one."""
+        found = _access_path(self._iterables.get((id(node), name)))
+        if found is None or found[0] in seen:
+            return
+        base, inner = found
+        steps = inner + (_ALL,) + steps
+        self._add(_Write(base, node, steps, source, take, True))
+        self._into_container(base, steps, node, source, take, seen | {base})
 
     def _augmented_kinds(self, node: ast.AugAssign) -> set[Optional[str]]:
         """What the two sides of ``x += v`` are (:func:`_operand`)."""
@@ -4987,6 +5031,7 @@ class _PathCarry:
             if isinstance(node, ast.comprehension)
             for name in walk(node.target)
         }
+        self._iterables = _loop_iterables(func, self.dicts)
         for node in own_nodes(func):
             if (
                 isinstance(node, ast.AugAssign)

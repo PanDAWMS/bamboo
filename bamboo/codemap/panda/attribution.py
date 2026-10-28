@@ -304,6 +304,23 @@ def _concatenated(iterable: ast.expr) -> Optional[list[ast.expr]]:
     return None
 
 
+def loop_only_names(func: ast.AST) -> frozenset[str]:
+    """The names only ``for`` targets bind in *func* -- no assignment, parameter or other binding that could hold
+    something else: wherever one is read, it is an element of its loop's iterable."""
+    targets = {
+        id(node.target)
+        for node in walk(func)
+        if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name)
+    }
+    kinds: dict[str, set[bool]] = {}
+    for node in walk(func):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            kinds.setdefault(node.id, set()).add(id(node) in targets)
+        elif isinstance(node, ast.arg):
+            kinds.setdefault(node.arg, set()).add(False)
+    return frozenset(name for name, how in kinds.items() if how == {True})
+
+
 class SpecAttributor:
     """Resolves the spec class behind an attribute write.
 
@@ -750,18 +767,7 @@ class SpecAttributor:
         binding that could hold another -- by the loop rule; ``None`` elsewhere."""
         held = self._loop_bound.get(id(func))
         if held is None or held[0] is not func:
-            targets = {
-                id(node.target)
-                for node in walk(func)
-                if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name)
-            }
-            kinds: dict[str, set[bool]] = {}
-            for node in walk(func):
-                if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-                    kinds.setdefault(node.id, set()).add(id(node) in targets)
-                elif isinstance(node, ast.arg):
-                    kinds.setdefault(node.arg, set()).add(False)
-            held = self._loop_bound[id(func)] = (func, frozenset(name for name, how in kinds.items() if how == {True}))
+            held = self._loop_bound[id(func)] = (func, loop_only_names(func))
         key = (id(func), variable)
         if variable not in held[1] or key in self._looping:
             return None
