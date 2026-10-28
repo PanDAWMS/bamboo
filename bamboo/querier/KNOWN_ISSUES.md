@@ -65,12 +65,17 @@ A mover retries every few hours (tmaeno, 2026-10-13), so S1 asks a stuck window'
 *Shows:* the line "no run of its own from ...: asking the rest of the window" and the rest's window.
 *Revisit:* when the second round's asks cost too much; measure the movers' retry gaps.
 
-### K6. H6 has no window for a make call in JEDI's code
+### K6. H6 finds a maker only in a run that holds one of the job's rows
 
-The window is the Datasets row's `creationdate`, which only the server's setupper inserts.
+H6 asks the make calls' logs at each of the job's statuslog rows, at the row's second on its host
+(`windows.rows_until`), and takes a run there that printed the name at a make call and names the job.  A maker that
+wrote no row of the job -- a run that made the object before the job was created, and wrote none of its rows -- is
+not seen.  The window was the Datasets row's `creationdate` before; that row is of the first run to use the vuid
+(insertDataset writes none where one is), not of this job's, and gave JEDI's make calls no window at all.
 
-*Shows:* a stop at H6 that says so (through the record door; the file door needs no window).
-*Revisit:* when a case needs it: another time to anchor JEDI's makers by.
+*Shows:* a stop at H6, "a make call whose function printed the object's name, in a run holding one of the job's
+rows and naming the job", and the line of each row asked.
+*Revisit:* when a case's maker wrote no row of its job.
 
 ## The record door (`recorded.py`)
 
@@ -123,7 +128,8 @@ S1 counts a mover's arms in its own function only; `TaskBuffer.killJobs` writes 
 - S1 asks the map's reach of each mover with no arm of its own (`Rerun._reach_of`, `reach_said`): from the def holding
   its statement -- every def of its name where it takes rows another selects -- does any function it can go on into
   hold an arm moving the value off?  It drops the mover (`reaches-no-write`) only where the answer is `[]`: no write
-  reached and no call on the way left open.  It keeps one whose own defs hold an arm the junctions place there though
+  reached and no call on the way left open.  The reach closes a call left open where no function of the corpus of
+  its name can lead to a write (`closed_by_name`, the map's O1); a drop that rests on that names the calls closed.  It keeps one whose own defs hold an arm the junctions place there though
   S1 counts none, and one where the map could not read where all its rows go (a gap that may hide a write the reach has
   no junction for: any `ReaderGap` but a statement read only in part, whose gap is which rows it takes -- `hides_where`).
   Every gap is said, a part-read one too (`map-gap`, in the map's words).  A kept

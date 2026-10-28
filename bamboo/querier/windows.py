@@ -12,10 +12,12 @@ needs a window (``Logs.needs_window``), so the cases run on files go on as befor
   row before the last stretch of rows holding the value (or the row's creation) to the stretch's first row, on every
   machine.  A row holding the value says it was there by then, not which run wrote it: the history row is written by
   whichever run moves the status, and the run that wrote the value need not be that one (h2-value-time-design.md).
-* H6 (``around_creation``): the Datasets row's ``creationdate`` +- :data:`SLACK`.  The row is inserted by the run
-  that registers the dataset (setupper_atlas_plugin's insertDatasets calls, in the function of the make call), on
-  that machine's clock.  A creationdate before the job was created (its first statuslog row) less SLACK is not this
-  job's dataset's: no window.
+* H6 (``rows_until``): the job's own statuslog rows up to the run the object was missing in, each at its own time on
+  the machine that wrote it, as H2's.  A row is the job's, so a run holding its second on its host can be one that
+  handled the job; H6 takes a maker only from a run that also names the job.  Not the Datasets row: Datasets holds
+  one row per vuid (md5 of ``scope:name``), inserted by the first run to use it (insertDataset), so its
+  ``creationdate`` is that run's, and a name many runs share was not made by this job's (panda-server,
+  live-harness/notes/from-panda-server-13.md 1-2).
 * S1, S2 (``stuck``): from the observed value's statuslog row less SLACK, but no earlier than ``as_of`` less
   :data:`STUCK_SPAN`, to ``as_of``, when the statuslog was read.  A mover retries every few hours (tmaeno,
   2026-10-13), so the last six hours are asked first; but no pass in six hours is not no pass in the window, so S1
@@ -52,10 +54,6 @@ def when(text: str) -> datetime.datetime:
 
 def _down(t: datetime.datetime) -> str:
     return f"{t:%Y-%m-%d %H:%M:%S}"
-
-
-def _up(t: datetime.datetime) -> str:
-    return _down(t.replace(microsecond=0) + datetime.timedelta(seconds=1) if t.microsecond else t)
 
 
 def at_transition(state: dict) -> Asking:
@@ -96,29 +94,10 @@ def value_held(states: list[dict], column: str, value: str, created: str | None)
                                              f"{first['time']}, on every machine (no row says which run wrote it)")
 
 
-def around_creation(datasets: dict | None, name: str, created: str) -> Asking:
-    """H6: the Datasets row of *name*: its creationdate +- SLACK; or why there is no window.
-
-    *created* is when the job was created (its first statuslog row, "" when there is none).  The section lists every name asked
-    (``asked``): a name not asked is the builder's gap, a name asked with no row is not in the table now.
-    """
-    if datasets is None:
-        return Asking(None, None, "the rows file has no datasets section")
-    if name not in datasets.get("asked", []):
-        return Asking(None, None, f"the datasets section did not ask for {name}")
-    rows = [r for r in datasets.get("rows", []) if r.get("name") == name]
-    if not rows:
-        return Asking(None, None, f"no {datasets.get('table', 'Datasets')} row for {name} (asked; it may have been purged)")
-    stamps = sorted({r.get("creationdate") for r in rows}, key=str)
-    if len(stamps) > 1 or not stamps[0]:
-        return Asking(None, None, f"{len(rows)} {datasets.get('table', 'Datasets')} rows for {name}, creationdate {stamps}")
-    if not created:
-        return Asking(None, None, "the statuslog has no row to say when the job was created")
-    made = when(stamps[0])
-    anchor = f"{datasets.get('class', '?')} {datasets.get('table', '?')} creationdate {stamps[0]} (the inserting machine's clock)"
-    if made < when(created) - SLACK:
-        return Asking(None, None, f"{anchor} is before the job was created ({created}) less {_minutes(SLACK)}")
-    return Asking((_down(made - SLACK), _up(made + SLACK)), None, f"{anchor} +- {_minutes(SLACK)}")
+def rows_until(states: list[dict], until: str) -> list[tuple[dict, Asking]]:
+    """H6: the statuslog rows written by *until* (the last record of the run the object was missing in), in order, each
+    with its own time on the machine that wrote it (:func:`at_transition`)."""
+    return [(s, at_transition(s)) for s in states if s["time"][:19] <= until[:19]]
 
 
 def stuck(statuslog: dict, observed: str) -> Asking:
