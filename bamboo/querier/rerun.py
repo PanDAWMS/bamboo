@@ -70,6 +70,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import copy
 import datetime
 import hashlib
 import importlib
@@ -436,10 +437,30 @@ def lines_after(func: ast.AST, arm_stmt: ast.stmt, name: str) -> list[tuple[int,
     return []
 
 
+def never_runs(kf) -> bool:
+    """Whether the map says *kf*'s statement never runs from a placed caller: it read routes into the statement's
+    function (``routes``), each rules the statement out by the constants it hands (``out_on``: an if holding it, an exit
+    before it), and none is left open (``routes_open``: a call by the function's name placed nowhere, a route cut) --
+    ``retryJob``'s in-place UPDATE (4146) under ``if not getNewPandaID:``, where every caller hands True.  A statement
+    with no route placed (the map leaves it open: reached from outside, called from outside the corpus, its class read
+    as a value), or a dump without the fields, is not known never to run."""
+    routes = getattr(kf, "routes", None) or 0
+    return routes > 0 and len(getattr(kf, "out_on", None) or []) == routes and getattr(kf, "routes_open", True) is False
+
+
+#: ``[the dump's key_froms list, those of it a placed caller may run]`` -- the list is held so that its id is never
+#: another list's
+_RUNS: list = [None, []]
+
+
 def key_froms() -> list:
     """The installed dump's ``key_froms``: where each row-naming term of a write was filled from (``KeyFrom``); none
-    before an install or from a dump that has none."""
-    return getattr(mapdump.fragment(), "key_froms", None) or []
+    before an install or from a dump that has none.  A statement no placed caller runs persists nothing, so its records
+    are not read (``never_runs``; KNOWN_ISSUES.md K30): every reader of S1, H2 and F1 takes them from here."""
+    kfs = getattr(mapdump.fragment(), "key_froms", None) or []
+    if _RUNS[0] is not kfs:
+        _RUNS[:] = [kfs, [kf for kf in kfs if not never_runs(kf)]]
+    return _RUNS[1]
 
 
 def is_birth(kf) -> bool:
@@ -501,6 +522,25 @@ def born_lines(writers: list, owner: str, subject: str) -> set[int]:
     writes no row that was there before (KNOWN_ISSUES.md K29)."""
     marks = birth_marks(owner, subject)
     return {b.line for j in writers if j.owner == owner for b in j.branches if b.line is not None and born(b, marks)}
+
+
+def unborn_junctions(junctions: list, subject: str) -> list:
+    """*junctions* with their branches of *subject* that are births (``born``) left out, for the map's reach
+    (``reach.moving_off``), which reads arms off the junctions' branches as ``arms_of`` does but knows no KeyFrom: an arm
+    S1 leaves out as a birth is no arm of a mover's own def for K14's keep (``reach_said``), nor of a writer its calls
+    reach -- ``updateJobStatus``'s new FileSpec of type zipinput (434) kept it a mover of ``FileSpec.type=input``
+    (KNOWN_ISSUES.md K29)."""
+    out = []
+    for j in junctions:
+        kept = [b for b in j.branches if not born(b, birth_marks(j.owner, subject))] if j.subject == subject else j.branches
+        if len(kept) == len(j.branches):
+            out.append(j)
+        elif hasattr(j, "model_copy"):
+            out.append(j.model_copy(update={"branches": kept}))
+        else:
+            out.append(copy.copy(j))
+            out[-1].branches = kept
+    return out
 
 
 #: what the fields of an object no write in its function persists reach, as the map's KeyFrom of no term says
@@ -2213,8 +2253,9 @@ class Rerun:
         -- every def of its name where it has none, as it takes rows another selects -- does any function it can go on
         into hold an arm moving *q.subject* off *q.observed* (``reach.moving_off``)?  The writes reached (``[]`` for none
         with nothing left open, ``None`` for none with calls left open), the holes, the assumptions the answer relied
-        on and the closure's size; ``own_arms`` names a start the junctions give an arm S1 does not count.  ``None``
-        where the dump has no ``reach_graph``: said once, as the first ask is (build2-design.md 6)."""
+        on and the closure's size; ``own_arms`` names a start the junctions give an arm S1 does not count.  The reach
+        reads the junctions without their births (``unborn_junctions``), as ``arms_of`` does.  ``None`` where the dump
+        has no ``reach_graph``: said once, as the first ask is (build2-design.md 6)."""
         if self._reach is None:
             graph = self._graph()
             if graph is not None:
@@ -2230,7 +2271,8 @@ class Rerun:
             return None
         RE, graph, ends = self._reach
         if (q.subject, q.observed) not in ends:
-            ends[q.subject, q.observed] = RE.moving_off(mapdump.fragment().junctions, graph, q.subject, q.observed)
+            junctions = unborn_junctions(mapdump.fragment().junctions, q.subject)
+            ends[q.subject, q.observed] = RE.moving_off(junctions, graph, q.subject, q.observed)
         destination = ends[q.subject, q.observed]
         rel = owner.split("::", 1)[0]
         starts = [graph.function_at(rel, n) for n in lines] if lines else graph.named(owner)
