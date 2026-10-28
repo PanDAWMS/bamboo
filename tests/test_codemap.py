@@ -18766,6 +18766,14 @@ class TaskModule:
         sqlO = "UPDATE ATLAS_PANDA.JEDI_Tasks_Old SET status=:st,parent_tid=:pt WHERE jediTaskID=:t "
         self.cur.execute(sqlO + comment, {":st": "done", ":pt": None, ":t": 1})
 
+    def handed(self, taskSpec, taskID, tasks):
+        varMap = {}
+        varMap[":jediTaskID"] = taskSpec.parent_tid
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID" + comment, varMap)
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:m", {":m": taskID})
+        for task in tasks:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:n", {":n": task.jediTaskID})
+
     def restart(self):
         sqlTL = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status IN (:s1,:s2) "
         self.cur.execute(sqlTL + comment, {":s1": "defined", ":s2": "ready"})
@@ -18977,6 +18985,22 @@ def test_a_select_list_reads_a_name_holding_a_hole_as_the_hole_and_a_star_over_o
     assert sqltext.select_items("SELECT * FROM (SELECT a FROM t1 UNION SELECT a FROM t2)") == (star,)
     assert sqltext.select_items("SELECT * FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p") == (star,)
 
+
+
+def test_a_key_a_parameter_s_field_fills_says_the_field_as_a_subject(tmp_path):
+    """archiveJob 1718's shape (P2's own): the key is filled with a field of what the caller hands -- the parameter's
+    own, or of an element of it -- and the source names the parameter and, as a subject, the field; a parameter
+    handed whole is what the callers hand, no subject."""
+    froms, _sites, _at = _reread(tmp_path)
+    handed = {one.term: one for one in froms if one.owner.endswith("::handed")}
+    assert {
+        term: [(s.kind, s.name, s.paths, s.attr) for s in handed[term].sources]
+        for term in ("jediTaskID=:jediTaskID", "jediTaskID=:m", "jediTaskID=:n")
+    } == {
+        "jediTaskID=:jediTaskID": [("parameter", "taskSpec", ["()"], "JediTaskSpec.parent_tid")],
+        "jediTaskID=:m": [("parameter", "taskID", ["()"], "")],
+        "jediTaskID=:n": [("parameter", "tasks", ["()"], "JediTaskSpec.jediTaskID")],
+    }
 
 _ACROSS = '''
 from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec

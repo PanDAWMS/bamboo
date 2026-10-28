@@ -6166,9 +6166,10 @@ class _Filled:
         sites: Iterable[ReadSiteNode] = (),
         attributor: Optional[SpecAttributor] = None,
         class_of: Optional[Callable[[str], Optional[str]]] = None,
+        owner_class: Optional[str] = None,
     ):
         self.reading, self.file, self.func, self.attributor = reading, file, func, attributor
-        self.class_of = class_of
+        self.class_of, self.owner_class = class_of, owner_class
         self.sites = sorted((site for site in sites if site.region), key=lambda site: site.anchor.line_start)
         runs = [run for run in sql.executions(func) if _SELECTS_SEQUENCE.match(run.sql or "")]
         laid = sql.regions(func, list(sql.executions(func))) if runs else {}
@@ -6291,7 +6292,7 @@ class _Filled:
                     )
                 )
         found += [
-            KeySource(kind=kind, line=line, name=name, paths=_spelled_paths(paths))
+            KeySource(kind=kind, line=line, name=name, paths=_spelled_paths(paths), attr=self.subject(value))
             for kind, name, paths in self._handed(value, at)
         ]
         if found:
@@ -6299,7 +6300,17 @@ class _Filled:
         if isinstance(value, ast.Constant):
             return [KeySource(kind=KEY_CONSTANT, line=line, name=repr(value.value))]
         kind = KEY_ATTRIBUTE if isinstance(value, ast.Attribute) else KEY_UNKNOWN
-        return [KeySource(kind=kind, line=line, name=ast.unparse(value))]
+        return [KeySource(kind=kind, line=line, name=ast.unparse(value), attr=self.subject(value))]
+
+    def subject(self, value: ast.AST) -> str:
+        """The subject *value* is where it is a field of an object whose spec class the build tells -- ``x.f`` as
+        ``Class.f``, the attribute as the class declares it (``archiveJob``'s ``tmpFile.dispatchDBlock``,
+        ``FileSpec.dispatchDBlock``) -- else ``""``: the key's value, whichever parameter or field it came by."""
+        if not isinstance(value, ast.Attribute) or self.attributor is None:
+            return ""
+        spec_class = self.attributor.class_of(value.value, self.func, self.owner_class)
+        spelled = _declared_spelling(self.attributor, spec_class, value.attr) if spec_class else None
+        return f"{spec_class}.{spelled}" if spelled else ""
 
     def items(self, site: ReadSiteNode) -> tuple[tuple[sqltext.SelectItem, ...], ...]:
         """*site*'s select lists, one per distinct list its run's texts give (:func:`_select_lists`)."""
@@ -6699,6 +6710,7 @@ def attach_key_sources(
     for site in read_sites:
         sites_of.setdefault(site.owner, []).append(site)
     sites = {site.name: site for listed in sites_of.values() for site in listed}
+    owners = {id(func): owner for module in modules for func, owner in functions_with_owner(module.tree)}
     filled: dict[int, tuple[ast.AST, _Filled]] = {}
 
     def of(func: ast.FunctionDef | ast.AsyncFunctionDef, file: str) -> _Filled:
@@ -6710,7 +6722,10 @@ def attach_key_sources(
                 for site in sites_of.get(f"{file}::{func.name}", ())
                 if first <= site.anchor.line_start <= last
             ]
-            held = filled[id(func)] = (func, _Filled(reading, file, func, sites, attributor, table_class))
+            held = filled[id(func)] = (
+                func,
+                _Filled(reading, file, func, sites, attributor, table_class, owners.get(id(func))),
+            )
         return held[1]
 
     read = 0

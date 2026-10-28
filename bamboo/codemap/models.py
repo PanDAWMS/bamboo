@@ -2694,8 +2694,9 @@ class KeySource(BaseModel):
         description=(
             "``rows`` / ``sequence`` / ``parameter`` / ``self_field``: where in the bind's value they sit -- ``()`` "
             "the value itself, else its steps (``[0]``, ``.f``, ``[*]``).  A part of them reads as them here; which "
-            "column of a row fills the key is *column*, and which field of a parameter or of ``self`` is not said "
-            "(``archiveJob``'s ``:name`` at 1718, ``tmpFile.dispatchDBlock`` of a file of its ``job``, is ``job``)."
+            "column of a row fills the key is *column*, and which field of a parameter or of ``self`` is *attr* "
+            "(``archiveJob``'s ``:name`` at 1718, ``tmpFile.dispatchDBlock`` of a file of its ``job``, is ``job`` "
+            "here and ``FileSpec.dispatchDBlock`` there)."
         ),
     )
     column: str = Field(
@@ -2714,7 +2715,10 @@ class KeySource(BaseModel):
             "``rows``: *column* as a subject, ``JediTaskSpec.jediTaskID``, where its table's spec class has it; where "
             f"the statement's texts give columns of several tables that are one subject (*column_unread* "
             f"``{KEY_COLUMN_TEXTS}``: a hole read per table, ``jobsActive4``'s or ``jobsDefined4``'s ``PandaID``), "
-            "that subject."
+            "that subject.  ``parameter`` / ``self_field`` / ``attribute``: the subject of the value the key is "
+            "filled with, where that value is a field of an object whose spec class the build tells "
+            "(``archiveJob`` 1718's ``tmpFile.dispatchDBlock`` of a file of its parameter ``job``, "
+            "``FileSpec.dispatchDBlock``); empty for the parameter or field itself (what the callers hand)."
         ),
     )
     column_unread: str = Field(
