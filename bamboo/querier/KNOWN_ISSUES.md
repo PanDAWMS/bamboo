@@ -154,12 +154,17 @@ case of mine asks `finished` (2026-10-26); not counted map-wide.
 Past a selecting statement's region, S1 takes an arm of the owner's as the statement's where the map says the
 statement's rows fill the key the arm's write names its row by (`keyed_arms`, the map's `KeyFrom`, 2026-10-27):
 `prepareTasksToBeFinished_JEDI` keys the writes of its later loop by the `jediTaskID` its statements at 3723 and 3768
-select.  The map says where in a value the rows sit, not which column of them fills the key (its ii and U1), so a key
-computed from the rows, or filled from a column naming another row, reads as the rows: the owner is kept as a mover
-where it may not be one.  Nor is an arm's path condition read against the rows' values, here as in the region:
-`getTasksToBeFinished_JEDI`'s 1705 runs only for a `scouted` row (`if taskStatus == "scouted":`), yet it is 1676's
-for each value 1676 selects, and the function is kept as a mover of `prepared`, `passed`, `tobroken` and `toabort`,
-which it hands on to the agent that moves them (`post_process_tasks`, through its return; on pin k, 2026-10-27).  An
+select.  Whatever column of the rows fills the key counts, and an arm's path condition is not read against the rows'
+values, here as in the region.  The map's v says both on each `rows` source -- the select item filling the key
+(`column`), whether the write names the rows themselves by the table's whole key (`same_rows`), the values for which
+it never runs (`never_at`) -- and S1 does not read them here: on x13v4k (M 03c3237), of the 55 arms keyed so over
+six subjects, 47 are keyed by a `same_rows` source, 5 by a part of the key from the same column (the rows and more:
+`throttleUserJobs` 1746, `unThrottleUserJobs` 1844, `restartTasksForContentsUpdate_JEDI` 1839 / 1884,
+`resetFileStatusInJEDI` 2083), 3 by a column the map did not read (`insertFilesForDataset_JEDI` 1116 / 1143), none
+by another column and none at a value in `never_at`: reading them would move no row.  The example here before,
+`getTasksToBeFinished_JEDI`'s 1705 under `if taskStatus == "scouted":`, kept as 1676's at `prepared`, `passed`,
+`tobroken` and `toabort`, holds no more: its branch says the row precondition `status=scouted`, so `arms_of` leaves
+it out at those values (`refused_arms`).  An
 arm whose key the map did not read (no bind map, no bind found, a value not followed) keeps the owner too, said.  So
 does an arm set on an object no write in the function persists (the map's KeyFrom of no term, AK-2: the object's
 fields handed to a call, bound in a statement, returned, kept in what the function was handed, or no use found):
@@ -168,18 +173,18 @@ said with the object and where its fields go, not as a key the map could not rea
 over every subject: 3 (statement, value) pairs, none of `JediTaskSpec.status` or `JobSpec.jobStatus` --
 `datasetManager.run`@359's `FileSpec.status` `failed` / `merging` (713 / 745 / 958: a file of the job the function
 hands on, which the map does not read as the job's, no use found) and `getJobs`@2743's `FileSpec.type` `output`
-(2786: handed to a call and returned).  Not seen: rows reaching the key through a call (the map's v:
-`setScoutJobDataToTasks_JEDI` names 3631's row by `taskSpec.jediTaskID`, the task `getTaskWithID_JEDI` returns for a
-`jediTaskID` 3605 selects, and the arm reads as not 3605's), and an arm no KeyFrom names (`datasetManager.run`'s
-858, `tmpFile.status = "ready"`; `getCommands`' 1824, an `IN` list of binds made by a join) -- such an arm is the
-statement's only inside its region, as before.
+(2786: handed to a call and returned).  Rows reaching another function's key through calls (v's sources with `via`)
+are not read as keying its arms: on x13v4k, 16 such records, each of a function S1 has as a mover of the value
+already.  Not seen: an arm no KeyFrom names (`datasetManager.run`'s 858, `tmpFile.status = "ready"`; `getCommands`'
+1824, an `IN` list of binds made by a join) -- such an arm is the statement's only inside its region, as before.
 
 *Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]", or "...
 the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept", or "... no write in the
 function persists the value(s) set at [...] (<object> (<where its fields go>)): kept" (the two joined by ", and "
 where a statement has both).
-*Revisit:* with the map's per-column carry (ii, U1); with its v, rows and objects followed across a call (a field
-set on an element of a container handed on, a key of an object a call returns).
+*Revisit:* when a census on a new map finds an arm keyed by another column or at a value in `never_at` (v's fields
+make both readable); with objects followed across a call (a field set on an element of a container handed on, a key of
+an object a call returns).
 
 ### K29. A birth is no arm only where the map says every write on its lines makes the row
 
@@ -243,6 +248,37 @@ later status leaves out.
 *Revisit:* a statement some routes run, read per way: none of S1's rows rests on one on pin k (the map's iv,
 2026-10-28), and the way would need the hand-off call's line (`lockJobsForReassign`@846's rows reach `retryJob` at
 copyArchive 814, not from `lockJobsForReassign`).
+
+### K31. Rows read again are handed on whatever test the call runs under, and to a function that may write other rows
+
+S1 follows a selecting statement's rows into a statement that reads them again (`read_again`; the map's v: a read
+KeyFrom whose `rows` source is the selecting statement's, `same_rows`, the value not in its `never_at`) and hands them
+on from there as from a selecting statement's region, to writers only, one hop: `getTasksToBeFinished_JEDI`@1676 ->
+1731 -> `post_process_tasks`, a mover of `passed`, `prepared`, `tobroken` and `toabort` (the movers oracle's A11).
+It overclaims in two ways, as the region does:
+- a call is taken whatever test it runs under.  `prepareTasksToBeFinished_JEDI`@3723 -> 3896 (`sqlRT`) ->
+  `setScoutJobData_JEDI`, whose call at 3958 runs under `taskSpec.status == "scouting" or jediTaskID in
+  set_scout_data_only or (taskSpec.status == "ready" and ...)`; `set_scout_data_only` holds only tasks `sqlEA` adds,
+  and 3723's are not among them (`jediTaskID not in jediTaskIDstatusMap`), so for 3723's rows the call runs at
+  `scouting` and `ready` alone, and S1 keeps `setScoutJobData_JEDI` a mover of `merging`, `preprocessing`,
+  `throttled` and `running` too.  What decides it is a set's membership, filled under a test on another statement's
+  rows: a `never_at` on the call, read as a source's is (a test on a name holding the rows' column), would rule none
+  of the four out.
+- a function reached may write other rows than those it is handed: `reassignJobsInPreassignedTask_JEDI`@5755 ->
+  `killJob` 991 (through 5759) -> `killEventServiceConsumers` and `killUnusedEventServiceConsumers`, which kill the
+  job's consumers, kept as movers of `JobSpec.jobStatus` `activated`.
+On x13v4k (M 03c3237), over six subjects: 12 (value, mover) pairs come -- 6 right (`post_process_tasks` x4,
+`setScoutJobData_JEDI` at `scouting` and `ready`), 4 and 2 as above -- and no other mover, why, arm or reach moves;
+of the cases, D's L2 alone, where `killEventServiceConsumers` and `killUnusedEventServiceConsumers`, by key already,
+are given 5755's rows.  Handed on to every function the statement reaches, writers or not, 35 more pairs came, each for
+K14 to drop or keep by its reach, and D's L2 no longer ruled out `updateRelatedEventServiceJobs` (its arm refuses
+`activated`) nor `recordStatusChange`: hence writers only.  A miss costs more than an overclaim here: a mover kept
+is asked, one left out is not looked at again.
+
+*Shows:* the mover's line "<statement> selects the value, and <statement> reads its rows again and hands them to it",
+or "..., and they fill the key of the write(s) at [...]".
+*Revisit:* with a reading of the test a call runs under on the rows' values, through what a set the function fills
+holds; with whether a function reached writes the rows it is handed (its write's KeyFrom).
 
 ### K16. S1 asks a writer that takes a row by its key over the window's last part only
 
