@@ -65,6 +65,7 @@ from bamboo.codemap.panda.recognizers import (
     progress,
     selection,
     sqlwrite,
+    tables,
     trigger,
 )
 from bamboo.models.graph_element import NodeType
@@ -19001,6 +19002,137 @@ def test_a_key_a_parameter_s_field_fills_says_the_field_as_a_subject(tmp_path):
         "jediTaskID=:m": [("parameter", "taskID", ["()"], "")],
         "jediTaskID=:n": [("parameter", "tasks", ["()"], "JediTaskSpec.jediTaskID")],
     }
+
+
+_TABLES_SPECS = """
+class JobSpec(object):
+    _attributes = ("PandaID", "jobStatus", "creationTime", "modificationTime")
+"""
+
+_TABLES = '''
+comment = " /* x */"
+
+
+class JobModule:
+    def insertJob(self, pandaID):
+        sqlI = "INSERT INTO ATLAS_PANDA.jobsActive4 (PandaID,jobStatus,creationTime,modificationTime) "
+        sqlI += "VALUES (:PandaID,:jobStatus,CURRENT_DATE,CURRENT_DATE) "
+        self.cur.execute(sqlI + comment, {":PandaID": pandaID, ":jobStatus": "activated"})
+
+    def insertOther(self, pandaID):
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        varMap[":jobStatus"] = "defined"
+        varMap[":ct"] = naive_utcnow()
+        varMap[":mt"] = naive_utcnow()
+        sqlD = "INSERT INTO ATLAS_PANDA.jobsActive4 (PandaID,jobStatus,creationTime,modificationTime) "
+        sqlD += "VALUES (:PandaID,:jobStatus,:ct,:mt) "
+        self.cur.execute(sqlD + comment, varMap)
+
+    def touch(self, pandaID):
+        sqlU = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:s,modificationTime=CURRENT_DATE WHERE PandaID=:p "
+        self.cur.execute(sqlU + comment, {":s": "running", ":p": pandaID})
+
+    def both(self):
+        sqlR = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s "
+        sqlR += "UNION SELECT PandaID FROM ATLAS_PANDAARCH.jobsArchived WHERE jobStatus=:s "
+        self.cur.execute(sqlR + comment, {":s": "failed"})
+        return self.cur.fetchall()
+'''
+
+
+def test_a_table_record_says_its_key_as_the_class_spells_it_its_family_and_its_rows_creation(tmp_path):
+    """The live-case harness's fetch tables (P2R): a table holding a class's rows names its row by the class's
+    attribute, is read with its archive in one UNION, and the class's column every write of which makes the row
+    and puts the time now -- by the statement's clock or a bound one -- is its creation; one an UPDATE writes is
+    not.  The archive is the family's table holding the rows that no INSERT writes, partitioned by time."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/JobSpec.py": _TABLES_SPECS, rel: _TABLES}
+    )
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    held = frozenset({"pandaid", "jobstatus", "creationtime", "modificationtime"})
+    schema = {"jobsactive4": held, "jobsarchived": held}
+    keys = {"jobsactive4": frozenset({"pandaid"})}
+    dated = {"jobsactive4": frozenset({"creationtime", "modificationtime"}), "jobsarchived": frozenset()}
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls), sqltext.with_schema(schema, keys, dated):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites,
+            table_class=attributor.class_for_table, modules=modules, attributor=attributor,
+        )
+        entities = [
+            EntityNode(
+                map_id=MAP_ID, derived_from=VERSION, name="jobsactive4", tables=["jobsActive4"],
+                spec_class="JobSpec", created_by=[f"{rel}::JobModule.insertJob"],
+            )
+        ]
+        made = tables.records(
+            modules, entities, sites, froms, attributor, attributor.class_for_table, schema, keys,
+            {"jobsarchived": ("range", ("modificationtime",))},
+            {"jobsactive4": ("ATLAS_PANDA",), "jobsarchived": ("ATLAS_PANDAARCH",)},
+        )
+    by = {one.name: one for one in made}
+    written = sorted(
+        (one.owner.rsplit("::", 1)[1], line)
+        for one in froms
+        for line in one.writes.get("JobSpec.creationTime", [])
+    )
+    assert [owner for owner, _line in written] == ["insertJob", "insertOther"]
+    assert sorted(by) == ["jobsactive4", "jobsarchived"]
+    live, archive = by["jobsactive4"], by["jobsarchived"]
+    assert (live.rows_of, live.identity, live.identity_attrs, live.inserted, live.family, live.creation) == (
+        "JobSpec", ["pandaid"], ["JobSpec.PandaID"], True, ["jobsarchived"], ["JobSpec.creationTime"],
+    )
+    assert (live.schema_names, live.partitioned_by, live.spellings) == (["ATLAS_PANDA"], [], ["jobsActive4"])
+    assert (
+        archive.rows_of, archive.identity, archive.inserted, archive.family, archive.schema_names,
+        archive.partition_kind, archive.partitioned_by, archive.partitioned_by_attrs, archive.creation,
+    ) == (
+        "JobSpec", [], False, ["jobsactive4"], ["ATLAS_PANDAARCH"],
+        "range", ["modificationtime"], ["JobSpec.modificationTime"], ["JobSpec.creationTime"],
+    )
+
+
+def test_the_ddl_says_a_tables_partition_and_the_schema_creating_it(tmp_path):
+    """``PARTITION BY RANGE ("MODIFICATIONTIME")`` after a table's body is its, not the next table's; the schema
+    is the one its ``CREATE TABLE`` names."""
+    (tmp_path / "ATLAS_PANDA.sql").write_text(
+        'CREATE TABLE "ATLAS_PANDA"."JOBSARCHIVED4"\n   (\t"PANDAID" NUMBER(11,0),\n\t"MODIFICATIONTIME" DATE\n   )\n'
+        '  PARTITION BY RANGE ("MODIFICATIONTIME")\n (PARTITION "P1" VALUES LESS THAN (MAXVALUE)) ;\n'
+        'CREATE TABLE "ATLAS_PANDA"."JOBSACTIVE4"\n   (\t"PANDAID" NUMBER(11,0)\n   ) ;\n'
+    )
+    (tmp_path / "ATLAS_PANDAARCH.sql").write_text(
+        'CREATE TABLE "ATLAS_PANDAARCH"."JOBSARCHIVED"\n   (\t"PANDAID" NUMBER(11,0),\n\t"JEDITASKID" NUMBER\n   )\n'
+        '  PARTITION BY LIST ("JEDITASKID", "PANDAID")\n (PARTITION "P1" VALUES (DEFAULT)) ;\n'
+    )
+    (tmp_path / "ATLAS_PANDA_VIEW.sql").write_text('CREATE OR REPLACE VIEW "ATLAS_PANDA"."V" AS SELECT 1 FROM dual;\n')
+    assert sqltext.read_partitions(tmp_path) == {
+        "jobsarchived4": ("range", ("modificationtime",)),
+        "jobsarchived": ("list", ("jeditaskid", "pandaid")),
+    }
+    assert sqltext.read_declaring(tmp_path) == {
+        "jobsarchived4": ("ATLAS_PANDA",),
+        "jobsactive4": ("ATLAS_PANDA",),
+        "jobsarchived": ("ATLAS_PANDAARCH",),
+    }
+
+
+def test_a_union_pairs_the_tables_its_arms_read_in_one_place():
+    """The arms' one sources, or the sources of one alias -- not every table of a joined arm with every other, not
+    a WITH name."""
+    assert sqltext.union_places(
+        "SELECT PandaID FROM ATLAS_PANDA.jobsArchived4 WHERE x=:x "
+        "UNION SELECT PandaID FROM ATLAS_PANDAARCH.jobsArchived"
+    ) == (("jobsarchived", "jobsarchived4"),)
+    assert sqltext.union_places(
+        "SELECT f.lfn FROM filesTable4 f, jobsActive4 j WHERE f.PandaID=j.PandaID "
+        "UNION SELECT f.lfn FROM filesTable4 f, jobsDefined4 j WHERE f.PandaID=j.PandaID"
+    ) == (("jobsactive4", "jobsdefined4"),)
+    assert sqltext.union_places("WITH w AS (SELECT a FROM t1) SELECT a FROM w UNION SELECT a FROM t2") == ()
 
 _ACROSS = '''
 from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec

@@ -65,6 +65,7 @@ from bamboo.codemap.panda.recognizers import (
     progress,
     selection,
     sqlwrite,
+    tables,
     trigger,
 )
 
@@ -221,6 +222,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._schema: Optional[dict[str, frozenset[str]]] = None
         self._keys: Optional[dict[str, frozenset[str]]] = None
         self._dated: Optional[dict[str, frozenset[str]]] = None
+        self._partitions: dict[str, tuple[str, tuple[str, ...]]] = {}
+        self._declaring: dict[str, tuple[str, ...]] = {}
         self._schema_stamp = "none"
         self._recorded: Optional[calls_mod.Recorded] = None
         self._record_stamp = "none"
@@ -240,6 +243,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._schema = sqltext.read_schema(schema_root)
             self._keys = sqltext.read_keys(schema_root)
             self._dated = sqltext.read_dated(schema_root)
+            self._partitions = sqltext.read_partitions(schema_root)
+            self._declaring = sqltext.read_declaring(schema_root)
             self._schema_stamp = _schema_stamp(Path(schema_root), self._schema, self._keys)
         if instance_record is not None:
             self._recorded, self._record_stamp = calls_mod.read_recorded(Path(instance_record))
@@ -709,6 +714,21 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # The routes of calls on which each write never runs, its records all made (the objects' last).
         sqlwrite.attach_routes(fragment.key_froms, self._calls)
         lap("key sources")
+        # What the schema and the corpus say of each table named, for a reader asking rows: the write records all
+        # made, read inside the calls and the schema as the read sites were.
+        fragment.tables = tables.records(
+            self._modules,
+            fragment.entities,
+            fragment.read_sites,
+            fragment.key_froms,
+            attributor,
+            attributor.class_for_table,
+            self._schema or {},
+            self._keys or {},
+            self._partitions,
+            self._declaring,
+        )
+        lap("tables")
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the

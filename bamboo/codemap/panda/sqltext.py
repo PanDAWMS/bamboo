@@ -1640,6 +1640,37 @@ def read_dated(directory: Path) -> dict[str, frozenset[str]]:
     return {table: frozenset(columns) for table, columns in found.items()}
 
 
+_PARTITION_BY = re.compile(r'PARTITION\s+BY\s+(RANGE|LIST|HASH)\s*\(([^)]*)\)', re.IGNORECASE)
+
+
+def read_partitions(directory: Path) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """``{table: (kind, its partitioning columns)}``, lowered, from the DDL :func:`read_schema` reads: the
+    ``PARTITION BY RANGE ("MODIFICATIONTIME")`` after a table's body, before the next table -- ``jobsArchived4``
+    and ATLAS_PANDAARCH's ``jobsArchived`` by ``modificationtime``, the JEDI tables by ``jeditaskid``.  A table
+    partitioned by nothing is absent."""
+    found: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for path in sorted(Path(directory).glob("*.sql")):
+        text = path.read_text()
+        tables = list(_CREATE_TABLE.finditer(text))
+        for number, match in enumerate(tables):
+            span = text[match.end() : tables[number + 1].start() if number + 1 < len(tables) else len(text)]
+            partitioned = _PARTITION_BY.search(span)
+            if partitioned is not None:
+                columns = tuple(one.strip().strip('"').lower() for one in partitioned.group(2).split(","))
+                found[match.group(2).lower()] = (partitioned.group(1).lower(), columns)
+    return found
+
+
+def read_declaring(directory: Path) -> dict[str, tuple[str, ...]]:
+    """``{table: the schemas whose DDL creates it}``, the table lowered: ``jobsarchived`` is ATLAS_PANDAARCH's,
+    ``jobsarchived4`` ATLAS_PANDA's."""
+    found: dict[str, set[str]] = {}
+    for path in sorted(Path(directory).glob("*.sql")):
+        for match in _CREATE_TABLE.finditer(path.read_text()):
+            found.setdefault(match.group(2).lower(), set()).add(match.group(1))
+    return {table: tuple(sorted(schemas)) for table, schemas in found.items()}
+
+
 def read_keys(directory: Path) -> dict[str, frozenset[str]]:
     """``{table: its primary key's columns}``, both lowered, from the DDL :func:`read_schema` reads.
 
@@ -2099,6 +2130,55 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
         else:
             items.append(SelectItem(ITEM_EXPRESSION))
     return tuple(items)
+
+
+def is_hole(name: str) -> bool:
+    """Whether *name* holds a hole the code fills (``__h1``): no table or column the text names."""
+    return bool(_NAMED_HOLE.search(name))
+
+
+@functools.lru_cache(maxsize=None)
+def union_places(sql: str) -> tuple[tuple[str, str], ...]:
+    """Each pair of distinct tables two arms of one of *sql*'s ``UNION``\\ s read in one place, lowered and sorted:
+    the sources of the same alias, or the one source of each arm -- ``SELECT ... FROM jobsArchived4 UNION SELECT
+    ... FROM ATLAS_PANDAARCH.jobsArchived``.  An arm joining two tables pairs each with the other arm's source of
+    its alias (``filesTable4 f, jobsActive4 j`` against ``filesTable4 f, jobsDefined4 j``: the jobs tables), not
+    with every table of the other arm.  A ``WITH`` name and a hole are no table; ``()`` where *sql* is not read as
+    a tree."""
+    tree = parsed(sql).tree
+    if tree is None:
+        return ()
+    named = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+    found: set[tuple[str, str]] = set()
+    for union in tree.find_all(exp.Union):
+        arms = [_arm_sources(arm) for arm in _arms(union)]
+        for number, left in enumerate(arms):
+            for right in arms[number + 1 :]:
+                if len(left) == 1 and len(right) == 1:
+                    pairs = [(left[0][1], right[0][1])]
+                else:
+                    pairs = [(a, b) for alias, a in left for other, b in right if alias == other]
+                found.update(
+                    (min(a, b), max(a, b))
+                    for a, b in pairs
+                    if a != b and not ({a, b} & named) and not any(is_hole(t) for t in (a, b))
+                )
+    return tuple(sorted(found))
+
+
+def _arm_sources(select: exp.Select) -> list[tuple[str, str]]:
+    """``(alias, table)`` of the sources one arm reads its rows from, lowered: its ``FROM`` and joins, a derived
+    table's own arms' under the derived table's alias."""
+    head = select.args.get("from_")
+    sources = ([head.this] if head is not None else []) + [join.this for join in select.args.get("joins") or []]
+    found: list[tuple[str, str]] = []
+    for source in sources:
+        if isinstance(source, exp.Table):
+            found.append((source.alias_or_name.lower(), source.name.lower()))
+        elif isinstance(source, exp.Subquery):
+            for arm in _arms(source.this):
+                found.extend((source.alias_or_name.lower() or alias, table) for alias, table in _arm_sources(arm))
+    return found
 
 
 class Equality(NamedTuple):
