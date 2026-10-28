@@ -5714,6 +5714,9 @@ class _Landing:
     held: dict[str, _Paths]
     #: The same, per select item by its position, from the walks seeded with each (:func:`_item_landings`).
     items: dict[int, dict[str, _Paths]] = dataclasses.field(default_factory=dict)
+    #: The function of the statement whose rows these are: the way's first step is a caller's where the rows were
+    #: returned before they went down.
+    origin: Optional[ast.AST] = None
 
     def key(self) -> tuple:
         """The same landing in another walk of the statement: its call by the same way."""
@@ -5926,9 +5929,11 @@ def _item_landings(
 
 
 def _select_items(func: ast.AST, site: ReadSiteNode) -> Optional[tuple[sqltext.SelectItem, ...]]:
-    """*site*'s select items (:func:`sqltext.select_items`), where every text its run has gives the same."""
+    """*site*'s select items (:func:`sqltext.select_items`), where every text its run has that is read as a tree gives
+    the same."""
     line = site.anchor.line_start
-    read = {sqltext.select_items(run.reading) for run in sql.executions(func) if run.call.lineno == line}  # type: ignore[arg-type]
+    runs = [run for run in sql.executions(func) if run.call.lineno == line]  # type: ignore[arg-type]
+    read = {items for run in runs if (items := sqltext.select_items(run.reading)) is not None}
     return next(iter(read)) if len(read) == 1 else None
 
 
@@ -6069,6 +6074,8 @@ def attach_crossings(
         crossings, returned = _walk(reading, func, site, landing=landings is not None)
         if landings is not None:
             found = [one for one in crossings.landings if not _own_run(one, func, site)]
+            for landing in found:
+                landing.origin = func
             if found:
                 _item_landings(reading, func, site, found)
                 landings[site.name] = found
@@ -6122,8 +6129,10 @@ class _Filled:
         func: ast.FunctionDef | ast.AsyncFunctionDef,
         sites: Iterable[ReadSiteNode] = (),
         attributor: Optional[SpecAttributor] = None,
+        class_of: Optional[Callable[[str], Optional[str]]] = None,
     ):
         self.reading, self.file, self.func, self.attributor = reading, file, func, attributor
+        self.class_of = class_of
         self.sites = sorted((site for site in sites if site.region), key=lambda site: site.anchor.line_start)
         runs = [run for run in sql.executions(func) if _SELECTS_SEQUENCE.match(run.sql or "")]
         laid = sql.regions(func, list(sql.executions(func))) if runs else {}
@@ -6284,7 +6293,7 @@ class _Filled:
         """*column* (``table.column``) as a subject where its table's spec class has it, else ``""``."""
         if not column or self.attributor is None:
             return ""
-        return _spec_attr(self.attributor, *column.split(".", 1))
+        return _spec_attr(self.attributor, *column.split(".", 1), self.class_of)
 
     def never_at(self, site: ReadSiteNode, places: list[ast.AST]) -> list[str]:
         """The values *site* selects (its *selects*) for which no node of *places* runs: a test on the way to each
@@ -6327,9 +6336,13 @@ class _Filled:
         )
 
 
-def _spec_attr(attributor: SpecAttributor, table: str, column: str) -> str:
-    """*table*'s *column* as a subject where the table's spec class has it (``JediTaskSpec.jediTaskID``), else ``""``."""
-    qualifier, attribute, kind = _subject_of(attributor, attributor.class_for_table(table), table, column)
+def _spec_attr(
+    attributor: SpecAttributor, table: str, column: str, class_of: Optional[Callable[[str], Optional[str]]] = None
+) -> str:
+    """*table*'s *column* as a subject where the table's spec class has it (``JediTaskSpec.jediTaskID``), else ``""``:
+    the class by *class_of* where given (the attributor that learned the tables), else *attributor*'s."""
+    spec_class = class_of(table) if class_of is not None else attributor.class_for_table(table)
+    qualifier, attribute, kind = _subject_of(attributor, spec_class, table, column)
     return SubjectNode.make_name(qualifier, attribute) if kind == "spec" else ""
 
 
@@ -6429,6 +6442,7 @@ def _landed_sources(
     landings: dict[str, list[_Landing]],
     sites: dict[str, ReadSiteNode],
     attributor: Optional[SpecAttributor],
+    class_of: Optional[Callable[[str], Optional[str]]] = None,
 ) -> None:
     """Add to each KeyFrom a ``rows`` source of each statement whose rows the walk carried through calls to a run of
     its statement with them under one of its term's binds (:class:`_Landing`): the calls on the way
@@ -6442,7 +6456,7 @@ def _landed_sources(
         site = sites.get(name)
         if site is None:
             continue
-        items = _select_items(found[0].way[0][2], site)
+        items = _select_items(found[0].origin, site)
         for landing in found:
             for key_from in by_call.get(id(landing.call), ()):
                 hit = [key.lstrip(":") for key in re.findall(r":\w+", key_from.term) if key.lstrip(":") in landing.held]
@@ -6466,7 +6480,7 @@ def _landed_sources(
                     site_line=site.anchor.line_start,
                     paths=_spelled_paths(frozenset(path for key in hit for path in landing.held[key])),
                     column=column,
-                    attr=_spec_attr(attributor, *column.split(".", 1)) if column and attributor is not None else "",
+                    attr=_spec_attr(attributor, *column.split(".", 1), class_of) if column and attributor is not None else "",
                     column_unread=unread,
                     via=via,
                 )
@@ -6622,7 +6636,7 @@ def attach_key_sources(
                 for site in sites_of.get(f"{file}::{func.name}", ())
                 if first <= site.anchor.line_start <= last
             ]
-            held = filled[id(func)] = (func, _Filled(reading, file, func, sites, attributor))
+            held = filled[id(func)] = (func, _Filled(reading, file, func, sites, attributor, table_class))
         return held[1]
 
     read = 0
@@ -6642,7 +6656,7 @@ def attach_key_sources(
         read += 1
     for key_from in froms:
         if attributor is not None and key_from.table and key_from.term:
-            key_from.attr = _spec_attr(attributor, key_from.table, _term_column(key_from.term))
+            key_from.attr = _spec_attr(attributor, key_from.table, _term_column(key_from.term), table_class)
         if key_from._binds is None or key_from._runs is None:
             continue
         func, file, _values = key_from._binds
@@ -6651,7 +6665,7 @@ def attach_key_sources(
             if source.kind == KEY_ROWS and source.name in sites and not source.via:
                 source.never_at = reader.never_at(sites[source.name], list(key_from._runs[1]))
     if landings:
-        _landed_sources(froms, landings, sites, attributor)
+        _landed_sources(froms, landings, sites, attributor, table_class)
     _same_rows(froms, sites)
     if landings:
         _attach_reaches(froms, sites, _Reading(calls, {junction.owner for junction in junctions}, record, True))

@@ -18791,6 +18791,9 @@ def _reread(tmp_path):
     )
     attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
     attributor.learn_table_classes(modules)
+    # As the build hands them: the attributor the attribute slice reads with, which learns no table, and the
+    # tables' classes from the one that did.
+    audited = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
     schema = {
         "jedi_tasks": frozenset({"jeditaskid", "status", "parent_tid"}),
         "jedi_datasets": frozenset({"jeditaskid", "datasetid"}),
@@ -18801,7 +18804,15 @@ def _reread(tmp_path):
         _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
         sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
         sqlwrite.attach_key_sources(
-            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+            [],
+            junctions,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            table_class=attributor.class_for_table,
+            modules=modules,
+            attributor=audited,
         )
     lines = _REREAD.split("\n")
 
@@ -18904,6 +18915,16 @@ class TaskModule:
         taskSpec = self.readTask(someID)
         self.other(taskSpec)
 
+    def toCheck(self):
+        self.cur.execute("SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s" + comment, {":s": "ok"})
+        res = self.cur.fetchall()
+        return res
+
+    def checker(self):
+        for jediTaskID, taskStatus in self.toCheck():
+            taskSpec = self.readTask(jediTaskID)
+            self.finish(taskSpec)
+
     def readTask(self, jediTaskID):
         varMap = {}
         varMap[":jediTaskID"] = jediTaskID
@@ -18952,6 +18973,7 @@ def test_rows_reaching_a_key_through_calls_say_the_way_and_where_the_rows_read_a
     )
     attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
     attributor.learn_table_classes(modules)
+    audited = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
     schema = {"jedi_tasks": frozenset({"jeditaskid", "status", "parent_tid"})}
     froms: list[KeyFrom] = []
     landings: dict[str, list] = {}
@@ -18960,13 +18982,21 @@ def test_rows_reaching_a_key_through_calls_say_the_way_and_where_the_rows_read_a
         sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
         sqlwrite.attach_crossings(sites, modules, junctions, calls, record, landings=landings)
         sqlwrite.attach_key_sources(
-            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor,
+            [],
+            junctions,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            table_class=attributor.class_for_table,
+            modules=modules,
+            attributor=audited,
             landings=landings,
         )
     lines = _ACROSS.split("\n")
 
-    def at(text: str) -> int:
-        return next(number for number, line in enumerate(lines, 1) if text in line)
+    def at(text: str, nth: int = 1) -> int:
+        return [number for number, line in enumerate(lines, 1) if text in line][nth - 1]
 
     (source_site,) = [site for site in sites if site.owner.endswith("::toFinish")]
 
@@ -18987,6 +19017,26 @@ def test_rows_reaching_a_key_through_calls_say_the_way_and_where_the_rows_read_a
     ]
     assert rows("self.cur.execute(sqlUL") == [
         ([f"{rel}:{at('self.lockTask(jediTaskID)')}"], "jedi_tasks.jeditaskid", True, [])
+    ]
+    # Returned to a caller first, then handed down: the column is still the returning statement's.
+    (back_site,) = [site for site in sites if site.owner.endswith("::toCheck")]
+    (key_from,) = [
+        one for one in froms if one.statement == at("self.cur.execute(sqlTS") and one.term == "jediTaskID=:jediTaskID"
+    ]
+    assert [
+        (one.via, one.column, one.attr, one.same_rows)
+        for one in key_from.sources
+        if one.kind == "rows" and one.name == back_site.name
+    ] == [
+        (
+            [
+                f"{rel}:{at('for jediTaskID, taskStatus in self.toCheck()')}",
+                f"{rel}:{at('taskSpec = self.readTask(jediTaskID)', 2)}",
+            ],
+            "jedi_tasks.jeditaskid",
+            "JediTaskSpec.jediTaskID",
+            True,
+        )
     ]
 
 
