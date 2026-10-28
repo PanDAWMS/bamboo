@@ -160,13 +160,26 @@ where it may not be one.  Nor is an arm's path condition read against the rows' 
 `getTasksToBeFinished_JEDI`'s 1705 runs only for a `scouted` row (`if taskStatus == "scouted":`), yet it is 1676's
 for each value 1676 selects, and the function is kept as a mover of `prepared`, `passed`, `tobroken` and `toabort`,
 which it hands on to the agent that moves them (`post_process_tasks`, through its return; on pin k, 2026-10-27).  An
-arm whose key the map did not read (no bind map, no bind found, a value not followed) keeps the owner too, said.  Not
-seen: rows reaching the key through a call (the map's v), and a write naming its row by an object (the attribute arms,
-a step of the map's own) -- such an arm is the statement's only inside its region, as before.
+arm whose key the map did not read (no bind map, no bind found, a value not followed) keeps the owner too, said.  So
+does an arm set on an object no write in the function persists (the map's KeyFrom of no term, AK-2: the object's
+fields handed to a call, bound in a statement, returned, kept in what the function was handed, or no use found):
+there is no key here to read, and the write that persists the value, if any, is the caller's or a callee's; it is
+said with the object and where its fields go, not as a key the map could not read.  On x13ak8k (the map's 5fab70b),
+over every subject: 3 (statement, value) pairs, none of `JediTaskSpec.status` or `JobSpec.jobStatus` --
+`datasetManager.run`@359's `FileSpec.status` `failed` / `merging` (713 / 745 / 958: a file of the job the function
+hands on, which the map does not read as the job's, no use found) and `getJobs`@2743's `FileSpec.type` `output`
+(2786: handed to a call and returned).  Not seen: rows reaching the key through a call (the map's v:
+`setScoutJobDataToTasks_JEDI` names 3631's row by `taskSpec.jediTaskID`, the task `getTaskWithID_JEDI` returns for a
+`jediTaskID` 3605 selects, and the arm reads as not 3605's), and an arm no KeyFrom names (`datasetManager.run`'s
+858, `tmpFile.status = "ready"`; `getCommands`' 1824, an `IN` list of binds made by a join) -- such an arm is the
+statement's only inside its region, as before.
 
 *Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]", or "...
-the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept".
-*Revisit:* with the map's per-column carry (ii, U1); the attribute arms when the map reads them.
+the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept", or "... no write in the
+function persists the value(s) set at [...] (<object> (<where its fields go>)): kept" (the two joined by ", and "
+where a statement has both).
+*Revisit:* with the map's per-column carry (ii, U1); with its v, rows and objects followed across a call (a field
+set on an element of a container handed on, a key of an object a call returns).
 
 ### K29. A birth is no arm only where the map says every write on its lines makes the row
 
@@ -184,8 +197,15 @@ a row rewritten (DELETE and INSERT of its whole key), a call that updates the ta
 too stay arms: errs on keeping.  An object of the table's class handed in is not followed to where its key was made
 (None): `insertNewJob`'s new jobs, whose PandaID `TaskBuffer.storeJobs` takes from the sequence, stay arms.
 
+The same fact answers who wrote a statuslog row (H2, F1): a write that makes the row writes no row that was there, so
+where the statuslog holds a row of the key before the one asked, a reading's birth lines are no candidates, and a
+reading left with none goes (`_unborn`, `held.row_before`): `ppEventServiceJob`'s new jobs, INSERTed activated with a
+sequence's PandaID, did not write a job's 'activated' after its 'defined'.  For the row's first status, a tie at the
+second the log keeps, or a value held beside the status (`JobSpec.computingSite`), every reading stays.
+
 *Shows:* "<owner>: its writes at [...] make the row (births: sequence at 623): not arms"; result.json's `births`; a
-writer with births alone is absent from the movers.
+writer with births alone is absent from the movers; H2 / F1: "the key's row was there before 'activated' at ..., so
+its writes that make a row are no candidates: ppEventServiceJob [5556, 5558, 5560] (births: sequence at 5706)".
 *Revisit:* when the map follows an object handed in to where its key was made.
 
 ### K16. S1 asks a writer that takes a row by its key over the window's last part only

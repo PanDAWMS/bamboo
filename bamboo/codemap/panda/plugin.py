@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -191,6 +192,19 @@ def _schema_stamp(root: Path, schema: dict[str, frozenset[str]], keys: dict[str,
     return f"{root}: {len(schema)} table(s), {len(keys)} key(s), {digest.hexdigest()[:16]}"
 
 
+class _Lap:
+    """How long each stage of a build took, logged as it ends: what to make faster is chosen from where the time
+    goes, and a profiler's shares are not a run's (tmaeno, 2026-10-27: the build's time is the bottleneck)."""
+
+    def __init__(self) -> None:
+        self._at = time.monotonic()
+
+    def __call__(self, stage: str) -> None:
+        now = time.monotonic()
+        logger.info("PandaCodeMapPlugin: %s took %.1f s", stage, now - self._at)
+        self._at = now
+
+
 class PandaCodeMapPlugin(CodeMapPlugin):
     """Builds the ``panda`` Code Map from installed or checked-out source."""
 
@@ -252,7 +266,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         """
         if not self._modules:
             raise RuntimeError("prepare() must be called before run()")
+        lap = _Lap()
         self._calls = sqlwrite.corpus_calls(self._modules, self._roots, self._recorded)
+        lap("the corpus's calls")
         with sql.across_calls(self._calls), sqltext.with_schema(self._schema, self._keys, self._dated):
             return self._run()
 
@@ -268,6 +284,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
     def _run(self) -> MapFragment:
 
+        lap = _Lap()
         fragment = MapFragment(
             map_id=self.map_id,
             derived_from=self._version,
@@ -341,6 +358,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             if len(spaces) == 1
         }
 
+        lap("enumerations and boundaries")
         subjects, junctions, progress_coverage, written_text, bindings = progress.extract(
             self._modules, self.map_id, self._version, enumerations
         )
@@ -352,6 +370,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._tagged_branches = sum(1 for j in junctions for b in j.branches if b.tags)
         self._unclaimed_tags = progress.unclaimed_tags(self._modules, junctions)
 
+        lap("the attribute slice")
         # The SQL slice needs an attributor that already knows the table map,
         # which is learned from the whole corpus rather than from one module.
         declarations = progress.spec_attributes(self._modules)
@@ -422,6 +441,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # the same blindness ``spec-declarations-are-read`` was written for.
         fragment.spec_annotation_forms = spec_annotation_forms(self._modules, audited)
 
+        lap("attributors and annotation audits")
         alias_subjects, alias_junctions, alias_coverage = alias.extract(
             self._modules, self.map_id, self._version, declarations, attributor
         )
@@ -439,6 +459,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions.extend(returned_junctions)
         fragment.coverage.extend(returned_coverage)
 
+        lap("the alias slices")
         (
             sql_subjects,
             sql_junctions,
@@ -469,6 +490,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(sql_coverage)
         fragment.diagnostics.extend(bound_text)
 
+        lap("the SQL slice")
         # The read side of the same statements: which values something selects
         # rows on, and whose rows it selects at all.  The values are attached to
         # the subject rather than kept apart, so the invariants can compare them
@@ -512,6 +534,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # A function that writes a status both ways produces one junction from
         # each recognizer under the same name.  Storage merges on the name, so
         # without this the second silently replaces the first's branches.
+        lap("the read side")
         fragment.junctions = _merge_junctions(fragment.junctions)
         fragment.subjects = _unique_subjects(fragment.subjects)
         cut = progress.spec_length_limits(self._modules)
@@ -542,6 +565,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # callers with ``audited`` rather than ``attributor`` -- it asks which
         # class an attribute write is on, which is the progress slice's own
         # question, and that slice learns element types before asking it.
+        lap("merging")
         self._flush_guards = flush.attach(
             fragment.junctions,
             self._modules,
@@ -560,6 +584,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # Promotion last, because criterion 3 reads the extracted branches.
         # Everything the slices found is kept; the criteria say which subjects
         # the code treats as deciding something.
+        lap("flush")
         criteria = promotion.criteria_for(
             fragment,
             promotion.gated_fields(self._modules),
@@ -593,6 +618,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # Classified once and handed to both readers of it: the trigger slice
         # builds entry points from it, and the log sites need the same fact to
         # say whether a reader re-evaluates.
+        lap("promotion")
         cadence = trigger.classify(
             self._modules, {b.interface.split(".")[-1] for b in channels}
         )
@@ -622,6 +648,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # edge out of a junction that a reader can follow without resolving a
         # name, and the only route from an arm to the aggregate it decided on.
         self._consults = trigger.attach_calls(fragment.junctions, self._modules)
+        lap("the trigger slice")
         # Who calls each owner, by what the receiver is declared to be -- the
         # other direction from ``calls``, and the one a transition's movers
         # are answered from.
@@ -640,6 +667,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     {module.rel_path: module.blob_sha for module in self._modules},
                 )
             )
+        lap("callers and the reach record")
         # Where a row a statement keeps is carried on to: after the reach
         # record, whose holes and database calls it reads, over every junction
         # the map keeps.
@@ -656,6 +684,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._calls,
             record,
         )
+        lap("crossings")
         # Where each write's row keys were filled from, and who handed a guarded write its keys: read by the carry,
         # which reads a call where it lands, so after the reach record and with it.
         sqlwrite.attach_key_sources(
@@ -671,6 +700,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             modules=self._modules,
             attributor=audited,
         )
+        lap("key sources")
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a
         # run-time receiver is, and this says "one of these", which is the
@@ -682,6 +712,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._log_files = logfile.attach(fragment, self._modules, cadence)
         self._declared_files = logfile.declared_files(self._modules)
 
+        lap("dispatch and log files")
         # After the log files, because the file an emit lands in is resolved
         # from the module that writes the line.  Reads the callers with
         # ``audited`` for the reason the flush pass does: it asks which class
@@ -693,11 +724,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 self._emits,
             )
 
+        lap("emits")
         # Last, because it keys on the anchor every other pass has finished
         # placing.  Chooses the text a reader would be given; reading it is
         # nobody's business at build time.
         self._glossed = reading.attach(fragment, self._modules)
 
+        lap("glosses")
         # What every function prints, as the skeleton reads it with nothing
         # asked: the rows the querier walked each function for.  Counted a
         # second way off the syntax tree, so that a call the skeleton leaves
@@ -712,6 +745,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             fragment.junctions, fragment.function_prints, self._modules, self._declarations
         )
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
+        lap("prints")
         if self._calls is not None:
             # Where each function puts the objects it names and which of their
             # columns it assigns: what bamboo.codemap.objects.follow answers
@@ -736,6 +770,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 paired,
             )
 
+        lap("objects and runs")
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",

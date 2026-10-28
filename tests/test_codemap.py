@@ -2209,6 +2209,149 @@ def test_a_row_precondition_whose_bind_arrives_from_outside_keeps_its_bind():
     ) == ("jobStatus=:oldStatus", False)
 
 
+@pytest.mark.parametrize(
+    "where, binds, expected",
+    [
+        # A list of binds, each a literal (insertNewJob 3302, resetDefinedJob 412).
+        ("jobStatus IN (:old1,:old2)", ["varMap[':old1'] = 'activated'", "varMap[':old2'] = 'throttled'"],
+         "jobStatus IN (activated,throttled)"),
+        # A test negated outright (updateJobStatus 242, updateUnmergedDatasets 1834).
+        ("NOT jobStatus=:old1", ["varMap[':old1'] = 'holding'"], "jobStatus<>holding"),
+        ("NOT jobStatus IN (:old1,:old2)", ["varMap[':old1'] = 'activated'", "varMap[':old2'] = 'throttled'"],
+         "jobStatus NOT IN (activated,throttled)"),
+        # One bind of the list nothing here fills: the others are not all the row may hold.
+        ("jobStatus IN (:old1,:old2)", ["varMap[':old1'] = 'activated'", "varMap[':old2'] = oldStatus"],
+         "jobStatus IN (:old1,:old2)"),
+        # One assignment of the bind nothing settles beside one that does.
+        ("jobStatus=:old1",
+         ["if first:", "    varMap[':old1'] = 'activated'", "else:", "    varMap[':old1'] = oldStatus"],
+         "jobStatus=:old1"),
+        # The status read off a row, bound under a test of it (getTasksToBeFinished_JEDI 1705).
+        ("jobStatus=:old1", ["if oldStatus == 'scouted':", "    varMap[':old1'] = oldStatus"], "jobStatus=scouted"),
+        ("jobStatus=:old1", ["if oldStatus in ('scouted', 'running') and first:", "    varMap[':old1'] = oldStatus"],
+         "jobStatus IN (running,scouted)"),
+        # Bound again under the test: the test says nothing of it.
+        ("jobStatus=:old1",
+         ["if oldStatus == 'scouted':", "    oldStatus = self.get()", "    varMap[':old1'] = oldStatus"],
+         "jobStatus=:old1"),
+    ],
+)
+def test_a_row_precondition_settles_each_shape_a_bind_takes(where, binds, expected):
+    """The guards whose values are in Python, whatever shape the statement spells them in -- a list of binds, a
+    negation -- and a bind holding what a test above it says; and none settled from part of what it may hold."""
+    lines = "".join(f"    {line}\n" for line in binds)
+    source = (
+        "def f(self, first, oldStatus):\n"
+        "    sqlJ = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newJobStatus'\n"
+        f"    sqlJ += ' WHERE PandaID=:PandaID AND {where}'\n"
+        "    varMap = {}\n"
+        "    varMap[':newJobStatus'] = 'sent'\n"
+        f"{lines}"
+        "    self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+    func = _func(source)
+    (run,) = sql.executions(func)
+    (statement,) = sqltext.writes(run.sql)
+
+    settled, done = sql.settled_precondition(
+        statement.preconditions["jobStatus"], func, run.varmap, run.window, values.resolver(), at=run
+    )
+
+    assert (settled, done) == (expected, ":" not in expected)
+
+
+_HANDED_GUARDS = {
+    "pandaserver/taskbuffer/EventServiceUtils.py": "ST_ready = 0\nST_done = 3\n",
+    "pandaserver/taskbuffer/JediTaskSpec.py": (
+        "class JediTaskSpec(object):\n"
+        "    @classmethod\n"
+        "    def statusForJobGenerator(cls):\n"
+        "        return ['ready', 'running']\n"
+    ),
+    "pandaserver/taskbuffer/db_proxy_mods/event_module.py": (
+        "from pandaserver.taskbuffer import EventServiceUtils\n"
+        "from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec\n"
+        "\n"
+        "\n"
+        "class EventModule:\n"
+        "    def finishEvents(self, pandaID):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.JEDI_Events SET status=:newStatus "
+        "WHERE PandaID=:PandaID AND status=:oldStatus '\n"
+        "        varMap = {}\n"
+        "        varMap[':PandaID'] = pandaID\n"
+        "        varMap[':newStatus'] = EventServiceUtils.ST_done\n"
+        "        varMap[':oldStatus'] = EventServiceUtils.ST_ready\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+        "\n"
+        "    def setStatus(self, jediTaskID, oldStatus):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus "
+        "WHERE jediTaskID=:jediTaskID AND status=:oldStatus '\n"
+        "        varMap = {':jediTaskID': jediTaskID, ':newStatus': 'running', ':oldStatus': oldStatus}\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+        "\n"
+        "    def kick(self, jediTaskID):\n"
+        "        self.setStatus(jediTaskID, 'ready')\n"
+        "\n"
+        "    def setRead(self, jediTaskID, oldStatus):\n"
+        "        sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus "
+        "WHERE jediTaskID=:jediTaskID AND status=:oldStatus '\n"
+        "        varMap = {':jediTaskID': jediTaskID, ':newStatus': 'running', ':oldStatus': oldStatus}\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+        "\n"
+        "    def reread(self, jediTaskID):\n"
+        "        self.cur.execute('SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID', "
+        "{':jediTaskID': jediTaskID})\n"
+        "        (status,) = self.cur.fetchone()\n"
+        "        self.setRead(jediTaskID, status)\n"
+        "\n"
+        "    def generate(self, jediTaskID):\n"
+        "        names, old_map = get_sql_IN_bind_variables("
+        "JediTaskSpec.statusForJobGenerator() + ['pending'], prefix=':old_')\n"
+        "        sql = f'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus "
+        "WHERE jediTaskID=:jediTaskID AND status IN ({names}) '\n"
+        "        varMap = {':jediTaskID': jediTaskID, ':newStatus': 'scouting'}\n"
+        "        varMap.update(old_map)\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "function, expected",
+    [
+        # A module's constant, by the name the event service binds every status with.
+        ("finishEvents", "status=0"),
+        # A parameter its one caller hands a literal.
+        ("setStatus", "status=ready"),
+        # A parameter its caller hands what it read off the row: a compare-and-set, no value to say.
+        ("setRead", "status=:oldStatus"),
+        # A helper's IN list of a method's literal list and one more (JobGenerator.runImpl's oldStatus).
+        ("generate", "status IN (pending,ready,running)"),
+    ],
+)
+def test_a_row_precondition_settles_its_binds_as_the_read_side_does(tmp_path, function, expected):
+    """The write side's guards read their binds the way the read side reads its own (values.bind_settler): a
+    constant of a module, what a parameter's callers hand it -- and nothing where one of those is read off a row."""
+    modules, calls, _record = _keyed_corpus(tmp_path, _HANDED_GUARDS)
+    func = next(
+        node
+        for module in modules
+        for node in ast.walk(module.tree)
+        if isinstance(node, ast.FunctionDef) and node.name == function
+    )
+    with sql.across_calls(calls):
+        (run,) = sql.executions(func)
+        (statement,) = sqltext.writes(run.reading)
+        settled, done = sql.settled_precondition(
+            statement.preconditions["status"], func, run.varmap, run.window, values.bind_settler(calls), at=run
+        )
+        assert (settled, done) == (expected, ":" not in expected)
+        if function == "finishEvents":
+            # The value the write gives the row reads in the same spelling, by the resolver both sides share.
+            bound = sql.bound_values(func, run.varmap, ":newStatus", run.window, at=run)
+            assert [values.resolver()(bind.value, func) for bind in bound] == [["3"]]
+
+
 @pytest.mark.parametrize("guarded_first", [False, True])
 def test_a_row_precondition_is_what_every_statement_writing_the_value_requires(guarded_first):
     """``killJob`` binds ``tobekilled`` once and runs one of two statements:
@@ -2342,8 +2485,9 @@ def test_a_guard_some_writes_carry_is_said_with_the_test_that_adds_it():
     (branch,) = junctions[0].branches
 
     assert branch.row_precondition == []
+    # Settled as a test negated outright is (the bind holds "X").
     assert [(guard.term, guard.when) for guard in branch.row_precondition_when] == [
-        ("NOT blacklisted=:ng", ["status == 'Y'"])
+        ("blacklisted<>X", ["status == 'Y'"])
     ]
 
 
@@ -9618,6 +9762,43 @@ def test_a_statement_says_which_junction_its_rows_are_carried_to(tmp_path):
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == ["pandaserver/r.py::retryTask", "pandaserver/w.py::run"]
     assert census.stored == 2
+
+
+@pytest.mark.parametrize("unread_kept", [True, False], ids=["the build's", "strict"])
+def test_a_count_of_the_rows_crosses_nowhere_and_another_systems_answer_is_kept(tmp_path, monkeypatch, unread_kept):
+    """U1: what a callee is handed made from the rows is none of them -- ``len(res)`` is a number -- while what the map
+    cannot read, another system's answer made from them, is kept as a crossing in the build's way (and is none read
+    strictly, as the KeyFroms read it)."""
+    source = _typed(
+        (
+            "class TaskModule:\n"
+            "    def sweep(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'pending'\n"
+            "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlA += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlA + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        self.retrier.retryTask(len(res))\n"
+            "    def sweep_more(self):\n"
+            "        varMap = {}\n"
+            "        varMap[':status'] = 'ready'\n"
+            "        sqlB = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+            "        sqlB += 'WHERE status=:status '\n"
+            "        self.cur.execute(sqlB + comment, varMap)\n"
+            "        res = self.cur.fetchall()\n"
+            "        self.retrier.retryTask(self.ddm.lookup(res))\n"
+        )
+        + _EXIT_TAIL,
+        ("retrier", "Retry", "r"),
+    )
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+    real = sqlwrite.attach_crossings
+    monkeypatch.setattr(sqlwrite, "attach_crossings", lambda *a: real(*a, unread_kept=unread_kept))
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(retrier, "r.py")])
+
+    crossed = {n.anchor.line_start: n.crosses_to for n in nodes if n.anchor.line_start in (7, 15)}
+    assert crossed == {7: [], 15: ["pandaserver/r.py::retryTask"] if unread_kept else []}
 
 
 _NEXT_STATEMENT = (
@@ -17702,13 +17883,14 @@ def _keyed_corpus(tmp_path, files: dict[str, str]):
         ("row_id", ""),
         ("self.datasets[0].vuid", "self.datasets"),
         ("str(jediTaskID)", "jediTaskID"),
-        ("self.getNext(jediTaskID)", "jediTaskID"),
+        # A method no reading places: what it makes of its argument is its own value (U1), and the method no field.
+        ("self.getNext(jediTaskID)", ""),
         ("self.cur.rowcount", "self.cur"),
     ],
 )
 def test_a_value_is_filled_from_the_parameter_or_field_of_self_the_carry_brings_it_from(tmp_path, expression, expected):
-    """Through a local or a loop; a fetch from the cursor is the database's, not the field's; what a method is handed
-    is, and the method is no field."""
+    """Through a local or a loop; a fetch from the cursor is the database's, not the field's; what a method no reading
+    places makes of what it is handed is not, and the method is no field."""
     rel = "pandaserver/taskbuffer/proxy.py"
     source = (
         "class Proxy:\n"
@@ -17833,6 +18015,17 @@ class JobModule:
         sql = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} WHERE "
         sql += "jediTaskID=:jediTaskID AND status=:preStatus "
         self.cur.execute(sql + comment, varMap)
+
+    def updateTaskOld_JEDI(self, taskSpec: JediTaskSpec, jediTaskID, oldStatus=None):
+        varMap = taskSpec.valuesMap(useSeq=False, onlyChanged=True)
+        varMap[":jediTaskID"] = jediTaskID
+        sql = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql += "WHERE jediTaskID=:jediTaskID "
+        if oldStatus is not None:
+            names, old_map = get_sql_IN_bind_variables(oldStatus, prefix=":old_", value_as_suffix=True)
+            sql += f"AND status IN ({names}) "
+            varMap.update(old_map)
+        self.cur.execute(sql + comment, varMap)
 '''
 
 
@@ -17928,6 +18121,77 @@ class TaskRefiner:
         (["status"], "self.taskID"),
         (["status"], ""),
     ]
+
+
+def test_a_flush_guard_is_what_each_call_hands_it(tmp_path):
+    """A flush's guard on a parameter of the method is settled at each call, by what that call hands it:
+    ``JobGenerator.runImpl``'s list is its guard, and another caller's is not; a value read off the row stays the
+    bind (a compare-and-set); a status tested above the call (``if taskStatus in ["registered", "staged"]`` before
+    ``registerTaskInOneShot_JEDI``) is what the test says.  Said only where every guarded call of the function
+    settles alike, and on the branches the call writes: ``TaskRefiner.runImpl``'s two calls are alternatives, and a
+    branch's guards a conjunction."""
+    caller = '''
+class Agent:
+    def generate(self, taskSpec: JediTaskSpec, jediTaskID):
+        taskSpec.status = "running"
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=["ready", "scouting"])
+
+    def refine(self, taskSpec: JediTaskSpec, jediTaskID, taskStatus):
+        taskSpec.status = "ready"
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=[taskStatus])
+
+    def register(self, taskSpec: JediTaskSpec, jediTaskID, taskStatus):
+        if taskStatus in ["registered", "staged"]:
+            taskSpec.status = "defined"
+            self.taskBufferIF.registerTaskInOneShot_JEDI(jediTaskID, taskSpec, taskStatus)
+
+    def both(self, taskSpec: JediTaskSpec, jediTaskID, taskStatus):
+        if taskStatus in ["registered", "staged"]:
+            taskSpec.status = "defined"
+            self.taskBufferIF.registerTaskInOneShot_JEDI(jediTaskID, taskSpec, taskStatus)
+        else:
+            taskSpec.status = "broken"
+            self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=[taskStatus])
+
+    def partly(self, taskSpec: JediTaskSpec, jediTaskID):
+        taskSpec.status = "running"
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=["ready"])
+        taskSpec.status = "done"
+'''
+    rel = "pandajedi/jediorder/Agent.py"
+    modules, calls, _record = _keyed_corpus(
+        tmp_path,
+        {
+            "pandaserver/taskbuffer/Specs.py": _SPECS,
+            "pandaserver/taskbuffer/db_proxy_mods/task_module.py": _FLUSH_PROXY,
+            "pandaserver/taskbuffer/db_proxy_mods/job_module.py": _FLUSH_MORE,
+            rel: caller,
+        },
+    )
+    _s, arms, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    with sql.across_calls(calls):
+        flush.attach(arms, modules, attributor)
+
+    guards = {
+        junction.owner.rpartition("::")[2]: {b.outcome: b.row_precondition for b in junction.branches}
+        for junction in arms
+        if junction.owner.startswith(rel) and junction.subject == "JediTaskSpec.status"
+    }
+    assert guards == {
+        "generate": {"running": ["status IN (ready,scouting)"]},
+        "refine": {"ready": ["status IN (:old___in)"]},
+        "register": {"defined": ["status IN (registered,staged)"]},
+        # Two calls settling apart: each call's guard is the other's branch's too, so neither is said settled.
+        "both": {
+            "defined": ["status IN (:old___in)", "status=:preStatus"],
+            "broken": ["status IN (:old___in)", "status=:preStatus"],
+        },
+        # The status set after the call is no write of it: the bind, as the method has it.
+        "partly": {"running": ["status=ready"], "done": ["status IN (:old___in)"]},
+    }
 
 
 _UNSAVED = '''

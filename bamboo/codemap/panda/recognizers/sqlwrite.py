@@ -999,6 +999,9 @@ def extract(
     diagnostics: list[DiagnosticTemplate] = []
     unexplained: list[Unexplained] = []
     settle = values.resolver()
+    # A guard's binds as the read side settles its own (values.bind_settler): a list's members, what a parameter's
+    # callers hand it, all of them or none.
+    guard_settle = values.bind_settler(sql._CALLS)
     # The same census the attribute slice makes, for the same reading: which
     # call persists a message into a declared column.  Asked of the attributor
     # rather than recomputed from the source, so the two halves of the map
@@ -1048,7 +1051,7 @@ def extract(
                     preconditions = []
                     for term in terms:
                         settled, done = sql.settled_precondition(
-                            term, func, run.varmap, run.window, settle, at=run
+                            term, func, run.varmap, run.window, guard_settle, at=run
                         )
                         preconditions.append(settled)
                         if not done and ":" in term:
@@ -1166,7 +1169,7 @@ def extract(
                             # Called by _record before the loop moves on; the defaults keep this pass's run if it ever is not.
                             beside=lambda node, terms=terms, func=func, run=run: [
                                 sql.settled_precondition(
-                                    term, func, run.varmap, run.window, settle, beside=node, at=run
+                                    term, func, run.varmap, run.window, guard_settle, beside=node, at=run
                                 )[0]
                                 for term in terms
                             ],
@@ -4347,6 +4350,142 @@ _LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exceptio
 #: Calls making a logger whose tag is the value: the tag is a log line's.  ``create_tagged_logger`` tests ``if tag is
 #: None`` and ``MsgWrapper.__init__`` its token, which read as using it.
 _LOG_MAKERS = frozenset({"create_tagged_logger", "MsgWrapper", "LogWrapper"})
+#: What a ``+`` is of, as its operand is written (U1): a list, a number, a text -- or not written (``None``).
+_SEQUENCE, _NUMBER, _TEXT = "sequence", "number", "text"
+#: Calls reading a value again out of a text -- a column's content parsed, decoded: a value of its own (U1).
+_READ_AGAIN = frozenset(
+    {"loads", "load", "literal_eval", "safe_load", "b64decode", "decode", "unquote", "fromisoformat", "strptime"}
+)
+#: Builtins and modules computing a number from what they are handed (U1).
+_COMPUTING = frozenset(
+    {"len", "sum", "round", "abs", "divmod", "pow", "min", "max", "any", "all", "ord", "chr", "hash", "bool", "range"}
+)
+_COMPUTING_MODULES = frozenset({"math", "statistics", "numpy", "np"})
+
+
+def _unread_call(call: ast.Call, name: str) -> bool:
+    """Whether *call*, which no reading places, makes a value the map cannot read (U1's 4): another system's answer, a
+    function of the corpus or a library -- not a builtin or a module computing a number, a value read again out of a
+    text, a text made by a str method."""
+    if name in _READ_AGAIN or name in _COMPUTING or name in ("join", "format"):
+        return False
+    if isinstance(call.func, ast.Attribute):
+        receiver = call.func.value
+        if isinstance(receiver, ast.Constant):
+            return False
+        if isinstance(receiver, ast.Name) and receiver.id in _COMPUTING_MODULES:
+            return False
+    return True
+
+
+def _operand(expression: ast.AST, names: Optional[dict[str, str]] = None) -> Optional[str]:
+    """What an operand of ``+`` is, as written: a list or tuple made here, a number, a text, a name the function says
+    one of them of (*names*: :func:`_name_kinds`) -- ``None`` where the code does not say (a field, a call's value)."""
+    if isinstance(expression, ast.Name):
+        return (names or {}).get(expression.id)
+    if isinstance(expression, ast.Subscript) and isinstance(expression.value, ast.Name):
+        return (names or {}).get(expression.value.id + _ELEMENT)
+    if isinstance(expression, (ast.List, ast.Tuple, ast.ListComp, ast.GeneratorExp)):
+        return _SEQUENCE
+    if isinstance(expression, ast.Constant):
+        if isinstance(expression.value, str):
+            return _TEXT
+        if isinstance(expression.value, (int, float)) and not isinstance(expression.value, bool):
+            return _NUMBER
+        return None
+    if isinstance(expression, ast.JoinedStr):
+        return _TEXT
+    if isinstance(expression, ast.Call):
+        name = _callee_name(expression)
+        if name in ("str", "repr", "format", "join"):
+            return _TEXT
+        if name in ("int", "float", "len", "sum", "round", "abs"):
+            return _NUMBER
+        if name in ("list", "tuple", "sorted"):
+            return _SEQUENCE
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+        kinds = {_operand(expression.left, names), _operand(expression.right, names)}
+        return next((kind for kind in (_SEQUENCE, _TEXT, _NUMBER) if kind in kinds), None)
+    return None
+
+
+def _summands(expression: ast.BinOp) -> list[ast.expr]:
+    """The operands of a chain of ``+`` (``a + b + c``: ``[a, b, c]``)."""
+    found: list[ast.expr] = []
+    for side in (expression.left, expression.right):
+        if isinstance(side, ast.BinOp) and isinstance(side.op, ast.Add):
+            found.extend(_summands(side))
+        else:
+            found.append(side)
+    return found
+
+
+def _annotation_kind(annotation: Optional[ast.AST]) -> Optional[str]:
+    """What an annotation says a value is, as :func:`_operand` names it: ``list[...]``, ``int``, ``Optional[str]``."""
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        sides = [
+            side
+            for side in (annotation.left, annotation.right)
+            if not (isinstance(side, ast.Constant) and side.value is None)
+        ]
+        return _annotation_kind(sides[0]) if len(sides) == 1 else None
+    head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    name = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", None)
+    if name == "Optional" and isinstance(annotation, ast.Subscript):
+        return _annotation_kind(annotation.slice)
+    if name in ("list", "List", "tuple", "Tuple", "Sequence"):
+        return _SEQUENCE
+    if name in ("int", "float"):
+        return _NUMBER
+    return _TEXT if name == "str" else None
+
+
+#: The key :func:`_name_kinds` says what a name's elements are under: ``d[k] = []`` makes ``d[k]`` a list.
+_ELEMENT = "[]"
+
+
+def _name_kinds(func: ast.AST) -> dict[str, str]:
+    """What each name of *func* is, for a ``+`` of it (U1): what its annotation, or the values it is bound to where
+    the code says, are -- one of them, every one that says agreeing (``files = []`` then ``files = self.get()`` is a
+    list); a loop over ``range(...)`` binds numbers; ``d[k] = []`` says what ``d``'s elements are.  A name bound to
+    two kinds is none."""
+    said: dict[str, set[Optional[str]]] = {}
+    made: dict[str, list[ast.AST]] = {}
+    arguments = getattr(func, "args", None)
+    if arguments is not None:
+        for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+            said.setdefault(one.arg, set()).add(_annotation_kind(one.annotation))
+    for node in own_nodes(func):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    made.setdefault(target.id, []).append(node.value)
+                elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    made.setdefault(target.value.id + _ELEMENT, []).append(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            said.setdefault(node.target.id, set()).add(_annotation_kind(node.annotation))
+            if node.value is not None:
+                made.setdefault(node.target.id, []).append(node.value)
+        elif (
+            isinstance(node, (ast.For, ast.AsyncFor))
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.iter, ast.Call)
+            and _callee_name(node.iter) == "range"
+        ):
+            said.setdefault(node.target.id, set()).add(_NUMBER)
+    kinds: dict[str, str] = {}
+    for _ in range(len(made) + 1):  # each round settles at least one name more, or the kinds stand
+        found = {
+            name: (said.get(name, set()) | {_operand(value, kinds) for value in made.get(name, [])}) - {None}
+            for name in set(said) | set(made)
+        }
+        settled = {name: next(iter(kind)) for name, kind in found.items() if len(kind) == 1}
+        if settled == kinds:
+            break
+        kinds = settled
+    return kinds
+
+
 #: Builtins whose value is what they are handed, elements and all.
 _KEEPING = frozenset({"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter", "dict"})
 #: Builtins handing on what they are handed, or its elements: read where their value goes.
@@ -4515,6 +4654,11 @@ def _index_step(node: ast.AST) -> str:
     return _ALL
 
 
+def _in_elements(paths: _Paths) -> bool:
+    """Whether a value holds the rows only in its elements -- a list or tuple of them, never a number or a text."""
+    return bool(paths) and all(path and path[0] == _ALL for path in paths)
+
+
 def _whole(paths: Iterable[tuple[str, ...]]) -> bool:
     """Whether the value itself holds the rows -- not only a part of it."""
     return any(not _bare(path) for path in paths)
@@ -4644,13 +4788,22 @@ class _PathCarry:
         seeds: Optional[dict[str, _Paths]] = None,
         start: Iterable[ast.AST] = (),
         call_values: Optional[dict[int, _Paths]] = None,
+        deciding: bool = False,
     ):
         self.reading, self.file, self.func, self.bound = reading, file, func, bound
         self.call_values = call_values or {}
+        #: Read for what the rows decide rather than what carries them (U1): a value computed from them -- a
+        #: comparison, a count, a flag -- is made from them, so a test on it reads them (:meth:`_Reading.reads_in`).
+        self.deciding = deciding
+        #: A value the map cannot read (U1's 4 and 5: a call no reading places, a + of operands whose type is not
+        #: written) held as before U1 -- what the rows reach through one is said apart (:attr:`_Reading.unread_kept`).
+        self.unread_kept = reading.unread_kept
+        self.names = reading.names_of(func)
+        self._made = (seeds, tuple(start))
         self.dicts = reading.dicts_of(func)
         self.writes: list[_Write] = []
         self.by_name: dict[str, list[_Write]] = {}
-        for write in reading.writes_of(func):
+        for write in reading.writes_of(func, deciding):
             self._add(write.fresh())
         arguments = getattr(func, "args", None)
         seeds = seeds or {}
@@ -4669,11 +4822,18 @@ class _PathCarry:
     # -- the writes ----------------------------------------------------------
 
     @staticmethod
-    def read_writes(func: ast.AST, dicts: frozenset[str] = frozenset()) -> list[_Write]:
+    def read_writes(
+        func: ast.AST,
+        dicts: frozenset[str] = frozenset(),
+        deciding: bool = False,
+        unread_kept: bool = False,
+        names: Optional[dict[str, str]] = None,
+    ) -> list[_Write]:
         """Every write of a name in *func*, its parameters last, holding nothing yet; *dicts* the names it holds
         dicts in."""
         carry = _PathCarry.__new__(_PathCarry)
-        carry.writes, carry.by_name, carry.dicts = [], {}, dicts
+        carry.writes, carry.by_name, carry.dicts, carry.deciding = [], {}, dicts, deciding
+        carry.unread_kept, carry.names = unread_kept, names if names is not None else _name_kinds(func)
         carry._read(func)
         arguments = getattr(func, "args", None)
         if arguments is not None:
@@ -4700,6 +4860,18 @@ class _PathCarry:
                 self._add(_Write(base, node, steps, source, take, True))
             self._keys_put(target, node)
 
+    def _augmented_kinds(self, node: ast.AugAssign) -> set[Optional[str]]:
+        """What the two sides of ``x += v`` are (:func:`_operand`)."""
+        return {_operand(node.target, self.names), _operand(node.value, self.names)}
+
+    @staticmethod
+    def _target_writes(target: ast.AST, node: ast.AST) -> list[_Write]:
+        """The writes of an augmented assignment computing a new value: holding nothing, a name's replacing it."""
+        if isinstance(target, ast.Name):
+            return [_Write(target.id, node)]
+        found = _access_path(target)
+        return [_Write(found[0], node, found[1], None, None, True)] if found is not None else []
+
     def _keys_put(self, expression: ast.AST, node: ast.AST) -> None:
         """What each key of the access *expression* written through holds is one of its container's keys:
         ``d[k] = v``, ``d[a][b] = v``, ``d[k].append(v)``."""
@@ -4720,7 +4892,17 @@ class _PathCarry:
             for name in ast.walk(node.target)
         }
         for node in own_nodes(func):
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            if (
+                isinstance(node, ast.AugAssign)
+                and not self.deciding
+                and not (isinstance(node.op, ast.Add) and _SEQUENCE in self._augmented_kinds(node))
+                and not (self.unread_kept and isinstance(node.op, ast.Add) and self._augmented_kinds(node) == {None})
+            ):
+                # ``total += row[2]``, ``x /= 2``, ``msg += f"..."``: a value computed from the old holds none of the
+                # rows (U1) -- a name's replaces it, a field of an object is written with nothing.
+                for write in self._target_writes(node.target, node):
+                    self._add(write)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:
                     self._target(target, node, node.value, _same, isinstance(node, ast.AugAssign))
@@ -4912,17 +5094,37 @@ class _PathCarry:
             return frozenset(path for value in expression.values for path in held(value, at))
         if isinstance(expression, ast.IfExp):
             return held(expression.body, at) | held(expression.orelse, at)
+        if self.deciding and isinstance(expression, (ast.BinOp, ast.UnaryOp, ast.Compare, ast.JoinedStr)):
+            # Made from the rows, for what they decide: any operand holding them whole.
+            parts = [held(one, at) for one in ast.iter_child_nodes(expression) if isinstance(one, ast.expr)]
+            if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+                return parts[0] | parts[1]
+            if isinstance(expression, ast.JoinedStr):
+                return _WHOLE if any(parts) else _NOTHING
+            return _WHOLE if any(_whole(part) for part in parts) else _NOTHING
+        # A value computed from the rows holds none of them (U1): arithmetic, a sign, a comparison, a message of
+        # several values -- what reaches a call or a key from it is a number or a text, not a row nor what names one.
         if isinstance(expression, ast.BinOp):
-            left, right = held(expression.left, at), held(expression.right, at)
-            if isinstance(expression.op, ast.Add):
-                return left | right
-            return _WHOLE if _whole(left) or _whole(right) else _NOTHING
-        if isinstance(expression, ast.UnaryOp):
-            return _WHOLE if _whole(held(expression.operand, at)) else _NOTHING
-        if isinstance(expression, ast.Compare):
-            return _WHOLE if any(_whole(held(one, at)) for one in (expression.left, *expression.comparators)) else _NOTHING
+            if not isinstance(expression.op, ast.Add):
+                return _NOTHING
+            # The chain ``a + b + c`` as one: a list anywhere in it makes every + of it a list's.
+            operands = _summands(expression)
+            parts = [held(one, at) for one in operands]
+            joined = frozenset(path for part in parts for path in part)
+            kinds = {_operand(one, self.names) for one in operands}
+            if _SEQUENCE in kinds or any(_in_elements(part) for part in parts):
+                return joined  # lists concatenated: still the rows
+            if _TEXT in kinds and _NUMBER not in kinds:
+                # One value made into a text carries it (``"x" + str(pandaID)``); two make a message.
+                return _WHOLE if sum(1 for part in parts if part) == 1 else _NOTHING
+            if self.unread_kept and kinds == {None}:
+                return joined  # operands whose type is not written: held as before U1 (the crossing pass)
+            return _NOTHING  # a sum of numbers, or of operands whose type is not written: not read
+        if isinstance(expression, (ast.UnaryOp, ast.Compare)):
+            return _NOTHING
         if isinstance(expression, ast.JoinedStr):
-            return _WHOLE if any(held(value, at) for value in expression.values) else _NOTHING
+            formatted = [value for value in expression.values if isinstance(value, ast.FormattedValue)]
+            return _WHOLE if len(formatted) == 1 and held(formatted[0], at) else _NOTHING
         if isinstance(expression, ast.FormattedValue):
             return _WHOLE if held(expression.value, at) else _NOTHING
         if isinstance(expression, (ast.Await, ast.NamedExpr, ast.Starred)):
@@ -5011,12 +5213,45 @@ class _PathCarry:
             taken = args if name in _CHAINING else args[:1]
             elements = frozenset(path for one in taken for path in _elements(self._as_list(one, at)))
             return _below((_ALL, _ALL) if name in _CHUNKING else (_ALL,), elements)
-        # A call no reading places -- a builtin, a str method, a hole: its value is made from what it is handed, and
-        # holds the rows where something handed holds them whole (or an element of it does).
-        parts = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
-        if isinstance(call.func, ast.Attribute):
-            parts.append(held(call.func.value, at))
-        return _WHOLE if any(_whole(part) or _whole(_under(_ALL, part)) for part in parts) else _NOTHING
+        # A call no reading places -- a builtin, a str method, a hole -- computes a value from what it is handed, and
+        # it holds none of the rows (U1): a count, a sum, a value read again (``json.loads`` of a column), another
+        # system's answer (a hole handed them is said where it is handed them: ``crosses_open``).  What carries them
+        # is a conversion of one value (``int(row[0])``), a held value reshaped by its own method
+        # (``tmpLFN.strip()``), one column's values joined (``",".join(ids)``) or one value formatted
+        # (``"{}".format(pandaID)``).
+        def holding(part: _Paths) -> bool:
+            return _whole(part) or _whole(_under(_ALL, part))
+
+        if self.deciding:
+            # Made from what it is handed, for what the rows decide.
+            parts = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
+            if isinstance(call.func, ast.Attribute):
+                parts.append(held(call.func.value, at))
+            return _WHOLE if any(holding(part) for part in parts) else _NOTHING
+        if isinstance(call.func, ast.Name) and name in _CONVERSIONS:
+            return _WHOLE if args and holding(held(args[0], at)) else _NOTHING
+        if isinstance(call.func, ast.Attribute) and name not in _READ_AGAIN:
+            if holding(held(call.func.value, at)):
+                return _WHOLE
+            if name in ("sub", "subn") and args and len(args) <= 3:
+                # ``re.sub(pattern, repl, value)`` / ``pattern.sub(repl, value)``: one value reshaped, as
+                # ``value.replace(...)`` is, where it alone holds them.
+                handed = [held(one, at) for one in args]
+                if holding(handed[-1]) and not any(handed[:-1]):
+                    return _WHOLE
+            if name in ("join", "format"):
+                # A text made by a separator or a template, written here or held in a name.
+                handed = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
+                holders = [part for part in handed if holding(part)]
+                if len(handed) == 1 or (name == "join" and len(holders) == 1):
+                    return _WHOLE if holders else _NOTHING  # one value, or one column's values ("," .join(ids))
+                return _NOTHING  # a text of several values: os.path.join(a, b), "{} {}".format(a, b)
+        if self.unread_kept and _unread_call(call, name) and not self.reading.record.is_database(self.file, call):
+            parts = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
+            if isinstance(call.func, ast.Attribute):
+                parts.append(held(call.func.value, at))
+            return _WHOLE if any(holding(part) for part in parts) else _NOTHING
+        return _NOTHING
 
     def handed_any(self, call: ast.Call, at: Optional[ast.AST] = None) -> bool:
         """Whether an argument of *call*, or the object it is made on, holds a part of the rows."""
@@ -5065,8 +5300,9 @@ class _Reading:
     A definition is read while it is read: a call of itself gets nothing back and reads nothing.
     """
 
-    def __init__(self, calls: Calls, owners: set[str], record: "ReachGraph"):
+    def __init__(self, calls: Calls, owners: set[str], record: "ReachGraph", unread_kept: bool = False):
         self.calls, self.owners, self.record = calls, owners, record
+        self.unread_kept = unread_kept
         #: The names junction owners' functions have: where a hole spelled ``x.f(...)`` could land at one.
         self.owner_names = {owner.rsplit("::", 1)[-1] for owner in owners}
         self._summaries: dict[tuple, _Summary] = {}
@@ -5075,13 +5311,23 @@ class _Reading:
         #: Keyed by node ids, each holding the node, so that no id is reused while the build runs.
         self._writes: dict[int, tuple[ast.AST, list[_Write]]] = {}
         self._dicts: dict[int, tuple[ast.AST, frozenset[str]]] = {}
+        self._names: dict[int, tuple[ast.AST, dict[str, str]]] = {}
         self._surviving: dict[tuple, set[int]] = {}
         self._nested: dict[int, tuple[ast.AST, set[int]]] = {}
 
-    def writes_of(self, func: ast.AST) -> list[_Write]:
-        held = self._writes.get(id(func))
+    def writes_of(self, func: ast.AST, deciding: bool = False) -> list[_Write]:
+        held = self._writes.get((id(func), deciding))
         if held is None:
-            held = self._writes[id(func)] = (func, _PathCarry.read_writes(func, self.dicts_of(func)))
+            held = self._writes[(id(func), deciding)] = (
+                func, _PathCarry.read_writes(func, self.dicts_of(func), deciding, self.unread_kept, self.names_of(func))
+            )
+        return held[1]
+
+    def names_of(self, func: ast.AST) -> dict[str, str]:
+        """What *func*'s names are, for a ``+`` of them (:func:`_name_kinds`)."""
+        held = self._names.get(id(func))
+        if held is None:
+            held = self._names[id(func)] = (func, _name_kinds(func))
         return held[1]
 
     def dicts_of(self, func: ast.AST) -> frozenset[str]:
@@ -5224,13 +5470,19 @@ class _Reading:
         if key in self._reads:
             return self._reads[key]
         self._reads[key] = False
-        carry = self.summary(target, given).carry or self.carry(target, given)
-        got = self.reads_in(carry)
+        got = self.reads_in(_PathCarry(self, target.file, target.func, target.bound, seeds=given, deciding=True))
         self._reads[key] = got
         return got
 
     def reads_in(self, carry: _PathCarry) -> bool:
-        """Whether *carry*'s function reads a part of the rows it holds."""
+        """Whether *carry*'s function reads a part of the rows it holds -- read for what they decide
+        (:attr:`_PathCarry.deciding`): a test on a value computed from them reads them."""
+        if not carry.deciding:
+            seeds, start = carry._made
+            carry = _PathCarry(
+                self, carry.file, carry.func, carry.bound, seeds=seeds, start=start, call_values=carry.call_values,
+                deciding=True,
+            )
         for node in own_nodes(carry.func):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 # ``x.m(...)`` on what holds them: ``x.m`` itself is no part they are held in (job.valuesMap()).
@@ -5463,6 +5715,7 @@ def attach_crossings(
     junctions: list[JunctionNode],
     calls: Optional[Calls],
     record: Optional["ReachGraph"],
+    unread_kept: bool = True,
 ) -> CrossingCensus:
     """Say which junction a row handled here is carried on to.
 
@@ -5513,6 +5766,17 @@ def attach_crossings(
     function alone, against 824 -- the decision is in the junction's own
     guards, and no reader asks a statement for it.
 
+    **A value computed from the rows carries none of them** (U1, the
+    querier's five kinds): a number, a comparison, a count, a text of several
+    values, a column's content read again (``json.loads``) reach the callee,
+    not a row nor what names one -- getTaskParamsWithID_JEDI 1402's parsed
+    taskParams, getScoutJobData_JEDI's medians.  A value the map cannot read
+    -- another system's answer, a call no reading places, a ``+`` whose
+    operands' types the code does not say -- is held as before (*unread_kept*,
+    the build's way): the callee is kept, and the reader's words "hands the
+    rows" say more than the map knows there.  What the rows decide is read
+    with the rule before U1 throughout (:attr:`_PathCarry.deciding`).
+
     A lead has to name somewhere the map will answer for, and read by name it
     did not: before promotion filtered the junctions, every
     ``self.cur.execute(...)`` in a region resolved to the ``execute`` of an
@@ -5533,7 +5797,7 @@ def attach_crossings(
         return CrossingCensus(0, 0, 0, 0)
     owners = {junction.owner for junction in junctions}
     trees = {module.rel_path: module.tree for module in modules}
-    reading = _Reading(calls, owners, record)
+    reading = _Reading(calls, owners, record, unread_kept)
     stored = handing_back = resolved = opened = 0
     for site in read_sites:
         if not site.region:

@@ -101,6 +101,9 @@ class Flush(NamedTuple):
     flushed: frozenset[tuple[str, int, str]] = frozenset()
     #: the dict parameter whose items make those statements' ``WHERE`` (``updateTask_JEDI``'s ``criteria``), or ""
     criteria: str = ""
+    #: column -> (the term as written, the method, {bind: its values in the method}) for a guard the method does not
+    #: settle itself -- ``status IN (:old___in)`` from its ``oldStatus`` -- settled at each call (:func:`_guard_at`)
+    guard_binds: dict = {}
 
 
 def _parameters(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]:
@@ -289,6 +292,7 @@ def flush_methods(
                 continue
             parameters = _parameters(func)
             guards: dict[str, tuple[str, frozenset[str]]] = {}
+            guard_binds: dict[str, tuple] = {}
             flushed: set[tuple[str, int, str]] = set()
             criteria = ""
             dicts = sqlwrite._dict_names(func)
@@ -317,10 +321,19 @@ def flush_methods(
                         # bind while the other spells the value would leave the
                         # list unreadable and the gate comparing it against a
                         # reader's values half blind.
-                        settled, _done = sql.settled_precondition(
+                        settled, done = sql.settled_precondition(
                             term, func, run.varmap, run.window, settle, at=run
                         )
                         guards[column] = (settled, gating)
+                        if not done and run.varmap is not None:
+                            guard_binds[column] = (
+                                term,
+                                func,
+                                {
+                                    key: tuple(sql.bound_values(func, run.varmap, key, run.window, at=run))
+                                    for key in sql.precondition_binds(term)
+                                },
+                            )
             found[func.name] = Flush(
                 spec_classes=frozenset(classes),
                 guards=guards,
@@ -334,6 +347,7 @@ def flush_methods(
                 owner=f"{module.rel_path}::{func.name}",
                 flushed=frozenset(flushed),
                 criteria=criteria,
+                guard_binds=guard_binds,
             )
     return found
 
@@ -423,12 +437,15 @@ def attach(
                     called[id(call)] = _call_key_froms(call, func, owner, module.rel_path, flush, owned, attributor)
                     key_froms.extend(called[id(call)])  # type: ignore[union-attr]
 
+    # A guard's binds as the SQL slice settles its own (values.bind_settler), read at each call.
+    settle = values.bind_settler(sql._CALLS)
     annotated = 0
     for module in modules:
         for func, owner in functions_with_owner(module.tree):
             here = by_owner.get(f"{module.rel_path}::{func.name}")
             if not here:
                 continue
+            uses = []
             for node in ast.walk(func):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                     continue
@@ -438,38 +455,134 @@ def attach(
                 changed = _changed_attributes(func, owner, attributor, flush.spec_classes)
                 for spec, attributes in changed.items():
                     written = attributes - flush.excluded
-                    guards = sorted(
-                        term
-                        for column, (term, gating) in flush.guards.items()
+                    applied = [
+                        (column, term, _guard_at(node, func, flush, column, term, settle))
+                        for column, (term, gating) in sorted(flush.guards.items())
                         if column in written
                         and all(_supplied(node, p, flush.parameters) for p in gating)
-                    )
-                    if not guards and not flush.rows_emits:
-                        continue
-                    if row_keys is not None and guards:
-                        row_keys.append(
-                            _row_key_source(node, func, spec, flush, guards, module, called.get(id(node), []))
+                    ]
+                    uses.append((node, flush, spec, written, applied))
+            # A guard settled at a call is said where every guarded flush call of the function settles the column
+            # alike, and on the branches that call writes: the calls are alternatives, and a branch's guards a
+            # conjunction.  TaskRefiner.runImpl hands registerTaskInOneShot_JEDI a status tested to be registered or
+            # staged, and updateTask_JEDI the status it read (`[taskStatus]`), and either guard on every branch
+            # would drop the other call's arms; read as the method has it, the bind drops none.
+            at_calls: dict[str, set[str]] = {}
+            for _node, _flush, _spec, _written, applied in uses:
+                for column, _term, settled in applied:
+                    at_calls.setdefault(column, set()).add(settled)
+            for node, flush, spec, written, applied in uses:
+                guards = sorted(term for _column, term, _settled in applied)
+                if not guards and not flush.rows_emits:
+                    continue
+                if row_keys is not None and guards:
+                    row_keys.append(
+                        _row_key_source(
+                            node, func, spec, [column for column, _t, _s in applied], module, called.get(id(node), [])
                         )
-                    for junction in here:
-                        if junction.subject not in {
-                            SubjectNode.make_name(spec, attribute) for attribute in written
-                        }:
-                            continue
-                        for branch in junction.branches:
-                            missing = [g for g in guards if g not in branch.row_precondition]
-                            if missing:
-                                branch.row_precondition = sorted(
-                                    branch.row_precondition + missing
-                                )
-                                annotated += 1
-                            # The line saying whether the row actually moved is
-                            # written by the flush, in the flush's own log, and
-                            # the code that chose the value never sees it.
-                            for line in flush.rows_emits:
-                                if any(e.template == line.template for e in branch.emits):
-                                    continue
-                                branch.emits.append(line)
+                    )
+                alike = {
+                    column: settled
+                    for column, term, settled in applied
+                    if settled != term and at_calls.get(column) == {settled}
+                }
+                reached = _reached_lines(node, func, owner, spec, written, attributor) if alike else set()
+                for junction in here:
+                    if junction.subject not in {
+                        SubjectNode.make_name(spec, attribute) for attribute in written
+                    }:
+                        continue
+                    attribute = junction.subject.rpartition(".")[2]
+                    for branch in junction.branches:
+                        mine = any(
+                            (attribute, line) in reached
+                            for line in (branch.line, *branch.other_lines)
+                            if line is not None
+                        )
+                        said = sorted(
+                            alike[column] if mine and column in alike else term for column, term, _settled in applied
+                        )
+                        missing = [g for g in said if g not in branch.row_precondition]
+                        if missing:
+                            branch.row_precondition = sorted(
+                                branch.row_precondition + missing
+                            )
+                            annotated += 1
+                        # The line saying whether the row actually moved is
+                        # written by the flush, in the flush's own log, and
+                        # the code that chose the value never sees it.
+                        for line in flush.rows_emits:
+                            if any(e.template == line.template for e in branch.emits):
+                                continue
+                            branch.emits.append(line)
     return annotated
+
+
+def _reached_lines(
+    call: ast.Call,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner: Optional[str],
+    spec: str,
+    attributes: set[str],
+    attributor: SpecAttributor,
+) -> set[tuple[str, int]]:
+    """``(attribute, line)`` of each assignment on a spec *call* is handed that reaches it -- what the call's
+    records write (:func:`_call_key_froms`, :func:`sqlwrite._fields_at`), read here because those are filled after
+    the reach record."""
+    found: set[tuple[str, int]] = set()
+    for obj in (
+        argument
+        for argument in (*call.args, *(keyword.value for keyword in call.keywords))
+        if not isinstance(argument, ast.Starred) and attributor.class_of(argument, func, owner) == spec
+    ):
+        for attribute in attributes:
+            found |= {(attribute, node.lineno) for node in sqlwrite._fields_at(func, obj, attribute, [call], spec)}
+    return found
+
+
+def _guard_at(
+    call: ast.Call,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    flush: Flush,
+    column: str,
+    term: str,
+    settle,
+) -> str:
+    """A flush's guard as *call* has it: one the method settles itself as it is, else its binds filled by the call --
+    each a parameter's part read as the same part of the call's argument (:func:`_rerooted`), settled in the caller
+    (*settle*, and a test above the call saying what a name equals: :func:`sql.tested_values`); the method's own value
+    as the method settles it.  ``JobGenerator.runImpl`` hands ``updateTask_JEDI`` ``oldStatus=JediTaskSpec.
+    statusForJobGenerator() + ["pending"]``: its guard is that list, not the bind -- and another caller's list is not
+    its.  One bind not settled leaves the guard as the method has it (``TaskRefiner.runImpl``'s ``[taskStatus]``, the
+    status it read off the row: a compare-and-set)."""
+    held = flush.guard_binds.get(column)
+    if held is None:
+        return term
+    raw, method, binds = held
+    at = site_of(call)
+    plain = values.resolver()
+
+    def held_by(key: str) -> Optional[set[str]]:
+        found: set[str] = set()
+        for bind in binds.get(key, ()):
+            root = sqlwrite._root(bind.value)
+            handed = (
+                _argument(call, root.id, flush.parameters)
+                if root is not None and root.id in flush.parameters[1:]
+                else None
+            )
+            if handed is not None:
+                moved = _rerooted(bind.value, root.id, handed)  # type: ignore[union-attr]
+                got = (settle(moved, func) or sql.tested_values(moved, at, func)) if moved is not None else []
+            else:
+                got = plain(bind.value, method)
+            if not got:
+                return None
+            found.update(got)
+        return found or None
+
+    settled, done = sql.settled_term(raw, held_by)
+    return settled if done else term
 
 
 def _argument(call: ast.Call, parameter: str, parameters: tuple[str, ...]) -> Optional[ast.expr]:
@@ -609,8 +722,7 @@ def _row_key_source(
     call: ast.Call,
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     spec: str,
-    flush: Flush,
-    guards: list[str],
+    columns: list[str],
     module: SourceModule,
     records: list[KeyFrom],
 ) -> RowKeySource:
@@ -622,7 +734,7 @@ def _row_key_source(
         owner=f"{module.rel_path}::{func.name}",
         file=module.rel_path,
         statement=call.lineno,
-        columns=sorted(column for column, (term, _gating) in flush.guards.items() if term in guards),
+        columns=sorted(columns),
         keys=[record.term for record in mine],
     )
     # The key's value itself, as the records hold it: a field of the spec handed in (``jobSpec.PandaID``), a value of

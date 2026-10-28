@@ -1735,7 +1735,7 @@ def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_an
     )
     unread = ["PandaID=:PandaID (no bind found)", "jobsetID=:jobsetID (not followed: jsid)"]
     # 3800's rows fill no key: only the unread one may be its
-    assert json.loads(out.splitlines()[-2]) == [[[3913, 4059], {"4300": unread}], [[], {"4300": unread}]]
+    assert json.loads(out.splitlines()[-2]) == [[[3913, 4059], {"4300": unread}, {}], [[], {"4300": unread}, {}]]
     before, keyed, kept = json.loads(out.splitlines()[-1])
     # no arm in the region: before KeyFrom only the helper took the rows; now the owner is a mover by its keyed arms
     # too, and one whose key was not read is kept, said; the helper takes them as before
@@ -1745,6 +1745,64 @@ def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_an
     assert kept == {"p/fin.py::prepare": f"prepare@3800 selects the value, and the map could not read what fills "
                                          f"the key of the write(s) at [4300] (4300: {', '.join(unread)}): kept",
                     "p/fin.py::helper3800": "prepare@3800 hands the rows it selects to it"}
+
+
+def test_an_arm_no_write_in_its_function_persists_keeps_the_owner_said_with_where_its_fields_go(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import keyed_arms
+
+    owner = "d/dm.py::run"
+    writers.append(writer(owner, branch(713, "failed"), branch(745, "merging"), branch(958, "failed"),
+                          branch(2786, "output"), branch(4300, "broken"), branch(5000, "lost")))
+
+    def kf(writes, term="", unread="", obj="", handed_to=(), *sources):
+        return N(owner=owner, term=term, writes={"FileSpec.status": writes}, unread=unread, object=obj,
+                 handed_to=list(handed_to), sources=list(sources))
+
+    def follow(line):
+        return N(guarded_by=[], reader_statements=[stmt(owner, line, ["FileSpec.status=running"], [line, line + 10])])
+
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        # an element of a container handed on, which the map does not read as the container's: no use found
+        kf([713, 745], unread="no use found", obj="file"),
+        kf([958], unread="no use found", obj="tmpFile"),
+        # one object's fields handed to two calls and returned: one record per use
+        kf([2786], unread="handed to a call", obj="spec", handed_to=["p/tb.py::updateJobs", "p/spec.py::addFile"]),
+        kf([2786], unread="returned", obj="spec"),
+        # a key the map did not read beside them
+        kf([4300], "PandaID=:PandaID", "no bind found"),
+        # 5000 is persisted by a write keyed by 359's rows, and handed on as well: keyed
+        kf([5000], "PandaID=:PandaID", "", "", (), N(kind="rows", name=f"panda:{owner}@359", site_owner=owner, site_line=359)),
+        kf([5000], unread="kept in what it was handed", obj="job"),
+    ])]
+    arms = arms_of(writers, owner, "FileSpec.status", "running")
+    print(json.dumps(keyed_arms(writers, follow(359).reader_statements[0], "FileSpec.status", arms)))
+    held = mapdump._FRAGMENT[0]
+    held.key_froms = [k for k in held.key_froms if k.sources == []]
+    print(json.dumps(movers_of(follow(359), writers, "FileSpec.status", "running")))
+    held.key_froms = [k for k in held.key_froms if k.term == ""]
+    print(json.dumps(movers_of(follow(359), writers, "FileSpec.status", "running")))
+    """,
+        )
+    )
+    to = ["spec (handed to a call: updateJobs, addFile)", "spec (returned)"]
+    unpersisted = {"713": ["file (no use found)"], "745": ["file (no use found)"], "958": ["tmpFile (no use found)"],
+                   "2786": to}
+    # 5000 is keyed by 359's rows, whatever else its object reaches; the others are no key the map could not read
+    assert json.loads(out.splitlines()[-3]) == [[5000], {"4300": ["PandaID=:PandaID (no bind found)"]}, unpersisted]
+    said = "713: file (no use found); 745: file (no use found); 958: tmpFile (no use found); 2786: " + ", ".join(to)
+    # with no keyed arm both are said, joined; 5000's object is kept by the function, so it is one of them
+    both, alone = (json.loads(line)["d/dm.py::run"] for line in out.splitlines()[-2:])
+    assert both == (f"run@359 selects the value, and the map could not read what fills the key of the write(s) at "
+                    f"[4300] (4300: PandaID=:PandaID (no bind found)), and no write in the function persists the "
+                    f"value(s) set at [713, 745, 958, 2786, 5000] ({said}; 5000: job (kept in what it was handed)): kept")
+    # without the unread key, the unpersisted alone
+    assert alone == (f"run@359 selects the value, and no write in the function persists the value(s) set at "
+                     f"[713, 745, 958, 2786, 5000] ({said}; 5000: job (kept in what it was handed)): kept")
 
 
 def test_a_write_that_makes_the_row_is_no_arm_where_every_key_from_writing_it_there_says_a_new_row(tmp_path):
@@ -1803,6 +1861,70 @@ def test_a_write_that_makes_the_row_is_no_arm_where_every_key_from_writing_it_th
     # writer of births alone is no writer that takes a row by its key
     assert before == {"p/make.py::make": "make@8 selects the value"} and by_key_before
     assert after == {"p/make.py::helper": "make@8 hands the rows it selects to it"} and not by_key_after
+
+
+def test_a_write_that_makes_the_row_is_no_candidate_for_a_status_the_row_had_a_row_before(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.codemap.models import Reading
+    from bamboo.querier import held as HD, mapdump
+
+    S = "JobSpec.jobStatus"
+    es, act, mix, half = (f"p/{n}.py::{n}" for n in ("es", "act", "mix", "half"))
+    def branch(line, other=()):
+        return N(line=line, outcome="activated", other_lines=list(other))
+    writers = [N(owner=es, branches=[branch(5556), branch(5558)]), N(owner=act, branches=[branch(71)]),
+               N(owner=mix, branches=[branch(10), branch(20)]), N(owner=half, branches=[branch(30, [31])])]
+    fetched = []
+
+    async def writers_of(subject):
+        fetched.append(subject)
+        return writers
+    r._writers_of = writers_of
+
+    def key(owner, lines, new_row=None):
+        return N(owner=owner, statement=lines[0], term="k=:k", writes={S: lines}, unread="", sources=[],
+                 new_row=new_row, new_row_by="sequence" if new_row else "", new_row_line=5706 if new_row else None)
+
+    def reading(owner, lines):
+        return Reading(owner=owner, file=owner.split("::")[0], lines=lines, log_files=["x.log"])
+
+    readings = [reading(es, [5556, 5558]), reading(act, [71]), reading(mix, [10, 20]), reading(half, [30])]
+    rows = [{"status": "pending", "time": "2026-01-01 00:00:00", "time_extended": "2026-01-01 00:00:00.2"},
+            {"status": "defined", "time": "2026-01-01 00:00:00", "time_extended": "2026-01-01 00:00:00.7"},
+            {"status": "activated", "time": "2026-01-01 00:00:04", "time_extended": "2026-01-01 00:00:04.1"}]
+    r.data["statuslog"] = {"states": rows}
+    def unborn(state):
+        kept, said = r._unborn(readings, S, state)
+        return [[x.owner.split("::")[-1], x.lines] for x in kept], said
+
+    no_marks, fetched_before = unborn(rows[2]), list(fetched)
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        key(es, [5556, 5558], new_row=True), key(act, [71]), key(mix, [10], new_row=True), key(mix, [20]),
+        key(half, [30], new_row=True)])]   # half's 31, another line of the branch, no KeyFrom names
+    later, first = unborn(rows[2]), unborn(rows[0])
+    handed = unborn({"status": "activated", "time": "2026-01-01 00:00:00"})   # a tie at the second: not before
+    print(json.dumps([no_marks, fetched_before, later, first, handed, unborn(None),
+                      HD.row_before(rows, rows[1]), HD.row_before(rows[:1], rows[0])]))
+    """,
+        )
+    )
+    no_marks, fetched, later, first, handed, no_state, defined_after_pending, alone = json.loads(out.splitlines()[-1])
+    every = [["es", [5556, 5558]], ["act", [71]], ["mix", [10, 20]], ["half", [30]]]
+    # with no birth marked the map's writers are not read, and every reading stays
+    assert no_marks == [every, ""] and fetched == []
+    # 'activated' after 'pending' and 'defined': the row was there, so the new jobs' INSERTs are no candidates; a
+    # function keeps its other lines; a branch whose other line is not a birth stays whole; an UPDATE stays
+    kept, said = later
+    assert kept == [["act", [71]], ["mix", [20]], ["half", [30]]]
+    assert said == ("the key's row was there before 'activated' at 2026-01-01 00:00:04, so its writes that make a row are "
+                    "no candidates: es [5556, 5558] (births: sequence at 5706); mix [10] (births: sequence at 5706) "
+                    "(KNOWN_ISSUES.md K29)")
+    # the row's first status, a tie at the second the log keeps, and no state: the birth may be the row's
+    assert first == [every, ""] and handed == [every, ""] and no_state == [every, ""]
+    assert defined_after_pending is True and alone is False
 
 
 _M2_SETUP = """

@@ -2,9 +2,11 @@
 
 Each shape marks the statements the rows arrive in ``# rows`` and a statement
 whose call arguments (or returned value) should or should not hold a part of
-them ``# holds`` / ``# not``.  ``sqlwrite._PathCarry`` is asked, starting from
-the marked statements, as the crossing pass asks it -- over no corpus, so no
-call is placed and none keeps or returns anything of what it is handed.
+them ``# holds`` / ``# not`` -- or hold them only where a value the map cannot
+read is held as before U1, as the crossing pass reads (``# unread``:
+:attr:`sqlwrite._Reading.unread_kept`).  ``sqlwrite._PathCarry`` is asked,
+starting from the marked statements, both ways -- over no corpus, so no call is
+placed and none keeps or returns anything of what it is handed.
 """
 
 from __future__ import annotations
@@ -173,13 +175,14 @@ SHAPES = {
                     out.append(task_id)
             return out  # not
     """,
+    # A sum of the rows' values is a number computed from them, none of the rows (U1).
     "added up": """
         def f(self):
             total = 0
             res = self.cur.fetchall()  # rows
             for r in res:
                 total += r[1]
-            return total  # holds
+            return total  # not
     """,
     "rebound in the loop after the use": """
         def f(self):
@@ -200,7 +203,7 @@ SHAPES = {
         def f(self):
             res = self.cur.fetchall()  # rows
             def inner():
-                return g(res)  # holds
+                g(res)  # holds
             return inner
     """,
     "with ... as the same name": """
@@ -225,6 +228,81 @@ SHAPES = {
                 out.append(r)
             return out  # holds
     """,
+    # U1: what a + is of, read from the function -- a list made here, a name
+    # bound to one, a dict whose values are made lists, a value holding the
+    # rows only in its elements; a number or a type the code does not say.
+    "joined onto a list made here": """
+        def f(self):
+            out = []
+            res = self.cur.fetchall()  # rows
+            out += res
+            return out  # holds
+    """,
+    "a field joined to a name bound to a list": """
+        def f(self):
+            extra = self.more()
+            extra = []
+            res = self.cur.fetchall()  # rows
+            return self.files + res + extra  # holds
+    """,
+    "joined onto a dict's made list": """
+        def f(self, k):
+            d = {}
+            d[k] = []
+            res = self.cur.fetchall()  # rows
+            d[k] += res
+            return d  # holds
+    """,
+    "held in its elements, joined to a field": """
+        def f(self):
+            res = self.cur.fetchall()  # rows
+            got = self.start()
+            for r in res:
+                got.append(r)
+            return got + self.others  # holds
+    """,
+    "added to a name of no written kind": """
+        def f(self):
+            n = self.start()
+            res = self.cur.fetchone()  # rows
+            n += res[0]
+            return n  # unread
+    """,
+    "another system's answer": """
+        def f(self):
+            res = self.cur.fetchall()  # rows
+            return self.ddm.lookup(res)  # unread
+    """,
+    "a flag": """
+        def f(self):
+            res = self.cur.fetchall()  # rows
+            return bool(res)  # not
+    """,
+    "one value in a template held in a name": """
+        def f(self, tmpl):
+            res = self.cur.fetchone()  # rows
+            return tmpl.format(res[0])  # holds
+    """,
+    "a message of two values in a template held in a name": """
+        def f(self, tmpl):
+            res = self.cur.fetchone()  # rows
+            return tmpl.format(res[0], res[1])  # not
+    """,
+    "one value reshaped by a pattern": """
+        def f(self):
+            res = self.cur.fetchone()  # rows
+            return re.sub("_sub[0-9]+$", "", res[0])  # holds
+    """,
+    "a pattern putting one value into another": """
+        def f(self):
+            res = self.cur.fetchone()  # rows
+            return re.sub("[.][0-9]+$", res[1], res[0])  # unread
+    """,
+    "a path made of one value": """
+        def f(self, base):
+            res = self.cur.fetchone()  # rows
+            return os.path.join(base, res[0])  # holds
+    """,
     # Over no corpus no method is placed, so what ``pack`` keeps of its
     # argument is not read (``_get_datasets_with_unprocessed_inputs``; placed,
     # it is -- test_codemap's rows put into an object).
@@ -245,7 +323,7 @@ def _cases() -> list[tuple[str, int]]:
         (title, number)
         for title, source in SHAPES.items()
         for number, line in enumerate(textwrap.dedent(source).splitlines(), 1)
-        if line.rstrip().endswith(("# holds", "# not"))
+        if line.rstrip().endswith(("# holds", "# not", "# unread"))
     ]
 
 
@@ -256,18 +334,20 @@ def _taken(statement: ast.stmt) -> list[ast.AST]:
     return list(statement.value.args)
 
 
+@pytest.mark.parametrize("unread_kept", [False, True], ids=["strict", "unread kept"])
 @pytest.mark.parametrize(("title", "line"), _cases(), ids=[f"{t}@{n}" for t, n in _cases()])
-def test_a_write_holds_the_rows_where_some_run_brings_them(title, line):
+def test_a_write_holds_the_rows_where_some_run_brings_them(title, line, unread_kept):
     text = textwrap.dedent(SHAPES[title])
     tree = ast.parse(text)
     attach_parents(tree)
     lines = text.splitlines()
     statements = {node.lineno: node for node in ast.walk(tree) if isinstance(node, ast.stmt)}
     rows = [statements[n] for n, text_line in enumerate(lines, 1) if text_line.rstrip().endswith("# rows")]
-    reading = _Reading(Calls(Types({}, {})), set(), reach.ReachGraph([]))
+    reading = _Reading(Calls(Types({}, {})), set(), reach.ReachGraph([]), unread_kept)
     carry = _PathCarry(reading, "f.py", tree.body[0], start=rows)
 
     use = statements[line]
     held = any(carry.held(taken, use) for taken in _taken(use))
 
-    assert held == lines[line - 1].rstrip().endswith("# holds")
+    mark = lines[line - 1].rstrip()
+    assert held == (mark.endswith("# holds") or (unread_kept and mark.endswith("# unread")))
