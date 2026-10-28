@@ -777,3 +777,31 @@ async def test_a_tasks_rows_file_says_its_jobs_again_by_link_and_table_and_each_
         "11": ["running", "finished"],
         "12": ["running", "failed"],
     }
+
+
+async def test_a_scoped_dataset_name_is_asked_with_and_without_its_scope_and_found_either_way():
+    # the Datasets rows are keyed by either form, as PanDA asks a dataset by name (datasetName IN (:name1,:name2))
+    job = JOB | {"prodDBlock": "data:data.in"}
+    rows = [
+        *DATASETS,
+        {"name": "data.in", "subType": "in"},
+        {"name": "data:data.in", "subType": "in"},
+    ]
+    panda = FakePanda({}, JOB_LOG, [], jobs={PID: job}, datasets=rows)
+    out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
+    assert panda.calls[1][1] == [
+        "data.in",
+        "data:data.in",
+        "panda.dis1",
+        "user.x.log",
+        "user.x_sub1",
+    ]
+    by_via = {(e["via"]["from"], e["via"]["to"]): e for e in out["linked"]}
+    prod = by_via[("JobSpec.prodDBlock", "DatasetSpec.name")]
+    assert prod["asked"] == ["data.in", "data:data.in"]
+    assert [r["name"] for r in prod["rows"]] == ["data.in", "data:data.in"]
+    # a name with no scope is asked as it is
+    assert by_via[("FileSpec.dataset", "DatasetSpec.name")]["asked"] == [
+        "data.in",
+        "user.x.log",
+    ]

@@ -214,6 +214,23 @@ def value_of(row: dict, attr: str) -> Any:
     return row.get(attr, row.get(attr.lower()))
 
 
+def with_and_without_scope(name: str) -> list[str]:
+    """A dataset's name as written, and without its scope (``scope:name``) where it has one."""
+    return [name, name.split(":")[-1]] if ":" in name else [name]
+
+
+#: the forms a value is asked by where a link leads, where a row may be keyed by more than one: a dataset's
+#: name with and without its scope, as PanDA asks one by name (``datasetName IN (:name1,:name2)``,
+#: resetFileStatusInJEDI), since the Datasets rows are keyed by either
+ASKED_AS = {"DatasetSpec.name": with_and_without_scope}
+
+
+def asked_as(dst: str, values: set) -> set:
+    """Every form *values* are asked by where *dst* leads."""
+    form = ASKED_AS.get(dst)
+    return {f for v in values for f in form(v)} if form else set(values)
+
+
 def asked_at(response: dict) -> datetime.datetime:
     return datetime.datetime.strptime(response["asked_at"], "%Y-%m-%d %H:%M:%S")
 
@@ -340,12 +357,12 @@ def values_by(link: Link, got: list[dict], key_class: str, key: int) -> set:
 
 
 def link_values(rows: dict[str, list[dict]], dst: str, asked: Asked) -> list:
-    """Every value the links leading to *dst* hold in *rows*, once each."""
+    """Every value the links leading to *dst* hold in *rows*, in every form it is asked by, once each."""
     held = set()
     for cls, got in rows.items():
         for link in links_from(cls):
             if link.dst == dst and not link.held:
-                held |= values_by(link, got, asked.cls, asked.key)
+                held |= asked_as(dst, values_by(link, got, asked.cls, asked.key))
     return sorted(held)
 
 

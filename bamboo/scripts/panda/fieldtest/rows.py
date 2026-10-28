@@ -69,6 +69,7 @@ from typing import Any
 from bamboo.scripts.panda.fieldtest.fetch import (
     FILES,
     KEY,
+    asked_as,
     held_rows,
     job_of,
     links_from,
@@ -468,7 +469,7 @@ def _datasets_section(
     }
 
 
-Answer = list[tuple[str | None, dict, list[dict]]]
+Answer = list[tuple[str | None, dict, set | None, list[dict]]]
 
 
 def _datasets_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer | None:
@@ -477,7 +478,7 @@ def _datasets_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer |
         return None
     read = {"source": "job/get_datasets_by_name", **bounds_of(response)}
     rows = [columns(r, spellings[DATASET], set()) for r in response["rows"]]
-    return [(DATASET_TABLE, read, rows)]
+    return [(DATASET_TABLE, read, set(laid.requests["datasets"]["names"]), rows)]
 
 
 def _task_jobs_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer | None:
@@ -491,11 +492,12 @@ def _task_jobs_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer 
     by_table: dict[str, list[dict]] = {}
     for table, r in laid.rows["job_rows"]:
         by_table.setdefault(table, []).append(columns(r, spellings["JobSpec"], set()))
-    return [(t, read, rows) for t, rows in by_table.items()]
+    return [(t, read, None, rows) for t, rows in by_table.items()]
 
 
 #: where the rows a link names are in a fetch record, by where it leads: for each table, the table, how
-#: they were read and the rows as their class spells them; None where that answer is not complete
+#: they were read, the values the call was asked with (None where it was asked by the key alone) and the
+#: rows as their class spells them; None where that answer is not complete
 LINK_ANSWERS = {
     "DatasetSpec.name": _datasets_read,
     "JobSpec.jediTaskID": _task_jobs_read,
@@ -517,9 +519,11 @@ def linked(
 ) -> list[dict]:
     """The rows each link from the key's rows named: one entry per link and table, with the values it asked.
 
-    The rows a link holds in its source row's answer (a job's files) are all
-    that link's; of an answer asked for several links (the datasets), a link's
-    are those whose ``to`` column holds one of its values.
+    A link's values are asked in every form they are asked by (a dataset's
+    name with and without its scope), each that the call was asked with.  The
+    rows a link holds in its source row's answer (a job's files) are all that
+    link's; of an answer asked for several links (the datasets), a link's are
+    those whose ``to`` column holds one of its asked values.
     """
     held = held_rows(key_class, raw)
     out = []
@@ -534,6 +538,7 @@ def linked(
                     (
                         None,
                         read,
+                        None,
                         [columns(r, spelling, set()) for r in held[link.dst_class]],
                     )
                 ]
@@ -541,13 +546,16 @@ def linked(
                 answers = LINK_ANSWERS[link.dst](laid, spellings)
                 if answers is None:
                     continue
-            to, named = link.dst.partition(".")[2], {str(v) for v in values}
-            for table, how, rows in answers:
+            forms, to = asked_as(link.dst, set(values)), link.dst.partition(".")[2]
+            for table, how, sent, rows in answers:
+                if not (asked := sorted(forms if sent is None else forms & sent)):
+                    continue
+                named = {str(v) for v in asked}
                 out.append(
                     {
                         "class": link.dst_class,
                         "via": link.via(),
-                        "asked": values,
+                        "asked": asked,
                         **({"table": table} if table else {}),
                         **how,
                         "rows": [
