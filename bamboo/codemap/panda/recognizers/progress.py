@@ -64,6 +64,7 @@ from bamboo.codemap.panda.pathcond import (
     enclosing_function,
     entries,
     exclusive,
+    field_additions,
     field_replacements,
     functions_with_owner,
     literal_values,
@@ -892,6 +893,8 @@ def extract(
     settle = values.resolver()
     aliases = find_aliases(modules, declarations)
     memo: dict = {}
+    # The ``+=`` already a branch of a junction, which a value written before in two arms reaches twice.
+    added_at: set[tuple[str, int]] = set()
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --
@@ -982,14 +985,25 @@ def extract(
             # where it never does -- ``remAttribute`` rewrites ``self.attributes``
             # four times before ``if self.attributes == "":`` -- and an entry per
             # later write that can replace it.
+            callee = setters_of(aliases, attributor, target.attr)
             replaced = (
-                field_replacements(
-                    node, target.value, target.attr, value, setters_of(aliases, attributor, target.attr), memo
-                )
+                field_replacements(node, target.value, target.attr, value, callee, memo)
                 if func is not None
                 else []
             )
-            if replaced is None:
+            # And each ``+=`` that adds to the value and leaves: what leaves there is what the
+            # function makes of it -- ``setDatasetAttribute``'s ``self.attributes += attr`` after
+            # ``self.attributes = ""``, a count from ``0``.
+            adding = [
+                one
+                for one in (
+                    field_additions(node, target.value, target.attr, callee, memo)
+                    if func is not None
+                    else []
+                )
+                if (name, id(one)) not in added_at
+            ]
+            if replaced is None and not adding:
                 continue
 
             structural = attributor.structural_class(target, func, owner_class)
@@ -1009,37 +1023,54 @@ def extract(
                 )
                 junctions[name] = junction
 
-            # The write's own guards, shared by every outcome its right-hand
-            # side can produce: reaching a write is necessary for any of them.
-            dominating = path_condition(node)
-            later = entries(replaced, dominating)
-            tags, messages = (
-                recorded_signature(node, func, setters, target.attr)
-                if func is not None
-                else ([], [])
-            )
-            for resolved in _resolve(
-                value,
-                func=func,
-                dominating=dominating,
-                attributor=attributor,
-                owner_class=owner_class,
-                spec_names=spec_attribute_names,
-                settle=settle,
-                at=node,
-            ):
+            if replaced is not None:
+                # The write's own guards, shared by every outcome its right-hand
+                # side can produce: reaching a write is necessary for any of them.
+                dominating = path_condition(node)
+                later = entries(replaced, dominating)
+                tags, messages = (
+                    recorded_signature(node, func, setters, target.attr)
+                    if func is not None
+                    else ([], [])
+                )
+                for resolved in _resolve(
+                    value,
+                    func=func,
+                    dominating=dominating,
+                    attributor=attributor,
+                    owner_class=owner_class,
+                    spec_names=spec_attribute_names,
+                    settle=settle,
+                    at=node,
+                ):
+                    junction.branches.append(
+                        Branch(
+                            outcome=resolved.outcome,
+                            path_condition=dominating
+                            + list(resolved.conditions)
+                            + [entry for entry in later if entry not in resolved.conditions],
+                            order=len(junction.branches),
+                            tier=resolved.tier,
+                            tags=tags,
+                            messages=messages,
+                            line=node.lineno,
+                            value_frames=list(resolved.frames),
+                        )
+                    )
+            for one in adding:
+                added_at.add((name, id(one)))
+                guards = path_condition(one)
+                left = field_replacements(one, target.value, target.attr, None, callee, memo) or []
+                one_tags, one_messages = recorded_signature(one, func, setters, target.attr)
                 junction.branches.append(
                     Branch(
-                        outcome=resolved.outcome,
-                        path_condition=dominating
-                        + list(resolved.conditions)
-                        + [entry for entry in later if entry not in resolved.conditions],
+                        outcome=_runtime(ast.BinOp(left=one.target, op=one.op, right=one.value)),
+                        path_condition=guards + entries(left, guards),
                         order=len(junction.branches),
-                        tier=resolved.tier,
-                        tags=tags,
-                        messages=messages,
-                        line=node.lineno,
-                        value_frames=list(resolved.frames),
+                        tier=2,
+                        tags=one_tags,
+                        messages=one_messages,
+                        line=one.lineno,
                     )
                 )
         if candidates:

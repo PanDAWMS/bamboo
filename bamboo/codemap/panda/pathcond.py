@@ -1436,7 +1436,9 @@ def literal_values(
     None`` where no bind reads it, and that is no value of the bind.  And an
     augmented binding replaces it as well: after ``tmpNumFiles += ...`` in
     ``updateUnmergedDatasets``' loop the bind reads another number than the
-    ``0`` above it, so ``0`` is a value only where no pass added to it.
+    ``0`` above it, so ``0`` is a value only where no pass added to it; one
+    the value surely meets leaves it no value of the bind past it, and a test
+    past one does not read the name as the value.
 
     Exclusive siblings replace nothing, or every branch of a chain would carry
     the negation of every other: ``-dest_blacklisted`` would come out requiring
@@ -1479,6 +1481,8 @@ def literal_values(
     found.sort(key=lambda pair: pair[0].lineno)
     own = [binding for binding in bindings(func, name) if not binding.nested]
     sites = _unique([binding.site for binding in own])
+    # The name's ``+=``: each keeps what was there and makes another value of it.
+    added = [site for site in sites if isinstance(site, ast.AugAssign)]
     values: list[tuple[str, list[str], int]] = []
     for assignment, settled in found:
         guards = list(path_condition(assignment))
@@ -1489,8 +1493,14 @@ def literal_values(
                 [at],
                 place=name,
                 value=written_value(assignment),
+                rereads=added,
             )
             if replaced is None:
+                continue
+            # Each value the assignment is settled to meets the tests on the way as a literal does in
+            # replacements: getTasksToExecCommand_JEDI binds the status only under `if newTaskStatus != "dummy"`.
+            settled = [one for one in settled if not _refused(at, assignment, func, name, one, added, (), texts=True)]
+            if not settled:
                 continue
             guards.extend(entries(replaced, guards))
         # A copy per value: two branches sharing one condition list is a
@@ -1537,7 +1547,8 @@ SKIPPED = "skipped"
 #: ``match`` case the value's write is not in, whose tests are not enough for it to run;
 NOT_ON_ITS_TESTS = "not on its tests"
 #: the other write has no test the value's write is not under -- it runs wherever the value's pass
-#: gets to it, and the value reaches a read past it only where something raises;
+#: gets to it, and the value reaches a read past it only where something raises -- past a ``+=``, not as
+#: itself at all;
 NO_TEST = "no test"
 #: or the entry would not parse.
 UNREADABLE = "unreadable"
@@ -1613,6 +1624,20 @@ def replacements(
     test is as written, unannotated, and reads its names as they are when it
     runs, as every test in a path condition does.
 
+    A ``+=`` of the place is asked too, a reread or not: past it the place
+    holds another value.  Where the value surely meets one (:data:`NO_TEST`)
+    it goes no further as itself -- ``setDatasetAttribute`` sets
+    ``self.attributes = ""`` and then ``self.attributes += attr``, and the
+    object never leaves holding ``""`` -- and where one may run, the value
+    needs it not to have run, as for any other write.  It stays a reread for
+    the tests on the way: one past it does not read the place as the value.
+
+    A read is one the value reaches only where no test on its way refuses it:
+    a test of an ``if`` holding the read and not *write*, reading *place*
+    while it still holds the literal *value* -- ``retryJob``'s ``longSite =
+    None`` never gets to ``job.computingSite = longSite`` under ``if longSite
+    is not None``.
+
     The entry has to be false only where the other write surely ran, so:
 
     - a test that reads *place* itself is read with *value* where that is a
@@ -1650,16 +1675,22 @@ def replacements(
         for read in reads
         if read is not write
         and any(site is write for site in surviving_writes(sites, read, keeping, as_run=True, killers=killers))
+        and not (kept is not None and _refused(read, write, func, place, kept[0], keeping, killers))
     ]
     exits = returning and any(site is write for site in reaching_exit(func, sites, killers, keeping))
     if not reached and not exits:
         return None
-    asked = [other for other in others if other is not write and not any(other is one for one in rereads)]
+    asked = [
+        other
+        for other in others
+        if other is not write and (isinstance(other, ast.AugAssign) or not any(other is one for one in rereads))
+    ]
     found = [
         _replacement(write, other, func, reached, exits, sites, killers, keeping, place, kept, callee)
         for other in asked
     ]
     cut = [held for one, held in found if one.why == SURELY]
+    cut += [one.site for one, _held in found if one.why == NO_TEST and isinstance(one.site, ast.AugAssign)]
     if cut:
         # Where the value always meets another write, it goes no further.
         killers = _unique([*killers, *cut])
@@ -2044,6 +2075,58 @@ def _holding(write: ast.AST, statement: ast.AST, rereads: Sequence[ast.AST], kil
     )
 
 
+def _refused(
+    read: ast.AST,
+    write: ast.AST,
+    func: ast.AST,
+    place: str,
+    kept: object,
+    rereads: Sequence[ast.AST],
+    killers: Sequence[ast.AST],
+    texts: bool = False,
+) -> bool:
+    """Whether a test on the way to *read* -- an ``if`` holding it and not *write* -- is settled by *kept* against
+    its arm.
+
+    With *texts*, *kept* is a value as a settler spells it -- ``"dummy"``, and ``"0"`` or ``"None"`` for what a
+    literal of another type spells -- so a test comparing *place* with anything but a text is not read with it:
+    ``"0" == 0`` would refuse a value the code writes.
+    """
+    child = read
+    for ancestor in ancestors(read):
+        if ancestor is func:
+            return False
+        if isinstance(ancestor, ast.If) and not _within(write, ancestor):
+            arm: Optional[bool] = None
+            if any(child is one for one in ancestor.body):
+                arm = True
+            elif any(child is one for one in ancestor.orelse):
+                arm = False
+            if texts and not _compared_with_texts(ancestor.test, place):
+                arm = None
+            if arm is not None and _holding(write, ancestor, rereads, killers):
+                result = _decided_with(ancestor.test, place, kept)
+                if result is not UNDECIDED and result is not arm:
+                    return True
+        child = ancestor
+    return False
+
+
+def _compared_with_texts(test: ast.expr, place: str) -> bool:
+    """Whether every constant *test* compares *place* with is a text (a truth test of it compares with none)."""
+    for node in walk(test):
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left, *node.comparators]
+        if not any(ast.unparse(operand) == place for operand in operands):
+            continue
+        for operand in operands:
+            for part in walk(operand):
+                if isinstance(part, ast.Constant) and not isinstance(part.value, str):
+                    return False
+    return True
+
+
 def holder_texts(holder: ast.expr) -> set[str]:
     """*holder*'s text and the text of each object that holds it: ``impl.taskSpec`` and ``impl``."""
     found: set[str] = set()
@@ -2219,23 +2302,9 @@ def field_replacements(
     of names, fields and items, ``[]``: read as before.  *memo* keeps what one
     function's holder and field give, for a caller asking it of each write.
     """
-    func = enclosing_function(write)
-    if func is None:
-        return []
-    root = holder
-    while isinstance(root, (ast.Attribute, ast.Subscript)):
-        root = root.value
-    if not isinstance(root, ast.Name):
-        return []
-    key = (id(func), ast.unparse(holder), attribute)
-    held = memo.get(key) if memo is not None else None
+    held = _field_held(write, holder, attribute, callee, memo)
     if held is None:
-        writes, rereads, calls = field_writes(func, holder, attribute, callee)
-        if not any(one is write for one in writes):
-            writes.append(write)  # type: ignore[arg-type]
-        held = (writes, rereads, calls, ways_out(func, holder, writes), renewals(func, holder))
-        if memo is not None:
-            memo[key] = held
+        return []
     writes, rereads, calls, out, renewed = held
     return replacements(
         write,
@@ -2251,6 +2320,93 @@ def field_replacements(
         callee=lambda site: calls.get(id(site)),
     )
 
+
+def _field_held(
+    write: ast.AST,
+    holder: ast.expr,
+    attribute: str,
+    callee: Optional[Callable[[ast.Call], Optional[Callee]]],
+    memo: Optional[dict],
+) -> Optional[tuple[list[ast.stmt], list[ast.stmt], dict[int, Callee], list[ast.AST], list[ast.AST]]]:
+    """``(writes, rereads, calls, ways out, renewals)`` of the field *write* writes, or ``None`` at module level or
+    on a holder that is no chain of names, fields and items."""
+    func = enclosing_function(write)
+    if func is None:
+        return None
+    root = holder
+    while isinstance(root, (ast.Attribute, ast.Subscript)):
+        root = root.value
+    if not isinstance(root, ast.Name):
+        return None
+    key = (id(func), ast.unparse(holder), attribute)
+    held = memo.get(key) if memo is not None else None
+    if held is None:
+        writes, rereads, calls = field_writes(func, holder, attribute, callee)
+        if not any(one is write for one in writes):
+            writes.append(write)  # type: ignore[arg-type]
+        held = (writes, rereads, calls, ways_out(func, holder, writes), renewals(func, holder))
+        if memo is not None:
+            memo[key] = held
+    return held
+
+
+def additions(
+    write: ast.AST,
+    writes: Sequence[ast.AST],
+    reads: Sequence[ast.AST],
+    *,
+    place: str,
+    killers: Sequence[ast.AST] = (),
+    returning: bool = False,
+) -> list[ast.AugAssign]:
+    """The ``+=`` of *place* among *writes* that add to what *write* puts there and whose own value leaves.
+
+    Each is a write of what the function makes of the value: past a ``+=`` the place holds another value
+    (:func:`replacements`), and where the value is still there when one runs and what that one makes reaches a
+    read -- one of *reads*, or with *returning* the function's end -- that is what leaves.  ``setDatasetAttribute``
+    sets ``self.attributes = ""`` and then ``self.attributes += attr``: the method writes the sum.  *writes* are the
+    place's writes; the ``+=`` among them keep what was there, the others overwrite.
+    """
+    added = [one for one in writes if isinstance(one, ast.AugAssign) and one is not write]
+    sites = _unique([write, *writes])
+    return [
+        one
+        for one in added
+        if any(site is write for site in surviving_writes(sites, one, added, as_run=True, killers=killers))
+        and replacements(
+            one,
+            [other for other in writes if other is not one],
+            reads,
+            place=place,
+            killers=killers,
+            rereads=added,
+            returning=returning,
+        )
+        is not None
+    ]
+
+
+def field_additions(
+    write: ast.AST,
+    holder: ast.expr,
+    attribute: str,
+    callee: Optional[Callable[[ast.Call], Optional[Callee]]] = None,
+    memo: Optional[dict] = None,
+) -> list[ast.AugAssign]:
+    """:func:`additions` for a write of an object's field, the field's ``+=`` read on the route
+    :func:`field_replacements` reads: to where the object leaves."""
+    held = _field_held(write, holder, attribute, callee, memo)
+    if held is None:
+        return []
+    writes, _rereads, _calls, out, renewed = held
+    return additions(
+        write,
+        writes,
+        _unique([*out, *renewed]),
+        place=f"{ast.unparse(holder)}.{attribute}",
+        killers=renewed,
+        returning=True,
+    )
 
 def _substitute_bare_name(
     rendered: str, test: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef

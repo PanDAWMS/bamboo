@@ -4812,7 +4812,12 @@ class _PathCarry:
         for write in self.writes:
             if write.node is arguments and write.source is None and write.call is None and write.name in seeds:
                 write.forced = frozenset(seeds[write.name])
-            elif id(write.node) in start_ids and write.call is None and write.source is not None:
+            elif (
+                id(write.node) in start_ids
+                and write.call is None
+                # A ``+=`` started from writes its field with what the reader follows, though it holds no rows.
+                and (write.source is not None or isinstance(write.node, ast.AugAssign))
+            ):
                 write.forced = _below(write.steps, _WHOLE)
         self._grow()
 
@@ -6187,10 +6192,13 @@ def _unpersisted(
                     if line is not None and first <= line <= last and (owner, junction.subject, line) not in written
                 }
                 for line in sorted(lines):
+                    # A ``+=`` that adds to a value is an arm of its own (the attribute slice's), as an assignment is.
                     assigned = [
                         (statement, target.value)
                         for statement in statements.get(line, ())
-                        for target in targets_of(statement)
+                        for target in (
+                            [statement.target] if isinstance(statement, ast.AugAssign) else targets_of(statement)
+                        )
                         if isinstance(target, ast.Attribute)
                         and target.attr == attribute
                         and attributor.class_of(target.value, func, owner_class) == spec

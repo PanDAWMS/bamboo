@@ -24,7 +24,11 @@ cannot tell a caller that never ran from a guard that rejected the status.
 declared attribute, the same rule matches 36 methods and 600 call sites, led by
 ``__init__``, ``pack``, ``__setattr__`` and ``setErrDiag`` -- serialization and
 parameter passing, which settle nothing.  Narrowed to literals it matches five
-methods, and the criteria mark the one that matters.
+methods, and the criteria mark the one that matters.  A literal the method goes
+on to add to -- ``self.attributes = ""``, then ``self.attributes += attr`` --
+never leaves it as written, so its calls write what the method computes,
+``runtime(setDatasetAttribute())``: still a write of the field at each call,
+and not of ``""``.
 
 **The same method, seen the other way round.**  A helper can settle a subject by
 *returning* the value instead of writing it, and the caller assigns it::
@@ -60,14 +64,18 @@ from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import CERTAIN, SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     Callee,
+    Replacement,
+    additions,
     attach_parents,
     enclosing_class,
     enclosing_function,
     entries,
     field_replacements,
+    field_writes,
     functions_with_owner,
     literal_values,
     path_condition,
+    replacements,
     site_of,
     targets_of,
     unmarked,
@@ -85,15 +93,23 @@ class Alias:
     def __init__(self, spec_class: str, method: str) -> None:
         self.spec_class = spec_class
         self.method = method
-        # (attribute, literal, the conditions inside the method)
-        self.writes: list[tuple[str, str, list[str]]] = []
+        # (attribute, value, the conditions inside the method, tier): a literal, or what the method adds to one
+        self.writes: list[tuple[str, str, list[str], int]] = []
 
 
 def _literal_self_writes(
     func: ast.FunctionDef | ast.AsyncFunctionDef, declared: set[str]
-) -> list[tuple[str, str, list[str]]]:
-    """Return ``(attribute, literal, inner conditions)`` for ``self.attr = "lit"``."""
-    found: list[tuple[str, str, list[str]]] = []
+) -> list[tuple[str, str, list[str], int]]:
+    """Return ``(attribute, value, inner conditions, tier)`` for each ``self.attr = "lit"`` the method returns with.
+
+    A literal the method goes on to add to does not leave it as written: ``setDatasetAttribute`` sets
+    ``self.attributes = ""`` and then ``self.attributes += attr``, so what its callers' objects hold is the sum.
+    Each ``+=`` that adds to the literal and whose own value leaves is then a write of the method, said
+    ``runtime(setDatasetAttribute())`` (tier 2) under its own tests: the callers still write the field.  Whether the
+    literal leaves, and on what, is :func:`pathcond.replacements`' reading of the ``+=``: one it surely meets ends
+    it, so none of the callers writes ``""``; one that may run leaves it where that one does not.
+    """
+    found: list[tuple[str, str, list[str], int]] = []
     for node in walk(func):
         value = written_value(node)
         if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
@@ -105,8 +121,33 @@ def _literal_self_writes(
                 and target.value.id == "self"
                 and target.attr in declared
             ):
-                found.append((target.attr, value.value, path_condition(node)))
+                left, adding = _added_to(func, node, target, value) if enclosing_function(node) is func else ([], [])
+                if left is not None:
+                    inner = path_condition(node)
+                    found.append((target.attr, value.value, inner + entries(left, inner), 1))
+                for one in adding:
+                    write = (target.attr, f"runtime({func.name}())", path_condition(one), 2)
+                    if write not in found:
+                        found.append(write)
     return found
+
+
+def _added_to(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, write: ast.AST, target: ast.Attribute, value: ast.expr
+) -> tuple[Optional[list[Replacement]], list[ast.AugAssign]]:
+    """What the method's ``+=`` of *target* do to the literal *write* puts there.
+
+    ``(left, adding)``: :func:`pathcond.replacements` of the literal against the ``+=`` -- ``None`` where it never
+    leaves as written; the field's other writes overwrite, as killers, since what is asked here is only what the
+    ``+=`` do -- and the ``+=`` that add to it and leave the method (:func:`pathcond.additions`).
+    """
+    writes, added, _calls = field_writes(func, target.value, target.attr)
+    plain = [one for one in writes if one is not write and not isinstance(one, ast.AugAssign)]
+    place = ast.unparse(target)
+    left = replacements(
+        write, added, [], place=place, value=value, killers=plain, rereads=added, returning=True
+    )
+    return left, additions(write, writes, [], place=place, returning=True)
 
 
 def find_aliases(
@@ -375,7 +416,7 @@ def setters_of(
         alias = _alias_at(aliases, call, attributor, enclosing_function(call), enclosing_class(call))
         if alias is None:
             return None
-        writes = tuple(tuple(inner) for written, _literal, inner in alias.writes if written == attribute)
+        writes = tuple(tuple(inner) for written, _value, inner, _tier in alias.writes if written == attribute)
         return Callee(alias.method, writes) if writes else None
 
     return callee
@@ -433,7 +474,7 @@ def extract(
                 continue
             explained += 1
             caller = path_condition(node)
-            for attribute, literal, inner in alias.writes:
+            for attribute, value, inner, tier in alias.writes:
                 attributed.add((alias.spec_class, attribute))
                 # The call writes the field as an assignment would: no branch
                 # where what it writes never leaves the object, an entry per
@@ -442,7 +483,7 @@ def extract(
                     site_of(node),
                     node.func.value,
                     attribute,
-                    ast.Constant(value=literal),
+                    ast.Constant(value=value) if tier == 1 else None,
                     setters_of(aliases, attributor, attribute),
                     memo,
                 )
@@ -458,12 +499,13 @@ def extract(
                     owner=f"{module.rel_path}::{func.name if func else '<module>'}",
                     spec_class=alias.spec_class,
                     attribute=attribute,
-                    literal=literal,
+                    literal=value,
                     # The caller's conditions decide whether the alias runs; the
                     # alias's own decide whether running it changes anything.
                     # Both are required and they fail differently, so the second
                     # set says where it lives.
                     condition=caller + marked + [entry for entry in entries(replaced, caller) if entry not in marked],
+                    tier=tier,
                 )
         if candidates:
             coverage.append(
