@@ -156,6 +156,61 @@ def test_no_dump_no_map(tmp_path):
     assert "no map dump is installed" in out
 
 
+def test_the_dump_stays_as_it_was_read(tmp_path):
+    # a reader opens a client of its own and asks through CodeMap, which reads the dump the client carries: nothing is
+    # stored, so no question writes the dump's nodes (a store gave each an id and a valid_for), and a reader of the
+    # client itself stops rather than finding no map in it
+    out = _ok(
+        _run(
+            tmp_path,
+            f"""
+            import asyncio, json
+            from bamboo.codemap.lookup import CodeMap
+            from bamboo.codemap.models import Anchor, Branch, JunctionNode, MapFragment, SubjectNode
+            from bamboo.database import graph_database_client
+            from bamboo.querier import mapdump
+
+            owner, subject, built = "pandajedi/a.py::A.run", "JediTaskSpec.status", "panda-server-source 1.0.2"
+            fragment = MapFragment(
+                map_id="panda",
+                derived_from="source-root:{_corpus(tmp_path)}",
+                subjects=[SubjectNode(name=subject, map_id="panda", derived_from=built, spec_class="JediTaskSpec", attribute="status")],
+                junctions=[JunctionNode(
+                    name=JunctionNode.make_name("panda", subject, owner), map_id="panda", derived_from=built, subject=subject,
+                    owner=owner, branches=[Branch(outcome="ready", line=10)],
+                    anchor=Anchor(package="pandajedi", file="pandajedi/a.py", line_start=42),
+                )],
+            )
+            with open("map.json", "w") as f:
+                f.write(fragment.model_dump_json())
+            mapdump.install("map.json")
+            read = mapdump.fragment().model_dump_json()
+
+            async def reader():
+                client = graph_database_client.GraphDatabaseClient()
+                await client.connect()
+                code_map = CodeMap(client, map_id="panda", version=None)
+                found = [len(await code_map.subjects()), len(await code_map.writers_of(subject)), await code_map.versions()]
+                try:
+                    await client.find_map_nodes("Subject", "panda", None, None)
+                    refused = ""
+                except RuntimeError as e:
+                    refused = str(e)
+                await client.close()
+                return found, refused
+
+            first, second = asyncio.run(reader()), asyncio.run(reader())
+            print(json.dumps([first, second, mapdump.fragment().model_dump_json() == read]))
+            """,
+        )
+    )
+    first, second, unchanged = json.loads(out)
+    assert first == second
+    assert first[0] == [1, 1, ["panda-server-source 1.0.2"]]
+    assert "read through CodeMap" in first[1]
+    assert unchanged
+
+
 def test_handed_to_binds_arguments_and_states_defaults(tmp_path):
     out = _ok(
         _run(

@@ -1,8 +1,10 @@
 """Read the map from a dump (``diff-map --dump``) instead of Neo4j, in this process.
 
-``install(path)`` replaces ``graph_database_client.GraphDatabaseClient`` with the in-memory backend, filled with the
-dump through the tree's own ``store_fragment`` on each connect.  Every reader looks the client class up at call time
-(``rerun._writers_of``, ``derive_strategy._investigate``, ``rows._function_prints``), so the swap reaches them.
+``install(path)`` replaces ``graph_database_client.GraphDatabaseClient`` with a client that carries the dump and
+nothing else: a ``CodeMap`` on it reads the dump's own nodes, with the store's rules (``lookup._fragment_nodes``).
+Nothing is stored, so the dump stays as it was read for the whole run; a reader that asks the client itself stops.
+Every reader looks the client class up at call time (``rerun._writers_of``, ``derive_strategy._investigate``,
+``rows._function_prints``), so the swap reaches them.
 
 Each case is read against the map built from the corpus that wrote its log: its own ``PANDA_PIN`` and the dump of
 that pin.  The swap is per process: a process started with ``spawn`` would have to call ``install_from_env()`` itself.  None needs to
@@ -34,9 +36,7 @@ def install(path: str) -> None:
     if _INSTALLED:
         raise RuntimeError(f"a map dump is installed already ({_INSTALLED['path']}), not {path}")
     from bamboo.codemap.models import MapFragment
-    from bamboo.codemap.store import store_fragment
     from bamboo.database import graph_database_client
-    from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
 
     data = Path(path).read_bytes()
     raw = json.loads(data)
@@ -49,17 +49,21 @@ def install(path: str) -> None:
         raise RuntimeError(f"the map dump {path} was built on {built_on or '(no derived_from)'}, the run reads PANDA_PIN={pin or '(unset)'}")
     fragment = MapFragment.model_validate(raw)
 
-    class _FromDump(InMemoryGraphBackend):
+    class _FromDump:
         async def connect(self):
-            await super().connect()
-            await store_fragment(fragment, self)
+            pass
 
         async def close(self):
             pass
 
-    # CodeMap reads the map from the dump it carries (lookup._fragment_nodes) rather than from the store above; the store
-    # stays for a reader of the client itself, at 0.01 s a connect since the in-memory backend merges by an index
-    _FromDump.fragment = fragment
+        def __getattr__(self, name):
+            # a store of the dump would write its nodes (ids, valid_for), and Neo4j's client holds no map: neither
+            # answers a reader of the client, so it stops rather than reading an empty map as "nothing writes it"
+            if name.startswith("__"):
+                raise AttributeError(name)
+            raise RuntimeError(f"the map dump is read through CodeMap (lookup._fragment_nodes), not the graph client's {name}")
+
+    _FromDump.fragment = fragment  # what CodeMap reads; set here, as the class body would read mapdump.fragment
     graph_database_client.GraphDatabaseClient = _FromDump
     _INSTALLED["path"] = path
     _INSTALLED["sha256"] = hashlib.sha256(data).hexdigest()
