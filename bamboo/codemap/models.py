@@ -1759,6 +1759,22 @@ class OpenCrossing(BaseModel):
     callee: str = Field(..., description="As :attr:`ReachHole.callee` spells it.")
 
 
+class JoinPair(BaseModel):
+    """A column of one source of a statement compared equal with a column of another (:func:`sqltext.equalities`):
+    how two tables meet in it -- ``tabD.jediTaskID=tabT.jediTaskID``.  Sides sorted by *a* / *b*.  A composite key is
+    the pairs of one statement sharing one (*a_source*, *b_source*): two aliases of one table joined to another
+    twice are two keys."""
+
+    a: str = Field(..., description="``table.column``, lowered: ``jedi_datasets.jeditaskid``.")
+    b: str
+    a_source: str = Field(
+        ..., description="The source *a* is read from as the statement names it -- its alias, or the table -- lowered."
+    )
+    b_source: str
+    a_attr: str = Field(default="", description="*a* as a subject where its table's spec class has it, else empty.")
+    b_attr: str = ""
+
+
 class CallReading(BaseModel):
     """What one statement reads when one route of calls runs it: :attr:`ReadSiteNode.call_readings`.
 
@@ -2247,6 +2263,15 @@ class ReadSiteNode(BaseNode):
             "(spelled with the returning function's name) -- each a hole of the "
             "reach record, its why there.  Empty: every call on the way was "
             "placed, and no hole may be a caller back."
+        ),
+    )
+    joins: list[JoinPair] = Field(
+        default_factory=list,
+        description=(
+            "Each column = column equality between two of the statement's "
+            "sources, in a ``WHERE`` or an ``ON``, a subquery's among them -- "
+            "read off the statement's tree, so a statement not read as one "
+            "gives none; sorted.  Not ``x IN (SELECT y ...)``."
         ),
     )
     anchor: Anchor = Field(

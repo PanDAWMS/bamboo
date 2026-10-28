@@ -1555,6 +1555,7 @@ def with_schema(
     term_spans.cache_clear()
     _terms_read.cache_clear()
     select_items.cache_clear()
+    equalities.cache_clear()
     try:
         yield
     finally:
@@ -1572,6 +1573,7 @@ def with_schema(
         term_spans.cache_clear()
         _terms_read.cache_clear()
         select_items.cache_clear()
+        equalities.cache_clear()
 
 
 _CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
@@ -2087,6 +2089,64 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
         else:
             items.append(SelectItem(ITEM_EXPRESSION))
     return tuple(items)
+
+
+class Equality(NamedTuple):
+    """A column of one source of a statement compared equal with a column of another: how two tables meet."""
+
+    #: The first side's table, schema stripped and lowered, its column lowered, and the source it is read from as the
+    #: statement names it -- its alias, or the table where it has none -- lowered.
+    table: str
+    column: str
+    source: str
+    #: The other side, the same way; the two sides sorted.
+    other_table: str
+    other_column: str
+    other_source: str
+
+
+@functools.lru_cache(maxsize=None)
+def equalities(sql: str) -> tuple[Equality, ...]:
+    """Each ``a.x = b.y`` of *sql* between two of its sources -- two tables, or two aliases of one -- in a ``WHERE`` or
+    an ``ON``, inner or outer, a subquery's among them; each column's table read as a term's is (:func:`_owner`).
+    Sorted.  A composite key is one statement's equalities sharing one pair of sources.
+
+    Not a ``SET a = b``, nor a ``MERGE``'s, nor a side naming a hole, a pseudo column or a table not read, nor a column
+    compared with one of its own source (``a.x = a.y``); ``x IN (SELECT y ...)`` is no equality.  ``()`` where the
+    statement is not read as a tree: a text :func:`joins` reads only by its words gives none.
+    """
+    tree = parsed(sql).tree
+    if tree is None:
+        return ()
+    scopes, root = _scopes(tree)
+    found: set[Equality] = set()
+    for node in tree.find_all(exp.EQ):
+        left, right = node.this, node.expression
+        if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
+            continue
+        if isinstance(node.parent, exp.Update) or node.find_ancestor(exp.Merge) is not None:
+            continue
+        holder = node.find_ancestor(exp.Select, exp.Update, exp.Delete)
+        if isinstance(holder, (exp.Update, exp.Delete)):
+            scope = root
+        else:
+            scope = next((one for one, _verb, _kind in scopes if one.expression is holder), None)
+        if scope is None:
+            continue
+        sides = []
+        for column in (left, right):
+            name = column.name.lower()
+            if _NAMED_HOLE.search(column.name) or name in _PSEUDO_NAMES:
+                break
+            owned, why = _owner(column, scope, root)
+            if why or not owned:
+                break
+            sides.append((owned[0].lower(), name, (column.table or owned[0]).lower()))
+        else:
+            if sides[0][2] != sides[1][2]:
+                first, second = sorted(sides)
+                found.add(Equality(*first, *second))
+    return tuple(sorted(found))
 
 
 @functools.lru_cache(maxsize=None)

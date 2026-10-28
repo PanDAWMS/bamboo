@@ -18990,6 +18990,57 @@ def test_rows_reaching_a_key_through_calls_say_the_way_and_where_the_rows_read_a
     ]
 
 
+_JOINED = '''
+comment = " /* x */"
+
+
+class TaskModule:
+    def joined(self):
+        sql = "SELECT d.datasetID FROM ATLAS_PANDA.JEDI_Datasets d, ATLAS_PANDA.JEDI_Dataset_Contents c "
+        sql += "WHERE d.jediTaskID=c.jediTaskID AND d.datasetID=c.datasetID AND c.status=:s "
+        sql += "AND NOT EXISTS (SELECT 1 FROM ATLAS_PANDA.JEDI_Tasks t WHERE t.jediTaskID=d.jediTaskID) "
+        self.cur.execute(sql + comment, {":s": "ready"})
+        sqlP = "SELECT a.jediTaskID FROM ATLAS_PANDA.JEDI_Tasks a LEFT OUTER JOIN ATLAS_PANDA.JEDI_Tasks b "
+        sqlP += "ON a.parent_tid=b.jediTaskID WHERE a.status=:s AND a.status=a.oldStatus "
+        self.cur.execute(sqlP + comment, {":s": "running"})
+
+    def set(self, jediTaskID):
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,parent_tid=:p WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sql + comment, {":status": "x", ":p": 1, ":jediTaskID": jediTaskID})
+'''
+
+
+def test_a_read_site_says_each_equality_joining_two_of_its_sources(tmp_path):
+    """The harness's P2 by joins: each column = column between two sources, a subquery's and an outer join's ``ON``
+    among them, each side's source as the statement names it -- so the two columns of a composite key share one
+    pair, and two aliases of one table are two sources -- and its subject where the table's class has the column.
+    Not a column compared with its own source's."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules = [_module(_REREAD_SPECS, "pandaserver/taskbuffer/JediTaskSpec.py"), _module(_JOINED, rel)]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+    by = {site.owner.rsplit("::", 1)[1] + "@" + str(site.anchor.line_start): site for site in sites}
+    joined = [site for name, site in by.items() if name.startswith("joined@")]
+    assert [[(one.a, one.b, one.a_source, one.b_source, one.a_attr, one.b_attr) for one in site.joins] for site in joined] == [
+        [
+            ("jedi_dataset_contents.datasetid", "jedi_datasets.datasetid", "c", "d", "", ""),
+            ("jedi_dataset_contents.jeditaskid", "jedi_datasets.jeditaskid", "c", "d", "", ""),
+            ("jedi_datasets.jeditaskid", "jedi_tasks.jeditaskid", "d", "t", "", "JediTaskSpec.jediTaskID"),
+        ],
+        [
+            (
+                "jedi_tasks.jeditaskid",
+                "jedi_tasks.parent_tid",
+                "b",
+                "a",
+                "JediTaskSpec.jediTaskID",
+                "JediTaskSpec.parent_tid",
+            )
+        ],
+    ]
+
+
 def test_a_key_filled_from_a_batch_is_the_batched_values_not_the_batch_size(tmp_path):
     """``updateInputFilesStaged_JEDI``'s shape: a map per file, copied from one filled before the loop, appended to the
     list ``executemany`` takes, the file's key from a batch of a dict the caller handed.  ``batched`` is not the

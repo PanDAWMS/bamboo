@@ -115,6 +115,7 @@ from bamboo.codemap.models import (
     DiagnosticTemplate,
     EntityNode,
     GuardRead,
+    JoinPair,
     JunctionNode,
     KeyFrom,
     KeySource,
@@ -1906,6 +1907,9 @@ class ReadStatement(NamedTuple):
     printed_by: tuple[PrintedBy, ...] = ()
     #: Each blanked order item and what builds it -- :attr:`ReadSiteNode.order_holes`.
     order_holes: tuple[OrderHole, ...] = ()
+    #: Each equality joining two of its sources, every run's (:func:`sqltext.equalities`), as
+    #: ``(a, b, a_source, b_source, a_attr, b_attr)`` -- :attr:`ReadSiteNode.joins`.  A set made with the record.
+    joins: Optional[set[tuple[str, str, str, str, str, str]]] = None
     #: What the statement returns -- :attr:`ReadSiteNode.result`.  Read off
     #: every run, so it arrives by ``_replace``.
     result: str = ""
@@ -3232,6 +3236,18 @@ def read_side(
             kept = kept._replace(unresolved=tuple(sorted(set(kept.unresolved) | set(at.unresolved))))
             statements[site] = kept
         kept.tables.update(read_tables)
+        if kept.joins is not None:
+            kept.joins.update(
+                (
+                    f"{one.table}.{one.column}",
+                    f"{one.other_table}.{one.other_column}",
+                    one.source,
+                    one.other_source,
+                    _spec_attr(attributor, one.table, one.column),
+                    _spec_attr(attributor, one.other_table, one.other_column),
+                )
+                for one in sqltext.equalities(run.reading)
+            )
         orders, limits = sqltext.ordering(run.reading)
         kept.order_by.update(orders)
         for bound_to, strict in limits:
@@ -4160,6 +4176,7 @@ def read_side(
                     limits=set(),
                     tables=set(),
                     conditions=[],
+                    joins=set(),
                     unresolved=tuple(
                         sorted(
                             {f"{stop.source} -- {stop.reason}" for stop in run.unresolved}
@@ -4297,6 +4314,10 @@ def read_site_nodes(
                 callers_complete=at.callers_complete,
                 callers_stop=list(at.callers_stop),
                 tables=sorted(at.tables),
+                joins=[
+                    JoinPair(a=a, b=b, a_source=a_source, b_source=b_source, a_attr=a_attr, b_attr=b_attr)
+                    for a, b, a_source, b_source, a_attr, b_attr in sorted(at.joins or ())
+                ],
                 # Empty only where the call names no varmap to read -- one
                 # statement in the corpus, ``querySQLS(sql.format(t), {})``,
                 # whose values are all literals in the text.  There is no
