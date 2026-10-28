@@ -304,6 +304,64 @@ def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_it
     assert pushed.settled.get("outside_returns_outside") == 1
     assert [hole.callee for hole in loose.holes] == ["self.loose.send"]
 
+
+_BY_NAME = (
+    "import queue\n\n"
+    "class Writer:\n"
+    "    def save(self):\n"
+    "        write_status()\n\n"
+    "class Quiet:\n"
+    "    def note(self):\n"
+    "        pass\n\n"
+    "class Runner:\n"
+    "    def execute(self, sql):\n"
+    "        pass\n\n"
+    "def write_status():\n"
+    "    pass\n\n"
+    "def quiet(thing):\n"
+    "    thing.note()\n\n"
+    "def loud(thing):\n"
+    "    thing.save()\n\n"
+    "def handed(q: queue.Queue):\n"
+    "    q.put(1)\n\n"
+    "def run(cur):\n"
+    "    cur.execute('UPDATE t SET a=1')\n"
+)
+
+
+def test_a_call_left_open_closes_by_its_name_where_no_function_of_the_name_reaches_the_destination(tmp_path):
+    """MV 4 (O1): ``thing.note()`` on a receiver nothing declares lands, if anywhere in the corpus, at ``Quiet.note``,
+    which writes nothing: the answer is ``[]``, the hole is listed as closed and the assumption counted.
+    ``thing.save()`` may land at ``Writer.save``, which reaches the write: it stays open.  A queue's ``put`` and a
+    database call whose statement was not read are closed by no name, though ``Runner.execute`` writes nothing."""
+
+    def leaves(file, func, call, placed):
+        if getattr(call.func, "attr", "") == "execute":
+            return "hole", f"{reach.HOLE_STATEMENT_NOT_READ}: no statement this function builds reaches this call"
+        return None
+
+    record = _record(tmp_path, leaves=leaves, mod=_BY_NAME)
+    destination = _writing("pkg/mod.py::write_status")
+
+    quiet = record.reach(["pkg/mod.py::quiet"], destination)
+    loud = record.reach(["pkg/mod.py::loud"], destination)
+    handed = record.reach(["pkg/mod.py::handed"], destination)
+    run = record.reach(["pkg/mod.py::run"], destination)
+    unclosed = record.reach(["pkg/mod.py::quiet"], destination, by_name=False)
+    lines = _BY_NAME.split("\n")
+    noted, saved = (
+        next(n for n, line in enumerate(lines, 1) if call in line) for call in ("thing.note()", "thing.save()")
+    )
+
+    assert (quiet.writes, quiet.holes, quiet.assumptions.get("closed_by_name")) == ([], [], 1)
+    assert [hole.split(" -- ")[0] for hole in quiet.closed] == [f"pkg/mod.py::quiet:{noted} thing.note"]
+    assert loud.writes is None
+    assert [hole.split(" -- ")[0] for hole in loud.holes] == [f"pkg/mod.py::loud:{saved} thing.save"]
+    assert loud.closed == []
+    assert handed.writes is None and reach.HOLE_QUEUE in handed.holes[0]
+    assert run.writes is None and reach.HOLE_STATEMENT_NOT_READ in run.holes[0]
+    assert unclosed.writes is None and unclosed.closed == []
+
 def test_what_outside_code_returns_from_a_corpus_object_it_was_handed_is_not_taken_as_outside(
     tmp_path,
 ):

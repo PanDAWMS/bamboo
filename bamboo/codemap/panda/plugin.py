@@ -1194,7 +1194,7 @@ class _DatabaseLeaves:
                     # ``JediTaskBuffer.queryTasksToPreassign_JEDI`` hands its caller's statement on to the proxy's,
                     # which updates the tasks it picks: followed, as a run of it is.
                     return None if runners[called.attr].own else ("database", "runner_runs_callers_sql")
-                return "hole", f"the statement is not read: {skipped[call.lineno]}"
+                return "hole", f"{reach.HOLE_STATEMENT_NOT_READ}: {skipped[call.lineno]}"
             if _on_driver(call, placed):
                 return "hole", "the statement this runs is read nowhere"
             return None

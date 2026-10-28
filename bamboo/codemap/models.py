@@ -5398,7 +5398,15 @@ class Reach(BaseModel):
     writes: Optional[list[ReachWrite]] = None
     holes: list[str] = Field(
         default_factory=list,
-        description="``owner:line callee -- why`` for each hole in the closure.",
+        description="``owner:line callee -- why`` for each hole in the closure, but those :attr:`closed` lists.",
+    )
+    closed: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``owner:line callee -- why`` of each hole closed by its call's name (``closed_by_name``): no function "
+            "of the corpus of that name, nor anything it reaches, writes the destination.  Only where no write is "
+            "reached."
+        ),
     )
     assumptions: dict[str, int] = Field(
         default_factory=dict,

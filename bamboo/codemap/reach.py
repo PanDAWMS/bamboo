@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import re
 from collections import Counter, deque
 from typing import Callable, Iterable, Iterator, Optional
 
@@ -91,6 +92,10 @@ ASSUMPTIONS: dict[str, str] = {
         "run it, and nothing of the corpus."
     ),
     "driver_talks_only_to_db": "A call on the database driver -- a cursor, a connection -- goes only to the database.",
+    "closed_by_name": (
+        "A call left open lands, if anywhere in the corpus, at a function of the corpus of its name: where none of "
+        "those, nor anything they reach, writes the destination, the call writes none of it (MV 4, O1)."
+    ),
 }
 
 #: A database leaf or a hole for a call, as a build's plugin reads it:
@@ -102,6 +107,12 @@ HOLE_LOCAL_CALLED = "a local or a parameter is called"
 HOLE_QUEUE = "hands a value to another thread or process through a queue"
 HOLE_FAILED = "placing it failed"
 HOLE_OUTSIDE_START = "start() of a class built outside the corpus may run its run"
+#: How a plugin's leaves say a database call whose statement the build could not read: it may be a write.
+HOLE_STATEMENT_NOT_READ = "the statement is not read"
+#: Holes no name closes (:class:`_ByName`): whoever takes a queue's value, a ``run`` a ``start()`` of a class built
+#: outside the corpus may run, a statement not read.
+_NOT_BY_NAME = (HOLE_QUEUE, HOLE_OUTSIDE_START, HOLE_STATEMENT_NOT_READ)
+_HOLE_TEXT = re.compile(r"^(?P<owner>.*?):(?P<line>\d+) (?P<callee>.*?) -- (?P<why>.*)$")
 
 #: The library classes whose ``put()`` hands a value to whoever ``get()``s it
 #: -- another thread, another process, another task.
@@ -2619,6 +2630,54 @@ class Destination:
         self.unmatched = unmatched
 
 
+def _named_call(hole: str) -> Optional[str]:
+    """The name *hole*'s call is made with -- ``mb_proxy.send`` gives ``send`` --, or ``None`` where no name can close
+    it: a hole of :data:`_NOT_BY_NAME`, a called local or parameter, a callee cut short, no call (a write no function
+    holds)."""
+    found = _HOLE_TEXT.match(hole)
+    if found is None or found.group("why").startswith(_NOT_BY_NAME):
+        return None
+    callee = found.group("callee")
+    _head, dot, name = callee.rpartition(".")
+    return name if dot and not callee.endswith("…") and name.isidentifier() else None
+
+
+class _ByName:
+    """Which call names can reach a write of one destination: the least fixpoint over names (MV 4, O1).
+
+    A name can where a function of the corpus of that name reaches a write of the destination, leaves a hole no name
+    closes, or makes a call whose name can.  A name no function of the corpus has lands in no corpus code
+    (``no_runtime_methods``), and cannot."""
+
+    def __init__(self, graph: "ReachGraph", destination: Destination):
+        self.graph, self.destination = graph, destination
+        self._read: dict[str, tuple[bool, set[Optional[str]]]] = {}
+        self._can: set[str] = set()
+
+    def can(self, name: str) -> bool:
+        todo = [name]
+        while todo:
+            one = todo.pop()
+            if one in self._read:
+                continue
+            owners = self.graph.functions_named(one)
+            if not owners:
+                self._read[one] = (False, set())
+                continue
+            answer = self.graph.reach(owners, self.destination, by_name=False)
+            inner = {_named_call(hole) for hole in answer.holes}
+            self._read[one] = (bool(answer.writes), inner)
+            todo.extend(other for other in inner if other is not None and other not in self._read)
+        changed = True
+        while changed:
+            changed = False
+            for one, (writes, inner) in self._read.items():
+                if one not in self._can and (writes or None in inner or inner & self._can):
+                    self._can.add(one)
+                    changed = True
+        return name in self._can
+
+
 class ReachGraph:
     """The record :func:`graph` built, read: which function holds a line, which a junction owner names, what a start reaches."""
 
@@ -2626,7 +2685,11 @@ class ReachGraph:
         self.rows = {row.owner: row for row in rows}
         self._by_file: dict[str, list[ReachNode]] = {}
         self._spelled: dict[str, list[tuple[str, int, str]]] = {}
+        self._functions: dict[str, list[str]] = {}
+        # Per destination, kept with it so its id is not reused (a destination is built per question).
+        self._closers: dict[int, tuple[Destination, _ByName]] = {}
         for row in rows:
+            self._functions.setdefault(row.function, []).append(row.owner)
             if row.anchor is not None:
                 self._by_file.setdefault(row.anchor.file, []).append(row)
             for hole in row.holes:
@@ -2676,8 +2739,16 @@ class ReachGraph:
             row.owner for row in self._by_file.get(file, ()) if row.function == bare
         ]
 
-    def reach(self, starts: list[str], destination: Destination) -> Reach:
-        """What *starts* reach: the writes, or whether none can be said (see :class:`Reach`)."""
+    def functions_named(self, name: str) -> list[str]:
+        """The owner of every function of the record named *name*: where a call of that name can land."""
+        return self._functions.get(name, [])
+
+    def reach(self, starts: list[str], destination: Destination, by_name: bool = True) -> Reach:
+        """What *starts* reach: the writes, or whether none can be said (see :class:`Reach`).
+
+        Where no write is reached, a hole whose call's name no function of the corpus reaching the destination has
+        (:class:`_ByName`) is closed by ``closed_by_name`` and listed in :attr:`Reach.closed`; *by_name* off, none
+        is."""
         start_nodes = []
         for owner in starts:
             row = self.rows.get(owner)
@@ -2719,6 +2790,7 @@ class ReachGraph:
         assumptions: Counter = Counter()
         for owner in owners:
             assumptions.update(self.rows[owner].settled)
+        closed: list[str] = []
         writes = []
         for node in came:
             owner = node[0]
@@ -2737,9 +2809,22 @@ class ReachGraph:
                         chain=list(reversed(chain)),
                     )
                 )
+        if by_name and not writes and holes:
+            held = self._closers.get(id(destination))
+            if held is None or held[0] is not destination:
+                held = self._closers[id(destination)] = (destination, _ByName(self, destination))
+            names = held[1]
+            kept: list[str] = []
+            for hole in holes:
+                called = _named_call(hole)
+                (closed if called is not None and not names.can(called) else kept).append(hole)
+            holes = kept
+            if closed:
+                assumptions["closed_by_name"] += len(closed)
         return Reach(
             writes=writes if writes or not holes else None,
             holes=holes,
+            closed=closed,
             assumptions=dict(sorted(assumptions.items())),
             closure=len(owners),
         )
