@@ -40,15 +40,11 @@ from bamboo.codemap.lookup import CodeMap
 
 
 async def _vocabulary(map_id: str, dump: Path) -> list[dict]:
-    from bamboo.codemap.store import dump_graph
+    from bamboo.codemap.store import load_dump
 
-    db = await dump_graph(dump)
-    try:
-        terms = await CodeMap(db, map_id=map_id).vocabulary()
-    finally:
-        await db.close()
+    terms = await CodeMap(load_dump(dump), map_id=map_id).vocabulary()
     # Sorted by key so the draw depends on the map's content and not on the
-    # order the store happened to return.
+    # order the dump happened to hold.
     return [
         {
             "kind": term.kind,

@@ -114,6 +114,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "exits",
         "crosses_to",
         "crosses_open",
+        "joins",
         "result",
     ),
     # ``calls``, ``joined_entities`` and ``dispatch`` are what the owner
@@ -406,7 +407,7 @@ def _key(node: Any) -> tuple[str, str]:
 
 def _index(fragment: MapFragment) -> dict[tuple[str, str], Any]:
     nodes: dict[tuple[str, str], Any] = {}
-    # Every kind ``store_fragment`` writes, from the one tuple both read.
+    # Every kind the map's reader takes (``lookup._fragment_nodes``), from the one tuple both read.
     # ``log_sites`` was once missing from a list written out here, so
     # ``CONTENT_FIELDS[LOG_SITE]`` was answering a question nobody asked and all
     # 294 of them compared as absent from both builds.

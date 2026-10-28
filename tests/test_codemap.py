@@ -16,7 +16,6 @@ from __future__ import annotations
 import ast
 import contextlib
 from collections import Counter
-from unittest.mock import AsyncMock
 
 import click.testing
 import pytest
@@ -296,63 +295,6 @@ def test_content_hash_changes_when_the_condition_changes():
     after = JunctionNode(branches=[Branch(outcome="ready", path_condition=["a > 2"])], **common)
 
     assert before.content_hash() != after.content_hash()
-
-
-# --------------------------------------------------------------------------- #
-# storage namespace
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_store_fragment_replaces_the_whole_map_it_writes():
-    """A build is one build of one corpus, and replaces the map it writes.
-
-    Clearing only this build's own stamp left a 54-node fragment of a
-    different source tree under the same ``map_id``, answering queries about
-    a corpus it was never built from.  The incident graph is still untouched:
-    ``clear_all`` would take human-validated knowledge with it.
-    """
-    fragment = MapFragment(
-        map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)]
-    )
-    graph_db = AsyncMock()
-    graph_db.clear_map.return_value = 3
-
-    from bamboo.codemap.store import store_fragment
-
-    written = await store_fragment(fragment, graph_db)
-
-    graph_db.clear_map.assert_awaited_once_with(MAP_ID)
-    graph_db.clear_all.assert_not_awaited()
-    assert written["value_enums"] == 1
-    assert graph_db.merge_map_node.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_store_fragment_says_how_much_it_deleted():
-    """The only destructive number in the build, so it is returned, not logged."""
-    fragment = MapFragment(
-        map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)]
-    )
-    graph_db = AsyncMock()
-    graph_db.clear_map.return_value = 54
-
-    from bamboo.codemap.store import store_fragment
-
-    assert (await store_fragment(fragment, graph_db))["cleared"] == 54
-
-
-@pytest.mark.asyncio
-async def test_store_fragment_can_write_beside_what_is_there():
-    """For a caller assembling one map from several fragments."""
-    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)])
-    graph_db = AsyncMock()
-
-    from bamboo.codemap.store import store_fragment
-
-    await store_fragment(fragment, graph_db, replace_map=False)
-
-    graph_db.clear_map.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------- #
@@ -11325,17 +11267,13 @@ def test_a_reader_whose_statement_the_map_holds_says_nothing():
 
 @pytest.mark.asyncio
 async def test_the_read_site_kind_is_on_every_list_that_has_to_know_about_it():
-    """``FilterStage`` was once missing from ``clear_map`` and stayed in the
-    database forever; ``log_sites`` was once missing from ``_index`` and all 294
-    of them compared as absent from both builds.  Several lists have to know
-    about a kind, and the two that matter most fail silently: a kind the store
-    does not write is stored as nothing, and a kind ``_index`` skips compares
-    equal to itself however much it changed."""
+    """``log_sites`` was once missing from ``_index`` and all 294 of them
+    compared as absent from both builds.  Several lists have to know about a
+    kind, and the two that matter most fail silently: a kind the reader does not
+    take is read as nothing, and a kind ``_index`` skips compares equal to
+    itself however much it changed."""
     from bamboo.codemap import lookup
-    from bamboo.codemap.store import store_fragment
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
 
-    assert NodeType.READ_SITE in CODE_MAP_NODE_TYPES
     assert NodeType.READ_SITE.value in diff.CONTENT_FIELDS
     assert lookup._MODELS[ReadSiteNode] is NodeType.READ_SITE
     assert "read_sites" in MapFragment.model_fields
@@ -11349,14 +11287,10 @@ async def test_the_read_site_kind_is_on_every_list_that_has_to_know_about_it():
         anchor=Anchor(package="pandaserver", file="x.py", line_start=7, line_end=7),
     )
 
-    # The store writes it and says so.
-    graph_db = AsyncMock()
-    graph_db.clear_map.return_value = 0
-    written = await store_fragment(
-        MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site]), graph_db
-    )
-    assert written["read_sites"] == 1
-    assert graph_db.merge_map_node.await_count == 1
+    # The reader takes it.
+    assert [node for node, _ in lookup._fragment_nodes(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site]), NodeType.READ_SITE
+    )] == [site]
 
     # And ``_index`` reaches it, so a change to one is a change the diff reports.
     fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site])
@@ -12822,7 +12756,7 @@ def test_two_identical_builds_report_as_identical():
 
 
 def _stored_kinds() -> dict[str, type]:
-    """``{node kind: model}`` for every part of a fragment the store writes."""
+    """``{node kind: model}`` for every part of a fragment that holds the map's nodes."""
     import typing
 
     from bamboo.codemap.models import MAP_NODE_GROUPS
@@ -12860,30 +12794,12 @@ def test_every_field_of_a_branch_and_an_entry_is_compared_or_says_why_not():
 
 
 def test_every_part_of_a_fragment_is_stored_and_compared_or_says_why_not():
-    """The store and ``diff`` read one tuple of stored parts, and every other
-    part of a fragment is named with the reason it is not compared."""
+    """The reader and ``diff`` read one tuple of the parts holding nodes, and
+    every other part of a fragment is named with the reason it is not compared."""
     from bamboo.codemap.models import MAP_NODE_GROUPS
 
     assert not set(MAP_NODE_GROUPS) & set(diff.NOT_COMPARED_PARTS)
     assert set(MAP_NODE_GROUPS) | set(diff.NOT_COMPARED_PARTS) == set(MapFragment.model_fields)
-
-
-async def test_the_store_writes_every_stored_part():
-    from bamboo.codemap.models import MAP_NODE_GROUPS
-    from bamboo.codemap.store import store_fragment
-
-    fragment = _fragment_of(
-        _stage_for_diff("-disk", ["a"], 100),
-        _junction_for_diff([Branch(outcome="ready", order=0)]),
-    )
-    graph = AsyncMock()
-    graph.clear_map.return_value = 0
-
-    written = await store_fragment(fragment, graph)
-
-    assert set(written) == {"cleared", *MAP_NODE_GROUPS}
-    assert written["filter_stages"] == 1 and written["junctions"] == 1
-    assert graph.merge_map_node.await_count == 2
 
 
 def test_extending_a_fragment_merges_every_part():
@@ -14462,21 +14378,18 @@ def test_two_cuts_sharing_a_signature_fail_the_identity_gate():
 
 
 def test_the_new_node_kind_is_on_every_list_that_has_to_know_about_it():
-    """``FilterStage`` was once missing from ``clear_map``, so stages from a
-    previous source version stayed in the database forever; and a kind missing
-    from ``CONTENT_FIELDS`` compares equal to itself no matter what changed."""
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+    """A kind missing from ``CONTENT_FIELDS`` compares equal to itself no matter
+    what changed, and one missing from the groups is read as nothing."""
+    from bamboo.codemap.models import MAP_NODE_GROUPS
 
-    assert NodeType.LOOP_CUT in CODE_MAP_NODE_TYPES
+    assert "loop_cuts" in MAP_NODE_GROUPS
     assert NodeType.LOOP_CUT.value in diff.CONTENT_FIELDS
 
 
 def test_the_function_prints_kind_is_on_every_list_that_has_to_know_about_it():
     from bamboo.codemap import lookup
     from bamboo.codemap.models import MAP_NODE_GROUPS, FunctionPrintsNode
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
 
-    assert NodeType.FUNCTION_PRINTS in CODE_MAP_NODE_TYPES
     assert NodeType.FUNCTION_PRINTS.value in diff.CONTENT_FIELDS
     assert "function_prints" in MAP_NODE_GROUPS
     assert lookup._MODELS[FunctionPrintsNode] is NodeType.FUNCTION_PRINTS
@@ -15447,9 +15360,9 @@ def test_a_log_site_is_a_stored_kind():
     a question nobody put to it.  Which log will show a reader's query running
     is the point of the node; a build that moved it said nothing.
     """
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+    from bamboo.codemap.models import MAP_NODE_GROUPS
 
-    assert NodeType.LOG_SITE in CODE_MAP_NODE_TYPES
+    assert "log_sites" in MAP_NODE_GROUPS
     assert NodeType.LOG_SITE.value in diff.CONTENT_FIELDS
 
     def site(files):
@@ -18545,6 +18458,14 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
             "site_owner": site.owner,
             "site_line": site.anchor.line_start,
             "paths": ["()"],
+            "column": "jedi_tasks.jeditaskid",
+            "attr": "",
+            "column_unread": "",
+            "same_rows": False,
+            "never_at": [],
+            "via": [],
+            "reaches": [],
+            "reaches_open": [],
         }
     ]
     assert throttle.unread == ""
@@ -18696,6 +18617,526 @@ def test_a_write_of_a_function_no_call_places_has_no_route(tmp_path):
 
     (uncalled,) = by["sqlN"]
     assert (uncalled.routes, uncalled.routes_open, uncalled.out_on) == (0, True, [])
+
+
+_REREAD_SPECS = """
+class JediTaskSpec(object):
+    _attributes = ("jediTaskID", "status", "parent_tid")
+
+    def pack(self, values):
+        for i in range(len(self._attributes)):
+            attr = self._attributes[i]
+            val = values[i]
+            object.__setattr__(self, attr, val)
+"""
+
+_REREAD = '''
+from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec
+
+comment = " /* x */"
+
+
+class TaskModule:
+    def toFinish(self):
+        varMap = {}
+        varMap[":status1"] = "prepared"
+        varMap[":status2"] = "scouted"
+        sqlRT = "SELECT tabT.jediTaskID,tabT.status,tabT.parent_tid FROM ATLAS_PANDA.JEDI_Tasks tabT "
+        sqlRT += "WHERE tabT.status IN (:status1,:status2) "
+        self.cur.execute(sqlRT + comment, varMap)
+        resList = self.cur.fetchall()
+        retTasks = []
+        for jediTaskID, taskStatus, parentID in resList:
+            if taskStatus == "scouted":
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "running"
+                sqlSC = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID "
+                self.cur.execute(sqlSC + comment, varMap)
+            else:
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                sqlTS = "SELECT jediTaskID,status,parent_tid FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+                self.cur.execute(sqlTS + comment, varMap)
+                resTS = self.cur.fetchone()
+                taskSpec = JediTaskSpec()
+                taskSpec.pack(resTS)
+                retTasks.append(taskSpec)
+                varMap = {}
+                varMap[":jediTaskID"] = taskSpec.jediTaskID
+                sqlDS = "SELECT datasetID FROM ATLAS_PANDA.JEDI_Datasets WHERE jediTaskID=:jediTaskID "
+                self.cur.execute(sqlDS + comment, varMap)
+                varMap = {}
+                varMap[":jediTaskID"] = parentID
+                sqlP = "SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+                self.cur.execute(sqlP + comment, varMap)
+        return retTasks
+
+    def twice(self, jediTaskID, again):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        sqlW = "SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+        if again:
+            self.cur.execute(sqlW + comment, varMap)
+        else:
+            self.cur.execute(sqlW + comment, varMap)
+
+    def kinds(self, cols):
+        self.cur.execute("SELECT * FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s", {":s": "ready"})
+        every = self.cur.fetchall()
+        for row in every:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:a", {":a": row[0]})
+        self.cur.execute("SELECT COUNT(*),MAX(jediTaskID) FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s", {":s": "x"})
+        res = self.cur.fetchone()
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:b", {":b": res[1]})
+        self.cur.execute("SELECT {0} FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s".format(cols), {":s": "y"})
+        one = self.cur.fetchone()
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:c", {":c": one[2]})
+        spec = JediTaskSpec()
+        spec.pack(one)
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:h", {":h": spec.lockedBy})
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:i", {":i": spec.parent_tid})
+
+    def texts(self, defined):
+        if defined:
+            sqlA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        else:
+            sqlA = "SELECT jediTaskID,parent_tid+1 FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        self.cur.execute(sqlA + comment, {":s": "done"})
+        resA = self.cur.fetchall()
+        for row in resA:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:d", {":d": row[0]})
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:e", {":e": row[1]})
+        if defined:
+            sqlB = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        else:
+            sqlB = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Datasets WHERE status=:s "
+        self.cur.execute(sqlB + comment, {":s": "done"})
+        resB = self.cur.fetchall()
+        for row in resB:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:f", {":f": row[0]})
+        sqlC = "SELECT * FROM (SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        sqlC += "ORDER BY jediTaskID) WHERE rownum<=:n "
+        self.cur.execute(sqlC + comment, {":s": "done", ":n": 10})
+        resC = self.cur.fetchall()
+        for row in resC:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:g", {":g": row[0]})
+        if defined:
+            sqlK = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        else:
+            sqlK = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks_Old WHERE status=:s "
+        self.cur.execute(sqlK + comment, {":s": "done"})
+        resK = self.cur.fetchall()
+        for row in resK:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:k", {":k": row[0]})
+        sqlO = "UPDATE ATLAS_PANDA.JEDI_Tasks_Old SET status=:st,parent_tid=:pt WHERE jediTaskID=:t "
+        self.cur.execute(sqlO + comment, {":st": "done", ":pt": None, ":t": 1})
+
+    def restart(self):
+        sqlTL = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status IN (:s1,:s2) "
+        self.cur.execute(sqlTL + comment, {":s1": "defined", ":s2": "ready"})
+        resTL = self.cur.fetchall()
+        sqlTD = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID "
+        for jediTaskID, taskStatus in resTL:
+            if taskStatus == "defined":
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "defined"
+                self.cur.execute(sqlTD + comment, varMap)
+            else:
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "defined"
+                self.cur.execute(sqlTD + comment, varMap)
+        self.cur.execute("SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s" + comment, {":s": "ready"})
+        resTW = self.cur.fetchall()
+        for (jediTaskID,) in resTW:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":newStatus"] = "defined"
+            self.cur.execute(sqlTD + comment, varMap)
+'''
+
+
+def _reread(tmp_path):
+    """The KeyFroms of :data:`_REREAD`'s statements, read sources and all, with a schema giving the tables' keys, and
+    a function of the source to find a line by its text."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/JediTaskSpec.py": _REREAD_SPECS, rel: _REREAD}
+    )
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    # As the build hands them: the attributor the attribute slice reads with, which learns no table, and the
+    # tables' classes from the one that did.
+    audited = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    schema = {
+        "jedi_tasks": frozenset({"jeditaskid", "status", "parent_tid"}),
+        "jedi_tasks_old": frozenset({"jeditaskid", "status", "parent_tid"}),
+        "jedi_datasets": frozenset({"jeditaskid", "datasetid"}),
+    }
+    keys = {
+        "jedi_tasks": frozenset({"jeditaskid"}),
+        "jedi_tasks_old": frozenset({"jeditaskid"}),
+        "jedi_datasets": frozenset({"jeditaskid", "datasetid"}),
+    }
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls), sqltext.with_schema(schema, keys, {}):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [],
+            junctions,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            table_class=attributor.class_for_table,
+            modules=modules,
+            attributor=audited,
+        )
+    lines = _REREAD.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    return [one for one in froms if one.term], sites, at
+
+
+def test_a_read_statements_terms_say_which_rows_fill_them_and_whether_they_are_the_same_rows(tmp_path):
+    """getTasksToBeFinished_JEDI's shape (the querier's A11, K28): a statement's rows fill the key of a read of the
+    same table by its key -- the same rows, read again -- of a write of them, of a read of another table by them, and
+    of a read of the same table by another column; each source says the column, and the values the statement
+    selects at which the keyed statement never runs, by the test on the rows' status on its way."""
+    froms, sites, at = _reread(tmp_path)
+    by = {(one.statement, one.term): one for one in froms}
+    (rt,) = [site for site in sites if site.anchor.line_start == at("self.cur.execute(sqlRT")]
+    assert sorted(rt.selects) == ["JediTaskSpec.status=prepared", "JediTaskSpec.status=scouted"]
+
+    def rows(line: int) -> list[tuple]:
+        (key_from,) = [one for (statement, term), one in by.items() if statement == line and "jediTaskID" in term]
+        return [
+            (s.name.rsplit("@", 1)[1], s.column, s.attr, s.column_unread, s.same_rows, s.never_at)
+            for s in key_from.sources
+            if s.kind == "rows"
+        ]
+
+    ts = by[(at("self.cur.execute(sqlTS"), "jediTaskID=:jediTaskID")]
+    assert (ts.reads, ts.writes, ts.table, ts.attr, ts.unread) == (True, {}, "JEDI_Tasks", "JediTaskSpec.jediTaskID", "")
+    (site_ts,) = [site for site in sites if site.anchor.line_start == ts.statement]
+    assert site_ts.owner == ts.owner
+    rt_line = str(rt.anchor.line_start)
+    # Read again: the task's own rows, by its key, from the key column -- and not at the value that takes the if.
+    assert rows(ts.statement) == [
+        (rt_line, "jedi_tasks.jeditaskid", "JediTaskSpec.jediTaskID", "", True, ["JediTaskSpec.status=scouted"])
+    ]
+    # A write of the same rows, under the if: never at the other value.
+    assert rows(at("self.cur.execute(sqlSC")) == [
+        (rt_line, "jedi_tasks.jeditaskid", "JediTaskSpec.jediTaskID", "", True, ["JediTaskSpec.status=prepared"])
+    ]
+    # Another table by the rows read again: a link, the field of the packed object its column by name.
+    ts_line = str(ts.statement)
+    assert rows(at("self.cur.execute(sqlDS")) == [
+        (ts_line, "jedi_tasks.jeditaskid", "JediTaskSpec.jediTaskID", "", False, [])
+    ]
+    # The same table by another column: the parent's row, not these.
+    assert rows(at("self.cur.execute(sqlP")) == [
+        (rt_line, "jedi_tasks.parent_tid", "JediTaskSpec.parent_tid", "", False, ["JediTaskSpec.status=scouted"])
+    ]
+    # The status list is a term of the statement's own, filled by literals.
+    rt_terms = [one for one in froms if one.statement == rt.anchor.line_start]
+    assert [(one.term, [s.kind for s in one.sources]) for one in rt_terms] == [
+        ("status IN (:status1, :status2)", ["constant", "constant"])
+    ]
+
+
+def test_a_read_run_from_two_places_is_one_keyfrom_at_its_read_sites_line(tmp_path):
+    """One text with one map run from two calls is one run, its read site at the first: the KeyFrom is that line's,
+    so a reader joining a source's statement to the read site cannot miss it on the second."""
+    froms, sites, at = _reread(tmp_path)
+    twice = [one for one in froms if one.owner.endswith("::twice")]
+    (site,) = [one for one in sites if one.owner.endswith("::twice")]
+    assert [(one.statement, one.term, [(s.kind, s.name) for s in one.sources]) for one in twice] == [
+        (site.anchor.line_start, "jediTaskID=:jediTaskID", [("parameter", "jediTaskID")])
+    ]
+    assert site.anchor.line_start == at("self.cur.execute(sqlW")
+
+
+def test_a_rows_source_says_why_it_names_no_column(tmp_path):
+    """``SELECT *``, an aggregate, a position a hole's columns fill, a field of an object packed from a hole that the
+    table has no column of: the rows fill the key, and which column is not said, with why -- a field it has is its
+    column."""
+    froms, _sites, _at = _reread(tmp_path)
+    kinds = {one.term: one for one in froms if one.owner.endswith("::kinds")}
+    assert {
+        term: [(s.kind, s.column, s.column_unread) for s in kinds[term].sources]
+        for term in ("jediTaskID=:a", "jediTaskID=:b", "jediTaskID=:c", "jediTaskID=:h", "jediTaskID=:i")
+    } == {
+        "jediTaskID=:a": [("rows", "", "select *")],
+        "jediTaskID=:b": [("rows", "", "an expression")],
+        "jediTaskID=:c": [("rows", "", "in a hole")],
+        "jediTaskID=:h": [("rows", "", "no item")],
+        "jediTaskID=:i": [("rows", "jedi_tasks.parent_tid", "")],
+    }
+
+
+def test_a_value_s_column_is_read_on_each_select_list_of_the_statement_s_texts(tmp_path):
+    """One line, two texts by an ``if``: a value is the column both lists give at its place, and where they give
+    two -- another column, another table -- which is not said, with why, and the subject where both are one (a
+    table of the same class); a ``*`` over one derived table is its list (``getJobs``'s ``SELECT * FROM (SELECT
+    PandaID, ...) WHERE rownum<=:n``)."""
+    froms, _sites, _at = _reread(tmp_path)
+    texts = {one.term: one for one in froms if one.owner.endswith("::texts")}
+    task = "JediTaskSpec.jediTaskID"
+    assert {
+        term: [(s.kind, s.column, s.attr, s.column_unread) for s in texts[term].sources]
+        for term in ("jediTaskID=:d", "jediTaskID=:e", "jediTaskID=:f", "jediTaskID=:g", "jediTaskID=:k")
+    } == {
+        "jediTaskID=:d": [("rows", "jedi_tasks.jeditaskid", task, "")],
+        "jediTaskID=:e": [("rows", "", "", "texts differ")],
+        "jediTaskID=:f": [("rows", "", "", "texts differ")],
+        "jediTaskID=:g": [("rows", "jedi_tasks.jeditaskid", task, "")],
+        "jediTaskID=:k": [("rows", "", task, "texts differ")],
+    }
+
+
+def test_a_statement_run_from_several_calls_never_runs_at_a_value_only_where_the_call_handed_the_value_does_not(
+    tmp_path,
+):
+    """restartTasksForContentsUpdate_JEDI's shape: one statement run in both arms of a test on the rows' status and
+    in a loop over another statement's rows, each call with its own bind -- the call another statement's rows reach
+    runs at every value, and does not keep the arms' sources from saying theirs."""
+    froms, sites, at = _reread(tmp_path)
+    (tl,) = [site for site in sites if site.anchor.line_start == at("self.cur.execute(sqlTL")]
+    assert sorted(tl.selects) == ["JediTaskSpec.status=defined", "JediTaskSpec.status=ready"]
+    tl_line = str(tl.anchor.line_start)
+    found = sorted(
+        (s.line, s.name.rsplit("@", 1)[1] == tl_line, s.never_at)
+        for one in froms
+        if one.owner.endswith("::restart") and one.term == "jediTaskID=:jediTaskID"
+        for s in one.sources
+        if s.kind == "rows"
+    )
+    assert [(same, never) for _line, same, never in found] == [
+        (True, ["JediTaskSpec.status=ready"]),
+        (True, ["JediTaskSpec.status=defined"]),
+        (False, []),
+    ]
+
+
+def test_a_select_list_reads_a_name_holding_a_hole_as_the_hole_and_a_star_over_one_derived_table_as_its_list():
+    """``{}{}`` is a hole spelled as two (a column list built in a loop, read on a pass that writes two), not a
+    column of that name; ``SELECT * FROM (SELECT a, b ...)`` returns the derived table's items, a ``*`` over a union
+    or a table stays one."""
+    hole = sqltext.SelectItem(sqltext.ITEM_HOLE, "jobsactive4")
+    assert sqltext.select_items("SELECT {}{} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID") == (hole,)
+    assert sqltext.select_items("SELECT {},{} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID") == (
+        hole,
+        sqltext.SelectItem(sqltext.ITEM_AFTER_HOLE),
+    )
+    derived = "SELECT * FROM (SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 tab WHERE x=:x) WHERE rownum<=:n"
+    assert sqltext.select_items(derived) == (
+        sqltext.SelectItem(sqltext.ITEM_COLUMN, "jobsactive4", "pandaid"),
+        sqltext.SelectItem(sqltext.ITEM_COLUMN, "jobsactive4", "jobstatus"),
+    )
+    star = sqltext.SelectItem(sqltext.ITEM_STAR)
+    assert sqltext.select_items("SELECT * FROM (SELECT a FROM t1 UNION SELECT a FROM t2)") == (star,)
+    assert sqltext.select_items("SELECT * FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p") == (star,)
+
+
+_ACROSS = '''
+from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec
+
+comment = " /* x */"
+
+
+class TaskModule:
+    def toFinish(self):
+        self.cur.execute("SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s" + comment, {":s": "done"})
+        resList = self.cur.fetchall()
+        for jediTaskID, taskStatus in resList:
+            taskSpec = self.readTask(jediTaskID)
+            self.finish(taskSpec)
+            self.lockTask(jediTaskID)
+
+    def elsewhere(self, someID):
+        taskSpec = self.readTask(someID)
+        self.other(taskSpec)
+
+    def toCheck(self):
+        self.cur.execute("SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s" + comment, {":s": "ok"})
+        res = self.cur.fetchall()
+        return res
+
+    def checker(self):
+        for jediTaskID, taskStatus in self.toCheck():
+            taskSpec = self.readTask(jediTaskID)
+            self.finish(taskSpec)
+
+    def readTask(self, jediTaskID):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        sqlTS = "SELECT jediTaskID,status,parent_tid FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlTS + comment, varMap)
+        res = self.cur.fetchone()
+        taskSpec = JediTaskSpec()
+        taskSpec.pack(res)
+        return taskSpec
+
+    def lockTask(self, jediTaskID):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        sqlLK = "SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID FOR UPDATE "
+        self.cur.execute(sqlLK + comment, varMap)
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = "locked"
+        sqlUL = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlUL + comment, varMap)
+
+    def finish(self, taskSpec):
+        varMap = {}
+        varMap[":jediTaskID"] = taskSpec.jediTaskID
+        varMap[":status"] = "finished"
+        sqlF = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlF + comment, varMap)
+
+    def other(self, taskSpec):
+        varMap = {}
+        varMap[":jediTaskID"] = taskSpec.jediTaskID
+        varMap[":status"] = "other"
+        sqlO = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlO + comment, varMap)
+'''
+
+
+def test_rows_reaching_a_key_through_calls_say_the_way_and_where_the_rows_read_again_go(tmp_path):
+    """getTaskWithID_JEDI's shape: a statement's ids handed to a helper reading each task again by its key, the task
+    returned and handed on; and to a junction's owner that reads them in a bind (the walk crosses to it, not through).
+    The source says the call it came by, the column, the same rows -- and where the task read again goes back up that
+    call alone, not to what another caller of the helper hands it to."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/JediTaskSpec.py": _REREAD_SPECS, rel: _ACROSS}
+    )
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    audited = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    schema = {"jedi_tasks": frozenset({"jeditaskid", "status", "parent_tid"})}
+    froms: list[KeyFrom] = []
+    landings: dict[str, list] = {}
+    with sql.across_calls(calls), sqltext.with_schema(schema, {"jedi_tasks": frozenset({"jeditaskid"})}, {}):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_crossings(sites, modules, junctions, calls, record, landings=landings)
+        sqlwrite.attach_key_sources(
+            [],
+            junctions,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            table_class=attributor.class_for_table,
+            modules=modules,
+            attributor=audited,
+            landings=landings,
+        )
+    lines = _ACROSS.split("\n")
+
+    def at(text: str, nth: int = 1) -> int:
+        return [number for number, line in enumerate(lines, 1) if text in line][nth - 1]
+
+    (source_site,) = [site for site in sites if site.owner.endswith("::toFinish")]
+
+    def rows(text: str) -> list[tuple]:
+        (key_from,) = [one for one in froms if one.statement == at(text) and one.term == "jediTaskID=:jediTaskID"]
+        return [
+            (one.via, one.column, one.same_rows, [owner.rsplit("::", 1)[1] for owner in one.reaches])
+            for one in key_from.sources
+            if one.kind == "rows" and one.name == source_site.name
+        ]
+
+    assert rows("self.cur.execute(sqlTS") == [
+        ([f"{rel}:{at('taskSpec = self.readTask(jediTaskID)')}"], "jedi_tasks.jeditaskid", True, ["finish"])
+    ]
+    # In an owner crossed to: the read there, and the write.
+    assert rows("self.cur.execute(sqlLK") == [
+        ([f"{rel}:{at('self.lockTask(jediTaskID)')}"], "jedi_tasks.jeditaskid", True, [])
+    ]
+    assert rows("self.cur.execute(sqlUL") == [
+        ([f"{rel}:{at('self.lockTask(jediTaskID)')}"], "jedi_tasks.jeditaskid", True, [])
+    ]
+    # Returned to a caller first, then handed down: the column is still the returning statement's.
+    (back_site,) = [site for site in sites if site.owner.endswith("::toCheck")]
+    (key_from,) = [
+        one for one in froms if one.statement == at("self.cur.execute(sqlTS") and one.term == "jediTaskID=:jediTaskID"
+    ]
+    assert [
+        (one.via, one.column, one.attr, one.same_rows)
+        for one in key_from.sources
+        if one.kind == "rows" and one.name == back_site.name
+    ] == [
+        (
+            [
+                f"{rel}:{at('for jediTaskID, taskStatus in self.toCheck()')}",
+                f"{rel}:{at('taskSpec = self.readTask(jediTaskID)', 2)}",
+            ],
+            "jedi_tasks.jeditaskid",
+            "JediTaskSpec.jediTaskID",
+            True,
+        )
+    ]
+
+
+_JOINED = '''
+comment = " /* x */"
+
+
+class TaskModule:
+    def joined(self):
+        sql = "SELECT d.datasetID FROM ATLAS_PANDA.JEDI_Datasets d, ATLAS_PANDA.JEDI_Dataset_Contents c "
+        sql += "WHERE d.jediTaskID=c.jediTaskID AND d.datasetID=c.datasetID AND c.status=:s "
+        sql += "AND NOT EXISTS (SELECT 1 FROM ATLAS_PANDA.JEDI_Tasks t WHERE t.jediTaskID=d.jediTaskID) "
+        self.cur.execute(sql + comment, {":s": "ready"})
+        sqlP = "SELECT a.jediTaskID FROM ATLAS_PANDA.JEDI_Tasks a LEFT OUTER JOIN ATLAS_PANDA.JEDI_Tasks b "
+        sqlP += "ON a.parent_tid=b.jediTaskID WHERE a.status=:s AND a.status=a.oldStatus "
+        self.cur.execute(sqlP + comment, {":s": "running"})
+
+    def set(self, jediTaskID):
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,parent_tid=:p WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sql + comment, {":status": "x", ":p": 1, ":jediTaskID": jediTaskID})
+'''
+
+
+def test_a_read_site_says_each_equality_joining_two_of_its_sources(tmp_path):
+    """The harness's P2 by joins: each column = column between two sources, a subquery's and an outer join's ``ON``
+    among them, each side's source as the statement names it -- so the two columns of a composite key share one
+    pair, and two aliases of one table are two sources -- and its subject where the table's class has the column.
+    Not a column compared with its own source's."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules = [_module(_REREAD_SPECS, "pandaserver/taskbuffer/JediTaskSpec.py"), _module(_JOINED, rel)]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+    by = {site.owner.rsplit("::", 1)[1] + "@" + str(site.anchor.line_start): site for site in sites}
+    joined = [site for name, site in by.items() if name.startswith("joined@")]
+    assert [[(one.a, one.b, one.a_source, one.b_source, one.a_attr, one.b_attr) for one in site.joins] for site in joined] == [
+        [
+            ("jedi_dataset_contents.datasetid", "jedi_datasets.datasetid", "c", "d", "", ""),
+            ("jedi_dataset_contents.jeditaskid", "jedi_datasets.jeditaskid", "c", "d", "", ""),
+            ("jedi_datasets.jeditaskid", "jedi_tasks.jeditaskid", "d", "t", "", "JediTaskSpec.jediTaskID"),
+        ],
+        [
+            (
+                "jedi_tasks.jeditaskid",
+                "jedi_tasks.parent_tid",
+                "b",
+                "a",
+                "JediTaskSpec.jediTaskID",
+                "JediTaskSpec.parent_tid",
+            )
+        ],
+    ]
 
 
 def test_a_key_filled_from_a_batch_is_the_batched_values_not_the_batch_size(tmp_path):

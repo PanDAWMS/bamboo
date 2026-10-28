@@ -58,11 +58,9 @@ class NodeType(str, Enum):
     DEPENDENCY = "Dependency"
     USER = "User"
 
-    # Code Map types.  These live in the same Neo4j database but form a
-    # separate namespace: they are machine-derived from source and can be
-    # rebuilt at will, whereas the incident types above are human-validated
-    # and irreplaceable.  Keeping the labels distinct is what lets
-    # ``clear_map()`` drop a Code Map without touching incident knowledge.
+    # Code Map types.  Machine-derived from source and rebuilt at will, kept
+    # in dumps (``build-map --dump``) and never in the database, whereas the
+    # incident types above are human-validated and irreplaceable.
     JUNCTION_POINT = "JunctionPoint"
     BOUNDARY = "Boundary"
     SUBJECT = "Subject"
@@ -75,34 +73,6 @@ class NodeType(str, Enum):
     READ_SITE = "ReadSite"
     FUNCTION_PRINTS = "FunctionPrints"
     REACH = "Reach"
-
-
-#: The labels that make up the Code Map namespace.
-#:
-#: Named here rather than spelled out at each use so that "which labels may a
-#: rebuild delete" is stated once.  Spelled out at the use site instead, the
-#: set silently went stale: ``clear_map`` was written before ``FilterStage``
-#: existed and kept deleting only four of the five, leaving stages from a
-#: previous source version behind forever.
-#:
-#: ``tests/test_docs.py`` checks this against the node models in
-#: ``bamboo.codemap.models``, which declare the same fact independently.
-CODE_MAP_NODE_TYPES: frozenset["NodeType"] = frozenset(
-    {
-        NodeType.JUNCTION_POINT,
-        NodeType.BOUNDARY,
-        NodeType.SUBJECT,
-        NodeType.ENTITY,
-        NodeType.VALUE_ENUM,
-        NodeType.FILTER_STAGE,
-        NodeType.LOOP_CUT,
-        NodeType.GLOSS,
-        NodeType.LOG_SITE,
-        NodeType.READ_SITE,
-        NodeType.FUNCTION_PRINTS,
-        NodeType.REACH,
-    }
-)
 
 
 class RelationType(str, Enum):

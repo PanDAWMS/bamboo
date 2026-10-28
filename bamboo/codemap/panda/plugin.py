@@ -678,12 +678,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # is the finding: an empty ``crosses_to`` on a statement that plainly
         # hands its rows on would otherwise read as "these rows go nowhere".
         record = reach.ReachGraph(fragment.reach_graph) if self._calls is not None else None
+        # Where the walk reaches the database through calls with a statement's rows in its binds: the KeyFroms'
+        # sources across calls, read in the next step.
+        landings: dict[str, list] = {}
         self.crossings = sqlwrite.attach_crossings(
             fragment.read_sites,
             self._modules,
             fragment.junctions,
             self._calls,
             record,
+            landings=landings,
         )
         lap("crossings")
         # Where each write's row keys were filled from, and who handed a guarded write its keys: read by the carry,
@@ -700,6 +704,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             # The objects no write persists: their arms read as the attribute slice reads them.
             modules=self._modules,
             attributor=audited,
+            landings=landings,
         )
         # The routes of calls on which each write never runs, its records all made (the objects' last).
         sqlwrite.attach_routes(fragment.key_froms, self._calls)

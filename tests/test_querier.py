@@ -127,8 +127,8 @@ def test_the_header_names_the_dump_installed_not_the_one_asked_for(tmp_path):
 
 
 def test_no_dump_no_map(tmp_path):
-    # the map lives in dumps only: an entry without MAP_DUMP stops, and a reader with no dump installed stops before
-    # it opens Neo4j's client, whose empty store would read as "nothing writes it"
+    # the map lives in dumps only: an entry without MAP_DUMP stops, and a reader with no dump installed stops, opening
+    # no graph client -- there is no other map, and reading none would say "nothing writes it"
     for unset in (None, ""):
         done = _run(tmp_path, "from bamboo.querier import mapdump; mapdump.install_from_env()", MAP_DUMP=unset)
         assert done.returncode != 0
@@ -154,6 +154,55 @@ def test_no_dump_no_map(tmp_path):
         )
     )
     assert "no map dump is installed" in out
+
+
+def test_the_dump_stays_as_it_was_read(tmp_path):
+    # every reader asks the installed dump through mapdump.code_map, which opens no graph client and stores nothing (a
+    # store gave each node an id and a valid_for): with the client refused after the install, readers in turn get the
+    # map's answers and leave the dump as it was read
+    out = _ok(
+        _run(
+            tmp_path,
+            f"""
+            import asyncio, json
+            from bamboo.codemap.models import Anchor, Branch, JunctionNode, MapFragment, SubjectNode
+            from bamboo.database import graph_database_client
+            from bamboo.querier import mapdump, rows
+
+            class Refused:
+                def __init__(self, *a, **k):
+                    raise AssertionError("a graph client was opened")
+
+            owner, subject, built = "pandajedi/a.py::A.run", "JediTaskSpec.status", "panda-server-source 1.0.2"
+            fragment = MapFragment(
+                map_id="panda",
+                derived_from="source-root:{_corpus(tmp_path)}",
+                subjects=[SubjectNode(name=subject, map_id="panda", derived_from=built, spec_class="JediTaskSpec", attribute="status")],
+                junctions=[JunctionNode(
+                    name=JunctionNode.make_name("panda", subject, owner), map_id="panda", derived_from=built, subject=subject,
+                    owner=owner, branches=[Branch(outcome="ready", line=10)],
+                    anchor=Anchor(package="pandajedi", file="pandajedi/a.py", line_start=42),
+                )],
+            )
+            with open("map.json", "w") as f:
+                f.write(fragment.model_dump_json())
+            mapdump.install("map.json")
+            graph_database_client.GraphDatabaseClient = Refused
+            read = mapdump.fragment().model_dump_json()
+
+            async def reader():
+                code_map = mapdump.code_map("the test")
+                return [len(await code_map.subjects()), len(await code_map.writers_of(subject)), await code_map.versions()]
+
+            first, second = asyncio.run(reader()), asyncio.run(reader())
+            print(json.dumps([first, second, rows._function_prints(owner), mapdump.fragment().model_dump_json() == read]))
+            """,
+        )
+    )
+    first, second, prints, unchanged = json.loads(out)
+    assert first == second == [1, 1, ["panda-server-source 1.0.2"]]
+    assert prints is None  # asked, and the dump holds no prints of the owner
+    assert unchanged
 
 
 def test_handed_to_binds_arguments_and_states_defaults(tmp_path):

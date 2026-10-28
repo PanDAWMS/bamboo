@@ -2,9 +2,10 @@
 
 This was also ``bamboo derive-strategy``, the command that printed the walk's
 strategy for a reader and read the map from Neo4j.  The map is kept as dumps now,
-read through the querier's in-memory backend (``bamboo.querier.mapdump``), and the
+read from the dump the querier installs (``bamboo.querier.mapdump``), and the
 command had no user left, so it and its report are gone.  What stays is the walk:
-:func:`_investigate` is what ``bamboo.querier.rerun`` calls, by this module's name.
+:func:`_investigate` is what ``bamboo.querier.rerun`` calls, by this module's name,
+handing it a ``CodeMap`` on that dump.
 """
 
 from __future__ import annotations
@@ -88,8 +89,7 @@ async def walk(
 
 
 async def _investigate(
-    map_id: str,
-    version: Optional[str],
+    code_map: CodeMap,
     symptom: Optional[Symptom],
     description: Optional[str],
     task_id: Optional[str],
@@ -97,33 +97,25 @@ async def _investigate(
     budget: int,
     settle: Optional[Callable[[Strategy], Strategy]],
 ) -> tuple[Investigation, list]:
-    from bamboo.database.graph_database_client import GraphDatabaseClient
-
-    graph_db = GraphDatabaseClient()
-    await graph_db.connect()
-    try:
-        code_map = CodeMap(graph_db, map_id=map_id, version=version)
-        matches: list = []
-        if symptom is None:
-            # Resolution needs the map, so it happens here rather than in the
-            # caller: the vocabulary is the map's, and building a second copy
-            # of it outside would be a second thing to keep current.
-            matches = strategy_mod.resolve(description or "", await code_map.vocabulary())
-            if not matches:
-                raise LookupError(
-                    "nothing in this map's vocabulary matches that description.  "
-                    "Name a subject and a value instead, or say it in the map's own "
-                    "words -- a status, a rejection reason, a brokerage step."
-                )
-            symptom = matches[0].term.symptom.model_copy(
-                update={
-                    "task_id": task_id or strategy_mod.entity_in(description or ""),
-                    "observed_diag": observed_diag,
-                }
+    matches: list = []
+    if symptom is None:
+        # Resolution needs the map, so it happens here rather than in the
+        # caller: the vocabulary is the map's, and building a second copy
+        # of it outside would be a second thing to keep current.
+        matches = strategy_mod.resolve(description or "", await code_map.vocabulary())
+        if not matches:
+            raise LookupError(
+                "nothing in this map's vocabulary matches that description.  "
+                "Name a subject and a value instead, or say it in the map's own "
+                "words -- a status, a rejection reason, a brokerage step."
             )
-        # The description only ever chooses the first question.  Every hop after
-        # it is chosen by what the map opened and the evidence left standing,
-        # which is why resolution happens once and outside the walk.
-        return await walk(code_map, symptom, budget=budget, settle=settle), matches
-    finally:
-        await graph_db.close()
+        symptom = matches[0].term.symptom.model_copy(
+            update={
+                "task_id": task_id or strategy_mod.entity_in(description or ""),
+                "observed_diag": observed_diag,
+            }
+        )
+    # The description only ever chooses the first question.  Every hop after
+    # it is chosen by what the map opened and the evidence left standing,
+    # which is why resolution happens once and outside the walk.
+    return await walk(code_map, symptom, budget=budget, settle=settle), matches

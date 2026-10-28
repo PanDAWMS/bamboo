@@ -724,27 +724,14 @@ _GRAPH: dict = {}
 
 
 def _function_prints(owner: str):
-    """The map's ``FunctionPrintsNode`` for *owner*, or None: one connection per process.
-
-    The client class is looked up at call time, so the
-    in-memory map of :func:`bamboo.querier.mapdump.install` stands in for Neo4j the same way it does for the rest;
-    with no dump installed it stops (:func:`bamboo.querier.mapdump.require`).
-    """
+    """The map's ``FunctionPrintsNode`` for *owner*, or None: one reader of the installed dump per process
+    (:func:`bamboo.querier.mapdump.code_map`); with no dump installed it stops."""
     if owner in _GRAPH:
         return _GRAPH[owner]
     import asyncio
-    import atexit
-
-    from bamboo.codemap.lookup import CodeMap
-    from bamboo.database import graph_database_client
 
     if "loop" not in _GRAPH:
-        mapdump.require(f"the prints of {owner}")
-        loop = asyncio.new_event_loop()
-        client = graph_database_client.GraphDatabaseClient()
-        loop.run_until_complete(client.connect())
-        _GRAPH["loop"], _GRAPH["map"] = loop, CodeMap(client, map_id="panda", version=None)
-        atexit.register(lambda: loop.run_until_complete(client.close()))
+        _GRAPH["loop"], _GRAPH["map"] = asyncio.new_event_loop(), mapdump.code_map(f"the prints of {owner}")
     found = _GRAPH["loop"].run_until_complete(_GRAPH["map"].function_prints([owner]))
     _GRAPH[owner] = found.get(owner)
     return _GRAPH[owner]

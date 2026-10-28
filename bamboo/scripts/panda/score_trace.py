@@ -223,14 +223,10 @@ async def _draw(
     """
     from bamboo.codemap.lookup import CodeMap
     from bamboo.codemap.models import JunctionNode
-    from bamboo.codemap.store import dump_graph
+    from bamboo.codemap.store import load_dump
 
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
-    graph_db = await dump_graph(dump, source_root)
-    try:
-        junctions = await CodeMap(graph_db, map_id=map_id)._find(JunctionNode)
-    finally:
-        await graph_db.close()
+    junctions = await CodeMap(load_dump(dump, source_root), map_id=map_id)._find(JunctionNode)
 
     arms: list[dict] = []
     kind_counts: Counter = Counter()
@@ -649,15 +645,10 @@ async def _scan(map_id: str, source_root: Optional[Path], budget, top: int, dump
     """Walk every arm the map can locate, and count the weaker answers."""
     from bamboo.codemap.lookup import CodeMap
     from bamboo.codemap.models import JunctionNode
-    from bamboo.codemap.store import dump_graph
+    from bamboo.codemap.store import load_dump
 
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
-    graph_db = await dump_graph(dump, source_root)
-    try:
-        code_map = CodeMap(graph_db, map_id=map_id)
-        junctions = await code_map._find(JunctionNode)
-    finally:
-        await graph_db.close()
+    junctions = await CodeMap(load_dump(dump, source_root), map_id=map_id)._find(JunctionNode)
 
     arms = walked = steps_total = 0
     hits: list = []

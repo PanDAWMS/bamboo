@@ -1759,6 +1759,26 @@ class OpenCrossing(BaseModel):
     callee: str = Field(..., description="As :attr:`ReachHole.callee` spells it.")
 
 
+class JoinPair(BaseModel):
+    """A column of one source of a statement compared equal with a column of another (:func:`sqltext.equalities`):
+    how two tables meet in it -- ``tabD.jediTaskID=tabT.jediTaskID``.  Sides sorted by *a* / *b*.  A composite key is
+    the pairs of one statement sharing one (*a_source*, *b_source*) and one pair of tables (*a*'s and *b*'s): two
+    aliases of one table joined to another twice are two keys, and so are one pair of aliases over other tables in
+    another text or arm (``getUserJobMetadata``'s ``j`` / ``m``, ``jobsArchived4`` with ``metatable`` and
+    ``jobsArchived`` with ``metatable_arch``; a ``UNION``'s arms).  The pairs of a line's texts and arms are one list,
+    so two arms joining the same two tables under the same aliases by other columns would read as one key: none on
+    pin k."""
+
+    a: str = Field(..., description="``table.column``, lowered: ``jedi_datasets.jeditaskid``.")
+    b: str
+    a_source: str = Field(
+        ..., description="The source *a* is read from as the statement names it -- its alias, or the table -- lowered."
+    )
+    b_source: str
+    a_attr: str = Field(default="", description="*a* as a subject where its table's spec class has it, else empty.")
+    b_attr: str = ""
+
+
 class CallReading(BaseModel):
     """What one statement reads when one route of calls runs it: :attr:`ReadSiteNode.call_readings`.
 
@@ -2249,6 +2269,15 @@ class ReadSiteNode(BaseNode):
             "placed, and no hole may be a caller back."
         ),
     )
+    joins: list[JoinPair] = Field(
+        default_factory=list,
+        description=(
+            "Each column = column equality between two of the statement's "
+            "sources, in a ``WHERE`` or an ``ON``, a subquery's among them -- "
+            "read off the statement's tree, so a statement not read as one "
+            "gives none; sorted.  Not ``x IN (SELECT y ...)``."
+        ),
+    )
     anchor: Anchor = Field(
         ...,
         description=(
@@ -2628,6 +2657,18 @@ NEW_ROW_UNREAD = "not read"
 #: Not said either: the run updates the row or inserts it -- one text or the other of one statement
 #: (``addStdOut``'s ``sqlU`` / ``sqlI``) -- so the row it writes may have been there.
 NEW_ROW_UPSERT = "updates or inserts"
+#: Why a ``rows`` source names no column of its statement's rows (:attr:`KeySource.column_unread`): the select list
+#: is ``*``, the value is at a place a hole's columns fill (``SELECT {JobSpec.columnNames()}`` read by position),
+#: the item is an expression, no item or several hold the value (no item: also a field of an object packed from a
+#: hole or ``*`` that the table has no column of), the statement's texts give it different columns
+#: (``getCoJumboJobsToBeFinished``'s ``jobsActive4`` or ``jobsDefined4``), or no select list was read.
+KEY_COLUMN_STAR = "select *"
+KEY_COLUMN_HOLE = "in a hole"
+KEY_COLUMN_EXPRESSION = "an expression"
+KEY_COLUMN_NONE = "no item"
+KEY_COLUMN_SEVERAL = "several items"
+KEY_COLUMN_TEXTS = "texts differ"
+KEY_COLUMN_UNREAD = "select list not read"
 
 
 class KeySource(BaseModel):
@@ -2652,27 +2693,103 @@ class KeySource(BaseModel):
         default_factory=list,
         description=(
             "``rows`` / ``sequence`` / ``parameter`` / ``self_field``: where in the bind's value they sit -- ``()`` "
-            "the value itself, else its steps (``[0]``, ``.f``, ``[*]``).  Which column of a row fills the key is not "
-            "said: the carry says where the rows sit in a value, and a part of them reads as them."
+            "the value itself, else its steps (``[0]``, ``.f``, ``[*]``).  A part of them reads as them here; which "
+            "column of a row fills the key is *column*, and which field of a parameter or of ``self`` is not said "
+            "(``archiveJob``'s ``:name`` at 1718, ``tmpFile.dispatchDBlock`` of a file of its ``job``, is ``job``)."
         ),
     )
+    column: str = Field(
+        default="",
+        description=(
+            "``rows``: the statement's select item the value is, as ``table.column`` lowered "
+            "(``jedi_tasks.jeditaskid``) -- each item carried on its own from where it sits in what the statement's "
+            "fetch gives; a field of an object filled by name (``taskSpec.pack(row)``) is the item of its name.  "
+            "Read on each select list the statement's texts give, and said where all agree.  Empty where "
+            "*column_unread* says why."
+        ),
+    )
+    attr: str = Field(
+        default="",
+        description=(
+            "``rows``: *column* as a subject, ``JediTaskSpec.jediTaskID``, where its table's spec class has it; where "
+            f"the statement's texts give columns of several tables that are one subject (*column_unread* "
+            f"``{KEY_COLUMN_TEXTS}``: a hole read per table, ``jobsActive4``'s or ``jobsDefined4``'s ``PandaID``), "
+            "that subject."
+        ),
+    )
+    column_unread: str = Field(
+        default="",
+        description=(
+            f"``rows`` with no *column*: ``{KEY_COLUMN_STAR}``, ``{KEY_COLUMN_HOLE}``, ``{KEY_COLUMN_EXPRESSION}``, "
+            f"``{KEY_COLUMN_NONE}``, ``{KEY_COLUMN_SEVERAL}``, ``{KEY_COLUMN_TEXTS}``, ``{KEY_COLUMN_UNREAD}``."
+        ),
+    )
+    same_rows: bool = Field(
+        default=False,
+        description=(
+            "``rows``: the term's statement names the source statement's own rows -- one of its tables, by every "
+            "column of the table's primary key, each filled from that *column* of the source's rows: a read reads "
+            "them again (``getTasksToBeFinished_JEDI`` reads 1676's tasks again at 1731 by ``jediTaskID``), a write "
+            "writes them.  Not where it names other rows by them: another table's (``JEDI_Datasets`` by the task's "
+            "``jediTaskID``), a part of a key, another column (``checkParentTask_JEDI``'s parent by ``parent_tid``)."
+        ),
+    )
+    never_at: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``rows``: the values the source statement selects (``JediTaskSpec.status=scouted``, as its read site's "
+            "*selects*) for which the term's statement never runs with this value -- a test on the way to each call "
+            "handed it (``pathcond.ruled_out_at``) on a name holding that column of the source's rows: 1731 is in the "
+            "``else`` of ``if taskStatus == \"scouted\":``, ``taskStatus`` 1676's ``status``.  Read in the source's "
+            "own function only: empty where the rows come through calls (*via*)."
+        ),
+    )
+    via: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``rows`` reaching the bind through calls, as the walk carrying the statement's rows "
+            "(``attach_crossings``) took them: each call on the way, ``file:line`` -- one handing them down, or one "
+            "in a caller they are returned to -- from the source's function to the term's; empty in the source's own "
+            "function.  The term's statement may be in a junction's owner the walk crosses to and does not go "
+            "through: its statements are read with what it is handed."
+        ),
+    )
+    reaches: list[str] = Field(
+        default_factory=list,
+        description=(
+            "On a *same_rows* source of a read through calls (*via*): the junction owners the read's rows reach and "
+            "read (as ``ReadSiteNode.crosses_to`` names them), going back up only by the calls of *via* -- not every "
+            "caller of the read's function, as the read site's own ``crosses_to`` is walked; the read's own owner "
+            "aside, the source's own may be one."
+        ),
+    )
+    reaches_open: list[OpenCrossing] = Field(
+        default_factory=list,
+        description="On that way, the calls the walk could not place, as ``ReadSiteNode.crosses_open``.",
+    )
+    #: The walk's way to the bind, ``(kind, file, func, call)`` per step, for *reaches* (``sqlwrite._Landing``).
+    _way: Optional[tuple] = PrivateAttr(default=None)
 
 
 class KeyFrom(BaseModel):
-    """Where one row-naming term of a write was filled from: the rows it lands on, and who named them.
+    """Where one row-naming term of a statement was filled from: the rows it lands on, and who named them.
 
     Not a node, beside :class:`RowKeySource`.  One per term of a write's ``WHERE`` that names its rows --
     ``jediTaskID=:jediTaskID``, or an ``IN`` list a helper builds, ``datasetID IN (:dataset__in)`` -- on a column
-    the statement does not write, for every write statement, guarded or not.  Its *sources* are where the bind's
+    the statement does not write, for every write statement, guarded or not; and one per term a read statement (a
+    :class:`ReadSiteNode`'s) compares its own rows' column with a bind in, every row meeting it (*reads*).  Its *sources* are where the bind's
     values came from, each read by the carry: the rows of a statement of the same function
     (``prepareTasksToBeFinished_JEDI`` keys the runs of its later loop by the ``jediTaskID`` its statements at 3723
     and 3768 select), a parameter, a field of ``self``.  A reader asking which of a function's arms the rows of one of its statements
-    reach takes the KeyFroms with a ``rows`` source of that statement, and the branches at *writes*' lines.
+    reach takes the KeyFroms with a ``rows`` source of that statement, and the branches at *writes*' lines; one asking
+    where they go after a statement reads them again takes the read KeyFroms with a ``rows`` source of it that is
+    :attr:`KeySource.same_rows`, less those whose :attr:`KeySource.never_at` holds the value, and that read site's
+    own way on (its ``crosses_to``, its KeyFroms' sources): joined by the reader, which can test the value there.
 
     Read in the same step as :attr:`RowKeySource.handed_by`, after the reach record and by the same carries, so the
     two never disagree.  A statement run with several texts is one KeyFrom per term, its sources every text's.
     Not followed here: rows reaching the bind through a call (a parameter is where this function was handed them),
-    which column of a row fills it, and the values of the columns the statement writes.
+    and the values of the columns the statement writes.
 
     Two more kinds of record, of an object whose fields the function assigns (*object*).  A call of a method that
     persists what its caller changed on a spec (a flush: ``self.taskBufferIF.updateJob(job, ...)``) is a write at
@@ -2699,7 +2816,9 @@ class KeyFrom(BaseModel):
             "fields reach the use on (the call, the statement, the return), else the first assignment's."
         ),
     )
-    table: str = Field(default="", description="The table written; empty for an object no write persists.")
+    table: str = Field(
+        default="", description="The table written, or read (*reads*); empty for an object no write persists."
+    )
     term: str = Field(
         description=(
             "As the map reads it: ``jediTaskID=:jediTaskID``, ``datasetID IN (:dataset__in)``; empty for an object no "
@@ -2724,6 +2843,17 @@ class KeyFrom(BaseModel):
         ),
     )
     sources: list[KeySource] = Field(default_factory=list)
+    reads: bool = Field(
+        default=False,
+        description=(
+            "A term of a statement that reads rows (its read site's run): *writes* empty, no *object* nor *new_row*; "
+            "*routes* as a write's.  Its sources say which rows the statement is asked for by."
+        ),
+    )
+    attr: str = Field(
+        default="",
+        description="The term's column as a subject, ``JediTaskSpec.jediTaskID``, where *table*'s spec class has it.",
+    )
     object: str = Field(
         default="",
         description=(
@@ -2794,6 +2924,9 @@ class KeyFrom(BaseModel):
     #: ``(func, [node, ...])``: where the write runs from -- the calls running its text with its map, a flush's call,
     #: an object's uses -- for *routes* / *out_on* (``sqlwrite.attach_routes``).
     _runs: Optional[tuple] = PrivateAttr(default=None)
+    #: The runs of its statement (``sql.Execution``) a term's record was read from: which of *_runs*' calls a source's
+    #: value is handed to (``never_at``).
+    _executions: list = PrivateAttr(default_factory=list)
     #: An ``INSERT``'s, what decides *new_row* beside the sources: see :class:`~bamboo.codemap.panda.recognizers.
     #: sqlwrite._Insert`.
     _insert: Optional[Any] = PrivateAttr(default=None)
@@ -2933,12 +3066,12 @@ class MapFragment(BaseModel):
                 held.extend(getattr(other, part))
 
 
-#: The parts of a :class:`MapFragment` that hold stored nodes, in the order
-#: ``store_fragment`` writes them.  One tuple for the store and for ``diff``,
-#: because the two lists were once separate and ``diff`` held seven of the
-#: eight kinds the database stored: every log site compared as absent from
-#: both builds.  Every other part is the build's own report -- see
-#: ``diff.NOT_COMPARED_PARTS``.
+#: The parts of a :class:`MapFragment` that hold the map's nodes, in the order
+#: the reader takes them (``lookup._fragment_nodes``).  One tuple for the reader
+#: and for ``diff``, because the store and ``diff`` once kept two lists and
+#: ``diff`` held seven of the eight kinds the database stored: every log site
+#: compared as absent from both builds.  Every other part is the build's own
+#: report -- see ``diff.NOT_COMPARED_PARTS``.
 MAP_NODE_GROUPS: tuple[str, ...] = (
     "value_enums",
     "subjects",
