@@ -2119,7 +2119,8 @@ class Equality(NamedTuple):
 def equalities(sql: str) -> tuple[Equality, ...]:
     """Each ``a.x = b.y`` of *sql* between two of its sources -- two tables, or two aliases of one -- in a ``WHERE`` or
     an ``ON``, inner or outer, a subquery's among them; each column's table read as a term's is (:func:`_owner`).
-    Sorted.  A composite key is one statement's equalities sharing one pair of sources.
+    Sorted.  A composite key is one statement's equalities sharing one pair of sources and their tables (as
+    :class:`~bamboo.codemap.models.JoinPair` says).
 
     Not a ``SET a = b``, nor a ``MERGE``'s, nor a side naming a hole, a pseudo column or a table not read, nor a column
     compared with one of its own source (``a.x = a.y``); ``x IN (SELECT y ...)`` is no equality.  ``()`` where the

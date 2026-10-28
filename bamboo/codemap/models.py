@@ -1762,8 +1762,12 @@ class OpenCrossing(BaseModel):
 class JoinPair(BaseModel):
     """A column of one source of a statement compared equal with a column of another (:func:`sqltext.equalities`):
     how two tables meet in it -- ``tabD.jediTaskID=tabT.jediTaskID``.  Sides sorted by *a* / *b*.  A composite key is
-    the pairs of one statement sharing one (*a_source*, *b_source*): two aliases of one table joined to another
-    twice are two keys."""
+    the pairs of one statement sharing one (*a_source*, *b_source*) and one pair of tables (*a*'s and *b*'s): two
+    aliases of one table joined to another twice are two keys, and so are one pair of aliases over other tables in
+    another text or arm (``getUserJobMetadata``'s ``j`` / ``m``, ``jobsArchived4`` with ``metatable`` and
+    ``jobsArchived`` with ``metatable_arch``; a ``UNION``'s arms).  The pairs of a line's texts and arms are one list,
+    so two arms joining the same two tables under the same aliases by other columns would read as one key: none on
+    pin k."""
 
     a: str = Field(..., description="``table.column``, lowered: ``jedi_datasets.jeditaskid``.")
     b: str
