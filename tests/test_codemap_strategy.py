@@ -1,10 +1,11 @@
-"""Deriving an investigation from a stored Code Map.
+"""Deriving an investigation from a Code Map's dump.
 
-Run against the in-memory example backend rather than mocks, for the reason
+Run against the map as its dump reads back rather than mocks, for the reason
 ``test_codemap_lookup`` gives: a mock hands back whatever the test put in and
 proves nothing about the encoding.  Here it also proves something about the
-reading -- the strategy is built from decoded nodes, so a field that does not
-survive storage would show up as a wrong verdict rather than as a type error.
+reading -- the strategy is built from the nodes the dump's JSON gives back, so a
+field that does not survive the dump would show up as a wrong verdict rather than
+as a type error.
 
 Nothing here touches production.  Evidence is constructed from the queries the
 strategy itself asks for, which keeps the fixtures honest about the shape a
@@ -40,8 +41,6 @@ from bamboo.codemap.models import (
     SubjectNode,
     Symptom,
 )
-from bamboo.codemap.store import store_fragment
-from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
 
 MAP_ID = "panda"
 VERSION = "panda-server-source 1.0.2"
@@ -106,10 +105,7 @@ def _junction(
 
 
 async def _map(fragment: MapFragment) -> CodeMap:
-    backend = InMemoryGraphBackend()
-    await backend.connect()
-    await store_fragment(fragment, backend)
-    return CodeMap(backend, map_id=MAP_ID)
+    return CodeMap(MapFragment.model_validate_json(fragment.model_dump_json()), map_id=MAP_ID)
 
 
 def _result(query: GrepQuery, matched: int = 0, truncated: bool = False,

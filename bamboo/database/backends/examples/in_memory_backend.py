@@ -17,7 +17,6 @@ from typing import Any, Dict, Set
 
 from bamboo.database.base import GraphDatabaseBackend
 from bamboo.models.graph_element import (
-    CODE_MAP_NODE_TYPES,
     BaseNode,
     GraphRelationship,
 )
@@ -33,9 +32,6 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self.nodes: Dict[str, BaseNode] = {}
         self.relationships: Dict[str, GraphRelationship] = {}
         self.node_index: Dict[str, Set[str]] = {}  # Index by type for quick lookups
-        # Code Map nodes by what merge_map_node merges on, (node_type, map_id, name): the ids created with the key,
-        # in creation order; a node since removed, or no longer holding the key, is skipped where it is read
-        self._map_index: Dict[tuple, list[str]] = {}
         self.connected = False
 
     async def connect(self):
@@ -50,7 +46,6 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self.nodes.clear()
         self.relationships.clear()
         self.node_index.clear()
-        self._map_index.clear()
 
     async def create_node(self, node: BaseNode) -> str:
         """Create a node in memory."""
@@ -66,8 +61,6 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         if node_type not in self.node_index:
             self.node_index[node_type] = set()
         self.node_index[node_type].add(node.id)
-        if getattr(node, "map_id", None):
-            self._map_index.setdefault(self._map_key(node), []).append(node.id)
 
         logger.debug(f"Created node: {node.id} ({node.name})")
         return node.id
@@ -319,117 +312,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self.nodes.clear()
         self.relationships.clear()
         self.node_index.clear()
-        self._map_index.clear()
         logger.info("In-memory backend: all data cleared")
-
-    @staticmethod
-    def _map_key(node: BaseNode) -> tuple:
-        """What :meth:`merge_map_node` merges a Code Map node on."""
-        return (node.node_type, getattr(node, "map_id", None), node.name)
-
-    def _map_node(self, key: tuple) -> BaseNode | None:
-        """The first node created with *key* that is still held and still holds it -- the one a scan of
-        ``self.nodes`` in its order finds -- from the index, dropping the ids it skips.  A scan per merge made storing
-        a map quadratic: 3.5 s for the 8741 nodes of PanDA's, which the querier stores at every connect."""
-        ids = self._map_index.get(key)
-        while ids:
-            node = self.nodes.get(ids[0])
-            if node is not None and self._map_key(node) == key:
-                return node
-            ids.pop(0)
-        return None
-
-    async def merge_map_node(self, node: BaseNode) -> str:
-        """Merge a Code Map node on ``(label, map_id, name)``.
-
-        A Code Map node is identified by what it means, not by where it was
-        found, so a rebuild after the target system moved the code updates the
-        existing node.  ``valid_for`` accumulates the versions the node was
-        seen unchanged in rather than being overwritten.
-
-        The node models declare no ``valid_for`` field — Neo4j sets it as a
-        stored property, which has no counterpart here — so this backend keeps
-        it under ``metadata``, the model's own place for what the store adds.
-        """
-        map_id = getattr(node, "map_id", None)
-        if not map_id:
-            raise ValueError("Code Map nodes must carry a map_id")
-        version = getattr(node, "derived_from", None)
-
-        existing = self._map_node(self._map_key(node))
-        valid_for = list((existing.metadata.get("valid_for") if existing else None) or [])
-        if version is not None and version not in valid_for:
-            valid_for.append(version)
-
-        if existing is None:
-            node_id = await self.create_node(node)
-        else:
-            node.id = existing.id
-            self.nodes[existing.id] = node
-            node_id = existing.id
-        self.nodes[node_id].metadata["valid_for"] = valid_for
-
-        logger.debug(f"Merged map node: {node_id} ({map_id}/{node.name})")
-        return node_id
-
-    async def find_map_nodes(
-        self,
-        label: str,
-        map_id: str,
-        match: dict[str, Any] | None = None,
-        version: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Match Code Map nodes on equality, and hand back their properties."""
-        if label not in {t.value for t in CODE_MAP_NODE_TYPES}:
-            raise ValueError(f"{label!r} is not a Code Map label")
-
-        found = []
-        for node in self.nodes.values():
-            if node.node_type.value != label:
-                continue
-            props = node.model_dump(exclude={"node_type"})
-            if props.get("map_id") != map_id:
-                continue
-            if version is not None:
-                # Membership, not the stamp -- see the Neo4j backend for why.
-                # ``valid_for`` lives under ``metadata`` here because the models
-                # do not declare it; it is what the store adds, not what the
-                # recogniser found.
-                valid_for = (props.get("metadata") or {}).get("valid_for") or [
-                    props.get("derived_from")
-                ]
-                if version not in valid_for:
-                    continue
-            if any(props.get(k) != v for k, v in (match or {}).items()):
-                continue
-            found.append(props)
-        return found
-
-    async def clear_map(self, map_id: str, version: str | None = None) -> int:
-        """Delete one Code Map's nodes, leaving the incident graph untouched."""
-        doomed = [
-            node_id
-            for node_id, node in self.nodes.items()
-            if node.node_type in CODE_MAP_NODE_TYPES
-            and getattr(node, "map_id", None) == map_id
-            and (version is None or getattr(node, "derived_from", None) == version)
-        ]
-        for node_id in doomed:
-            node_type = str(self.nodes[node_id].node_type)
-            self.node_index.get(node_type, set()).discard(node_id)
-            del self.nodes[node_id]
-        self.relationships = {
-            rel_id: rel
-            for rel_id, rel in self.relationships.items()
-            if rel.source_id not in doomed and rel.target_id not in doomed
-        }
-        logger.info(
-            "In-memory backend: cleared Code Map map_id=%s version=%s (%d node(s))",
-            map_id,
-            version or "*",
-            len(doomed),
-        )
-        return len(doomed)
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""

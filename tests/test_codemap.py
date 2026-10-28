@@ -16,7 +16,6 @@ from __future__ import annotations
 import ast
 import contextlib
 from collections import Counter
-from unittest.mock import AsyncMock
 
 import click.testing
 import pytest
@@ -296,63 +295,6 @@ def test_content_hash_changes_when_the_condition_changes():
     after = JunctionNode(branches=[Branch(outcome="ready", path_condition=["a > 2"])], **common)
 
     assert before.content_hash() != after.content_hash()
-
-
-# --------------------------------------------------------------------------- #
-# storage namespace
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_store_fragment_replaces_the_whole_map_it_writes():
-    """A build is one build of one corpus, and replaces the map it writes.
-
-    Clearing only this build's own stamp left a 54-node fragment of a
-    different source tree under the same ``map_id``, answering queries about
-    a corpus it was never built from.  The incident graph is still untouched:
-    ``clear_all`` would take human-validated knowledge with it.
-    """
-    fragment = MapFragment(
-        map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)]
-    )
-    graph_db = AsyncMock()
-    graph_db.clear_map.return_value = 3
-
-    from bamboo.codemap.store import store_fragment
-
-    written = await store_fragment(fragment, graph_db)
-
-    graph_db.clear_map.assert_awaited_once_with(MAP_ID)
-    graph_db.clear_all.assert_not_awaited()
-    assert written["value_enums"] == 1
-    assert graph_db.merge_map_node.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_store_fragment_says_how_much_it_deleted():
-    """The only destructive number in the build, so it is returned, not logged."""
-    fragment = MapFragment(
-        map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)]
-    )
-    graph_db = AsyncMock()
-    graph_db.clear_map.return_value = 54
-
-    from bamboo.codemap.store import store_fragment
-
-    assert (await store_fragment(fragment, graph_db))["cleared"] == 54
-
-
-@pytest.mark.asyncio
-async def test_store_fragment_can_write_beside_what_is_there():
-    """For a caller assembling one map from several fragments."""
-    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)])
-    graph_db = AsyncMock()
-
-    from bamboo.codemap.store import store_fragment
-
-    await store_fragment(fragment, graph_db, replace_map=False)
-
-    graph_db.clear_map.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------- #
@@ -11325,17 +11267,13 @@ def test_a_reader_whose_statement_the_map_holds_says_nothing():
 
 @pytest.mark.asyncio
 async def test_the_read_site_kind_is_on_every_list_that_has_to_know_about_it():
-    """``FilterStage`` was once missing from ``clear_map`` and stayed in the
-    database forever; ``log_sites`` was once missing from ``_index`` and all 294
-    of them compared as absent from both builds.  Several lists have to know
-    about a kind, and the two that matter most fail silently: a kind the store
-    does not write is stored as nothing, and a kind ``_index`` skips compares
-    equal to itself however much it changed."""
+    """``log_sites`` was once missing from ``_index`` and all 294 of them
+    compared as absent from both builds.  Several lists have to know about a
+    kind, and the two that matter most fail silently: a kind the reader does not
+    take is read as nothing, and a kind ``_index`` skips compares equal to
+    itself however much it changed."""
     from bamboo.codemap import lookup
-    from bamboo.codemap.store import store_fragment
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
 
-    assert NodeType.READ_SITE in CODE_MAP_NODE_TYPES
     assert NodeType.READ_SITE.value in diff.CONTENT_FIELDS
     assert lookup._MODELS[ReadSiteNode] is NodeType.READ_SITE
     assert "read_sites" in MapFragment.model_fields
@@ -11349,14 +11287,10 @@ async def test_the_read_site_kind_is_on_every_list_that_has_to_know_about_it():
         anchor=Anchor(package="pandaserver", file="x.py", line_start=7, line_end=7),
     )
 
-    # The store writes it and says so.
-    graph_db = AsyncMock()
-    graph_db.clear_map.return_value = 0
-    written = await store_fragment(
-        MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site]), graph_db
-    )
-    assert written["read_sites"] == 1
-    assert graph_db.merge_map_node.await_count == 1
+    # The reader takes it.
+    assert [node for node, _ in lookup._fragment_nodes(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site]), NodeType.READ_SITE
+    )] == [site]
 
     # And ``_index`` reaches it, so a change to one is a change the diff reports.
     fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site])
@@ -12822,7 +12756,7 @@ def test_two_identical_builds_report_as_identical():
 
 
 def _stored_kinds() -> dict[str, type]:
-    """``{node kind: model}`` for every part of a fragment the store writes."""
+    """``{node kind: model}`` for every part of a fragment that holds the map's nodes."""
     import typing
 
     from bamboo.codemap.models import MAP_NODE_GROUPS
@@ -12860,30 +12794,12 @@ def test_every_field_of_a_branch_and_an_entry_is_compared_or_says_why_not():
 
 
 def test_every_part_of_a_fragment_is_stored_and_compared_or_says_why_not():
-    """The store and ``diff`` read one tuple of stored parts, and every other
-    part of a fragment is named with the reason it is not compared."""
+    """The reader and ``diff`` read one tuple of the parts holding nodes, and
+    every other part of a fragment is named with the reason it is not compared."""
     from bamboo.codemap.models import MAP_NODE_GROUPS
 
     assert not set(MAP_NODE_GROUPS) & set(diff.NOT_COMPARED_PARTS)
     assert set(MAP_NODE_GROUPS) | set(diff.NOT_COMPARED_PARTS) == set(MapFragment.model_fields)
-
-
-async def test_the_store_writes_every_stored_part():
-    from bamboo.codemap.models import MAP_NODE_GROUPS
-    from bamboo.codemap.store import store_fragment
-
-    fragment = _fragment_of(
-        _stage_for_diff("-disk", ["a"], 100),
-        _junction_for_diff([Branch(outcome="ready", order=0)]),
-    )
-    graph = AsyncMock()
-    graph.clear_map.return_value = 0
-
-    written = await store_fragment(fragment, graph)
-
-    assert set(written) == {"cleared", *MAP_NODE_GROUPS}
-    assert written["filter_stages"] == 1 and written["junctions"] == 1
-    assert graph.merge_map_node.await_count == 2
 
 
 def test_extending_a_fragment_merges_every_part():
@@ -14462,21 +14378,18 @@ def test_two_cuts_sharing_a_signature_fail_the_identity_gate():
 
 
 def test_the_new_node_kind_is_on_every_list_that_has_to_know_about_it():
-    """``FilterStage`` was once missing from ``clear_map``, so stages from a
-    previous source version stayed in the database forever; and a kind missing
-    from ``CONTENT_FIELDS`` compares equal to itself no matter what changed."""
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+    """A kind missing from ``CONTENT_FIELDS`` compares equal to itself no matter
+    what changed, and one missing from the groups is read as nothing."""
+    from bamboo.codemap.models import MAP_NODE_GROUPS
 
-    assert NodeType.LOOP_CUT in CODE_MAP_NODE_TYPES
+    assert "loop_cuts" in MAP_NODE_GROUPS
     assert NodeType.LOOP_CUT.value in diff.CONTENT_FIELDS
 
 
 def test_the_function_prints_kind_is_on_every_list_that_has_to_know_about_it():
     from bamboo.codemap import lookup
     from bamboo.codemap.models import MAP_NODE_GROUPS, FunctionPrintsNode
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
 
-    assert NodeType.FUNCTION_PRINTS in CODE_MAP_NODE_TYPES
     assert NodeType.FUNCTION_PRINTS.value in diff.CONTENT_FIELDS
     assert "function_prints" in MAP_NODE_GROUPS
     assert lookup._MODELS[FunctionPrintsNode] is NodeType.FUNCTION_PRINTS
@@ -15447,9 +15360,9 @@ def test_a_log_site_is_a_stored_kind():
     a question nobody put to it.  Which log will show a reader's query running
     is the point of the node; a build that moved it said nothing.
     """
-    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+    from bamboo.codemap.models import MAP_NODE_GROUPS
 
-    assert NodeType.LOG_SITE in CODE_MAP_NODE_TYPES
+    assert "log_sites" in MAP_NODE_GROUPS
     assert NodeType.LOG_SITE.value in diff.CONTENT_FIELDS
 
     def site(files):

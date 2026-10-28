@@ -85,7 +85,6 @@ from pathlib import Path
 
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types
-from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
     KEY_BOUND,
     KEY_HANDED,
@@ -1154,7 +1153,7 @@ def _union(spans: list) -> list:
 
 class Rerun:
     def __init__(self, args: argparse.Namespace) -> None:
-        mapdump.require("rerun")  # _investigate and _writers_of open their own graph clients
+        mapdump.require("rerun")  # _investigate's walks and _writers_of ask mapdump.code_map
         A.made.clear()
         self.args = args
         self.mode, self.decide = args.patterns, args.decide
@@ -1547,7 +1546,7 @@ class Rerun:
         """H1's reading: the map's writers of ``subject=value`` (derive-strategy's readings), read once per value."""
         if (subject, value) not in self._readings:
             symptom = Symptom(subject=subject, observed=value, task_id=key)
-            inv, _ = asyncio.run(_investigate("panda", None, symptom, None, key, None, 1, None))
+            inv, _ = asyncio.run(_investigate(mapdump.code_map("rerun"), symptom, None, key, None, 1, None))
             R.check_blobs(inv, "derive-strategy's readings")
             self._readings[(subject, value)] = inv.hops[0].strategy.readings
         return self._readings[(subject, value)]
@@ -2074,7 +2073,7 @@ class Rerun:
             self.result["window"] = {"start": _iso(rows[-1].get("time_extended") or rows[-1]["time"]) if rows else None,
                                      "end": _iso(statuslog.get("as_of")), "end_kind": "as_of", "end_from": "statuslog"}
         symptom = Symptom(subject=q.subject, observed=q.observed, task_id=q.key)
-        inv, _ = asyncio.run(_investigate("panda", None, symptom, None, q.key, None, 1, None))
+        inv, _ = asyncio.run(_investigate(mapdump.code_map("rerun"), symptom, None, q.key, None, 1, None))
         R.check_blobs(inv, "derive-strategy's readings")
         strategy = inv.hops[0].strategy
         follow = self.need("the map's answer to what moves the value on", strategy.follow_up)
@@ -2350,16 +2349,9 @@ class Rerun:
         return {"held": True, "why": f"{searched.window[0]} .. {asking.window[1]} searched in {to_hand}, none of it unsearched"}
 
     async def _writers_of(self, subject: str) -> list:
-        from bamboo.database.graph_database_client import GraphDatabaseClient
-
-        graph_db = GraphDatabaseClient()
-        await graph_db.connect()
-        try:
-            writers = await CodeMap(graph_db, map_id="panda", version=None).writers_of(subject)
-            R.check_blobs(writers, f"the map's writers of {subject}")
-            return writers
-        finally:
-            await graph_db.close()
+        writers = await mapdump.code_map("rerun").writers_of(subject)
+        R.check_blobs(writers, f"the map's writers of {subject}")
+        return writers
 
     # ------------------------------------------------------------ Passes: which way each pass went
     def passes(self, q: Passes):
@@ -2687,7 +2679,7 @@ class Rerun:
         self.say(f"{q.observed!r} from {since}; {after['status']!r} at {moved}, "
                  f"{(moved - since).total_seconds() / 3600:.1f} h later")
         symptom = Symptom(subject=q.subject, observed=q.observed, task_id=q.key)
-        inv, _ = asyncio.run(_investigate("panda", None, symptom, None, q.key, None, 1, None))
+        inv, _ = asyncio.run(_investigate(mapdump.code_map("rerun"), symptom, None, q.key, None, 1, None))
         R.check_blobs(inv, "derive-strategy's readings")
         follow = self.need("the map's answer to what moves the value on", inv.hops[0].strategy.follow_up)
         asked = f"{q.subject}={q.observed}"

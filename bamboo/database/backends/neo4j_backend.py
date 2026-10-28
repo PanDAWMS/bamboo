@@ -25,7 +25,6 @@ except ImportError as e:
 from bamboo.config import get_settings
 from bamboo.database.base import GraphDatabaseBackend
 from bamboo.models.graph_element import (
-    CODE_MAP_NODE_TYPES,
     BaseNode,
     GraphRelationship,
     NodeType,
@@ -427,103 +426,6 @@ class Neo4jBackend(GraphDatabaseBackend):
         async with self._session() as session:
             await session.run("MATCH (n) DETACH DELETE n")
         logger.info("Neo4j: all nodes and relationships deleted")
-
-    async def merge_map_node(self, node: BaseNode) -> str:
-        """Merge a Code Map node on ``(label, map_id, name)``."""
-        import uuid
-
-        properties = node.model_dump(exclude={"node_type"})
-        map_id = properties.get("map_id")
-        version = properties.get("derived_from")
-        if not map_id:
-            raise ValueError("Code Map nodes must carry a map_id")
-        if not properties.get("id"):
-            properties["id"] = str(uuid.uuid4())
-        # Neo4j stores primitives and arrays only; nested structures (branches,
-        # anchors, metadata) are JSON-encoded.
-        for key, val in list(properties.items()):
-            if isinstance(val, (dict, list)) and any(
-                isinstance(item, (dict, list)) for item in (val.values() if isinstance(val, dict) else val)
-            ):
-                properties[key] = json.dumps(val, default=str)
-            elif isinstance(val, dict):
-                properties[key] = json.dumps(val, default=str)
-
-        async with self._session(database=self.settings.neo4j_database) as session:
-            result = await session.run(
-                f"MERGE (n:{node.node_type.value} {{map_id: $map_id, name: $name}}) "
-                "ON CREATE SET n = $properties "
-                "ON MATCH SET n += $properties "
-                "SET n.valid_for = CASE "
-                "  WHEN n.valid_for IS NULL THEN [$version] "
-                "  WHEN $version IN n.valid_for THEN n.valid_for "
-                "  ELSE n.valid_for + $version END "
-                "RETURN n.id AS id",
-                map_id=map_id,
-                name=properties["name"],
-                properties=properties,
-                version=version,
-            )
-            record = await result.single()
-            return record["id"]
-
-    async def find_map_nodes(
-        self,
-        label: str,
-        map_id: str,
-        match: dict[str, Any] | None = None,
-        version: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Match Code Map nodes on equality, and hand back their properties."""
-        if label not in {t.value for t in CODE_MAP_NODE_TYPES}:
-            raise ValueError(f"{label!r} is not a Code Map label")
-
-        params: dict[str, Any] = {"map_id": map_id}
-        clauses = ["n.map_id = $map_id"]
-        if version is not None:
-            # Membership, not the stamp.  ``derived_from`` says which build last
-            # wrote the node -- a later build that leaves a node alone still
-            # overwrites that on merge -- so matching it answers "what changed in
-            # this version", which for a chain returns a fragment and calls it
-            # the chain.  ``valid_for`` is the record of which builds had the
-            # node, and until now nothing read it.  The coalesce covers a node
-            # written before the property existed.
-            clauses.append("$version IN coalesce(n.valid_for, [n.derived_from])")
-            params["version"] = version
-        for index, (key, value) in enumerate(sorted((match or {}).items())):
-            # Parameterised on the value; the key is interpolated because Cypher
-            # has no placeholder for a property name. Keys come from the models,
-            # never from a caller's input, and a bad one matches nothing.
-            if not key.isidentifier():
-                raise ValueError(f"{key!r} is not a property name")
-            clauses.append(f"n.{key} = $v{index}")
-            params[f"v{index}"] = value
-
-        query = f"MATCH (n:{label}) WHERE {' AND '.join(clauses)} RETURN properties(n) AS props"
-        async with self._session(database=self.settings.neo4j_database) as session:
-            result = await session.run(query, **params)
-            return [record["props"] async for record in result]
-
-    async def clear_map(self, map_id: str, version: str | None = None) -> int:
-        """Delete one Code Map's nodes without touching the incident graph."""
-        labels = sorted(t.value for t in CODE_MAP_NODE_TYPES)
-        label_filter = " OR ".join(f"n:{label}" for label in labels)
-        query = f"MATCH (n) WHERE ({label_filter}) AND n.map_id = $map_id "
-        params: dict[str, Any] = {"map_id": map_id}
-        if version is not None:
-            query += "AND n.derived_from = $version "
-            params["version"] = version
-        query += "WITH n, count(n) AS _ DETACH DELETE n RETURN count(*) AS deleted"
-
-        async with self._session(database=self.settings.neo4j_database) as session:
-            result = await session.run(query, **params)
-            record = await result.single()
-            deleted = record["deleted"] if record else 0
-        logger.info(
-            "Neo4j: cleared Code Map map_id=%s version=%s (%d node(s))",
-            map_id, version or "*", deleted,
-        )
-        return deleted
 
     async def find_causes(
         self,

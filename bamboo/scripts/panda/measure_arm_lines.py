@@ -189,73 +189,69 @@ async def _run(
     evidence: Optional[Path] = None,
     dump: Optional[Path] = None,
 ) -> None:
-    from bamboo.codemap.store import dump_graph
+    from bamboo.codemap.store import load_dump
 
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
-    graph_db = await dump_graph(dump, source_root)
-    try:
-        code_map = CodeMap(graph_db, map_id=map_id)
+    code_map = CodeMap(load_dump(dump, source_root), map_id=map_id)
 
-        # The whole map, independent of any symptom: what the build has to work
-        # with before a question is asked of it.
-        everywhere = [
-            strategy_mod.Sentence(emit.template, junction.owner, branch.line, junction.log_files)
-            for junction in await code_map._find(JunctionNode)
-            for branch in junction.branches
-            for emit in branch.emits
-            if emit.reports == REPORTS_DECISION
-        ]
-        click.echo("the map's arm sentences, over the whole map")
-        click.echo(_line(strategy_mod.discrimination(everywhere), len(everywhere)))
+    # The whole map, independent of any symptom: what the build has to work
+    # with before a question is asked of it.
+    everywhere = [
+        strategy_mod.Sentence(emit.template, junction.owner, branch.line, junction.log_files)
+        for junction in await code_map._find(JunctionNode)
+        for branch in junction.branches
+        for emit in branch.emits
+        if emit.reports == REPORTS_DECISION
+    ]
+    click.echo("the map's arm sentences, over the whole map")
+    click.echo(_line(strategy_mod.discrimination(everywhere), len(everywhere)))
 
-        await _which_family_answers(code_map, evidence)
+    await _which_family_answers(code_map, evidence)
 
-        terms = [t for t in await code_map.vocabulary() if t.kind == "value"]
-        from_map: Counter = Counter()
-        from_trace: Counter = Counter()
-        totals = {"terms": len(terms), "map": 0, "trace": 0, "arms": 0, "anchored": 0}
-        shape: Counter = Counter()
-        patterns: dict[str, tuple[str, str]] = {}
-        rows = []
-        for term in terms:
-            strategy = await strategy_mod.derive(code_map, term.symptom)
-            strategy_mod.attach_traces(strategy, roots)
-            walked = strategy_mod.skeleton_sentences(strategy.readings)
-            from_trace += strategy_mod.discrimination(walked)
-            from_map[len({e.log_pattern for e in strategy.readings if e.log_pattern})] += 1
-            totals["map"] += len({e.log_pattern for e in strategy.readings if e.log_pattern})
-            totals["trace"] += len(walked)
-            totals["arms"] += sum(len(entry.lines) for entry in strategy.readings)
-            totals["anchored"] += len(
-                {row.line for e in strategy.readings for row in e.skeleton if row.value}
-            )
-            for entry in strategy.readings:
-                for row in entry.skeleton:
-                    if row.kind != models_mod.SKELETON_PRINT:
-                        continue
-                    shape["rows"] += 1
-                    if row.pattern:
-                        patterns.setdefault(row.pattern, (term.key, row.text))
-                    else:
-                        shape["refused"] += 1
-                    if row.value:
-                        shape["with a value in the hole"] += 1
-                        patterns.setdefault(row.value, (term.key, row.text))
-                    shape[f"reachable from {min(len(row.arms), 3)} arm(s)"] += 1
-            rows.append(
-                {
-                    "term": f"{term.symptom.subject}={term.symptom.observed}",
-                    "map": len({e.log_pattern for e in strategy.readings if e.log_pattern}),
-                    "trace": len(walked),
-                    "skeleton": [
-                        {"owner": e.owner, **row.model_dump()}
-                        for e in strategy.readings
-                        for row in e.skeleton
-                    ],
-                }
-            )
-    finally:
-        await graph_db.close()
+    terms = [t for t in await code_map.vocabulary() if t.kind == "value"]
+    from_map: Counter = Counter()
+    from_trace: Counter = Counter()
+    totals = {"terms": len(terms), "map": 0, "trace": 0, "arms": 0, "anchored": 0}
+    shape: Counter = Counter()
+    patterns: dict[str, tuple[str, str]] = {}
+    rows = []
+    for term in terms:
+        strategy = await strategy_mod.derive(code_map, term.symptom)
+        strategy_mod.attach_traces(strategy, roots)
+        walked = strategy_mod.skeleton_sentences(strategy.readings)
+        from_trace += strategy_mod.discrimination(walked)
+        from_map[len({e.log_pattern for e in strategy.readings if e.log_pattern})] += 1
+        totals["map"] += len({e.log_pattern for e in strategy.readings if e.log_pattern})
+        totals["trace"] += len(walked)
+        totals["arms"] += sum(len(entry.lines) for entry in strategy.readings)
+        totals["anchored"] += len(
+            {row.line for e in strategy.readings for row in e.skeleton if row.value}
+        )
+        for entry in strategy.readings:
+            for row in entry.skeleton:
+                if row.kind != models_mod.SKELETON_PRINT:
+                    continue
+                shape["rows"] += 1
+                if row.pattern:
+                    patterns.setdefault(row.pattern, (term.key, row.text))
+                else:
+                    shape["refused"] += 1
+                if row.value:
+                    shape["with a value in the hole"] += 1
+                    patterns.setdefault(row.value, (term.key, row.text))
+                shape[f"reachable from {min(len(row.arms), 3)} arm(s)"] += 1
+        rows.append(
+            {
+                "term": f"{term.symptom.subject}={term.symptom.observed}",
+                "map": len({e.log_pattern for e in strategy.readings if e.log_pattern}),
+                "trace": len(walked),
+                "skeleton": [
+                    {"owner": e.owner, **row.model_dump()}
+                    for e in strategy.readings
+                    for row in e.skeleton
+                ],
+            }
+        )
 
     click.echo(f"\nover the {totals['terms']} value term(s) of the vocabulary")
     click.echo(f"  {totals['arms']} arm(s) read, {totals['anchored']} of them anchored")

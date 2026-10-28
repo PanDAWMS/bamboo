@@ -5,9 +5,9 @@ source tree, and a Code Map's lifetime is tied to that *code version*, not to an
 incident, which is what makes its stamp meaningful.
 
 The map is kept as a dump -- the whole fragment, written to a file -- and not in
-the graph database.  Every reading of it is a lookup by label and property
-(:meth:`~bamboo.codemap.lookup.CodeMap`), which the in-memory backend answers
-from the file as well as Neo4j did; and each case is read against the map of the
+the graph database.  Every reading of it is a lookup in the dump itself
+(:class:`~bamboo.codemap.lookup.CodeMap` on :func:`~bamboo.codemap.store.load_dump`),
+with no database between; and each case is read against the map of the
 corpus that wrote its log, one file per pin, where the database held one build at
 a time.  Neo4j keeps the incident graph only.
 
