@@ -40,6 +40,13 @@ again only reads it later).  A run, or a pass of one (``Run.part``), still that 
 a mark that spans days are whole.  Once, because a mark such as a task's ``jediTaskID`` spans days, and widening at
 every end would end only at the oldest file kept.  EDGE is the windows' slack, not a measured gap: a run whose records stop for longer
 than it across a rotation is read as whole while it is not (KNOWN_ISSUES.md K7).
+
+An ask with no record of its own is answered from the record of a wider one (``RecordedLogs._within``): of the same
+log and strings, its window holding the ask's, on the ask's machine or on every machine.  The recording step reads
+every file whose covers meet the window, and every machine holding a file of the log when no machine is named, so the
+wider record holds every file the ask reaches, each searched whole for the strings; the files past the ask's window
+only add seconds that were searched.  It is read for the ask's machine alone, and a machine an every-machine record
+does not name holds no file of the log there.  The log's notes say which record answered.
 """
 from __future__ import annotations
 
@@ -52,8 +59,7 @@ from pathlib import Path
 from bamboo.querier.records import PREFIX, STAMP, Log, Record, Unrecorded, Window, keyed
 
 EDGE = datetime.timedelta(minutes=10)
-#: the windows are on the database's clock (statuslog, as_of) or the inserting machine's (creationdate); a log's
-#: stamps are its machine's.  The server's statuslog rows fell inside their runs' log times to the second (bamboo-e1,
+#: the windows are on the database's clock (statuslog, as_of); a log's stamps are its machine's.  The server's statuslog rows fell inside their runs' log times to the second (bamboo-e1,
 #: 2026-10-13, 14 rows); JEDI's clocks were measured against the database on some of its machines only (2026-10-14)
 JEDI_CLOCKS = "the windows take its log clock as the database's within their slack, measured on some of JEDI's machines only"
 _SECOND = datetime.timedelta(seconds=1)
@@ -61,6 +67,11 @@ _SECOND = datetime.timedelta(seconds=1)
 
 def key_of(ask: dict) -> str:
     return json.dumps(ask, sort_keys=True, separators=(",", ":"))
+
+
+def _alike(ask: dict) -> tuple:
+    """What an ask and a wider one share: all but the window and the machine."""
+    return ask["name"], ask["service"], tuple(sorted(set(ask["strings"]))), ask.get("whole_records")
 
 
 def _t(text: str) -> datetime.datetime:
@@ -246,6 +257,9 @@ class RecordedLogs:
                 if key in self._records:
                     raise SystemExit(f"{path}:{n}: a second record for the ask {key}: which to read is not this door's choice")
                 self._records[key] = record
+        self._alike: dict[tuple, list[dict]] = {}
+        for record in self._records.values():
+            self._alike.setdefault(_alike(record["ask"]), []).append(record)
         self._logs: dict[tuple, Log] = {}
 
     def names(self, wanted: list[str]) -> list[str]:
@@ -261,18 +275,41 @@ class RecordedLogs:
             self._logs[at] = self._read(name, key, window, machine, owners)
         return self._logs[at]
 
-    def _get(self, asks: list[tuple[Ask, str]]) -> list[dict]:
-        """The records of *asks*, or every one missing as :class:`Unrecorded`."""
-        missing = [(a, why) for a, why in asks if a.key not in self._records]
+    def _get(self, asks: list[tuple[Ask, str]], notes: list[str]) -> list[dict]:
+        """The records of *asks*, or every one missing as :class:`Unrecorded`.  An ask with no record of its own is
+        answered from a wider ask's (:meth:`_within`), and *notes* says which."""
+        got = [(a, why, self._records.get(a.key) or self._within(a)) for a, why in asks]
+        missing = [(a, why) for a, why, record in got if record is None]
         if missing:
             raise Unrecorded(missing)
-        return [self._records[a.key] for a, _ in asks]
+        notes += [record["within"] for _, _, record in got if "within" in record]
+        return [record for _, _, record in got]
+
+    def _within(self, ask: Ask) -> dict | None:
+        """*ask*'s answer from the record of a wider ask (the module's doc), or None where none holds it: its own
+        machine's record before every machine's, then the narrowest window."""
+        want = ask.canonical()
+        lo, hi = want["window"]
+        found = [
+            r for r in self._alike.get(_alike(want), [])
+            if r["ask"]["machine"] in (None, want["machine"]) and r["ask"]["window"][0] <= lo and hi <= r["ask"]["window"][1]
+        ]
+        if not found:
+            return None
+        record = min(found, key=lambda r: (r["ask"]["machine"] is None, _t(r["ask"]["window"][1]) - _t(r["ask"]["window"][0]), key_of(r["ask"])))
+        wider = record["ask"]
+        machines = record.get("machines", {})
+        if want["machine"] is not None and wider["machine"] is None:
+            machines = {want["machine"]: machines.get(want["machine"], {"status": "no such log"})}
+        where = wider["machine"] or "every machine"
+        return {**record, "ask": want, "machines": machines,
+                "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')})"}
 
     def _read(self, name: str, key: str, window: Window, machine: str | None, owners: frozenset[str] | None = None) -> Log:
-        notes = []
-        (first,) = self._get([(Ask(name, (key,), window, machine), "")])
+        notes: list[str] = []
+        (first,) = self._get([(Ask(name, (key,), window, machine), "")], notes)
         if machine is not None and first.get("machines", {}).get(machine, {}).get("status") == "not listed":
-            (first,) = self._get([(Ask(name, (key,), window), f"{machine} is not in list_logs: every machine asked")])
+            (first,) = self._get([(Ask(name, (key,), window), f"{machine} is not in list_logs: every machine asked")], notes)
             notes.append(f"{machine} is not in list_logs, so every machine was asked")
         got = _Gathered()
         got.add(first)
@@ -288,7 +325,7 @@ class RecordedLogs:
         partial = _partial(got, marks, owners)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
         why = "the records of the key's runs whose mark does not hold the key"
-        for record in self._get([(Ask(name, tuple(sorted(t)), window, m), why) for m, t in sorted(marks.items())]):
+        for record in self._get([(Ask(name, tuple(sorted(t)), window, m), why) for m, t in sorted(marks.items())], notes):
             got.add(record)
 
         # the ends of what was searched: widened past once, where a part of a run that reaches the window lies near one
@@ -304,7 +341,7 @@ class RecordedLogs:
             if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1] and (m, hi[1]) in got.rotated_ends:
                 widen.setdefault((m, (window[0], _text(hi[1] + _SECOND))), set()).update(strings)
         why = f"a run within {int(EDGE.total_seconds() // 60)} min of an end of what was searched"
-        for record in self._get([(Ask(name, tuple(sorted(s)), w, m), why) for (m, w), s in sorted(widen.items())]):
+        for record in self._get([(Ask(name, tuple(sorted(s)), w, m), why) for (m, w), s in sorted(widen.items())], notes):
             got.add(record)
         log = got.log(name)
         log.holes = got.holes(window)
@@ -320,7 +357,7 @@ class RecordedLogs:
             notes.append(f"{sorted(got.without)} hold(s) no file of it")
         if jedi := sorted(m for m, service in got.services.items() if service == "jedi"):
             notes.append(f"JEDI's machine(s) {jedi}: {JEDI_CLOCKS}")
-        log.notes = notes + ([f"{got.fragments} fragment(s) of records whose head was not returned"] if got.fragments else [])
+        log.notes = list(dict.fromkeys(notes)) + ([f"{got.fragments} fragment(s) of records whose head was not returned"] if got.fragments else [])
         return log
 
 

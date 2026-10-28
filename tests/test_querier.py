@@ -414,10 +414,10 @@ def test_the_windows_come_from_the_rows_or_say_why_not(tmp_path):
                 return [a.window, a.machine, a.why]
 
             state = {"status": "failed", "time": "2026-09-28 19:41:08", "host": "aipanda093.cern.ch"}
-            ds = {"class": "DatasetSpec", "table": "ATLAS_PANDA.Datasets", "asked": ["a_sub1", "gone", "twice"],
-                  "rows": [{"name": "a_sub1", "creationdate": "2026-09-28 08:31:12.345678"},
-                           {"name": "twice", "creationdate": "2026-09-28 08:00:00"},
-                           {"name": "twice", "creationdate": "2026-09-28 09:00:00"}]}
+            job = [{"status": "pending", "time": "2026-09-28 08:31:07", "host": "aipanda087.cern.ch"},
+                   {"status": "defined", "time": "2026-09-28 08:31:08", "host": "aipanda098.cern.ch"},
+                   {"status": "activated", "time": "2026-09-28 08:31:12", "host": "aipanda098.cern.ch"},
+                   {"status": "sent", "time": "2026-09-28 10:14:38", "host": "aipanda092.cern.ch"}]
             log = {"as_of": "2026-10-13 12:00:00", "states": [
                 {"status": "finishing", "time": "2026-10-13 01:00:00"},
                 {"status": "running", "time": "2026-10-13 02:00:00"},
@@ -425,12 +425,8 @@ def test_the_windows_come_from_the_rows_or_say_why_not(tmp_path):
             print(json.dumps([
                 w(W.at_transition(state)),
                 w(W.at_transition({"status": "failed", "time": "2026-09-28 19:41:08"})),
-                w(W.around_creation(ds, "a_sub1", "2026-09-28 08:31:08")),
-                w(W.around_creation(None, "a_sub1", "2026-09-28 08:31:08")),
-                w(W.around_creation(ds, "never", "2026-09-28 08:31:08")),
-                w(W.around_creation(ds, "gone", "2026-09-28 08:31:08")),
-                w(W.around_creation(ds, "twice", "2026-09-28 08:31:08")),
-                w(W.around_creation(ds, "a_sub1", "2026-09-28 09:00:00")),
+                [[s["status"], w(a)] for s, a in W.rows_until(job, "2026-09-28 08:31:12,959")],
+                [s["status"] for s, _ in W.rows_until(job, "2026-09-28 08:31:11,999")],
                 w(W.stuck(log, "finishing")),
                 w(W.stuck({**log, "as_of": "2026-10-13 20:00:00"}, "finishing")),
                 w(W.stuck({"states": log["states"]}, "finishing")),
@@ -439,18 +435,15 @@ def test_the_windows_come_from_the_rows_or_say_why_not(tmp_path):
             """,
         )
     )
-    (h2, h2_any, h6, no_section, not_asked, gone, twice, too_early, stuck, stuck_long, no_as_of, no_row) = json.loads(out)
+    (h2, h2_any, h6, h6_early, stuck, stuck_long, no_as_of, no_row) = json.loads(out)
     # H2: the row's own time, on the machine that wrote it
     assert h2[:2] == [["2026-09-28 19:41:08", "2026-09-28 19:41:08"], "aipanda093.cern.ch"]
     assert h2_any[1] is None and "names no host" in h2_any[2]
-    # H6: creationdate +- 10 min, cut outwards to seconds
-    assert h6[0] == ["2026-09-28 08:21:12", "2026-09-28 08:41:13"]
-    assert "inserting machine's clock" in h6[2]
-    assert no_section[0] is None and "no datasets section" in no_section[2]
-    assert not_asked[0] is None and "did not ask" in not_asked[2]
-    assert gone[0] is None and "may have been purged" in gone[2]
-    assert twice[0] is None and "2 ATLAS_PANDA.Datasets rows" in twice[2]
-    assert too_early[0] is None and "before the job was created" in too_early[2]
+    # H6: the job's own rows up to the run's last record, in order, each at its second on its host, as H2's
+    assert [status for status, _ in h6] == ["pending", "defined", "activated"]
+    assert h6[2][1][:2] == [["2026-09-28 08:31:12", "2026-09-28 08:31:12"], "aipanda098.cern.ch"]
+    assert h6[0][1][1] == "aipanda087.cern.ch"
+    assert h6_early == ["pending", "defined"]
     # --stuck: from the last row of the value less 10 min, but no earlier than as_of less 6 h
     assert stuck[0] == ["2026-10-13 09:50:00", "2026-10-13 12:00:00"]
     assert stuck_long[0] == ["2026-10-13 14:00:00", "2026-10-13 20:00:00"]
@@ -754,6 +747,53 @@ def test_the_record_door_asks_the_marks_that_do_not_hold_the_key_a_round_later(t
     assert notes == ["1 fragment(s) of records whose head was not returned"]
     assert would_print is True
     assert "a second record for the ask" in twice
+
+
+def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            TOK, W = "2026-09-28/08:31:10.314981", ("2026-09-28 08:21:12", "2026-09-28 08:41:13")
+            AT, M3 = ("2026-09-28 08:31:12", "2026-09-28 08:31:12"), "aipanda095.cern.ch"
+            hit = {**line("08:31:12", "registered ds_sub1", TOK), "offset": 200}
+            key_rec = record(Ask("panda-x.log", ("ds_sub1",), W), {M1: answered({**TODAY, "records": [hit]}),
+                                                                  M2: answered({**TODAY, "records": []})})
+            tok_rec = record(Ask("panda-x.log", (TOK,), W, M1), {M1: answered({**TODAY, "records": [
+                {**line("08:31:10", "start", TOK), "offset": 100}, hit, {**line("08:31:14", "end", TOK), "offset": 300}]})})
+            wider = [key_rec, tok_rec]
+            log, at_m1 = ask_of(wider, "panda-x.log", "ds_sub1", AT, M1)
+            run, = runs_for(log, "ds_sub1")
+            nowhere, at_m3 = ask_of(wider, "panda-x.log", "ds_sub1", AT, M3)
+            _, past = ask_of(wider, "panda-x.log", "ds_sub1", ("2026-09-28 08:31:12", "2026-09-28 08:41:14"), M1)
+            _, other = ask_of(wider, "panda-x.log", "ds_sub2", AT, M1)
+            own = record(Ask("panda-x.log", ("ds_sub1",), AT, M1), {M1: answered({**TODAY, "records": []})})
+            mine, _ = ask_of(wider + [own], "panda-x.log", "ds_sub1", AT, M1)
+            print(json.dumps([at_m1, [r.span for r in run.records], log.holes, log.notes, at_m3, nowhere.records,
+                              nowhere.notes, past, other, mine.records, mine.notes]))
+            """),
+        )
+    )
+    at_m1, spans, holes, notes, at_m3, nowhere, nowhere_notes, past, other, mine, mine_notes = json.loads(out)
+    # an ask inside a recorded window, on a machine the every-machine record answered: that machine's part of it, and
+    # the mark's ask from the mark's record on the machine -- each said
+    assert at_m1 == []
+    assert spans == ["aipanda093:panda-x.log-20260929.gz@100", "aipanda093:panda-x.log-20260929.gz@200",
+                     "aipanda093:panda-x.log-20260929.gz@300"]
+    assert holes == []
+    assert notes == [
+        "answered from the record of a wider ask (2026-09-28 08:21:12 .. 2026-09-28 08:41:13, every machine, round 1)",
+        "answered from the record of a wider ask (2026-09-28 08:21:12 .. 2026-09-28 08:41:13, aipanda093.cern.ch, round 1)",
+    ]
+    # a machine the every-machine record does not name holds no file of the log
+    assert at_m3 == [] and nowhere == []
+    assert "['aipanda095.cern.ch'] hold(s) no file of it" in nowhere_notes
+    # a window past the recorded one, or other strings: not answered
+    assert past[0][0]["window"] == ["2026-09-28 08:31:12", "2026-09-28 08:41:14"]
+    assert other[0][0]["strings"] == ["ds_sub2"]
+    # an ask's own record comes first
+    assert mine == [] and mine_notes == []
 
 
 def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared_one_as_cut(tmp_path):
@@ -1389,17 +1429,20 @@ def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_no
             import json
             from bamboo.querier.rerun import reach_said
 
-            def reach(writes, holes=0, own=()):
+            def reach(writes, holes=0, own=(), closed=0):
                 return {"starts": ["p/m.py::f"], "writes": writes, "holes": holes, "first_holes": ["p/m.py::f:3 x.y -- why"][:holes],
-                        "assumptions": {"runner_runs_only_sql": 2}, "closure": 4, "own_arms": list(own)}
+                        "assumptions": {"runner_runs_only_sql": 2, **({"closed_by_name": closed} if closed else {})},
+                        "closed": closed, "first_closed": ["p/m.py::f:5 d[k].append -- an element of a dict"][:closed],
+                        "closure": 4, "own_arms": list(own)}
 
             w = [{"function": "p/w.py::W.killJob", "arms": ["failed@3"], "chain": ["p/m.py:7"]}]
             print(json.dumps([reach_said(None, False), reach_said(reach([]), False), reach_said(reach(None, 1), False),
-                              reach_said(reach(w), False), reach_said(reach([]), True), reach_said(reach([], own=["p/m.py::f"]), False)]))
+                              reach_said(reach(w), False), reach_said(reach([]), True), reach_said(reach([], own=["p/m.py::f"]), False),
+                              reach_said(reach([], closed=1), False)]))
             """,
         )
     )
-    unasked, nothing, holed, writes, gapped, own = json.loads(out.splitlines()[-1])
+    unasked, nothing, holed, writes, gapped, own, by_name = json.loads(out.splitlines()[-1])
     assert unasked == [False, None]
     # only the map's [] drops: no write reached and no call left open
     assert nothing == [True, "no arm of its own, and reaches no write of another value with nothing left open (closure 4; "
@@ -1412,6 +1455,10 @@ def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_no
     assert gapped[0] is False and "could not read where all its rows go" in gapped[1]
     # an arm the junctions place in its own def, though S1 counts none: the two disagree, so it is kept
     assert own[0] is False and "though S1 counts none" in own[1]
+    # a drop that rests on calls closed by their name names them (O1)
+    assert by_name == [True, "no arm of its own, and reaches no write of another value with nothing left open (closure 4; "
+                             "assuming ['closed_by_name', 'runner_runs_only_sql']; 1 call(s) closed by name, e.g. "
+                             "['p/m.py::f:5 d[k].append -- an element of a dict']): dropped"]
 
 
 def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_path):
@@ -1432,7 +1479,8 @@ def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_
             rows = [node("p/m.py::count", 1, 2),
                     node("p/m.py::FetchData.count", 6, 8, calls=[ReachCall(line=7, callee="write()", to="p/w.py::write")]),
                     node("p/w.py::write", 1, 5),
-                    node("p/h.py::h", 1, 4, holes=[ReachHole(line=3, callee="d[k].append", why="an element of a dict")])]
+                    node("p/h.py::h", 1, 4, holes=[ReachHole(line=3, callee="f", why=RE.HOLE_LOCAL_CALLED)]),
+                    node("p/n.py::n", 1, 4, holes=[ReachHole(line=3, callee="d[k].append", why="an element of a dict")])]
             asked = []
             RE.moving_off = lambda junctions, graph, subject, value: asked.append((subject, value)) or RE.Destination({"p/w.py::write": ["failed@3"]}, [])
             q = rerun.Stuck("JobSpec.jobStatus", "running", "1")
@@ -1446,7 +1494,8 @@ def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_
             r = fresh(rows)
             got = {name: r._reach_of(q, owner, lines) for name, owner, lines in [
                 ("own statement", "p/m.py::count", [7]), ("rows handed", "p/m.py::count", []), ("nothing", "p/m.py::count", [1]),
-                ("hole", "p/h.py::h", [2]), ("own arm", "p/w.py::write", [2]), ("none holds", "p/x.py::x", [3])]}
+                ("hole", "p/h.py::h", [2]), ("by name", "p/n.py::n", [2]), ("own arm", "p/w.py::write", [2]),
+                ("none holds", "p/x.py::x", [3])]}
             bare = fresh([])
             print(json.dumps([got, r.lines, r.result["reach"]["functions"], asked,
                               [bare._reach_of(q, "p/m.py::count", [7]), bare._reach_of(q, "p/m.py::count", [1])], bare.lines, bare.result]))
@@ -1460,12 +1509,17 @@ def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_
     assert got["own statement"]["writes"][0]["chain"] == ["p/m.py:7"]
     assert got["rows handed"]["starts"] == ["p/m.py::count", "p/m.py::FetchData.count"]
     assert got["nothing"]["writes"] == [] and got["nothing"]["closure"] == 1
-    assert got["hole"]["writes"] is None and got["hole"]["holes"] == 1
+    # a called local: no name closes it, so it stays open
+    assert got["hole"]["writes"] is None and got["hole"]["holes"] == 1 and got["hole"]["closed"] == 0
+    # a call no function of its name can lead to a write: closed by its name, said (O1)
+    assert got["by name"]["writes"] == [] and got["by name"]["holes"] == 0
+    assert got["by name"]["closed"] == 1 and got["by name"]["first_closed"] == ["p/n.py::n:3 d[k].append -- an element of a dict"]
+    assert got["by name"]["assumptions"] == {"closed_by_name": 1}
     assert got["own arm"]["own_arms"] == ["p/w.py::write"]
     assert got["none holds"]["writes"] is None and got["none holds"]["starts"] == []
     # the record is read once, and the ends once per question
-    assert len(lines) == 1 and lines[0].startswith("  reach: the dump's reach_graph, 4 function(s); every answer rests on [")
-    assert functions == 4 and asked == [["JobSpec.jobStatus", "running"]]
+    assert len(lines) == 1 and lines[0].startswith("  reach: the dump's reach_graph, 5 function(s); every answer rests on [")
+    assert functions == 5 and asked == [["JobSpec.jobStatus", "running"]]
     # a dump with no reach: nothing asked, said once
     assert bare == [None, None] and bare_result == {"reach": {"present": False}}
     assert bare_lines == ["  reach: the dump has no reach_graph: a mover with no arm of its own is kept (KNOWN_ISSUES.md K14)"]

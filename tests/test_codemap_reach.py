@@ -263,6 +263,105 @@ def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_
     assert row.settled == {"outside_returns_outside": 1}
 
 
+
+def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):
+    """``base_module``'s ``self.jedi_mb_proxy_dict: "PassiveProxies | None"``, assigned from a callable field's call no
+    reading places: ``mb_proxy.send(msg)`` on an element of it is a call on an outside object, closed by the assumption,
+    though a class of the corpus defines ``send``.  A field declared ``Any`` says nothing, and is read from its
+    assignments as before: the same call on it is a hole."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "from typing import TYPE_CHECKING, Any, Callable\n\n"
+            "if TYPE_CHECKING:\n"
+            "    from bus.proxies import Proxies\n\n"
+            "class Sender:\n"
+            "    def send(self, msg):\n"
+            "        pass\n\n"
+            "class Module:\n"
+            '    proxies: "Proxies | None"\n'
+            "    loose: Any\n"
+            '    setter: "Callable[[], Proxies | None] | None"\n\n'
+            "    def __init__(self):\n"
+            "        self.proxies = None\n"
+            "        self.loose = None\n"
+            "        self.setter = None\n\n"
+            "    def push(self, msg):\n"
+            "        if self.proxies is None:\n"
+            "            self.proxies = self.setter()\n"
+            "        proxy = self.proxies['out']['status']\n"
+            "        proxy.send(msg)\n\n"
+            "    def push_loose(self, msg):\n"
+            "        self.loose = self.setter()\n"
+            "        self.loose.send(msg)\n"
+        ),
+    )
+
+    pushed = record.rows["pkg/mod.py::Module.push"]
+    loose = record.rows["pkg/mod.py::Module.push_loose"]
+
+    assert [hole.callee for hole in pushed.holes] == []
+    assert pushed.settled.get("outside_returns_outside") == 1
+    assert [hole.callee for hole in loose.holes] == ["self.loose.send"]
+
+
+_BY_NAME = (
+    "import queue\n\n"
+    "class Writer:\n"
+    "    def save(self):\n"
+    "        write_status()\n\n"
+    "class Quiet:\n"
+    "    def note(self):\n"
+    "        pass\n\n"
+    "class Runner:\n"
+    "    def execute(self, sql):\n"
+    "        pass\n\n"
+    "def write_status():\n"
+    "    pass\n\n"
+    "def quiet(thing):\n"
+    "    thing.note()\n\n"
+    "def loud(thing):\n"
+    "    thing.save()\n\n"
+    "def handed(q: queue.Queue):\n"
+    "    q.put(1)\n\n"
+    "def run(cur):\n"
+    "    cur.execute('UPDATE t SET a=1')\n"
+)
+
+
+def test_a_call_left_open_closes_by_its_name_where_no_function_of_the_name_reaches_the_destination(tmp_path):
+    """MV 4 (O1): ``thing.note()`` on a receiver nothing declares lands, if anywhere in the corpus, at ``Quiet.note``,
+    which writes nothing: the answer is ``[]``, the hole is listed as closed and the assumption counted.
+    ``thing.save()`` may land at ``Writer.save``, which reaches the write: it stays open.  A queue's ``put`` and a
+    database call whose statement was not read are closed by no name, though ``Runner.execute`` writes nothing."""
+
+    def leaves(file, func, call, placed):
+        if getattr(call.func, "attr", "") == "execute":
+            return "hole", f"{reach.HOLE_STATEMENT_NOT_READ}: no statement this function builds reaches this call"
+        return None
+
+    record = _record(tmp_path, leaves=leaves, mod=_BY_NAME)
+    destination = _writing("pkg/mod.py::write_status")
+
+    quiet = record.reach(["pkg/mod.py::quiet"], destination)
+    loud = record.reach(["pkg/mod.py::loud"], destination)
+    handed = record.reach(["pkg/mod.py::handed"], destination)
+    run = record.reach(["pkg/mod.py::run"], destination)
+    unclosed = record.reach(["pkg/mod.py::quiet"], destination, by_name=False)
+    lines = _BY_NAME.split("\n")
+    noted, saved = (
+        next(n for n, line in enumerate(lines, 1) if call in line) for call in ("thing.note()", "thing.save()")
+    )
+
+    assert (quiet.writes, quiet.holes, quiet.assumptions.get("closed_by_name")) == ([], [], 1)
+    assert [hole.split(" -- ")[0] for hole in quiet.closed] == [f"pkg/mod.py::quiet:{noted} thing.note"]
+    assert loud.writes is None
+    assert [hole.split(" -- ")[0] for hole in loud.holes] == [f"pkg/mod.py::loud:{saved} thing.save"]
+    assert loud.closed == []
+    assert handed.writes is None and reach.HOLE_QUEUE in handed.holes[0]
+    assert run.writes is None and reach.HOLE_STATEMENT_NOT_READ in run.holes[0]
+    assert unclosed.writes is None and unclosed.closed == []
+
 def test_what_outside_code_returns_from_a_corpus_object_it_was_handed_is_not_taken_as_outside(
     tmp_path,
 ):
