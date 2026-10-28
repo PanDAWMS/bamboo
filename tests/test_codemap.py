@@ -4957,6 +4957,91 @@ def test_the_key_half_of_the_loop_is_not_a_value():
     assert bound == []
 
 
+def _settled_by_name(caller: str) -> dict[str, list[str]]:
+    """:func:`_settled`, by the name each assignment in ``f`` binds, on a tree with its parents, as a build reads it."""
+    modules = [
+        _module(_COMMAND_MAP, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(_IMPORTS_TASK_SPEC + caller, "pandaserver/taskbuffer/caller.py"),
+    ]
+    for module in modules:
+        pathcond.attach_parents(module.tree)
+    func = next(
+        node
+        for node in ast.walk(modules[-1].tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "f"
+    )
+    settle = values.resolver()
+    with _with_calls(modules):
+        return {
+            node.targets[0].id: settle(node.value, func)
+            for node in ast.walk(func)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript)
+        }
+
+
+def test_a_run_time_key_a_test_on_the_way_decides_reads_only_the_entries_it_leaves():
+    """``retryTask_JEDI`` reads ``JediTaskSpec.commandStatusMap()[commStr]["done"]`` under ``if commStr ==
+    "retry":`` and in its ``else``, past ``if commStr not in ["retry", "incexec"]: return``: the first can only be
+    "ready", the second only "rerefine" -- not the six statuses of every command."""
+    settled = _settled_by_name(
+        "def f(self, commandStr):\n"
+        "    if commandStr not in ['kill', 'finish']:\n"
+        "        return\n"
+        "    if commandStr == 'kill':\n"
+        "        a = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
+        "    else:\n"
+        "        b = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
+        "    c = JediTaskSpec.commandStatusMap()[commandStr]['doing']\n"
+    )
+
+    assert settled == {"a": ["toabort"], "b": ["passed"], "c": ["aborting", "finishing"]}
+
+
+def test_a_key_bound_on_each_pass_before_its_test_is_read_as_the_test_reads_it():
+    """``TaskCommando.runImpl`` takes ``commandStr`` from each command's row and reads ``[commandStr]["done"]``
+    under ``if commandStr in ["kill", "finish", "reassign"]`` on the same pass: the next pass binds it again, and
+    tests it again before the read."""
+    settled = _settled_by_name(
+        "def f(self, commands):\n"
+        "    for command in commands:\n"
+        "        commandStr = command['command']\n"
+        "        if commandStr in ['kill', 'pause']:\n"
+        "            a = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
+    )
+
+    assert settled["a"] == ["dummy", "toabort"]
+
+
+def test_a_key_bound_again_between_its_test_and_the_read_is_not_read_as_tested():
+    """What the test saw is not what the read reads: every entry stays."""
+    inside = _settled_by_name(
+        "def f(self, commandStr, other):\n"
+        "    if commandStr == 'kill':\n"
+        "        commandStr = other\n"
+        "        a = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
+    )
+    past_an_exit = _settled_by_name(
+        "def f(self, commandStr, other):\n"
+        "    if commandStr != 'kill':\n"
+        "        return\n"
+        "    commandStr = other\n"
+        "    a = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
+    )
+
+    assert inside["a"] == past_an_exit["a"] == ["dummy", "passed", "toabort"]
+
+
+def test_a_key_the_tests_leave_no_entry_for_resolves_to_nothing():
+    """The read runs only with a key the mapping lacks: as a stated key it lacks, two parts of the source disagree."""
+    settled = _settled_by_name(
+        "def f(self, commandStr):\n"
+        "    if commandStr == 'resume':\n"
+        "        a = JediTaskSpec.commandStatusMap()[commandStr]['done']\n"
+    )
+
+    assert settled["a"] == []
+
+
 def test_a_mapping_with_one_computed_entry_resolves_to_nothing():
     """Elimination treats a short candidate list as complete, so a value set
     missing a member is worse than no value set: the caller then records an
@@ -5436,7 +5521,8 @@ def test_a_constant_two_enumerations_share_is_not_a_binding():
 
 
 def test_the_attribute_slice_reads_a_subscript_of_a_declared_mapping():
-    """``TaskCommando.py:178`` -- the write that accounts for ``passed``."""
+    """``TaskCommando.py:178`` -- the write that accounts for ``passed``; under its test, of the kill and finish
+    commands alone (pause's ``dummy`` is no value it writes)."""
     caller = _IMPORTS_TASK_SPEC + (
         "def runImpl(self, tmpTaskSpec, commandStr):\n"
         "    if commandStr in ['kill', 'finish']:\n"
@@ -5451,7 +5537,7 @@ def test_the_attribute_slice_reads_a_subscript_of_a_declared_mapping():
         _subjects, junctions, _cov, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
     written = [j for j in junctions if j.owner.endswith("::runImpl")]
 
-    assert _outcomes(written) == [("dummy", 1), ("passed", 1), ("toabort", 1)]
+    assert _outcomes(written) == [("passed", 1), ("toabort", 1)]
 
 
 # --------------------------------------------------------------------------- #

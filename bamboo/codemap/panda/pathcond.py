@@ -839,6 +839,34 @@ def ruled_out_by(node: ast.AST, func: ast.AST, values: dict[str, object]) -> boo
     return False
 
 
+def ruled_out_at(node: ast.AST, func: ast.AST, name: str, value: object) -> bool:
+    """Whether *func* never runs *node* with *name* holding *value* there.
+
+    :func:`ruled_out_by` reads what the parameters hold as the function starts.  A name read at *node* holds what a
+    test on *node*'s way read only where no binding of it lies on a way from the test to *node* that does not run the
+    test again; such a test -- an ``if`` holding *node*, an ``if`` before it that leaves -- rules on *value*, any
+    other is not read.  ``retryTask_JEDI`` reads ``JediTaskSpec.commandStatusMap()[commStr]["done"]`` under ``if
+    commStr == "retry":``, past ``if commStr not in ["retry", "incexec"]: return``; ``TaskCommando.runImpl`` binds
+    ``commandStr`` from each command's row and reads ``[commandStr]["done"]`` under ``if commandStr in ["kill",
+    "finish", "reassign"]`` on the same pass.
+    """
+    statement = node if isinstance(node, ast.stmt) else None
+    if statement is None:
+        statement = next((one for one in ancestors(node) if isinstance(one, ast.stmt)), None)
+    if statement is None:
+        return False
+    sites = [one.site for one in bindings(func, name) if not one.nested]
+    for test, keeps in _tests_on(node, func):
+        result = decided(test, {name: value})
+        if result is UNDECIDED or result is keeps:
+            continue
+        held = getattr(test, "parent", None)
+        if held is None or any(_leads_to(held, site) and _leads_to(site, statement, (held,)) for site in sites):
+            continue
+        return True
+    return False
+
+
 def tests_on(node: ast.AST, func: ast.AST) -> list[ast.expr]:
     """The tests :func:`ruled_out_by` reads for *node* in *func*: what its parameters must settle to rule on it."""
     return [test for test, _keeps in _tests_on(node, func)]

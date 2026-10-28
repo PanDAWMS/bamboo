@@ -554,7 +554,10 @@ def mapping_values(
     A key the code states narrows to one entry; a key settled at run time
     enumerates the level.  So ``[commandStr]["done"]`` gives the six statuses a
     completed command leaves behind, and ``["incexec"]["done"]`` gives exactly
-    ``rerefine``.
+    ``rerefine``.  A run-time key the tests on the read's way decide enumerates
+    the entries they leave it (:func:`_keys_the_way_leaves`): ``retryTask_JEDI``
+    reads ``[commStr]["done"]`` under ``if commStr == "retry":``, which is
+    ``ready`` alone.
 
     A name a loop bound to one entry of the mapping enters one level down, and
     is otherwise the same walk -- see :func:`_mapping_iterated`.
@@ -562,7 +565,7 @@ def mapping_values(
     Returns ``[]`` when the expression is not this shape, when the mapping is
     not declared, or when a stated key is not in it -- that last one being a
     disagreement between two parts of the source, which is not this function's
-    to settle.
+    to settle; so is a run-time key the tests leave no entry for.
     """
     keys: list[ast.expr] = []
     node: ast.expr = expression
@@ -582,20 +585,42 @@ def mapping_values(
         level = [entry for mapping in iterated for entry in mapping.values()]
 
     for key in reversed(keys):
+        stated = isinstance(key, ast.Constant) and isinstance(key.value, str)
+        leaves = None if stated else _keys_the_way_leaves(key, level, expression, func)
+        if leaves is not None and not leaves:
+            return []
         stepped: list[Union[str, Mapping]] = []
         for entry in level:
             if not isinstance(entry, dict):
                 return []
-            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            if stated:
                 if key.value not in entry:
                     return []
                 stepped.append(entry[key.value])
             else:
-                stepped.extend(entry.values())
+                stepped.extend(value for name, value in entry.items() if leaves is None or name in leaves)
         level = stepped
     if not level or any(not isinstance(entry, str) for entry in level):
         return []
     return sorted({entry for entry in level if isinstance(entry, str)})
+
+
+def _keys_the_way_leaves(
+    key: ast.expr,
+    level: list[Union[str, Mapping]],
+    expression: ast.expr,
+    func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+) -> Optional[set[str]]:
+    """The keys of *level* a read of *expression* can run with, its run-time *key* a name; ``None`` for every key.
+
+    A key the read's own tests decide -- an ``if`` holding it, an ``if`` before it that leaves -- is each entry's key
+    those tests leave (:func:`pathcond.ruled_out_at`, which reads a test only where the name still holds at the read
+    what the test read).  A key that is not a name, and a read outside *func*, take every entry.
+    """
+    if not isinstance(key, ast.Name) or func is None or pathcond.enclosing_function(expression) is not func:
+        return None
+    names = {name for entry in level if isinstance(entry, dict) for name in entry}
+    return {name for name in names if not pathcond.ruled_out_at(expression, func, key.id, name)}
 
 
 def resolver():
