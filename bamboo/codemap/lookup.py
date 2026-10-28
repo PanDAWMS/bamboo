@@ -81,9 +81,9 @@ _FRAGMENT_NODES: list = [None, {}]
 
 
 def _fragment_nodes(fragment: MapFragment, node_type: NodeType) -> list[tuple[BaseNode, list[str]]]:
-    """*fragment*'s nodes of *node_type* as a store of it holds them (``store.store_fragment``): one per (node_type,
-    map_id, name), at the place the first came in and with the last one's content, in the groups' order -- each with the
-    builds it was seen in, its ``valid_for``."""
+    """*fragment*'s nodes of *node_type*, one per (node_type, map_id, name) as the map's store merged them while it had
+    one: at the place the first came in and with the last one's content, in the groups' order -- each with the builds it
+    was seen in, its ``valid_for``."""
     if _FRAGMENT_NODES[0] is not fragment:
         by_key: dict[tuple, tuple[BaseNode, list[str]]] = {}
         for group in MAP_NODE_GROUPS:
@@ -182,7 +182,7 @@ class CodeMap:
         if self.version is not None:
             # A pin selects which nodes that build had; it cannot select which
             # build's *content* they carry, because a node of several builds
-            # holds the last one's (as the store merged them).  So a node present
+            # holds the last one's (:func:`_fragment_nodes`).  So a node present
             # in both builds comes back with the later one's conditions.  Said out
             # loud rather than left to be discovered: reading a months-old
             # incident against edited conditions is the skew the version stamp

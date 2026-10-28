@@ -3062,12 +3062,12 @@ class MapFragment(BaseModel):
                 held.extend(getattr(other, part))
 
 
-#: The parts of a :class:`MapFragment` that hold stored nodes, in the order
-#: ``store_fragment`` writes them.  One tuple for the store and for ``diff``,
-#: because the two lists were once separate and ``diff`` held seven of the
-#: eight kinds the database stored: every log site compared as absent from
-#: both builds.  Every other part is the build's own report -- see
-#: ``diff.NOT_COMPARED_PARTS``.
+#: The parts of a :class:`MapFragment` that hold the map's nodes, in the order
+#: the reader takes them (``lookup._fragment_nodes``).  One tuple for the reader
+#: and for ``diff``, because the store and ``diff`` once kept two lists and
+#: ``diff`` held seven of the eight kinds the database stored: every log site
+#: compared as absent from both builds.  Every other part is the build's own
+#: report -- see ``diff.NOT_COMPARED_PARTS``.
 MAP_NODE_GROUPS: tuple[str, ...] = (
     "value_enums",
     "subjects",

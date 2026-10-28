@@ -67,15 +67,12 @@ different places.
 | Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss`, `LogSite`, `ReadSite`, `FunctionPrints`, `Reach` |
 
 The Code Map was once stored in this database under its own labels. It left because
-nothing about reading it needs a database. Every reading is a lookup by label and
-property equality (`find_map_nodes`), never an edge: `JunctionPoint.subject` holds a
-`Subject.name`, and a `passthrough(...)` chain lives inside `branches` as JSON that the
-reader decodes. The in-memory backend answers those lookups from a dump as Neo4j did.
-And each case has to be read against the map of the source version that wrote its log,
-while the database held one build at a time.
-
-`clear_map(map_id)` still removes a stored map's labels without touching the incident
-graph. `clear_all()` drops everything.
+nothing about reading it needs a database. Every reading is a lookup by name, never an
+edge: `JunctionPoint.subject` holds a `Subject.name`, and a `passthrough(...)` chain
+lives inside `branches`. The reader (`CodeMap`) takes the dump's own nodes. And each
+case has to be read against the map of the source version that wrote its log, while
+the database held one build at a time. No backend method stores or reads a map now;
+`clear_all()` drops everything the database holds.
 
 The two would join at `Component`: an incident's `Component` node and the Code Map's
 junctions describe the same subsystem from opposite directions, which is what

@@ -126,30 +126,8 @@ class GraphDatabaseClient:
         return await self._backend.remove_graph_id(graph_id)
 
     async def clear_all(self) -> None:
-        """Delete every node and relationship in the graph database.
-
-        Includes Code Map nodes; use :meth:`clear_map` to rebuild a Code Map
-        without discarding human-validated incident knowledge.
-        """
+        """Delete every node and relationship in the graph database."""
         await self._backend.clear_all()
-
-    async def merge_map_node(self, node: BaseNode) -> str:
-        """Merge a Code Map node on its semantic signature."""
-        return await self._backend.merge_map_node(node)
-
-    async def clear_map(self, map_id: str, version: str | None = None) -> int:
-        """Delete a Code Map's nodes, leaving the incident graph untouched."""
-        return await self._backend.clear_map(map_id, version)
-
-    async def find_map_nodes(
-        self,
-        label: str,
-        map_id: str,
-        match: dict | None = None,
-        version: str | None = None,
-    ) -> list[dict]:
-        """Return Code Map nodes whose properties equal *match*, as raw dicts."""
-        return await self._backend.find_map_nodes(label, map_id, match, version)
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter on a cause node."""

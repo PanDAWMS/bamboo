@@ -3,8 +3,7 @@
 These read the map as its dump's JSON gives it back rather than mocks, so the
 build's nodes and the reading meet each other: a mock would happily hand back
 whatever the test put in and prove nothing about the encoding, which is the half
-most likely to drift.  The reference backend is still exercised where it is what
-is checked: the label namespace, and the store's merge the reading follows.
+most likely to drift.
 """
 
 from __future__ import annotations
@@ -24,8 +23,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     Symptom,
 )
-from bamboo.codemap.store import load_dump, store_fragment
-from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
+from bamboo.codemap.store import load_dump
 from bamboo.models.graph_element import NodeType
 
 MAP_ID = "panda"
@@ -484,15 +482,6 @@ async def test_the_vocabulary_is_every_question_the_map_can_be_asked():
     assert "py" not in by_key["b.py::doBrokerage"].words
 
 
-async def test_reading_refuses_a_label_outside_the_code_map_namespace():
-    """The separation is what stops a Code Map read reaching incident knowledge."""
-    backend = InMemoryGraphBackend()
-    await backend.connect()
-
-    with pytest.raises(ValueError, match="not a Code Map label"):
-        await backend.find_map_nodes("Cause", MAP_ID)
-
-
 async def test_what_bounds_a_query_is_asked_of_the_subject():
     """"Does anything select this value" is only half of "will anything pick it
     up".  A task sat in ``finishing`` while the query that rescues it ran every
@@ -642,10 +631,10 @@ def test_a_dump_of_another_tree_is_refused_and_a_git_stamp_is_taken(tmp_path):
     assert load_dump(path, tmp_path) is not None
 
 
-async def test_a_dump_is_read_as_the_store_merged_it():
-    """The reading takes the dump's own nodes by the rules the store merged them with (``store_fragment``): one node
-    per (kind, map_id, name), the last one's content at the first one's place, with the builds it was seen in -- so a
-    pin reads what that build had, and a name the dump holds twice is one writer."""
+async def test_a_dump_is_read_one_node_per_name():
+    """The reading takes the dump's own nodes as the map's store merged them: one node per (kind, map_id, name), the
+    last one's content at the first one's place, with the builds it was seen in -- so a pin reads what that build had,
+    and a name the dump holds twice is one writer."""
     older = _subject("status").model_copy(update={"derived_from": "panda-server-source 1.0.1"})
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -658,17 +647,15 @@ async def test_a_dump_is_read_as_the_store_merged_it():
             _junction("pandajedi/a.py::A.run", Branch(outcome="broken", line=11)),
         ],
     )
-    backend = InMemoryGraphBackend()
-    await backend.connect()
-    # a copy: the store writes the nodes it is handed (ids, valid_for), and the reading must see the dump as it is
-    await store_fragment(fragment.model_copy(deep=True), backend)
-    for node_type in (NodeType.SUBJECT, NodeType.JUNCTION_POINT):
-        stored = [n for n in backend.nodes.values() if n.node_type == node_type]
-        read = _fragment_nodes(fragment, node_type)
-        assert [n.model_dump(exclude={"id", "metadata"}) for n in stored] == [
-            n.model_dump(exclude={"id", "metadata"}) for n, _ in read
-        ]
-        assert [n.metadata["valid_for"] for n in stored] == [seen for _, seen in read]
+    subjects, junctions = (_fragment_nodes(fragment, kind) for kind in (NodeType.SUBJECT, NodeType.JUNCTION_POINT))
+    assert [(n.name, n.derived_from, seen) for n, seen in subjects] == [
+        ("JediTaskSpec.status", "panda-server-source 1.0.1", [VERSION, "panda-server-source 1.0.1"]),
+        ("JediTaskSpec.lockedBy", VERSION, [VERSION]),
+    ]
+    assert [(n.owner, [b.outcome for b in n.branches], seen) for n, seen in junctions] == [
+        ("pandajedi/a.py::A.run", ["broken"], [VERSION]),
+        ("pandajedi/b.py::B.run", ["done"], [VERSION]),
+    ]
 
     code_map = CodeMap(fragment, map_id=MAP_ID)
     assert [b.outcome for j in await code_map.writers_of("JediTaskSpec.status") for b in j.branches] == ["broken", "done"]
