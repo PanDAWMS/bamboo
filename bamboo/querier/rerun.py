@@ -307,7 +307,8 @@ def reach_said(reach: dict | None, hidden: bool) -> tuple[bool, str | None]:
     (``Rerun._reach_of``), and the line saying so.  Dropped only where it reaches no write of another value and leaves
     no call on the way open (the map's ``[]``, never its ``None``), its own defs hold no arm the junctions place there,
     and no gap of the map's may hide where its rows go (*hidden*, ``hides_where``) -- such a gap may hide a write the
-    reach has no junction for (build2-design.md 6, R1).  No line where the map was not asked."""
+    reach has no junction for (build2-design.md 6, R1).  A drop that rests on calls the reach closed by their name
+    (``closed_by_name``) names them.  No line where the map was not asked."""
     if reach is None:
         return False, None
     if reach["own_arms"]:
@@ -323,8 +324,9 @@ def reach_said(reach: dict | None, hidden: bool) -> tuple[bool, str | None]:
     if hidden:
         return False, ("reach: reaches no write of another value and leaves nothing open, but the map could not read "
                        "where all its rows go: kept")
+    closed = f"; {reach['closed']} call(s) closed by name, e.g. {reach['first_closed']}" if reach.get("closed") else ""
     return True, (f"no arm of its own, and reaches no write of another value with nothing left open (closure "
-                  f"{reach['closure']}; assuming {sorted(reach['assumptions'])}): dropped")
+                  f"{reach['closure']}; assuming {sorted(reach['assumptions'])}{closed}): dropped")
 
 
 def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
@@ -2335,7 +2337,8 @@ class Rerun:
             lines: set[int] = set()
             for n, call in enumerate(row.calls):
                 one = row.model_copy(update={"owner": f"{start}#{n}", "calls": [call]})
-                reached = RE.ReachGraph([*rows, one]).reach([one.owner], RE.Destination({end: ["called"]}, []))
+                # the writes reached alone are read: a call closed by its name adds no way (by_name off)
+                reached = RE.ReachGraph([*rows, one]).reach([one.owner], RE.Destination({end: ["called"]}, []), by_name=False)
                 if any(w.function == end for w in reached.writes or []):
                     lines.update(call.lines or [call.line])
             self._calls_into[(start, end)] = [f"{file}:{line}" for line in sorted(lines)]
@@ -2346,7 +2349,8 @@ class Rerun:
         -- every def of its name where it has none, as it takes rows another selects -- does any function it can go on
         into hold an arm moving *q.subject* off *q.observed* (``reach.moving_off``)?  The writes reached (``[]`` for none
         with nothing left open, ``None`` for none with calls left open), the holes, the assumptions the answer relied
-        on and the closure's size; ``own_arms`` names a start the junctions give an arm S1 does not count.  The reach
+        on and the closure's size, the calls it closed by their name (``closed``); ``own_arms`` names a start the
+        junctions give an arm S1 does not count.  The reach
         reads the junctions without their births (``unborn_junctions``), as ``arms_of`` does.  ``None`` where the dump
         has no ``reach_graph``: said once, as the first ask is (build2-design.md 6)."""
         if self._reach is None:
@@ -2378,6 +2382,7 @@ class Rerun:
                 "writes": None if answer.writes is None else [{"function": w.function, "arms": w.arms, "chain": w.chain}
                                                               for w in answer.writes],
                 "holes": len(answer.holes), "first_holes": answer.holes[:3], "assumptions": answer.assumptions,
+                "closed": len(answer.closed), "first_closed": answer.closed[:3],
                 "closure": answer.closure, "own_arms": [s for s in starts if s in destination.arms]}
 
     def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking, rest: bool = True,

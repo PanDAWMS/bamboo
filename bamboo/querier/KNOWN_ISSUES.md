@@ -128,7 +128,8 @@ S1 counts a mover's arms in its own function only; `TaskBuffer.killJobs` writes 
 - S1 asks the map's reach of each mover with no arm of its own (`Rerun._reach_of`, `reach_said`): from the def holding
   its statement -- every def of its name where it takes rows another selects -- does any function it can go on into
   hold an arm moving the value off?  It drops the mover (`reaches-no-write`) only where the answer is `[]`: no write
-  reached and no call on the way left open.  It keeps one whose own defs hold an arm the junctions place there though
+  reached and no call on the way left open.  The reach closes a call left open where no function of the corpus of
+  its name can lead to a write (`closed_by_name`, the map's O1); a drop that rests on that names the calls closed.  It keeps one whose own defs hold an arm the junctions place there though
   S1 counts none, and one where the map could not read where all its rows go (a gap that may hide a write the reach has
   no junction for: any `ReaderGap` but a statement read only in part, whose gap is which rows it takes -- `hides_where`).
   Every gap is said, a part-read one too (`map-gap`, in the map's words).  A kept

@@ -1429,17 +1429,20 @@ def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_no
             import json
             from bamboo.querier.rerun import reach_said
 
-            def reach(writes, holes=0, own=()):
+            def reach(writes, holes=0, own=(), closed=0):
                 return {"starts": ["p/m.py::f"], "writes": writes, "holes": holes, "first_holes": ["p/m.py::f:3 x.y -- why"][:holes],
-                        "assumptions": {"runner_runs_only_sql": 2}, "closure": 4, "own_arms": list(own)}
+                        "assumptions": {"runner_runs_only_sql": 2, **({"closed_by_name": closed} if closed else {})},
+                        "closed": closed, "first_closed": ["p/m.py::f:5 d[k].append -- an element of a dict"][:closed],
+                        "closure": 4, "own_arms": list(own)}
 
             w = [{"function": "p/w.py::W.killJob", "arms": ["failed@3"], "chain": ["p/m.py:7"]}]
             print(json.dumps([reach_said(None, False), reach_said(reach([]), False), reach_said(reach(None, 1), False),
-                              reach_said(reach(w), False), reach_said(reach([]), True), reach_said(reach([], own=["p/m.py::f"]), False)]))
+                              reach_said(reach(w), False), reach_said(reach([]), True), reach_said(reach([], own=["p/m.py::f"]), False),
+                              reach_said(reach([], closed=1), False)]))
             """,
         )
     )
-    unasked, nothing, holed, writes, gapped, own = json.loads(out.splitlines()[-1])
+    unasked, nothing, holed, writes, gapped, own, by_name = json.loads(out.splitlines()[-1])
     assert unasked == [False, None]
     # only the map's [] drops: no write reached and no call left open
     assert nothing == [True, "no arm of its own, and reaches no write of another value with nothing left open (closure 4; "
@@ -1452,6 +1455,10 @@ def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_no
     assert gapped[0] is False and "could not read where all its rows go" in gapped[1]
     # an arm the junctions place in its own def, though S1 counts none: the two disagree, so it is kept
     assert own[0] is False and "though S1 counts none" in own[1]
+    # a drop that rests on calls closed by their name names them (O1)
+    assert by_name == [True, "no arm of its own, and reaches no write of another value with nothing left open (closure 4; "
+                             "assuming ['closed_by_name', 'runner_runs_only_sql']; 1 call(s) closed by name, e.g. "
+                             "['p/m.py::f:5 d[k].append -- an element of a dict']): dropped"]
 
 
 def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_path):
@@ -1472,7 +1479,8 @@ def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_
             rows = [node("p/m.py::count", 1, 2),
                     node("p/m.py::FetchData.count", 6, 8, calls=[ReachCall(line=7, callee="write()", to="p/w.py::write")]),
                     node("p/w.py::write", 1, 5),
-                    node("p/h.py::h", 1, 4, holes=[ReachHole(line=3, callee="d[k].append", why="an element of a dict")])]
+                    node("p/h.py::h", 1, 4, holes=[ReachHole(line=3, callee="f", why=RE.HOLE_LOCAL_CALLED)]),
+                    node("p/n.py::n", 1, 4, holes=[ReachHole(line=3, callee="d[k].append", why="an element of a dict")])]
             asked = []
             RE.moving_off = lambda junctions, graph, subject, value: asked.append((subject, value)) or RE.Destination({"p/w.py::write": ["failed@3"]}, [])
             q = rerun.Stuck("JobSpec.jobStatus", "running", "1")
@@ -1486,7 +1494,8 @@ def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_
             r = fresh(rows)
             got = {name: r._reach_of(q, owner, lines) for name, owner, lines in [
                 ("own statement", "p/m.py::count", [7]), ("rows handed", "p/m.py::count", []), ("nothing", "p/m.py::count", [1]),
-                ("hole", "p/h.py::h", [2]), ("own arm", "p/w.py::write", [2]), ("none holds", "p/x.py::x", [3])]}
+                ("hole", "p/h.py::h", [2]), ("by name", "p/n.py::n", [2]), ("own arm", "p/w.py::write", [2]),
+                ("none holds", "p/x.py::x", [3])]}
             bare = fresh([])
             print(json.dumps([got, r.lines, r.result["reach"]["functions"], asked,
                               [bare._reach_of(q, "p/m.py::count", [7]), bare._reach_of(q, "p/m.py::count", [1])], bare.lines, bare.result]))
@@ -1500,12 +1509,17 @@ def test_the_reach_starts_at_the_def_holding_the_statement_and_is_said_once(tmp_
     assert got["own statement"]["writes"][0]["chain"] == ["p/m.py:7"]
     assert got["rows handed"]["starts"] == ["p/m.py::count", "p/m.py::FetchData.count"]
     assert got["nothing"]["writes"] == [] and got["nothing"]["closure"] == 1
-    assert got["hole"]["writes"] is None and got["hole"]["holes"] == 1
+    # a called local: no name closes it, so it stays open
+    assert got["hole"]["writes"] is None and got["hole"]["holes"] == 1 and got["hole"]["closed"] == 0
+    # a call no function of its name can lead to a write: closed by its name, said (O1)
+    assert got["by name"]["writes"] == [] and got["by name"]["holes"] == 0
+    assert got["by name"]["closed"] == 1 and got["by name"]["first_closed"] == ["p/n.py::n:3 d[k].append -- an element of a dict"]
+    assert got["by name"]["assumptions"] == {"closed_by_name": 1}
     assert got["own arm"]["own_arms"] == ["p/w.py::write"]
     assert got["none holds"]["writes"] is None and got["none holds"]["starts"] == []
     # the record is read once, and the ends once per question
-    assert len(lines) == 1 and lines[0].startswith("  reach: the dump's reach_graph, 4 function(s); every answer rests on [")
-    assert functions == 4 and asked == [["JobSpec.jobStatus", "running"]]
+    assert len(lines) == 1 and lines[0].startswith("  reach: the dump's reach_graph, 5 function(s); every answer rests on [")
+    assert functions == 5 and asked == [["JobSpec.jobStatus", "running"]]
     # a dump with no reach: nothing asked, said once
     assert bare == [None, None] and bare_result == {"reach": {"present": False}}
     assert bare_lines == ["  reach: the dump has no reach_graph: a mover with no arm of its own is kept (KNOWN_ISSUES.md K14)"]
