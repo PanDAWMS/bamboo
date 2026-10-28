@@ -701,6 +701,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             modules=self._modules,
             attributor=audited,
         )
+        # The routes of calls on which each write never runs, its records all made (the objects' last).
+        sqlwrite.attach_routes(fragment.key_froms, self._calls)
         lap("key sources")
         # Which classes a run-time dispatch could have picked.  A candidate
         # set, never an attribution: P1-11 refused to name the single class a

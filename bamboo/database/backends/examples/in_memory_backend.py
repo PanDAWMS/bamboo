@@ -33,6 +33,9 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self.nodes: Dict[str, BaseNode] = {}
         self.relationships: Dict[str, GraphRelationship] = {}
         self.node_index: Dict[str, Set[str]] = {}  # Index by type for quick lookups
+        # Code Map nodes by what merge_map_node merges on, (node_type, map_id, name): the ids created with the key,
+        # in creation order; a node since removed, or no longer holding the key, is skipped where it is read
+        self._map_index: Dict[tuple, list[str]] = {}
         self.connected = False
 
     async def connect(self):
@@ -47,6 +50,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self.nodes.clear()
         self.relationships.clear()
         self.node_index.clear()
+        self._map_index.clear()
 
     async def create_node(self, node: BaseNode) -> str:
         """Create a node in memory."""
@@ -62,6 +66,8 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         if node_type not in self.node_index:
             self.node_index[node_type] = set()
         self.node_index[node_type].add(node.id)
+        if getattr(node, "map_id", None):
+            self._map_index.setdefault(self._map_key(node), []).append(node.id)
 
         logger.debug(f"Created node: {node.id} ({node.name})")
         return node.id
@@ -313,7 +319,25 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self.nodes.clear()
         self.relationships.clear()
         self.node_index.clear()
+        self._map_index.clear()
         logger.info("In-memory backend: all data cleared")
+
+    @staticmethod
+    def _map_key(node: BaseNode) -> tuple:
+        """What :meth:`merge_map_node` merges a Code Map node on."""
+        return (node.node_type, getattr(node, "map_id", None), node.name)
+
+    def _map_node(self, key: tuple) -> BaseNode | None:
+        """The first node created with *key* that is still held and still holds it -- the one a scan of
+        ``self.nodes`` in its order finds -- from the index, dropping the ids it skips.  A scan per merge made storing
+        a map quadratic: 3.5 s for the 8741 nodes of PanDA's, which the querier stores at every connect."""
+        ids = self._map_index.get(key)
+        while ids:
+            node = self.nodes.get(ids[0])
+            if node is not None and self._map_key(node) == key:
+                return node
+            ids.pop(0)
+        return None
 
     async def merge_map_node(self, node: BaseNode) -> str:
         """Merge a Code Map node on ``(label, map_id, name)``.
@@ -332,16 +356,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             raise ValueError("Code Map nodes must carry a map_id")
         version = getattr(node, "derived_from", None)
 
-        existing = next(
-            (
-                n
-                for n in self.nodes.values()
-                if n.node_type == node.node_type
-                and getattr(n, "map_id", None) == map_id
-                and n.name == node.name
-            ),
-            None,
-        )
+        existing = self._map_node(self._map_key(node))
         valid_for = list((existing.metadata.get("valid_for") if existing else None) or [])
         if version is not None and version not in valid_for:
             valid_for.append(version)

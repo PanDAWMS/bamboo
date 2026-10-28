@@ -449,6 +449,7 @@ def _key_froms(
             )
             record._binds = (func, rel_path, [])
             key_froms.append(record)
+        _ran_by(record, func, run)
         for subject, lines in written.items():
             record.writes[subject] = sorted({*record.writes.get(subject, ()), *lines})
         # A map written into the call -- ``execute(sql, {":vo": vo})`` -- is a bind map as a named one is.
@@ -462,6 +463,14 @@ def _key_froms(
         binds = record._binds[2]
         binds.extend(found)
         record.unread = "" if binds else KEY_NO_BIND
+
+
+def _ran_by(record: KeyFrom, func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> None:
+    """Add the calls running *run*'s text with its map to where *record*'s write runs from (``KeyFrom._runs``)."""
+    if record._runs is None:
+        record._runs = (func, [])
+    places = record._runs[1]
+    places.extend(call for call in (run.calls or (run.call,)) if not any(call is one for one in places))
 
 
 _INSERT_INTO = re.compile(r"^\s*INSERT\s+(?:/\*.*?\*/\s*)?INTO\s+([\w.{}$]+)", re.IGNORECASE | re.DOTALL)
@@ -711,6 +720,7 @@ def _insert_from(
         key_froms.append(record)
     else:
         record._insert.binds.extend(insert.binds)
+    _ran_by(record, func, run)
     for subject, lines in written.items():
         record.writes[subject] = sorted({*record.writes.get(subject, ()), *lines})
     record._binds[2].extend(binds)
@@ -3021,6 +3031,11 @@ def _fetches(node: ast.AST) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == "rowcount"
 
 
+def _route_constants(calls: Calls, target: Target, sites: tuple[CallSite, ...], tested: set[str]) -> dict[str, object]:
+    """The constants the route *sites* (the call into *target* first) hands *target*'s parameters *tested*."""
+    return {name: value for name in sorted(tested) if (value := calls.route_constant(name, target, sites)) is not UNSET}
+
+
 def _flag_parameters(func: ast.AST) -> set[str]:
     """The parameters *func* tests in an ``if`` and never rebinds: the ones a call's constant can decide."""
     args = func.args  # type: ignore[attr-defined]
@@ -3475,9 +3490,7 @@ def read_side(
         own = route_reading(func, file)
         records: dict[int, list[CallReading]] = {line: [] for line in lines}
         for route in found:
-            constants = {
-                name: value for name in sorted(tested) if (value := calls.route_constant(name, target, route.sites)) is not UNSET
-            }
+            constants = _route_constants(calls, target, route.sites, tested)
             routing.update(chain=route.chain, into=into, func=func, handed=_route_handed(target, route.sites, calls))
             try:
                 if constants:
@@ -6101,6 +6114,40 @@ def attach_key_sources(
     return read
 
 
+def attach_routes(key_froms: Iterable[KeyFrom], calls: Optional[Calls]) -> None:
+    """Fill each KeyFrom's :attr:`~KeyFrom.routes`, :attr:`~KeyFrom.routes_open` and :attr:`~KeyFrom.out_on`: the
+    routes of calls into its function, whether a call by the function's name is placed nowhere, and the routes on
+    which no place its write runs from runs -- each ruled out by the constants the route hands the function's flag
+    parameters, as a read site's route says its statement is not run (``CallReading.not_run``, :func:`sql.at_call`).
+    Without *calls*, nothing is filled."""
+    if calls is None:
+        return
+    held: dict[int, tuple[ast.AST, list[tuple[list[str], dict[str, object]]], bool]] = {}
+    for record in key_froms:
+        if record._runs is None:
+            continue
+        func, places = record._runs
+        found = held.get(id(func))
+        if found is None or found[0] is not func:
+            owned = calls.types.method_class(record.file, func)
+            target = Target(record.file, func, owned[1] if owned else None)
+            routes, stops = calls.routes(target)
+            tested = _flag_parameters(func)
+            found = held[id(func)] = (
+                func,
+                [(list(route.chain), _route_constants(calls, target, route.sites, tested)) for route in routes],
+                bool(stops),
+            )
+        _func, routes, opened = found
+        record.routes = len(routes)
+        record.routes_open = opened
+        record.out_on = [
+            chain
+            for chain, constants in routes
+            if constants and places and all(pathcond.ruled_out_by(place, func, constants) for place in places)
+        ]
+
+
 def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> None:
     """Add to a KeyFrom persisting an object the subjects the function assigns on that object, at the
     assignments' lines -- ``killJob``'s ``job.jobStatus = ...`` written by its ``INSERT`` of ``job.valuesMap()``.
@@ -6214,18 +6261,18 @@ def _unpersisted(
                         handed_to |= callees
                         writes.setdefault(junction.subject, set()).add(line)
             for (spelled, kind), (ats, handed_to, writes) in sorted(found.items()):
-                made.append(
-                    KeyFrom(
-                        owner=owner,
-                        file=module.rel_path,
-                        statement=min(ats),
-                        term="",
-                        object=spelled,
-                        unread=kind,
-                        handed_to=sorted(handed_to),
-                        writes={subject: sorted(lines) for subject, lines in sorted(writes.items())},
-                    )
+                record = KeyFrom(
+                    owner=owner,
+                    file=module.rel_path,
+                    statement=min(ats),
+                    term="",
+                    object=spelled,
+                    unread=kind,
+                    handed_to=sorted(handed_to),
+                    writes={subject: sorted(lines) for subject, lines in sorted(writes.items())},
                 )
+                record._runs = (func, [statement for at in sorted(set(ats)) for statement in statements.get(at, ())])
+                made.append(record)
     return made
 
 

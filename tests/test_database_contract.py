@@ -143,3 +143,26 @@ async def test_rebuilding_a_map_updates_the_node_and_records_both_versions() -> 
     assert first == second
     assert len(backend.nodes) == 1
     assert backend.nodes[first].metadata["valid_for"] == ["1.0.2", "1.0.3"]
+
+
+async def test_a_merge_goes_to_the_node_a_scan_of_the_nodes_finds() -> None:
+    """The merge reads an index rather than every node (a store of PanDA's map took 3.5 s), and must land where the
+    scan did: on the first node holding the key in the nodes' order, past those since removed."""
+    from bamboo.database.backends.examples.in_memory_backend import (
+        InMemoryGraphBackend,
+    )
+
+    backend = InMemoryGraphBackend()
+    first = await backend.merge_map_node(_subject("1.0.2"))
+    assert await backend.clear_map("panda") == 1
+    again = await backend.merge_map_node(_subject("1.0.3"))
+    # cleared, the subject stored again is a new node with a history of its own
+    assert again != first and backend.nodes[again].metadata["valid_for"] == ["1.0.3"]
+    # a second node made with the key another way: the merge goes to the first
+    direct = await backend.create_node(_subject("1.0.4"))
+    assert await backend.merge_map_node(_subject("1.0.5")) == again
+    # the first removed (one release's nodes cleared): the merge goes to the one left
+    assert await backend.clear_map("panda", version="1.0.5") == 1
+    assert await backend.merge_map_node(_subject("1.0.6")) == direct
+    assert list(backend.nodes) == [direct]
+    assert backend.nodes[direct].metadata["valid_for"] == ["1.0.6"]
