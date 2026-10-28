@@ -140,6 +140,7 @@ from typing import Callable, Iterator, NamedTuple, Optional, Union
 
 from bamboo.codemap import calls as C
 from bamboo.codemap import objects, reach
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     BIND_ALIAS,
     BIND_FILL,
@@ -482,7 +483,7 @@ class _Reader:
                 if id(holder) in seen:
                     continue
                 seen.add(id(holder))
-                for node in ast.walk(holder):
+                for node in walk(holder):
                     if (
                         isinstance(node, ast.Attribute)
                         and isinstance(node.ctx, ast.Store)
@@ -537,7 +538,7 @@ class _Reader:
         call = next(
             (
                 node
-                for node in ast.walk(site)
+                for node in walk(site)
                 if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == level
@@ -916,7 +917,7 @@ class _Reader:
         call = next(
             (
                 node
-                for node in ast.walk(site)
+                for node in walk(site)
                 if isinstance(node, ast.Call)
                 and node.lineno == line
                 and _called(node) == named
@@ -1037,7 +1038,7 @@ class _Reader:
                 {
                     name.id
                     for test in pathcond.tests_on(statement, func)
-                    for name in ast.walk(test)
+                    for name in walk(test)
                     if isinstance(name, ast.Name)
                     and keycolumns.is_parameter(func, name.id)
                     and not C._rebinds(func, name.id)
@@ -1663,7 +1664,7 @@ class _Reader:
                 self._executions[id(func)] = sql.executions(func)  # type: ignore[arg-type]
             except Exception:  # noqa: BLE001 -- the record keeps no write of it
                 self._executions[id(func)] = []
-        inside = {id(node) for node in ast.walk(arm)}
+        inside = {id(node) for node in walk(arm)}
         for run in self._executions[id(func)]:
             for call in run.run_at:
                 if call.lineno != line:
@@ -1821,7 +1822,7 @@ class _Reader:
                 next(
                     (
                         node
-                        for node in ast.walk(site)
+                        for node in walk(site)
                         if isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Attribute)
                         and node.func.attr == statement.level
@@ -2040,7 +2041,7 @@ def _read_from(func: ast.AST, bind: sql.Bind, inside: set[int]) -> bool:
         if id(site) in inside:
             return True
         for name in sorted(
-            {node.id for node in ast.walk(value) if isinstance(node, ast.Name)}
+            {node.id for node in walk(value) if isinstance(node, ast.Name)}
         ):
             for one in pathcond.reaching_definitions(func, name, site):  # type: ignore[arg-type]
                 if id(one) not in seen:

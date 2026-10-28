@@ -50,6 +50,7 @@ import ast
 from collections import Counter
 from typing import Collection, Iterator, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     ARRIVES_BY_CALL,
     ARRIVES_BY_DISPATCH,
@@ -96,7 +97,7 @@ _DAEMON_PATH = "/daemons/scripts/"
 
 
 def _is_message_plugin(module: SourceModule) -> bool:
-    for node in ast.walk(module.tree):
+    for node in walk(module.tree):
         if not isinstance(node, ast.ClassDef):
             continue
         for base in node.bases:
@@ -109,7 +110,7 @@ def _is_message_plugin(module: SourceModule) -> bool:
 def _is_polled(module: SourceModule) -> bool:
     if _DAEMON_PATH in f"/{module.rel_path}":
         return True
-    for node in ast.walk(module.tree):
+    for node in walk(module.tree):
         if not isinstance(node, ast.While):
             continue
         if not (isinstance(node.test, ast.Constant) and node.test.value is True):
@@ -121,7 +122,7 @@ def _is_polled(module: SourceModule) -> bool:
             isinstance(call, ast.Call)
             and isinstance(call.func, ast.Attribute)
             and call.func.attr == "sleep"
-            for call in ast.walk(node)
+            for call in walk(node)
         ):
             return True
     return False
@@ -149,7 +150,7 @@ def foreign_readers(
 def _calls_by_name(module: SourceModule) -> dict[str, ast.Call]:
     """Return ``{method name: first call}`` for the attribute calls in *module*."""
     calls: dict[str, ast.Call] = {}
-    for node in ast.walk(module.tree):
+    for node in walk(module.tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             calls.setdefault(node.func.attr, node)
     return calls
@@ -181,7 +182,7 @@ def forwarder_classes(modules: list[SourceModule]) -> dict[str, tuple[str, int]]
     """
     found: dict[str, list[tuple[str, int]]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             held = _held_callables(node)
@@ -201,7 +202,7 @@ def _held_callables(cls: ast.ClassDef) -> Optional[tuple[str, int]]:
         return None
     parameters = [argument.arg for argument in init.args.args[1:]]
     kept: dict[str, str] = {}
-    for node in ast.walk(init):
+    for node in walk(init):
         targets = targets_of(node)
         if (
             len(targets) == 1
@@ -217,7 +218,7 @@ def _held_callables(cls: ast.ClassDef) -> Optional[tuple[str, int]]:
         for method in cls.body
         if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
         and method is not init
-        for node in ast.walk(method)
+        for node in walk(method)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and isinstance(node.func.value, ast.Name)
@@ -270,7 +271,7 @@ def _forwarded_sites(
     sites: list[tuple[tuple[str, ...], str, ast.Call]] = []
     for func, _owner in functions_with_owner(module.tree):
         built: list[tuple[Optional[str], str, ast.Call]] = []
-        for node in ast.walk(func):
+        for node in walk(func):
             built_here = written_value(node)
             if isinstance(built_here, ast.Call) and targets_of(node):
                 method = _forwarded_call(built_here, forwarders)
@@ -298,7 +299,7 @@ def _called_on(
     func: ast.FunctionDef | ast.AsyncFunctionDef, bound: str, fallback: ast.Call
 ) -> ast.Call:
     """The first call made on *bound* inside *func*, or *fallback*."""
-    for node in ast.walk(func):
+    for node in walk(func):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -410,7 +411,7 @@ def _forwards_to_itself(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     rival implementations.  ``self`` is excluded so that genuine recursion is
     not mistaken for a handoff.
     """
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         if node.func.attr != func.name:
@@ -468,7 +469,7 @@ def imported_modules(module: SourceModule) -> set[str]:
     hopeless across the corpus.
     """
     found: set[str] = set()
-    for node in ast.walk(module.tree):
+    for node in walk(module.tree):
         if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             found.add(node.module.replace(".", "/") + ".py")
             found.update(
@@ -504,7 +505,7 @@ def _self_calls(tree: ast.AST) -> dict[str, set[str]]:
     edges: dict[str, set[str]] = {}
     for func, _owner in functions_with_owner(tree):
         targets = edges.setdefault(func.name, set())
-        for node in ast.walk(func):
+        for node in walk(func):
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
@@ -581,7 +582,7 @@ def _inherited_homes(
     defines: dict[str, set[str]] = {}
     declares: dict[str, list[str]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if isinstance(node, ast.ClassDef):
                 declared_in.setdefault(node.name, set()).add(module.rel_path)
                 declares.setdefault(module.rel_path, []).append(node.name)
@@ -622,7 +623,7 @@ def _declared_family(
     """
     family: dict[str, set[str]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             here = family.setdefault(module.rel_path, set())
@@ -729,7 +730,7 @@ def _dispatch_families(
                 if arg.annotation is not None
                 and (found := annotated_generic(arg.annotation, bases)) is not None
             }
-            for node in ast.walk(func):
+            for node in walk(func):
                 # ``self.impl: T = impl`` binds as ``self.impl = impl`` does.
                 if len(targets := targets_of(node)) != 1:
                     continue
@@ -782,7 +783,7 @@ def _dispatch_families(
             if owner is None:
                 continue
             bound: dict[str, str] = {}
-            for node in ast.walk(func):
+            for node in walk(func):
                 # ``impl: T = self.getImpl(...)`` binds as ``impl = self.getImpl(...)`` does.
                 if len(targets := targets_of(node)) != 1:
                     continue
@@ -813,7 +814,7 @@ def _dispatch_families(
                     bound[target.id] = named
             if not bound:
                 continue
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not (
                     isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 ):
@@ -1070,7 +1071,7 @@ def subclass_edges(
     """
     edges: dict[str, list[tuple[ast.ClassDef, str]]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             for base in node.bases:
@@ -1114,7 +1115,7 @@ def worker_door(modules: list[SourceModule]) -> Optional[str]:
     which one carries the work is a guess.
     """
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if isinstance(node, ast.ClassDef) and node.name == _WORKER_BASE:
                 called = _self_calls(node).get("run", set())
                 if len(called) == 1:
@@ -1178,7 +1179,7 @@ def _handover(
         {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg is not None}
     )
     fields: dict[str, str] = {}
-    for node in ast.walk(init):
+    for node in walk(init):
         targets = targets_of(node)
         if len(targets) != 1:
             continue
@@ -1248,7 +1249,7 @@ def worker_uplinks(
         for func, _owner in functions_with_owner(module.tree):
             built: list[tuple[Optional[str], ast.Call]] = []
             dispatched: set[str] = set()
-            for node in ast.walk(func):
+            for node in walk(func):
                 value = written_value(node)
                 if (
                     targets_of(node)
@@ -1316,7 +1317,7 @@ def construction_uplinks(
     reach: dict[tuple[str, str], list[tuple[str, str, dict[str, str], tuple[int, int]]]] = {}
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
                     continue
                 held = wanted.get(node.func.id)
@@ -1353,7 +1354,7 @@ def _classes_owning_a_junction(
     owners = {junction.owner for junction in junctions}
     found: dict[str, list[tuple[str, list[str], tuple[int, int], Optional[ast.AST]]]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef) or node.name in spec_classes:
                 continue
             methods = [
@@ -1423,7 +1424,7 @@ def dispatch_fanouts(modules: list[SourceModule]) -> dict[str, list[DispatchFano
     subclasses: dict[str, list[str]] = {}
     declared: dict[str, list[ast.ClassDef]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             declared.setdefault(node.name, []).append(node)
@@ -1441,7 +1442,7 @@ def dispatch_fanouts(modules: list[SourceModule]) -> dict[str, list[DispatchFano
 
     found: dict[str, list[DispatchFanout]] = {}
     for module in modules:
-        for cls in [n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)]:
+        for cls in [n for n in walk(module.tree) if isinstance(n, ast.ClassDef)]:
             fanouts = [
                 fanout
                 for method in cls.body
@@ -1466,7 +1467,7 @@ def _fanouts_in(
     declared: dict[str, list[ast.ClassDef]],
     subclasses: dict[str, list[str]],
 ) -> Iterator[DispatchFanout]:
-    body = list(ast.walk(func))
+    body = list(walk(func))
     seen: set[tuple[str, str]] = set()
     for node in body:
         targets = targets_of(node)
@@ -1478,7 +1479,7 @@ def _fanouts_in(
         for guard in body:
             if not isinstance(guard, ast.If) or not _tests_none(guard.test, name):
                 continue
-            for statement in ast.walk(guard):
+            for statement in walk(guard):
                 inner = targets_of(statement)
                 if not (
                     inner
@@ -1537,7 +1538,7 @@ def _announces(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
     ``plugin name {self.adder_plugin_class.__name__}``, so ``plugin name ``
     is what to ask the log for.
     """
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.JoinedStr):
             continue
         names = {
@@ -1578,7 +1579,7 @@ def attach_dispatch(junctions: list[JunctionNode], modules: list[SourceModule]) 
         return 0
     spans: dict[str, list[tuple[str, tuple[int, int], list[DispatchFanout]]]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             held = fanouts.get(f"{module.rel_path}::{node.name}")

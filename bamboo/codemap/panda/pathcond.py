@@ -20,6 +20,7 @@ import ast
 import functools
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import sqleval
 from bamboo.codemap.panda.reaching import reaching, reaching_exit
 
@@ -57,7 +58,7 @@ def qualified_name(func: ast.AST) -> str:
 
 
 def attach_parents(tree: ast.AST) -> None:
-    for parent in ast.walk(tree):
+    for parent in walk(tree):
         for child in ast.iter_child_nodes(parent):
             child.parent = parent  # type: ignore[attr-defined]
 
@@ -181,7 +182,7 @@ class _Index:
         """name -> the values an ``=`` writes to it, an unpacked element included."""
         if self._definitions is None:
             found: dict[str, list[ast.expr]] = {}
-            for node in ast.walk(self.scope):
+            for node in walk(self.scope):
                 value = written_value(node)
                 if value is None:
                     continue
@@ -195,7 +196,7 @@ class _Index:
         """name -> every value bound to it, ``+=`` included (:func:`assigned_expressions`)."""
         if self._assigned is None:
             found: dict[str, list[ast.expr]] = {}
-            for node in ast.walk(self.scope):
+            for node in walk(self.scope):
                 if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                     names = [node.target]
                 else:
@@ -230,11 +231,11 @@ class _Index:
         """name -> every :class:`Binding` of it in the scope, in ``ast.walk`` order."""
         if self._bindings is None:
             inner: set[int] = set()
-            for node in ast.walk(self.scope):
+            for node in walk(self.scope):
                 if node is not self.scope and isinstance(node, _SCOPES):
-                    inner.update(id(held) for held in ast.walk(node) if held is not node)
+                    inner.update(id(held) for held in walk(node) if held is not node)
             found: dict[str, list[Binding]] = {}
-            for node in ast.walk(self.scope):
+            for node in walk(self.scope):
                 for binding in _bindings_at(node, id(node) in inner):
                     found.setdefault(binding.name, []).append(binding)
             self._bindings = {name: tuple(held) for name, held in found.items()}
@@ -460,7 +461,7 @@ def class_of(tree: ast.AST, func: ast.AST) -> Optional[ast.ClassDef]:
     own at use time and has no such guarantee, so this descends instead -- the
     same rule, read from the other end.
     """
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, ast.ClassDef) and any(
             method is func for method in methods_of(node)
         ):
@@ -480,7 +481,7 @@ def bases_in(tree: ast.AST, cls: ast.ClassDef) -> list[ast.ClassDef]:
     it is not in the way.
     """
     declared = {
-        node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+        node.name: node for node in walk(tree) if isinstance(node, ast.ClassDef)
     }
     order: list[ast.ClassDef] = []
     seen = {cls.name}
@@ -972,7 +973,7 @@ def reachable_when(node: ast.AST) -> list[str]:
 
 
 def _names_in(expression: ast.AST) -> set[str]:
-    return {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
+    return {node.id for node in walk(expression) if isinstance(node, ast.Name)}
 
 
 def _rebinds(func: ast.AST) -> dict[str, list[ast.AST]]:
@@ -992,7 +993,7 @@ def _rebinds(func: ast.AST) -> dict[str, list[ast.AST]]:
         own = [binding.site for binding in sites if not binding.nested]
         if own:
             found[name] = own
-    for node in ast.walk(func):
+    for node in walk(func):
         if node is func or enclosing_function(node) is not func:
             continue
         if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
@@ -1464,7 +1465,7 @@ def literal_values(
 
     settle = resolve or literal_only
     found: list[tuple[ast.stmt, list[str]]] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         value = written_value(node)
         if value is None:
             continue
@@ -1837,7 +1838,7 @@ def _read_after(
     start, end = getattr(write, "lineno", 0), getattr(getattr(expression, "parent", None), "lineno", 0)
     texts: set[str] = set()
     names: set[str] = set()
-    for node in ast.walk(expression):
+    for node in walk(expression):
         if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)) and isinstance(getattr(node, "ctx", None), ast.Load):
             texts.add(_text(node))
             if isinstance(node, ast.Name):
@@ -1903,7 +1904,7 @@ def _jump_statements(func: ast.AST) -> list[ast.stmt]:
     if held is None:
         held = [
             node
-            for node in ast.walk(func)
+            for node in walk(func)
             if isinstance(node, (ast.Return, ast.Raise, ast.Continue, ast.Break))
             and enclosing_function(node) is func
         ]
@@ -2027,7 +2028,7 @@ def _decided_with(test: ast.expr, place: str, kept: object) -> object:
     except Exception:  # noqa: BLE001
         return UNDECIDED
     spelled = _AsKept(place).visit(fresh)
-    if not any(isinstance(node, ast.Name) and node.id == _KEPT_NAME for node in ast.walk(spelled)):
+    if not any(isinstance(node, ast.Name) and node.id == _KEPT_NAME for node in walk(spelled)):
         return UNDECIDED
     return decided(spelled, {_KEPT_NAME: kept})
 
@@ -2060,7 +2061,7 @@ def _own_statements(func: ast.AST) -> list[ast.stmt]:
     if held is None:
         held = [
             node
-            for node in ast.walk(func)
+            for node in walk(func)
             if isinstance(node, ast.stmt) and node is not func and enclosing_function(node) is func
         ]
         try:
@@ -2076,7 +2077,7 @@ def _evaluated(statement: ast.stmt) -> Iterator[ast.AST]:
     A nested ``def`` or ``class`` whole, since what it closes over leaves with it.
     """
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        yield from ast.walk(statement)
+        yield from walk(statement)
         return
     stack = [
         child
@@ -2143,9 +2144,9 @@ def renewals(func: ast.FunctionDef | ast.AsyncFunctionDef, holder: ast.expr) -> 
     for ``self.job``, and ``tmp_name``'s next value for
     ``self.dataset_map[tmp_name]``.  ``+=`` keeps the object.
     """
-    texts = holder_texts(holder) - {name.id for name in ast.walk(holder) if isinstance(name, ast.Name)}
+    texts = holder_texts(holder) - {name.id for name in walk(holder) if isinstance(name, ast.Name)}
     found: list[ast.AST] = []
-    for name in {node.id for node in ast.walk(holder) if isinstance(node, ast.Name)}:
+    for name in {node.id for node in walk(holder) if isinstance(node, ast.Name)}:
         found.extend(
             binding.site
             for binding in bindings(func, name)

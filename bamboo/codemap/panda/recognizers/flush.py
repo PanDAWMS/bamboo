@@ -53,6 +53,7 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import own_nodes
 from bamboo.codemap.models import (
     KEY_IN_CALLEE,
@@ -277,7 +278,7 @@ def flush_methods(
                 continue
             classes: set[str] = set()
             excluded: set[str] = set()
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                     continue
                 if node.func.attr == FLUSH_EXPRESSION:
@@ -380,7 +381,7 @@ def _changed_attributes(
 ) -> dict[str, set[str]]:
     """``{spec class: attributes assigned on it}`` inside *func*."""
     changed: dict[str, set[str]] = {}
-    for node in ast.walk(func):
+    for node in walk(func):
         for target in targets_of(node):
             if not isinstance(target, ast.Attribute):
                 continue
@@ -446,7 +447,7 @@ def attach(
             if not here:
                 continue
             uses = []
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                     continue
                 flush = flushes.get(node.func.attr)

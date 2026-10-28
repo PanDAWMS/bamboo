@@ -25,6 +25,7 @@ from typing import Optional
 
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap import reach, reading, trace
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
@@ -411,7 +412,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             f"{module.rel_path}:{target.lineno} {ast.unparse(target)}"
             for module in self._modules
             for func, _owner in functions_with_owner(module.tree)
-            for target in ast.walk(func)
+            for target in walk(func)
             if isinstance(target, ast.Attribute)
             and isinstance(target.ctx, ast.Store)
             and target.attr in spec_attribute_names
@@ -1223,7 +1224,7 @@ def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]
     defined = {
         node.name
         for module in modules
-        for node in ast.walk(module.tree)
+        for node in walk(module.tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
     considered = 0
@@ -1263,7 +1264,7 @@ def _attach_called_from(junctions, calls) -> None:
             file, _, name = junction.owner.partition("::")
             tree = calls.types.tree(file)
             found: list[str] = []
-            for func in ast.walk(tree) if tree is not None else ():
+            for func in walk(tree) if tree is not None else ():
                 if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or func.name != name:
                     continue
                 if junction.anchor is not None and not (

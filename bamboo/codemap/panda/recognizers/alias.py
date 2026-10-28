@@ -47,6 +47,7 @@ from __future__ import annotations
 import ast
 from typing import Callable, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -93,7 +94,7 @@ def _literal_self_writes(
 ) -> list[tuple[str, str, list[str]]]:
     """Return ``(attribute, literal, inner conditions)`` for ``self.attr = "lit"``."""
     found: list[tuple[str, str, list[str]]] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         value = written_value(node)
         if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
             continue
@@ -162,7 +163,7 @@ def _returned_values(
 
     values: list[tuple[str, list[str]]] = []
     opaque = False
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.Return) or node.value is None:
             continue
         if enclosing_function(node) is not func:
@@ -256,7 +257,7 @@ def extract_producers(
         attach_parents(module.tree)
         candidates = 0
         explained = 0
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             call = written_value(node)
             if not isinstance(call, ast.Call):
                 continue
@@ -420,7 +421,7 @@ def extract(
         attach_parents(module.tree)
         candidates = 0
         explained = 0
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             if node.func.attr not in aliases:

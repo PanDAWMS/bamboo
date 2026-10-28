@@ -53,6 +53,7 @@ import ast
 import re
 from typing import Iterator, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, LoopCutNode, SourceModule
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
@@ -121,7 +122,7 @@ def _preceding(node: ast.stmt) -> list[ast.stmt]:
 
 
 def _logging_calls(statement: ast.stmt) -> Iterator[ast.Call]:
-    for node in ast.walk(statement):
+    for node in walk(statement):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -135,7 +136,7 @@ def _last_assignment(
 ) -> Optional[ast.stmt]:
     """The last statement above *before* that assigns *name*."""
     found: Optional[ast.stmt] = None
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
             continue
         if node.lineno >= before:
@@ -290,7 +291,7 @@ def extract(
             # the honest reading -- any of those conditions drops a candidate
             # onto this line.
             found: dict[str, _Cut] = {}
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not isinstance(node, ast.Continue):
                     continue
                 if enclosing_function(node) is not func:

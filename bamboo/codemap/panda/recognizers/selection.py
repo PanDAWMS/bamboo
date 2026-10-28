@@ -38,6 +38,7 @@ import hashlib
 import re
 from typing import Iterator, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, CoverageStat, FilterStageNode, SourceModule
 from bamboo.codemap.panda import values
 from bamboo.codemap.panda.pathcond import (
@@ -80,7 +81,7 @@ def _rendered(node: ast.AST) -> Optional[str]:
 
 def _strings(tree: ast.AST) -> Iterator[tuple[ast.AST, str]]:
     """Yield each string literal once, not once per f-string piece."""
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, ast.JoinedStr):
             yield node, _rendered(node) or ""
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -106,11 +107,11 @@ def _identifiers(expression: str) -> list[str]:
     # would send the backward walk after a method name.
     called = {
         node.func
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
     }
     names: list[str] = []
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if node in called:
             continue
         if isinstance(node, ast.Attribute):
@@ -207,7 +208,7 @@ def helper_log_levels(modules: list[SourceModule]) -> dict[str, Optional[str]]:
             if func.name != _SUMMARY or owner is None:
                 continue
             found = None
-            for node in ast.walk(func):
+            for node in walk(func):
                 if (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
@@ -272,7 +273,7 @@ def _steps(
 ) -> list[_Step]:
     """Return the named steps of *func*'s chain, in source order."""
     found: list[_Step] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -449,7 +450,7 @@ def _appends(statements: list[ast.stmt]) -> bool:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "append"
         for statement in statements
-        for node in ast.walk(statement)
+        for node in walk(statement)
     )
 
 
@@ -498,7 +499,7 @@ def _untagged_steps(
             continue
         stage = _Stage("", step.label, step.line)
         stage.level = step.level
-        for node in ast.walk(func):
+        for node in walk(func):
             if not isinstance(node, (ast.Continue, ast.If)):
                 continue
             if not previous < node.lineno <= step.line:

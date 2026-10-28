@@ -50,6 +50,7 @@ import re
 import string
 from typing import TYPE_CHECKING, Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import sqleval, sqltext
 from bamboo.codemap.panda.pathcond import (
     BIND_ANNOTATED,
@@ -255,7 +256,7 @@ def _own_lists(scope: ast.AST) -> dict[str, InList]:
     if held is not None:
         return held
     found: dict[str, InList] = {}
-    nodes = scope.body if isinstance(scope, ast.Module) else ast.walk(scope)
+    nodes = scope.body if isinstance(scope, ast.Module) else walk(scope)
     for node in nodes:
         if not (
             isinstance(node, ast.Assign)
@@ -372,7 +373,7 @@ def returned(
     if _CALLS is None:
         return []
     found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
             continue
         if enclosing_function(node) is not func:
@@ -423,7 +424,7 @@ def _at_slot(
     if isinstance(value, ast.Name):
         return [
             (func, element)
-            for node in ast.walk(func)
+            for node in walk(func)
             if isinstance(node, (ast.Assign, ast.AnnAssign))
             and node.value is not None
             and enclosing_function(node) is func
@@ -929,7 +930,7 @@ def _sequence_values(
     """
     found: list[str] = []
     assigned = False
-    for node in ast.walk(func):
+    for node in walk(func):
         if _AT_CALL and ruled_out(node):
             continue
         if any(
@@ -1090,7 +1091,7 @@ def _literal_values(
         return []
     deeper = seen | {expression.id}
     found: list[str] = _default_values(func, expression.id)
-    for node in ast.walk(func):
+    for node in walk(func):
         if (
             isinstance(node, ast.For)
             and isinstance(node.target, ast.Name)
@@ -1169,7 +1170,7 @@ def _keys_walked(node: ast.For) -> tuple[str, Optional[ast.expr]]:
         and one.value.id == over.id
         and isinstance(one.slice, ast.Name)
         and one.slice.id == target.id
-        for one in ast.walk(node)
+        for one in walk(node)
     ):
         return target.id, over
     return "", None
@@ -1198,7 +1199,7 @@ def _literal_keys(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> li
     which would put a key set inside an ``if`` after one set below it.
     """
     found: dict[str, int] = {}
-    for node in ast.walk(func):
+    for node in walk(func):
         for target in targets_of(node):
             if (
                 isinstance(target, ast.Subscript)
@@ -1259,7 +1260,7 @@ def _string_value(
             return bound[node.id]
         if hops >= _KEY_HOPS:
             return None
-        for other in ast.walk(scope):
+        for other in walk(scope):
             value = written_value(other)
             if value is not None and any(
                 isinstance(target, ast.Name) and target.id == node.id
@@ -1358,7 +1359,7 @@ def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
     reported as written on every pass when the code writes it on none.
     """
     guards: list[ast.expr] = []
-    for node in ast.walk(loop):
+    for node in walk(loop):
         if isinstance(node, ast.For) and node is not loop:
             # Its ``continue`` belongs to the inner loop and says nothing
             # about which keys reach the fragment.
@@ -1366,7 +1367,7 @@ def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
         if isinstance(node, ast.If) and len(node.body) == 1 and isinstance(node.body[0], ast.Continue):
             guards.append(node.test)
         elif isinstance(node, ast.Continue) and not any(
-            isinstance(one, ast.If) and one.body == [node] for one in ast.walk(loop)
+            isinstance(one, ast.If) and one.body == [node] for one in walk(loop)
         ):
             return None
     kept: list[str] = []
@@ -1450,7 +1451,7 @@ def map_key(
     )
     probe = "\x00key"
     spelled = bind.replace("{}", probe)
-    for node in ast.walk(loop):
+    for node in walk(loop):
         for stored in targets_of(node):
             if not (
                 isinstance(stored, ast.Subscript)
@@ -1549,7 +1550,7 @@ def _run_fragments(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[a
             if isinstance(hole.stmt, (ast.For, ast.AsyncFor, ast.While)):
                 inside = [
                     node
-                    for node in ast.walk(hole.stmt)
+                    for node in walk(hole.stmt)
                     if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
                     and any(
                         isinstance(t, ast.Name) and t.id == hole.source
@@ -1735,7 +1736,7 @@ def _skip_without_text(
         # place to go and read.
         bound = any(
             isinstance(node, ast.Name) and node.id == head.id and isinstance(node.ctx, ast.Store)
-            for node in ast.walk(func)
+            for node in walk(func)
         )
         return Skip(call.lineno, SKIP_UNREAD_NAME if bound else SKIP_UNBOUND, head.id)
     return Skip(call.lineno, SKIP_UNRENDERED, _clipped(_unparsed(head)))
@@ -1806,7 +1807,7 @@ def _corpus_runners(types) -> dict[str, Runner]:
         tree = types.tree(file)
         if tree is None:
             continue
-        for func in ast.walk(tree):
+        for func in walk(tree):
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             parameters = {
@@ -1816,7 +1817,7 @@ def _corpus_runners(types) -> dict[str, Runner]:
             made = []
             for node in own_nodes(func):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
-                    named = any(isinstance(one, ast.Name) and one.id in parameters for one in ast.walk(node.args[0]))
+                    named = any(isinstance(one, ast.Name) and one.id in parameters for one in walk(node.args[0]))
                     made.append((node.func.attr, named and _runs_a_parameter(func, node)))
             if made:
                 calling.append((func.name, made))
@@ -1989,7 +1990,7 @@ def written_back_at(path: Path, line: int) -> Optional[tuple[str, ...]]:
     held = parsed(path)
     if held is None:
         return None
-    for node in ast.walk(held[1]):
+    for node in walk(held[1]):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -2065,7 +2066,7 @@ def binding_window(
     forwarded form already had.
     """
     start = func.lineno
-    for node in ast.walk(func):
+    for node in walk(func):
         # ``targets`` first: it is what rules out the nodes with no line number
         # at all, so testing it before ``lineno`` is what keeps this safe.
         targets = targets_of(node)
@@ -2255,7 +2256,7 @@ def tested_values(value: ast.expr, site: ast.stmt, func: ast.AST) -> list[str]:
         if isinstance(ancestor, ast.If) and previous in ancestor.body:
             found = _equal_to(ancestor.test, value.id)
             if found:
-                inside = {id(node) for node in ast.walk(ancestor)}
+                inside = {id(node) for node in walk(ancestor)}
                 again = any(id(one) in inside and one.lineno < site.lineno for one in rebound)
                 return [] if again else found
         previous = ancestor
@@ -2313,7 +2314,7 @@ def declared_row_classes(
     carries meaning instead of at all of them.
     """
     found: dict[str, str] = {}
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.JoinedStr):
             continue
         text = ""
@@ -2489,7 +2490,7 @@ def scan_binds(
             excluded += 1
 
     lists = {one.values_map: one for one in in_lists(func).values()}
-    for node in ast.walk(func):
+    for node in walk(func):
         if _AT_CALL and ruled_out(node):
             continue
         if (
@@ -2670,7 +2671,7 @@ def _appended(func: ast.AST, listing: str, varmap: str) -> list[ast.stmt]:
     """The ``<listing>.append(<varmap>)`` statements of *func*."""
     return [
         node
-        for node in ast.walk(func)
+        for node in walk(func)
         if isinstance(node, ast.Expr)
         and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Attribute)
@@ -2916,7 +2917,7 @@ def _simple_statements(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast
     if not store:
         store[0] = [
             node
-            for node in ast.walk(func)
+            for node in walk(func)
             if isinstance(node, ast.stmt)
             and "body" not in node._fields
             and "cases" not in node._fields
@@ -3067,7 +3068,7 @@ def _rereads(write: ast.AST, varmap: str) -> bool:
         and node.value.id == varmap
         and isinstance(node.slice, ast.Constant)
         and node.slice.value == key.value
-        for node in ast.walk(write.value)  # type: ignore[attr-defined]
+        for node in walk(write.value)  # type: ignore[attr-defined]
     )
 
 
@@ -3333,7 +3334,7 @@ def _unrendered(hole: "sqleval.HoleAt", func: ast.FunctionDef | ast.AsyncFunctio
     own = getattr(func, "_own_augassigns", None)
     if own is None:
         own = func._own_augassigns = frozenset(  # type: ignore[union-attr]
-            id(node) for node in ast.walk(func) if isinstance(node, ast.AugAssign)
+            id(node) for node in walk(func) if isinstance(node, ast.AugAssign)
         )
     return id(hole.stmt) in own
 

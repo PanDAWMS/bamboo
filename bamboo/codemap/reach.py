@@ -39,6 +39,7 @@ from collections import Counter, deque
 from typing import Callable, Iterable, Iterator, Optional
 
 from bamboo.codemap import calls as C
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
     JunctionNode,
@@ -453,7 +454,7 @@ class _Receivers:
             found = [
                 self.annotation(file, node.returns)
                 for file in self.types.corpus_files()
-                for node in ast.walk(
+                for node in walk(
                     self.types.tree(file) or ast.Module(body=[], type_ignores=[])
                 )
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -656,7 +657,7 @@ class _Receivers:
             found: set[str] = set()
             forwarded = self.calls.forwarded_reads()
             for file in self.types.corpus_files():
-                for node in ast.walk(
+                for node in walk(
                     self.types.tree(file) or ast.Module(body=[], type_ignores=[])
                 ):
                     if id(node) in forwarded:
@@ -960,7 +961,7 @@ class _Scope:
         self.func = func
         self.names: dict[str, list[ast.Name]] = {}
         self.others: set[str] = set()
-        for node in ast.walk(func):
+        for node in walk(func):
             if isinstance(node, ast.Name):
                 self.names.setdefault(node.id, []).append(node)
             elif isinstance(node, ast.ExceptHandler) and node.name:
@@ -1841,7 +1842,7 @@ def _key_texts(func: ast.AST, key: ast.expr, holders: set[str]) -> Optional[set[
     ]
     if not stores or any(
         isinstance(node, (ast.Global, ast.Nonlocal)) and key.id in node.names
-        for node in ast.walk(func)
+        for node in walk(func)
     ):
         return None
     texts: set[str] = set()
@@ -1901,7 +1902,7 @@ def _iterated_texts(
     elif isinstance(over, ast.Name) and over.id not in _parameters(func):
         uses = [
             node
-            for node in ast.walk(func)
+            for node in walk(func)
             if isinstance(node, ast.Name) and node.id == over.id
         ]
         bound = [
@@ -2024,13 +2025,13 @@ def _always_given(func: ast.AST, call: ast.Call, spread: ast.expr, key: str) -> 
     sites: list[ast.AST] = []
     if name in _parameters(func):
         sites.append(func.args)  # type: ignore[attr-defined]
-    for node in ast.walk(func):
+    for node in walk(func):
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
             and node is not func
         ):
             if any(
-                isinstance(one, ast.Name) and one.id == name for one in ast.walk(node)
+                isinstance(one, ast.Name) and one.id == name for one in walk(node)
             ):
                 return False
         if (
@@ -2086,7 +2087,7 @@ def _always_given(func: ast.AST, call: ast.Call, spread: ast.expr, key: str) -> 
             ):
                 sites.append(held)
         elif isinstance(node, ast.Delete) and any(
-            name in {one.id for one in ast.walk(target) if isinstance(one, ast.Name)}
+            name in {one.id for one in walk(target) if isinstance(one, ast.Name)}
             for target in node.targets
         ):
             sites.append(node)
@@ -2107,7 +2108,7 @@ def _spells(func: ast.AST, value: ast.expr, key: str) -> bool:
     if value.id in _parameters(func):
         return False
     bound = False
-    for node in ast.walk(func):
+    for node in walk(func):
         if (
             isinstance(node, ast.Name)
             and node.id == value.id
@@ -2160,18 +2161,18 @@ def _parameters(func: ast.AST) -> dict[str, Optional[ast.expr]]:
 def _loop_sources(func: ast.AST, name: str) -> list[tuple[ast.expr, bool]]:
     """``(source, entered)`` for each loop, comprehension or ``with`` in *func* that binds *name*."""
     found: list[tuple[ast.expr, bool]] = []
-    for node in ast.walk(func):
+    for node in walk(func):
         if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
             if any(
                 isinstance(leaf, ast.Name) and leaf.id == name
-                for leaf in ast.walk(node.target)
+                for leaf in walk(node.target)
             ):
                 found.append((node.iter, False))
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if item.optional_vars is not None and any(
                     isinstance(leaf, ast.Name) and leaf.id == name
-                    for leaf in ast.walk(item.optional_vars)
+                    for leaf in walk(item.optional_vars)
                 ):
                     found.append((item.context_expr, True))
     return found
@@ -2340,7 +2341,7 @@ def graph(
     defined = {
         method.name
         for file in types.corpus_files()
-        for node in ast.walk(types.tree(file) or ast.Module(body=[], type_ignores=[]))
+        for node in walk(types.tree(file) or ast.Module(body=[], type_ignores=[]))
         if isinstance(node, ast.ClassDef)
         for method in pathcond.methods_of(node)
     }

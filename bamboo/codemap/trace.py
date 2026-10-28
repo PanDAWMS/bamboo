@@ -60,6 +60,7 @@ from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap import astwalk
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.calls import Types as _Types
 from bamboo.codemap.gitsource import blob_sha as git_blob_sha
@@ -282,7 +283,7 @@ def _node_at(func: ast.AST, place: tuple) -> Optional[ast.AST]:
     """The node of *func* at *place*, or ``None``."""
     if not place:
         return None
-    return next((node for node in ast.walk(func) if _place(node) == place), None)
+    return next((node for node in astwalk.walk(func) if _place(node) == place), None)
 
 
 class _Frame(NamedTuple):
@@ -363,11 +364,11 @@ def _reads(expression: ast.AST) -> list[str]:
     # ``self.getClobObj`` and said the caller chose them.
     called = {
         node.func
-        for node in ast.walk(expression)
+        for node in astwalk.walk(expression)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
     out: list[str] = []
-    for node in ast.walk(expression):
+    for node in astwalk.walk(expression):
         if isinstance(node, ast.Attribute):
             base: ast.AST = node
             nearest = ""
@@ -443,14 +444,14 @@ def _statement_at(func: ast.AST, line: int) -> Optional[ast.stmt]:
     """The statement the map's line addresses, innermost first."""
     exact = [
         node
-        for node in ast.walk(func)
+        for node in astwalk.walk(func)
         if isinstance(node, ast.stmt) and node.lineno == line
     ]
     if exact:
         return min(exact, key=lambda node: (node.end_lineno or node.lineno) - node.lineno)
     holding = [
         node
-        for node in ast.walk(func)
+        for node in astwalk.walk(func)
         if isinstance(node, ast.stmt)
         and node.lineno <= line <= (node.end_lineno or node.lineno)
     ]
@@ -782,7 +783,7 @@ def _of_interest(
     comes back whole, and burying the rows a reader came for is the same
     failure this round is fixing in the report's other half.
     """
-    for node in ast.walk(statement):
+    for node in astwalk.walk(statement):
         if isinstance(node, ast.stmt):
             if id(node) in printed or getattr(node, "lineno", 0) in armed:
                 return True
@@ -1206,7 +1207,7 @@ _MAX_MUTATIONS = 24
 
 def _same_node(scope: ast.AST, node: ast.AST) -> Optional[ast.AST]:
     """The node of *scope*'s own tree at *node*'s position, *node* being from another parse."""
-    for held in ast.walk(scope):
+    for held in astwalk.walk(scope):
         if (
             type(held) is type(node)
             and getattr(held, "lineno", None) == getattr(node, "lineno", None)
@@ -1219,7 +1220,7 @@ def _same_node(scope: ast.AST, node: ast.AST) -> Optional[ast.AST]:
 def _keyed_reads(expression: ast.AST) -> list[str]:
     """``x['k']`` for every item of a local read by a constant key in *expression*."""
     found: list[str] = []
-    for node in ast.walk(expression):
+    for node in astwalk.walk(expression):
         if (
             isinstance(node, ast.Subscript)
             and isinstance(node.value, ast.Name)
@@ -1321,7 +1322,7 @@ def _plain_bindings(func: ast.AST, name: str) -> Optional[list[ast.expr]]:
     values: list[ast.expr] = []
 
     def names(target: ast.AST) -> bool:
-        return any(isinstance(node, ast.Name) and node.id == name for node in ast.walk(target))
+        return any(isinstance(node, ast.Name) and node.id == name for node in astwalk.walk(target))
 
     for node in calls_mod.own_nodes(func):
         if isinstance(node, ast.Assign):
@@ -1579,7 +1580,7 @@ def _imported_names(tree: ast.Module) -> frozenset[str]:
     values, and :func:`_module_bindings` reads them.
     """
     found: set[str] = set()
-    for node in ast.walk(tree):
+    for node in astwalk.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 found.add(alias.asname or alias.name.split(".")[0])
@@ -1654,7 +1655,7 @@ def _mutated_bindings(func: ast.AST, name: str) -> list[ast.expr]:
     it, so this is asked only where every assignment is an empty container.
     """
     found: list[ast.expr] = []
-    for node in ast.walk(func):
+    for node in astwalk.walk(func):
         # ``returnMap["ramCount"] = memVal`` puts a value in as much as
         # ``xmlIDs.add(x)`` does, and it is how the scout's result is built.
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -1788,7 +1789,7 @@ def _raised_in(node: ast.AST, classify: Classifier, resolve, typed=None) -> tupl
         # detail names each, so a traceback's frame can be matched to one.
         found: dict[str, tuple[str, str]] = {}
         for statement in block.body:
-            for sub in ast.walk(statement):
+            for sub in astwalk.walk(statement):
                 if isinstance(sub, ast.Call):
                     terminal, detail = classify(sub, resolve, typed)
                     if terminal:
@@ -2383,7 +2384,7 @@ class _Walk:
                 method = next(
                     (
                         node
-                        for node in (ast.walk(parsed[1]) if parsed is not None else ())
+                        for node in (astwalk.walk(parsed[1]) if parsed is not None else ())
                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.lineno == move.line
                     ),
                     None,
@@ -2769,7 +2770,7 @@ class _Walk:
                 callee_env[statement.target.id] = (held or [_Unknown(statement.target.id)]) + (folded or [_Unknown("...")])
             elif isinstance(statement, ast.If):
                 # Whatever a branch assigns, ``+=`` too, is not known to have run.
-                for node in ast.walk(statement):
+                for node in astwalk.walk(statement):
                     for held in [node.target] if isinstance(node, ast.AugAssign) else pathcond.targets_of(node):
                         if isinstance(held, ast.Name):
                             callee_env[held.id] = [_Unknown(held.id)]
@@ -3291,7 +3292,7 @@ class _Walk:
         if not bindings and not loops and not caught:
             if any(
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
-                for node in ast.walk(frame.func)
+                for node in astwalk.walk(frame.func)
                 if node is not frame.func
             ):
                 # A function defined here is a name for code, not a value --
@@ -3495,7 +3496,7 @@ class _Walk:
         if isinstance(site, (ast.If, ast.While)):
             tests.append(site.test)
         for test in tests:
-            for node in ast.walk(test):
+            for node in astwalk.walk(test):
                 if isinstance(node, ast.Call) and not (
                     isinstance(node.func, ast.Name) and node.func.id in _BUILTINS
                 ):
@@ -4906,7 +4907,7 @@ def exit_guard(
         return None
     # An ``except`` is addressed by its own line and is not an ``ast.stmt``,
     # so it is looked for by hand before the statements are.
-    for node in ast.walk(frame.func):
+    for node in astwalk.walk(frame.func):
         if isinstance(node, ast.ExceptHandler) and node.lineno == line and node.body:
             return (line, node.body[0].lineno, node.body[-1].end_lineno or node.lineno)
     statement = _statement_at(frame.func, line)

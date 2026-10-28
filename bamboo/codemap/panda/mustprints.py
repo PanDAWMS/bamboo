@@ -48,6 +48,7 @@ from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
     MUST_ROW_WRITTEN,
@@ -317,7 +318,7 @@ def _unbound_since(
     stored = set(chain)
     # The objects whose state holds the attribute: ``job``; ``self.job`` and ``self``.
     holding = {*chain[1:], root.id}
-    for node in ast.walk(func):
+    for node in walk(func):
         if isinstance(node, ast.Attribute) and isinstance(
             node.ctx, (ast.Store, ast.Del)
         ):
@@ -378,7 +379,7 @@ def _parented(tree: ast.AST) -> None:
 def _function_at(tree: ast.AST, line: int) -> Optional[ast.AST]:
     """The innermost ``def`` holding *line*."""
     best = None
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, _FUNCTIONS) and node.lineno <= line <= (
             node.end_lineno or node.lineno
         ):
@@ -390,7 +391,7 @@ def _function_at(tree: ast.AST, line: int) -> Optional[ast.AST]:
 def _statement_at(func: ast.AST, line: int) -> Optional[ast.stmt]:
     """The innermost statement of *func* holding *line*, *func* itself left out."""
     best: Optional[ast.stmt] = None
-    for node in ast.walk(func):
+    for node in walk(func):
         if not isinstance(node, ast.stmt) or node is func:
             continue
         if node.lineno <= line <= (node.end_lineno or node.lineno):

@@ -39,6 +39,7 @@ from __future__ import annotations
 import ast
 from typing import Iterator, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -137,7 +138,7 @@ def declared_vocabularies(
     """
     vocabularies: dict[tuple[str, str], set[str]] = {}
     for module in modules:
-        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
             attributes = declarations.get(cls.name, set())
             if not attributes:
                 continue
@@ -147,7 +148,7 @@ def declared_vocabularies(
                 attribute = _described_attribute(func.name, attributes)
                 if attribute is None:
                     continue
-                for stmt in ast.walk(func):
+                for stmt in walk(func):
                     if not isinstance(stmt, ast.Return) or stmt.value is None:
                         continue
                     literals = _literal_strings(stmt.value)
@@ -171,7 +172,7 @@ def _attribute_writes(
     side is yielded unresolved -- what can be made of it is :func:`_resolve`'s
     question, and it needs the enclosing function this does not have.
     """
-    for node in ast.walk(tree):
+    for node in walk(tree):
         value = written_value(node)
         if value is None:
             continue
@@ -227,7 +228,7 @@ def spec_setters(
             if not parameters:
                 continue
             written: dict[str, set[str]] = {}
-            for node in ast.walk(func):
+            for node in walk(func):
                 targets = targets_of(node)
                 if len(targets) != 1:
                     continue
@@ -240,7 +241,7 @@ def spec_setters(
                 ):
                     continue
                 flowing = {
-                    name.id for name in ast.walk(node.value) if isinstance(name, ast.Name)
+                    name.id for name in walk(node.value) if isinstance(name, ast.Name)
                 } & set(parameters)
                 if flowing:
                     written.setdefault(target.attr, set()).update(flowing)
@@ -294,7 +295,7 @@ def _recorded_in(
     reading it as this branch's message would make the value its own
     description -- a frame that matches any message with the word in it.
     """
-    for node in ast.walk(statement):
+    for node in walk(statement):
         if isinstance(node, ast.Call):
             yield _recorded_argument(node, setters)
         elif (
@@ -339,7 +340,7 @@ def _reaching(
     definitions = sorted(
         (
             node
-            for node in ast.walk(func)
+            for node in walk(func)
             if any(isinstance(t, ast.Name) and t.id == name for t in targets_of(node))
             or (
                 isinstance(node, ast.AugAssign)
@@ -467,7 +468,7 @@ def _persisted_templates(
     seen: set[tuple[str, str, int]] = set()
     for func, _owner in functions_with_owner(module.tree):
         assignments = assigned_expressions(func)
-        for call in ast.walk(func):
+        for call in walk(func):
             if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
                 continue
             setter = setters.get(call.func.attr)
@@ -535,11 +536,11 @@ def unclaimed_tags(
             # renders as the frame, so counting both reports every tag twice.
             inside = {
                 id(part)
-                for node in ast.walk(func)
+                for node in walk(func)
                 if isinstance(node, ast.JoinedStr)
                 for part in node.values
             }
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not isinstance(node, (ast.Constant, ast.JoinedStr)) or id(node) in inside:
                     continue
                 text = values.rendered_text(node)
@@ -755,7 +756,7 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
     """
     found: list[tuple[str, str, set[str]]] = []
     for module in modules:
-        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
                 names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
                 if not names & SPEC_DECLARATION_NAMES:
@@ -800,7 +801,7 @@ def spec_length_limits(modules: list[SourceModule]) -> dict[tuple[str, str], int
     """
     found: dict[tuple[str, str], int] = {}
     for module in modules:
-        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
             declared: dict[str, int] = {}
             for stmt in cls.body:
                 if not any(isinstance(t, ast.Name) and t.id == LENGTH_LIMITS for t in targets_of(stmt)):
@@ -821,7 +822,7 @@ def spec_length_limits(modules: list[SourceModule]) -> dict[tuple[str, str], int
                 and isinstance(node.upper, ast.Subscript)
                 and isinstance(node.upper.value, ast.Attribute)
                 and node.upper.value.attr == LENGTH_LIMITS
-                for node in ast.walk(cls)
+                for node in walk(cls)
             ):
                 found.update(((cls.name, attribute), limit) for attribute, limit in declared.items())
     return found

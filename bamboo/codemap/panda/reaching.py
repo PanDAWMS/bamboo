@@ -73,6 +73,8 @@ from __future__ import annotations
 import ast
 from typing import Optional, Sequence
 
+from bamboo.codemap.astwalk import walk
+
 #: The nodes whose body is a scope of its own.
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
 
@@ -360,7 +362,7 @@ def _bound_only_to_one(scope: ast.AST, name: str) -> bool:
     neither, nor declared global or nonlocal."""
     allowed = {
         id(one)
-        for node in ast.walk(scope)
+        for node in walk(scope)
         if isinstance(node, ast.Assign) and _is_one(node.value)
         for one in node.targets
         if isinstance(one, ast.Name) and one.id == name
@@ -372,7 +374,7 @@ def _binds(
     scope: ast.AST, name: str, allowed: frozenset[int] | set[int] = frozenset()
 ) -> bool:
     """Whether anything inside *scope* -- its nested scopes too -- binds *name*, besides the nodes in *allowed*."""
-    for node in ast.walk(scope):
+    for node in walk(scope):
         if id(node) in allowed:
             continue
         if (

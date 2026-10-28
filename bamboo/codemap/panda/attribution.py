@@ -52,6 +52,7 @@ import ast
 import re
 from typing import Collection, Iterator, NamedTuple, Optional
 
+from bamboo.codemap.astwalk import changing, walk
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.pathcond import (
@@ -244,7 +245,7 @@ def class_bases(modules: list[SourceModule]) -> dict[str, list[str]]:
     """
     bases: dict[str, list[str]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             names = [base_name(base) for base in node.bases]
@@ -274,7 +275,7 @@ def class_type_arguments(
     """
     arguments: dict[str, dict[str, list[str]]] = {}
     for module in modules:
-        for node in ast.walk(module.tree):
+        for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             for base in node.bases:
@@ -349,7 +350,7 @@ class SpecAttributor:
         adders = self._adder_methods(modules)
         for module in modules:
             for func, owner in functions_with_owner(module.tree):
-                for call in (n for n in ast.walk(func) if isinstance(n, ast.Call)):
+                for call in (n for n in walk(func) if isinstance(n, ast.Call)):
                     if not isinstance(call.func, ast.Attribute) or not call.args:
                         continue
                     receiver = call.func.value
@@ -397,13 +398,13 @@ class SpecAttributor:
         already stated another way all agreed.
         """
         for module in modules:
-            for node in ast.walk(module.tree):
+            for node in walk(module.tree):
                 if not isinstance(node, ast.ClassDef):
                     continue
                 # Kept for the same reason the attribute pool is: a field
                 # annotated in a base class is read in the derived one.
                 self._class_nodes.setdefault(node.name, node)
-                for inner in ast.walk(node):
+                for inner in walk(node):
                     if (
                         not isinstance(inner, ast.Attribute)
                         or inner.attr not in self._declared_names
@@ -456,7 +457,7 @@ class SpecAttributor:
         seen: dict[str, list[Optional[str]]] = {}
         first: dict[str, ast.expr] = {}
         for module in modules:
-            for node in ast.walk(module.tree):
+            for node in walk(module.tree):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
                 annotation = node.returns
@@ -527,7 +528,7 @@ class SpecAttributor:
         if func is None:
             return None
         found: list[ast.expr] = []
-        for node in ast.walk(func):
+        for node in walk(func):
             targets = targets_of(node)
             if len(targets) != 1:
                 continue
@@ -679,7 +680,7 @@ class SpecAttributor:
         for module in modules:
             for func, _owner in functions_with_owner(module.tree):
                 parameters = {a.arg for a in (*func.args.posonlyargs, *func.args.args)}
-                for call in (n for n in ast.walk(func) if isinstance(n, ast.Call)):
+                for call in (n for n in walk(func) if isinstance(n, ast.Call)):
                     if (
                         isinstance(call.func, ast.Attribute)
                         and call.func.attr == "append"
@@ -783,7 +784,7 @@ class SpecAttributor:
         # places states nothing about either.
         if isinstance(expression, ast.Name) and func is not None:
             sources: set[str] = set()
-            for node in ast.walk(func):
+            for node in walk(func):
                 if not any(
                     isinstance(t, ast.Name) and t.id == expression.id
                     for t in targets_of(node)
@@ -844,7 +845,7 @@ class SpecAttributor:
         for scope in scopes:
             if scope is None:
                 continue
-            for node in ast.walk(scope):
+            for node in walk(scope):
                 if isinstance(node, ast.AnnAssign):
                     target = node.target
                     if (
@@ -1162,7 +1163,7 @@ class SpecAttributor:
             for item in cls.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     methods.setdefault(item.name, item)
-        for node in ast.walk(func):
+        for node in walk(func):
             if not isinstance(node, (ast.With, ast.AsyncWith)):
                 continue
             for entry in node.items:
@@ -1204,7 +1205,7 @@ class SpecAttributor:
                 return stated
         # ``x: JediDatasetSpec`` on a local or on ``self``, which is the form the
         # annotation policy asks PanDA for when nothing else states the type.
-        for node in ast.walk(func):
+        for node in walk(func):
             if not isinstance(node, ast.AnnAssign):
                 continue
             target = node.target
@@ -1226,7 +1227,7 @@ class SpecAttributor:
         if yielded is not None:
             return yielded
         constructors: set[str] = set()
-        for node in ast.walk(func):
+        for node in walk(func):
             if not any(
                 isinstance(target, ast.Name) and target.id == variable
                 for target in targets_of(node)
@@ -1298,7 +1299,7 @@ class SpecAttributor:
         if func is None:
             return None
         built: set[str] = set()
-        for node in ast.walk(func):
+        for node in walk(func):
             if not any(
                 isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
@@ -1353,14 +1354,14 @@ class SpecAttributor:
             return False
         reflected = {
             target.id
-            for node in ast.walk(func)
+            for node in walk(func)
             for target in targets_of(node)
             if isinstance(target, ast.Name)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
             and node.value.func.id == "getattr"
         }
-        for node in ast.walk(func):
+        for node in walk(func):
             if not any(
                 isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
@@ -1406,7 +1407,7 @@ class SpecAttributor:
         seen = seen or frozenset()
         if variable in seen:
             return None
-        for node in ast.walk(func):
+        for node in walk(func):
             if not any(
                 isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
@@ -1458,7 +1459,7 @@ class SpecAttributor:
         if variable in seen:
             return None
         found: set[str] = set()
-        for node in ast.walk(func):
+        for node in walk(func):
             if (
                 not isinstance(node, (ast.For, ast.AsyncFor))
                 or not isinstance(node.target, ast.Name)
@@ -1590,7 +1591,7 @@ class SpecAttributor:
         """
         seen: dict[str, set[str]] = {}
         for module in modules:
-            for node in ast.walk(module.tree):
+            for node in walk(module.tree):
                 if not isinstance(node, ast.ImportFrom):
                     continue
                 for alias in node.names:
@@ -1680,7 +1681,7 @@ class SpecAttributor:
         if cached is not None:
             return cached
         found: dict[str, set[str]] = {}
-        for node in ast.walk(func):
+        for node in walk(func):
             if not isinstance(node, ast.Attribute) or node.attr not in self._declared_names:
                 continue
             try:
@@ -1911,7 +1912,7 @@ def _consumed_annotations(
     returns like ``tuple[DataCarouselRequestSpec | None, str | None]`` are
     exactly the shape it would misreport.
     """
-    for node in ast.walk(module.tree):
+    for node in walk(module.tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             decorators = {
                 d.id if isinstance(d, ast.Name) else getattr(d, "attr", "")
@@ -2049,7 +2050,7 @@ def _trusted_annotations(
     """
     found: list[tuple[ast.AST, str, str, str, Scope]] = []
     local: Scope = list(functions_with_owner(module.tree))
-    contains = {id(func): set(map(id, ast.walk(func))) for func, _ in local}
+    contains = {id(func): set(map(id, walk(func))) for func, _ in local}
 
     def scope_of(node: ast.AST, on_self: bool) -> Scope:
         holder = next(((f, o) for f, o in local if id(node) in contains[id(f)]), None)
@@ -2162,7 +2163,7 @@ def _manager_is_entered(method: str, scope: Scope) -> bool:
     statement about nothing.
     """
     for func, _owner in scope:
-        for node in ast.walk(func):
+        for node in walk(func):
             if not isinstance(node, (ast.With, ast.AsyncWith)):
                 continue
             for entry in node.items:
@@ -2194,7 +2195,7 @@ def _container_is_opened(name: str, scope: Scope) -> bool:
     knowing.  Narrowing to those is what keeps the gate about the extraction.
     """
     for func, _owner in scope:
-        for node in ast.walk(func):
+        for node in walk(func):
             if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(
                 node.iter, (ast.Name, ast.Attribute)
             ):
@@ -2231,7 +2232,7 @@ def _classes_put_in(
     """
     found: set[str] = set()
     for func, owner in scope:
-        for node in ast.walk(func):
+        for node in walk(func):
             targets = targets_of(node)
             if len(targets) != 1:
                 continue
@@ -2279,15 +2280,16 @@ def _annotation_changes_a_write(
     # PanDA's context managers were written before it was asked for.
     field = "returns" if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else "annotation"
     saved = getattr(node, field)
-    setattr(
-        node,
-        field,
-        None if field == "returns" else ast.Name(id="dict", ctx=ast.Load()),
-    )
-    try:
-        after = _scope_resolutions(scope, attributor, spec_attribute_names)
-    finally:
-        setattr(node, field, saved)
+    with changing():
+        setattr(
+            node,
+            field,
+            None if field == "returns" else ast.Name(id="dict", ctx=ast.Load()),
+        )
+        try:
+            after = _scope_resolutions(scope, attributor, spec_attribute_names)
+        finally:
+            setattr(node, field, saved)
     return before != after
 
 
@@ -2306,7 +2308,7 @@ def _scope_resolutions(
     """
     out: dict[tuple[int, str], tuple[Optional[str], str]] = {}
     for func, owner in scope:
-        for target in ast.walk(func):
+        for target in walk(func):
             if not isinstance(target, ast.Attribute) or not isinstance(
                 target.ctx, ast.Store
             ):
