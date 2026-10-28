@@ -71,6 +71,12 @@ from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     KEY_ATTRIBUTE,
     KEY_BOUND,
+    KEY_COLUMN_EXPRESSION,
+    KEY_COLUMN_HOLE,
+    KEY_COLUMN_NONE,
+    KEY_COLUMN_SEVERAL,
+    KEY_COLUMN_STAR,
+    KEY_COLUMN_UNREAD,
     KEY_CONSTANT,
     KEY_HANDED,
     KEY_KEPT,
@@ -4768,6 +4774,49 @@ class _Summary(NamedTuple):
     carry: Optional["_PathCarry"]
 
 
+#: Where a select item sits, ``{}`` its position, in what a call giving a statement's rows gives: one row's of a
+#: ``fetchone``, each row's of a ``fetchall`` / ``fetchmany`` and of the task buffer's ``querySQL``, the rows' of
+#: ``querySQLS``'s ``(status, rows)``.
+_ITEM_AT: dict[str, tuple[str, ...]] = {
+    "fetchone": ("[{}]",),
+    "fetchall": (_ALL, "[{}]"),
+    "fetchmany": (_ALL, "[{}]"),
+    "querySQL": (_ALL, "[{}]"),
+    "querySQLS": ("[1]", _ALL, "[{}]"),
+}
+
+
+def _item_seed(write: _Write, item: int) -> _Paths:
+    """Where select item *item* of a statement's rows sits in what its seed *write* holds: a loop over the cursor
+    takes a row each pass, an assignment what its value gives (:func:`_item_in`), each taken apart as its target
+    is."""
+    if isinstance(write.node, (ast.For, ast.AsyncFor)):
+        placed: _Paths = frozenset({(_ALL, f"[{item}]")})
+    else:
+        placed = _item_in(write.source, item)
+    if not placed:
+        return _NOTHING
+    return write.take(placed) if write.take is not None else placed
+
+
+def _item_in(value: Optional[ast.AST], item: int) -> _Paths:
+    """Where select item *item* sits in *value*'s value: a fetch's (:data:`_ITEM_AT`), a part of one, a number or a
+    text made of one (``int(self.cur.fetchone()[0])``); nowhere in any other value."""
+    while (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in ("int", "str", "float")
+        and len(value.args) == 1
+        and not value.keywords
+    ):
+        value = value.args[0]
+    if isinstance(value, ast.Subscript) and not isinstance(value.slice, ast.Slice):
+        return _under(_index_step(value.slice), _item_in(value.value, item))
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr in _ITEM_AT:
+        return frozenset({tuple(step.format(item) for step in _ITEM_AT[value.func.attr])})
+    return _NOTHING
+
+
 class _PathCarry:
     """Which parts of which names hold the rows in one function, as it runs: a holding is a name and an access path.
 
@@ -4791,6 +4840,9 @@ class _PathCarry:
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
     *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.
+
+    With *item*, the statement's seeds hold its select item of that position where it sits in what they are given,
+    not the rows whole (:func:`_item_seed`): a value held whole is that column of a row.
     """
 
     def __init__(
@@ -4803,6 +4855,7 @@ class _PathCarry:
         start: Iterable[ast.AST] = (),
         call_values: Optional[dict[int, _Paths]] = None,
         deciding: bool = False,
+        item: Optional[int] = None,
     ):
         self.reading, self.file, self.func, self.bound = reading, file, func, bound
         self.call_values = call_values or {}
@@ -4831,7 +4884,7 @@ class _PathCarry:
                 # A ``+=`` started from writes its field with what the reader follows, though it holds no rows.
                 and (write.source is not None or isinstance(write.node, ast.AugAssign))
             ):
-                write.forced = _below(write.steps, _WHOLE)
+                write.forced = _below(write.steps, _WHOLE if item is None else _item_seed(write, item))
         self._grow()
 
     def _add(self, write: _Write) -> None:
@@ -5890,6 +5943,12 @@ class _Filled:
     the field's.  A statement's rows are seeded as :func:`attach_crossings` seeds them, to its region's end; so are
     a statement's that selects a sequence's next values, which reads no table and is no read site
     (:data:`KEY_SEQUENCE`).
+
+    Which column of a statement's rows a value is: each select item (:func:`sqltext.select_items`) carried on its
+    own (:class:`_PathCarry`'s *item*), the value that item's where its carry holds it whole; a field of an object
+    several items fill (``taskSpec.pack(row)``) is the item of its name, and where the item is a hole or ``*`` the
+    column of its name where the table has one.  And for which of the values a statement selects a statement here
+    never runs: a test on its way on a name holding that column (:meth:`never_at`).
     """
 
     def __init__(
@@ -5898,8 +5957,9 @@ class _Filled:
         file: str,
         func: ast.FunctionDef | ast.AsyncFunctionDef,
         sites: Iterable[ReadSiteNode] = (),
+        attributor: Optional[SpecAttributor] = None,
     ):
-        self.reading, self.file, self.func = reading, file, func
+        self.reading, self.file, self.func, self.attributor = reading, file, func, attributor
         self.sites = sorted((site for site in sites if site.region), key=lambda site: site.anchor.line_start)
         runs = [run for run in sql.executions(func) if _SELECTS_SEQUENCE.match(run.sql or "")]
         laid = sql.regions(func, list(sql.executions(func))) if runs else {}
@@ -5934,6 +5994,7 @@ class _Filled:
             else []
         )
         self._carries: dict[str, _PathCarry] = {}
+        self._items: dict[str, Optional[tuple[sqltext.SelectItem, ...]]] = {}
 
     def _carry(self, name: str, seeds: dict[str, _Paths]) -> _PathCarry:
         carry = self._carries.get(name)
@@ -5992,6 +6053,7 @@ class _Filled:
             carry = self._rows(site)
             paths = carry.held(value, at) if carry is not None else _NOTHING
             if paths:
+                column, unread = self.column(site, value, at)
                 found.append(
                     KeySource(
                         kind=KEY_ROWS,
@@ -6000,6 +6062,9 @@ class _Filled:
                         site_owner=site.owner,
                         site_line=site.anchor.line_start,
                         paths=_spelled_paths(paths),
+                        column=column,
+                        attr=self.attr(column),
+                        column_unread=unread,
                     )
                 )
         for sequence, run_line, last in self.sequences:
@@ -6027,6 +6092,229 @@ class _Filled:
         kind = KEY_ATTRIBUTE if isinstance(value, ast.Attribute) else KEY_UNKNOWN
         return [KeySource(kind=kind, line=line, name=ast.unparse(value))]
 
+    def items(self, site: ReadSiteNode) -> Optional[tuple[sqltext.SelectItem, ...]]:
+        """*site*'s select items, where every text its run has gives the same; ``None`` where none is read."""
+        if site.name not in self._items:
+            line = site.anchor.line_start
+            read = {sqltext.select_items(run.reading) for run in sql.executions(self.func) if run.call.lineno == line}
+            self._items[site.name] = next(iter(read)) if len(read) == 1 else None
+        return self._items[site.name]
+
+    def _item(self, site: ReadSiteNode, item: int) -> _PathCarry:
+        key = f"item {item} {site.name}"
+        if key not in self._carries:
+            seeds = _rows_written(self.func, site.anchor.line_start, site.region[1])
+            self._carries[key] = _PathCarry(self.reading, self.file, self.func, (), start=seeds, item=item)
+        return self._carries[key]
+
+    def column(self, site: ReadSiteNode, value: ast.AST, at: ast.AST) -> tuple[str, str]:
+        """``(table.column, "")`` of the select item of *site*'s rows *value* is where *at* runs, or ``("", why
+        not)`` (:data:`KEY_COLUMN_STAR` ...)."""
+        items = self.items(site)
+        if items is None:
+            return "", KEY_COLUMN_UNREAD
+        held = [
+            number
+            for number, item in enumerate(items)
+            if item.kind != sqltext.ITEM_AFTER_HOLE and _whole(self._item(site, number).held(value, at))
+        ]
+        field = value.attr.lower() if isinstance(value, ast.Attribute) else None
+        if len(held) > 1 and field is not None:
+            named = [number for number in held if items[number].column == field]
+            spread = [number for number in held if items[number].kind in (sqltext.ITEM_HOLE, sqltext.ITEM_STAR)]
+            held = named or spread or held
+        if not held:
+            unread = any(item.kind in (sqltext.ITEM_HOLE, sqltext.ITEM_AFTER_HOLE) for item in items)
+            return "", KEY_COLUMN_HOLE if unread else KEY_COLUMN_NONE
+        if len(held) > 1:
+            return "", KEY_COLUMN_SEVERAL
+        item = items[held[0]]
+        if item.kind == sqltext.ITEM_COLUMN:
+            return f"{item.table}.{item.column}", ""
+        if item.kind in (sqltext.ITEM_HOLE, sqltext.ITEM_STAR):
+            tables = {table.lower() for table in site.tables}
+            table = item.table or (next(iter(tables)) if len(tables) == 1 else "")
+            if field is not None and table and field in sqltext.table_columns(table):
+                return f"{table}.{field}", ""
+            return "", KEY_COLUMN_HOLE if item.kind == sqltext.ITEM_HOLE else KEY_COLUMN_STAR
+        return "", KEY_COLUMN_EXPRESSION
+
+    def attr(self, column: str) -> str:
+        """*column* (``table.column``) as a subject where its table's spec class has it, else ``""``."""
+        if not column or self.attributor is None:
+            return ""
+        return _spec_attr(self.attributor, *column.split(".", 1))
+
+    def never_at(self, site: ReadSiteNode, places: list[ast.AST]) -> list[str]:
+        """The values *site* selects (its *selects*) for which no node of *places* runs: a test on the way to each
+        (``pathcond.ruled_out_at``) on a name holding the column of that subject in *site*'s rows."""
+        items = self.items(site) or ()
+        if not places or not site.selects or self.attributor is None:
+            return []
+        subjects = {
+            number: self.attr(f"{item.table}.{item.column}")
+            for number, item in enumerate(items)
+            if item.kind == sqltext.ITEM_COLUMN
+        }
+        chosen: dict[str, list[str]] = {}
+        for selected in site.selects:
+            chosen.setdefault(selected.partition("=")[0], []).append(selected)
+        wanted = {number: subject for number, subject in subjects.items() if subject in chosen}
+        if not wanted:
+            return []
+        tested: list[dict[str, set[str]]] = []
+        for place in places:
+            names: dict[str, set[str]] = {}
+            for test in pathcond.tests_on(place, self.func):
+                for node in walk(test):
+                    if isinstance(node, ast.Name):
+                        for number, subject in wanted.items():
+                            if _whole(self._item(site, number).held(node, node)):
+                                names.setdefault(subject, set()).add(node.id)
+            tested.append(names)
+        return sorted(
+            selected
+            for subject, listed in chosen.items()
+            for selected in listed
+            if all(
+                any(
+                    pathcond.ruled_out_at(place, self.func, name, _selected_value(selected))
+                    for name in sorted(names.get(subject, ()))
+                )
+                for place, names in zip(places, tested, strict=True)
+            )
+        )
+
+
+def _spec_attr(attributor: SpecAttributor, table: str, column: str) -> str:
+    """*table*'s *column* as a subject where the table's spec class has it (``JediTaskSpec.jediTaskID``), else ``""``."""
+    qualifier, attribute, kind = _subject_of(attributor, attributor.class_for_table(table), table, column)
+    return SubjectNode.make_name(qualifier, attribute) if kind == "spec" else ""
+
+
+def _selected_value(selected: str) -> object:
+    """The value of a read site's *selects* entry (``JobSpec.jobStatus=activated``) as the code compares it: a number
+    where it is one."""
+    text = selected.partition("=")[2]
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def _term_column(term: str) -> str:
+    """The column a KeyFrom's *term* compares: ``jediTaskID`` of ``jediTaskID=:jediTaskID`` or of
+    ``jediTaskID IN (:a, :b)``."""
+    return term.split(" IN ", 1)[0].split("=", 1)[0].strip()
+
+
+def _site_function(
+    trees: dict[str, ast.AST], site: ReadSiteNode
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The function *site*'s statement runs in: the first of its owner's name holding its line."""
+    tree = trees.get(site.anchor.file)
+    if tree is None:
+        return None
+    wanted = site.owner.rsplit("::", 1)[-1]
+    return next(
+        (
+            node
+            for node in walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == wanted
+            and node.lineno <= site.anchor.line_start <= (node.end_lineno or node.lineno)
+        ),
+        None,
+    )
+
+
+def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) -> list[KeyFrom]:
+    """A KeyFrom (:attr:`KeyFrom.reads`) for each row-naming term of each read site's run: a term on the statement's
+    own rows (:data:`sqltext.ROW`) comparing a column with binds, not excluding, every row meeting it -- as
+    :func:`_key_froms` makes a write's, its binds read the same way.  Its statement is the read site's line, the run's
+    first; an ``IN`` list of several binds is one term.
+    """
+    found: dict[tuple[str, int, str, str], KeyFrom] = {}
+    for site in sorted(sites, key=lambda one: (one.owner, one.anchor.line_start)):
+        func = _site_function(trees, site)
+        if func is None:
+            continue
+        line, file = site.anchor.line_start, site.anchor.file
+        for run in sql.executions(func):
+            if run.call.lineno != line:
+                continue
+            for term in sqltext.terms(run.reading).terms:
+                if term.verb != "read" or term.scope != sqltext.ROW or term.excluding or not term.decided:
+                    continue
+                # A bind spelt with a hole is no term here: sqltext.terms reads none.
+                binds = list(term.binds)
+                if not binds:
+                    continue
+                if len(binds) == 1 and not binds[0].endswith(sqltext.IN_LIST_SUFFIX):
+                    spelled = f"{term.column}={binds[0]}"
+                else:
+                    spelled = f"{term.column} IN ({', '.join(binds)})"
+                record = found.get((site.owner, line, term.table, spelled))
+                if record is None:
+                    record = found[(site.owner, line, term.table, spelled)] = KeyFrom(
+                        owner=site.owner,
+                        file=file,
+                        statement=line,
+                        table=term.table,
+                        term=spelled,
+                        unread=KEY_NO_MAP,
+                        reads=True,
+                    )
+                    record._binds = (func, file, [])
+                _ran_by(record, func, run)
+                bound = [
+                    filled
+                    for bind in binds
+                    for filled in (
+                        sql.bound_values(func, run.varmap, bind, run.window, at=run)
+                        if run.varmap is not None
+                        else sql.inline_binds(run.call, bind)
+                    )
+                ]
+                if run.varmap is None and not bound:
+                    continue
+                record._binds[2].extend(bound)
+                record.unread = "" if record._binds[2] else KEY_NO_BIND
+    return list(found.values())
+
+
+def _same_rows(froms: list[KeyFrom], sites: dict[str, ReadSiteNode]) -> None:
+    """Mark each ``rows`` source of a statement that names its source statement's own rows
+    (:attr:`KeySource.same_rows`): the statement's KeyFroms on one of the source's tables fill every column naming a
+    row of it (:func:`sqltext.table_identity`: its key, dated columns aside) from that column of the source's rows."""
+    together: dict[tuple[str, int], list[KeyFrom]] = {}
+    for key_from in froms:
+        if key_from.term and key_from.table:
+            together.setdefault((key_from.owner, key_from.statement), []).append(key_from)
+    for listed in together.values():
+        for table in sorted({key_from.table.lower() for key_from in listed}):
+            identity = sqltext.table_identity(table)
+            if not identity:
+                continue
+            by_source: dict[str, dict[str, list[KeySource]]] = {}
+            for key_from in listed:
+                column = _term_column(key_from.term).lower()
+                if key_from.table.lower() != table or column not in identity:
+                    continue
+                for source in key_from.sources:
+                    site = sites.get(source.name) if source.kind == KEY_ROWS else None
+                    if (
+                        site is not None
+                        and source.column == f"{table}.{column}"
+                        and table in {one.lower() for one in site.tables}
+                    ):
+                        by_source.setdefault(source.name, {}).setdefault(column, []).append(source)
+            for columns in by_source.values():
+                if set(columns) == identity:
+                    for marked in columns.values():
+                        for source in marked:
+                            source.same_rows = True
+
 
 def _spelled_paths(paths: _Paths) -> list[str]:
     """*paths* as :attr:`KeySource.paths` spells them: ``()`` for the value itself."""
@@ -6045,7 +6333,11 @@ def attach_key_sources(
     attributor: Optional[SpecAttributor] = None,
 ) -> int:
     """Say where each write's row keys were filled from: :attr:`KeyFrom.sources`, and which parameter or field of
-    ``self`` handed each guarded write its keys (:attr:`RowKeySource.handed_by`); then, by those sources, whether each
+    ``self`` handed each guarded write its keys (:attr:`RowKeySource.handed_by`) -- with *modules*, a read
+    statement's too, a KeyFrom for each row-naming term of each read site's run added to *key_froms*
+    (:func:`_read_key_froms`); of a ``rows`` source, the column of the rows it is (:attr:`KeySource.column`), the
+    values the rows' statement selects at which the term's statement never runs (:attr:`KeySource.never_at`) and
+    whether the statement names those very rows (:attr:`KeySource.same_rows`); then, by those sources, whether each
     ``INSERT`` makes its row (:attr:`KeyFrom.new_row`, *table_class* saying whose rows a read site's tables hold),
     and which subjects a write persisting an object writes (:attr:`KeyFrom.writes`, the function's assignments on it);
     last, with *modules* and *attributor* (the one the attribute slice reads assignments with), a KeyFrom for each
@@ -6062,9 +6354,11 @@ def attach_key_sources(
     if calls is None or record is None:
         return 0
     reading = _Reading(calls, {junction.owner for junction in junctions}, record)
+    modules = list(modules)
     sites_of: dict[str, list[ReadSiteNode]] = {}
     for site in read_sites:
         sites_of.setdefault(site.owner, []).append(site)
+    sites = {site.name: site for listed in sites_of.values() for site in listed}
     filled: dict[int, tuple[ast.AST, _Filled]] = {}
 
     def of(func: ast.FunctionDef | ast.AsyncFunctionDef, file: str) -> _Filled:
@@ -6076,11 +6370,15 @@ def attach_key_sources(
                 for site in sites_of.get(f"{file}::{func.name}", ())
                 if first <= site.anchor.line_start <= last
             ]
-            held = filled[id(func)] = (func, _Filled(reading, file, func, sites))
+            held = filled[id(func)] = (func, _Filled(reading, file, func, sites, attributor))
         return held[1]
 
     read = 0
     froms = list(key_froms or ())
+    if key_froms is not None and modules:
+        reads = _read_key_froms(sites.values(), {module.rel_path: module.tree for module in modules})
+        key_froms.extend(reads)
+        froms.extend(reads)
     for key_from in froms:
         if key_from._binds is None:
             continue
@@ -6090,8 +6388,18 @@ def attach_key_sources(
         unique = {id(bind.value): bind for bind in binds}.values()
         key_from.sources = [source for bind in unique for source in reader.sources(bind.value, bind.site)]
         read += 1
+    for key_from in froms:
+        if attributor is not None and key_from.table and key_from.term:
+            key_from.attr = _spec_attr(attributor, key_from.table, _term_column(key_from.term))
+        if key_from._binds is None or key_from._runs is None:
+            continue
+        func, file, _values = key_from._binds
+        reader = of(func, file)
+        for source in key_from.sources:
+            if source.kind == KEY_ROWS and source.name in sites:
+                source.never_at = reader.never_at(sites[source.name], list(key_from._runs[1]))
+    _same_rows(froms, sites)
     _object_writes(froms, junctions)
-    sites = {site.name: site for listed in sites_of.values() for site in listed}
     statements: dict[tuple[str, int, str], list[KeyFrom]] = {}
     for key_from in froms:
         if key_from._insert is not None:

@@ -2628,6 +2628,15 @@ NEW_ROW_UNREAD = "not read"
 #: Not said either: the run updates the row or inserts it -- one text or the other of one statement
 #: (``addStdOut``'s ``sqlU`` / ``sqlI``) -- so the row it writes may have been there.
 NEW_ROW_UPSERT = "updates or inserts"
+#: Why a ``rows`` source names no column of its statement's rows (:attr:`KeySource.column_unread`): the select list
+#: is ``*``, the value is at a place a hole's columns fill (``SELECT {JobSpec.columnNames()}`` read by position),
+#: the item is an expression, no item or several hold the value, or the select list was not read.
+KEY_COLUMN_STAR = "select *"
+KEY_COLUMN_HOLE = "in a hole"
+KEY_COLUMN_EXPRESSION = "an expression"
+KEY_COLUMN_NONE = "no item"
+KEY_COLUMN_SEVERAL = "several items"
+KEY_COLUMN_UNREAD = "select list not read"
 
 
 class KeySource(BaseModel):
@@ -2652,27 +2661,71 @@ class KeySource(BaseModel):
         default_factory=list,
         description=(
             "``rows`` / ``sequence`` / ``parameter`` / ``self_field``: where in the bind's value they sit -- ``()`` "
-            "the value itself, else its steps (``[0]``, ``.f``, ``[*]``).  Which column of a row fills the key is not "
-            "said: the carry says where the rows sit in a value, and a part of them reads as them."
+            "the value itself, else its steps (``[0]``, ``.f``, ``[*]``).  A part of them reads as them here; which "
+            "column of a row fills the key is *column*, and which field of a parameter or of ``self`` is not said "
+            "(``archiveJob``'s ``:name`` at 1718, ``tmpFile.dispatchDBlock`` of a file of its ``job``, is ``job``)."
+        ),
+    )
+    column: str = Field(
+        default="",
+        description=(
+            "``rows``: the statement's select item the value is, as ``table.column`` lowered "
+            "(``jedi_tasks.jeditaskid``) -- each item carried on its own from where it sits in what the statement's "
+            "fetch gives; a field of an object filled by name (``taskSpec.pack(row)``) is the item of its name.  "
+            "Empty where *column_unread* says why."
+        ),
+    )
+    attr: str = Field(
+        default="",
+        description="``rows``: *column* as a subject, ``JediTaskSpec.jediTaskID``, where its table's spec class has it.",
+    )
+    column_unread: str = Field(
+        default="",
+        description=(
+            f"``rows`` with no *column*: ``{KEY_COLUMN_STAR}``, ``{KEY_COLUMN_HOLE}``, ``{KEY_COLUMN_EXPRESSION}``, "
+            f"``{KEY_COLUMN_NONE}``, ``{KEY_COLUMN_SEVERAL}``, ``{KEY_COLUMN_UNREAD}``."
+        ),
+    )
+    same_rows: bool = Field(
+        default=False,
+        description=(
+            "``rows``: the term's statement names the source statement's own rows -- one of its tables, by every "
+            "column of the table's primary key, each filled from that *column* of the source's rows: a read reads "
+            "them again (``getTasksToBeFinished_JEDI`` reads 1676's tasks again at 1731 by ``jediTaskID``), a write "
+            "writes them.  Not where it names other rows by them: another table's (``JEDI_Datasets`` by the task's "
+            "``jediTaskID``), a part of a key, another column (``checkParentTask_JEDI``'s parent by ``parent_tid``)."
+        ),
+    )
+    never_at: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``rows``: the values the source statement selects (``JediTaskSpec.status=scouted``, as its read site's "
+            "*selects*) for which the term's statement never runs -- a test on its way (``pathcond.ruled_out_at``) on "
+            "a name holding that column of the source's rows: 1731 is in the ``else`` of ``if taskStatus == "
+            "\"scouted\":``, ``taskStatus`` 1676's ``status``."
         ),
     )
 
 
 class KeyFrom(BaseModel):
-    """Where one row-naming term of a write was filled from: the rows it lands on, and who named them.
+    """Where one row-naming term of a statement was filled from: the rows it lands on, and who named them.
 
     Not a node, beside :class:`RowKeySource`.  One per term of a write's ``WHERE`` that names its rows --
     ``jediTaskID=:jediTaskID``, or an ``IN`` list a helper builds, ``datasetID IN (:dataset__in)`` -- on a column
-    the statement does not write, for every write statement, guarded or not.  Its *sources* are where the bind's
+    the statement does not write, for every write statement, guarded or not; and one per term a read statement (a
+    :class:`ReadSiteNode`'s) compares its own rows' column with a bind in, every row meeting it (*reads*).  Its *sources* are where the bind's
     values came from, each read by the carry: the rows of a statement of the same function
     (``prepareTasksToBeFinished_JEDI`` keys the runs of its later loop by the ``jediTaskID`` its statements at 3723
     and 3768 select), a parameter, a field of ``self``.  A reader asking which of a function's arms the rows of one of its statements
-    reach takes the KeyFroms with a ``rows`` source of that statement, and the branches at *writes*' lines.
+    reach takes the KeyFroms with a ``rows`` source of that statement, and the branches at *writes*' lines; one asking
+    where they go after a statement reads them again takes the read KeyFroms with a ``rows`` source of it that is
+    :attr:`KeySource.same_rows`, less those whose :attr:`KeySource.never_at` holds the value, and that read site's
+    own way on (its ``crosses_to``, its KeyFroms' sources): joined by the reader, which can test the value there.
 
     Read in the same step as :attr:`RowKeySource.handed_by`, after the reach record and by the same carries, so the
     two never disagree.  A statement run with several texts is one KeyFrom per term, its sources every text's.
     Not followed here: rows reaching the bind through a call (a parameter is where this function was handed them),
-    which column of a row fills it, and the values of the columns the statement writes.
+    and the values of the columns the statement writes.
 
     Two more kinds of record, of an object whose fields the function assigns (*object*).  A call of a method that
     persists what its caller changed on a spec (a flush: ``self.taskBufferIF.updateJob(job, ...)``) is a write at
@@ -2699,7 +2752,9 @@ class KeyFrom(BaseModel):
             "fields reach the use on (the call, the statement, the return), else the first assignment's."
         ),
     )
-    table: str = Field(default="", description="The table written; empty for an object no write persists.")
+    table: str = Field(
+        default="", description="The table written, or read (*reads*); empty for an object no write persists."
+    )
     term: str = Field(
         description=(
             "As the map reads it: ``jediTaskID=:jediTaskID``, ``datasetID IN (:dataset__in)``; empty for an object no "
@@ -2724,6 +2779,17 @@ class KeyFrom(BaseModel):
         ),
     )
     sources: list[KeySource] = Field(default_factory=list)
+    reads: bool = Field(
+        default=False,
+        description=(
+            "A term of a statement that reads rows (its read site's run): *writes* empty, no *object* nor *new_row*; "
+            "*routes* as a write's.  Its sources say which rows the statement is asked for by."
+        ),
+    )
+    attr: str = Field(
+        default="",
+        description="The term's column as a subject, ``JediTaskSpec.jediTaskID``, where *table*'s spec class has it.",
+    )
     object: str = Field(
         default="",
         description=(

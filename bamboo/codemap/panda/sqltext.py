@@ -1554,6 +1554,7 @@ def with_schema(
     _readings.cache_clear()
     term_spans.cache_clear()
     _terms_read.cache_clear()
+    select_items.cache_clear()
     try:
         yield
     finally:
@@ -1570,6 +1571,7 @@ def with_schema(
         _readings.cache_clear()
         term_spans.cache_clear()
         _terms_read.cache_clear()
+        select_items.cache_clear()
 
 
 _CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
@@ -1603,6 +1605,11 @@ _PRIMARY_KEY = re.compile(
 )
 _INLINE_PRIMARY_KEY = re.compile(r'^\s*(?:CONSTRAINT\s+"?\w+"?\s+)?PRIMARY\s+KEY\s*\(([^)]*)\)', re.IGNORECASE)
 _COLUMN_PRIMARY_KEY = re.compile(r"\bPRIMARY\s+KEY\b(?!\s*\()", re.IGNORECASE)
+
+
+def table_columns(table: str) -> frozenset[str]:
+    """*table*'s columns, lowered, as :func:`with_schema` was given them; empty outside it."""
+    return (_SCHEMA or {}).get(table.lower(), frozenset())
 
 
 def table_key(table: str) -> frozenset[str]:
@@ -2025,6 +2032,61 @@ def term_spans(sql: str) -> tuple[tuple[int, int], ...]:
     'sent')``, whatever fragments of the text its column and its values fall in -- or the column alone where it
     is in none."""
     return _terms_read(sql)[1]
+
+
+#: What one item of a select list is (:class:`SelectItem`): a column of a table, every column (``*``), a hole the
+#: code fills with columns (``{JobSpec.columnNames()}``), an expression -- or an item after a hole, at a position the
+#: hole's columns move.
+ITEM_COLUMN, ITEM_STAR, ITEM_HOLE, ITEM_EXPRESSION, ITEM_AFTER_HOLE = "column", "star", "hole", "expression", "after hole"
+
+
+class SelectItem(NamedTuple):
+    """One item of a statement's select list, at its position in each row the statement returns."""
+
+    kind: str
+    #: The table it is a column of, schema stripped and lowered; ``""`` where none is read.
+    table: str = ""
+    #: Its column, lowered; ``""`` but for :data:`ITEM_COLUMN`.
+    column: str = ""
+
+
+@functools.lru_cache(maxsize=None)
+def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
+    """The items of the select list of *sql*'s first arm, in order -- what each row it returns holds where; ``None``
+    where the statement is not read as a tree or returns no ``SELECT``'s rows.
+
+    A column's table is read as a term's is (:func:`_owner`): ``tabT.jediTaskID`` is ``jedi_tasks``'s.  A hole
+    stands for the columns the code fills it with, so it is one item, and the items after it are at positions it
+    moves.
+    """
+    tree = parsed(sql).tree
+    if tree is None:
+        return None
+    arms = _arms(tree)
+    if not arms:
+        return None
+    select = arms[0]
+    scopes, root = _scopes(tree)
+    scope = next((one for one, _verb, _kind in scopes if one.expression is select), None)
+    items: list[SelectItem] = []
+    for projection in select.selects:
+        column = projection.unalias()
+        if items and items[-1].kind in (ITEM_HOLE, ITEM_AFTER_HOLE):
+            items.append(SelectItem(ITEM_AFTER_HOLE))
+        elif isinstance(column, exp.Star) or (isinstance(column, exp.Column) and isinstance(column.this, exp.Star)):
+            items.append(SelectItem(ITEM_STAR))
+        elif isinstance(column, exp.Column) and scope is not None:
+            owned, why = _owner(column, scope, root)
+            table = owned[0].lower() if owned and not why else ""
+            if _NAMED_HOLE.fullmatch(column.name):
+                items.append(SelectItem(ITEM_HOLE, table))
+            elif table:
+                items.append(SelectItem(ITEM_COLUMN, table, column.name.lower()))
+            else:
+                items.append(SelectItem(ITEM_EXPRESSION))
+        else:
+            items.append(SelectItem(ITEM_EXPRESSION))
+    return tuple(items)
 
 
 @functools.lru_cache(maxsize=None)
