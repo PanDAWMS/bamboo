@@ -1796,6 +1796,74 @@ def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_an
                     "p/fin.py::helper3800": "prepare@3800 hands the rows it selects to it"}
 
 
+def test_rows_read_again_by_their_key_are_handed_on_to_writers_where_the_reread_runs_with_the_value(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import paths_of
+
+    owner = "p/fin.py::getTasks"
+    for name, line, outcome in [("post", 165, "done"), ("other", 5, "failed"), ("consumers", 808, "cancelled"),
+                                ("already", 3, "failed"), ("keyed", 1750, "failed")]:
+        writers.append(writer(f"p/{name}.py::{name}", branch(line, outcome)))
+    writers.append(writer(owner, branch(1746, "failed")))
+
+    def rows(line, same_rows=True, never_at=(), via=(), reaches=()):
+        return N(kind="rows", name=f"panda:{owner}@{line}", site_owner=owner, site_line=line, same_rows=same_rows,
+                 never_at=list(never_at), via=list(via), reaches=list(reaches))
+
+    def read(at, statement, *sources):
+        return N(owner=at, term="jediTaskID=:jediTaskID", writes={}, reads=True, unread="", sources=list(sources),
+                 statement=statement)
+
+    def site(line, region, crosses_to):
+        return N(owner=owner, anchor=N(line_start=line), region=region, crosses_to=crosses_to)
+
+    follow = N(guarded_by=[], reader_statements=[
+        stmt(owner, 1676, ["JobSpec.jobStatus=running", "JobSpec.jobStatus=scouted"], [1634, 1690],
+             ["p/already.py::already"])])
+    before = movers_of(follow, writers, "JobSpec.jobStatus", "running")
+    mapdump._FRAGMENT[:] = [N(
+        key_froms=[
+            # 1731 reads 1676's rows again for each value but scouted, and hands them to post, record and already
+            read(owner, 1731, rows(1676, never_at=["JobSpec.jobStatus=scouted"])),
+            # 1740 reads them by another column: not followed
+            read(owner, 1740, rows(1676, same_rows=False)),
+            # killJob, through a call, reads them again: its rows reach consumers and events
+            read("p/kill.py::killJob", 991, rows(1676, via=["p/fin.py:1700"],
+                                                 reaches=["p/consumers.py::consumers", "p/events.py::events"])),
+            # 1745 reads them again; its rows fill the key of the owner's write at 1746, outside 1731's region
+            read(owner, 1745, rows(1676)),
+            N(owner=owner, term="jediTaskID=:jediTaskID", writes={"JobSpec.jobStatus": [1746]}, unread="",
+              sources=[N(kind="rows", name=f"panda:{owner}@1745", site_owner=owner, site_line=1745)]),
+        ],
+        read_sites=[site(1731, [1729, 1737], ["p/post.py::post", "p/record.py::record", "p/already.py::already"]),
+                    site(1740, [1738, 1756], ["p/other.py::other"]), site(1745, [1745, 1745], [])])]
+    found = [movers_of(follow, writers, "JobSpec.jobStatus", v) for v in ("running", "scouted")]
+    paths = paths_of(follow, writers, "JobSpec.jobStatus", "running")
+    print(json.dumps([before, found, {o: [st.line for st in p] for o, p in paths.items()}]))
+    """,
+        )
+    )
+    before, (running, scouted), paths = json.loads(out.splitlines()[-1])
+    again = "getTasks@1676 selects the value, and {} reads its rows again"
+    assert before == {"p/already.py::already": "getTasks@1676 hands the rows it selects to it"}
+    # after every other way: to the writers 1731 calls (not record, which writes nothing; already keeps its first why),
+    # the owner whose write 1745's rows key, and the writer killJob's rows reach through a call (not events)
+    assert list(running.items()) == [
+        ("p/already.py::already", "getTasks@1676 hands the rows it selects to it"),
+        ("p/post.py::post", again.format("getTasks@1731") + " and hands them to it"),
+        ("p/consumers.py::consumers", again.format("killJob@991") + " and hands them to it"),
+        ("p/fin.py::getTasks", again.format("getTasks@1745") + ", and they fill the key of the write(s) at [1746]"),
+    ]
+    # 1731 never runs for a scouted row: post is not reached then
+    assert "p/post.py::post" not in scouted and "p/consumers.py::consumers" in scouted
+    # the statement whose rows were taken is 1676, for L2 to read
+    assert paths["p/post.py::post"] == [1676] and paths["p/fin.py::getTasks"] == [1676]
+
+
 def test_an_arm_no_write_in_its_function_persists_keeps_the_owner_said_with_where_its_fields_go(tmp_path):
     out = _ok(
         _run(
