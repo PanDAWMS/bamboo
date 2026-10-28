@@ -714,3 +714,94 @@ def test_the_fetch_record_holds_every_request_and_response(tmp_path):
         "panda.dis1",
     ]
     assert again["steps"][2]["response"]["rows"][0]["jobStatus"] == "pending"
+
+
+# ------------------------------------------------------------------ the same rows by link
+
+
+async def test_a_jobs_rows_file_says_its_files_and_datasets_again_by_the_link_that_named_them():
+    out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS)
+    by_via = {(e["via"]["from"], e["via"]["to"]): e for e in out["linked"]}
+    files = by_via[("JobSpec.PandaID", "FileSpec.PandaID")]
+    # held in the job's own answer: every file is the link's, read when the job was
+    assert files["class"] == "FileSpec" and files["asked"] == [PID]
+    assert [f["lfn"] for f in files["rows"]] == ["a.log.tgz", "in.root"]
+    assert (files["as_of"], files["clock"]) == ("2026-10-13 10:00:05", "client")
+    assert "table" not in files
+    # the datasets were asked in one call; each link keeps the rows its own values name
+    dest = by_via[("FileSpec.destinationDBlock", "DatasetSpec.name")]
+    assert dest["asked"] == ["user.x_sub1"]
+    assert [r["name"] for r in dest["rows"]] == ["user.x_sub1"]
+    assert (dest["table"], dest["clock"]) == ("ATLAS_PANDA.Datasets", "database")
+    # a value asked with no row: the link says it found none
+    prod = by_via[("JobSpec.prodDBlock", "DatasetSpec.name")]
+    assert prod["asked"] == ["data.in"] and prod["rows"] == []
+    # a column empty on every row asks nothing
+    assert ("JobSpec.dispatchDBlock", "DatasetSpec.name") not in by_via
+    log = out["statuslogs"]["JobSpec"]
+    assert log["key"] == "JobSpec.PandaID"
+    assert log["by_key"] == {str(PID): out["statuslog"]["states"]}
+    assert (log["as_of"], log["retained_from"]) == (
+        out["statuslog"]["as_of"],
+        out["statuslog"]["retained_from"],
+    )
+
+
+async def test_a_job_not_answered_links_nothing_and_its_history_stands_by_its_key():
+    out = RB.build(await _fetch(_job_panda(job=None), JOB_Q), SPELLINGS)
+    assert out["linked"] == []
+    assert list(out["statuslogs"]["JobSpec"]["by_key"]) == [str(PID)]
+
+
+async def test_a_tasks_rows_file_says_its_jobs_again_by_link_and_table_and_each_history_by_its_rows_key():
+    out = RB.build(await _fetch(_task_panda(), TASK_Q), SPELLINGS)
+    via = {"from": "JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"}
+    jobs = [e for e in out["linked"] if e["via"] == via]
+    # read by the task's key, so every row R gave is the link's; a PandaID in two tables is in both
+    assert [(e["table"], [r["PandaID"] for r in e["rows"]]) for e in jobs] == [
+        ("jobsArchived4", [11, 12]),
+        ("jobsArchived", [11]),
+    ]
+    assert all(e["asked"] == [TID] and e["clock"] == "database" for e in jobs)
+    # spelled as the class spells its columns, not R's lower case
+    assert jobs[0]["rows"][0]["jobStatus"] == "finished"
+    logs = out["statuslogs"]
+    assert logs["JediTaskSpec"]["key"] == "JediTaskSpec.jediTaskID"
+    assert [s["status"] for s in logs["JediTaskSpec"]["by_key"][str(TID)]] == [
+        "running",
+        "finished",
+    ]
+    assert {
+        k: [s["status"] for s in v] for k, v in logs["JobSpec"]["by_key"].items()
+    } == {
+        "11": ["running", "finished"],
+        "12": ["running", "failed"],
+    }
+
+
+async def test_a_scoped_dataset_name_is_asked_with_and_without_its_scope_and_found_either_way():
+    # the Datasets rows are keyed by either form, as PanDA asks a dataset by name (datasetName IN (:name1,:name2))
+    job = JOB | {"prodDBlock": "data:data.in"}
+    rows = [
+        *DATASETS,
+        {"name": "data.in", "subType": "in"},
+        {"name": "data:data.in", "subType": "in"},
+    ]
+    panda = FakePanda({}, JOB_LOG, [], jobs={PID: job}, datasets=rows)
+    out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
+    assert panda.calls[1][1] == [
+        "data.in",
+        "data:data.in",
+        "panda.dis1",
+        "user.x.log",
+        "user.x_sub1",
+    ]
+    by_via = {(e["via"]["from"], e["via"]["to"]): e for e in out["linked"]}
+    prod = by_via[("JobSpec.prodDBlock", "DatasetSpec.name")]
+    assert prod["asked"] == ["data.in", "data:data.in"]
+    assert [r["name"] for r in prod["rows"]] == ["data.in", "data:data.in"]
+    # a name with no scope is asked as it is
+    assert by_via[("FileSpec.dataset", "DatasetSpec.name")]["asked"] == [
+        "data.in",
+        "user.x.log",
+    ]
