@@ -1800,8 +1800,8 @@ class Rerun:
         self.say(f"{receiver}: {len(calls)} make call(s)")
         logs = list(dict.fromkeys(f for x in calls for f in self.files_of(f"{x.rel}::{x.func}", [], [x.line])))
         rows = W.rows_until(states, question.last)
-        self.say(f"{len(rows)} statuslog row(s) by the run's last record {question.last}: each asked at its second on its "
-                 f"host, in turn, until a run holds it")
+        self.say(f"{len(rows)} statuslog row(s) by the run's last record {question.last}: each asked at its second, in "
+                 f"turn, until a run holds it")
         job = keyed(self.args.key)
         makers, unanswered = [], []
         for state, asking in rows:
@@ -1825,8 +1825,10 @@ class Rerun:
                                  f"another job's, {r2.describe()}")
                         continue
                     found.append((x, f2, r2, hits))
-            self.say(f"-- {state['status']!r} at {hi} on {asking.machine or 'every machine'}: {len(held)} run(s) of the name "
-                     f"hold that second, {len(found)} with a make call's print and the job's key")
+            # the door over files reads the files given whatever machine wrote them: the row's host is not where it looked
+            where = f"on {asking.machine or 'every machine'}" if self.logs.needs_window else "in the files given, their machine not known"
+            self.say(f"-- {state['status']!r} at {hi} {where}: {len(held)} run(s) of the name hold that second, {len(found)} "
+                     f"with a make call's print and the job's key")
             if found:
                 makers = found
                 break

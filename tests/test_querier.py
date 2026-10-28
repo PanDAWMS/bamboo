@@ -2594,6 +2594,53 @@ def test_a_row_is_missing_only_from_a_run_of_a_file_the_map_places_it_in(tmp_pat
     assert row7 == [True, True]
 
 
+def test_h6_names_a_rows_host_only_for_a_door_that_asks_by_machine(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    r.opened = []
+    r.data["statuslog"]["states"] = [
+        {"status": "pending", "time": "2026-10-07 13:06:45", "host": "aipanda087.cern.ch"},
+        {"status": "defined", "time": "2026-10-07 13:06:45", "host": "aipanda093.cern.ch"},
+        {"status": "failed", "time": "2026-10-07 13:08:03"},
+    ]
+    # no make call: every row is asked, and the stop is at the makers' need
+    rerun.O.instances_in = lambda rel: ["Setupper"]
+    rerun.O.calls_through = lambda receiver: []
+    r._ask = lambda obj, logs, asking: ({}, [], {})
+    q = rerun.Missing("user.x_sub01", N(rel="pandaserver/dataservice/setupper.py"), N(last="2026-10-07 13:08:04,059"))
+    said = []
+    for door in (True, False):
+        r.lines, r.logs = [], N(needs_window=door)
+        try:
+            r.missing(q)
+        except rerun.Stop:
+            pass
+        said.append([line for line in r.lines if line.startswith("-- ") or "statuslog row(s)" in line])
+    print(json.dumps(said))
+    """,
+        )
+    )
+    by_machine, files = json.loads(out.splitlines()[-1])
+    rows = "3 statuslog row(s) by the run's last record 2026-10-07 13:08:04,059: each asked at its second, in turn, until a run holds it"
+    none = ": 0 run(s) of the name hold that second, 0 with a make call's print and the job's key"
+    # the door that asks by machine asks each row on its host, every machine where the row names none
+    assert by_machine == [
+        rows,
+        "-- 'pending' at 2026-10-07 13:06:45 on aipanda087.cern.ch" + none,
+        "-- 'defined' at 2026-10-07 13:06:45 on aipanda093.cern.ch" + none,
+        "-- 'failed' at 2026-10-07 13:08:03 on every machine" + none,
+    ]
+    # the door over files reads the files given, whatever machine wrote them
+    assert files == [
+        rows,
+        "-- 'pending' at 2026-10-07 13:06:45 in the files given, their machine not known" + none,
+        "-- 'defined' at 2026-10-07 13:06:45 in the files given, their machine not known" + none,
+        "-- 'failed' at 2026-10-07 13:08:03 in the files given, their machine not known" + none,
+    ]
+
+
 def test_stuck_reads_at_the_moment_the_rows_file_says_its_values_were_read(tmp_path):
     out = _ok(
         _run(

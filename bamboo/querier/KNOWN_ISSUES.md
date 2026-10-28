@@ -71,7 +71,9 @@ H6 asks the make calls' logs at each of the job's statuslog rows, at the row's s
 (`windows.rows_until`), and takes a run there that printed the name at a make call and names the job.  A maker that
 wrote no row of the job -- a run that made the object before the job was created, and wrote none of its rows -- is
 not seen.  The window was the Datasets row's `creationdate` before; that row is of the first run to use the vuid
-(insertDataset writes none where one is), not of this job's, and gave JEDI's make calls no window at all.
+(insertDataset writes none where one is), not of this job's, and gave JEDI's make calls no window at all.  The door
+over files knows no file's machine: a run in any file given that holds the row's second is taken, and the row's
+line says "in the files given, their machine not known", not the row's host.
 
 *Shows:* a stop at H6, "a make call whose function printed the object's name, in a run holding one of the job's
 rows and naming the job", and the line of each row asked.
