@@ -1863,6 +1863,86 @@ def test_a_write_that_makes_the_row_is_no_arm_where_every_key_from_writing_it_th
     assert after == {"p/make.py::helper": "make@8 hands the rows it selects to it"} and not by_key_after
 
 
+def test_a_statement_no_placed_caller_runs_persists_nothing(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import key_froms
+
+    S = "JobSpec.jobStatus"
+    names = ("every", "open", "entry", "some", "bare")
+    owners = {n: f"p/{n}.py::{n}" for n in names}
+    writers = [writer(owners[n], branch(4016, "activated")) for n in names]
+    route = ["p/c.py:814", "p/t.py:815"]
+
+    def records(owner, **fields):
+        # a new row's INSERT and the old row's UPDATE, both writing what 4016 set
+        birth = N(owner=owner, statement=4177, term="PandaID=:PandaID", writes={S: [4016]}, unread="", sources=[],
+                  new_row=True, new_row_by="sequence", new_row_line=4177)
+        update = N(owner=owner, statement=4146, term="PandaID=:PandaID", writes={S: [4016]}, unread="", sources=[], **fields)
+        return [birth, update]
+
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        *records(owners["every"], routes=3, out_on=[route] * 3, routes_open=False),   # every route hands True
+        *records(owners["open"], routes=3, out_on=[route] * 3, routes_open=True),     # a call placed nowhere
+        *records(owners["entry"], routes=0, out_on=[], routes_open=True),             # no call placed: reached from outside
+        *records(owners["some"], routes=3, out_on=[route] * 2, routes_open=False),    # one route runs it
+        *records(owners["bare"]),                                                     # a dump without the fields
+    ])]
+    first, again = key_froms(), key_froms()
+    print(json.dumps([{n: sorted(arms_of(writers, owners[n], S, "failed")) for n in names},
+                      [(k.owner.split("::")[-1], k.statement) for k in first], first is again]))
+    """,
+        )
+    )
+    arms, read, same = json.loads(out.splitlines()[-1])
+    # the UPDATE that no placed caller runs is not read: what 4016 sets reaches only the new row, a birth, so no arm
+    assert arms == {"every": [], "open": [4016], "entry": [4016], "some": [4016], "bare": [4016]}
+    assert ["every", 4146] not in read and ["every", 4177] in read and len(read) == 9
+    # one list per dump, so that the births' index (held by the list's id) is built once
+    assert same
+
+
+def test_the_reach_reads_the_junctions_without_their_births(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap import reach as RE
+            from bamboo.querier import mapdump, rerun
+
+            S = "FileSpec.type"
+            def br(line, outcome):
+                return N(line=line, outcome=outcome, path_condition=[], row_precondition=[], other_lines=[])
+            junctions = [N(owner="p/j.py::update", subject=S, branches=[br(434, "zipinput"), br(500, "output")]),
+                         N(owner="p/j.py::insert", subject=S, branches=[br(20, "log")]),
+                         N(owner="p/j.py::insert", subject="FileSpec.status", branches=[br(20, "ready")])]
+            def kf(owner, statement, line, new_row=None):
+                return N(owner=owner, statement=statement, term="row_ID=:row_ID", writes={S: [line], "FileSpec.status": [line]},
+                         unread="", sources=[], new_row=new_row)
+            mapdump._FRAGMENT[:] = [N(reach_graph=[], junctions=junctions, key_froms=[
+                kf("p/j.py::update", 438, 434, True), kf("p/j.py::update", 510, 500), kf("p/j.py::insert", 25, 20, True)])]
+            seen = []
+            RE.moving_off = lambda js, graph, subject, value: seen.append(
+                [(j.owner.split("::")[-1], j.subject, [b.line for b in j.branches]) for j in js]) or RE.Destination({}, [])
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.result, r._graph_read = [], {}, None
+            r._reach = (RE, N(function_at=lambda rel, n: None, named=lambda owner: []), {})
+            r._reach_of(rerun.Stuck(S, "input", "1"), "p/j.py::update", [434])
+            print(json.dumps([seen, [len(j.branches) for j in junctions]]))
+            """,
+        )
+    )
+    seen, untouched = json.loads(out.splitlines()[-1])
+    # the reach is handed the subject's junctions less their births; another subject's, and the dump's own, are as read
+    assert seen == [[["update", "FileSpec.type", [500]], ["insert", "FileSpec.type", []], ["insert", "FileSpec.status", [20]]]]
+    assert untouched == [2, 1, 1]
+
+
 def test_a_write_that_makes_the_row_is_no_candidate_for_a_status_the_row_had_a_row_before(tmp_path):
     out = _ok(
         _run(

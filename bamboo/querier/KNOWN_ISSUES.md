@@ -203,10 +203,46 @@ reading left with none goes (`_unborn`, `held.row_before`): `ppEventServiceJob`'
 sequence's PandaID, did not write a job's 'activated' after its 'defined'.  For the row's first status, a tie at the
 second the log keeps, or a value held beside the status (`JobSpec.computingSite`), every reading stays.
 
+K14's keep reads the same fact: the map's reach (`reach.moving_off`) reads arms off the junctions' branches as
+`arms_of` does but knows no KeyFrom, so a mover whose own def holds births alone was kept -- "its def holds an arm
+moving it off by the map's junctions ..., though S1 counts none" -- `updateJobStatus` at `FileSpec.type=input` and
+`pseudo_input` by its new FileSpec of type zipinput (434, KeyFrom 438).  The reach is handed the junctions without
+their births (`unborn_junctions`), for a mover's own def and for the writers its calls reach alike.  On M 5aca5a4
+no verdict moved by it: `updateJobStatus` is kept now because its reach leaves 2 calls open
+(`push_job_status_message`'s `mb_proxy.send`, ...), and 27 reach texts lose writers of births alone
+(`ppEventServiceJob`, `makeFakeCoJumbo`, `increaseSeqNumber_JEDI`, ...).
+
 *Shows:* "<owner>: its writes at [...] make the row (births: sequence at 623): not arms"; result.json's `births`; a
 writer with births alone is absent from the movers; H2 / F1: "the key's row was there before 'activated' at ..., so
-its writes that make a row are no candidates: ppEventServiceJob [5556, 5558, 5560] (births: sequence at 5706)".
+its writes that make a row are no candidates: ppEventServiceJob [5556, 5560] (births: sequence at 5706)".
 *Revisit:* when the map follows an object handed in to where its key was made.
+
+### K30. A statement no placed caller runs persists nothing
+
+The map says of each KeyFrom the routes into its statement's function (`routes`, as `Calls.routes` places them), those
+on which the statement never runs by the constants the route hands (`out_on`: an if holding it, an exit before it),
+and whether a route is left open (`routes_open`: a call by the function's name placed nowhere, a route cut).
+`retryJob`'s in-place UPDATE (4146) is under `if not getNewPandaID:`, and every placed caller (TaskBuffer 1127,
+copyArchive 704 / 814 through TaskBuffer 815) hands True: the old row keeps its status, its only write the error code
+and diag (4202-4207), and what 4016 sets (`job.jobStatus = "activated"`) goes to the new row's INSERT alone.  S1 kept
+retryJob a mover of six statuses by 4146 (the movers oracle's O5): `failed` by its keyed way, `assigned`, `defined`,
+`pending`, `waiting` and `starting` by the rows `lockJobsForReassign`@846 and copyArchive's `main`@696 hand it.  Now
+S1, H2 and F1 read no KeyFrom whose statement never runs from a placed caller (`never_runs`: routes > 0, every route
+in `out_on`, none open; `key_froms`, the one place they read the records): 4016 is then written by a birth alone, no
+arm (K29).  Measured on M's dump with the field put on its 5 such records: retryJob leaves `failed`; at the five
+statuses handed to it, it stays as K14's (no arm of its own; its reach leaves 5 calls open: `file.pack`,
+`file.bindUpdateChangesExpression`, `file.valuesMap` on an element of `job.Files`, ...), so the oracle's O5 holds
+there until the reach places those calls.  H2 / F1: 4016 is no candidate for an 'activated' after a row before
+(A-rec, N-rec: 7 -> 6 readings).  A statement with no route placed (the map leaves it open: reached from outside,
+called from outside the corpus), one some route runs, and a dump without the fields are read as before.  A caller
+outside the map's view (a test handing `simul=True`, a REST call) may still run such a statement: S1 errs on
+dropping there, by the map's word that no placed caller does.
+
+*Shows:* the writer is absent from the movers, as one with births alone (K29); H2 / F1: its line among the births a
+later status leaves out.
+*Revisit:* a statement some routes run, read per way: none of S1's rows rests on one on pin k (the map's iv,
+2026-10-28), and the way would need the hand-off call's line (`lockJobsForReassign`@846's rows reach `retryJob` at
+copyArchive 814, not from `lockJobsForReassign`).
 
 ### K16. S1 asks a writer that takes a row by its key over the window's last part only
 
