@@ -18779,6 +18779,10 @@ class TaskModule:
         self.cur.execute("SELECT {0} FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s".format(cols), {":s": "y"})
         one = self.cur.fetchone()
         self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:c", {":c": one[2]})
+        spec = JediTaskSpec()
+        spec.pack(one)
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:h", {":h": spec.lockedBy})
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:i", {":i": spec.parent_tid})
 
     def texts(self, defined):
         if defined:
@@ -18804,6 +18808,16 @@ class TaskModule:
         resC = self.cur.fetchall()
         for row in resC:
             self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:g", {":g": row[0]})
+        if defined:
+            sqlK = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        else:
+            sqlK = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks_Old WHERE status=:s "
+        self.cur.execute(sqlK + comment, {":s": "done"})
+        resK = self.cur.fetchall()
+        for row in resK:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:k", {":k": row[0]})
+        sqlO = "UPDATE ATLAS_PANDA.JEDI_Tasks_Old SET status=:st,parent_tid=:pt WHERE jediTaskID=:t "
+        self.cur.execute(sqlO + comment, {":st": "done", ":pt": None, ":t": 1})
 
     def restart(self):
         sqlTL = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status IN (:s1,:s2) "
@@ -18845,9 +18859,14 @@ def _reread(tmp_path):
     audited = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
     schema = {
         "jedi_tasks": frozenset({"jeditaskid", "status", "parent_tid"}),
+        "jedi_tasks_old": frozenset({"jeditaskid", "status", "parent_tid"}),
         "jedi_datasets": frozenset({"jeditaskid", "datasetid"}),
     }
-    keys = {"jedi_tasks": frozenset({"jeditaskid"}), "jedi_datasets": frozenset({"jeditaskid", "datasetid"})}
+    keys = {
+        "jedi_tasks": frozenset({"jeditaskid"}),
+        "jedi_tasks_old": frozenset({"jeditaskid"}),
+        "jedi_datasets": frozenset({"jeditaskid", "datasetid"}),
+    }
     froms: list[KeyFrom] = []
     with sql.across_calls(calls), sqltext.with_schema(schema, keys, {}):
         _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
@@ -18931,34 +18950,40 @@ def test_a_read_run_from_two_places_is_one_keyfrom_at_its_read_sites_line(tmp_pa
 
 
 def test_a_rows_source_says_why_it_names_no_column(tmp_path):
-    """``SELECT *``, an aggregate, a position a hole's columns fill: the rows fill the key, and which column is not
-    said, with why."""
+    """``SELECT *``, an aggregate, a position a hole's columns fill, a field of an object packed from a hole that the
+    table has no column of: the rows fill the key, and which column is not said, with why -- a field it has is its
+    column."""
     froms, _sites, _at = _reread(tmp_path)
     kinds = {one.term: one for one in froms if one.owner.endswith("::kinds")}
     assert {
         term: [(s.kind, s.column, s.column_unread) for s in kinds[term].sources]
-        for term in ("jediTaskID=:a", "jediTaskID=:b", "jediTaskID=:c")
+        for term in ("jediTaskID=:a", "jediTaskID=:b", "jediTaskID=:c", "jediTaskID=:h", "jediTaskID=:i")
     } == {
         "jediTaskID=:a": [("rows", "", "select *")],
         "jediTaskID=:b": [("rows", "", "an expression")],
         "jediTaskID=:c": [("rows", "", "in a hole")],
+        "jediTaskID=:h": [("rows", "", "no item")],
+        "jediTaskID=:i": [("rows", "jedi_tasks.parent_tid", "")],
     }
 
 
 def test_a_value_s_column_is_read_on_each_select_list_of_the_statement_s_texts(tmp_path):
     """One line, two texts by an ``if``: a value is the column both lists give at its place, and where they give
-    two -- another column, another table -- which is not said, with why; a ``*`` over one derived table is its
-    list (``getJobs``'s ``SELECT * FROM (SELECT PandaID, ...) WHERE rownum<=:n``)."""
+    two -- another column, another table -- which is not said, with why, and the subject where both are one (a
+    table of the same class); a ``*`` over one derived table is its list (``getJobs``'s ``SELECT * FROM (SELECT
+    PandaID, ...) WHERE rownum<=:n``)."""
     froms, _sites, _at = _reread(tmp_path)
     texts = {one.term: one for one in froms if one.owner.endswith("::texts")}
+    task = "JediTaskSpec.jediTaskID"
     assert {
-        term: [(s.kind, s.column, s.column_unread) for s in texts[term].sources]
-        for term in ("jediTaskID=:d", "jediTaskID=:e", "jediTaskID=:f", "jediTaskID=:g")
+        term: [(s.kind, s.column, s.attr, s.column_unread) for s in texts[term].sources]
+        for term in ("jediTaskID=:d", "jediTaskID=:e", "jediTaskID=:f", "jediTaskID=:g", "jediTaskID=:k")
     } == {
-        "jediTaskID=:d": [("rows", "jedi_tasks.jeditaskid", "")],
-        "jediTaskID=:e": [("rows", "", "texts differ")],
-        "jediTaskID=:f": [("rows", "", "texts differ")],
-        "jediTaskID=:g": [("rows", "jedi_tasks.jeditaskid", "")],
+        "jediTaskID=:d": [("rows", "jedi_tasks.jeditaskid", task, "")],
+        "jediTaskID=:e": [("rows", "", "", "texts differ")],
+        "jediTaskID=:f": [("rows", "", "", "texts differ")],
+        "jediTaskID=:g": [("rows", "jedi_tasks.jeditaskid", task, "")],
+        "jediTaskID=:k": [("rows", "", task, "texts differ")],
     }
 
 

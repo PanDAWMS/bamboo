@@ -2655,7 +2655,8 @@ NEW_ROW_UNREAD = "not read"
 NEW_ROW_UPSERT = "updates or inserts"
 #: Why a ``rows`` source names no column of its statement's rows (:attr:`KeySource.column_unread`): the select list
 #: is ``*``, the value is at a place a hole's columns fill (``SELECT {JobSpec.columnNames()}`` read by position),
-#: the item is an expression, no item or several hold the value, the statement's texts give it different columns
+#: the item is an expression, no item or several hold the value (no item: also a field of an object packed from a
+#: hole or ``*`` that the table has no column of), the statement's texts give it different columns
 #: (``getCoJumboJobsToBeFinished``'s ``jobsActive4`` or ``jobsDefined4``), or no select list was read.
 KEY_COLUMN_STAR = "select *"
 KEY_COLUMN_HOLE = "in a hole"
@@ -2705,7 +2706,12 @@ class KeySource(BaseModel):
     )
     attr: str = Field(
         default="",
-        description="``rows``: *column* as a subject, ``JediTaskSpec.jediTaskID``, where its table's spec class has it.",
+        description=(
+            "``rows``: *column* as a subject, ``JediTaskSpec.jediTaskID``, where its table's spec class has it; where "
+            f"the statement's texts give columns of several tables that are one subject (*column_unread* "
+            f"``{KEY_COLUMN_TEXTS}``: a hole read per table, ``jobsActive4``'s or ``jobsDefined4``'s ``PandaID``), "
+            "that subject."
+        ),
     )
     column_unread: str = Field(
         default="",

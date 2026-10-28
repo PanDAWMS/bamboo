@@ -5948,17 +5948,27 @@ def _positions(lists: tuple[tuple[sqltext.SelectItem, ...], ...]) -> list[int]:
 
 
 def _column_choice(
-    lists: tuple[tuple[sqltext.SelectItem, ...], ...], held: list[int], value: Optional[ast.AST], site: ReadSiteNode
-) -> tuple[str, str]:
-    """``(table.column, "")`` of the select item of *site*'s rows a bind's *value* is, the places whose carry holds it
-    whole being *held* -- chosen on each of its select *lists* and said where all agree; or ``("", why not)``
+    lists: tuple[tuple[sqltext.SelectItem, ...], ...],
+    held: list[int],
+    value: Optional[ast.AST],
+    site: ReadSiteNode,
+    subject_of: Callable[[str], str],
+) -> tuple[str, str, str]:
+    """``(table.column, its subject, "")`` of the select item of *site*'s rows a bind's *value* is, the places whose
+    carry holds it whole being *held* -- chosen on each of its select *lists* and said where all agree, the subject by
+    *subject_of*; where they give columns of one subject, ``("", it, KEY_COLUMN_TEXTS)`` (a hole read per table:
+    ``jobsActive4``'s or ``jobsDefined4``'s ``PandaID``, ``JobSpec.PandaID``); or ``("", "", why not)``
     (:data:`KEY_COLUMN_STAR` ...)."""
     if not lists:
-        return "", KEY_COLUMN_UNREAD
+        return "", "", KEY_COLUMN_UNREAD
     chosen = {
         _item_choice(items, [number for number in held if number < len(items)], value, site) for items in lists
     }
-    return chosen.pop() if len(chosen) == 1 else ("", KEY_COLUMN_TEXTS)
+    if len(chosen) == 1:
+        column, why = chosen.pop()
+        return column, subject_of(column), why
+    subjects = {subject_of(column) for column, _why in chosen}
+    return "", subjects.pop() if len(subjects) == 1 else "", KEY_COLUMN_TEXTS
 
 
 def _item_choice(
@@ -5985,6 +5995,10 @@ def _item_choice(
         table = item.table or (next(iter(tables)) if len(tables) == 1 else "")
         if field is not None and table and field in sqltext.table_columns(table):
             return f"{table}.{field}", ""
+        if field is not None and table and sqltext.table_columns(table):
+            # ``fileSpec.fileID`` of ``job.Files``, ``job`` packed from ``SELECT {} FROM jobsDefined4``: a part of
+            # the rows, and no column of theirs.
+            return "", KEY_COLUMN_NONE
         return "", KEY_COLUMN_HOLE if item.kind == sqltext.ITEM_HOLE else KEY_COLUMN_STAR
     return "", KEY_COLUMN_EXPRESSION
 
@@ -6248,7 +6262,7 @@ class _Filled:
             carry = self._rows(site)
             paths = carry.held(value, at) if carry is not None else _NOTHING
             if paths:
-                column, unread = self.column(site, value, at)
+                column, attr, unread = self.column(site, value, at)
                 found.append(
                     KeySource(
                         kind=KEY_ROWS,
@@ -6258,7 +6272,7 @@ class _Filled:
                         site_line=site.anchor.line_start,
                         paths=_spelled_paths(paths),
                         column=column,
-                        attr=self.attr(column),
+                        attr=attr,
                         column_unread=unread,
                     )
                 )
@@ -6300,12 +6314,12 @@ class _Filled:
             self._carries[key] = _PathCarry(self.reading, self.file, self.func, (), start=seeds, item=item)
         return self._carries[key]
 
-    def column(self, site: ReadSiteNode, value: ast.AST, at: ast.AST) -> tuple[str, str]:
-        """``(table.column, "")`` of the select item of *site*'s rows *value* is where *at* runs, or ``("", why
-        not)`` (:data:`KEY_COLUMN_STAR` ...)."""
+    def column(self, site: ReadSiteNode, value: ast.AST, at: ast.AST) -> tuple[str, str, str]:
+        """``(table.column, its subject, "")`` of the select item of *site*'s rows *value* is where *at* runs, or
+        ``("", the subject or "", why not)`` (:func:`_column_choice`)."""
         lists = self.items(site)
         held = [number for number in _positions(lists) if _whole(self._item(site, number).held(value, at))]
-        return _column_choice(lists, held, value, site)
+        return _column_choice(lists, held, value, site, self.attr)
 
     def attr(self, column: str) -> str:
         """*column* (``table.column``) as a subject where its table's spec class has it, else ``""``."""
@@ -6521,7 +6535,17 @@ def _landed_sources(
                     if any(_whole(holdings.get(key, _NOTHING)) for key in hit)
                 )
                 bound = key_from._binds[2] if key_from._binds is not None else []
-                column, unread = _column_choice(lists, held, bound[0].value if bound else None, site)
+                column, attr, unread = _column_choice(
+                    lists,
+                    held,
+                    bound[0].value if bound else None,
+                    site,
+                    lambda column: (
+                        _spec_attr(attributor, *column.split(".", 1), class_of)
+                        if column and attributor is not None
+                        else ""
+                    ),
+                )
                 source = KeySource(
                     kind=KEY_ROWS,
                     line=getattr(bound[0].site, "lineno", None) if bound else landing.call.lineno,
@@ -6530,7 +6554,7 @@ def _landed_sources(
                     site_line=site.anchor.line_start,
                     paths=_spelled_paths(frozenset(path for key in hit for path in landing.held[key])),
                     column=column,
-                    attr=_spec_attr(attributor, *column.split(".", 1), class_of) if column and attributor is not None else "",
+                    attr=attr,
                     column_unread=unread,
                     via=via,
                 )
