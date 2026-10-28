@@ -65,6 +65,7 @@ from bamboo.codemap.panda.recognizers import (
     progress,
     selection,
     sqlwrite,
+    tables,
     trigger,
 )
 from bamboo.models.graph_element import NodeType
@@ -927,6 +928,40 @@ def test_element_type_comes_from_what_was_put_in_the_container():
     assert written[0].subject == "FileSpec.status"
     assert written[0].attribution == "container"
 
+
+
+def test_a_name_only_loops_bind_is_what_its_loops_containers_hold():
+    """``propagateResultToJEDI``'s ``for fileSpec in jobSpec.Files`` -- and ``jobSpec.Files + pseudoFiles`` -- holds
+    ``FileSpec`` rows for ``class_of`` too, where the fields the loop uses (a JEDI file's ``status`` as well) could not
+    tell it; a name an assignment binds as well is not read by its loop."""
+    consumer = (
+        "def propagate(jobSpec: JobSpec, pseudoFiles: list[FileSpec]):\n"
+        "    for fileSpec in jobSpec.Files:\n"
+        "        use(fileSpec.status)\n"
+        "    for other in jobSpec.Files + pseudoFiles:\n"
+        "        use(other.status)\n"
+        "    for mixed in jobSpec.Files:\n"
+        "        use(mixed.status)\n"
+        "    mixed = make()\n"
+        "    use(mixed.status)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ADDERS, "pandaserver/taskbuffer/JobSpec.py"),
+        _module(consumer, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_element_types(modules)
+    func = next(node for node in ast.walk(modules[-1].tree) if isinstance(node, ast.FunctionDef))
+
+    def read(name: str):
+        return attributor.class_of(ast.Name(id=name, ctx=ast.Load()), func, None)
+
+    assert {name: read(name) for name in ("fileSpec", "other", "mixed")} == {
+        "fileSpec": "FileSpec",
+        "other": "FileSpec",
+        "mixed": None,
+    }
 
 def test_two_containers_named_files_hold_different_classes():
     """``JobSpec.Files`` and ``JediDatasetSpec.Files`` are the pair naming cannot split.
@@ -18130,16 +18165,18 @@ class JobModule:
 '''
 
 
-def _flushed(tmp_path, caller: str, rel: str = "pandajedi/jediorder/Knight.py"):
-    """The build's steps a flush call's records come out of, over *caller* and the proxies: the attribute slice's
-    arms, the SQL slice's records of the methods' own statements, the calls' (flush.attach), then their sources and
-    writes and the objects no write persists (sqlwrite.attach_key_sources).  ``(KeyFroms, RowKeySources)``."""
+def _flushed(tmp_path, caller: str, rel: str = "pandajedi/jediorder/Knight.py", more: dict | None = None):
+    """The build's steps a flush call's records come out of, over *caller* and the proxies (and *more* modules): the
+    attribute slice's arms, the SQL slice's records of the methods' own statements, the calls' (flush.attach), then
+    their sources and writes and the objects no write persists (sqlwrite.attach_key_sources).
+    ``(KeyFroms, RowKeySources)``."""
     modules, calls, record = _keyed_corpus(
         tmp_path,
         {
             "pandaserver/taskbuffer/Specs.py": _SPECS,
             "pandaserver/taskbuffer/db_proxy_mods/task_module.py": _FLUSH_PROXY,
             "pandaserver/taskbuffer/db_proxy_mods/job_module.py": _FLUSH_MORE,
+            **(more or {}),
             rel: caller,
         },
     )
@@ -18353,6 +18390,67 @@ def test_an_object_no_write_persists_says_what_its_fields_reach(tmp_path):
         ("note", "job", "", KEY_NO_USE, [], [], {"JobSpec.jobStatus": [closed]}),
     ]
 
+
+
+_LOOPED_UNSAVED = '''
+def updateJobs(jobs):
+    return len(jobs)
+
+
+class Agent:
+    def activate(self):
+        job = JobSpec()
+        for fileSpec in job.Files:
+            fileSpec.status = "ready"
+        updateJobs([job])
+
+    def build(self):
+        job = JobSpec()
+        for fileSpec in job.Files:
+            fileSpec.status = "built"
+        return job
+
+    def finalize(self, job: JobSpec):
+        for fileSpec in job.Files:
+            fileSpec.status = "merging"
+
+    def fail(self, jobs: list[JobSpec]):
+        for job in jobs:
+            for fileSpec in job.Files:
+                fileSpec.status = "failed"
+
+    def note(self):
+        job = JobSpec()
+        for fileSpec in job.Files:
+            fileSpec.status = "noted"
+'''
+
+
+def test_a_field_set_on_a_loops_element_reaches_where_its_container_goes(tmp_path):
+    """The element a loop takes is its container's: a field set on it goes where what holds the container goes --
+    ``datasetManager.run``'s ``for tmpFile in tmpJob.Files: tmpFile.status = "ready"`` before ``tmpJob`` is handed
+    to ``activateJobs``, ``doGenerateBuild``'s ``jobSpec`` returned, a parameter's files, a parameter's jobs' files
+    (on up through the outer loop) -- and nowhere only where nothing takes the container on."""
+    rel = "pandajedi/jediorder/Agent.py"
+    froms, _keys = _flushed(tmp_path, _LOOPED_UNSAVED, rel, more={"pandaserver/taskbuffer/JobSpec.py": _ADDERS})
+
+    lines = _LOOPED_UNSAVED.split("\n")
+    ready, built, merging, failed, noted = (
+        next(n for n, line in enumerate(lines, 1) if f'= "{value}"' in line)
+        for value in ("ready", "built", "merging", "failed", "noted")
+    )
+    read = sorted(
+        (one.owner.rpartition("::")[2], one.object, one.unread, one.handed_to, one.writes)
+        for one in froms
+        if not one.term
+    )
+    assert read == [
+        ("activate", "fileSpec", KEY_HANDED, [f"{rel}::updateJobs"], {"FileSpec.status": [ready]}),
+        ("build", "fileSpec", KEY_RETURNED, [], {"FileSpec.status": [built]}),
+        ("fail", "fileSpec", KEY_KEPT, [], {"FileSpec.status": [failed]}),
+        ("finalize", "fileSpec", KEY_KEPT, [], {"FileSpec.status": [merging]}),
+        ("note", "fileSpec", KEY_NO_USE, [], {"FileSpec.status": [noted]}),
+    ]
 
 
 def test_a_plus_equals_arm_says_what_its_field_reaches(tmp_path):
@@ -18732,6 +18830,14 @@ class TaskModule:
         sqlO = "UPDATE ATLAS_PANDA.JEDI_Tasks_Old SET status=:st,parent_tid=:pt WHERE jediTaskID=:t "
         self.cur.execute(sqlO + comment, {":st": "done", ":pt": None, ":t": 1})
 
+    def handed(self, taskSpec, taskID, tasks):
+        varMap = {}
+        varMap[":jediTaskID"] = taskSpec.parent_tid
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID" + comment, varMap)
+        self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:m", {":m": taskID})
+        for task in tasks:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:n", {":n": task.jediTaskID})
+
     def restart(self):
         sqlTL = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status IN (:s1,:s2) "
         self.cur.execute(sqlTL + comment, {":s1": "defined", ":s2": "ready"})
@@ -18943,6 +19049,153 @@ def test_a_select_list_reads_a_name_holding_a_hole_as_the_hole_and_a_star_over_o
     assert sqltext.select_items("SELECT * FROM (SELECT a FROM t1 UNION SELECT a FROM t2)") == (star,)
     assert sqltext.select_items("SELECT * FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p") == (star,)
 
+
+
+def test_a_key_a_parameter_s_field_fills_says_the_field_as_a_subject(tmp_path):
+    """archiveJob 1718's shape (P2's own): the key is filled with a field of what the caller hands -- the parameter's
+    own, or of an element of it -- and the source names the parameter and, as a subject, the field; a parameter
+    handed whole is what the callers hand, no subject."""
+    froms, _sites, _at = _reread(tmp_path)
+    handed = {one.term: one for one in froms if one.owner.endswith("::handed")}
+    assert {
+        term: [(s.kind, s.name, s.paths, s.attr) for s in handed[term].sources]
+        for term in ("jediTaskID=:jediTaskID", "jediTaskID=:m", "jediTaskID=:n")
+    } == {
+        "jediTaskID=:jediTaskID": [("parameter", "taskSpec", ["()"], "JediTaskSpec.parent_tid")],
+        "jediTaskID=:m": [("parameter", "taskID", ["()"], "")],
+        "jediTaskID=:n": [("parameter", "tasks", ["()"], "JediTaskSpec.jediTaskID")],
+    }
+
+
+_TABLES_SPECS = """
+class JobSpec(object):
+    _attributes = ("PandaID", "jobStatus", "creationTime", "modificationTime")
+"""
+
+_TABLES = '''
+comment = " /* x */"
+
+
+class JobModule:
+    def insertJob(self, pandaID):
+        sqlI = "INSERT INTO ATLAS_PANDA.jobsActive4 (PandaID,jobStatus,creationTime,modificationTime) "
+        sqlI += "VALUES (:PandaID,:jobStatus,CURRENT_DATE,CURRENT_DATE) "
+        self.cur.execute(sqlI + comment, {":PandaID": pandaID, ":jobStatus": "activated"})
+
+    def insertOther(self, pandaID):
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        varMap[":jobStatus"] = "defined"
+        varMap[":ct"] = naive_utcnow()
+        varMap[":mt"] = naive_utcnow()
+        sqlD = "INSERT INTO ATLAS_PANDA.jobsActive4 (PandaID,jobStatus,creationTime,modificationTime) "
+        sqlD += "VALUES (:PandaID,:jobStatus,:ct,:mt) "
+        self.cur.execute(sqlD + comment, varMap)
+
+    def touch(self, pandaID):
+        sqlU = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:s,modificationTime=CURRENT_DATE WHERE PandaID=:p "
+        self.cur.execute(sqlU + comment, {":s": "running", ":p": pandaID})
+
+    def both(self):
+        sqlR = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s "
+        sqlR += "UNION SELECT PandaID FROM ATLAS_PANDAARCH.jobsArchived WHERE jobStatus=:s "
+        self.cur.execute(sqlR + comment, {":s": "failed"})
+        return self.cur.fetchall()
+'''
+
+
+def test_a_table_record_says_its_key_as_the_class_spells_it_its_family_and_its_rows_creation(tmp_path):
+    """The live-case harness's fetch tables (P2R): a table holding a class's rows names its row by the class's
+    attribute, is read with its archive in one UNION, and the class's column every write of which makes the row
+    and puts the time now -- by the statement's clock or a bound one -- is its creation; one an UPDATE writes is
+    not.  The archive is the family's table holding the rows that no INSERT writes, partitioned by time."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/JobSpec.py": _TABLES_SPECS, rel: _TABLES}
+    )
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    held = frozenset({"pandaid", "jobstatus", "creationtime", "modificationtime"})
+    schema = {"jobsactive4": held, "jobsarchived": held}
+    keys = {"jobsactive4": frozenset({"pandaid"})}
+    dated = {"jobsactive4": frozenset({"creationtime", "modificationtime"}), "jobsarchived": frozenset()}
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls), sqltext.with_schema(schema, keys, dated):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites,
+            table_class=attributor.class_for_table, modules=modules, attributor=attributor,
+        )
+        entities = [
+            EntityNode(
+                map_id=MAP_ID, derived_from=VERSION, name="jobsactive4", tables=["jobsActive4"],
+                spec_class="JobSpec", created_by=[f"{rel}::JobModule.insertJob"],
+            )
+        ]
+        made = tables.records(
+            modules, entities, sites, froms, attributor, attributor.class_for_table, schema, keys,
+            {"jobsarchived": ("range", ("modificationtime",))},
+            {"jobsactive4": ("ATLAS_PANDA",), "jobsarchived": ("ATLAS_PANDAARCH",)},
+        )
+    by = {one.name: one for one in made}
+    written = sorted(
+        (one.owner.rsplit("::", 1)[1], line)
+        for one in froms
+        for line in one.writes.get("JobSpec.creationTime", [])
+    )
+    assert [owner for owner, _line in written] == ["insertJob", "insertOther"]
+    assert sorted(by) == ["jobsactive4", "jobsarchived"]
+    live, archive = by["jobsactive4"], by["jobsarchived"]
+    assert (live.rows_of, live.identity, live.identity_attrs, live.inserted, live.family, live.creation) == (
+        "JobSpec", ["pandaid"], ["JobSpec.PandaID"], True, ["jobsarchived"], ["JobSpec.creationTime"],
+    )
+    assert (live.schema_names, live.partitioned_by, live.spellings) == (["ATLAS_PANDA"], [], ["jobsActive4"])
+    assert (
+        archive.rows_of, archive.identity, archive.inserted, archive.family, archive.schema_names,
+        archive.partition_kind, archive.partitioned_by, archive.partitioned_by_attrs, archive.creation,
+    ) == (
+        "JobSpec", [], False, ["jobsactive4"], ["ATLAS_PANDAARCH"],
+        "range", ["modificationtime"], ["JobSpec.modificationTime"], ["JobSpec.creationTime"],
+    )
+
+
+def test_the_ddl_says_a_tables_partition_and_the_schema_creating_it(tmp_path):
+    """``PARTITION BY RANGE ("MODIFICATIONTIME")`` after a table's body is its, not the next table's; the schema
+    is the one its ``CREATE TABLE`` names."""
+    (tmp_path / "ATLAS_PANDA.sql").write_text(
+        'CREATE TABLE "ATLAS_PANDA"."JOBSARCHIVED4"\n   (\t"PANDAID" NUMBER(11,0),\n\t"MODIFICATIONTIME" DATE\n   )\n'
+        '  PARTITION BY RANGE ("MODIFICATIONTIME")\n (PARTITION "P1" VALUES LESS THAN (MAXVALUE)) ;\n'
+        'CREATE TABLE "ATLAS_PANDA"."JOBSACTIVE4"\n   (\t"PANDAID" NUMBER(11,0)\n   ) ;\n'
+    )
+    (tmp_path / "ATLAS_PANDAARCH.sql").write_text(
+        'CREATE TABLE "ATLAS_PANDAARCH"."JOBSARCHIVED"\n   (\t"PANDAID" NUMBER(11,0),\n\t"JEDITASKID" NUMBER\n   )\n'
+        '  PARTITION BY LIST ("JEDITASKID", "PANDAID")\n (PARTITION "P1" VALUES (DEFAULT)) ;\n'
+    )
+    (tmp_path / "ATLAS_PANDA_VIEW.sql").write_text('CREATE OR REPLACE VIEW "ATLAS_PANDA"."V" AS SELECT 1 FROM dual;\n')
+    assert sqltext.read_partitions(tmp_path) == {
+        "jobsarchived4": ("range", ("modificationtime",)),
+        "jobsarchived": ("list", ("jeditaskid", "pandaid")),
+    }
+    assert sqltext.read_declaring(tmp_path) == {
+        "jobsarchived4": ("ATLAS_PANDA",),
+        "jobsactive4": ("ATLAS_PANDA",),
+        "jobsarchived": ("ATLAS_PANDAARCH",),
+    }
+
+
+def test_a_union_pairs_the_tables_its_arms_read_in_one_place():
+    """The arms' one sources, or the sources of one alias -- not every table of a joined arm with every other, not
+    a WITH name."""
+    assert sqltext.union_places(
+        "SELECT PandaID FROM ATLAS_PANDA.jobsArchived4 WHERE x=:x "
+        "UNION SELECT PandaID FROM ATLAS_PANDAARCH.jobsArchived"
+    ) == (("jobsarchived", "jobsarchived4"),)
+    assert sqltext.union_places(
+        "SELECT f.lfn FROM filesTable4 f, jobsActive4 j WHERE f.PandaID=j.PandaID "
+        "UNION SELECT f.lfn FROM filesTable4 f, jobsDefined4 j WHERE f.PandaID=j.PandaID"
+    ) == (("jobsactive4", "jobsdefined4"),)
+    assert sqltext.union_places("WITH w AS (SELECT a FROM t1) SELECT a FROM w UNION SELECT a FROM t2") == ()
 
 _ACROSS = '''
 from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec

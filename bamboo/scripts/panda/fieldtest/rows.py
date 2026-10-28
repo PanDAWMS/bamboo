@@ -6,6 +6,17 @@ sections are the ones the querier reads (``rerun.py``): ``classes``,
 ``collections`` and ``datasets``, for a task ``job_rows``, ``job_statuslog``
 and ``counts``.
 
+**The same rows by link.**  ``linked`` holds the rows each link of the fetch
+(:data:`~bamboo.scripts.panda.fieldtest.fetch.LINKS`) named from the key's
+rows, one entry per link and table: its ``class``, ``via`` (``{"from":
+"FileSpec.destinationDBlock", "to": "DatasetSpec.name"}``), the values
+``asked`` by it, how the rows were read, and the ``rows`` -- those whose
+``to`` column holds an asked value, or every row of the answer where the rows
+do not carry that column (a task's jobs, read by the task's key).
+``statuslogs`` holds each class's status histories by the key of the row each
+belongs to.  Both say again what the sections above say, so a reader can move
+to them; the sections above stay as they were until it has.
+
 **Columns.**  The querier reads a row by the spec class's attribute
 (``PandaID``, ``specialHandling``).  The class's column list in PanDA's source
 -- ``_attributes``, or ``attributes`` in JEDI's specs -- gives the columns and
@@ -58,9 +69,13 @@ from typing import Any
 from bamboo.scripts.panda.fieldtest.fetch import (
     FILES,
     KEY,
+    asked_as,
+    held_rows,
     job_of,
+    links_from,
     rows_of,
     task_of,
+    values_by,
     when,
 )
 
@@ -350,6 +365,8 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
             _datasets_section(out, laid, spellings[DATASET], other, left_out)
     else:
         _task_sections(out, laid, left_out)
+    out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings)
+    out["statuslogs"] = statuslogs(laid, int(q["key"]))
 
     if other:
         out["about"] += (
@@ -450,3 +467,126 @@ def _datasets_section(
         "asked": laid.requests["datasets"]["names"],
         "rows": [columns(r, spelling, other) for r in response["rows"]],
     }
+
+
+Answer = list[tuple[str | None, dict, set | None, list[dict]]]
+
+
+def _datasets_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer | None:
+    response = laid.responses.get("datasets")
+    if not response or not response.get("success"):
+        return None
+    read = {"source": "job/get_datasets_by_name", **bounds_of(response)}
+    rows = [columns(r, spellings[DATASET], set()) for r in response["rows"]]
+    return [(DATASET_TABLE, read, set(laid.requests["datasets"]["names"]), rows)]
+
+
+def _task_jobs_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer | None:
+    if not laid.complete("job_rows"):
+        return None
+    read = {
+        "source": f"R as of {laid.as_of.get('job_rows')}",
+        "as_of": down_to_second(laid.as_of.get("job_rows")),
+        "clock": DATABASE,
+    }
+    by_table: dict[str, list[dict]] = {}
+    for table, r in laid.rows["job_rows"]:
+        by_table.setdefault(table, []).append(columns(r, spellings["JobSpec"], set()))
+    return [(t, read, None, rows) for t, rows in by_table.items()]
+
+
+#: where the rows a link names are in a fetch record, by where it leads: for each table, the table, how
+#: they were read, the values the call was asked with (None where it was asked by the key alone) and the
+#: rows as their class spells them; None where that answer is not complete
+LINK_ANSWERS = {
+    "DatasetSpec.name": _datasets_read,
+    "JobSpec.jediTaskID": _task_jobs_read,
+}
+#: the part answering a class's status histories, and how :func:`states_of` reads it
+HISTORIES = {
+    "JobSpec": ("job_history", "job"),
+    "JediTaskSpec": ("task_history", "task"),
+}
+
+
+def linked(
+    laid: Laid,
+    key_class: str,
+    key: int,
+    raw: dict | None,
+    read: dict,
+    spellings: dict[str, dict[str, str]],
+) -> list[dict]:
+    """The rows each link from the key's rows named: one entry per link and table, with the values it asked.
+
+    A link's values are asked in every form they are asked by (a dataset's
+    name with and without its scope), each that the call was asked with.  The
+    rows a link holds in its source row's answer (a job's files) are all that
+    link's; of an answer asked for several links (the datasets), a link's are
+    those whose ``to`` column holds one of its asked values.
+    """
+    held = held_rows(key_class, raw)
+    out = []
+    for cls, got in held.items():
+        for link in links_from(cls):
+            values = sorted(values_by(link, got, key_class, key))
+            if not values or (link.held and not got):
+                continue
+            if link.held:
+                spelling = spellings[link.dst_class]
+                answers = [
+                    (
+                        None,
+                        read,
+                        None,
+                        [columns(r, spelling, set()) for r in held[link.dst_class]],
+                    )
+                ]
+            else:
+                answers = LINK_ANSWERS[link.dst](laid, spellings)
+                if answers is None:
+                    continue
+            forms, to = asked_as(link.dst, set(values)), link.dst.partition(".")[2]
+            for table, how, sent, rows in answers:
+                if not (asked := sorted(forms if sent is None else forms & sent)):
+                    continue
+                named = {str(v) for v in asked}
+                out.append(
+                    {
+                        "class": link.dst_class,
+                        "via": link.via(),
+                        "asked": asked,
+                        **({"table": table} if table else {}),
+                        **how,
+                        "rows": [
+                            r
+                            for r in rows
+                            if link.held or to not in r or str(r[to]) in named
+                        ],
+                    }
+                )
+    return out
+
+
+def statuslogs(laid: Laid, key: int) -> dict:
+    """Each class's status histories that were answered, by the key of the row each belongs to; every key asked is there."""
+    out = {}
+    for cls, (part, kind) in HISTORIES.items():
+        states, source = states_of(laid.responses.get(part), kind)
+        if states is None:
+            continue
+        request = laid.requests[part]
+        by_key: dict[str, list[dict]] = {
+            str(k): [] for k in request.get("job_ids") or [request.get("task_id")]
+        }
+        for s in states:
+            by_key.setdefault(str(s.get("pandaid", key)), []).append(
+                {k: v for k, v in s.items() if k != "pandaid"}
+            )
+        out[cls] = {
+            "key": f"{cls}.{KEY[cls]}",
+            "source": source,
+            **bounds_of(laid.responses[part]),
+            "by_key": by_key,
+        }
+    return out

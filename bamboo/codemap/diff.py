@@ -321,6 +321,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "a dump's section compare reads them"
     ),
     "print_calls": "the second reading prints-are-counted checks the stored rows against",
+    "tables": (
+        "records beside the nodes, not nodes: what the schema and the corpus say of each table named -- see "
+        "TableRecord; a dump's section compare reads them"
+    ),
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,
     "spec_annotation_forms": _REPORT,

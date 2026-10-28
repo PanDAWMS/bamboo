@@ -293,6 +293,34 @@ def class_type_arguments(
     return arguments
 
 
+def _concatenated(iterable: ast.expr) -> Optional[list[ast.expr]]:
+    """The containers a loop iterates: one, or each side of ``a + b`` (and ``a + b + c``); ``None`` for anything
+    else the loop rule does not read."""
+    if isinstance(iterable, (ast.Attribute, ast.Name, ast.Call)):
+        return [iterable]
+    if isinstance(iterable, ast.BinOp) and isinstance(iterable.op, ast.Add):
+        left, right = _concatenated(iterable.left), _concatenated(iterable.right)
+        return left + right if left is not None and right is not None else None
+    return None
+
+
+def loop_only_names(func: ast.AST) -> frozenset[str]:
+    """The names only ``for`` targets bind in *func* -- no assignment, parameter or other binding that could hold
+    something else: wherever one is read, it is an element of its loop's iterable."""
+    targets = {
+        id(node.target)
+        for node in walk(func)
+        if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name)
+    }
+    kinds: dict[str, set[bool]] = {}
+    for node in walk(func):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            kinds.setdefault(node.id, set()).add(id(node) in targets)
+        elif isinstance(node, ast.arg):
+            kinds.setdefault(node.arg, set()).add(False)
+    return frozenset(name for name, how in kinds.items() if how == {True})
+
+
 class SpecAttributor:
     """Resolves the spec class behind an attribute write.
 
@@ -318,6 +346,9 @@ class SpecAttributor:
         self._class_nodes: dict[str, ast.ClassDef] = {}
         self._return_annotations: dict[str, ast.expr] = {}
         self._aliases: dict[str, str] = {}
+        #: Per function, the names only ``for`` targets bind (:meth:`_looped_class`), and the loops being read.
+        self._loop_bound: dict[int, tuple[ast.AST, frozenset[str]]] = {}
+        self._looping: set[tuple[int, str]] = set()
 
     # -- container element types ----------------------------------------- #
 
@@ -705,6 +736,12 @@ class SpecAttributor:
         Attribute-agnostic, unlike :meth:`attribute_write`, because the object
         of an ``addFile`` call has to be typed without knowing which attribute
         is being written.
+
+        A name only ``for`` targets bind is what its loops' containers hold
+        (:meth:`_iterated_element_class`) before it is what its uses suggest:
+        ``propagateResultToJEDI``'s ``for fileSpec in jobSpec.Files`` holds
+        ``FileSpec`` rows, which the structural reading -- the fields it uses,
+        a JEDI file's as well -- could not tell.
         """
         if isinstance(expression, ast.Call):
             return self._constructed_class(expression, func)
@@ -715,7 +752,30 @@ class SpecAttributor:
                 stated = self._stated_local_class(expression.id, func)
                 if stated is not None:
                     return stated
+                looped = self._looped_class(expression.id, func, enclosing_class)
+                if looped is not None:
+                    return looped
         return self._structural_of(expression, func, enclosing_class)
+
+    def _looped_class(
+        self,
+        variable: str,
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+        enclosing_class: Optional[str],
+    ) -> Optional[str]:
+        """The class a name is where only ``for`` targets bind it in *func* -- no assignment, parameter or other
+        binding that could hold another -- by the loop rule; ``None`` elsewhere."""
+        held = self._loop_bound.get(id(func))
+        if held is None or held[0] is not func:
+            held = self._loop_bound[id(func)] = (func, loop_only_names(func))
+        key = (id(func), variable)
+        if variable not in held[1] or key in self._looping:
+            return None
+        self._looping.add(key)
+        try:
+            return self._iterated_element_class(variable, func, enclosing_class)
+        finally:
+            self._looping.discard(key)
 
     @staticmethod
     def _container_read(expression: ast.expr) -> Optional[ast.expr]:
@@ -1464,64 +1524,82 @@ class SpecAttributor:
                 not isinstance(node, (ast.For, ast.AsyncFor))
                 or not isinstance(node.target, ast.Name)
                 or node.target.id != variable
-                or not isinstance(node.iter, (ast.Attribute, ast.Name, ast.Call))
             ):
                 continue
-            if isinstance(node.iter, ast.Call):
-                # ``for taskSpec in self.taskBufferIF.getTasksToReassign_JEDI()``
-                # -- the element type is stated on the call rather than on a
-                # name, and no annotation was ever written here to find.
-                stated_return = self._stated_return(node.iter)
-                stated = (
-                    self._annotated_element(stated_return)
-                    if stated_return is not None
-                    else None
-                )
-                if stated is not None:
-                    found.add(stated)
+            sides = _concatenated(node.iter)
+            if sides is None:
                 continue
-            if isinstance(node.iter, ast.Name):
-                # ``for job in jobs`` -- a parameter rather than a spec's own
-                # list, so there is no adder to have taught us anything and the
-                # annotation is the only statement of the element type.
-                annotation = self._annotation_of(node.iter, func)
-                if annotation is None:
-                    # ``taskList = self.taskBufferIF.getTasksToReassign_JEDI()``
-                    # one line above the loop: the list is never annotated,
-                    # the function that produced it is.  This is how every
-                    # watchdog in the corpus reads its work list.
-                    annotation = self._returned_annotation_of(node.iter.id, func)
-                stated = (
-                    self._annotated_element(annotation) if annotation is not None else None
-                )
-                if stated is not None:
-                    found.add(stated)
-                continue
-            holder = self.class_of(node.iter.value, func, enclosing_class)
-            if holder is None and isinstance(node.iter.value, ast.Name):
-                # Nested loops, and the outer one already answered this.
-                # ``class_of`` does not consult the loop rule, so a container
-                # held by a loop variable was unreadable even with the outer
-                # container annotated -- ``for job in jobs`` then
-                # ``for file in job.Files`` in ``update_failed_jobs``.  The two
-                # entry points disagreed about which readings exist, which is
-                # the same divergence this design keeps finding elsewhere.
-                holder = self._iterated_element_class(
-                    node.iter.value.id, func, enclosing_class, seen | {variable}
-                )
-            if holder is None:
-                # No adder taught us this container, but it may say so itself:
-                # ``self.jobs: List[JobSpec]`` states the element type where
-                # the adder idiom is absent.
-                annotation = self._annotation_of(node.iter, func)
-                stated = (
-                    self._annotated_element(annotation) if annotation is not None else None
-                )
-                if stated is not None:
-                    found.add(stated)
-                continue
-            found |= self._element_types.get((holder, node.iter.attr), set())
+            # ``for fileSpec in jobSpec.Files + pseudoFiles`` -- the classes both sides hold, where they hold the same.
+            held = [self._container_elements(side, variable, func, enclosing_class, seen) for side in sides]
+            if all(held) and all(one == held[0] for one in held):
+                found |= held[0]
         return next(iter(found)) if len(found) == 1 else None
+
+    def _container_elements(
+        self,
+        iterable: ast.expr,
+        variable: str,
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+        enclosing_class: Optional[str],
+        seen: frozenset[str],
+    ) -> set[str]:
+        """The classes the elements of one container a loop over *variable* iterates are, as
+        :meth:`_iterated_element_class` reads them; empty where not told."""
+        found: set[str] = set()
+        if isinstance(iterable, ast.Call):
+            # ``for taskSpec in self.taskBufferIF.getTasksToReassign_JEDI()``
+            # -- the element type is stated on the call rather than on a
+            # name, and no annotation was ever written here to find.
+            stated_return = self._stated_return(iterable)
+            stated = (
+                self._annotated_element(stated_return)
+                if stated_return is not None
+                else None
+            )
+            if stated is not None:
+                found.add(stated)
+            return found
+        if isinstance(iterable, ast.Name):
+            # ``for job in jobs`` -- a parameter rather than a spec's own
+            # list, so there is no adder to have taught us anything and the
+            # annotation is the only statement of the element type.
+            annotation = self._annotation_of(iterable, func)
+            if annotation is None:
+                # ``taskList = self.taskBufferIF.getTasksToReassign_JEDI()``
+                # one line above the loop: the list is never annotated,
+                # the function that produced it is.  This is how every
+                # watchdog in the corpus reads its work list.
+                annotation = self._returned_annotation_of(iterable.id, func)
+            stated = (
+                self._annotated_element(annotation) if annotation is not None else None
+            )
+            if stated is not None:
+                found.add(stated)
+            return found
+        holder = self.class_of(iterable.value, func, enclosing_class)
+        if holder is None and isinstance(iterable.value, ast.Name):
+            # Nested loops, and the outer one already answered this.
+            # ``class_of`` consults the loop rule only for a name loops alone
+            # bind, so a container held by a loop variable bound otherwise too
+            # was unreadable even with the outer container annotated --
+            # ``for job in jobs`` then ``for file in job.Files`` in
+            # ``update_failed_jobs``.
+            holder = self._iterated_element_class(
+                iterable.value.id, func, enclosing_class, seen | {variable}
+            )
+        if holder is None:
+            # No adder taught us this container, but it may say so itself:
+            # ``self.jobs: List[JobSpec]`` states the element type where
+            # the adder idiom is absent.
+            annotation = self._annotation_of(iterable, func)
+            stated = (
+                self._annotated_element(annotation) if annotation is not None else None
+            )
+            if stated is not None:
+                found.add(stated)
+            return found
+        found |= self._element_types.get((holder, iterable.attr), set())
+        return found
 
     # -- per-site resolution --------------------------------------------- #
 

@@ -2694,8 +2694,9 @@ class KeySource(BaseModel):
         description=(
             "``rows`` / ``sequence`` / ``parameter`` / ``self_field``: where in the bind's value they sit -- ``()`` "
             "the value itself, else its steps (``[0]``, ``.f``, ``[*]``).  A part of them reads as them here; which "
-            "column of a row fills the key is *column*, and which field of a parameter or of ``self`` is not said "
-            "(``archiveJob``'s ``:name`` at 1718, ``tmpFile.dispatchDBlock`` of a file of its ``job``, is ``job``)."
+            "column of a row fills the key is *column*, and which field of a parameter or of ``self`` is *attr* "
+            "(``archiveJob``'s ``:name`` at 1718, ``tmpFile.dispatchDBlock`` of a file of its ``job``, is ``job`` "
+            "here and ``FileSpec.dispatchDBlock`` there)."
         ),
     )
     column: str = Field(
@@ -2714,7 +2715,10 @@ class KeySource(BaseModel):
             "``rows``: *column* as a subject, ``JediTaskSpec.jediTaskID``, where its table's spec class has it; where "
             f"the statement's texts give columns of several tables that are one subject (*column_unread* "
             f"``{KEY_COLUMN_TEXTS}``: a hole read per table, ``jobsActive4``'s or ``jobsDefined4``'s ``PandaID``), "
-            "that subject."
+            "that subject.  ``parameter`` / ``self_field`` / ``attribute``: the subject of the value the key is "
+            "filled with, where that value is a field of an object whose spec class the build tells "
+            "(``archiveJob`` 1718's ``tmpFile.dispatchDBlock`` of a file of its parameter ``job``, "
+            "``FileSpec.dispatchDBlock``); empty for the parameter or field itself (what the callers hand)."
         ),
     )
     column_unread: str = Field(
@@ -2936,6 +2940,68 @@ class KeyFrom(BaseModel):
     _object: Optional[tuple] = PrivateAttr(default=None)
 
 
+class TableRecord(BaseModel):
+    """What the schema and the corpus say of one table the corpus names -- the kind of row it holds, how a row is
+    named, where it goes when it is old, and when it was made -- for a reader asking rows of it (the live-case
+    harness's fetch).  One per table an entity, a read site or a family names, folded to lower case; a table only
+    the DDL names (``jobsWaiting4``) has none.  A report beside the nodes, not a node.
+
+    Which of a class's tables is live and which is its archive is the reader's: a family's tables the corpus
+    inserts into, and those holding the class's rows it does not (``jobsArchived``, which the schema's own
+    procedure fills from ``jobsArchived4``; ``filesTable_ARCH``) -- the procedure is not read.
+    """
+
+    name: str = Field(..., description="The table, lowered: ``jobsarchived4``.")
+    spellings: list[str] = Field(default_factory=list, description="How the corpus spells it.")
+    schema_names: list[str] = Field(
+        default_factory=list,
+        description="The schemas whose DDL creates it (``ATLAS_PANDA``, ``ATLAS_PANDAARCH``); empty where none does.",
+    )
+    key: list[str] = Field(default_factory=list, description="Its primary key's columns, lowered; empty where none.")
+    identity: list[str] = Field(
+        default_factory=list,
+        description="The columns naming its row: *key* less dated ones (``jobsArchived4``: ``pandaid``).",
+    )
+    identity_attrs: list[str] = Field(
+        default_factory=list,
+        description="*identity* as *rows_of*'s attributes, where it has one: ``JobSpec.PandaID``.",
+    )
+    partition_kind: str = Field(default="", description="``range``, ``list`` or ``hash``; empty where not partitioned.")
+    partitioned_by: list[str] = Field(
+        default_factory=list, description="The DDL's ``PARTITION BY`` columns, lowered: ``modificationtime``."
+    )
+    partitioned_by_attrs: list[str] = Field(
+        default_factory=list,
+        description="*partitioned_by* as *rows_of*'s attributes, where it has one: ``JobSpec.modificationTime``.",
+    )
+    rows_of: str = Field(
+        default="",
+        description=(
+            "The spec class every attribute of which is one of its columns -- it holds that class's rows "
+            "(``jobsArchived``, ``filesTable_ARCH``); not ``jobParamsTable``, three columns keyed by a job's.  "
+            "Empty where none, or more than one, is."
+        ),
+    )
+    spec_class: str = Field(default="", description="The class the build learned the table holds, as entities say.")
+    inserted: bool = Field(default=False, description="A corpus ``INSERT`` writes it (its entity's *created_by*).")
+    family: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The other tables a ``SELECT``'s ``UNION`` arms read in its place -- the same alias, or the arm's one "
+            "source -- joined across statements, lowered: ``jobsarchived4``'s are ``jobsactive4``, "
+            "``jobsarchived``, ``jobsdefined4``.  Not a line's texts choosing a table by an ``if`` (they choose "
+            "other kinds of rows as well), nor a ``WITH`` name."
+        ),
+    )
+    creation: list[str] = Field(
+        default_factory=list,
+        description=(
+            "*rows_of*'s attributes set when a row is made and never after: every write of it is in an ``INSERT`` "
+            "and puts the time now (``JobSpec.creationTime``, ``JediTaskSpec.creationDate``)."
+        ),
+    )
+
+
 class CoverageStat(BaseModel):
     """Per-file extraction coverage for one slice.
 
@@ -3012,6 +3078,7 @@ class MapFragment(BaseModel):
     )
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
     key_froms: list[KeyFrom] = Field(default_factory=list)
+    tables: list[TableRecord] = Field(default_factory=list)
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
         description=(

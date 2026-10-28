@@ -600,8 +600,9 @@ def _reached(follow, writers: list, subject: str, observed: str):
     its own: KNOWN_ISSUES.md K14).  A statement that aggregates (the map's ``result``) gives none: what it hands on is
     a value computed from the rows, not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator,
     which picks none of them up); one that varies, or whose result the map did not read, is read as returning rows.
-    Then each writer whose write requires the value (``guarded_by``).  A writer that takes a row by its key alone is in
-    neither (KNOWN_ISSUES.md K16)."""
+    Then each writer whose write requires the value (``guarded_by``).  Last, a statement that reads a selecting
+    statement's rows again hands them on to writers (``read_again``).  A writer that takes a row by its key alone is in
+    none (KNOWN_ISSUES.md K16)."""
     asked = f"{subject}={observed}"
     writing = {j.owner for j in writers if arms_of(writers, j.owner, subject, observed)}
     for rs in follow.reader_statements:
@@ -632,6 +633,75 @@ def _reached(follow, writers: list, subject: str, observed: str):
             yield owner, f"{reader} hands the rows it selects to it" if rs.crosses_to else f"{reader} selects the value", rs
     for g in follow.guarded_by:
         yield g.owner, "its write requires the value", None
+    for rs in follow.reader_statements:
+        if asked in rs.selects and rs.result != RESULT_AGGREGATE:
+            yield from read_again(writers, writing, subject, observed, rs)
+
+
+@dataclass(frozen=True)
+class ReadAgain:
+    """A statement that reads another's rows again, in the fields ``_reached`` reads of a selecting one."""
+
+    owner: str
+    line: int
+    region: list
+    crosses_to: list
+
+
+#: ``[the key_froms list, {(owner, line): [(read KeyFrom, its rows source)]} of the sources reading that statement's
+#: rows again, the read sites by (owner, line)]`` -- the list is held so that its id is never another list's
+_AGAIN: list = [None, {}, {}]
+
+
+def read_again(writers: list, writing: set[str], subject: str, observed: str, rs):
+    """``_reached``'s ways through the statements that read *rs*'s rows again: a read KeyFrom (``reads``) with a
+    ``rows`` source at *rs*'s owner and line that is ``same_rows`` -- its statement names them by every column of the
+    table's key, from those columns of the rows -- and whose ``never_at`` does not hold the value: getTasksToBeFinished_JEDI
+    reads 1676's tasks again at 1731 by ``jediTaskID`` for each status but ``scouted`` (1731 is in the else of ``if
+    taskStatus == "scouted":``), and 1731 hands them to ``post_process_tasks`` (the movers oracle's A11).  Such a
+    statement hands the rows on as a selecting one does: to its owner where an arm of the owner's lies in its region
+    or its rows fill an arm's key (``keyed_arms``), and to what it calls (``crosses_to``) -- but only to a function with
+    an arm off the value of its own (*writing*), as a selecting statement's region does: one with none came in as a
+    mover for K14 to drop, and as one that L2 could no longer rule out.  Through calls (the source's ``via``), to the
+    writers among the junctions the rows reach (``reaches``).  One hop: a statement reading those rows once more is not
+    followed.  A call is taken whatever test it runs under, and a function reached may write other rows than those it
+    is handed (KNOWN_ISSUES.md K31).  Yields as ``_reached``, *rs* the statement: it is the one whose rows were taken."""
+    kfs = key_froms()
+    if _AGAIN[0] is not kfs:
+        again: dict[tuple, list] = {}
+        for kf in kfs:
+            if getattr(kf, "reads", False):
+                for s in kf.sources:
+                    if s.kind == KEY_ROWS and getattr(s, "same_rows", False):
+                        again.setdefault((s.site_owner, s.site_line), []).append((kf, s))
+        sites = {(r.owner, r.anchor.line_start): r for r in getattr(mapdump.fragment(), "read_sites", None) or []}
+        _AGAIN[:] = [kfs, again, sites]
+    asked = f"{subject}={observed}"
+    reader = f"{rs.owner.split('::')[-1]}@{rs.line}"
+    for kf, s in _AGAIN[1].get((rs.owner, rs.line), []):
+        if asked in (getattr(s, "never_at", None) or []):
+            continue
+        said = f"{reader} selects the value, and {kf.owner.split('::')[-1]}@{kf.statement} reads its rows again"
+        if getattr(s, "via", None):
+            for owner in getattr(s, "reaches", None) or []:
+                if owner in writing:
+                    yield owner, f"{said} and hands them to it", rs
+            continue
+        site = _AGAIN[2].get((kf.owner, kf.statement))
+        if site is None:
+            continue
+        r = ReadAgain(site.owner, site.anchor.line_start, list(site.region), list(site.crosses_to))
+        lo, hi = (r.region or [r.line, r.line])[:2]
+        arms = arms_of(writers, r.owner, subject, observed)
+        if any(lo <= line <= hi for line in arms):
+            yield r.owner, said, rs
+        else:
+            keyed, _, _ = keyed_arms(writers, r, subject, arms)
+            if keyed:
+                yield r.owner, f"{said}, and they fill the key of the write(s) at {keyed}", rs
+        for owner in r.crosses_to:
+            if owner in writing:
+                yield owner, f"{said} and hands them to it", rs
 
 
 def movers_of(follow, writers: list, subject: str, observed: str) -> dict[str, str]:
