@@ -18779,6 +18779,55 @@ class TaskModule:
         self.cur.execute("SELECT {0} FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s".format(cols), {":s": "y"})
         one = self.cur.fetchone()
         self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:c", {":c": one[2]})
+
+    def texts(self, defined):
+        if defined:
+            sqlA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        else:
+            sqlA = "SELECT jediTaskID,parent_tid+1 FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        self.cur.execute(sqlA + comment, {":s": "done"})
+        resA = self.cur.fetchall()
+        for row in resA:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:d", {":d": row[0]})
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:e", {":e": row[1]})
+        if defined:
+            sqlB = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        else:
+            sqlB = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Datasets WHERE status=:s "
+        self.cur.execute(sqlB + comment, {":s": "done"})
+        resB = self.cur.fetchall()
+        for row in resB:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:f", {":f": row[0]})
+        sqlC = "SELECT * FROM (SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s "
+        sqlC += "ORDER BY jediTaskID) WHERE rownum<=:n "
+        self.cur.execute(sqlC + comment, {":s": "done", ":n": 10})
+        resC = self.cur.fetchall()
+        for row in resC:
+            self.cur.execute("SELECT status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:g", {":g": row[0]})
+
+    def restart(self):
+        sqlTL = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE status IN (:s1,:s2) "
+        self.cur.execute(sqlTL + comment, {":s1": "defined", ":s2": "ready"})
+        resTL = self.cur.fetchall()
+        sqlTD = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID "
+        for jediTaskID, taskStatus in resTL:
+            if taskStatus == "defined":
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "defined"
+                self.cur.execute(sqlTD + comment, varMap)
+            else:
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "defined"
+                self.cur.execute(sqlTD + comment, varMap)
+        self.cur.execute("SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE status=:s" + comment, {":s": "ready"})
+        resTW = self.cur.fetchall()
+        for (jediTaskID,) in resTW:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":newStatus"] = "defined"
+            self.cur.execute(sqlTD + comment, varMap)
 '''
 
 
@@ -18894,6 +18943,67 @@ def test_a_rows_source_says_why_it_names_no_column(tmp_path):
         "jediTaskID=:b": [("rows", "", "an expression")],
         "jediTaskID=:c": [("rows", "", "in a hole")],
     }
+
+
+def test_a_value_s_column_is_read_on_each_select_list_of_the_statement_s_texts(tmp_path):
+    """One line, two texts by an ``if``: a value is the column both lists give at its place, and where they give
+    two -- another column, another table -- which is not said, with why; a ``*`` over one derived table is its
+    list (``getJobs``'s ``SELECT * FROM (SELECT PandaID, ...) WHERE rownum<=:n``)."""
+    froms, _sites, _at = _reread(tmp_path)
+    texts = {one.term: one for one in froms if one.owner.endswith("::texts")}
+    assert {
+        term: [(s.kind, s.column, s.column_unread) for s in texts[term].sources]
+        for term in ("jediTaskID=:d", "jediTaskID=:e", "jediTaskID=:f", "jediTaskID=:g")
+    } == {
+        "jediTaskID=:d": [("rows", "jedi_tasks.jeditaskid", "")],
+        "jediTaskID=:e": [("rows", "", "texts differ")],
+        "jediTaskID=:f": [("rows", "", "texts differ")],
+        "jediTaskID=:g": [("rows", "jedi_tasks.jeditaskid", "")],
+    }
+
+
+def test_a_statement_run_from_several_calls_never_runs_at_a_value_only_where_the_call_handed_the_value_does_not(
+    tmp_path,
+):
+    """restartTasksForContentsUpdate_JEDI's shape: one statement run in both arms of a test on the rows' status and
+    in a loop over another statement's rows, each call with its own bind -- the call another statement's rows reach
+    runs at every value, and does not keep the arms' sources from saying theirs."""
+    froms, sites, at = _reread(tmp_path)
+    (tl,) = [site for site in sites if site.anchor.line_start == at("self.cur.execute(sqlTL")]
+    assert sorted(tl.selects) == ["JediTaskSpec.status=defined", "JediTaskSpec.status=ready"]
+    tl_line = str(tl.anchor.line_start)
+    found = sorted(
+        (s.line, s.name.rsplit("@", 1)[1] == tl_line, s.never_at)
+        for one in froms
+        if one.owner.endswith("::restart") and one.term == "jediTaskID=:jediTaskID"
+        for s in one.sources
+        if s.kind == "rows"
+    )
+    assert [(same, never) for _line, same, never in found] == [
+        (True, ["JediTaskSpec.status=ready"]),
+        (True, ["JediTaskSpec.status=defined"]),
+        (False, []),
+    ]
+
+
+def test_a_select_list_reads_a_name_holding_a_hole_as_the_hole_and_a_star_over_one_derived_table_as_its_list():
+    """``{}{}`` is a hole spelled as two (a column list built in a loop, read on a pass that writes two), not a
+    column of that name; ``SELECT * FROM (SELECT a, b ...)`` returns the derived table's items, a ``*`` over a union
+    or a table stays one."""
+    hole = sqltext.SelectItem(sqltext.ITEM_HOLE, "jobsactive4")
+    assert sqltext.select_items("SELECT {}{} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID") == (hole,)
+    assert sqltext.select_items("SELECT {},{} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID") == (
+        hole,
+        sqltext.SelectItem(sqltext.ITEM_AFTER_HOLE),
+    )
+    derived = "SELECT * FROM (SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 tab WHERE x=:x) WHERE rownum<=:n"
+    assert sqltext.select_items(derived) == (
+        sqltext.SelectItem(sqltext.ITEM_COLUMN, "jobsactive4", "pandaid"),
+        sqltext.SelectItem(sqltext.ITEM_COLUMN, "jobsactive4", "jobstatus"),
+    )
+    star = sqltext.SelectItem(sqltext.ITEM_STAR)
+    assert sqltext.select_items("SELECT * FROM (SELECT a FROM t1 UNION SELECT a FROM t2)") == (star,)
+    assert sqltext.select_items("SELECT * FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:p") == (star,)
 
 
 _ACROSS = '''

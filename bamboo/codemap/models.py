@@ -2655,12 +2655,14 @@ NEW_ROW_UNREAD = "not read"
 NEW_ROW_UPSERT = "updates or inserts"
 #: Why a ``rows`` source names no column of its statement's rows (:attr:`KeySource.column_unread`): the select list
 #: is ``*``, the value is at a place a hole's columns fill (``SELECT {JobSpec.columnNames()}`` read by position),
-#: the item is an expression, no item or several hold the value, or the select list was not read.
+#: the item is an expression, no item or several hold the value, the statement's texts give it different columns
+#: (``getCoJumboJobsToBeFinished``'s ``jobsActive4`` or ``jobsDefined4``), or no select list was read.
 KEY_COLUMN_STAR = "select *"
 KEY_COLUMN_HOLE = "in a hole"
 KEY_COLUMN_EXPRESSION = "an expression"
 KEY_COLUMN_NONE = "no item"
 KEY_COLUMN_SEVERAL = "several items"
+KEY_COLUMN_TEXTS = "texts differ"
 KEY_COLUMN_UNREAD = "select list not read"
 
 
@@ -2697,7 +2699,8 @@ class KeySource(BaseModel):
             "``rows``: the statement's select item the value is, as ``table.column`` lowered "
             "(``jedi_tasks.jeditaskid``) -- each item carried on its own from where it sits in what the statement's "
             "fetch gives; a field of an object filled by name (``taskSpec.pack(row)``) is the item of its name.  "
-            "Empty where *column_unread* says why."
+            "Read on each select list the statement's texts give, and said where all agree.  Empty where "
+            "*column_unread* says why."
         ),
     )
     attr: str = Field(
@@ -2708,7 +2711,7 @@ class KeySource(BaseModel):
         default="",
         description=(
             f"``rows`` with no *column*: ``{KEY_COLUMN_STAR}``, ``{KEY_COLUMN_HOLE}``, ``{KEY_COLUMN_EXPRESSION}``, "
-            f"``{KEY_COLUMN_NONE}``, ``{KEY_COLUMN_SEVERAL}``, ``{KEY_COLUMN_UNREAD}``."
+            f"``{KEY_COLUMN_NONE}``, ``{KEY_COLUMN_SEVERAL}``, ``{KEY_COLUMN_TEXTS}``, ``{KEY_COLUMN_UNREAD}``."
         ),
     )
     same_rows: bool = Field(
@@ -2725,10 +2728,10 @@ class KeySource(BaseModel):
         default_factory=list,
         description=(
             "``rows``: the values the source statement selects (``JediTaskSpec.status=scouted``, as its read site's "
-            "*selects*) for which the term's statement never runs -- a test on its way (``pathcond.ruled_out_at``) on "
-            "a name holding that column of the source's rows: 1731 is in the ``else`` of ``if taskStatus == "
-            "\"scouted\":``, ``taskStatus`` 1676's ``status``.  Read in the source's own function only: empty "
-            "where the rows come through calls (*via*)."
+            "*selects*) for which the term's statement never runs with this value -- a test on the way to each call "
+            "handed it (``pathcond.ruled_out_at``) on a name holding that column of the source's rows: 1731 is in the "
+            "``else`` of ``if taskStatus == \"scouted\":``, ``taskStatus`` 1676's ``status``.  Read in the source's "
+            "own function only: empty where the rows come through calls (*via*)."
         ),
     )
     via: list[str] = Field(
@@ -2911,6 +2914,9 @@ class KeyFrom(BaseModel):
     #: ``(func, [node, ...])``: where the write runs from -- the calls running its text with its map, a flush's call,
     #: an object's uses -- for *routes* / *out_on* (``sqlwrite.attach_routes``).
     _runs: Optional[tuple] = PrivateAttr(default=None)
+    #: The runs of its statement (``sql.Execution``) a term's record was read from: which of *_runs*' calls a source's
+    #: value is handed to (``never_at``).
+    _executions: list = PrivateAttr(default_factory=list)
     #: An ``INSERT``'s, what decides *new_row* beside the sources: see :class:`~bamboo.codemap.panda.recognizers.
     #: sqlwrite._Insert`.
     _insert: Optional[Any] = PrivateAttr(default=None)

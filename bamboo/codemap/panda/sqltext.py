@@ -2058,8 +2058,9 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
     where the statement is not read as a tree or returns no ``SELECT``'s rows.
 
     A column's table is read as a term's is (:func:`_owner`): ``tabT.jediTaskID`` is ``jedi_tasks``'s.  A hole
-    stands for the columns the code fills it with, so it is one item, and the items after it are at positions it
-    moves.
+    stands for the columns the code fills it with, so it is one item -- a name holding one too (``{}{}``,
+    ``tabT.{}``) -- and the items after it are at positions it moves.  A bare ``*`` over one derived table and no
+    join (``SELECT * FROM (SELECT PandaID, ... ) WHERE rownum<=:n``) returns that table's rows: its items.
     """
     tree = parsed(sql).tree
     if tree is None:
@@ -2068,6 +2069,15 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
     if not arms:
         return None
     select = arms[0]
+    while (
+        len(select.selects) == 1
+        and isinstance(select.selects[0], exp.Star)
+        and not select.args.get("joins")
+        and isinstance(source := select.args.get("from_"), exp.From)
+        and isinstance(source.this, exp.Subquery)
+        and isinstance(source.this.this, exp.Select)
+    ):
+        select = source.this.this
     scopes, root = _scopes(tree)
     scope = next((one for one, _verb, _kind in scopes if one.expression is select), None)
     items: list[SelectItem] = []
@@ -2080,7 +2090,7 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
         elif isinstance(column, exp.Column) and scope is not None:
             owned, why = _owner(column, scope, root)
             table = owned[0].lower() if owned and not why else ""
-            if _NAMED_HOLE.fullmatch(column.name):
+            if _NAMED_HOLE.search(column.name):
                 items.append(SelectItem(ITEM_HOLE, table))
             elif table:
                 items.append(SelectItem(ITEM_COLUMN, table, column.name.lower()))
