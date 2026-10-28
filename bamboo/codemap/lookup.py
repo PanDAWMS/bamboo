@@ -31,6 +31,7 @@ import re
 from typing import Any, Optional, Type, TypeVar
 
 from bamboo.codemap.models import (
+    MAP_NODE_GROUPS,
     PASSTHROUGH_OUTCOME,
     SYMPTOM_DISTRIBUTION,
     SYMPTOM_VALUE,
@@ -46,6 +47,7 @@ from bamboo.codemap.models import (
     JunctionNode,
     LogSiteNode,
     LoopCutNode,
+    MapFragment,
     MapTerm,
     ReachNode,
     ReadSiteNode,
@@ -76,6 +78,29 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
     FunctionPrintsNode: NodeType.FUNCTION_PRINTS,
     ReachNode: NodeType.REACH,
 }
+
+#: ``[a MapFragment, its nodes by node type with the builds each was seen in]`` -- the fragment is held so that its id
+#: is never another's (``_fragment_nodes``)
+_FRAGMENT_NODES: list = [None, {}]
+
+
+def _fragment_nodes(fragment: MapFragment, node_type: NodeType) -> list[tuple[BaseNode, list[str]]]:
+    """*fragment*'s nodes of *node_type* as a store of it holds them (``store.store_fragment``): one per (node_type,
+    map_id, name), at the place the first came in and with the last one's content, in the groups' order -- each with the
+    builds it was seen in, its ``valid_for``."""
+    if _FRAGMENT_NODES[0] is not fragment:
+        by_key: dict[tuple, tuple[BaseNode, list[str]]] = {}
+        for group in MAP_NODE_GROUPS:
+            for node in getattr(fragment, group):
+                key = (node.node_type, getattr(node, "map_id", None), node.name)
+                seen = by_key[key][1] if key in by_key else []
+                version = getattr(node, "derived_from", None)
+                by_key[key] = (node, seen + [version] if version is not None and version not in seen else seen)
+        index: dict[NodeType, list[tuple[BaseNode, list[str]]]] = {}
+        for node, seen in by_key.values():
+            index.setdefault(node.node_type, []).append((node, seen))
+        _FRAGMENT_NODES[:] = [fragment, index]
+    return _FRAGMENT_NODES[1].get(node_type, [])
 
 
 #: An outcome that names where the value came from rather than what it is.
@@ -174,8 +199,21 @@ class CodeMap:
         self._db = graph_db
         self.map_id = map_id
         self.version = version
+        # A client that carries the map's dump (the querier's ``mapdump``) is read from the dump's own nodes, with the
+        # store's match and version rules: no round trip of every node through its stored properties per question,
+        # which took a third of a querier run.  A dump does not change underneath, so its index is no stale cache.
+        self._fragment: Optional[MapFragment] = getattr(graph_db, "fragment", None)
 
     async def _find(self, model: Type[NodeT], **match: Any) -> list[NodeT]:
+        if self._fragment is not None:
+            wanted = {k: v for k, v in match.items() if v is not None}
+            return [
+                node
+                for node, seen in _fragment_nodes(self._fragment, _MODELS[model])
+                if getattr(node, "map_id", None) == self.map_id
+                and (self.version is None or self.version in (seen or [getattr(node, "derived_from", None)]))
+                and all(getattr(node, k, None) == v for k, v in wanted.items())
+            ]
         props = await self._db.find_map_nodes(
             _MODELS[model].value,
             self.map_id,
@@ -205,6 +243,9 @@ class CodeMap:
         Several coexist on purpose: an incident from months ago has to be read
         against the code that was running then, not the code on disk now.
         """
+        if self._fragment is not None:
+            return sorted({node.derived_from for node, _ in _fragment_nodes(self._fragment, NodeType.SUBJECT)
+                           if getattr(node, "map_id", None) == self.map_id and node.derived_from})
         subjects = await self._db.find_map_nodes(
             NodeType.SUBJECT.value, self.map_id, None, None
         )

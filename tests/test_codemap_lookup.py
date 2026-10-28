@@ -659,3 +659,41 @@ async def test_a_dump_of_another_tree_is_refused_and_a_git_stamp_is_taken(tmp_pa
 
     path.write_text(MapFragment(map_id=MAP_ID, derived_from="git:1.0.4-295-gbf2812ba").model_dump_json())
     assert await dump_graph(path, tmp_path) is not None
+
+
+async def test_a_client_carrying_the_dump_reads_as_the_store(tmp_path):
+    """A client that carries the map's dump (the querier's mapdump, dump_graph) is read from the dump's own nodes, not
+    through every node's stored properties: the same answers -- one node per name, the last one's content at the first
+    one's place, the same version pin -- and dump_graph's client carries its dump."""
+    from types import SimpleNamespace
+
+    def strip(nodes):
+        return [n.model_dump(exclude={"metadata"}) for n in nodes]
+
+    older = _subject("status").model_copy(update={"derived_from": "panda-server-source 1.0.1"})
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject("status"), _subject("lockedBy"), older],
+        junctions=[
+            _junction("pandajedi/a.py::A.run", Branch(outcome="ready", line=10)),
+            _junction("pandajedi/b.py::B.run", Branch(outcome="done", line=20)),
+            # the same name as the first: the store keeps one node, the last content at the first place
+            _junction("pandajedi/a.py::A.run", Branch(outcome="broken", line=11)),
+        ],
+    )
+    for version in (None, VERSION, "panda-server-source 1.0.1", "panda-server-source 9"):
+        stored = await _stored(fragment)
+        stored.version = version
+        carried = CodeMap(SimpleNamespace(fragment=fragment), map_id=MAP_ID, version=version)
+        assert strip(await carried.subjects()) == strip(await stored.subjects())
+        assert strip(await carried.writers_of("JediTaskSpec.status")) == strip(
+            await stored.writers_of("JediTaskSpec.status")
+        )
+        assert await carried.versions() == await stored.versions()
+    carried = CodeMap(SimpleNamespace(fragment=fragment), map_id=MAP_ID)
+    assert [b.outcome for j in await carried.writers_of("JediTaskSpec.status") for b in j.branches] == ["broken", "done"]
+
+    path = tmp_path / "map.json"
+    path.write_text(fragment.model_dump_json())
+    assert (await dump_graph(path)).fragment == fragment

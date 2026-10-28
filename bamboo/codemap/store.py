@@ -103,4 +103,6 @@ async def dump_graph(
     graph_db = InMemoryGraphBackend()
     await graph_db.connect()
     await store_fragment(fragment, graph_db)
+    # a CodeMap on this client reads the dump it carries (lookup._fragment_nodes), not the store
+    graph_db.fragment = fragment
     return graph_db

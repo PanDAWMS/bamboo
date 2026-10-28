@@ -57,6 +57,9 @@ def install(path: str) -> None:
         async def close(self):
             pass
 
+    # CodeMap reads the map from the dump it carries (lookup._fragment_nodes) rather than from the store above; the store
+    # stays for a reader of the client itself, at 0.01 s a connect since the in-memory backend merges by an index
+    _FromDump.fragment = fragment
     graph_database_client.GraphDatabaseClient = _FromDump
     _INSTALLED["path"] = path
     _INSTALLED["sha256"] = hashlib.sha256(data).hexdigest()
