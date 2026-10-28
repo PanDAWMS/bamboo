@@ -2,14 +2,13 @@
 
 No API is called: the same record, pin and dump give the same file.  The
 sections are the ones the querier reads (``rerun.py``): ``classes``,
-``spellings``, ``rows``, ``statuslog``, and for a job ``files``,
-``collections`` and ``datasets``, for a task ``job_rows``, ``job_statuslog``
-and ``counts``.
+``spellings``, ``rows``, ``statuslog``, and for a job ``files`` and
+``collections``, for a task ``job_rows``, ``job_statuslog`` and ``counts``.
 
 **The same rows by link.**  ``linked`` holds the rows each link of the fetch
 (:data:`~bamboo.scripts.panda.fieldtest.fetch.LINKS`) named from the key's
 rows, one entry per link and table: its ``class``, ``via`` (``{"from":
-"FileSpec.destinationDBlock", "to": "DatasetSpec.name"}``), the values
+"JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"}``), the values
 ``asked`` by it, how the rows were read, and the ``rows`` -- those whose
 ``to`` column holds an asked value, or every row of the answer where the rows
 do not carry that column (a task's jobs, read by the task's key).
@@ -33,8 +32,7 @@ clock, and its ``as_of`` is that moment cut down to its second: the row was
 read after it.  R's and H's ``as_of`` are the database's.  Every ``as_of``
 names its clock beside it, ``clock`` :data:`CLIENT` or :data:`DATABASE`, since
 the two differ and a value read by key is not read at a history's ``as_of``.
-A dataset's ``creationdate`` is on neither: the inserting machine wrote it from
-its own clock.  A key's row is laid out whole, every column with the moment it
+A key's row is laid out whole, every column with the moment it
 was read: a column may have been written between the moment a step of the
 querier asks about and that one, and only the querier knows the step's moment
 (``held``).
@@ -69,7 +67,6 @@ from typing import Any
 from bamboo.scripts.panda.fieldtest.fetch import (
     FILES,
     KEY,
-    asked_as,
     held_rows,
     job_of,
     links_from,
@@ -97,16 +94,11 @@ ENDPOINT = {
 }
 #: where task/get_detailed_info holds the splitRule column as stored
 SPLIT_RULE_RAW = "split_rule_raw"
-#: the class of the server's Datasets rows; the querier binds them by name, not as an entity.
-#: An input or output dataset has a row in JEDI_Datasets (JediDatasetSpec) too, made by
-#: another process at another time, so the section says which class its rows are
-DATASET = "DatasetSpec"
-DATASET_TABLE = "ATLAS_PANDA.Datasets"
 DECLARED = re.compile(r"^(?P<cls>\w+) \((?P<path>[^)]+)\)$")
 
 
 def column_spellings(
-    pin: Path, dump: Path, classes: tuple[str, ...] = (*ENTITY, DATASET)
+    pin: Path, dump: Path, classes: tuple[str, ...] = tuple(ENTITY)
 ) -> dict[str, dict[str, str]]:
     """class -> {lower-case column: the class's spelling}, from the column list in each class's source.
 
@@ -362,7 +354,6 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
                 "about": "JobSpec.Files holds the job's FileSpec rows (PanDA's schema).",
                 "job.Files": {"rows": "files", "entity": "file"},
             }
-            _datasets_section(out, laid, spellings[DATASET], other, left_out)
     else:
         _task_sections(out, laid, left_out)
     out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings)
@@ -430,55 +421,7 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
     }
 
 
-def _datasets_section(
-    out: dict,
-    laid: Laid,
-    spelling: dict[str, str],
-    other: set[str],
-    left_out: list[str],
-) -> None:
-    """The server's rows of every dataset the job's rows name, and the names asked.
-
-    A name asked with no row is not in the table now; one last modified
-    before ``retained_from`` may have been, in a partition since dropped.  The
-    rows are DatasetSpec's only: an input or output dataset's name has a
-    JediDatasetSpec row as well, in JEDI_Datasets, which is not read here.
-    """
-    response = laid.responses.get("datasets")
-    if response is None:
-        left_out.append("datasets: the job's rows name no dataset")
-        return
-    if not response.get("success"):
-        left_out.append(
-            f"datasets: {response.get('message') or response.get('data') or 'no answer'}"
-        )
-        return
-    out["datasets"] = {
-        "source": (
-            "job/get_datasets_by_name: every name in the job's and its files' "
-            "prodDBlock, dispatchDBlock, destinationDBlock and dataset; as_of and "
-            "retained_from (of modificationdate) are the database's clock, but "
-            "creationdate and modificationdate are the clock of the machine that "
-            "inserted the row (insertDataset sets both to naive_utcnow())"
-        ),
-        "class": DATASET,
-        "table": DATASET_TABLE,
-        **bounds_of(response),
-        "asked": laid.requests["datasets"]["names"],
-        "rows": [columns(r, spelling, other) for r in response["rows"]],
-    }
-
-
 Answer = list[tuple[str | None, dict, set | None, list[dict]]]
-
-
-def _datasets_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer | None:
-    response = laid.responses.get("datasets")
-    if not response or not response.get("success"):
-        return None
-    read = {"source": "job/get_datasets_by_name", **bounds_of(response)}
-    rows = [columns(r, spellings[DATASET], set()) for r in response["rows"]]
-    return [(DATASET_TABLE, read, set(laid.requests["datasets"]["names"]), rows)]
 
 
 def _task_jobs_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer | None:
@@ -499,7 +442,6 @@ def _task_jobs_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer 
 #: they were read, the values the call was asked with (None where it was asked by the key alone) and the
 #: rows as their class spells them; None where that answer is not complete
 LINK_ANSWERS = {
-    "DatasetSpec.name": _datasets_read,
     "JobSpec.jediTaskID": _task_jobs_read,
 }
 #: the part answering a class's status histories, and how :func:`states_of` reads it
@@ -519,11 +461,9 @@ def linked(
 ) -> list[dict]:
     """The rows each link from the key's rows named: one entry per link and table, with the values it asked.
 
-    A link's values are asked in every form they are asked by (a dataset's
-    name with and without its scope), each that the call was asked with.  The
-    rows a link holds in its source row's answer (a job's files) are all that
-    link's; of an answer asked for several links (the datasets), a link's are
-    those whose ``to`` column holds one of its asked values.
+    The rows a link holds in its source row's answer (a job's files) are all
+    that link's; of an answer asked for several links, a link's are those
+    whose ``to`` column holds one of its asked values.
     """
     held = held_rows(key_class, raw)
     out = []
@@ -546,7 +486,7 @@ def linked(
                 answers = LINK_ANSWERS[link.dst](laid, spellings)
                 if answers is None:
                     continue
-            forms, to = asked_as(link.dst, set(values)), link.dst.partition(".")[2]
+            forms, to = set(values), link.dst.partition(".")[2]
             for table, how, sent, rows in answers:
                 if not (asked := sorted(forms if sent is None else forms & sent)):
                     continue

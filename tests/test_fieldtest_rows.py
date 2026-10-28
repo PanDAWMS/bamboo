@@ -2,10 +2,10 @@
 
 A stand-in PanDA answers the way the server documents its answers
 (pandaserver/asyncprocess/db_read_handlers.py, api/v1/job_api.py
-get_description_incl_archive, get_datasets_by_name and get_status_history,
-task_api.py get_detailed_info): R rows keyed by lower-case names, times as
-``{"__datetime__": iso}``, a key's row, H rows and dataset rows in the
-columns' own spelling.
+get_description_incl_archive and get_status_history, task_api.py
+get_detailed_info): R rows keyed by lower-case names, times as
+``{"__datetime__": iso}``, a key's row and H rows in the columns' own
+spelling.
 """
 
 from __future__ import annotations
@@ -57,7 +57,6 @@ class FakePanda:
         truncate=(),
         jobs: dict | None = None,
         task: dict | None = None,
-        datasets: list[dict] = (),
     ):
         self.tables, self.job_log, self.task_log, self.truncate = (
             tables,
@@ -65,7 +64,7 @@ class FakePanda:
             task_log,
             set(truncate),
         )
-        self.jobs, self.task_row, self.dataset_rows = jobs or {}, task, list(datasets)
+        self.jobs, self.task_row = jobs or {}, task
         self.calls: list[tuple[str, object]] = []
 
     def parts(self) -> FE.Parts:
@@ -73,7 +72,6 @@ class FakePanda:
             db_read=self.db_read,
             jobs=self.get_jobs,
             task=self.get_task,
-            datasets=self.get_datasets,
             job_history=self.job_history,
             task_history=self.task_history,
         )
@@ -101,16 +99,6 @@ class FakePanda:
             "message": "",
             "data": self.task_row,
             "asked_at": ASKED,
-        }
-
-    async def get_datasets(self, names):
-        self.calls.append(("datasets", names))
-        return {
-            "success": True,
-            "rows": [r for r in self.dataset_rows if r["name"] in names],
-            "as_of": T(AS_OF),
-            "retained_from": T("2026-08-01T00:00:00"),
-            "calls": [],
         }
 
     async def db_read(self, queries):
@@ -224,10 +212,6 @@ JOB = {
     "destinationDBlock": "user.x_sub1",
     "Files": FILES,
 }
-DATASETS = [
-    {"name": "user.x_sub1", "creationdate": T("2026-10-07T13:06:46"), "subType": "sub"},
-    {"name": "panda.dis1", "creationdate": T("2026-10-07T13:06:47"), "subType": "dis"},
-]
 JOB_LOG = [
     _job_state(PID, "pending", "2026-10-07T13:06:45.443717"),
     _job_state(
@@ -261,11 +245,6 @@ SPELLINGS = {
         "modificationtime": "modificationTime",
         "splitrule": "splitRule",
     },
-    "DatasetSpec": {
-        "name": "name",
-        "creationdate": "creationdate",
-        "subtype": "subType",
-    },
 }
 JOB_Q = {
     "kind": "default",
@@ -276,7 +255,7 @@ JOB_Q = {
 
 
 def _job_panda(job: dict | None = JOB) -> FakePanda:
-    return FakePanda({}, JOB_LOG, [], jobs={PID: job}, datasets=DATASETS)
+    return FakePanda({}, JOB_LOG, [], jobs={PID: job})
 
 
 async def _fetch(panda: FakePanda, question: dict) -> dict:
@@ -286,17 +265,15 @@ async def _fetch(panda: FakePanda, question: dict) -> dict:
 # ------------------------------------------------------------------ a job's key
 
 
-async def test_a_job_is_asked_by_its_key_then_the_datasets_its_rows_name_then_its_history_from_its_creation():
+async def test_a_job_is_asked_by_its_key_then_its_history_from_its_creation():
     panda = _job_panda()
     rec = await _fetch(panda, JOB_Q)
-    assert [c[0] for c in panda.calls] == ["jobs", "datasets", "job_history"]
+    # the datasets its rows name are not asked: the querier reads no Datasets row
+    assert [c[0] for c in panda.calls] == ["jobs", "job_history"]
     assert panda.calls[0][1] == [PID] and isinstance(panda.calls[0][1][0], int)
-    # every name the job's row and its files hold, once each; an empty column names none
-    assert panda.calls[1][1] == ["data.in", "panda.dis1", "user.x.log", "user.x_sub1"]
-    assert panda.calls[2][1] == {"job_ids": [PID], "since": "2026-10-07 13:06:45"}
+    assert panda.calls[1][1] == {"job_ids": [PID], "since": "2026-10-07 13:06:45"}
     assert rec["key_class"] == "JobSpec" and [s["part"] for s in rec["steps"]] == [
         "jobs",
-        "datasets",
         "job_history",
     ]
 
@@ -308,7 +285,7 @@ async def test_a_job_not_found_or_not_read_is_left_out_with_why_and_its_history_
     ):
         panda = _job_panda(job)
         out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
-        # no creation time to start the history at, and no file to name a dataset
+        # no creation time to start the history at
         assert [c[0] for c in panda.calls] == ["jobs", "job_history"]
         assert panda.calls[1][1] == {"job_ids": [PID], "since": None}
         assert "rows" not in out and "files" not in out and "collections" not in out
@@ -357,52 +334,24 @@ async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_sa
     assert [f["lfn"]["value"] for f in out["files"]] == ["a.log.tgz", "in.root"]
     assert out["files"][0]["destinationDBlock"] == {"value": "user.x_sub1", **read}
     assert out["collections"]["job.Files"] == {"rows": "files", "entity": "file"}
-    # every name asked, so that a name with no row reads as not in the table rather than not asked
-    datasets = out["datasets"]
-    # the same name can be a JediDatasetSpec in JEDI_Datasets too: the section says whose rows these are
-    assert (datasets["class"], datasets["table"]) == (
-        "DatasetSpec",
-        "ATLAS_PANDA.Datasets",
-    )
-    assert datasets["asked"] == ["data.in", "panda.dis1", "user.x.log", "user.x_sub1"]
-    assert datasets["rows"] == [
-        {
-            "name": "user.x_sub1",
-            "creationdate": "2026-10-07 13:06:46",
-            "subType": "sub",
-        },
-        {"name": "panda.dis1", "creationdate": "2026-10-07 13:06:47", "subType": "dis"},
-    ]
-    assert (datasets["as_of"], datasets["clock"], datasets["retained_from"]) == (
-        "2026-10-13 10:00:00",
-        "database",
-        "2026-08-01 00:00:00",
-    )
-    assert "the clock of the machine that inserted the row" in datasets["source"]
+    assert "datasets" not in out
     assert "not columns" not in out["about"] and "datasets:" not in out["about"]
 
 
-async def test_a_refused_dataset_answer_leaves_the_datasets_out_and_says_why():
-    panda = _job_panda()
-
-    async def refused(names):
-        return {
-            "success": False,
-            "message": "",
-            "data": {
-                "rejected": "probe_budget",
-                "keys": 4,
-                "partitions": 5,
-                "budget": 1,
-            },
-            "calls": [],
-        }
-
-    panda_parts = panda.parts()
-    panda_parts.datasets = refused
-    out = RB.build(await FE.fetch(JOB_Q, panda_parts), SPELLINGS)
-    assert "datasets" not in out and "files" in out
-    assert "datasets: {'rejected': 'probe_budget'" in out["about"]
+async def test_a_record_that_asked_the_datasets_lays_out_none():
+    # a record fetched while the datasets were asked (every recorded fetch up to 2026-10-28) gives the same file
+    rec = await _fetch(_job_panda(), JOB_Q)
+    names = {"names": ["data.in", "user.x_sub1"]}
+    rows = [{"name": "user.x_sub1", "creationdate": T("2026-10-07T13:06:46")}]
+    response = {"success": True, "rows": rows, "as_of": T(AS_OF), "calls": []}
+    old = rec | {
+        "steps": [
+            rec["steps"][0],
+            {"part": "datasets", "request": names, "response": response},
+            *rec["steps"][1:],
+        ]
+    }
+    assert RB.build(old, SPELLINGS) == RB.build(rec, SPELLINGS)
 
 
 async def test_a_jobs_files_hold_only_their_class_columns():
@@ -709,35 +658,23 @@ def test_the_fetch_record_holds_every_request_and_response(tmp_path):
     assert list(again["steps"][0]["response"]["jobs"]) == [str(PID)]
     assert RB.build(again, SPELLINGS) == RB.build(rec, SPELLINGS)
     assert again["steps"][0]["request"] == {"job_ids": [PID]}
-    assert [r["name"] for r in again["steps"][1]["response"]["rows"]] == [
-        "user.x_sub1",
-        "panda.dis1",
-    ]
-    assert again["steps"][2]["response"]["rows"][0]["jobStatus"] == "pending"
+    assert again["steps"][1]["response"]["rows"][0]["jobStatus"] == "pending"
 
 
 # ------------------------------------------------------------------ the same rows by link
 
 
-async def test_a_jobs_rows_file_says_its_files_and_datasets_again_by_the_link_that_named_them():
+async def test_a_jobs_rows_file_says_its_files_again_by_the_link_that_named_them():
     out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS)
     by_via = {(e["via"]["from"], e["via"]["to"]): e for e in out["linked"]}
+    # the files are a job's one link: its rows name no dataset that is asked
+    assert list(by_via) == [("JobSpec.PandaID", "FileSpec.PandaID")]
     files = by_via[("JobSpec.PandaID", "FileSpec.PandaID")]
     # held in the job's own answer: every file is the link's, read when the job was
     assert files["class"] == "FileSpec" and files["asked"] == [PID]
     assert [f["lfn"] for f in files["rows"]] == ["a.log.tgz", "in.root"]
     assert (files["as_of"], files["clock"]) == ("2026-10-13 10:00:05", "client")
     assert "table" not in files
-    # the datasets were asked in one call; each link keeps the rows its own values name
-    dest = by_via[("FileSpec.destinationDBlock", "DatasetSpec.name")]
-    assert dest["asked"] == ["user.x_sub1"]
-    assert [r["name"] for r in dest["rows"]] == ["user.x_sub1"]
-    assert (dest["table"], dest["clock"]) == ("ATLAS_PANDA.Datasets", "database")
-    # a value asked with no row: the link says it found none
-    prod = by_via[("JobSpec.prodDBlock", "DatasetSpec.name")]
-    assert prod["asked"] == ["data.in"] and prod["rows"] == []
-    # a column empty on every row asks nothing
-    assert ("JobSpec.dispatchDBlock", "DatasetSpec.name") not in by_via
     log = out["statuslogs"]["JobSpec"]
     assert log["key"] == "JobSpec.PandaID"
     assert log["by_key"] == {str(PID): out["statuslog"]["states"]}
@@ -777,31 +714,3 @@ async def test_a_tasks_rows_file_says_its_jobs_again_by_link_and_table_and_each_
         "11": ["running", "finished"],
         "12": ["running", "failed"],
     }
-
-
-async def test_a_scoped_dataset_name_is_asked_with_and_without_its_scope_and_found_either_way():
-    # the Datasets rows are keyed by either form, as PanDA asks a dataset by name (datasetName IN (:name1,:name2))
-    job = JOB | {"prodDBlock": "data:data.in"}
-    rows = [
-        *DATASETS,
-        {"name": "data.in", "subType": "in"},
-        {"name": "data:data.in", "subType": "in"},
-    ]
-    panda = FakePanda({}, JOB_LOG, [], jobs={PID: job}, datasets=rows)
-    out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
-    assert panda.calls[1][1] == [
-        "data.in",
-        "data:data.in",
-        "panda.dis1",
-        "user.x.log",
-        "user.x_sub1",
-    ]
-    by_via = {(e["via"]["from"], e["via"]["to"]): e for e in out["linked"]}
-    prod = by_via[("JobSpec.prodDBlock", "DatasetSpec.name")]
-    assert prod["asked"] == ["data.in", "data:data.in"]
-    assert [r["name"] for r in prod["rows"]] == ["data.in", "data:data.in"]
-    # a name with no scope is asked as it is
-    assert by_via[("FileSpec.dataset", "DatasetSpec.name")]["asked"] == [
-        "data.in",
-        "user.x.log",
-    ]
