@@ -546,7 +546,12 @@ async def _keyed_in_calls(
 
     The keyed reads (job/get_status_history, job/get_datasets_by_name) refuse a
     call naming more keys than ``budget // partitions`` of the table they read,
-    and say both numbers; the keys are then split into calls of that size.
+    and say both numbers; the keys are then split into calls of that size.  A
+    read that looks each key up in more than one form (job/get_datasets_by_name
+    from panda-server 100f79b4: a name with and without its scope) says how many
+    in ``keys_per_name``, and both limits count those forms, so a call takes
+    ``budget // (keys_per_name * partitions)`` or ``max_keys // keys_per_name``;
+    a refusal without it counts one.
 
     Returns:
         ``(answers, calls)``: the ``data`` of every call in call order and
@@ -566,10 +571,11 @@ async def _keyed_in_calls(
             done += len(chunk)
             continue
         fits = None
+        per_key = data.get("keys_per_name") or 1
         if data.get("rejected") == "probe_budget" and data.get("partitions"):
-            fits = data["budget"] // data["partitions"]
-        elif data.get("rejected") == "too_many_keys":
-            fits = data.get("max_keys")
+            fits = data["budget"] // (per_key * data["partitions"])
+        elif data.get("rejected") == "too_many_keys" and data.get("max_keys"):
+            fits = data["max_keys"] // per_key
         if not fits or fits >= len(chunk):
             return None, calls
         size = fits
@@ -642,8 +648,9 @@ async def get_datasets_by_name(names: list[str]) -> dict[str, Any]:
 
     The table is partitioned by modificationdate, so each name is looked up in
     every partition; a call takes ``budget // partitions`` names, and the
-    names are split into as many calls as that takes.  JEDI_Datasets is not
-    read.
+    names are split into as many calls as that takes.  A server that looks a
+    name up with and without its scope halves that (its ``keys_per_name``, see
+    :func:`_keyed_in_calls`).  JEDI_Datasets is not read.
 
     Returns:
         On success ``{"success": True, "rows", "as_of", "retained_from",

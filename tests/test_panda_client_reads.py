@@ -475,6 +475,65 @@ async def test_datasets_split_by_the_budget_the_refusal_states_and_ask_a_name_on
     assert got["retained_from"] == _when("2026-07-01T00:00:00")
 
 
+def _datasets_server_both_forms(budget: int, partitions: int, max_keys: int):
+    """job/get_datasets_by_name as of panda-server 100f79b4: each name looked up in two forms,
+    both limits counted in those keys, and keys_per_name in every answer."""
+
+    def route(endpoint, data):
+        keys = 2 * len(data["names"])
+        said = {"keys_per_name": 2, "partitions": partitions, "budget": budget}
+        if keys > max_keys:
+            return {
+                "success": False,
+                "message": "too many",
+                "data": {
+                    "rejected": "too_many_keys",
+                    "keys": keys,
+                    "max_keys": max_keys,
+                    "keys_per_name": 2,
+                },
+            }
+        if keys * partitions > budget:
+            return {
+                "success": False,
+                "message": f"{keys} names x {partitions} partitions",
+                "data": {"rejected": "probe_budget", "keys": keys, **said},
+            }
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "rows": [{"name": n, "asked_as": [n]} for n in data["names"]],
+                "as_of": _when("2026-10-14T10:00:00"),
+                "retained_from": _when("2026-07-01T00:00:00"),
+                **said,
+            },
+        }
+
+    return route
+
+
+async def test_datasets_split_by_the_keys_each_name_costs_where_the_server_says_it():
+    # the probe budget: 1000 // (2 * 5) = 100 names a call, not the 200 of one form
+    ctx, calls = _patched(
+        _datasets_server_both_forms(budget=1000, partitions=5, max_keys=1000)
+    )
+    names = [f"user.x_sub{i}" for i in range(250)]
+    with ctx:
+        got = await PC.get_datasets_by_name(names)
+    assert [len(d["names"]) for _, d in calls] == [250, 100, 100, 50]
+    assert got["success"] is True and len(got["rows"]) == 250
+    # the IN list: 1000 keys // 2 = 500 names a call
+    ctx, calls = _patched(
+        _datasets_server_both_forms(budget=10**6, partitions=1, max_keys=1000)
+    )
+    names = [f"user.x_sub{i}" for i in range(600)]
+    with ctx:
+        got = await PC.get_datasets_by_name(names)
+    assert [len(d["names"]) for _, d in calls] == [600, 500, 100]
+    assert got["success"] is True and len(got["rows"]) == 600
+
+
 async def test_jobs_tell_an_error_from_a_job_not_found_and_go_a_few_dozen_at_a_time():
     def route(endpoint, data):
         assert endpoint == "job/get_description_incl_archive"
