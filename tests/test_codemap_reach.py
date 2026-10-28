@@ -263,6 +263,47 @@ def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_
     assert row.settled == {"outside_returns_outside": 1}
 
 
+
+def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):
+    """``base_module``'s ``self.jedi_mb_proxy_dict: "PassiveProxies | None"``, assigned from a callable field's call no
+    reading places: ``mb_proxy.send(msg)`` on an element of it is a call on an outside object, closed by the assumption,
+    though a class of the corpus defines ``send``.  A field declared ``Any`` says nothing, and is read from its
+    assignments as before: the same call on it is a hole."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "from typing import TYPE_CHECKING, Any, Callable\n\n"
+            "if TYPE_CHECKING:\n"
+            "    from bus.proxies import Proxies\n\n"
+            "class Sender:\n"
+            "    def send(self, msg):\n"
+            "        pass\n\n"
+            "class Module:\n"
+            '    proxies: "Proxies | None"\n'
+            "    loose: Any\n"
+            '    setter: "Callable[[], Proxies | None] | None"\n\n'
+            "    def __init__(self):\n"
+            "        self.proxies = None\n"
+            "        self.loose = None\n"
+            "        self.setter = None\n\n"
+            "    def push(self, msg):\n"
+            "        if self.proxies is None:\n"
+            "            self.proxies = self.setter()\n"
+            "        proxy = self.proxies['out']['status']\n"
+            "        proxy.send(msg)\n\n"
+            "    def push_loose(self, msg):\n"
+            "        self.loose = self.setter()\n"
+            "        self.loose.send(msg)\n"
+        ),
+    )
+
+    pushed = record.rows["pkg/mod.py::Module.push"]
+    loose = record.rows["pkg/mod.py::Module.push_loose"]
+
+    assert [hole.callee for hole in pushed.holes] == []
+    assert pushed.settled.get("outside_returns_outside") == 1
+    assert [hole.callee for hole in loose.holes] == ["self.loose.send"]
+
 def test_what_outside_code_returns_from_a_corpus_object_it_was_handed_is_not_taken_as_outside(
     tmp_path,
 ):

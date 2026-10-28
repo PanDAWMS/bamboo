@@ -278,7 +278,8 @@ class _Receivers:
     which returns no corpus object it was not handed (an assumption) --,
     ``queue``, or ``unknown``, *detail* saying why.  Read from the root of
     the receiver: a literal, a parameter's annotation, what a corpus call
-    is declared to return, what a name or a field is bound to.
+    is declared to return, a field's declaration where it names a class
+    outside the corpus, what a name or a field is bound to.
 
     Once per expression: a name bound several ways is read once for each
     binding, and without the memo a function rebinding its locals from one
@@ -751,6 +752,15 @@ class _Receivers:
             owned = self.types.method_class(file, func)
             if owned is None:
                 return _UNKNOWN, "self outside a method"
+            # A field declared as a class outside the corpus -- ``jedi_mb_proxy_dict: "PassiveProxies | None"``,
+            # ``logger: "LogWrapper"`` -- holds that class's object, whatever its assignments read as: a callable
+            # field's call, a value a loop installs.  The declaration is the boundary.  Any other declaration (``Any``,
+            # a class of the corpus) says less than the assignments, which are read as before.
+            declared = self.types._field_annotation(owned, expression.attr)
+            if declared is not None:
+                said = self.annotation(*declared)
+                if said[0] in (_OUTSIDE, _QUEUE):
+                    return said
             kinds = []
             seen: set[int] = set()
             for one in self.calls.objects_of(owned):
