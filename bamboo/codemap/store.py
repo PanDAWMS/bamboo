@@ -1,8 +1,8 @@
-"""Load a Code Map fragment into a graph backend.
+"""Read a Code Map's dump, or load a fragment into a graph backend.
 
 The map is kept as dumps (``build-map --dump``), one per source version, and is
-read through the in-memory backend: every reading is a lookup by label and
-property, which that backend answers from the file.  Neo4j holds the incident
+read from the dump itself (:func:`load_dump`, handed to ``lookup.CodeMap``); no
+reader asks a graph backend for it.  Neo4j holds the incident
 graph only.  When the map was stored there it shared the database under its own
 labels, and the separation was load-bearing: the Code Map is derived and
 disposable, while the incident graph holds human-validated knowledge that cannot
@@ -75,21 +75,15 @@ async def store_fragment(
     return written
 
 
-async def dump_graph(
-    path: Path, source_root: Optional[Path] = None
-) -> GraphDatabaseClient:
-    """A connected in-memory graph holding the map ``build-map --dump`` wrote at *path*.
+def load_dump(path: Path, source_root: Optional[Path] = None) -> MapFragment:
+    """The map ``build-map --dump`` wrote at *path*, for ``lookup.CodeMap``.
 
-    For a script that reads the map through the graph client: it opens this
-    where it opened ``GraphDatabaseClient()``, and closes it the same way.
     Where *source_root* is given and the dump names the tree it was built from,
     a dump of another tree is refused -- the readers walk *source_root* beside
     the map, and a map of a different corpus answers about lines that are not
     there.  A build of a git checkout is stamped with its description instead
     (``git:...``), which says no path to compare, and is taken as it is.
     """
-    from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
-
     fragment = MapFragment.model_validate_json(Path(path).read_text())
     built_on = fragment.derived_from.removeprefix("source-root:")
     if (
@@ -100,9 +94,4 @@ async def dump_graph(
         raise ValueError(
             f"the map dump {path} was built on {built_on}, not on {source_root}"
         )
-    graph_db = InMemoryGraphBackend()
-    await graph_db.connect()
-    await store_fragment(fragment, graph_db)
-    # a CodeMap on this client reads the dump it carries (lookup._fragment_nodes), not the store
-    graph_db.fragment = fragment
-    return graph_db
+    return fragment

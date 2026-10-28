@@ -1,4 +1,4 @@
-"""Read a stored Code Map back, in the vocabulary the map is written in.
+"""Read a Code Map back from its dump, in the vocabulary the map is written in.
 
 This is the *use* half of the three cadences: ``build-map`` extracts, ``check-map``
 says how far the extraction can be trusted, and an investigation only ever looks
@@ -13,19 +13,16 @@ terms and ranking thirty candidates, which fails as `no_candidates`,
 means naming a subject and getting its writers, and the answer does not depend on
 having phrased the question well.
 
-**Why the references are properties and not edges.**  A junction stores the
-``name`` of the subject it writes, so the join is on a property.  Both work, and
-the properties are what exists today -- see ``find_map_nodes``.  The one reference
-this cannot express is a ``passthrough(...)`` outcome, which sits inside
-``branches``: Neo4j has no nested values, so a junction's branches are stored as
-JSON text and the chain is followed by decoding it here rather than by matching a
-pattern in the query.  At ~1000 nodes that costs nothing, and it keeps the map
-from declaring an edge kind before the backward walk needs one.
+**Why the references are names and not edges.**  A junction holds the ``name``
+of the subject it writes, so the join is on a name, and a ``passthrough(...)``
+outcome sits inside ``branches`` and is followed by reading it here.  That kept the
+map from declaring an edge kind before the backward walk needed one, while it was
+stored in Neo4j; it is read from its dump now (``build-map --dump``), whose nodes a
+:class:`CodeMap` reads as they are.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any, Optional, Type, TypeVar
@@ -58,7 +55,6 @@ from bamboo.codemap.models import (
     branch_excludes,
     required_values,
 )
-from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.models.graph_element import BaseNode, NodeType
 
 logger = logging.getLogger(__name__)
@@ -122,34 +118,6 @@ _WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+")
 _BROKERAGE_WORDS = ("brokerage", "broker", "site", "sites", "distribution", "candidates")
 
 
-def _decode(model: Type[NodeT], props: dict[str, Any]) -> NodeT:
-    """Rebuild a node model from stored properties.
-
-    The inverse of what the backend had to do on the way in, and derived from
-    the same source of truth rather than from a second list of which fields are
-    nested: whatever the model does not declare as text, but which came back as
-    text, was JSON on the way in.  A hand-kept list of nested field names would
-    be a third expression of a fact the model already states, free to drift from
-    the encoder the moment a field is added.
-    """
-    decoded = dict(props)
-    for name, field in model.model_fields.items():
-        value = decoded.get(name)
-        if not isinstance(value, str):
-            continue
-        if field.annotation in (str, Optional[str]):
-            continue
-        try:
-            decoded[name] = json.loads(value)
-        except (TypeError, ValueError):
-            # Left as text: a field that is genuinely a string in a union, or a
-            # value an older build wrote differently. Validation reports it
-            # better than a guess here would.
-            pass
-    decoded.pop("valid_for", None)  # storage bookkeeping, not part of the model
-    return model.model_validate(decoded)
-
-
 def _short(owner: str) -> str:
     """``pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage`` -> the last two names."""
     where, sep, method = owner.partition("::")
@@ -173,83 +141,69 @@ def _words(*sources: str) -> list[str]:
 
 
 class CodeMap:
-    """A stored map, read one question at a time.
+    """A map's dump, read one question at a time.
 
-    Holds no cache.  A run answers a handful of questions against ~1000 nodes,
-    and a cache would have to be invalidated when a rebuild lands underneath it
-    -- which is precisely the staleness the separate cadences exist to make
-    visible rather than to paper over.
+    The dump's nodes are indexed by kind once per dump (:func:`_fragment_nodes`)
+    and nothing else is cached.  A dump does not change underneath its readers,
+    where a map stored in a database could be rebuilt beneath a cache -- the
+    staleness the separate cadences exist to make visible.
     """
 
     def __init__(
         self,
-        graph_db: GraphDatabaseClient,
+        fragment: MapFragment,
         map_id: str = "panda",
         version: Optional[str] = None,
     ) -> None:
         """
         Args:
-            graph_db: A connected client.
+            fragment: The map, as its dump reads back (``store.load_dump``, the
+                      querier's ``mapdump``).  Its nodes are handed out as they
+                      are and never written.
             map_id:   Which map. Distribution-scoped, so ``panda`` covers both
                       ``pandaserver`` and ``pandajedi``.
-            version:  Pin to one ``derived_from``.  ``None`` reads whatever is
-                      stored, which is right until an incident's own code
-                      version is known -- see :meth:`versions`.
+            version:  Pin to one ``derived_from``.  ``None`` reads every build
+                      the dump holds, which is right until an incident's own
+                      code version is known -- see :meth:`versions`.
         """
-        self._db = graph_db
+        self._fragment = fragment
         self.map_id = map_id
         self.version = version
-        # A client that carries the map's dump (the querier's ``mapdump``) is read from the dump's own nodes, with the
-        # store's match and version rules: no round trip of every node through its stored properties per question,
-        # which took a third of a querier run.  A dump does not change underneath, so its index is no stale cache.
-        self._fragment: Optional[MapFragment] = getattr(graph_db, "fragment", None)
 
     async def _find(self, model: Type[NodeT], **match: Any) -> list[NodeT]:
-        if self._fragment is not None:
-            wanted = {k: v for k, v in match.items() if v is not None}
-            return [
-                node
-                for node, seen in _fragment_nodes(self._fragment, _MODELS[model])
-                if getattr(node, "map_id", None) == self.map_id
-                and (self.version is None or self.version in (seen or [getattr(node, "derived_from", None)]))
-                and all(getattr(node, k, None) == v for k, v in wanted.items())
-            ]
-        props = await self._db.find_map_nodes(
-            _MODELS[model].value,
-            self.map_id,
-            {k: v for k, v in match.items() if v is not None} or None,
-            self.version,
-        )
+        wanted = {k: v for k, v in match.items() if v is not None}
+        found = [
+            node
+            for node, seen in _fragment_nodes(self._fragment, _MODELS[model])
+            if getattr(node, "map_id", None) == self.map_id
+            and (self.version is None or self.version in (seen or [getattr(node, "derived_from", None)]))
+            and all(getattr(node, k, None) == v for k, v in wanted.items())
+        ]
         if self.version is not None:
             # A pin selects which nodes that build had; it cannot select which
-            # build's *content* they carry, because the store merges on the
-            # semantic signature and the later write wins.  So a node present in
-            # both builds comes back with the later one's conditions.  Said out
+            # build's *content* they carry, because a node of several builds
+            # holds the last one's (as the store merged them).  So a node present
+            # in both builds comes back with the later one's conditions.  Said out
             # loud rather than left to be discovered: reading a months-old
             # incident against edited conditions is the skew the version stamp
             # exists to make visible, not a thing to hide behind a pin.
-            elsewhere = sum(1 for p in props if p.get("derived_from") != self.version)
+            elsewhere = sum(1 for node in found if getattr(node, "derived_from", None) != self.version)
             if elsewhere:
                 logger.warning(
                     "%d of %d %s node(s) were last written by a build other than %s, "
                     "so their content is that build's",
-                    elsewhere, len(props), _MODELS[model].value, self.version,
+                    elsewhere, len(found), _MODELS[model].value, self.version,
                 )
-        return [_decode(model, p) for p in props]
+        return found
 
     async def versions(self) -> list[str]:
-        """Every source version stored for this map, newest name last.
+        """Every source version the dump holds for this map, newest name last.
 
         Several coexist on purpose: an incident from months ago has to be read
         against the code that was running then, not the code on disk now.
         """
-        if self._fragment is not None:
-            return sorted({node.derived_from for node, _ in _fragment_nodes(self._fragment, NodeType.SUBJECT)
-                           if getattr(node, "map_id", None) == self.map_id and node.derived_from})
-        subjects = await self._db.find_map_nodes(
-            NodeType.SUBJECT.value, self.map_id, None, None
-        )
-        return sorted({s["derived_from"] for s in subjects if s.get("derived_from")})
+        return sorted({node.derived_from for node, _ in _fragment_nodes(self._fragment, NodeType.SUBJECT)
+                       if getattr(node, "map_id", None) == self.map_id and node.derived_from})
 
     async def subject(self, name: str) -> Optional[SubjectNode]:
         """One subject by its qualified name, e.g. ``JediTaskSpec.status``.

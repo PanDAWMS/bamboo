@@ -1,17 +1,17 @@
-"""Reading a stored Code Map back.
+"""Reading a Code Map back from its dump.
 
-These run against the in-memory example backend rather than mocks, so the write
-and the read meet each other: a mock would happily hand back whatever the test
-put in and prove nothing about the encoding, which is the half most likely to
-drift.  That the reference backend is exercised here at all is a side benefit --
-it is the thing that silently stopped working the last time the interface grew.
+These read the map as its dump's JSON gives it back rather than mocks, so the
+build's nodes and the reading meet each other: a mock would happily hand back
+whatever the test put in and prove nothing about the encoding, which is the half
+most likely to drift.  The reference backend is still exercised where it is what
+is checked: the label namespace, and the store's merge the reading follows.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from bamboo.codemap.lookup import CodeMap
+from bamboo.codemap.lookup import CodeMap, _fragment_nodes
 from bamboo.codemap.models import (
     SYMPTOM_DISTRIBUTION,
     Anchor,
@@ -24,8 +24,9 @@ from bamboo.codemap.models import (
     SubjectNode,
     Symptom,
 )
-from bamboo.codemap.store import dump_graph, store_fragment
+from bamboo.codemap.store import load_dump, store_fragment
 from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
+from bamboo.models.graph_element import NodeType
 
 MAP_ID = "panda"
 VERSION = "panda-server-source 1.0.2"
@@ -69,33 +70,24 @@ def _stage(label: str, tag: str, order: int, owner: str = "b.py::doBrokerage") -
     )
 
 
-async def _stored(fragment: MapFragment) -> CodeMap:
-    """Write *fragment* through the real store, and hand back a reader for it.
-
-    The backend stands in for the client, which is a façade whose signatures
-    mirror it one for one -- the same substitution the existing store tests make
-    with a mock, except that this one actually stores and reads.
-    """
-    backend = InMemoryGraphBackend()
-    await backend.connect()
-    await store_fragment(fragment, backend)
-    return CodeMap(backend, map_id=MAP_ID)
+async def _read_back(fragment: MapFragment) -> CodeMap:
+    """A reader of *fragment* as its dump gives it back: through the JSON ``build-map --dump`` writes."""
+    return CodeMap(MapFragment.model_validate_json(fragment.model_dump_json()), map_id=MAP_ID)
 
 
 async def test_a_junction_survives_the_round_trip_unchanged():
     """The encoding and the decoding are two expressions of one shape.
 
-    Nested values cannot be stored as they are -- Neo4j holds primitives and
-    arrays -- so branches, entry points and anchors go in as JSON and have to
-    come back out.  Comparing the model to itself across the trip is the only
-    thing that says the two halves still agree.
+    Branches, entry points and anchors are nested values, which go into the dump
+    as JSON and have to come back out.  Comparing the model to itself across the
+    trip is the only thing that says the two halves still agree.
     """
     original = _junction(
         "pandajedi/jediorder/JobGenerator.py::runImpl",
         Branch(outcome="pending", path_condition=["not tasks"], tier=1),
         Branch(outcome="runtime(newStatus)", tier=2),
     )
-    code_map = await _stored(
+    code_map = await _read_back(
         MapFragment(map_id=MAP_ID, derived_from=VERSION, subjects=[_subject()], junctions=[original])
     )
 
@@ -142,7 +134,7 @@ async def test_a_functions_prints_come_back_by_owner_as_they_went_in():
         ],
         anchor=Anchor(package="pandaserver", file=owner.split("::")[0], line_start=193),
     )
-    code_map = await _stored(
+    code_map = await _read_back(
         MapFragment(map_id=MAP_ID, derived_from=VERSION, function_prints=[original])
     )
 
@@ -164,7 +156,7 @@ async def test_the_writers_of_a_subject_are_all_of_them():
             _junction("c.py::h", Branch(outcome="broken"), subject="JediTaskSpec.oldStatus"),
         ],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert [j.owner for j in await code_map.writers_of("JediTaskSpec.status")] == [
         "a.py::f",
@@ -183,7 +175,7 @@ async def test_an_observed_value_eliminates_the_writers_that_cannot_produce_it()
             _junction("cannot.py::g", Branch(outcome="ready")),
         ],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert [j.owner for j in await code_map.producers_of("JediTaskSpec.status", "pending")] == [
         "can.py::f"
@@ -203,7 +195,7 @@ async def test_a_run_time_writer_is_never_eliminated_by_an_observed_value():
         subjects=[_subject()],
         junctions=[_junction("runtime.py::f", Branch(outcome="runtime(newStatus)", tier=2))],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
 
@@ -229,7 +221,7 @@ async def test_a_run_time_writer_whose_frame_the_value_does_not_fit_is_eliminate
             _junction("free.py::g", Branch(outcome="runtime(newStatus)", tier=2)),
         ],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert [j.owner for j in await code_map.producers_of("JediTaskSpec.status", "pending")] == [
         "free.py::g"
@@ -244,7 +236,7 @@ async def test_a_run_time_writer_whose_frame_the_value_fits_is_kept():
         subjects=[_subject()],
         junctions=[_junction("framed.py::f", _framed("merge_{}"))],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert len(await code_map.producers_of("JediTaskSpec.status", "merge_failed")) == 1
 
@@ -268,7 +260,7 @@ async def test_a_junction_keeps_the_arms_a_frame_does_not_rule_out():
             )
         ],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
 
@@ -281,7 +273,7 @@ async def test_an_arm_is_ruled_out_only_when_no_frame_of_it_fits():
         subjects=[_subject()],
         junctions=[_junction("framed.py::f", _framed("merge_{}", "pend{}"))],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
     assert len(await code_map.producers_of("JediTaskSpec.status", "ready")) == 0
@@ -300,7 +292,7 @@ async def test_the_outcome_text_is_not_read_as_a_frame():
         subjects=[_subject()],
         junctions=[_junction("framed.py::f", _framed())],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
 
@@ -325,7 +317,7 @@ async def test_a_value_as_long_as_the_spec_keeps_is_ruled_out_by_its_head_alone(
             )
         ],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     def asked(value: str):
         return code_map.producers_of("JediTaskSpec.errorDialog", value)
@@ -348,7 +340,7 @@ async def test_a_passthrough_moves_the_question_to_the_field_it_came_from():
             _junction("src.py::g", Branch(outcome="pending"), subject="JediTaskSpec.oldStatus"),
         ],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     carried = await code_map.carried_from("JediTaskSpec.status")
 
@@ -363,7 +355,7 @@ async def test_a_value_carried_from_outside_the_map_ends_the_walk():
         subjects=[_subject()],
         junctions=[_junction("copy.py::f", Branch(outcome="passthrough(JediTaskSpec.taskPriority)"))],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert (await code_map.carried_from("JediTaskSpec.status")) == {
         "JediTaskSpec.taskPriority": []
@@ -377,7 +369,7 @@ async def test_a_chain_comes_back_in_the_order_the_source_runs_it():
         derived_from=VERSION,
         filter_stages=[_stage("disk check", "-disk", 2), _stage("memory check", "-lowmemory", 1)],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert [s.criteria_tag for s in await code_map.chain("b.py::doBrokerage")] == [
         "-lowmemory",
@@ -394,7 +386,7 @@ async def test_a_tag_from_a_log_line_finds_every_stage_that_emits_it():
         derived_from=VERSION,
         filter_stages=[_stage("disk check", "-disk", 1), _stage("Storage check", "-disk", 2)],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert {s.funnel_label for s in await code_map.stage_for_tag("-disk")} == {
         "disk check",
@@ -413,40 +405,30 @@ async def test_a_version_pin_reads_every_node_that_version_had():
     did not exist.  ``valid_for`` is the record of membership and had no
     reader.
     """
-    backend = InMemoryGraphBackend()
-    await backend.connect()
     later = "git:0.0.31-3805-g91639d30"
     shared = _stage("status check", "-status", 0)
-    await store_fragment(
-        MapFragment(
-            map_id=MAP_ID,
-            derived_from=VERSION,
-            filter_stages=[shared, _stage("jumbo job check", "-jumbo", 1)],
-        ),
-        backend,
-    )
     moved = _stage("status check", "-status", 0)
     moved.derived_from = later
     moved.conditions = ["site.status != 'online'"]
     added = _stage("network check", "-network", 2)
     added.derived_from = later
-    # ``replace_map=False`` on purpose: a build replaces the map it writes, so
-    # two builds only coexist where a caller asks for that.  The read side is
-    # unchanged and this is what still exercises it.
-    await store_fragment(
-        MapFragment(map_id=MAP_ID, derived_from=later, filter_stages=[moved, added]),
-        backend,
-        replace_map=False,
+    # Two builds in one dump, the later's nodes after the earlier's: a build
+    # replaces the map it writes, so two builds only coexist where a caller
+    # asks for that.  The read side is unchanged and this is what exercises it.
+    both = MapFragment(
+        map_id=MAP_ID,
+        derived_from=later,
+        filter_stages=[shared, _stage("jumbo job check", "-jumbo", 1), moved, added],
     )
 
-    pinned = CodeMap(backend, map_id=MAP_ID, version=VERSION)
+    pinned = CodeMap(both, map_id=MAP_ID, version=VERSION)
     assert [s.criteria_tag for s in await pinned.chain("b.py::doBrokerage")] == [
         "-status",
         "-jumbo",
     ]
     # And it still excludes both ways: the later build dropped the jumbo stage
     # and added the network one, so neither pin answers for the other's.
-    newer = CodeMap(backend, map_id=MAP_ID, version=later)
+    newer = CodeMap(both, map_id=MAP_ID, version=later)
     assert {s.criteria_tag for s in await newer.chain("b.py::doBrokerage")} == {
         "-status",
         "-network",
@@ -478,7 +460,7 @@ async def test_the_vocabulary_is_every_question_the_map_can_be_asked():
         ],
         filter_stages=[_stage("memory check", "-lowmemory", 1)],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     terms = await code_map.vocabulary()
 
@@ -518,7 +500,7 @@ async def test_what_bounds_a_query_is_asked_of_the_subject():
     subject = _subject()
     subject.selected_values = ["finishing", "pending"]
     subject.selection_gates = ["JEDI_AUX_Status_MinTaskID"]
-    code_map = await _stored(
+    code_map = await _read_back(
         MapFragment(map_id=MAP_ID, derived_from=VERSION, subjects=[subject])
     )
 
@@ -552,7 +534,7 @@ async def test_which_log_to_read_is_answered_per_writer():
         subjects=[_subject()],
         junctions=[knight, proxy],
     )
-    code_map = await _stored(fragment)
+    code_map = await _read_back(fragment)
 
     assert await code_map.log_files_for("JediTaskSpec.status") == {
         knight.owner: {"own": ["panda-JobGenerator.log"], "caller": []},
@@ -591,7 +573,7 @@ async def test_a_statement_returns_a_value_by_exclusion_only_where_it_says_nothi
         _read_site(6, excludes=["JobSpec.processingType=pmerge"]),
         _read_site(7, selects=[f"{status}=defined"]),
     ]
-    code_map = await _stored(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
+    code_map = await _read_back(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
 
     returned = await code_map.read_sites_excluding(status, "defined")
 
@@ -605,7 +587,7 @@ async def test_a_statement_consults_a_value_only_where_its_subquery_names_it():
         _read_site(2, selects=[f"{status}=merging"]),
         _read_site(3, consults=[f"{status}=running"]),
     ]
-    code_map = await _stored(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
+    code_map = await _read_back(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
 
     consulting = await code_map.read_sites_consulting(status, "merging")
 
@@ -620,7 +602,7 @@ async def test_a_statement_leaves_a_value_out_only_where_the_map_says_every_row_
         _read_site(2, excludes=[f"{flag}=2"]),
         _read_site(3, excludes=[f"{flag}=3"], refuses=[f"{flag}=3"]),
     ]
-    code_map = await _stored(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
+    code_map = await _read_back(MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=sites))
 
     refusing = await code_map.read_sites_refusing(flag, "2")
 
@@ -628,24 +610,23 @@ async def test_a_statement_leaves_a_value_out_only_where_the_map_says_every_row_
     assert refusing[0].refuses == [f"{flag}=2"]
 
 
-async def test_a_dump_reads_back_as_the_stored_map_did(tmp_path):
-    """The map is kept as dumps: what ``build-map --dump`` writes, ``dump_graph``
-    opens as a graph the same lookups answer from."""
+async def test_a_dump_reads_back_as_the_map_was_built(tmp_path):
+    """The map is kept as dumps: what ``build-map --dump`` writes, ``load_dump``
+    reads back for the lookups to answer from."""
     original = _junction("a.py::run", Branch(outcome="pending", tier=1))
     fragment = MapFragment(map_id=MAP_ID, derived_from=f"source-root:{tmp_path}", subjects=[_subject()], junctions=[original])
     path = tmp_path / "map.json"
     path.write_text(fragment.model_dump_json())
 
-    graph_db = await dump_graph(path, tmp_path)
-    (read_back,) = await CodeMap(graph_db, map_id=MAP_ID).writers_of("JediTaskSpec.status")
+    (read_back,) = await CodeMap(load_dump(path, tmp_path), map_id=MAP_ID).writers_of("JediTaskSpec.status")
 
-    # Through JSON, so the store's id and stamp are its own and not the original's.
+    # Through JSON, so the nodes are the dump's and not the original's.
     assert (read_back.owner, read_back.branches, read_back.entry_points, read_back.anchor) == (
         original.owner, original.branches, original.entry_points, original.anchor
     )
 
 
-async def test_a_dump_of_another_tree_is_refused_and_a_git_stamp_is_taken(tmp_path):
+def test_a_dump_of_another_tree_is_refused_and_a_git_stamp_is_taken(tmp_path):
     """A reader walks its tree beside the map, so a map of another tree answers
     about lines that are not there; a git-described build names no path to
     compare."""
@@ -655,21 +636,16 @@ async def test_a_dump_of_another_tree_is_refused_and_a_git_stamp_is_taken(tmp_pa
     path.write_text(MapFragment(map_id=MAP_ID, derived_from=f"source-root:{other}").model_dump_json())
 
     with pytest.raises(ValueError, match="was built on"):
-        await dump_graph(path, tmp_path)
+        load_dump(path, tmp_path)
 
     path.write_text(MapFragment(map_id=MAP_ID, derived_from="git:1.0.4-295-gbf2812ba").model_dump_json())
-    assert await dump_graph(path, tmp_path) is not None
+    assert load_dump(path, tmp_path) is not None
 
 
-async def test_a_client_carrying_the_dump_reads_as_the_store(tmp_path):
-    """A client that carries the map's dump (the querier's mapdump, dump_graph) is read from the dump's own nodes, not
-    through every node's stored properties: the same answers -- one node per name, the last one's content at the first
-    one's place, the same version pin -- and dump_graph's client carries its dump."""
-    from types import SimpleNamespace
-
-    def strip(nodes):
-        return [n.model_dump(exclude={"metadata"}) for n in nodes]
-
+async def test_a_dump_is_read_as_the_store_merged_it():
+    """The reading takes the dump's own nodes by the rules the store merged them with (``store_fragment``): one node
+    per (kind, map_id, name), the last one's content at the first one's place, with the builds it was seen in -- so a
+    pin reads what that build had, and a name the dump holds twice is one writer."""
     older = _subject("status").model_copy(update={"derived_from": "panda-server-source 1.0.1"})
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -678,22 +654,28 @@ async def test_a_client_carrying_the_dump_reads_as_the_store(tmp_path):
         junctions=[
             _junction("pandajedi/a.py::A.run", Branch(outcome="ready", line=10)),
             _junction("pandajedi/b.py::B.run", Branch(outcome="done", line=20)),
-            # the same name as the first: the store keeps one node, the last content at the first place
+            # the same name as the first: one node, the last content at the first place
             _junction("pandajedi/a.py::A.run", Branch(outcome="broken", line=11)),
         ],
     )
-    for version in (None, VERSION, "panda-server-source 1.0.1", "panda-server-source 9"):
-        stored = await _stored(fragment)
-        stored.version = version
-        carried = CodeMap(SimpleNamespace(fragment=fragment), map_id=MAP_ID, version=version)
-        assert strip(await carried.subjects()) == strip(await stored.subjects())
-        assert strip(await carried.writers_of("JediTaskSpec.status")) == strip(
-            await stored.writers_of("JediTaskSpec.status")
-        )
-        assert await carried.versions() == await stored.versions()
-    carried = CodeMap(SimpleNamespace(fragment=fragment), map_id=MAP_ID)
-    assert [b.outcome for j in await carried.writers_of("JediTaskSpec.status") for b in j.branches] == ["broken", "done"]
+    backend = InMemoryGraphBackend()
+    await backend.connect()
+    # a copy: the store writes the nodes it is handed (ids, valid_for), and the reading must see the dump as it is
+    await store_fragment(fragment.model_copy(deep=True), backend)
+    for node_type in (NodeType.SUBJECT, NodeType.JUNCTION_POINT):
+        stored = [n for n in backend.nodes.values() if n.node_type == node_type]
+        read = _fragment_nodes(fragment, node_type)
+        assert [n.model_dump(exclude={"id", "metadata"}) for n in stored] == [
+            n.model_dump(exclude={"id", "metadata"}) for n, _ in read
+        ]
+        assert [n.metadata["valid_for"] for n in stored] == [seen for _, seen in read]
 
-    path = tmp_path / "map.json"
-    path.write_text(fragment.model_dump_json())
-    assert (await dump_graph(path)).fragment == fragment
+    code_map = CodeMap(fragment, map_id=MAP_ID)
+    assert [b.outcome for j in await code_map.writers_of("JediTaskSpec.status") for b in j.branches] == ["broken", "done"]
+    assert await code_map.versions() == ["panda-server-source 1.0.1", VERSION]
+    for version, names in (
+        (VERSION, ["JediTaskSpec.lockedBy", "JediTaskSpec.status"]),
+        ("panda-server-source 1.0.1", ["JediTaskSpec.status"]),
+        ("panda-server-source 9", []),
+    ):
+        assert [n.name for n in await CodeMap(fragment, map_id=MAP_ID, version=version).subjects()] == names

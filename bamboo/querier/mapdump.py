@@ -1,22 +1,21 @@
-"""Read the map from a dump (``diff-map --dump``) instead of Neo4j, in this process.
+"""Read the map from a dump (``diff-map --dump``), in this process.
 
-``install(path)`` replaces ``graph_database_client.GraphDatabaseClient`` with a client that carries the dump and
-nothing else: a ``CodeMap`` on it reads the dump's own nodes, with the store's rules (``lookup._fragment_nodes``).
-Nothing is stored, so the dump stays as it was read for the whole run; a reader that asks the client itself stops.
-Every reader looks the client class up at call time (``rerun._writers_of``, ``derive_strategy._investigate``,
-``rows._function_prints``), so the swap reaches them.
+``install(path)`` reads the dump once.  A reader asks it through ``code_map(what)``, a ``CodeMap`` on the dump's own
+nodes (``rerun._writers_of``, the walk it hands ``derive_strategy._investigate``, ``rows._function_prints``), or takes
+a section of it whole (``fragment``).  No graph client is opened and nothing writes the dump: it stays as it was read
+for the whole run.
 
 Each case is read against the map built from the corpus that wrote its log: its own ``PANDA_PIN`` and the dump of
-that pin.  The swap is per process: a process started with ``spawn`` would have to call ``install_from_env()`` itself.  None needs to
-today -- census_p's ``--jobs`` workers read no map store at all (census_p.py says how that was checked).
+that pin.  The install is per process: a process started with ``spawn`` would have to call ``install_from_env()`` itself.  None needs to
+today -- census_p's ``--jobs`` workers read no map at all (census_p.py says how that was checked).
 
 The entry that reads the map (``rerun``) calls ``install_from_env()`` first thing in ``main``, so ``MAP_DUMP`` means
 the same run with or without a driver that installed it before it; ``described()`` says what was installed, not what
 the environment asks for.
 
 There is no map but a dump (2026-10-13: Neo4j keeps only the incident graph).  A run without ``MAP_DUMP`` stops, and
-so does a reader in the package that would open a graph client with no dump installed (``require``): the client it
-would get is Neo4j's, whose store holds no map, and an empty answer from it reads as "nothing writes it".
+so does a reader in the package with no dump installed (``require``, ``code_map``): there is no other map to read, and
+reading none would say "nothing writes it".
 """
 from __future__ import annotations
 
@@ -30,13 +29,12 @@ _FRAGMENT: list = []  # the MapFragment installed, for the readers that take a s
 
 
 def install(path: str) -> None:
-    """Make every graph client in this process read the dump at *path*.  A second call with the same path does nothing."""
+    """Read the dump at *path* for every reader in this process.  A second call with the same path does nothing."""
     if _INSTALLED.get("path") == path:
         return
     if _INSTALLED:
         raise RuntimeError(f"a map dump is installed already ({_INSTALLED['path']}), not {path}")
     from bamboo.codemap.models import MapFragment
-    from bamboo.database import graph_database_client
 
     data = Path(path).read_bytes()
     raw = json.loads(data)
@@ -48,23 +46,6 @@ def install(path: str) -> None:
     if not built_on or not pin or Path(built_on).resolve() != Path(pin).resolve():
         raise RuntimeError(f"the map dump {path} was built on {built_on or '(no derived_from)'}, the run reads PANDA_PIN={pin or '(unset)'}")
     fragment = MapFragment.model_validate(raw)
-
-    class _FromDump:
-        async def connect(self):
-            pass
-
-        async def close(self):
-            pass
-
-        def __getattr__(self, name):
-            # a store of the dump would write its nodes (ids, valid_for), and Neo4j's client holds no map: neither
-            # answers a reader of the client, so it stops rather than reading an empty map as "nothing writes it"
-            if name.startswith("__"):
-                raise AttributeError(name)
-            raise RuntimeError(f"the map dump is read through CodeMap (lookup._fragment_nodes), not the graph client's {name}")
-
-    _FromDump.fragment = fragment  # what CodeMap reads; set here, as the class body would read mapdump.fragment
-    graph_database_client.GraphDatabaseClient = _FromDump
     _INSTALLED["path"] = path
     _INSTALLED["sha256"] = hashlib.sha256(data).hexdigest()
     _FRAGMENT[:] = [fragment]
@@ -79,9 +60,17 @@ def install_from_env() -> None:
 
 
 def require(what: str) -> None:
-    """Stop before *what* opens a graph client with no dump installed: that client would be Neo4j's."""
+    """Stop *what* before it reads the map with no dump installed."""
     if not _INSTALLED:
         raise RuntimeError(f"{what} reads the map, and no map dump is installed: install_from_env() first (MAP_DUMP)")
+
+
+def code_map(what: str):
+    """A ``CodeMap`` on the installed dump, for *what* to ask; *what* stops with no dump installed (``require``)."""
+    require(what)
+    from bamboo.codemap.lookup import CodeMap
+
+    return CodeMap(_FRAGMENT[0], map_id="panda", version=None)
 
 
 def installed() -> dict[str, str]:
@@ -91,7 +80,7 @@ def installed() -> dict[str, str]:
 
 def fragment():
     """The installed dump as its ``MapFragment``, or ``None`` before any install: for a reader that takes a section whole
-    rather than asking the graph client (``rerun._reach_of`` reads ``reach_graph`` and ``junctions``)."""
+    rather than asking ``code_map`` (``rerun._reach_of`` reads ``reach_graph`` and ``junctions``)."""
     return _FRAGMENT[0] if _FRAGMENT else None
 
 
