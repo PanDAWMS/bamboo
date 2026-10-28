@@ -116,7 +116,15 @@ from bamboo.querier import rows as R
 from bamboo.querier import value_diff as V
 from bamboo.querier import windows as W
 from bamboo.querier.recorded import RecordedLogs
-from bamboo.querier.records import CORPUS, FileLogs, Logs, Unrecorded, Window, runs_for
+from bamboo.querier.records import (
+    CORPUS,
+    FileLogs,
+    Logs,
+    Unrecorded,
+    Window,
+    keyed,
+    runs_for,
+)
 from bamboo.querier.which_ran import Candidate, class_of, judge, stable_holes
 from bamboo.scripts.derive_strategy import _investigate
 
@@ -814,6 +822,7 @@ class Missing:
 
     obj: str
     inner: object  # the corpus frame at the boundary
+    question: object  # the run the outside said it was missing in
 
 
 @dataclass
@@ -1378,8 +1387,9 @@ class Rerun:
         if not self.logs.needs_window:
             return asking.window
         window = self.need(f"a window to ask the logs over: {asking.why}", asking.window)
-        if (self.hop, window) not in self.windows_said:
-            self.windows_said.add((self.hop, window))
+        # once per machine: rows of one second on two hosts are two asks (H6)
+        if (self.hop, window, asking.machine) not in self.windows_said:
+            self.windows_said.add((self.hop, window, asking.machine))
             self.say(f"window: {window[0]} .. {window[1]}, {asking.why}")
         return window
 
@@ -1774,40 +1784,54 @@ class Rerun:
         missing = bool(re.search(r"NotFound|not found|does not exist", ch.exc_type + " " + ch.exc_message))
         self.say(f"object: {obj}  ({'the outside says it is missing' if missing else 'no word of it missing'})")
         self.need("the outside says the object is missing", missing)
-        return Missing(obj, inner)
+        return Missing(obj, inner, question)
 
     # ------------------------------------------------------------ Missing: who makes it
     def missing(self, q: Missing):
-        # H6
+        # H6: timed by the job's own rows, each on its host, in turn (W.rows_until; KNOWN_ISSUES.md K6)
         self.start("H6", "who makes it")
-        obj, inner = q.obj, q.inner
+        obj, inner, question = q.obj, q.inner, q.question
         states = self.data["statuslog"]["states"]
         receivers = O.instances_in(inner.rel)
         receiver = self.need(f"the client {inner.rel} builds", receivers[0] if receivers else None)
         calls = [x for x in O.calls_through(receiver) if x.verb == "make"]
         self.say(f"{receiver}: {len(calls)} make call(s)")
-        # the window is the Datasets row's creationdate, which only the server's setupper inserts: a make call in
-        # JEDI's code is not anchored by it (KNOWN_ISSUES.md K6)
-        jedi =[f"{Path(x.rel).name}:{x.line}" for x in calls if x.rel.startswith("pandajedi/")]
-        asking = (
-            W.Asking(None, None, f"the make call(s) {jedi} run in JEDI, which inserts no Datasets row to time them by")
-            if jedi
-            else W.around_creation(self.data.get("datasets"), obj, states[0]["time"] if states else "")
-        )
         logs = list(dict.fromkeys(f for x in calls for f in self.files_of(f"{x.rel}::{x.func}", [], [x.line])))
-        obj_runs = self.runs(obj, logs, asking)
-        makers = []
-        for x in calls:
-            f2 = R.function(x.rel, x.func, [x.line])
-            for rs in obj_runs.values():
-                for r2 in rs:
+        rows = W.rows_until(states, question.last)
+        self.say(f"{len(rows)} statuslog row(s) by the run's last record {question.last}: each asked at its second on its "
+                 f"host, in turn, until a run holds it")
+        job = keyed(self.args.key)
+        makers, unanswered = [], []
+        for state, asking in rows:
+            runs, missed, _ = self._ask(obj, logs, asking)
+            unanswered += missed
+            if missed:
+                continue
+            lo, hi = asking.window
+            held = [r for rs in runs.values() for r in rs if r.first[:19] <= hi and r.last[:19] >= lo]
+            found = []
+            for x in calls:
+                f2 = R.function(x.rel, x.func, [x.line])
+                for r2 in held:
                     sn2 = R.seen(f2, r2, self.mode)
                     hits = [(row.line, r2.records[i].span) for row in f2.rows for i, _, _ in sn2.hits.get(row.line, ()) if obj in r2.records[i].text]
-                    if hits:
-                        makers.append((x, f2, r2, hits))
+                    if not hits:
+                        continue
+                    # a name many runs share is made by each: the job's own run is one that names it
+                    if not any(job.search(r.message) or (r.token and job.search(r.token)) for r in r2.records):
+                        self.say(f"   {Path(x.rel).name}:{x.line} printed the name in a run that does not name {self.args.key}: "
+                                 f"another job's, {r2.describe()}")
+                        continue
+                    found.append((x, f2, r2, hits))
+            self.say(f"-- {state['status']!r} at {hi} on {asking.machine or 'every machine'}: {len(held)} run(s) of the name "
+                     f"hold that second, {len(found)} with a make call's print and the job's key")
+            if found:
+                makers = found
+                break
+        self._stop_unanswered(unanswered)
         for x, _f2, r2, hits in makers:
             self.say(f"  {Path(x.rel).name}:{x.line} {x.func} {x.method}({x.first_arg})  printed the name at {hits}  run {r2.describe()}")
-        self.need("a make call whose function printed the object's name", makers)
+        self.need("a make call whose function printed the object's name, in a run holding one of the job's rows and naming the job", makers)
         if len({(x.rel, x.func) for x, *_ in makers}) != 1:
             self.need("one function among the makers", None)
         x, f2, r2, _ = makers[0]
