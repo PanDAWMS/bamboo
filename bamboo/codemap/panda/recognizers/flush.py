@@ -647,6 +647,7 @@ def _call_key_froms(
             )
             record._binds = (func, rel_path, [])
             record._object = (spelled, spec, [call], flush.excluded)
+            record._runs = (func, [call])
         record._binds[2].extend(binds)
         record.unread = "" if record._binds[2] else unread
 

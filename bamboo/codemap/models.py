@@ -2763,8 +2763,37 @@ class KeyFrom(BaseModel):
             "computed or carried, the delete -- or the ``INSERT`` itself."
         ),
     )
+    routes: int = Field(
+        default=0,
+        description=(
+            "How many routes of calls the corpus's calls place into the function (``Calls.routes``).  0 where no call "
+            "is placed at it -- an entry point, a thread's ``run``, a daemon's ``main`` started by configuration, a "
+            "class read as a value -- and *routes_open* is then true: it says nothing of whether the write runs."
+        ),
+    )
+    routes_open: bool = Field(
+        default=False,
+        description=(
+            "Whether a route may be missing from *routes*: a call by the function's name placed nowhere, or the "
+            "function reached from outside the corpus (``Calls.missed``)."
+        ),
+    )
+    out_on: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "The routes on which the write never runs: each the calls of one route as ``file:line``, the call into "
+            "the function first, where every place the write runs from (each call running the text with its map, a "
+            "flush's call, an object's uses) is ruled out by the constants the route hands the function's flag "
+            "parameters -- an ``if`` holding it, an ``if`` before it that leaves.  A flag the function binds again "
+            "rules nothing out.  All of *routes* with *routes_open* false: no placed caller runs it (``retryJob``'s "
+            "old-row ``UPDATE`` under ``if not getNewPandaID``, every caller handing ``True``)."
+        ),
+    )
     #: The binds to read *sources* from, ``(func, file, [sql.Bind])``; the step after the reach record reads them.
     _binds: Optional[tuple] = PrivateAttr(default=None)
+    #: ``(func, [node, ...])``: where the write runs from -- the calls running its text with its map, a flush's call,
+    #: an object's uses -- for *routes* / *out_on* (``sqlwrite.attach_routes``).
+    _runs: Optional[tuple] = PrivateAttr(default=None)
     #: An ``INSERT``'s, what decides *new_row* beside the sources: see :class:`~bamboo.codemap.panda.recognizers.
     #: sqlwrite._Insert`.
     _insert: Optional[Any] = PrivateAttr(default=None)

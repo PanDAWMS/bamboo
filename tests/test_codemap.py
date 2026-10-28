@@ -18581,6 +18581,123 @@ class TaskModule:
 '''
 
 
+_ROUTED = '''
+class TaskModule:
+    def retry(self, jediTaskID, getNew):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = "ready"
+        if not getNew:
+            sqlU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlU + comment, varMap)
+        sqlB = "UPDATE ATLAS_PANDA.JEDI_Tasks SET oldStatus=:status WHERE jediTaskID=:jediTaskID "
+        if getNew:
+            self.cur.execute(sqlB + comment, varMap)
+        else:
+            self.cur.execute(sqlB + comment, varMap)
+
+    def partly(self, jediTaskID, getNew):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = "ready"
+        if not getNew:
+            sqlP = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlP + comment, varMap)
+
+    def rebinding(self, jediTaskID, getNew, forced):
+        getNew = getNew or forced
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = "ready"
+        if not getNew:
+            sqlR = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlR + comment, varMap)
+
+    def uncalled(self, jediTaskID, getNew):
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = "ready"
+        if not getNew:
+            sqlN = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlN + comment, varMap)
+
+    def daily(self):
+        self.retry(1, True)
+        self.partly(1, True)
+        self.rebinding(1, True, False)
+
+    def weekly(self):
+        self.retry(2, True)
+        self.partly(2, False)
+
+
+def outside(proxy):
+    proxy.partly(3, True)
+'''
+
+
+def _routed(tmp_path):
+    """:data:`_ROUTED`'s KeyFroms by the variable of their text, through :func:`sqlwrite.attach_routes`."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _ROUTED})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sqlwrite.attach_key_sources([], junctions, calls, record, key_froms=froms, read_sites=[])
+        sqlwrite.attach_routes(froms, calls)
+    lines = _ROUTED.split("\n")
+
+    def at(text: str) -> str:
+        return f"{rel}:{next(number for number, line in enumerate(lines, 1) if text in line)}"
+
+    by = {}
+    for one in froms:
+        variable = lines[one.statement - 1].split("execute(")[1].split(" ")[0]
+        by.setdefault(variable, []).append(one)
+    return by, at
+
+
+def test_a_write_says_the_routes_on_which_it_never_runs(tmp_path):
+    """``retryJob``'s old-row ``UPDATE`` runs only ``if not getNewPandaID``, and every placed call hands ``True``: the
+    record says each route it is out on, and that no call of the function goes unplaced -- a statement no placed
+    caller runs.  ``partly`` is out on the route that hands ``True`` alone, and a call by its name on an undeclared
+    receiver leaves its routes open."""
+    by, at = _routed(tmp_path)
+
+    (old_row,) = by["sqlU"]
+    assert (old_row.routes, old_row.routes_open) == (2, False)
+    assert sorted(old_row.out_on) == [[at("self.retry(1, True)")], [at("self.retry(2, True)")]]
+    (partly,) = by["sqlP"]
+    assert (partly.routes, partly.routes_open, partly.out_on) == (2, True, [[at("self.partly(1, True)")]])
+
+
+def test_a_write_run_from_two_places_is_out_only_where_both_are(tmp_path):
+    """One text and one map run from two places is one record at the first: on each route one of them runs."""
+    by, _at = _routed(tmp_path)
+
+    (both,) = by["sqlB"]
+    assert (both.routes, both.out_on) == (2, [])
+
+
+def test_a_flag_the_function_binds_again_rules_out_no_route(tmp_path):
+    """``getNew = getNew or forced``: what the caller handed is not what the test reads."""
+    by, _at = _routed(tmp_path)
+
+    (rebound,) = by["sqlR"]
+    assert (rebound.routes, rebound.out_on) == (1, [])
+
+
+def test_a_write_of_a_function_no_call_places_has_no_route(tmp_path):
+    """Not that it never runs: an entry point, a thread's ``run``, a daemon's ``main`` is called by no line, and is
+    reached from outside the corpus -- a route the corpus's calls do not hold (``Calls.missed``)."""
+    by, _at = _routed(tmp_path)
+
+    (uncalled,) = by["sqlN"]
+    assert (uncalled.routes, uncalled.routes_open, uncalled.out_on) == (0, True, [])
+
+
 def test_a_key_filled_from_a_batch_is_the_batched_values_not_the_batch_size(tmp_path):
     """``updateInputFilesStaged_JEDI``'s shape: a map per file, copied from one filled before the loop, appended to the
     list ``executemany`` takes, the file's key from a batch of a dict the caller handed.  ``batched`` is not the
