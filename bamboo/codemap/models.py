@@ -2269,6 +2269,24 @@ class ReadSiteNode(BaseNode):
             "placed, and no hole may be a caller back."
         ),
     )
+    crossing_selects: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "For a :attr:`crosses_to` owner the rows reach only by going back "
+            "up routes that select fewer values than the statement does: the "
+            "values those routes select (:attr:`call_readings` whose chain the "
+            "way back up starts with, or starts), sorted.  1898 in "
+            "``_get_tasks_datasets_with_unprocessed_inputs`` selects "
+            "``JediTaskSpec.status`` by ``statusForJobGenerator()`` only where "
+            "``target_tasks`` is not given; its rows reach "
+            "``setCloudToTasks_JEDI`` only back up TaskBroker 259, which gives "
+            "it, so none of those values go there.\n\n"
+            "An owner not here takes the statement's own :attr:`selects`: one "
+            "the rows reach in the statement's function or below it, by a way "
+            "no route reading matches, or from a statement with no route "
+            "read."
+        ),
+    )
     joins: list[JoinPair] = Field(
         default_factory=list,
         description=(
@@ -5842,6 +5860,13 @@ class StatementReading(BaseModel):
     crosses_open: list[OpenCrossing] = Field(
         default_factory=list,
         description=":attr:`ReadSiteNode.crosses_open`: the calls on the way, and the callers back, this reading cannot place.",
+    )
+    crossing_selects: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            ":attr:`ReadSiteNode.crossing_selects`: for a ``crosses_to`` owner the rows reach only back up routes "
+            "that select fewer values, those values; an owner not here takes ``selects``."
+        ),
     )
     result: str = Field(
         default="",

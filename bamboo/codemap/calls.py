@@ -219,6 +219,36 @@ def _roots_key(roots: dict[str, Path]) -> tuple:
 UNSET = object()
 
 
+class Displayed(list):
+    """What :meth:`Calls.route_constant` answers for a list, tuple or set display a route hands: as many items as it
+    spells, none of them read.
+
+    Not ``None``, and true exactly when it spells an item -- what a test on a flag parameter asks of
+    ``simTasks=[tmpTaskItem]`` (TaskBroker 259) under ``if simTasks is not None``.  An item read as a value is
+    unknown (:func:`~bamboo.codemap.panda.sqleval.from_py` reads one so).  Equal to no string, number or ``None``;
+    against a container its items would decide, so it raises the ``TypeError``
+    :func:`~bamboo.codemap.panda.pathcond.decided` reads as undecided.
+    """
+
+    def __init__(self, items: int) -> None:
+        super().__init__(object() for _ in range(items))
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if isinstance(other, (list, tuple, set, frozenset, dict)):
+            raise TypeError("a display's items are not read")
+        return False
+
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return f"<a display of {len(self)} item(s)>"
+
+
 class Target(NamedTuple):
     """One function definition a call can land in, and the classes its object can be when it runs there.
 
@@ -1629,12 +1659,16 @@ class Calls:
         before handing it on (:meth:`bound_again`): ``getTasksToBeProcessed_JEDI``
         sets ``is_dry_run = True`` whenever ``simTasks`` is given, whatever its
         caller passed -- on a route that gives it, not on one that leaves it
-        ``None``.
+        ``None``.  Where the route's constants say which binding runs, the
+        parameter holds what that one binds (:meth:`bound_on_route`).  A list,
+        tuple or set display is :class:`Displayed`.
         """
         site = sites[0]
         handed = self.handed(site, target).get(name)
         if isinstance(handed, ast.Constant):
             return handed.value
+        if (displayed := _displayed(handed)) is not None:
+            return displayed
         if (
             isinstance(handed, ast.Name)
             and name in self.filled(site, target)
@@ -1644,8 +1678,58 @@ class Calls:
             owned = self.types.method_class(site.file, site.func)
             outer = Target(site.file, site.func, owned[1] if owned else None)
             if self.bound_again(handed.id, outer, sites[1:]):
-                return UNSET
+                return self.bound_on_route(handed.id, outer, sites[1:], site.call)
             return self.route_constant(handed.id, outer, sites[1:])
+        return UNSET
+
+    def bound_on_route(self, name: str, target: Target, sites: tuple, call: ast.AST) -> object:
+        """What *target*'s parameter *name* holds at *call* when the route *sites* calls it and binds it again on the
+        way: what the one binding the route's constants say runs before *call* binds (:meth:`route_constant` of a
+        parameter it binds from), or :data:`UNSET`.
+
+        ``getTasksToBeProcessed_JEDI`` binds ``target_tasks = simTasks`` under ``if simTasks is not None`` (3245)
+        before handing ``target_tasks`` on (3287): on TaskBroker 259's route, which hands ``simTasks=[tmpTaskItem]``,
+        that binding runs and ``target_tasks`` holds the display.  Only a plain ``name = value`` held by nothing but
+        ``if``s of *target*'s own, every test on its way decided for it (:func:`pathcond.runs_by`), the only binding
+        of the name not ruled out, and above *call*: a loop's binding, one the constants leave open, or two that
+        may run say nothing.
+        """
+        func = target.func
+        again = [binding.site for binding in pathcond.bindings(func, name) if not binding.nested]
+        if not again or any(
+            isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Del) for node in own_nodes(func)
+        ):
+            return UNSET
+        tested = {
+            one.id
+            for site in again
+            for test in pathcond.tests_on(site, func)
+            for one in walk(test)
+            if isinstance(one, ast.Name) and one.id in _parameter_names(func)
+        }
+        constants = {
+            one: value for one in sorted(tested) if (value := self.route_constant(one, target, sites)) is not UNSET
+        }
+        running = [site for site in again if not pathcond.ruled_out_by(site, func, constants)]
+        if len(running) != 1:
+            return UNSET
+        site = running[0]
+        if not (
+            isinstance(site, ast.Assign)
+            and len(site.targets) == 1
+            and isinstance(site.targets[0], ast.Name)
+            and site.lineno < getattr(call, "lineno", 0)
+            and _held_by_ifs(site, func)
+            and pathcond.runs_by(site, func, constants)
+        ):
+            return UNSET
+        value = site.value
+        if isinstance(value, ast.Constant):
+            return value.value
+        if (displayed := _displayed(value)) is not None:
+            return displayed
+        if isinstance(value, ast.Name) and value.id in _parameter_names(func) and not _rebinds(func, value.id):
+            return self.route_constant(value.id, target, sites)
         return UNSET
 
     def bound_again(self, name: str, target: Target, sites: tuple) -> bool:
@@ -1900,6 +1984,24 @@ def _parameter_names(func: ast.AST) -> set[str]:
     if args is None:
         return set()
     return {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+
+
+def _displayed(node: Optional[ast.AST]) -> Optional[Displayed]:
+    """*node* as :class:`Displayed` where it is a list, tuple or set display that spells each item; else ``None``."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)) and not any(isinstance(one, ast.Starred) for one in node.elts):
+        return Displayed(len(node.elts))
+    return None
+
+
+def _held_by_ifs(node: ast.AST, func: ast.AST) -> bool:
+    """Whether every statement holding *node* up to *func* is an ``if`` (or *func* itself): no loop, ``try`` or
+    ``with`` decides whether, or how often, it runs."""
+    parent = getattr(node, "parent", None)
+    while parent is not None and parent is not func:
+        if not isinstance(parent, ast.If):
+            return False
+        parent = getattr(parent, "parent", None)
+    return parent is func
 
 
 def _rebinds(func: ast.AST, name: str) -> bool:

@@ -533,6 +533,7 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         exits=[_statement_exit(text) for text in site.exits],
         crosses_to=list(site.crosses_to),
         crosses_open=list(site.crosses_open),
+        crossing_selects={owner: list(values) for owner, values in site.crossing_selects.items()},
         result=site.result,
     )
 

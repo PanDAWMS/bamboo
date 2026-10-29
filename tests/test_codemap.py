@@ -10010,6 +10010,91 @@ def test_a_call_crosses_where_the_rows_reach_it_not_where_it_stands(tmp_path):
     assert [n.crosses_to for n in nodes if n is not node] == [[]] * (len(nodes) - 1)
 
 
+_PICK = (
+    "class TaskModule:\n"
+    "    def pick(self, target_tasks=None):\n"
+    "        varMap = {}\n"
+    "        if not target_tasks:\n"
+    "            varMap[':status'] = 'ready'\n"
+    "            sql = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
+    "        else:\n"
+    "            varMap[':jediTaskID'] = target_tasks[0]\n"
+    "            sql = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE jediTaskID=:jediTaskID '\n"
+    "        self.cur.execute(sql + comment, varMap)\n"
+    "        res = self.cur.fetchall()\n"
+    "        return res\n"
+)
+
+
+def _picking(cls: str, handed: str, to: str) -> str:
+    """A class whose ``run`` calls ``TaskModule.pick`` handing *handed* and gives the rows to the call *to*."""
+    return (
+        "from pandaserver.x import TaskModule\n"
+        "from pandaserver.s import Setter\n"
+        "from pandaserver.y import relay\n\n\n"
+        f"class {cls}:\n"
+        "    def __init__(self, proxy: TaskModule, setter: Setter):\n"
+        "        self.proxy = proxy\n"
+        "        self.setter = setter\n\n"
+        "    def run(self):\n"
+        f"        rows = self.proxy.pick({handed})\n"
+        f"        {to}(rows)\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("broker", "generator", "selects"),
+    [
+        ("self.setter.setCloud", "len", {"pandaserver/s.py::setCloud": []}),
+        ("relay", "len", {"pandaserver/s.py::setCloud": []}),
+        ("relay", "relay", {}),
+        ("self.setter.setCloud", "self.setter.setCloud", {}),
+    ],
+    ids=["its-own-way-in", "through-a-function", "a-function-both-ways-go-through", "both-ways-in"],
+)
+def test_a_crossing_takes_the_values_its_own_routes_select(tmp_path, broker, generator, selects):
+    """1898's rows reach ``setCloudToTasks_JEDI`` only back up TaskBroker 259, which hands ``simTasks=[...]``: the
+    status values of the branch it does not take go nowhere there (XB).
+
+    Two callers of one statement: ``Broker`` hands a display, so the statement selects no status on its way, and
+    ``Gen`` hands nothing.  Where both ways reach ``Setter.setCloud`` it takes the statement's values -- through
+    ``relay`` too, which the walk goes through once: the second way in still counts.
+    """
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import plugin
+
+    files = {
+        "pandaserver/taskbuffer/Specs.py": _SPECS,
+        "pandaserver/x.py": _PICK,
+        "pandaserver/s.py": "class Setter:\n    def setCloud(self, t):\n        if t:\n            pass\n",
+        "pandaserver/y.py": "from pandaserver.s import Setter\n\n\ndef relay(t):\n    Setter().setCloud(t)\n",
+        "pandaserver/b.py": _picking("Broker", "target_tasks=[1]", broker),
+        "pandaserver/g.py": _picking("Gen", "", generator),
+    }
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    with sql.across_calls(calls):
+        nodes = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor, calls).statements, MAP_ID, VERSION)
+        record = reach.ReachGraph(reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves()))
+        sqlwrite.attach_crossings(nodes, modules, [_junction("pandaserver/s.py::setCloud")], calls, record)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 10]
+    assert node.selects == ["JEDI_Tasks.status=ready"]
+    assert sorted(route.chain[-1].split(":")[0] for route in node.call_readings) == [
+        "pandaserver/b.py",
+        "pandaserver/g.py",
+    ]
+    assert node.crosses_to == ["pandaserver/s.py::setCloud"]
+    assert node.crossing_selects == selects
+
+
 @pytest.mark.parametrize(
     ("fill", "crosses"),
     [

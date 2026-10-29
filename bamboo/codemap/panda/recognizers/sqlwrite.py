@@ -48,11 +48,20 @@ map holds rather than one it has no room for.
 from __future__ import annotations
 
 import ast
+import contextlib
 import dataclasses
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    NamedTuple,
+    Optional,
+)
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -5886,10 +5895,13 @@ class _Crossings:
     declared ``Any``.
     """
 
-    def __init__(self, reading: _Reading, landing: bool = False):
+    def __init__(self, reading: _Reading, landing: bool = False, routed: bool = False):
         self.reading = reading
         #: Whether to keep where the rows reach the database through calls (:attr:`landings`).
         self.landing = landing
+        #: Whether to keep each found owner's ways back up (:attr:`ways`): only :func:`attach_crossings`' walk reads
+        #: them, and the key sources' walks, many more, keep them for nothing.
+        self.routed = routed
         #: The junction owners the rows reach and read them; those found on the way back too.
         self.found: set[str] = set()
         self.found_back: set[str] = set()
@@ -5901,11 +5913,52 @@ class _Crossings:
         #: Where the rows reached the database through calls (:class:`_Landing`), and the way the walk is on now.
         self.landings: list[_Landing] = []
         self._way: list[tuple[str, str, ast.AST, ast.Call]] = []
+        #: Each found owner's ways back up: the ``file:line`` of each caller's call the rows went back through, in
+        #: order, as a route's chain spells it (``()`` for one reached from the statement's function).
+        self.ways: dict[str, set[tuple[str, ...]]] = {}
+        #: Each function gone through or back to (its ``_entered`` / ``_returned`` key): the owners found beneath it,
+        #: each with the way back up from it there -- what a way that reaches it again, and is not walked again,
+        #: reaches too.  And the ones being walked now, with how far back up the walk was when it went in.
+        self._beneath: dict[tuple, set[tuple[str, tuple[str, ...]]]] = {}
+        self._walking: list[tuple[tuple, int]] = []
 
     def _cross(self, owner: str) -> None:
         self.found.add(owner)
         if self._backing:
             self.found_back.add(owner)
+        if self.routed:
+            self._reached(owner, self._back_up())
+
+    def _back_up(self) -> tuple[str, ...]:
+        """The way back up the walk is on now (:attr:`ways`)."""
+        return tuple(f"{file}:{call.lineno}" for kind, file, _func, call in self._way if kind == "back")
+
+    def _reached(self, owner: str, way: tuple[str, ...]) -> None:
+        self.ways.setdefault(owner, set()).add(way)
+        for key, depth in self._walking:
+            self._beneath[key].add((owner, way[depth:]))
+
+    def _again(self, key: tuple) -> None:
+        """A function the walk does not go through again, reached by another way: what it reached is reached by this
+        one too.  Not where the walk is in it now: what it reaches is found under the way that went in, whose start
+        this one has."""
+        if not self.routed or any(walking == key for walking, _depth in self._walking):
+            return
+        way = self._back_up()
+        for owner, rest in self._beneath.get(key, ()):
+            self._reached(owner, way + rest)
+
+    @contextlib.contextmanager
+    def _going(self, key: tuple) -> Iterator[None]:
+        if not self.routed:
+            yield
+            return
+        self._beneath[key] = set()
+        self._walking.append((key, len(self._back_up())))
+        try:
+            yield
+        finally:
+            self._walking.pop()
 
     def into(self, carry: _PathCarry, call: ast.Call, everything: bool = False) -> None:
         """Follow *call*, made in *carry*'s function, handed what *carry* holds there -- all of it, *everything* --
@@ -5973,17 +6026,20 @@ class _Crossings:
     def _through(self, target: Target, given: dict[str, _Paths]) -> None:
         key = self.reading._key(target, given)
         if key in self._entered:
+            self._again(("through", key))
             return
         self._entered.add(key)
         carry = self.reading.summary(target, given).carry or self.reading.carry(target, given)
-        for call in _own_calls(target.func):
-            if carry.follows(call):
-                self.into(carry, call)
+        with self._going(("through", key)):
+            for call in _own_calls(target.func):
+                if carry.follows(call):
+                    self.into(carry, call)
 
     def back(self, file: str, func: ast.AST, paths: _Paths) -> None:
         """Follow the parts *paths* of the rows *func* returns into each of its callers."""
         key = (file, func.lineno, paths)  # type: ignore[attr-defined]
         if key in self._returned:
+            self._again(("back", key))
             return
         self._returned.add(key)
         reading = self.reading
@@ -5991,25 +6047,26 @@ class _Crossings:
             self.open[hole] = None
         held = reading.calls.types.method_class(file, func)
         self._backing += 1
-        for site in reading.calls.callers(Target(file, func, held[1] if held is not None else None)):
-            # A call in a module's own body has no caller to hand the rows on to, and a function calling itself is
-            # not where they go next.
-            if site.in_module or (site.file == file and site.func is func):
-                continue
-            self._way.append(("back", site.file, site.func, site.call))
-            try:
-                carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
-                owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
-                if owner in reading.owners and reading.reads_in(carry):
-                    self._cross(owner)
-                for call in _own_calls(site.func):
-                    if call is not site.call and carry.follows(call):
-                        self.into(carry, call)
-                returned = carry.returns()
-                if returned:
-                    self.back(site.file, site.func, returned)
-            finally:
-                self._way.pop()
+        with self._going(("back", key)):
+            for site in reading.calls.callers(Target(file, func, held[1] if held is not None else None)):
+                # A call in a module's own body has no caller to hand the rows on to, and a function calling itself
+                # is not where they go next.
+                if site.in_module or (site.file == file and site.func is func):
+                    continue
+                self._way.append(("back", site.file, site.func, site.call))
+                try:
+                    carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
+                    owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
+                    if owner in reading.owners and reading.reads_in(carry):
+                        self._cross(owner)
+                    for call in _own_calls(site.func):
+                        if call is not site.call and carry.follows(call):
+                            self.into(carry, call)
+                    returned = carry.returns()
+                    if returned:
+                        self.back(site.file, site.func, returned)
+                finally:
+                    self._way.pop()
         self._backing -= 1
 
 
@@ -6019,14 +6076,15 @@ def _walk(
     site: ReadSiteNode,
     item: Optional[int] = None,
     landing: bool = False,
+    routed: bool = False,
 ) -> tuple[_Crossings, _Paths]:
     """Carry *site*'s rows on from its statement in *func* (:func:`attach_crossings`) -- with *item*, that select item
-    of them alone (:class:`_PathCarry`), with *landing* keeping where they reach the database through calls: the walk,
-    and what *func* returns of them."""
+    of them alone (:class:`_PathCarry`), with *landing* keeping where they reach the database through calls, with
+    *routed* each found owner's ways back up (:attr:`_Crossings.ways`): the walk, and what *func* returns of them."""
     file, line = site.anchor.file, site.anchor.line_start
     rows = _rows_written(func, line, site.region[1])
     carry = _PathCarry(reading, file, func, (), start=rows, item=item)
-    crossings = _Crossings(reading, landing)
+    crossings = _Crossings(reading, landing, routed)
     for call in _own_calls(func):
         if call.lineno == line:
             # The call running the statement, followed with all it hands:
@@ -6241,7 +6299,7 @@ def attach_crossings(
         func = _site_function(trees, site)
         if func is None:
             continue
-        crossings, returned = _walk(reading, func, site, landing=landings is not None)
+        crossings, returned = _walk(reading, func, site, landing=landings is not None, routed=True)
         if landings is not None:
             found = [one for one in crossings.landings if not _own_run(one, func, site)]
             for landing in found:
@@ -6261,9 +6319,44 @@ def attach_crossings(
         site.crosses_open = [
             OpenCrossing(owner=owner, line=line, callee=callee) for owner, line, callee in sorted(crossings.open)
         ]
+        site.crossing_selects = _crossing_selects(site, crossings.ways)
         stored += len(site.crosses_to)
         opened += 1 if site.crosses_open else 0
     return CrossingCensus(stored, handing_back, resolved, opened)
+
+
+def _crossing_selects(site: ReadSiteNode, ways: dict[str, set[tuple[str, ...]]]) -> dict[str, list[str]]:
+    """:attr:`ReadSiteNode.crossing_selects`: each of *site*'s ``crosses_to`` owners whose *ways* back up all go by
+    routes selecting fewer values than the statement, with those values.
+
+    A way's routes are the :attr:`~ReadSiteNode.call_readings` whose chain it starts with, or which start it -- a
+    route is read four calls out (:attr:`Calls.ROUTE_HOPS`), a way may stop sooner.  A route read as the statement
+    selects what it does, one it never runs on nothing.  A way from the statement's own function, or one no route
+    matches, takes the statement's values, and so the owner does: a caller the routes did not place is not a reason
+    to select less."""
+    own = set(site.selects)
+    if not site.call_readings or not own:
+        return {}
+    found: dict[str, list[str]] = {}
+    for owner in site.crosses_to:
+        values: set[str] = set()
+        for way in ways.get(owner, {()}):
+            routes = [route for route in site.call_readings if route.chain and _starts_alike(route.chain, way)]
+            if not way or not routes:
+                values = own
+                break
+            for route in routes:
+                if not route.not_run:
+                    values |= own if route.as_statement else set(route.selects)
+        if values & own != own:
+            found[owner] = sorted(values & own)
+    return found
+
+
+def _starts_alike(chain: list[str], way: tuple[str, ...]) -> bool:
+    """Whether one of *chain* and *way* starts the other."""
+    length = min(len(chain), len(way))
+    return tuple(chain[:length]) == way[:length]
 
 
 class _Filled:

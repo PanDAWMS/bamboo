@@ -2682,7 +2682,8 @@ def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_n
 
 
 def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path):
-    """Renamed and passed by position, it is the caller's; bound again on the route, it is no one's; a literal or a default is the forwarder's."""
+    """Renamed and passed by position, it is the caller's; bound again on the route, it is what the one binding the
+    route runs binds, else no one's; a literal or a default is the forwarder's."""
     roots = _tree(
         tmp_path,
         db="def lock(flag, other=False, more=None):\n    if flag or other or more:\n        return 1\n",
@@ -2695,14 +2696,19 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
             "\n"
             "def maybe(flag, sim):\n    if sim:\n        flag = True\n    return lock(flag, sim)\n"
             "\n"
+            "def opened(flag, sim):\n    if sim:\n        flag = True\n    return lock(flag, sim)\n"
+            "\n"
+            "def looped(flag, sim):\n    for one in sim:\n        flag = one\n    return lock(flag, sim)\n"
+            "\n"
             "def fixed(flag):\n    return lock(True, flag)\n"
             "\n"
             "def spread(**kwargs):\n    return lock(False, **kwargs)\n"
         ),
         main=(
-            "from pkg.tb import fixed, maybe, rebound, renamed, spread\n"
+            "from pkg.tb import fixed, looped, maybe, opened, rebound, renamed, spread\n"
             "\n"
-            "def run():\n    renamed(False)\n    rebound(False, [1])\n    fixed(False)\n    spread(other=True)\n    maybe(False, None)\n"
+            "def run(n):\n    renamed(False)\n    rebound(False, [1])\n    fixed(False)\n    spread(other=True)\n"
+            "    maybe(False, None)\n    opened(False, n)\n    looped(False, (2,))\n"
         ),
     )
     calls = _calls(roots)
@@ -2715,9 +2721,15 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
         return {name: value for name, value in found.items() if value is not calls_mod.UNSET}
 
     assert constants("renamed") == {"flag": False, "other": False, "more": None}
-    # ``sim`` is handed on as it came, so the route goes on out to ``run``; ``flag``
-    # is bound again first, and what ``run`` hands it is not what ``lock`` gets.
-    assert constants("rebound") == {"more": None}
+    # ``sim`` is handed on as it came, so the route goes on out to ``run``, which hands a display: the
+    # binding runs, and ``lock`` gets what it binds, not what ``run`` handed ``flag``.
+    rebound = constants("rebound")
+    assert rebound.pop("flag") is True and repr(rebound.pop("other")) == "<a display of 1 item(s)>"
+    assert rebound == {"more": None}
+    # Bound again under a test the route leaves open, or in a loop: it is no one's.
+    assert constants("opened") == {"more": None}
+    looped = constants("looped")
+    assert repr(looped.pop("other")) == "<a display of 1 item(s)>" and looped == {"more": None}
     # The same binding under a test the route's own constant rules out is not on the route.
     assert constants("maybe") == {"flag": False, "other": None, "more": None}
     # ``other`` is handed on as it came: the outer call's.
