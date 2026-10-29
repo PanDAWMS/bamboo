@@ -891,20 +891,8 @@ _PERCENT = re.compile(
     r"%(?:\((?P<key>[^)]*)\))?(?P<flags>[#0\- +]*)(?P<width>\*|\d+)?(?:\.(?P<prec>\*|\d+))?[hlL]?(?P<conv>[diouxXeEfFgGcrsa%])"
 )
 _FORMATTER = string.Formatter()
-_MUTATORS = frozenset(
-    {
-        "append",
-        "extend",
-        "insert",
-        "pop",
-        "remove",
-        "clear",
-        "sort",
-        "reverse",
-        "update",
-        "setdefault",
-    }
-)
+#: The methods changing their receiver (:data:`callfacts.CHANGING`): a container's value is not known after one.
+_MUTATORS = callfacts.CHANGING
 #: The ``str`` methods this evaluator runs (:meth:`method` applies the text's own; of
 #: :data:`callfacts.TEXT_METHODS`).
 _STR_METHODS = frozenset(

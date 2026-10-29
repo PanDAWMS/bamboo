@@ -89,7 +89,7 @@ _STARTERS = callfacts.STARTERS
 #: typeshed states ``def copy(x: _T) -> _T`` -- unless that class defines the
 #: hook, and then it is what the hook returns.  The map reads the corpus's
 #: annotations and not typeshed's, so it is said here.
-_COPIES = {("copy", "copy"): "__copy__", ("copy", "deepcopy"): "__deepcopy__"}
+_COPIES = callfacts.COPIES
 
 
 class RecordedClass(NamedTuple):

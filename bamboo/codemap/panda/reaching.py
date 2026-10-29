@@ -76,6 +76,7 @@ from __future__ import annotations
 import ast
 from typing import Optional, Sequence
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 
 #: The nodes whose body is a scope of its own.
@@ -99,7 +100,7 @@ _SAFE = (
 #: Statements that can raise whatever they hold.
 _RAISING = (ast.Raise, ast.Assert, ast.Delete, ast.Import, ast.ImportFrom)
 
-_CATCH_ALL = {"Exception", "BaseException"}
+_CATCH_ALL = callfacts.CATCH_ALL
 
 #: How many site sets a scope keeps flows for.
 _KEPT = 32

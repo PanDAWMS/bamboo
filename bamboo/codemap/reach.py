@@ -124,17 +124,10 @@ _BUILTIN_ANNOTATIONS = {
     "str", "int", "float", "bool", "bytes", "bytearray", "complex", "range", "None", "NoneType",
 } | callfacts.containers(callfacts.MAPPING, callfacts.COLLECTION, callfacts.RECORD)  # fmt: skip
 _SCALARS = {"str", "int", "float", "bool", "bytes", "complex", "NoneType"}
-#: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
-_OPERATORS: dict[type, tuple[str, ...]] = {
-    op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
-    for op, name in (
-        (ast.Add, "add"), (ast.Sub, "sub"), (ast.Mult, "mul"), (ast.MatMult, "matmul"), (ast.Div, "truediv"),
-        (ast.FloorDiv, "floordiv"), (ast.Mod, "mod"), (ast.Pow, "pow"), (ast.LShift, "lshift"),
-        (ast.RShift, "rshift"), (ast.BitAnd, "and"), (ast.BitXor, "xor"), (ast.BitOr, "or"),
-    )
-} | {ast.USub: ("__neg__",), ast.UAdd: ("__pos__",), ast.Invert: ("__invert__",)}  # fmt: skip
+#: The dunders each operator calls (:data:`callfacts.OPERATOR_DUNDERS`).
+_OPERATORS = callfacts.OPERATOR_DUNDERS
 
-#: The dunders Python runs with no call naming them -- ``with``, ``for``,
+#: The dunders Python runs with no call naming them (:data:`callfacts.IMPLICIT_DUNDERS`) -- ``with``, ``for``,
 #: ``in``, ``x[k]``, ``str(x)``, an operator, comparing, hashing, pickling
 #: and copying.  No edge says when they run, so the premise
 #: ``outside_calls_back_only_handed`` takes them to reach no write, and the
@@ -146,17 +139,7 @@ _OPERATORS: dict[type, tuple[str, ...]] = {
 #: ``__setattr__`` has no ``called_from`` -- and a store on an object no
 #: reading says anything of has none (167 stores on pin k, 9 of them of
 #: ``jobStatus``).
-IMPLICIT_DUNDERS = frozenset(
-    {
-        "__enter__", "__exit__", "__aenter__", "__aexit__", "__iter__", "__next__", "__aiter__", "__anext__",
-        "__getitem__", "__setitem__", "__delitem__", "__contains__", "__len__", "__bool__", "__eq__", "__ne__",
-        "__lt__", "__le__", "__gt__", "__ge__", "__hash__", "__str__", "__repr__", "__format__", "__del__",
-        "__call__", "__getattr__", "__getattribute__", "__setattr__", "__delattr__", "__reduce__",
-        "__reduce_ex__", "__getstate__", "__setstate__", "__copy__", "__deepcopy__", "__new__", "__post_init__",
-        "__await__", "__index__", "__int__", "__float__", "__init_subclass__",
-    }
-    | {name for names in _OPERATORS.values() for name in names}
-)  # fmt: skip
+IMPLICIT_DUNDERS = callfacts.IMPLICIT_DUNDERS
 
 #: How a reach edge says an attribute store runs its object's ``__setattr__`` (:meth:`calls.Calls.stored`).
 HOW_SETATTR = "setattr"

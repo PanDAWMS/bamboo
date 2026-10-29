@@ -374,6 +374,67 @@ QUEUE_PUTS, QUEUE_GETS = (
 STARTERS = frozenset({("threading", "Thread"), ("multiprocessing", "Process")})
 START, RUN, JOIN = "start", "run", "join"
 
+#: The ``copy`` module's functions -> the method a class defines to be copied some other way: ``copy.copy(x)`` is an
+#: object of ``x``'s class -- typeshed states ``def copy(x: _T) -> _T`` -- unless that class defines the hook, and
+#: then it is what the hook returns.
+COPIES = {("copy", "copy"): "__copy__", ("copy", "deepcopy"): "__deepcopy__"}
+#: Calls reading a value again out of a text -- a column's content parsed or decoded, a value of its own: ``json``'s
+#: and ``pickle``'s ``loads`` / ``load``, ``ast.literal_eval``, ``yaml.safe_load``, ``base64.b64decode``,
+#: ``bytes.decode``, ``urllib.parse.unquote``, ``datetime``'s ``fromisoformat`` / ``strptime``; by their names.
+READ_AGAIN = frozenset(
+    {
+        "loads",
+        "load",
+        "literal_eval",
+        "safe_load",
+        "b64decode",
+        "decode",
+        "unquote",
+        "fromisoformat",
+        "strptime",
+    }
+)
+#: A call writing a value out whole, every part of it read, as a builtin's text of it does (:data:`TEXT`):
+#: ``json.dumps``.
+SERIALIZING = "dumps"
+#: Modules computing a number from what they are handed, as a builtin does (:data:`COMPUTED`).
+COMPUTING_MODULES = frozenset({"math", "statistics", "numpy", "np"})
+#: Iterator helpers outside the corpus (``itertools``', ``pandacommon``'s ``batched``) whose value is made of the first
+#: argument's elements -- in chunks (``batched(items, chunk_size)``), or as they come (``islice``) -- and, for
+#: ``chain``, of every argument's; a count handed beside them makes nothing.
+CHUNKING, SLICING, CHAINING = (
+    frozenset({"batched"}),
+    frozenset({"islice"}),
+    frozenset({"chain"}),
+)
+#: The exception classes a handler catching every exception names: ``except Exception``.
+CATCH_ALL = frozenset({"Exception", "BaseException"})
+
+#: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
+OPERATOR_DUNDERS: dict[type, tuple[str, ...]] = {
+    op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
+    for op, name in (
+        (ast.Add, "add"), (ast.Sub, "sub"), (ast.Mult, "mul"), (ast.MatMult, "matmul"), (ast.Div, "truediv"),
+        (ast.FloorDiv, "floordiv"), (ast.Mod, "mod"), (ast.Pow, "pow"), (ast.LShift, "lshift"),
+        (ast.RShift, "rshift"), (ast.BitAnd, "and"), (ast.BitXor, "xor"), (ast.BitOr, "or"),
+    )
+} | {ast.USub: ("__neg__",), ast.UAdd: ("__pos__",), ast.Invert: ("__invert__",)}  # fmt: skip
+
+#: The dunders Python runs with no call naming them -- ``with``, ``for``, ``in``, ``x[k]``, ``str(x)``, an operator,
+#: comparing, hashing, pickling and copying (:data:`bamboo.codemap.reach.IMPLICIT_DUNDERS` says what the walk takes
+#: of them).
+IMPLICIT_DUNDERS = frozenset(
+    {
+        "__enter__", "__exit__", "__aenter__", "__aexit__", "__iter__", "__next__", "__aiter__", "__anext__",
+        "__getitem__", "__setitem__", "__delitem__", "__contains__", "__len__", "__bool__", "__eq__", "__ne__",
+        "__lt__", "__le__", "__gt__", "__ge__", "__hash__", "__str__", "__repr__", "__format__", "__del__",
+        "__call__", "__getattr__", "__getattribute__", "__setattr__", "__delattr__", "__reduce__",
+        "__reduce_ex__", "__getstate__", "__setstate__", "__copy__", "__deepcopy__", "__new__", "__post_init__",
+        "__await__", "__index__", "__int__", "__float__", "__init_subclass__",
+    }
+    | {name for names in OPERATOR_DUNDERS.values() for name in names}
+)  # fmt: skip
+
 #: The other systems PanDA is a client of -> the packages it reaches each through.  What a client's method is handed
 #: goes to that system: another run's input, not this run's (reach's premise ``cross_run_not_reach``).  Not the
 #: database's drivers (the driver rule says where those go), not a library that works on what it is handed here

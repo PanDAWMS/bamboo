@@ -520,3 +520,24 @@ def test_a_queue_and_a_thread_are_said_once():
     assert ("queue", "Queue") in callfacts.QUEUES and ("asyncio", "Queue") in callfacts.QUEUES
     assert calls._STARTERS == callfacts.STARTERS == {("threading", "Thread"), ("multiprocessing", "Process")}
     assert trigger._DISPATCH == {callfacts.START, callfacts.RUN}
+
+
+def test_the_rest_of_the_library_facts_are_said_once():
+    """The copy module, the calls reading a value again, the computing modules, the iterator helpers, the catch-all
+    exceptions and the dunders are callfacts', and sqleval's changing methods are the containers' (callfacts.CHANGING)
+    -- a set's ``add`` and ``discard`` among them, which its own list had not."""
+    from bamboo.codemap import calls, reach
+    from bamboo.codemap.panda import reaching, sqleval
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    assert calls._COPIES == callfacts.COPIES and sqlwrite._COPIES == {"copy", "deepcopy"}
+    assert (sqlwrite._READ_AGAIN, sqlwrite._COMPUTING_MODULES) == (callfacts.READ_AGAIN, callfacts.COMPUTING_MODULES)
+    assert (sqlwrite._CHUNKING, sqlwrite._SLICING, sqlwrite._CHAINING) == (
+        callfacts.CHUNKING,
+        callfacts.SLICING,
+        callfacts.CHAINING,
+    )
+    assert reaching._CATCH_ALL == callfacts.CATCH_ALL == {"Exception", "BaseException"}
+    assert reach._OPERATORS[ast.Add] == ("__add__", "__radd__", "__iadd__")
+    assert reach.IMPLICIT_DUNDERS is callfacts.IMPLICIT_DUNDERS and "__radd__" in reach.IMPLICIT_DUNDERS
+    assert sqleval._MUTATORS == callfacts.CHANGING and {"add", "discard", "append"} <= sqleval._MUTATORS

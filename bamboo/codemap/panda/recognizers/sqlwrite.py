@@ -4396,11 +4396,9 @@ _NOTHING: _Paths = frozenset()
 #: What a ``+`` is of, as its operand is written (U1): a list, a number, a text -- or not written (``None``).
 _SEQUENCE, _NUMBER, _TEXT = "sequence", "number", "text"
 #: Calls reading a value again out of a text -- a column's content parsed, decoded: a value of its own (U1).
-_READ_AGAIN = frozenset(
-    {"loads", "load", "literal_eval", "safe_load", "b64decode", "decode", "unquote", "fromisoformat", "strptime"}
-)
-#: Modules computing a number from what they are handed (U1), as a builtin does (:data:`callfacts.COMPUTED`).
-_COMPUTING_MODULES = frozenset({"math", "statistics", "numpy", "np"})
+_READ_AGAIN = callfacts.READ_AGAIN
+#: Modules computing a number from what they are handed (U1), as a builtin does (:data:`callfacts.COMPUTING_MODULES`).
+_COMPUTING_MODULES = callfacts.COMPUTING_MODULES
 
 
 def _unread_call(call: ast.Call, name: str, function: Optional[callfacts.Function]) -> bool:
@@ -4530,16 +4528,14 @@ def _name_kinds(func: ast.AST) -> dict[str, str]:
 
 
 #: ``copy.copy`` / ``copy.deepcopy``: the value again, not a use of it.
-_COPIES = frozenset({"copy", "deepcopy"})
+_COPIES = frozenset(name for _module, name in callfacts.COPIES)
 #: ``json.dumps``: writes a value out whole -- every part of it read -- as a builtin's text of it does
 #: (:data:`callfacts.TEXT`).
-_SERIALIZING = "dumps"
+_SERIALIZING = callfacts.SERIALIZING
 #: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
 #: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
 #: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
-_CHUNKING = frozenset({"batched"})
-_SLICING = frozenset({"islice"})
-_CHAINING = frozenset({"chain"})
+_CHUNKING, _SLICING, _CHAINING = callfacts.CHUNKING, callfacts.SLICING, callfacts.CHAINING
 
 
 def _cut(path: tuple[str, ...]) -> tuple[str, ...]:
