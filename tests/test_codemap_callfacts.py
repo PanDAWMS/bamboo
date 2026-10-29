@@ -364,3 +364,68 @@ def test_every_reader_of_a_print_reads_its_level_from_one_table(method, level):
     assert emit.logging_arguments(func) == ([call.args[0]] if level else [])
     assert list(loopcut._logging_calls(func.body[0])) == ([call] if level else [])
     assert score_trace._logging_calls(func) == ({3: level} if level else {})
+
+
+@pytest.mark.parametrize(
+    ("text", "placed"),
+    [
+        ("self.cur.fetchone()", {("[2]",)}),
+        ("self.cur.fetchall()", {("[*]", "[2]")}),
+        ("self.cur.fetchmany(100)", {("[*]", "[2]")}),
+        ("self.taskBufferIF.querySQL(sql, var_map)", {("[*]", "[2]")}),
+        ("self.taskBuffer.querySQLS(sql, var_map)", {("[1]", "[*]", "[2]")}),
+        ("self.cur.execute(sql, var_map)", set()),
+    ],
+    ids=["fetchone-one-row", "fetchall-the-rows", "fetchmany-the-rows", "querySQL-the-rows", "querySQLS-status-rows",
+         "execute-binds-nothing"],
+)
+def test_a_call_giving_a_statements_rows_says_where_a_select_item_sits(text, placed):
+    """The cursor's fetches and the task buffer's runners hand back one row or the rows, ``querySQLS`` inside its
+    ``(status, rows)`` (callfacts.FETCHES, TASK_BUFFER_RUNS); ``execute`` binds nothing at the call."""
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    assert sqlwrite._item_in(_call(text), 2) == placed
+    assert sqlwrite._fetches(_call(text)) == text.startswith("self.cur.fetch")
+    assert sqlwrite._fetches(ast.parse("self.cur.rowcount", mode="eval").body)
+
+
+@pytest.mark.parametrize(
+    ("text", "driver_class", "driver"),
+    [
+        ("self.conn.commit()", None, True),
+        ("cur.fetchall()", None, True),
+        ("self.cur.execute(sql, var_map)", None, True),
+        ("self.proxy.fetchall()", "WrappedCursor", True),
+        ("tbuf.querySQL(sql, var_map)", None, False),
+    ],
+    ids=["a-connection-by-its-name", "a-cursor-local", "a-cursor-field", "a-driver-by-its-class", "the-task-buffer"],
+)
+def test_a_call_on_the_driver_goes_only_to_the_database(text, driver_class, driver):
+    """A call on the driver -- held as ``cur`` / ``conn``, or placed at a method of a driver class
+    (callfacts.CURSOR_NAMES, CONNECTION_NAMES, DRIVER_CLASSES) -- is the database's.  A value read off a cursor is a
+    statement's rows, off a connection none: provenance's stop names the cursor and the task buffer, not the
+    connection."""
+    from types import SimpleNamespace
+
+    from bamboo.codemap.panda import plugin, provenance
+
+    targets = [SimpleNamespace(cls=SimpleNamespace(name=driver_class))] if driver_class else []
+    assert plugin._on_driver(_call(text), SimpleNamespace(targets=targets)) is driver
+    assert {"cur", "taskBuffer", "taskBufferIF"} <= provenance.DATABASE_INTERFACES
+    assert "conn" not in provenance.DATABASE_INTERFACES
+
+
+def test_the_runners_where_no_corpus_is_read_are_the_cursors_and_the_task_buffers():
+    """A reading with no corpus runs statements at the cursor's ``execute`` / ``executemany`` (its binds one map per
+    row) and the task buffer's ``querySQL`` / ``querySQLS``; sql's runners and sqleval's are the same names."""
+    from bamboo.codemap.panda import sql, sqleval
+
+    runners = sql.runners()
+    assert {name: runner.many for name, runner in runners.items()} == {
+        "execute": False,
+        "executemany": True,
+        "querySQL": False,
+        "querySQLS": False,
+    }
+    assert sqleval._RUNNERS == frozenset(runners)
+    assert sql.CURSOR_RUNNERS == {"execute", "executemany"}

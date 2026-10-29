@@ -1148,11 +1148,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         return modules, skipped_tests
 
 
-#: The classes PanDA's proxies talk to the database through.
-_DRIVER_CLASSES = frozenset({"WrappedCursor", "WrappedOracleConn", "WrappedPostgresConn"})
-#: The names a cursor or a connection is held under, a field or a local --
-#: ``provenance.DATABASE_INTERFACES`` names ``cur`` the same way.
-_DRIVER_NAMES = frozenset({"cur", "conn"})
+#: The names a cursor or a connection is held under, a field or a local (:data:`callfacts.CURSOR_NAMES`,
+#: :data:`callfacts.CONNECTION_NAMES`).
+_DRIVER_NAMES = callfacts.CURSOR_NAMES | callfacts.CONNECTION_NAMES
 
 
 class _DatabaseLeaves:
@@ -1226,7 +1224,7 @@ def _on_driver(call: ast.Call, placed) -> bool:
         root = root.func if isinstance(root, ast.Call) else root.value
     if isinstance(root, ast.Name) and root.id in _DRIVER_NAMES:
         return True
-    return any(target.cls is not None and target.cls.name in _DRIVER_CLASSES for target in placed.targets)
+    return any(target.cls is not None and target.cls.name in callfacts.DRIVER_CLASSES for target in placed.targets)
 
 
 def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop], list[CallStop]]:

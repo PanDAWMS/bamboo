@@ -793,7 +793,7 @@ class _Values:
             for node in C.own_nodes(self.func)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in sql.FETCHES
+            and node.func.attr in callfacts.FETCHES
         }
         ties: Optional[set[tuple[str, str]]] = None
         for path in rows:

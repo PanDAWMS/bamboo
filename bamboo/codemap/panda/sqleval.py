@@ -110,10 +110,12 @@ WHOLE_WORK: Optional[int] = (
     500_000  # the run over every call of a function; past it, each call on its own (was 5 s)
 )
 CALLEE_WORK: Optional[int] = 200_000  # one callee run (was 0.5 s)
-#: The names a call runs a statement by where no corpus is read; a corpus says its own (``sql.runners``), installed
-#: for the reading by :func:`use_runners`.
-RUNNERS = frozenset({"execute", "executemany", "querySQL", "querySQLS"})
-_RUNNERS: frozenset[str] = RUNNERS
+#: The names a call runs a statement by where no corpus is read (:data:`callfacts.CURSOR_RUNS`,
+#: :data:`callfacts.TASK_BUFFER_RUNS`); a corpus says its own (``sql.runners``), installed for the reading by
+#: :func:`use_runners`.
+_RUNNERS: frozenset[str] = frozenset(
+    {**callfacts.CURSOR_RUNS, **callfacts.TASK_BUFFER_RUNS}
+)
 
 
 def use_runners(names: frozenset[str]) -> frozenset[str]:
@@ -1638,7 +1640,6 @@ def _aligned(base: "Env", env: "Env", names) -> "Env":
 
 _RETURNS: dict = {}  # (callee, arguments) -> (callee, values or None, dims made in it)
 _PLACED: dict = {}  # id(call) -> (call, the resolver's targets)
-_DATABASE_READS = frozenset({"fetchall", "fetchone", "fetchmany"})
 _NESTED: dict = {}  # id(func) -> (func, ids of the functions defined inside it)
 
 
@@ -4568,7 +4569,7 @@ class Ref:
             if isinstance(node.func, ast.Attribute)
             else getattr(node.func, "id", "")
         )
-        if name in _RUNNERS or name in _DATABASE_READS:
+        if name in _RUNNERS or name in callfacts.FETCHES:
             return [UNK]  # what the database hands back
         held = _PLACED.get(id(node))
         if held is None or held[0] is not node:

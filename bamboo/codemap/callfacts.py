@@ -33,10 +33,11 @@ with no placing -- the trace, what may change a name between two lines -- reads 
 The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
 what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
 method changes its receiver, a logger's methods and the calls making a logger (:data:`LOG_LEVELS`,
-:data:`LOGGER_MAKERS`), and what a builtin function does with what it is handed -- what
-its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``), the builtin
-type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name is the
-builtin's (:func:`builtin_function`).
+:data:`LOGGER_MAKERS`), the database's driver, the calls running a statement and those handing back its rows
+(:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), and what a builtin function does with what it is
+handed -- what its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``),
+the builtin type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name
+is the builtin's (:func:`builtin_function`).
 """
 
 from __future__ import annotations
@@ -223,6 +224,54 @@ LOGGER_MAKERS: dict[str, LoggerMaker] = {
     "getLogger": LoggerMaker(None, None, opens=True),
     "setup_logger": LoggerMaker(None, None, opens=True),
 }
+
+#: The classes PanDA's proxies talk to the database through (``pandaserver/taskbuffer``'s wrappers of the driver): a
+#: call on one goes only to the database.
+DRIVER_CLASSES = frozenset(
+    {"WrappedCursor", "WrappedOracleConn", "WrappedPostgresConn"}
+)
+#: The names a cursor and a connection are held under, a field or a local, read where the class cannot be: a call on
+#: either goes only to the database; a value a cursor hands back is a statement's rows, a connection's none.
+CURSOR_NAMES, CONNECTION_NAMES = frozenset({"cur"}), frozenset({"conn"})
+#: The names the task buffer is held under: what a call on it hands back comes from the database.
+TASK_BUFFER_NAMES = frozenset({"taskBufferIF", "taskBuffer"})
+
+#: What a call gives of a statement's rows: one row, or the rows.
+ROW, ROWS = "row", "rows"
+
+
+class Rows(NamedTuple):
+    """What a call gives of the rows of the statement run: *gives* :data:`ROW` or :data:`ROWS`, at position *at* of
+    what it hands back, ``None`` for the whole of it (``querySQLS``'s ``(status, rows)`` holds them at 1)."""
+
+    gives: str
+    at: Optional[int] = None
+
+
+class Run(NamedTuple):
+    """A call running the statement it is handed: *many*, its binds a list of maps, one per row; *rows*, what it hands
+    back of the rows, ``None`` where they are fetched (:data:`FETCHES`)."""
+
+    many: bool = False
+    rows: Optional[Rows] = None
+
+
+#: The cursor's methods running a statement, by their names: the driver's, never a function of the corpus so named.
+CURSOR_RUNS: dict[str, Run] = {"execute": Run(), "executemany": Run(many=True)}
+#: The task buffer's, said where no corpus is read; a corpus says its own (:func:`bamboo.codemap.panda.sql.runners`).
+TASK_BUFFER_RUNS: dict[str, Run] = {
+    "querySQL": Run(rows=Rows(ROWS)),
+    "querySQLS": Run(rows=Rows(ROWS, 1)),
+}
+#: The cursor's methods handing back the rows of the statement it ran: ``self.cur.execute(sql, varMap)`` binds
+#: nothing at the call, ``res = self.cur.fetchall()`` the rows.
+FETCHES: dict[str, Rows] = {
+    "fetchone": Rows(ROW),
+    "fetchall": Rows(ROWS),
+    "fetchmany": Rows(ROWS),
+}
+#: The cursor's count of the rows its statement ran on.
+ROW_COUNT = "rowcount"
 
 #: The other systems PanDA is a client of -> the packages it reaches each through.  What a client's method is handed
 #: goes to that system: another run's input, not this run's (reach's premise ``cross_run_not_reach``).  Not the

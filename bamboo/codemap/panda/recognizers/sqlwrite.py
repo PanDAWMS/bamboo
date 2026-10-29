@@ -3018,7 +3018,7 @@ def _rows_written(
     over the cursor that ran the statement (``for (pandaID,) in self.cur:``,
     the receiver of the call line's ``execute``), whose target takes each row.
     Reading only the call would leave most of the corpus with no rows to test
-    an exit against -- see :data:`sql.FETCHES`.
+    an exit against -- see :func:`sql.regions`.
 
     A fetch was read only as the whole value, and only where the call line
     bound nothing: ``has_merging`` and ``nRow`` held no rows, so ``if not
@@ -3031,7 +3031,7 @@ def _rows_written(
         if isinstance(node, ast.Call)
         and node.lineno == line
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr in ("execute", "executemany")
+        and node.func.attr in callfacts.CURSOR_RUNS
     }
     found: list[ast.Assign | ast.AnnAssign | ast.For | ast.AsyncFor] = []
     for node in walk(func):
@@ -3050,8 +3050,8 @@ def _rows_written(
 def _fetches(node: ast.AST) -> bool:
     """Whether *node* fetches a statement's rows or reads how many there were: ``x.fetchall()``, ``x.rowcount``."""
     if isinstance(node, ast.Call):
-        return isinstance(node.func, ast.Attribute) and node.func.attr in sql.FETCHES
-    return isinstance(node, ast.Attribute) and node.attr == "rowcount"
+        return isinstance(node.func, ast.Attribute) and node.func.attr in callfacts.FETCHES
+    return isinstance(node, ast.Attribute) and node.attr == callfacts.ROW_COUNT
 
 
 def _route_constants(calls: Calls, target: Target, sites: tuple[CallSite, ...], tested: set[str]) -> dict[str, object]:
@@ -4842,15 +4842,21 @@ class _Summary(NamedTuple):
     carry: Optional["_PathCarry"]
 
 
+def _item_steps(rows: callfacts.Rows) -> tuple[str, ...]:
+    """The steps to a select item, ``{}`` its position, in what a call giving *rows* hands back."""
+    steps = ("[{}]",) if rows.gives == callfacts.ROW else (_ALL, "[{}]")
+    return steps if rows.at is None else (f"[{rows.at}]", *steps)
+
+
 #: Where a select item sits, ``{}`` its position, in what a call giving a statement's rows gives: one row's of a
 #: ``fetchone``, each row's of a ``fetchall`` / ``fetchmany`` and of the task buffer's ``querySQL``, the rows' of
-#: ``querySQLS``'s ``(status, rows)``.
+#: ``querySQLS``'s ``(status, rows)`` (:data:`callfacts.FETCHES`, :data:`callfacts.TASK_BUFFER_RUNS`).
 _ITEM_AT: dict[str, tuple[str, ...]] = {
-    "fetchone": ("[{}]",),
-    "fetchall": (_ALL, "[{}]"),
-    "fetchmany": (_ALL, "[{}]"),
-    "querySQL": (_ALL, "[{}]"),
-    "querySQLS": ("[1]", _ALL, "[{}]"),
+    name: _item_steps(rows)
+    for name, rows in [
+        *callfacts.FETCHES.items(),
+        *((name, run.rows) for name, run in callfacts.TASK_BUFFER_RUNS.items() if run.rows is not None),
+    ]
 }
 
 

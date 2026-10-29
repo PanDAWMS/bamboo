@@ -89,7 +89,7 @@ EXTERNAL_INTERFACES = {
 #: those come back as "chosen by whoever called or built this", which is true
 #: of the cursor object and false of the row: the row came from the statement
 #: executed a few lines above, and the map has read that statement.
-DATABASE_INTERFACES = {"taskBufferIF", "taskBuffer", "cur"}
+DATABASE_INTERFACES = callfacts.TASK_BUFFER_NAMES | callfacts.CURSOR_NAMES
 
 #: The task buffer's facades -> the attribute each borrows a proxy from, and
 #: the proxy class whose methods run the statements.
