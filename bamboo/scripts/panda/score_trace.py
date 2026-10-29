@@ -95,10 +95,6 @@ from bamboo.codemap import trace as trace_mod
 from bamboo.codemap.panda import provenance
 from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 
-# The level vocabulary rather than a second copy of it, for the reason
-# ``log_level`` is public: one of them has to be kept current.
-from bamboo.codemap.panda.recognizers.selection import _LOG_LEVELS
-
 logger = logging.getLogger(__name__)
 
 #: Every walk here is the whole-function one, although ``derive-strategy``
@@ -941,10 +937,10 @@ def _logging_calls(func: ast.AST) -> dict[int, str]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _LOG_LEVELS
+            and node.func.attr in callfacts.LOG_LEVELS  # the level vocabulary, not a second copy of it
             and node.args
         ):
-            found[node.lineno] = node.func.attr
+            found[node.lineno] = callfacts.LOG_LEVELS[node.func.attr]
     return found
 
 

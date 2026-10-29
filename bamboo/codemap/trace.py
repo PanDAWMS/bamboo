@@ -1049,6 +1049,9 @@ PREFIX_NOT_FOLLOWED = "the logger {logger} is built by {call}(...), which is not
 PREFIX_STAMP = "the logger {logger} is a LogWrapper with prefix None, which writes a time stamp"
 PREFIX_NOT_FOLDED = "the logger {logger}'s prefix {prefix} is not a string this reading folds"
 PREFIX_KEYWORD = "the logger {logger}'s prefix is given by keyword, which is not read"
+#: The logger maker whose prefix this reading spells: ``LogWrapper(logger, prefix)`` writes ``prefix + " " + message``,
+#: its mark where :data:`callfacts.LOGGER_MAKERS` says.
+_WRAPPER = "LogWrapper"
 
 
 def _fold(expression: Optional[ast.expr], env: dict[str, list], depth: int = 0) -> Optional[list]:
@@ -1142,14 +1145,15 @@ def _wrapper_prefix(built: ast.Call, env: dict[str, list]) -> tuple[Optional[lis
     ``LogWrapper(logger)`` writes the message alone; a prefix of ``None`` is a
     time stamp taken when the logger is made, which no pattern here spells.
     """
-    if len(built.args) >= 2:
-        given = built.args[1]
-    elif any(keyword.arg == "prefix" for keyword in built.keywords):
+    mark = callfacts.LOGGER_MAKERS[_WRAPPER].mark
+    if len(built.args) > mark.position:
+        given = built.args[mark.position]
+    elif any(keyword.arg == mark.keyword for keyword in built.keywords):
         return None, PREFIX_KEYWORD
     else:
-        return [], ""
+        return ([], "") if mark.absent == callfacts.NO_MARK else (None, PREFIX_STAMP)
     if isinstance(given, ast.Constant) and given.value is None:
-        return None, PREFIX_STAMP
+        return (None, PREFIX_STAMP) if mark.none == callfacts.STAMP else ([], "")
     pieces = _fold(given, env)
     if pieces is None:
         return None, PREFIX_NOT_FOLDED.replace("{prefix}", _text(given))
@@ -2736,7 +2740,7 @@ class _Walk:
         The why is a ``PREFIX_*`` text with ``{logger}`` left for the caller.
         """
         env = self._constant_env(frame.func)
-        if _called_name(built) == "LogWrapper":
+        if _called_name(built) == _WRAPPER:
             return _wrapper_prefix(built, env)
         unfollowed = PREFIX_NOT_FOLLOWED.replace("{call}", _called_name(built) or _text(built.func))
         if depth > 1:
@@ -2763,7 +2767,7 @@ class _Walk:
                 and isinstance(targets[0], ast.Name)
             ):
                 value = statement.value
-                if isinstance(value, ast.Call) and _called_name(value) == "LogWrapper":
+                if isinstance(value, ast.Call) and _called_name(value) == _WRAPPER:
                     loggers[targets[0].id] = _wrapper_prefix(value, callee_env)
                     continue
                 folded = _fold(value, callee_env)
@@ -2782,7 +2786,7 @@ class _Walk:
                 returned = statement.value
                 if isinstance(returned, ast.Name):
                     return loggers.get(returned.id, (None, unfollowed))
-                if isinstance(returned, ast.Call) and _called_name(returned) == "LogWrapper":
+                if isinstance(returned, ast.Call) and _called_name(returned) == _WRAPPER:
                     return _wrapper_prefix(returned, callee_env)
                 return None, unfollowed
         return None, unfollowed

@@ -32,7 +32,8 @@ with no placing -- the trace, what may change a name between two lines -- reads 
 
 The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
 what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
-method changes its receiver, a logger's methods, and what a builtin function does with what it is handed -- what
+method changes its receiver, a logger's methods and the calls making a logger (:data:`LOG_LEVELS`,
+:data:`LOGGER_MAKERS`), and what a builtin function does with what it is handed -- what
 its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``), the builtin
 type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name is the
 builtin's (:func:`builtin_function`).
@@ -163,22 +164,65 @@ BUILTIN_METHODS: dict[tuple[str, str], Method] = {
 #: handed in its object, whole (:data:`ASSUMPTIONS` ``library_keeps_what_it_is_handed``).
 KEEPS_ALL = Method((Put(EVERY_POSITIONAL, WHOLE), Put(EVERY_KEYWORD, WHOLE)), True)
 
-#: A logger's methods, by their names: a call of one writes a line and keeps nothing it is handed (:data:`ASSUMPTIONS`
-#: ``logger_keeps_nothing``).  ``sendMsg`` / ``keepMsg`` are JEDI's ``MsgWrapper``'s, ``log`` ``logging.Logger``'s.
-LOG_METHODS = frozenset(
-    {
-        "debug",
-        "info",
-        "warning",
-        "warn",
-        "error",
-        "exception",
-        "critical",
-        "sendMsg",
-        "keepMsg",
-        "log",
-    }
-)
+#: A logger's methods writing one line to its file at a level of their own, by their names -> that level, as the line
+#: spells it lower-cased: ``exception`` writes at ``error`` (the traceback too), ``warn`` is ``warning``'s old name.
+LOG_LEVELS: dict[str, str] = {
+    "debug": "debug",
+    "info": "info",
+    "warning": "warning",
+    "warn": "warning",
+    "error": "error",
+    "exception": "error",
+    "critical": "critical",
+}
+#: A logger's methods, by their names: a call of one writes a line, or keeps one to write later, and keeps nothing it
+#: is handed (:data:`ASSUMPTIONS` ``logger_keeps_nothing``).  Beside :data:`LOG_LEVELS`': ``log``, ``logging.Logger``'s,
+#: whose level is its first argument and the line its second; ``sendMsg``, ``MsgWrapper``'s and ``LogWrapper``'s,
+#: which sends the line to the HTTP logger, not the file; ``keepMsg``, theirs too, which keeps it and writes nothing.
+LOG_METHODS = frozenset(LOG_LEVELS) | {"log", "sendMsg", "keepMsg"}
+
+
+#: A logger maker's mark when it is given none, or ``None``: the time the logger is made, or no mark.
+STAMP, NO_MARK = "stamp", ""
+
+
+class Mark(NamedTuple):
+    """Where a logger maker takes the mark it writes on each line: the argument at *position* or *keyword*; *absent*
+    what it marks lines with when given neither, *none* when given ``None`` (:data:`STAMP` or :data:`NO_MARK`)."""
+
+    position: int
+    keyword: str
+    absent: str
+    none: str
+
+
+class LoggerMaker(NamedTuple):
+    """What a call making a logger does: *logger* the position of the logger it writes through, ``None`` where its
+    body says (``create_tagged_logger``'s ``self._log_stream``) or it opens a file; *mark* where it takes each line's
+    mark, ``None`` for none; *opens* whether it opens PandaLogger's file of the name it is handed first."""
+
+    logger: Optional[int]
+    mark: Optional[Mark]
+    opens: bool = False
+
+
+#: The calls making a logger, by their names: what they are handed is a log line's -- a mark, a name, a logger -- and
+#: the logger holds none of it as a value.  ``LogWrapper`` and ``make_logger`` are pandacommon's, ``MsgWrapper`` JEDI's,
+#: ``create_tagged_logger`` the database proxy's; ``getLogger`` is ``PandaLogger``'s and ``logging``'s alike.
+LOGGER_MAKERS: dict[str, LoggerMaker] = {
+    # LogWrapper(log, prefix="", ...): a prefix of None is the time.
+    "LogWrapper": LoggerMaker(0, Mark(1, "prefix", NO_MARK, STAMP)),
+    # MsgWrapper(logger, token=None, ...): "<time>" for none.
+    "MsgWrapper": LoggerMaker(0, Mark(1, "token", STAMP, STAMP)),
+    # make_logger(tmp_log, token=None, ...): "method <token>", "method :" for none.
+    "make_logger": LoggerMaker(0, Mark(1, "token", NO_MARK, NO_MARK)),
+    # DBProxy.create_tagged_logger(comment, tag=None): "method < tag >", the time for none.
+    "create_tagged_logger": LoggerMaker(None, Mark(1, "tag", STAMP, STAMP)),
+    # PandaLogger().getLogger(name) opens "<logdir>/panda-<name>.log"; setup_logger(name) too, its caller's module's
+    # name for none.
+    "getLogger": LoggerMaker(None, None, opens=True),
+    "setup_logger": LoggerMaker(None, None, opens=True),
+}
 
 #: The other systems PanDA is a client of -> the packages it reaches each through.  What a client's method is handed
 #: goes to that system: another run's input, not this run's (reach's premise ``cross_run_not_reach``).  Not the

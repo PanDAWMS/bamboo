@@ -2482,10 +2482,6 @@ def _merged_tree(one: Optional[ConditionNode], other: Optional[ConditionNode]) -
 _SEEDED = re.compile(r"(:\w+)@[\d,]+")
 
 
-#: The logger methods a print of a statement is made with.
-_PRINTS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
-
-
 def _message_parts(node: ast.expr) -> list[tuple[str, object]]:
     """A message as it is assembled: ``("text", str)`` and ``("expr", node)`` in order.
 
@@ -2580,7 +2576,7 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _PRINTS
+            and node.func.attr in callfacts.LOG_LEVELS  # a print of a statement
             and len(node.args) == 1
             and enclosing_function(node) is func
         ):
@@ -4397,9 +4393,6 @@ _Paths = frozenset[tuple[str, ...]]
 _WHOLE: _Paths = frozenset({()})
 _NOTHING: _Paths = frozenset()
 
-#: Calls making a logger whose tag is the value: the tag is a log line's.  ``create_tagged_logger`` tests ``if tag is
-#: None`` and ``MsgWrapper.__init__`` its token, which read as using it.
-_LOG_MAKERS = frozenset({"create_tagged_logger", "MsgWrapper", "LogWrapper"})
 #: What a ``+`` is of, as its operand is written (U1): a list, a number, a text -- or not written (``None``).
 _SEQUENCE, _NUMBER, _TEXT = "sequence", "number", "text"
 #: Calls reading a value again out of a text -- a column's content parsed, decoded: a value of its own (U1).
@@ -5293,7 +5286,7 @@ class _PathCarry:
         if id(call) in self.call_values:
             return self.call_values[id(call)]
         name = _callee_name(call)
-        if name in _LOG_MAKERS:
+        if name in callfacts.LOGGER_MAKERS:  # its tag is a log line's: the makers' `if tag is None` is no use of it
             return _NOTHING
         held = self.held
         args = [one.value if isinstance(one, ast.Starred) else one for one in call.args]
@@ -5483,9 +5476,9 @@ class _Reading:
     A function **reads** what it is handed where its value decides something there: a test on it whole (``if
     rows:``), an index it chooses, a call that uses it -- the database's (a bind), a method of the value
     (``job.valuesMap()``), a function owning no junction that reads it in its body; else what a call makes of it is
-    read where that goes.  Not a read: a log line (:data:`callfacts.LOG_METHODS`, :data:`_LOG_MAKERS`), a builtin
-    telling nothing of it, a copy, a value put into a container or handed on -- to a name, a loop, a ``return``, the
-    caller.
+    read where that goes.  Not a read: a log line (:data:`callfacts.LOG_METHODS`, :data:`callfacts.LOGGER_MAKERS`), a
+    builtin telling nothing of it, a copy, a value put into a container or handed on -- to a name, a loop, a
+    ``return``, the caller.
     A definition is read while it is read: a call of itself gets nothing back and reads nothing.
     """
 
@@ -5640,7 +5633,7 @@ class _Reading:
         :func:`callfacts.meaning` reads it: what the definitions it lands at keep (their summaries), the object a
         protocol copies into, what a library object's or a builtin container's method puts into its object."""
         name = _callee_name(call)
-        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return {}
         # The pickle round trip copies what ``y`` holds, whatever ``y.__getstate__()`` is read as.
         copied = callfacts.round_trip(call)
@@ -5784,7 +5777,7 @@ class _Reading:
 
     def _argument_reads(self, carry: _PathCarry, call: ast.Call, child: ast.AST) -> bool:
         name = _callee_name(call)
-        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return False
         function = callfacts.builtin_function(self.calls.types, carry.file, carry.func, call)
         if function is not None and function.gives == callfacts.TELLS:
@@ -5804,7 +5797,7 @@ class _Reading:
 
     def _method_reads(self, carry: _PathCarry, call: ast.Call) -> bool:
         name = _callee_name(call)
-        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return False
         if callfacts.round_trip(call) is not None or _state_handed_across(call):
             return False  # pickle's round trip, either half: a copy, read where the copy is used

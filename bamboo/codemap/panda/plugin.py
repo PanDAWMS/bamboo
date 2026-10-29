@@ -23,8 +23,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from bamboo.codemap import callfacts, reach, reading, trace
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reach, reading, trace
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
@@ -1148,11 +1148,6 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         return modules, skipped_tests
 
 
-#: A logger's methods.  What a log call lands in says nothing about a value,
-#: and counting them would make a third of the calls the stops are drawn from.
-_LOG_CALLS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
-
-
 #: The classes PanDA's proxies talk to the database through.
 _DRIVER_CLASSES = frozenset({"WrappedCursor", "WrappedOracleConn", "WrappedPostgresConn"})
 #: The names a cursor or a connection is held under, a field or a local --
@@ -1258,7 +1253,9 @@ def _call_stops(calls, modules: list[SourceModule]) -> tuple[int, list[CallStop]
     stops: list[CallStop] = []
     opened: list[CallStop] = []
     for name, sites in sorted(calls.every_call().items()):
-        if name not in defined or name in _LOG_CALLS:
+        # A logger's method: what it lands in says nothing about a value, and counting them would make a third
+        # of the calls the stops are drawn from.
+        if name not in defined or name in callfacts.LOG_METHODS:
             continue
         for site in sites:
             if site.file not in files or site.in_module:

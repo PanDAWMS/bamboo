@@ -138,8 +138,8 @@ import string
 from collections import defaultdict, deque
 from typing import Callable, Iterator, NamedTuple, Optional, Union
 
+from bamboo.codemap import callfacts, objects, reach
 from bamboo.codemap import calls as C
-from bamboo.codemap import objects, reach
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -175,28 +175,12 @@ HISTORY_TABLES: dict[str, str] = {
 HISTORY_KEYS: dict[str, str] = {"JobSpec": "PandaID", "JediTaskSpec": "jediTaskID"}
 
 
-class Builder(NamedTuple):
-    """Where a logger factory takes its mark from, and what it marks lines with when given none."""
-
-    #: The mark's position among the call's arguments.
-    position: int
-    keyword: str
-    #: For no argument: :data:`RUN_KEY_TIME` for a time stamp, ``""`` for no mark.
-    absent: str
-    #: For ``None`` given.
-    none: str
-
-
-#: PanDA's logger factories: a logger bound to one of these starts a run.
-BUILDERS: dict[str, Builder] = {
-    # pandacommon LogWrapper(log, prefix="", ...): a prefix of None is the time.
-    "LogWrapper": Builder(1, "prefix", "", RUN_KEY_TIME),
-    # pandajedi MsgWrapper(logger, token=None, ...): "<time>" for none.
-    "MsgWrapper": Builder(1, "token", RUN_KEY_TIME, RUN_KEY_TIME),
-    # DBProxy.create_tagged_logger(comment, tag=None): "method < tag >", the time for none.
-    "create_tagged_logger": Builder(1, "tag", RUN_KEY_TIME, RUN_KEY_TIME),
-    # pandacommon make_logger(tmp_log, token=None, ...): "method <token>", "method :" for none.
-    "make_logger": Builder(1, "token", "", ""),
+#: PanDA's logger factories, each with where it takes its mark from: a logger bound to one of these starts a run
+#: (:data:`callfacts.LOGGER_MAKERS`, the makers that mark their lines).
+BUILDERS: dict[str, callfacts.Mark] = {
+    name: maker.mark
+    for name, maker in callfacts.LOGGER_MAKERS.items()
+    if maker.mark is not None
 }
 
 MAX_DEPTH = 6
@@ -511,7 +495,7 @@ class _Reader:
         if not given or (
             isinstance(expression, ast.Constant) and expression.value is None
         ):
-            stamp = spec.none if given else spec.absent
+            stamp = (spec.none if given else spec.absent) == callfacts.STAMP
             key = [RunKey(expression="", columns=[RUN_KEY_TIME])] if stamp else []
             return RunStart(**common, mark="", key=key)
         pieces = _pieces(expression, func)  # type: ignore[arg-type]
@@ -2074,7 +2058,7 @@ def _root(node: ast.expr) -> ast.expr:
     return node
 
 
-def _given(call: ast.Call, spec: Builder) -> tuple[bool, Optional[ast.expr]]:
+def _given(call: ast.Call, spec: callfacts.Mark) -> tuple[bool, Optional[ast.expr]]:
     """Whether the factory call is given its mark, and the expression it is given."""
     for keyword in call.keywords:
         if keyword.arg == spec.keyword:

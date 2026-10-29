@@ -10556,11 +10556,16 @@ def test_an_owner_that_does_not_read_what_it_is_handed_is_gone_through(tmp_path)
     assert node.crosses_to == ["pandaserver/f.py::finish"]
 
 
-@pytest.mark.parametrize(("maker", "crosses"), [("MsgWrapper", False), ("Note", True)], ids=["a-logger", "a-class"])
+@pytest.mark.parametrize(
+    ("maker", "crosses"),
+    [("MsgWrapper", False), ("make_logger", False), ("Note", True)],
+    ids=["a-logger", "pandacommon-s-maker", "a-class"],
+)
 def test_a_logger_made_from_the_rows_does_not_read_them(tmp_path, maker, crosses):
     """``tmpLog = MsgWrapper(logger, token)``: the token is a log line's tag, though ``MsgWrapper.__init__`` tests it
     (as ``create_tagged_logger`` tests ``if tag is None``).  Read as a use, 7 crossings of pin k came by a tag alone.
-    The same ``__init__`` under another name reads it."""
+    ``make_logger(logger, token)`` makes one too (callfacts.LOGGER_MAKERS), whatever its body is read as here.  The
+    same ``__init__`` under another name reads it."""
     source = _typed(_sweep(_EACH_TASK_RETRIED) + _EXIT_TAIL, ("retrier", "Retry", "r"))
     retrier = (
         f"from pandaserver.m import {maker}\n\n\n"

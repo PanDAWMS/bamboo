@@ -339,3 +339,28 @@ def test_a_call_is_read_in_one_order(tmp_path, callee, kind, assumption):
     assert (meant.kind, meant.assumption) == (kind, assumption)
     if kind == callfacts.PROTOCOL:
         assert ast.unparse(meant.copied_from) == "other"
+
+
+@pytest.mark.parametrize(
+    ("method", "level"),
+    [("debug", "debug"), ("warn", "warning"), ("exception", "error"), ("log", None), ("sendMsg", None)],
+    ids=["debug", "warn-is-warning", "exception-writes-an-error", "log-has-no-level-of-its-own", "sendMsg-no-file"],
+)
+def test_every_reader_of_a_print_reads_its_level_from_one_table(method, level):
+    """A print is a logger's method writing one line to its file at a level of its own (callfacts.LOG_LEVELS):
+    selection's log_level (emit's prints, the selection and progress slices), loopcut's logging calls and
+    score_trace's audit read the one table -- ``exception`` writes at ``error``, ``warn`` is ``warning``.  ``log``
+    takes its level as an argument, and ``sendMsg`` sends to the HTTP logger: no print here."""
+    from bamboo.codemap.panda.pathcond import attach_parents
+    from bamboo.codemap.panda.recognizers import emit, loopcut, selection
+    from bamboo.scripts.panda import score_trace
+
+    tree = ast.parse(f"def f(log, rows):\n    for row in rows:\n        log.{method}('skip ' + row)\n        continue")
+    attach_parents(tree)
+    func = tree.body[0]
+    (call,) = [node for node in ast.walk(func) if isinstance(node, ast.Call) and node.func.attr == method]
+
+    assert selection.log_level(call.args[0]) == level
+    assert emit.logging_arguments(func) == ([call.args[0]] if level else [])
+    assert list(loopcut._logging_calls(func.body[0])) == ([call] if level else [])
+    assert score_trace._logging_calls(func) == ({3: level} if level else {})

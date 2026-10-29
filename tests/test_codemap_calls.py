@@ -1702,6 +1702,44 @@ def test_the_build_lists_every_call_to_its_own_functions_it_cannot_place(tmp_pat
     assert stops[0].owner == f"{PACKAGE}/m.py::run"
 
 
+@pytest.mark.parametrize("method", ["sendMsg", "keepMsg"])
+def test_a_loggers_method_is_no_stop_though_the_corpus_defines_one_so_named(tmp_path, method):
+    """``tmp_log.sendMsg(msg, ...)`` sends the line to the HTTP logger and ``keepMsg`` keeps it: a logger's methods
+    (callfacts.LOG_METHODS) as ``debug`` is, which say nothing about a value wherever they land -- JEDI's
+    ``MsgWrapper`` defines both, and a receiver not declared is not a stop for them."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import plugin
+
+    texts = {
+        "m": (
+            "class MsgWrapper:\n"
+            f"    def {method}(self, msg):\n        return msg\n\n"
+            "def helper():\n    return 1\n\n"
+            "def run(spec, tmp_log):\n"
+            "    spec.helper()\n"
+            f"    tmp_log.{method}('x')\n"
+        ),
+    }
+    roots = _tree(tmp_path, **texts)
+    calls = _calls(roots)
+    modules = [
+        SourceModule(
+            package=PACKAGE,
+            rel_path=f"{PACKAGE}/{name}.py",
+            tree=calls.types.tree(f"{PACKAGE}/{name}.py"),
+            source=text,
+            blob_sha=blob_sha(text),
+        )
+        for name, text in texts.items()
+    ]
+
+    considered, stops, opened = plugin._call_stops(calls, modules)
+
+    assert considered == 1  # ``spec.helper()``
+    assert [(stop.line, stop.callee) for stop in stops] == [(9, "spec.helper")]
+
+
 def test_a_term_a_callee_or_a_local_appends_on_some_paths_is_not_required(tmp_path):
     """``getJobs`` appends what ``construct_where_clause`` returns, through a closure.
 
