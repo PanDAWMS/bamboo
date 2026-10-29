@@ -93,7 +93,8 @@ class Asked(list):
 
 @functools.cache
 def _types() -> Types:
-    # one reading of the corpus for every question of the process: the code alone, as trace.walk reads it
+    # one reading of the corpus for every question of the process, the rows' skeleton under ROWS_FROM=walk too: the
+    # code alone, not the instance record the map's dump was built with (KNOWN_ISSUES.md K32)
     return Types(R.ROOTS, {})
 
 

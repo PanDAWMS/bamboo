@@ -55,7 +55,7 @@ DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 #: a row proves a path only when it says something -- a pattern of fewer
 #: literal characters than this can be present by accident
 MIN_PROOF = 8
-#: where a function's print rows come from: ``walk`` (``trace.walk``'s skeleton, per
+#: where a function's print rows come from: ``walk`` (the skeleton of the map's walk, ``trace.Asker.start``, per
 #: asking) or ``graph`` (the map's ``FunctionPrintsNode``), whose
 #: rows carry no arms -- those are computed here as the walk computes them.  ``graph``
 #: stops when the map read another
@@ -1032,7 +1032,10 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
     if ROWS_FROM == "graph":
         by_line, arms_of, files_of = _graph_rows(rel, node, arms)
     else:
-        walked = trace.walk(ROOTS, file=rel, owner=f"{rel}::{name}", lines=list(arms) or [node.lineno], classify=classify, reaching=False)
+        from .asked import _types  # asked imports this module
+
+        walked = trace.Asker(ROOTS, file=rel, owner=f"{rel}::{name}", lines=list(arms) or [node.lineno], classify=classify,
+                             reaching=False, types=_types()).start()
         for sk in walked.skeleton:
             if sk.kind == "print":
                 by_line.setdefault(sk.line, []).append(sk)

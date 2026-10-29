@@ -535,3 +535,27 @@ JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), no
 *Revisit:* when S3 must go on from such a guard: the map would record each entry's place (its `if`'s line, or the
 replacing write's, and for a callee's test the method and how its names map to the caller's); for an `[at N]`
 entry, when a reader holds a name's value at a line rather than for the whole pass.
+
+## The walks (`asked.py`)
+
+### K32. The walks read the code alone, not the instance record the map was built with
+
+The querier's walks (`asked.walk`: the map's `trace.Asker` over `asked._types()`; under `ROWS_FROM=walk` the rows'
+skeleton too) read the corpus with `Types(ROOTS, {})`: a module name holds what the code says.  The map built the
+dump with an instance's record (`MapFragment.instance_record`, `calls.read_recorded`), which the dump names by its
+path and digest only.  On x13vi1k the record is ATLAS production's `g_pluginMap`, empty, so `panda_config.getPlugin`
+returns None at its three callers (adder_gen 174, setupper 109, closer 126) and the ATLAS plugin class is taken; the
+walks read getPlugin's `type[Any] | None`, so the plugin constructor's binding names every plugin class of the name
+and says the call may land somewhere the reading cannot name, where the dump's reach has the ATLAS one.  The walks
+name more, never less: the steps and the questions are the same.  By the mover tables no S4 walk starts in those
+files -- the census's movers there have no arm (AdderAtlasPlugin's process_subscriptions, register_files and
+update_outputs, Closer.run, of FileSpec.type) -- and the 307 guards S4 walks from in 75 movers' functions read the
+same with the record and without, as do two rounds of every question from their arms (out/ir/ir-predictions.txt,
+ir1 and ir2, 2026-10-29).  The steps that read the plugins otherwise -- H1 to H6, F1, S1's reach -- read the dump.
+Not measured: R2's and value_diff's walks, which start where a case's traceback or diff is, past two rounds.
+
+*Shows:* silent that the record is not read; where a stop line prints the binding (S4, R2, value_diff), its "returns
+from ..." names every plugin class and "the call may also land somewhere this reading cannot name".
+*Revisit:* when the census gives a mover in a plugin's file an arm, the record holds more than `g_pluginMap`, or a
+case's answer rests on such a binding: the map would put the record's values in the dump, and `asked._types()` would
+hand them to `Types`.
