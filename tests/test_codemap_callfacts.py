@@ -39,7 +39,7 @@ def _puts(name: str, text: str) -> list[tuple[str, str, str]]:
 
 def test_a_builtin_method_is_said_once_by_its_type_and_by_its_name_for_every_type_having_it():
     """``setdefault`` is a dict's: its key and the value under it.  ``update`` by its name is a dict's merge and a
-    set's elements together; ``pop`` puts nothing and changes its receiver."""
+    set's elements together; ``pop`` puts nothing, changes its receiver and hands back one of what it holds."""
     setdefault = callfacts.builtin_method("dict", "setdefault")
     assert setdefault is not None and [put.into for put in setdefault.puts] == [callfacts.KEY, callfacts.VALUE]
     assert {put.into for put in callfacts.by_name("update").puts} == {
@@ -47,7 +47,7 @@ def test_a_builtin_method_is_said_once_by_its_type_and_by_its_name_for_every_typ
         callfacts.VALUE,
         callfacts.ELEMENTS,
     }
-    assert callfacts.by_name("pop") == callfacts.Method((), True)
+    assert callfacts.by_name("pop") == callfacts.Method((), True, callfacts.Give(callfacts.AT, 0, 1))
     assert callfacts.by_name("format") is None
     assert {"append", "add", "insert", "extend", "update", "setdefault"} <= callfacts.PUTTING
     assert "pop" not in callfacts.PUTTING and {"pop", "remove", "clear", "sort"} <= callfacts.CHANGING
@@ -67,6 +67,41 @@ def test_a_builtin_method_is_said_once_by_its_type_and_by_its_name_for_every_typ
 def test_what_a_call_puts_is_its_arguments_where_the_method_puts_them(name, text, expected):
     """An argument merged is not put as its elements too: what holds it whole holds each element's."""
     assert sorted(_puts(name, text)) == sorted(expected)
+
+
+@pytest.mark.parametrize(
+    ("name", "type_name", "expected"),
+    [
+        ("get", "dict", callfacts.Give(callfacts.AT, 0, 1)),
+        ("pop", "list", callfacts.Give(callfacts.AT, 0)),
+        ("pop", None, callfacts.Give(callfacts.AT, 0, 1)),
+        ("popleft", None, callfacts.Give(callfacts.AT)),
+        ("popitem", "dict", callfacts.Give(callfacts.ITEM)),
+        ("items", "dict", callfacts.Give(callfacts.ITEMS)),
+        ("keys", None, callfacts.Give(callfacts.KEYS)),
+        ("copy", "set", callfacts.Give(callfacts.SELF)),
+        ("get", "list", callfacts.Give(callfacts.AT, 0, 1)),
+        ("append", "list", None),
+    ],
+    ids=[
+        "get-the-value-at-its-key-or-the-default",
+        "a-list-s-pop-at-its-index",
+        "pop-by-its-name",
+        "popleft-any-one",
+        "popitem-one-pair",
+        "items-a-view-of-pairs",
+        "keys-a-view-of-keys",
+        "copy-another-of-its-make",
+        "a-type-without-the-method-takes-the-name-s",
+        "append-hands-back-nothing",
+    ],
+)
+def test_what_a_method_hands_back_of_its_receiver_is_said_once(name, type_name, expected):
+    """By its type where the reader knows it and the type has the method, by the name for every type having it
+    otherwise: ``pop`` is one of what it holds for each, at the key a dict's is handed, with a default beside it; a
+    receiver read as a list and handed ``get`` takes the name's."""
+    assert callfacts.taken(name, type_name) == expected
+    assert ({name} <= callfacts.TAKING) is (expected is not None)
 
 
 _MODULE = (

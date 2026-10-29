@@ -4543,9 +4543,6 @@ _TELLING_NOTHING = frozenset({"isinstance", "issubclass", "hasattr", "callable",
 _COPIES = frozenset({"copy", "deepcopy"})
 #: Calls that write a value out whole -- every part of it read.
 _SERIALIZING = frozenset({"dumps", "str", "repr"})
-#: A builtin container's methods handing back the container, and one of its elements.
-_CONTAINER_KEEPING = frozenset({"copy"})
-_CONTAINER_ELEMENT = frozenset({"get", "pop", "popitem", "setdefault"})
 #: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
 #: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
 #: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
@@ -5334,23 +5331,26 @@ class _PathCarry:
                 return held(args[0], at) if args else _NOTHING
             receiver = held(call.func.value, at)
             placed = self.reading.place(self, call) if receiver else None
-            if not receiver and name in _CONTAINER_ELEMENT and self.handed_any(call, at):
+            gives = callfacts.taken(name)
+            if not receiver and gives is not None and gives.key is not None and self.handed_any(call, at):
                 # ``d.get(k)``, ``k`` holding them: the key chooses the value; a default handed beside it may be it.
                 placed = self.reading.place(self, call)
                 if not (placed is not None and placed.targets):
-                    return frozenset(path for one in args[1:] for path in held(one, at))
-            if receiver and not (placed is not None and placed.targets):
-                # A method of a builtin container, which no reading places: dict.get, .values(), .items(), ...
-                if name == "values":
+                    beside = args[gives.default : gives.default + 1] if gives.default is not None else []
+                    return frozenset(path for one in beside for path in held(one, at))
+            if receiver and gives is not None and not (placed is not None and placed.targets):
+                # A builtin container's method no reading places, by what it hands back (callfacts.Give).
+                if gives.part == callfacts.VALUES:
                     return _below((_ALL,), _under(_ALL, receiver))
-                if name == "keys":
+                if gives.part == callfacts.KEYS:
                     return _below((_ALL,), _under(_KEY, receiver))
-                if name == "items":
+                if gives.part == callfacts.ITEMS:
                     return _below((_ALL, "[0]"), _under(_KEY, receiver)) | _below((_ALL, "[1]"), _under(_ALL, receiver))
-                if name in _CONTAINER_ELEMENT:
+                if gives.part == callfacts.ITEM:
+                    return _below(("[0]",), _under(_KEY, receiver)) | _below(("[1]",), _under(_ALL, receiver))
+                if gives.part == callfacts.AT:
                     return _under(_ALL, receiver)
-                if name in _CONTAINER_KEEPING:
-                    return receiver
+                return receiver  # a copy
         if not self.handed_any(call, at):
             return _NOTHING
         if self.reading.record.is_database(self.file, call) and self.reading.outermost(call):
@@ -5799,7 +5799,7 @@ class _Reading:
         placed = self.place(carry, call)
         if placed is not None and placed.targets:
             return self._call_reads(carry, call)
-        if name in {"values", "keys", "items"} | _CONTAINER_ELEMENT | _CONTAINER_KEEPING:
+        if name in callfacts.TAKING:
             return self._use_reads(carry, call)
         if self._puts_or_copies(carry, call):
             return False

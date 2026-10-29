@@ -80,6 +80,7 @@ import re
 import string
 from typing import Callable, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 
 HOLE = "\x00"
@@ -120,11 +121,6 @@ def use_runners(names: frozenset[str]) -> frozenset[str]:
     global _RUNNERS
     previous, _RUNNERS = _RUNNERS, names
     return previous
-
-
-_DICT_READS = frozenset(
-    {"keys", "items", "values", "get", "copy"}
-)  # methods that read a dict's structure
 
 
 # ================================================================ values
@@ -924,7 +920,16 @@ _STR_METHODS = frozenset(
         "endswith",
     }
 )
-_CONTAINER_METHODS = frozenset({"get", "keys", "values", "items", "copy"})
+#: The container methods this evaluator runs (:meth:`method`): a dict's that hand back a part of it and change
+#: nothing (:data:`callfacts.BUILTIN_METHODS`), ``__getitem__`` aside -- a subscript is read as one.
+_CONTAINER_METHODS = frozenset(
+    name
+    for (type_name, name), fact in callfacts.BUILTIN_METHODS.items()
+    if type_name == "dict"
+    and fact.gives is not None
+    and not fact.changes
+    and not name.startswith("__")
+)
 _BUILTINS = frozenset(
     {
         "str",
@@ -4076,7 +4081,7 @@ class Ref:
                     # are.  Applied per branch, a dict joined by widening (its values
                     # choices) handed a loop a choice of lists, read as a loop of
                     # unknown length.
-                    inside = type(receiver) is Dct and method in _DICT_READS
+                    inside = type(receiver) is Dct and method in _CONTAINER_METHODS
                     for args in self.ev_args(node.args, env):
                         over = list(range(1, len(args) + 1)) if inside else None
                         out.append(

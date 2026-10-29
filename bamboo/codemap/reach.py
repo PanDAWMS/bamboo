@@ -157,19 +157,6 @@ _BUILTIN_RESULTS = {
     "reversed": "iterator", "iter": "iterator", "open": "file", "input": "str", "print": "NoneType",
     "sum": "", "pow": "",
 }  # fmt: skip
-#: Methods of a builtin container whose value is one of what it holds.
-_ELEMENT_METHODS = {
-    "get",
-    "pop",
-    "popitem",
-    "setdefault",
-    "values",
-    "items",
-    "popleft",
-    "__getitem__",
-}
-#: Methods of a builtin whose value is another of the same type: ``d.copy()`` is a dict.
-_SAME_TYPE_METHODS = {"copy"}
 #: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
 _OPERATORS: dict[type, tuple[str, ...]] = {
     op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
@@ -597,9 +584,10 @@ class _Receivers:
             )
         if held in _SCALARS:
             return _BUILTIN, ""
-        if method in _SAME_TYPE_METHODS:
+        gives = callfacts.taken(method, held)
+        if gives is not None and gives.part == callfacts.SELF:
             return _BUILTIN, held
-        if method in _ELEMENT_METHODS:
+        if gives is not None and gives.part != callfacts.KEYS:
             return _UNKNOWN, f"what {_a(held or 'builtin container')} holds"
         return _BUILTIN, ""
 
@@ -878,14 +866,24 @@ _KEEPING_BUILTINS = {
 _COPYING_BUILTINS = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
 #: Builtins whose value is one of the elements of what they are handed.
 _PICKING_BUILTINS = {"max", "min", "next"}
-#: A builtin container's methods that hand back a part of it (what they put into it is :mod:`callfacts`'s): (the
-#: part's place below the receiver, the value's place below the part).
-_PARTS: dict[str, tuple[_Path, _Path]] = {
-    "copy": ((), ()),
-    "values": ((None,), (None,)),
-    "items": ((None, _SECOND), (None,)),
-    "popitem": ((_SECOND,), (None,)),
-}
+
+
+def _part(gives: callfacts.Give, args: list[ast.expr]) -> Optional[tuple[_Path, _Path]]:
+    """Where a builtin container's method's value is a part of its receiver (:class:`callfacts.Give`): (the place in
+    the value, the receiver's place it holds) -- ``d.items()``: each element's second is one of ``d``'s values;
+    ``d.get(k)`` is ``d``'s value at ``k``, ``xs.pop()`` one of its elements.  ``None`` for a view of the keys, which
+    holds none of what it holds."""
+    if gives.part == callfacts.SELF:
+        return (), ()
+    if gives.part == callfacts.VALUES:
+        return (None,), (None,)
+    if gives.part == callfacts.ITEMS:
+        return (None, _SECOND), (None,)
+    if gives.part == callfacts.ITEM:
+        return (_SECOND,), (None,)
+    if gives.part == callfacts.AT:
+        return ((), (args[gives.key],)) if gives.key is not None and gives.key < len(args) else ((), (None,))
+    return None
 
 
 def _subscripted(expression: ast.expr) -> tuple[Optional[ast.Name], list[ast.expr]]:
@@ -1136,10 +1134,11 @@ class _Holders:
         if (
             isinstance(value, ast.Call)
             and isinstance(value.func, ast.Attribute)
-            and value.func.attr in ("get", "pop")
-            and len(value.args) == 2
+            and (gives := callfacts.taken(value.func.attr)) is not None
+            and gives.default is not None
+            and len(value.args) > gives.default
         ):
-            self._place(file, func, value.args[1], at, of)  # the default
+            self._place(file, func, value.args[gives.default], at, of)  # the default
         chain = _chain(value)
         if chain is not None:
             root, path = chain
@@ -1180,16 +1179,10 @@ class _Holders:
         if (
             isinstance(called, ast.Attribute)
             and not value.args
-            and called.attr in _PARTS
+            and (gives := callfacts.taken(called.attr)) is not None
         ):
-            ys, xs = _PARTS[called.attr]
-            return [(called.value, xs, ys)]
-        if (
-            isinstance(called, ast.Attribute)
-            and called.attr == "keys"
-            and not value.args
-        ):
-            return []
+            part = _part(gives, [])
+            return [] if part is None else [(called.value, part[1], part[0])]
         if (
             isinstance(called, ast.Name)
             and len(value.args) == 1
@@ -1623,10 +1616,8 @@ class _Holders:
                     moved = _composed((), (ast.Constant(value=keyword.arg),), at, of)
                     if moved is not None:
                         self._place(file, func, keyword.value, *moved)
-        elif method in ("get", "pop"):
-            return ((), (args[0],)) if args else ((), (None,))
-        elif method in _PARTS:
-            return _PARTS[method]
+        elif (gives := callfacts.taken(method)) is not None and gives.part != callfacts.KEYS:
+            return _part(gives, args)
         elif method.startswith("__"):
             self._unread(at, of)
         return None

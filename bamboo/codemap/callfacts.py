@@ -28,11 +28,11 @@ one order:
 
 Each reader keeps its question and answers it from the :class:`Method` it is given.  A reader that reads text alone,
 with no placing -- the trace, what may change a name between two lines -- reads the facts by the name
-(:func:`by_name`), which is step 6's assumption for every call.
+(:func:`by_name`), which is step 7's assumption for every call.
 
-The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, whether a method
-changes its receiver, and a logger's methods; the taking ones (``get``, ``pop``, ``items``) and the builtin functions
-still sit with their readers.
+The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
+what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
+method changes its receiver, and a logger's methods; the builtin functions still sit with their readers.
 """
 
 from __future__ import annotations
@@ -70,29 +70,55 @@ class Put(NamedTuple):
     at: Optional[int] = None
 
 
+#: What a method hands back of its receiver: another of the same make-up, one of what it holds, a view of its keys,
+#: values or (key, value) pairs, or one (key, value) pair.
+SELF, AT, KEYS, VALUES, ITEMS, ITEM = ("self", "at", "keys", "values", "items", "item")
+
+
+class Give(NamedTuple):
+    """What a method hands back of its receiver.
+
+    *part* is :data:`SELF` (a copy), :data:`AT` (one of what it holds: the one the argument at position *key* names,
+    any one where the call hands none -- ``d.get(k)``, ``xs.pop()``), :data:`KEYS` / :data:`VALUES` / :data:`ITEMS`
+    (a view whose elements are its keys, its values, its (key, value) pairs) or :data:`ITEM` (one such pair);
+    *default* the position of an argument the value may be instead (``d.get(k, default)``)."""
+
+    part: str
+    key: Optional[int] = None
+    default: Optional[int] = None
+
+
 class Method(NamedTuple):
-    """What a method of a class the corpus does not hold does: what it puts into its receiver, and whether it changes
-    the receiver at all."""
+    """What a method of a class the corpus does not hold does: what it puts into its receiver, whether it changes
+    the receiver at all, and what it hands back of it."""
 
     puts: tuple[Put, ...] = ()
     changes: bool = False
+    gives: Optional[Give] = None
 
 
-def _changing() -> Method:
-    return Method((), True)
+def _changing(gives: Optional[Give] = None) -> Method:
+    return Method((), True, gives)
 
 
-#: The builtin containers' methods that put into them or change them, by ``(type, name)``.  ``collections.deque``'s
-#: are here too: :meth:`calls.Types.library_classes` reads ``collections`` as the builtins' (its values are).
+def _giving(gives: Give) -> Method:
+    return Method((), False, gives)
+
+
+#: The builtin containers' methods that put into them, change them or hand back a part of them, by ``(type, name)``.
+#: ``collections.deque``'s are here too: :meth:`calls.Types.library_classes` reads ``collections`` as the builtins'
+#: (its values are).
 BUILTIN_METHODS: dict[tuple[str, str], Method] = {
     ("list", "append"): Method((Put(0, ELEMENT),), True),
     ("list", "insert"): Method((Put(1, ELEMENT),), True),
     ("list", "extend"): Method((Put(0, ELEMENTS),), True),
-    ("list", "pop"): _changing(),
+    ("list", "pop"): _changing(Give(AT, 0)),
     ("list", "remove"): _changing(),
     ("list", "clear"): _changing(),
     ("list", "sort"): _changing(),
     ("list", "reverse"): _changing(),
+    ("list", "copy"): _giving(Give(SELF)),
+    ("list", "__getitem__"): _giving(Give(AT, 0)),
     ("set", "add"): Method((Put(0, ELEMENT),), True),
     ("set", "update"): Method((Put(EVERY_POSITIONAL, ELEMENTS),), True),
     ("set", "symmetric_difference_update"): Method((Put(0, ELEMENTS),), True),
@@ -100,24 +126,34 @@ BUILTIN_METHODS: dict[tuple[str, str], Method] = {
     ("set", "intersection_update"): _changing(),
     ("set", "discard"): _changing(),
     ("set", "remove"): _changing(),
-    ("set", "pop"): _changing(),
+    ("set", "pop"): _changing(Give(AT)),
     ("set", "clear"): _changing(),
+    ("set", "copy"): _giving(Give(SELF)),
     ("dict", "update"): Method((Put(0, MERGE), Put(EVERY_KEYWORD, VALUE)), True),
-    ("dict", "setdefault"): Method((Put(0, KEY), Put(1, VALUE, at=0)), True),
-    ("dict", "pop"): _changing(),
-    ("dict", "popitem"): _changing(),
+    ("dict", "setdefault"): Method(
+        (Put(0, KEY), Put(1, VALUE, at=0)), True, Give(AT, 0, 1)
+    ),
+    ("dict", "pop"): _changing(Give(AT, 0, 1)),
+    ("dict", "popitem"): _changing(Give(ITEM)),
     ("dict", "clear"): _changing(),
+    ("dict", "get"): _giving(Give(AT, 0, 1)),
+    ("dict", "__getitem__"): _giving(Give(AT, 0)),
+    ("dict", "keys"): _giving(Give(KEYS)),
+    ("dict", "values"): _giving(Give(VALUES)),
+    ("dict", "items"): _giving(Give(ITEMS)),
+    ("dict", "copy"): _giving(Give(SELF)),
     ("deque", "append"): Method((Put(0, ELEMENT),), True),
     ("deque", "appendleft"): Method((Put(0, ELEMENT),), True),
     ("deque", "insert"): Method((Put(1, ELEMENT),), True),
     ("deque", "extend"): Method((Put(0, ELEMENTS),), True),
     ("deque", "extendleft"): Method((Put(0, ELEMENTS),), True),
-    ("deque", "pop"): _changing(),
-    ("deque", "popleft"): _changing(),
+    ("deque", "pop"): _changing(Give(AT)),
+    ("deque", "popleft"): _changing(Give(AT)),
     ("deque", "remove"): _changing(),
     ("deque", "clear"): _changing(),
     ("deque", "rotate"): _changing(),
     ("deque", "reverse"): _changing(),
+    ("deque", "copy"): _giving(Give(SELF)),
 }
 
 #: What a method of a class outside the corpus does where this table says nothing of it: it keeps every argument it is
@@ -229,10 +265,7 @@ def by_name(name: str) -> Optional[Method]:
     found = [
         method for (_type, called), method in BUILTIN_METHODS.items() if called == name
     ]
-    if not found:
-        return None
-    puts = tuple(dict.fromkeys(put for method in found for put in method.puts))
-    return Method(puts, any(method.changes for method in found))
+    return _together(found)
 
 
 def _of_types(names: frozenset[str], name: str) -> Optional[Method]:
@@ -241,11 +274,38 @@ def _of_types(names: frozenset[str], name: str) -> Optional[Method]:
         for one in sorted(names)
         if (one, name) in BUILTIN_METHODS
     ]
+    return _together(found)
+
+
+def _together(found: list[Method]) -> Optional[Method]:
+    """Several types' facts of one name as one: every put, a change where one changes, and what they hand back where
+    every one hands back the same part -- ``pop`` is one of what it holds for each, at the key a dict's is handed."""
     if not found:
         return None
+    parts = {
+        method.gives.part if method.gives is not None else None for method in found
+    }
+    gives = None
+    if len(parts) == 1 and None not in parts:
+        gives = Give(
+            parts.pop(),
+            next(
+                (m.gives.key for m in found if m.gives and m.gives.key is not None),
+                None,
+            ),
+            next(
+                (
+                    m.gives.default
+                    for m in found
+                    if m.gives and m.gives.default is not None
+                ),
+                None,
+            ),
+        )
     return Method(
         tuple(dict.fromkeys(put for method in found for put in method.puts)),
         any(m.changes for m in found),
+        gives,
     )
 
 
@@ -261,12 +321,29 @@ def builtin_method(type_name: str, name: str) -> Optional[Method]:
     return by_name(name)
 
 
-#: The names some builtin container's method puts with, and the names some changes its receiver with.
+def taken(name: str, type_name: Optional[str] = None) -> Optional[Give]:
+    """What a builtin container's method *name* hands back of its receiver: *type_name*'s where a reader knows the
+    builtin type and the type has the method, every type's of the name together otherwise -- a receiver read as a
+    list and handed ``.get`` is not read right, and the name says more than the type there.  ``None`` where no
+    builtin's method of the name hands back any."""
+    if type_name in _TYPES and (type_name, name) in BUILTIN_METHODS:
+        return BUILTIN_METHODS[(type_name, name)].gives
+    method = by_name(name)
+    return method.gives if method is not None else None
+
+
+#: The names some builtin container's method puts with, the names some changes its receiver with, and the names
+#: some hands back a part of its receiver with.
 PUTTING = frozenset(
     called for (_type, called), method in BUILTIN_METHODS.items() if method.puts
 )
 CHANGING = frozenset(
     called for (_type, called), method in BUILTIN_METHODS.items() if method.changes
+)
+TAKING = frozenset(
+    called
+    for (_type, called), method in BUILTIN_METHODS.items()
+    if method.gives is not None
 )
 
 

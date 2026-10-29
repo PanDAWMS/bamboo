@@ -5,8 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reach
 from bamboo.codemap.models import Anchor, Branch, JunctionNode
 
 PACKAGE = "pkg"
@@ -1033,13 +1033,15 @@ def test_a_container_s_values_are_read_from_every_name_holding_it(tmp_path):
     ``kwargs.update(new_kwargs)`` -- the ``**`` holds the key on every way, so the ``*`` does not fill it -- and by
     ``store`` with the default: ``extracted['state']['vars']`` is the list ``setdefault`` puts there.  Where the
     update is on some ways only (``bulk2``), the ``*`` may fill it and the call stays a hole.  A value put through a
-    part (``setdefault(...).append``, ``get(...).append``), an alias (``e = d or more``), a loop over the values or
-    items or a builtin's copy of them, or by a callee handed the container, is one of what it holds there: the
-    undeclared one leaves ``d['a'][-1].move`` a hole.  A callee that only reads it leaves it closed.
+    part (``setdefault(...).append``, ``get(...).append``, ``__getitem__(...).append``), an alias (``e = d or
+    more``), a loop over the values or items or a builtin's copy of them, or by a callee handed the container, is one
+    of what it holds there: the undeclared one leaves ``d['a'][-1].move`` a hole.  A callee that only reads it leaves
+    it closed.
     """
     shapes = {
         "chain_setdefault": "    d.setdefault('a', []).append(undeclared())\n",
         "chain_get": "    d.get('a').append(undeclared())\n",
+        "chain_getitem": "    d.__getitem__('a').append(undeclared())\n",
         "loop_values": "    for v in d.values():\n        v.append(undeclared())\n",
         "loop_items": "    for k, v in d.items():\n        v.append(undeclared())\n",
         "alias": "    e = d or {}\n    e['a'].append(undeclared())\n",
@@ -1098,6 +1100,21 @@ def test_a_container_s_values_are_read_from_every_name_holding_it(tmp_path):
     assert "extracted['state']['vars'].append" in holes("record2")
     for name in shapes:
         assert ("d['a'][-1].move" in holes(name)) is (name != "callee_reads"), name
+
+
+def test_a_builtin_container_s_method_s_value_is_the_part_of_its_receiver_callfacts_says():
+    """(the place in the value, the receiver's place it holds), read from :class:`callfacts.Give`: a copy is the
+    receiver, a view's elements its values (each pair's second for ``items()``), a pair popped holds a value at its
+    second, ``get`` / ``pop`` the value at the key handed or any one where none is; a view of the keys holds none of
+    what it holds."""
+    key = ast.Name(id="k")
+    assert reach._part(callfacts.Give(callfacts.SELF), []) == ((), ())
+    assert reach._part(callfacts.Give(callfacts.VALUES), []) == ((None,), (None,))
+    assert reach._part(callfacts.Give(callfacts.ITEMS), []) == ((None, reach._SECOND), (None,))
+    assert reach._part(callfacts.Give(callfacts.ITEM), []) == ((reach._SECOND,), (None,))
+    assert reach._part(callfacts.taken("get"), [key]) == ((), (key,))
+    assert reach._part(callfacts.taken("popleft"), []) == ((), (None,))
+    assert reach._part(callfacts.taken("keys"), []) is None
 
 
 def test_a_container_the_function_makes_and_returns_holds_what_the_function_puts_there(

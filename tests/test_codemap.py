@@ -11021,6 +11021,36 @@ def test_rows_handed_back_as_a_dicts_keys_cross_to_what_the_caller_does(tmp_path
     assert (census.handing_back, census.resolved) == (1, 1)
 
 
+def test_a_popped_pair_s_first_is_the_key_the_rows_are_filed_under(tmp_path):
+    """``retMap[jediTaskID] = set()`` and the caller takes ``tasks.popitem()``: a (key, value) pair
+    (callfacts.ITEM), so the task the rows are filed under is the pair's first, not one of the values."""
+    source = (
+        "class TaskModule:\n"
+        "    def getTasks(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        retMap = {}\n"
+        "        for (taskID,) in res:\n"
+        "            retMap[taskID] = set()\n"
+        "        return retMap\n"
+    )
+    caller = _caller(
+        "Commando",
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        taskID, ids = tasks.popitem()\n"
+        "        self.retryTask(taskID)\n",
+        "retryTask",
+    )
+    nodes, census = _crossed(tmp_path, source, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
+
+
 def test_rows_used_only_to_choose_are_not_handed_back(tmp_path):
     """The rows pick which candidates are kept; the candidates are what is returned.
 

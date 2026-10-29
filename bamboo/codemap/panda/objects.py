@@ -113,8 +113,6 @@ _ELEMENTS_OF = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter
 _ONE_OF = {"next", "max", "min"}
 #: How :func:`callfacts.meaning` reads a call that puts into its object (:meth:`_Values._fill`).
 _FILLING = (callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED)
-#: A builtin container's own methods that hand back what is in it.
-_TAKERS = {"pop", "popleft", "get", "setdefault", "values", "copy", "items", "popitem"}
 #: A literal key a path keeps (8,937 of pin k's 8,950); another reads as ``[]``.
 _KEY = re.compile(r"[A-Za-z0-9_:\-]*")
 
@@ -718,21 +716,31 @@ class _Values:
                         self.carried(keyword.value), _named(keyword.arg)
                     )
                 ]
-        elif isinstance(called, ast.Attribute) and called.attr in _TAKERS:
+        elif (
+            isinstance(called, ast.Attribute)
+            and (gives := callfacts.taken(called.attr)) is not None
+        ):
+            # A builtin container's method, by what it hands back of what is in it (callfacts.Give).
             receiver = self.carried(called.value)
-            method = called.attr
-            if method in ("pop", "popleft") and not args:
+            if (
+                gives.part == callfacts.AT
+                and gives.key is not None
+                and len(args) > gives.key
+            ):
+                found = _index(receiver, _subscript(args[gives.key]))
+                beside = (
+                    [args[gives.default]]
+                    if gives.default is not None and len(args) > gives.default
+                    else []
+                )
+                return found + [carry for one in beside for carry in self.carried(one)]
+            if gives.part == callfacts.AT and not args:
                 return _index(receiver, "[]")
-            if method in ("pop", "get", "setdefault") and args:
-                found = _index(receiver, _subscript(args[0]))
-                return found + [
-                    carry for one in args[1:2] for carry in self.carried(one)
-                ]
-            if method in ("values", "copy") and not args:
+            if gives.part in (callfacts.VALUES, callfacts.SELF) and not args:
                 return _shift(_index(receiver, "[]"), "[]")
-            if method == "items" and not args:
+            if gives.part == callfacts.ITEMS and not args:
                 return _shift(_index(receiver, "[]"), "[][1]")
-            if method == "popitem" and not args:
+            if gives.part == callfacts.ITEM and not args:
                 return _shift(_index(receiver, "[]"), "[1]")
         return [_Carry("", call=call)]
 
