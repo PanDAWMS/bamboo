@@ -497,8 +497,6 @@ _INSERT_INTO = re.compile(r"^\s*INSERT\s+(?:/\*.*?\*/\s*)?INTO\s+([\w.{}$]+)", r
 #: level FROM dual CONNECT BY level<=:nIDs)`` -- and the sequence.
 _SELECTS_SEQUENCE = re.compile(r"^\s*SELECT\s+(?:/\*.*?\*/\s*)?([\w.{}$]+)\.nextval\b", re.IGNORECASE | re.DOTALL)
 _RETURNING = re.compile(r"\bRETURNING\s+(.*?)\s+INTO\b", re.IGNORECASE | re.DOTALL)
-#: Calls making one value of another without making it new: ``int(row[0])`` is still the row's.
-_CONVERSIONS = frozenset({"int", "str", "float", "long"})
 
 
 @dataclasses.dataclass
@@ -579,9 +577,19 @@ def _returned(text: str) -> set[str]:
     return {column.strip().lower() for column in m.group(1).split(",")} if (m := _RETURNING.search(text)) else set()
 
 
+def _converting(value: ast.AST) -> bool:
+    """Whether *value* makes one value of another without making it new -- ``int(row[0])`` is still the row's
+    (:data:`callfacts.CONVERTING`)."""
+    return (
+        isinstance(value, ast.Call)
+        and (function := callfacts.builtin_function_at(value)) is not None
+        and function.gives in callfacts.CONVERTING
+    )
+
+
 def _plain(value: ast.AST) -> bool:
     """A copy of one value: a name, an attribute or a subscript of one, or a conversion of such."""
-    while isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in _CONVERSIONS:
+    while _converting(value):
         if len(value.args) != 1:
             return False
         value = value.args[0]
@@ -591,12 +599,7 @@ def _plain(value: ast.AST) -> bool:
 
 
 def _root(value: ast.AST) -> Optional[ast.Name]:
-    while (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Name)
-        and value.func.id in _CONVERSIONS
-        and value.args
-    ):
+    while _converting(value) and value.args:
         value = value.args[0]
     while isinstance(value, (ast.Attribute, ast.Subscript)):
         value = value.value
@@ -4403,18 +4406,17 @@ _SEQUENCE, _NUMBER, _TEXT = "sequence", "number", "text"
 _READ_AGAIN = frozenset(
     {"loads", "load", "literal_eval", "safe_load", "b64decode", "decode", "unquote", "fromisoformat", "strptime"}
 )
-#: Builtins and modules computing a number from what they are handed (U1).
-_COMPUTING = frozenset(
-    {"len", "sum", "round", "abs", "divmod", "pow", "min", "max", "any", "all", "ord", "chr", "hash", "bool", "range"}
-)
+#: Modules computing a number from what they are handed (U1), as a builtin does (:data:`callfacts.COMPUTED`).
 _COMPUTING_MODULES = frozenset({"math", "statistics", "numpy", "np"})
 
 
-def _unread_call(call: ast.Call, name: str) -> bool:
+def _unread_call(call: ast.Call, name: str, function: Optional[callfacts.Function]) -> bool:
     """Whether *call*, which no reading places, makes a value the map cannot read (U1's 4): another system's answer, a
-    function of the corpus or a library -- not a builtin or a module computing a number, a value read again out of a
-    text, a text made by a str method."""
-    if name in _READ_AGAIN or name in _COMPUTING or name in ("join", "format"):
+    function of the corpus or a library -- not a builtin (*function*) or a module computing a number, a value read
+    again out of a text, a text made by a str method."""
+    if name in _READ_AGAIN or name in ("join", "format"):
+        return False
+    if function is not None and function.gives == callfacts.COMPUTED:
         return False
     if isinstance(call.func, ast.Attribute):
         receiver = call.func.value
@@ -4533,12 +4535,11 @@ def _name_kinds(func: ast.AST) -> dict[str, str]:
     return kinds
 
 
-#: Builtins that tell nothing of the value: its type, whether it has a part.
-_TELLING_NOTHING = frozenset({"isinstance", "issubclass", "hasattr", "callable", "id", "type"})
 #: ``copy.copy`` / ``copy.deepcopy``: the value again, not a use of it.
 _COPIES = frozenset({"copy", "deepcopy"})
-#: Calls that write a value out whole -- every part of it read.
-_SERIALIZING = frozenset({"dumps", "str", "repr"})
+#: ``json.dumps``: writes a value out whole -- every part of it read -- as a builtin's text of it does
+#: (:data:`callfacts.TEXT`).
+_SERIALIZING = "dumps"
 #: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
 #: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
 #: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
@@ -5296,14 +5297,14 @@ class _PathCarry:
             return _NOTHING
         held = self.held
         args = [one.value if isinstance(one, ast.Starred) else one for one in call.args]
-        if name in _SERIALIZING and args and (isinstance(call.func, ast.Name) or name == "dumps"):
+        function = callfacts.builtin_function(self.reading.calls.types, self.file, self.func, call)
+        gives = function.gives if function is not None else None
+        if args and (gives == callfacts.TEXT or name == _SERIALIZING):
             return _WHOLE if held(args[0], at) else _NOTHING
         if isinstance(call.func, ast.Name):
-            if name in _TELLING_NOTHING:
+            if gives == callfacts.TELLS:
                 return _NOTHING
             as_list = self._as_list
-            function = callfacts.builtin_function(self.reading.calls.types, self.file, self.func, call)
-            gives = function.gives if function is not None else None
             if gives == callfacts.COPY:
                 return as_list(args[0], at) if args else _NOTHING
             if gives == callfacts.DICT:
@@ -5395,7 +5396,7 @@ class _PathCarry:
             if isinstance(call.func, ast.Attribute):
                 parts.append(held(call.func.value, at))
             return _WHOLE if any(holding(part) for part in parts) else _NOTHING
-        if isinstance(call.func, ast.Name) and name in _CONVERSIONS:
+        if function is not None and function.gives in callfacts.CONVERTING:
             return _WHOLE if args and holding(held(args[0], at)) else _NOTHING
         if isinstance(call.func, ast.Attribute) and name not in _READ_AGAIN:
             if holding(held(call.func.value, at)):
@@ -5413,7 +5414,11 @@ class _PathCarry:
                 if len(handed) == 1 or (name == "join" and len(holders) == 1):
                     return _WHOLE if holders else _NOTHING  # one value, or one column's values ("," .join(ids))
                 return _NOTHING  # a text of several values: os.path.join(a, b), "{} {}".format(a, b)
-        if self.unread_kept and _unread_call(call, name) and not self.reading.record.is_database(self.file, call):
+        if (
+            self.unread_kept
+            and _unread_call(call, name, function)
+            and not self.reading.record.is_database(self.file, call)
+        ):
             parts = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
             if isinstance(call.func, ast.Attribute):
                 parts.append(held(call.func.value, at))
@@ -5781,7 +5786,8 @@ class _Reading:
         name = _callee_name(call)
         if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
             return False
-        if isinstance(call.func, ast.Name) and name in _TELLING_NOTHING:
+        function = callfacts.builtin_function(self.calls.types, carry.file, carry.func, call)
+        if function is not None and function.gives == callfacts.TELLS:
             return False
         if isinstance(call.func, ast.Attribute) and self._puts_or_copies(carry, call):
             return False  # put into a container, or copied: read where that is used
@@ -5792,7 +5798,7 @@ class _Reading:
             and call.func.value.id == "copy"
         ):
             return False
-        if callfacts.builtin_function(self.calls.types, carry.file, carry.func, call) is not None:
+        if function is not None and function.gives in callfacts.HANDING_ON:
             return self._use_reads(carry, call)  # a builtin handing on what it is handed, or a part of it
         return self._call_reads(carry, call)
 

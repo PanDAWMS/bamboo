@@ -112,22 +112,6 @@ _FILLING = (callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED)
 #: A literal key a path keeps (8,937 of pin k's 8,950); another reads as ``[]``.
 _KEY = re.compile(r"[A-Za-z0-9_:\-]*")
 
-#: Calls that hand a value on unchanged as far as a key is concerned (keycolumns, and a row's key the record binds): ``str(pandaID)``.
-CONVERSIONS = frozenset({"str", "int", "repr"})
-
-
-def unconverted(node: ast.expr) -> ast.expr:
-    """*node* without the conversions that hand it on unchanged (:data:`CONVERSIONS`)."""
-    while (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in CONVERSIONS
-        and len(node.args) == 1
-        and not node.keywords
-    ):
-        node = node.args[0]
-    return node
-
 
 def is_parameter(func: ast.AST, name: str) -> bool:
     """Whether *name* is one of *func*'s parameters."""
@@ -923,7 +907,11 @@ class _Values:
             for bind in binds:
                 if pathcond.enclosing_function(bind.value) is not self.func:
                     continue
-                for path in self.versions.paths(unconverted(bind.value)):
+                for path in self.versions.paths(
+                    callfacts.unconverted(
+                        self.reader.types, self.file, self.func, bind.value
+                    )
+                ):
                     found.add((attribute, path))
         return found
 

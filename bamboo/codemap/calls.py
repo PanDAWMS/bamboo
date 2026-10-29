@@ -35,6 +35,7 @@ import builtins
 import hashlib
 import json
 import re
+import weakref
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
@@ -77,17 +78,6 @@ _FORWARDING = (UNPLACED_FORWARDED, UNPLACED_GETATTRIBUTE)
 BUILTIN = "<builtins>"
 #: The names Python's builtins hold: a call of one no scope binds is the builtin's (:meth:`Types.is_builtin`).
 _BUILTIN_NAMES = frozenset(dir(builtins))
-#: The builtin types a call of their name builds, and what each builds.
-_BUILTIN_TYPES = {
-    "list": "list",
-    "dict": "dict",
-    "set": "set",
-    "tuple": "tuple",
-    "frozenset": "frozenset",
-    "str": "str",
-    "bytes": "bytes",
-    "sorted": "list",
-}
 #: The standard library's container classes, by the module they are imported from.
 _LIBRARY_CONTAINERS = {
     ("collections", "defaultdict"),
@@ -377,6 +367,69 @@ def bound_defs(scope: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDe
             yield child
         elif not isinstance(child, ast.Lambda):
             yield from bound_defs(child)
+
+
+#: The names each scope binds (:func:`_scope_names`), kept while its tree is.
+_SCOPES: "weakref.WeakKeyDictionary[ast.AST, frozenset[str]]" = weakref.WeakKeyDictionary()
+
+
+def _scope_names(scope: ast.AST) -> frozenset[str]:
+    """The names *scope* binds.  A function: its parameters, the names its own body stores or imports, the ``def``
+    and ``class`` statements it runs.  A module: an assignment at its level, any import in it (the names
+    :meth:`Types.imports` reads), a ``def`` or ``class`` it runs."""
+    if scope in _SCOPES:
+        return _SCOPES[scope]
+    found = {one.name for one in bound_defs(scope)}
+    if isinstance(scope, ast.Module):
+        for node in _module_statements(scope.body):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                found |= {target.id for target in targets if isinstance(target, ast.Name)}
+        for node in walk(scope):
+            if isinstance(node, ast.Import):
+                found |= {alias.asname or alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                found |= {alias.asname or alias.name for alias in node.names}
+    else:
+        arguments = getattr(scope, "args", None)
+        every = (
+            [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
+            if arguments is not None
+            else []
+        )
+        found |= {one.arg for one in every if one is not None}
+        for node in own_nodes(scope):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                found.add(node.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                found |= {(alias.asname or alias.name).split(".")[0] for alias in node.names}
+    _SCOPES[scope] = frozenset(found)
+    return _SCOPES[scope]
+
+
+def is_builtin_in(func: ast.AST, module: Optional[ast.Module], name: str) -> bool:
+    """Whether *name*, read in *func* of *module*, is Python's builtin of the name: one ``builtins`` holds that
+    neither the function -- a parameter, a name its own body binds or imports, a ``def`` or ``class`` it runs -- nor
+    the module -- a ``def``, a ``class``, an import, an assignment at its level -- binds."""
+    if name not in _BUILTIN_NAMES:
+        return False
+    if not isinstance(func, ast.Module) and name in _scope_names(func):
+        return False
+    return module is None or name not in _scope_names(module)
+
+
+def is_builtin_at(node: ast.AST, name: str) -> bool:
+    """:func:`is_builtin_in` for *node* where no :class:`Types` is at hand: the function and the module that hold it,
+    read off its parents (:func:`pathcond.attach_parents`)."""
+    func: Optional[ast.AST] = None
+    here: Optional[ast.AST] = node
+    while here is not None and not isinstance(here, ast.Module):
+        if func is None and isinstance(here, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func = here
+        here = getattr(here, "parent", None)
+    if here is None:
+        raise ValueError(f"no module holds {ast.dump(node)[:80]}: its tree has no parents")
+    return is_builtin_in(func if func is not None else here, here, name)
 
 
 def binding(
@@ -2032,17 +2085,14 @@ def _self_field(node: ast.AST) -> str:
     return ""
 
 
-#: Calls whose arguments are classes to test against, not to build.
-_CLASS_TESTS = frozenset({"isinstance", "issubclass", "super"})
-
-
 def _may_build_from(node: ast.expr) -> bool:
     """Whether *node*, a name or attribute read, holds a value a later call may build from -- :meth:`Calls.read_as_value`.
 
     Not a call's callee or an attribute's object -- those use it here -- and
     not a place that only tests or declares a class: a base list, a class
-    statement's keywords, ``isinstance``/``issubclass``/``super``, an
-    ``except`` clause, a comparison, an annotation.
+    statement's keywords, an argument of a builtin that neither calls nor
+    keeps it (:func:`callfacts.builds_nothing`: ``isinstance``, ``hasattr``,
+    ``super``'s first), an ``except`` clause, a comparison, an annotation.
     """
     parent = getattr(node, "parent", None)
     if isinstance(parent, ast.Call) and parent.func is node:
@@ -2053,7 +2103,12 @@ def _may_build_from(node: ast.expr) -> bool:
         return False
     child: ast.AST = node
     while parent is not None and not isinstance(parent, ast.stmt):
-        if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id in _CLASS_TESTS:
+        if (
+            isinstance(parent, ast.Call)
+            and child is not parent.func
+            and (function := callfacts.builtin_function_at(parent)) is not None
+            and callfacts.builds_nothing(function, parent, child.value if isinstance(child, ast.keyword) else child)
+        ):
             return False
         if isinstance(parent, ast.ExceptHandler):
             return False
@@ -2320,9 +2375,6 @@ class Types:
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
         #: :meth:`bound` per function.
         self._bound: dict[int, dict[str, list[ast.expr]]] = {}
-        #: :meth:`is_builtin`'s scopes: the names a function binds, by its id; the names a module binds, by its file.
-        self._local_scope: dict[int, frozenset[str]] = {}
-        self._module_scope: dict[str, frozenset[str]] = {}
         # (file, id(func), name, depth) -> (func, classes): see ``declared``.
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
@@ -2340,35 +2392,8 @@ class Types:
             raise ValueError(f"the instance record names what no module-level assignment binds: {', '.join(unbound)}")
 
     def is_builtin(self, file: str, func: ast.AST, name: str) -> bool:
-        """Whether *name*, read in *func* of *file*, is Python's builtin of the name: one ``builtins`` holds that
-        neither the function -- a parameter, a name its own body binds or imports, a ``def`` or ``class`` it runs --
-        nor the module -- a ``def``, a ``class``, an import, an assignment at its level -- binds."""
-        if name not in _BUILTIN_NAMES:
-            return False
-        if not isinstance(func, ast.Module):
-            if id(func) not in self._local_scope:
-                arguments = getattr(func, "args", None)
-                every = (
-                    [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
-                    if arguments is not None
-                    else []
-                )
-                found = {one.arg for one in every if one is not None}
-                found |= {one.name for one in bound_defs(func)}
-                for node in own_nodes(func):
-                    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                        found.add(node.id)
-                    elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                        found |= {(alias.asname or alias.name).split(".")[0] for alias in node.names}
-                self._local_scope[id(func)] = frozenset(found)
-            if name in self._local_scope[id(func)]:
-                return False
-        if file not in self._module_scope:
-            tree = self.tree(file)
-            found = set(self._module_names(file)) | set(self.imports(file))
-            found |= {one.name for one in bound_defs(tree)} if tree is not None else set()
-            self._module_scope[file] = frozenset(found)
-        return name not in self._module_scope[file]
+        """Whether *name*, read in *func* of *file*, is Python's builtin of the name (:func:`is_builtin_in`)."""
+        return is_builtin_in(func, self.tree(file), name)
 
     def _module_names(self, file: str) -> set[str]:
         """The names an assignment at *file*'s module level binds, whatever the value."""
@@ -3725,9 +3750,8 @@ class Types:
             held = self.imports(file).get(called.id)
             if held is not None:
                 return held[1] if held in _LIBRARY_CONTAINERS else ""
-            if called.id not in _BUILTIN_TYPES or not self.is_builtin(file, func, called.id):
-                return ""
-            return _BUILTIN_TYPES[called.id]
+            function = callfacts.builtin_function(self, file, func, expression)
+            return (function.result or "") if function is not None else ""
         if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
             held = self.imports(file).get(called.value.id)
             if held is not None and not held[1] and (held[0], called.attr) in _LIBRARY_CONTAINERS:

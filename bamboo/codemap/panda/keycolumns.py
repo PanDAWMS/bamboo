@@ -53,12 +53,12 @@ from __future__ import annotations
 import ast
 from typing import Callable, Optional
 
+from bamboo.codemap import callfacts, objects, reach
 from bamboo.codemap import calls as C
-from bamboo.codemap import objects, reach
 from bamboo.codemap.models import MAP_KEY, KeyStop, MapFragment, SourceModule
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import pathcond, sql, sqltext
-from bamboo.codemap.panda.objects import is_parameter, unconverted
+from bamboo.codemap.panda.objects import is_parameter
 from bamboo.codemap.panda.recognizers import progress
 
 
@@ -108,7 +108,7 @@ class Reader:
         uses: list[KeyStop] = []
         seen: set[tuple[str, str]] = set()
         owner = self.names.of(func) or ""
-        node = unconverted(node)
+        node = callfacts.unconverted(self.types, file, func, node)
         try:
             self._backward(file, func, owner, node, found, bound, seen)
             if isinstance(node, ast.Attribute) and any(
@@ -140,7 +140,7 @@ class Reader:
             reach = self.follow(owner, path)
             for at, paths in reach.held.items():
                 if at in self.funcs:
-                    self._used(at, self.funcs[at][1], set(paths), found, stops)
+                    self._used(at, *self.funcs[at], set(paths), found, stops)
             for site in reach.holes:
                 kind = "spread" if site.how == objects.NO_PARAMETER else "hole"
                 stops.append(_stop(kind, at=f"{_short(site.owner)}:{site.line}"))
@@ -158,6 +158,7 @@ class Reader:
     def _used(
         self,
         owner: str,
+        file: str,
         func: ast.AST,
         held: set[str],
         found: set[str],
@@ -194,7 +195,7 @@ class Reader:
                 if term.scope != sqltext.ROW or term.excluding or not term.decided:
                     continue
                 for key in term.binds:
-                    if self._filled(func, run, key, held):
+                    if self._filled(file, func, run, key, held):
                         self._column(
                             term.table,
                             term.column,
@@ -204,7 +205,7 @@ class Reader:
                         )
 
     def _filled(
-        self, func: ast.AST, run: sql.Execution, key: str, held: set[str]
+        self, file: str, func: ast.AST, run: sql.Execution, key: str, held: set[str]
     ) -> bool:
         """Whether *run* fills its bind *key* with the value *held* names in *func*."""
         binds = sql.bound_values(
@@ -216,7 +217,9 @@ class Reader:
             pathcond.enclosing_function(bind.value) is func
             and any(
                 objects._holds(held, path)
-                for path in self.paths.of(func, unconverted(bind.value))
+                for path in self.paths.of(
+                    func, callfacts.unconverted(self.types, file, func, bind.value)
+                )
             )
             for bind in binds
         )
@@ -292,7 +295,9 @@ class Reader:
             if binding.kind == pathcond.BIND_FOR:
                 iterable = getattr(binding.site, "iter", None)
                 what = (
-                    _kind(unconverted(iterable)) if iterable is not None else "a loop"
+                    _kind(callfacts.unconverted(self.types, file, func, iterable))
+                    if iterable is not None
+                    else "a loop"
                 )
                 stops.append(_stop("element", name=node.id, what=what, at=where))
             elif value is None:
@@ -322,7 +327,7 @@ class Reader:
                         _stop(
                             "bound",
                             name=node.id,
-                            what=f"a position of {_kind(unconverted(value))}",
+                            what=f"a position of {_kind(callfacts.unconverted(self.types, file, func, value))}",
                             at=where,
                         )
                     )
@@ -341,7 +346,7 @@ class Reader:
         seen: set[tuple[str, str]],
     ) -> None:
         """What *name* is given by *value*, bound to it in *func*: a name or an attribute read back, else the stop saying what it is."""
-        value = unconverted(value)
+        value = callfacts.unconverted(self.types, file, func, value)
         if isinstance(value, (ast.Name, ast.Attribute)):
             self._backward(file, func, owner, value, found, stops, seen)
             return

@@ -548,6 +548,30 @@ def test_a_class_handed_to_a_builtin_that_never_calls_it_builds_nothing(tmp_path
     assert _to(record, "pkg/mod.py::Child.__init__", "handed") == []
 
 
+def test_a_class_a_builtin_may_hand_back_is_built_and_one_it_holds_none_of_is_not(tmp_path):
+    """``getattr(holder, "factory", Base)`` may be ``Base`` itself, which ``factory()`` builds; ``hash(Other)``,
+    ``bool(Other)`` and ``getattr(Other, name)`` read the class and hold none of it (callfacts.builds_nothing)."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "class Base:\n"
+            "    def __init__(self):\n"
+            "        pass\n\n"
+            "class Other:\n"
+            "    def __init__(self):\n"
+            "        pass\n\n"
+            "def run(holder, name):\n"
+            "    hash(Other)\n"
+            "    bool(Other)\n"
+            "    getattr(Other, name)\n"
+            "    factory = getattr(holder, 'factory', Base)\n"
+            "    return factory()\n"
+        ),
+    )
+
+    assert _to(record, "pkg/mod.py::run", "handed") == ["pkg/mod.py::Base.__init__"]
+
+
 def test_a_function_set_on_a_class_is_handed_and_taken_as_called(tmp_path):
     """``setattr(Workflow, "scatter", scatter)`` installs it as a method something calls later: an edge, not a builtin's read."""
     record = _record(
@@ -935,6 +959,30 @@ _TAKER = (
 
 def _callees(record: reach.ReachGraph, owner: str) -> list[str]:
     return [hole.callee for hole in record.rows[owner].holes]
+
+
+def test_what_a_builtin_hands_back_of_a_container_is_read_by_what_callfacts_says(tmp_path):
+    """``e = getattr(o, "x", d)`` may be ``d`` itself (the default), so what ``e["a"].append`` puts may be in
+    ``d["a"]``: an unknown ``e`` leaves ``d["a"][-1].move()`` open.  ``range(d["a"][0])`` is a range, holding none
+    of ``d``: the walk of ``d`` goes on past it, and ``d["a"].append`` is a list's."""
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def defaults(o):\n"
+            "    d = {'a': [1]}\n"
+            "    e = getattr(o, 'x', d)\n"
+            "    e['a'].append(2)\n"
+            "    d['a'][-1].move()\n\n"
+            "def counts():\n"
+            "    d = {'a': [1]}\n"
+            "    for i in range(d['a'][0]):\n"
+            "        d['a'].append(i)\n"
+            "    d['a'][-1].move()\n"
+        ),
+    )
+
+    assert "d['a'][-1].move" in _callees(record, "pkg/mod.py::defaults")
+    assert _callees(record, "pkg/mod.py::counts") == []
 
 
 def test_a_container_s_copy_is_the_container_and_an_augmented_assignment_leaves_a_name_what_it_was(

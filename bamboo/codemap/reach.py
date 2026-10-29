@@ -131,12 +131,6 @@ _QUEUES = {
 }
 _PUTS = {"put", "put_nowait"}
 _GETS = {"get", "get_nowait"}
-#: Builtins that never call what they are handed: a class passed to them is no constructor run.
-_NOT_CALLING = {
-    "isinstance", "issubclass", "super", "getattr", "hasattr", "delattr", "type", "id",
-    "len", "repr", "str", "print", "callable", "vars", "dir",
-}  # fmt: skip
-
 _BUILTINS = set(dir(builtins))
 #: The builtin types and the typing and collections names a builtin value is annotated with.
 _BUILTIN_ANNOTATIONS = {
@@ -146,17 +140,6 @@ _BUILTIN_ANNOTATIONS = {
     "Counter", "deque", "DefaultDict",
 }  # fmt: skip
 _SCALARS = {"str", "int", "float", "bool", "bytes", "complex", "NoneType"}
-#: Builtin functions whose value is a builtin whatever they are handed, and of which type.
-_BUILTIN_RESULTS = {
-    "len": "int", "str": "str", "int": "int", "float": "float", "bool": "bool", "bytes": "bytes",
-    "repr": "str", "hash": "int", "id": "int", "abs": "", "round": "", "ord": "int", "chr": "str",
-    "hex": "str", "oct": "str", "bin": "str", "format": "str", "isinstance": "bool", "issubclass": "bool",
-    "hasattr": "bool", "callable": "bool", "any": "bool", "all": "bool", "divmod": "tuple", "range": "range",
-    "list": "list", "dict": "dict", "set": "set", "tuple": "tuple", "frozenset": "frozenset",
-    "sorted": "list", "enumerate": "iterator", "zip": "iterator", "map": "iterator", "filter": "iterator",
-    "reversed": "iterator", "iter": "iterator", "open": "file", "input": "str", "print": "NoneType",
-    "sum": "", "pow": "",
-}  # fmt: skip
 #: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
 _OPERATORS: dict[type, tuple[str, ...]] = {
     op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
@@ -556,7 +539,8 @@ class _Receivers:
             and isinstance(called, ast.Name)
             and self._is_builtin(file, func, called.id)
         ):
-            result = _BUILTIN_RESULTS.get(called.id)
+            function = callfacts.BUILTIN_FUNCTIONS.get(called.id)
+            result = function.result if function is not None else None
             if result is None:
                 return _UNKNOWN, f"what {called.id}() returns"
             return _BUILTIN, result
@@ -849,13 +833,6 @@ _PATH_CUT = 8
 _HOLDERS_CUT = 300
 #: The slot of an item's value -- ``for key, value in d.items()``, ``for index, one in enumerate(xs)``.
 _SECOND = ast.Constant(value=1)
-
-#: Builtins whose value holds nothing of what they are handed: a count, a text, a test.
-_KEEPING_BUILTINS = {
-    "len", "str", "repr", "int", "float", "bool", "bytes", "print", "isinstance", "issubclass", "hash", "id",
-    "type", "any", "all", "sum", "format", "abs", "round", "callable", "hasattr", "getattr", "ord", "chr",
-    "bin", "hex", "oct", "ascii", "divmod", "pow",
-}  # fmt: skip
 
 
 def _part(gives: callfacts.Give, args: list[ast.expr]) -> Optional[tuple[_Path, _Path]]:
@@ -1628,14 +1605,18 @@ class _Holders:
         if isinstance(called, ast.Name) and self.receivers._is_builtin(
             file, func, called.id
         ):
-            builtin = called.id
-            if builtin in _KEEPING_BUILTINS:
-                return None
+            function = callfacts.BUILTIN_FUNCTIONS.get(called.id)
+            gives = function.gives if function is not None else None
+            if gives in callfacts.HOLDING_NONE:
+                return None  # a text, a number, a count or a test of it
+            if function is not None and gives == callfacts.ATTRIBUTE:
+                # getattr's default may be the value; an attribute of a builtin container is a method of it.
+                default = function.default
+                kept = default is not None and len(call.args) > default and argument is call.args[default]
+                return ((), ()) if kept else None
             if isinstance(argument, (ast.keyword, ast.Starred)):
                 self._unread(at, of)
                 return None
-            function = callfacts.BUILTIN_FUNCTIONS.get(builtin)
-            gives = function.gives if function is not None else None
             if function is not None and gives == callfacts.ONE:
                 elements, whole = callfacts.picked(function, call)
                 if any(argument is one for one in whole):
@@ -2431,13 +2412,10 @@ def graph(
                     list(bound) or objects,
                     for_classes,
                 )
-            if (
-                isinstance(call.func, ast.Name)
-                and call.func.id in _NOT_CALLING
-                and receivers._is_builtin(file, func, call.func.id)
-            ):
-                continue
+            function = callfacts.builtin_function(receivers.types, file, func, call)
             for value in _handed_values(call):
+                if function is not None and callfacts.builds_nothing(function, call, value):
+                    continue  # isinstance(x, C), hasattr(C, name): no constructor run
                 for for_classes, bound in _groups(objects, classes, _reads_self(value)):
                     for target in calls.named_callables(file, func, value, bound):
                         to = names.of(target.func)

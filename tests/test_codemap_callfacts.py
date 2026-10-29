@@ -129,11 +129,11 @@ _SHADOWED = (
         ("max", None),
         ("zip", None),
         ("filter", None),
-        ("sorted", callfacts.Function(callfacts.COPY)),
-        ("next", callfacts.Function(callfacts.ONE, 1)),
-        ("min", callfacts.Function(callfacts.ONE)),
-        ("getattr", callfacts.Function(callfacts.ATTRIBUTE, 2)),
-        ("len", None),
+        ("sorted", (callfacts.COPY, None)),
+        ("next", (callfacts.ONE, 1)),
+        ("min", (callfacts.ONE, None)),
+        ("getattr", (callfacts.ATTRIBUTE, 2)),
+        ("len", (callfacts.COMPUTED, None)),
     ],
     ids=[
         "a-parameter",
@@ -144,7 +144,7 @@ _SHADOWED = (
         "the-builtin-picks-with-a-default",
         "the-builtin-picks",
         "the-builtin-takes-an-attribute",
-        "a-builtin-whose-value-holds-nothing-handed",
+        "the-builtin-computes",
     ],
 )
 def test_a_builtin_function_is_read_where_no_scope_binds_its_name(tmp_path, callee, expected):
@@ -160,7 +160,9 @@ def test_a_builtin_function_is_read_where_no_scope_binds_its_name(tmp_path, call
         for node in ast.walk(func)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == callee
     )
-    assert callfacts.builtin_function(types, file, func, call) == expected
+    function = callfacts.builtin_function(types, file, func, call)
+    assert (function.gives, function.default) == expected if expected is not None else function is None
+    assert callfacts.builtin_function_at(call) == function
     assert types.is_builtin(file, func, callee) is (callee in ("sorted", "next", "min", "getattr", "len"))
 
 
@@ -182,6 +184,59 @@ def test_a_picked_value_is_an_element_of_the_first_argument_or_an_argument_itsel
     got = callfacts.picked(callfacts.BUILTIN_FUNCTIONS[call.func.id], call)
     assert ([ast.unparse(one) for one in got[0]], [ast.unparse(one) for one in got[1]]) == (elements, whole)
 
+
+
+@pytest.mark.parametrize(
+    ("text", "argument", "expected"),
+    [
+        ("isinstance(x, C)", "C", True),
+        ("str(C)", "C", True),
+        ("getattr(C, name)", "C", True),
+        ("getattr(x, name, C)", "C", False),
+        ("super(C, self)", "C", True),
+        ("super(C, self)", "self", False),
+        ("sorted(xs, key=C)", "C", False),
+        ("list(C)", "C", False),
+    ],
+    ids=["a-test", "a-text", "an-attribute-of-it", "a-default", "super-s-class", "super-s-object", "a-key", "a-copy"],
+)
+def test_a_builtin_builds_nothing_it_neither_calls_nor_holds_as_it_is(text, argument, expected):
+    """``isinstance``, ``str``, ``getattr(C, name)`` and ``super``'s class read a class and run no constructor of it;
+    ``getattr``'s default may be the value, ``sorted`` calls its key, and ``list`` holds what iterating it gives."""
+    call = _call(text)
+    handed = [*call.args, *(keyword.value for keyword in call.keywords)]
+    one = next(node for node in handed if ast.unparse(node) == argument)
+    assert callfacts.builds_nothing(callfacts.BUILTIN_FUNCTIONS[call.func.id], call, one) is expected
+
+
+_CONVERTS = (
+    "def plain(x, spec):\n"
+    "    a = str(int(x))\n"
+    "    b = float(x)\n"
+    "    c = repr(x)\n"
+    "    d = format(x, spec)\n\n\n"
+    "def bound(x, str):\n"
+    "    e = str(x)\n"
+)
+
+
+def test_a_conversion_hands_one_value_on_where_the_name_is_the_builtin(tmp_path):
+    """``str(int(x))``, ``float(x)`` and ``repr(x)`` are ``x`` as another type; ``format(x, spec)`` writes it as the
+    spec says, and a ``str`` the function binds is not the builtin.  Read off the call's parents
+    (:func:`calls.is_builtin_at`), the scopes say the same; a tree with no parents has none to read."""
+    types = calls_mod.Types(_tree(tmp_path, mod=_CONVERTS), {})
+    file = f"{PACKAGE}/mod.py"
+    got = {}
+    for func in ast.walk(types.tree(file)):
+        if isinstance(func, ast.FunctionDef):
+            for node in ast.walk(func):
+                if isinstance(node, ast.Assign):
+                    got[node.targets[0].id] = ast.unparse(callfacts.unconverted(types, file, func, node.value))
+                    called = node.value.func.id
+                    assert calls_mod.is_builtin_at(node.value, called) is types.is_builtin(file, func, called)
+    assert got == {"a": "x", "b": "x", "c": "x", "d": "format(x, spec)", "e": "str(x)"}
+    with pytest.raises(ValueError):
+        calls_mod.is_builtin_at(_call("str(x)"), "str")
 
 _MODULE = (
     "import json\n"

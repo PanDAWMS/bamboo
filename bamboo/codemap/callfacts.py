@@ -32,9 +32,10 @@ with no placing -- the trace, what may change a name between two lines -- reads 
 
 The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
 what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
-method changes its receiver, a logger's methods, and what a builtin function's value holds of what it is handed --
-``list(xs)``, ``max(a, b)``, ``enumerate(xs)``, ``getattr(x, name)`` (:class:`Function`), read where the name is
-the builtin's (:func:`builtin_function`); what else a builtin function does still sits with its readers.
+method changes its receiver, a logger's methods, and what a builtin function does with what it is handed -- what
+its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``), the builtin
+type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name is the
+builtin's (:func:`builtin_function`).
 """
 
 from __future__ import annotations
@@ -352,7 +353,9 @@ TAKING = frozenset(
 #: What a builtin function's value holds of what it is handed (:class:`Function`): a new container or iterator of
 #: the first argument's elements, one of them, (position, element) pairs of them, tuples of each argument's elements
 #: in step, a dict of the first argument's pairs and of the keywords, the second argument's elements the first keeps,
-#: what the first makes of each of the second's, the first's attribute the second names.
+#: what the first makes of each of the second's, the first's attribute the second names; a text of all of the first,
+#: the first's number as another type, a value computed from them that holds none of them, what tells only their
+#: class, identity or whether they have an attribute, nothing (``None``), the second argument as its class's base.
 COPY, ONE, NUMBERED, ZIPPED, DICT, KEPT, MADE, ATTRIBUTE = (
     "copy",
     "one",
@@ -363,40 +366,99 @@ COPY, ONE, NUMBERED, ZIPPED, DICT, KEPT, MADE, ATTRIBUTE = (
     "made",
     "attribute",
 )
+TEXT, NUMBER, COMPUTED, TELLS, NOTHING, BOUND = (
+    "text",
+    "number",
+    "computed",
+    "tells",
+    "nothing",
+    "bound",
+)
+#: The values holding none of what they are handed: a text, a number, a count or a test of it, nothing.
+HOLDING_NONE = frozenset({TEXT, NUMBER, COMPUTED, TELLS, NOTHING})
+#: The values holding what they are handed or a part of it, a part a reader follows into the value.
+HANDING_ON = frozenset({COPY, ONE, NUMBERED, ZIPPED, DICT, KEPT, MADE, ATTRIBUTE})
+#: The values that are one value as another type -- ``str(pandaID)``, ``int(row[0])``: the same value to a reader
+#: of what a key or a column holds.
+CONVERTING = frozenset({TEXT, NUMBER})
 
 
 class Function(NamedTuple):
-    """What a builtin function's value holds of what it is handed.
+    """What a builtin function does with what it is handed.
 
-    *gives* is :data:`COPY` (``list(xs)``, ``sorted(xs)``, ``iter(xs)``), :data:`ONE` (one of the first argument's
-    elements; one of the arguments where it is handed several and *default* is none -- ``max(a, b)``),
-    :data:`NUMBERED` (``enumerate(xs)``), :data:`ZIPPED` (``zip(xs, ys)``), :data:`DICT` (``dict(pairs, k=v)``: a
-    mapping's or the (key, value) pairs' and the keywords'), :data:`KEPT` (``filter(f, xs)``), :data:`MADE`
-    (``map(f, xs)``) or :data:`ATTRIBUTE` (``getattr(x, name)``); *default* the position of an argument the value may
-    be instead (``next(it, default)``, ``getattr(x, name, default)``)."""
+    *gives* is what its value holds of it: :data:`COPY` (``list(xs)``, ``sorted(xs)``, ``iter(xs)``), :data:`ONE`
+    (one of the first argument's elements; one of the arguments where it is handed several and *default* is none --
+    ``max(a, b)``), :data:`NUMBERED` (``enumerate(xs)``), :data:`ZIPPED` (``zip(xs, ys)``), :data:`DICT`
+    (``dict(pairs, k=v)``: a mapping's or the (key, value) pairs' and the keywords'), :data:`KEPT` (``filter(f,
+    xs)``), :data:`MADE` (``map(f, xs)``), :data:`ATTRIBUTE` (``getattr(x, name)``; ``vars(x)``, every one),
+    :data:`TEXT` (``str(x)``), :data:`NUMBER` (``int(x)``), :data:`COMPUTED` (``len(xs)``), :data:`TELLS`
+    (``isinstance(x, C)``), :data:`NOTHING` (``print(x)``) or :data:`BOUND` (``super(C, self)``) -- ``None`` where
+    it is not said (``open(path)``); *default* the position of an argument the value may be instead (``next(it,
+    default)``, ``getattr(x, name, default)``).  *result* is the builtin type of the value, ``""`` for a builtin of
+    a type not said (``sum(xs)``), ``None`` where it is not said (``max(xs)``, ``type(x)``: a class, which
+    ``type(self)()`` builds).  *calls*: it may call a function it is handed (``map(f, xs)``, ``sorted(xs,
+    key=f)``)."""
 
-    gives: str
+    gives: Optional[str]
     default: Optional[int] = None
+    result: Optional[str] = None
+    calls: bool = False
 
 
-#: The builtin functions whose value holds a part of what they are handed, by name.
+#: The builtin functions this says something of, by name; a builtin not here is said nothing of (``setattr``).
 BUILTIN_FUNCTIONS: dict[str, Function] = {
-    "list": Function(COPY),
-    "tuple": Function(COPY),
-    "set": Function(COPY),
-    "frozenset": Function(COPY),
-    "sorted": Function(COPY),
-    "reversed": Function(COPY),
-    "iter": Function(COPY),
-    "max": Function(ONE),
-    "min": Function(ONE),
+    "list": Function(COPY, result="list"),
+    "tuple": Function(COPY, result="tuple"),
+    "set": Function(COPY, result="set"),
+    "frozenset": Function(COPY, result="frozenset"),
+    "sorted": Function(COPY, result="list", calls=True),
+    "reversed": Function(COPY, result="iterator"),
+    "iter": Function(COPY, result="iterator", calls=True),
+    "max": Function(ONE, calls=True),
+    "min": Function(ONE, calls=True),
     "next": Function(ONE, 1),
-    "enumerate": Function(NUMBERED),
-    "zip": Function(ZIPPED),
-    "dict": Function(DICT),
-    "filter": Function(KEPT),
-    "map": Function(MADE),
+    "enumerate": Function(NUMBERED, result="iterator"),
+    "zip": Function(ZIPPED, result="iterator"),
+    "dict": Function(DICT, result="dict"),
+    "filter": Function(KEPT, result="iterator", calls=True),
+    "map": Function(MADE, result="iterator", calls=True),
     "getattr": Function(ATTRIBUTE, 2),
+    "vars": Function(ATTRIBUTE, result="dict"),
+    "str": Function(TEXT, result="str"),
+    "repr": Function(TEXT, result="str"),
+    "ascii": Function(TEXT, result="str"),
+    "format": Function(TEXT, result="str"),
+    "int": Function(NUMBER, result="int"),
+    "float": Function(NUMBER, result="float"),
+    "len": Function(COMPUTED, result="int"),
+    "sum": Function(COMPUTED, result=""),
+    "abs": Function(COMPUTED, result=""),
+    "round": Function(COMPUTED, result=""),
+    "divmod": Function(COMPUTED, result="tuple"),
+    "pow": Function(COMPUTED, result=""),
+    "any": Function(COMPUTED, result="bool"),
+    "all": Function(COMPUTED, result="bool"),
+    "bool": Function(COMPUTED, result="bool"),
+    "hash": Function(COMPUTED, result="int"),
+    "ord": Function(COMPUTED, result="int"),
+    "chr": Function(COMPUTED, result="str"),
+    "hex": Function(COMPUTED, result="str"),
+    "oct": Function(COMPUTED, result="str"),
+    "bin": Function(COMPUTED, result="str"),
+    "range": Function(COMPUTED, result="range"),
+    "dir": Function(COMPUTED, result="list"),
+    "bytes": Function(COMPUTED, result="bytes"),
+    "isinstance": Function(TELLS, result="bool"),
+    "issubclass": Function(TELLS, result="bool"),
+    "hasattr": Function(TELLS, result="bool"),
+    "callable": Function(TELLS, result="bool"),
+    "id": Function(TELLS, result="int"),
+    "type": Function(TELLS),
+    "print": Function(NOTHING, result="NoneType"),
+    "delattr": Function(NOTHING, result="NoneType"),
+    "super": Function(BOUND),
+    "open": Function(None, result="file"),
+    "input": Function(None, result="str"),
 }
 
 
@@ -416,6 +478,17 @@ def builtin_function(
     )
 
 
+def builtin_function_at(call: ast.Call) -> Optional[Function]:
+    """:func:`builtin_function` where a reader has no :class:`calls.Types` at hand: the scopes read off the call's
+    parents (:func:`calls.is_builtin_at`)."""
+    from bamboo.codemap.calls import is_builtin_at
+
+    called = call.func
+    if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
+        return None
+    return BUILTIN_FUNCTIONS[called.id] if is_builtin_at(call, called.id) else None
+
+
 def picked(function: Function, call: ast.Call) -> tuple[list[ast.expr], list[ast.expr]]:
     """For a :data:`ONE` call: the arguments whose element the value may be, and the arguments it may be itself --
     ``([it], [default])`` for ``next(it, default)``, ``([xs], [])`` for ``max(xs)``, ``([], [a, b])`` for ``max(a,
@@ -432,6 +505,46 @@ def picked(function: Function, call: ast.Call) -> tuple[list[ast.expr], list[ast
         else []
     )
     return args[:1], beside
+
+
+def builds_nothing(function: Function, call: ast.Call, argument: ast.expr) -> bool:
+    """Whether *argument*, handed to the builtin *call*, is neither called by it nor held as it is by its value: a
+    class handed so is no constructor run, now or later -- ``isinstance(x, C)``, ``hasattr(C, name)``, ``str(C)``,
+    ``getattr(C, name)`` (an attribute of it), ``super(C, self)`` (the object, not the class)."""
+    if function.calls or function.gives is None:
+        return False
+    if function.gives in HOLDING_NONE:
+        return True
+    positional = [one for one in call.args if not isinstance(one, ast.Starred)]
+    if len(positional) != len(call.args) or not any(
+        argument is one for one in positional
+    ):
+        return False
+    if function.gives == ATTRIBUTE:
+        default = function.default
+        return (
+            default is None
+            or len(positional) <= default
+            or argument is not positional[default]
+        )
+    if function.gives == BOUND:
+        return argument is positional[0]
+    return False
+
+
+def unconverted(types: "Types", file: str, func: ast.AST, node: ast.expr) -> ast.expr:
+    """*node* without the builtin conversions that hand one value on as another type (:data:`CONVERTING`):
+    ``str(pandaID)``, ``int(row[0])``."""
+    while (
+        isinstance(node, ast.Call)
+        and len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and not node.keywords
+        and (function := builtin_function(types, file, func, node)) is not None
+        and function.gives in CONVERTING
+    ):
+        node = node.args[0]
+    return node
 
 
 def round_trip(call: ast.Call) -> Optional[ast.expr]:

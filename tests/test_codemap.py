@@ -11051,6 +11051,23 @@ def test_a_popped_pair_s_first_is_the_key_the_rows_are_filed_under(tmp_path):
     assert node.crosses_to == ["pandaserver/c.py::retryTask"]
 
 
+def test_a_conversion_of_one_value_is_a_plain_copy_of_it_where_the_name_is_the_builtin():
+    """A bind's value ``repr(job.PandaID)`` or ``float(job.PandaID)`` is the field again, as another type
+    (callfacts.CONVERTING); ``str(...)`` with a ``str`` the function binds, and ``len(...)``, are computed."""
+    tree = ast.parse(
+        "def f(job, other):\n"
+        "    a = repr(job.PandaID)\n"
+        "    b = float(job.PandaID)\n"
+        "    c = len(job.PandaID)\n\n"
+        "def g(job, str):\n"
+        "    d = str(job.PandaID)\n"
+    )
+    pathcond.attach_parents(tree)
+    values = [node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)]
+    assert [sqlwrite._plain(value) for value in values] == [True, True, False, False]
+    assert [getattr(sqlwrite._root(value), "id", None) for value in values] == ["job", "job", None, None]
+
+
 def test_one_of_two_values_a_builtin_picks_holds_what_each_holds(tmp_path):
     """``max(taskID, 0)`` is ``taskID`` or ``0`` (callfacts.ONE): the task the rows name reaches the call it is
     handed to, as ``taskID`` itself would; ``next(iter(ids), None)`` is one of the ids or None."""

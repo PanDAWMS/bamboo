@@ -591,6 +591,44 @@ class Elsewhere:
     ]
 
 
+
+def test_a_class_a_builtin_holds_none_of_is_not_read_as_a_value(tmp_path):
+    """``hasattr(Probed, name)``, ``getattr(Probed, name)`` and ``str(Named)`` read the class and hold none of it
+    (:func:`callfacts.builds_nothing`): reached from outside.  ``getattr(x, name, Kept)`` may be ``Kept``."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m='''\
+class Probed:
+    def __init__(self, job):
+        self.job = job
+
+class Named:
+    def __init__(self, job):
+        self.job = job
+
+class Kept:
+    def __init__(self, job):
+        self.job = job
+
+def look(x, name):
+    if hasattr(Probed, name):
+        return getattr(Probed, name)
+    print(str(Named))
+    return getattr(x, name, Kept)
+''',
+        )
+    )
+
+    for name in ("Probed", "Named"):
+        assert calls.missed(_method(calls, "m", name, "__init__")) == [
+            f"{name}: no call in the corpus names it -- reached from outside"
+        ]
+    assert calls.missed(_method(calls, "m", "Kept", "__init__")) == [
+        "Kept: no call in the corpus names it; the class is read as a value at pkg/m.py:17, "
+        "and a call of that value may build one"
+    ]
+
 def test_super_lands_at_the_next_class_in_the_order_of_every_object_it_runs_on(tmp_path):
     """A mixin's ``super().__init__`` reaches its base on its own and the next mixin on a class with both."""
     calls = _calls(
@@ -2792,6 +2830,29 @@ def test_a_receiver_built_as_a_builtin_lands_outside_the_corpus(tmp_path):
     given = _placed(calls, "m", "build", "given.append")
     assert (given.targets, given.unplaced) == ((), calls_mod.UNPLACED_RECEIVER)
 
+
+
+def test_a_receiver_a_builtin_function_makes_is_of_the_type_callfacts_says(tmp_path):
+    """``out = open(path)`` is a file and ``n = len(xs)`` an int: their methods are a builtin's, not ``Log.write``'s.
+    ``type(xs)`` is a class, whose type callfacts does not say."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m="class Log:\n    def write(self, x):\n        return x\n\n"
+            "def run(path, xs):\n"
+            "    out = open(path)\n"
+            "    out.write(xs)\n"
+            "    n = len(xs)\n"
+            "    n.write(xs)\n"
+            "    kind = type(xs)\n"
+            "    kind.write(xs)\n",
+        )
+    )
+
+    for text in ("out.write", "n.write"):
+        placed = _placed(calls, "m", "run", text)
+        assert (placed.targets, placed.unplaced) == ((), calls_mod.UNPLACED_OUTSIDE), text
+    assert _placed(calls, "m", "run", "kind.write").unplaced != calls_mod.UNPLACED_OUTSIDE
 
 def test_a_builtin_beside_a_corpus_class_leaves_the_call_open_as_before(tmp_path):
     """``held`` is a list on one branch and a ``ListWithLock`` on the other: either may run the call."""
