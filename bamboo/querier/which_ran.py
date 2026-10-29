@@ -200,9 +200,10 @@ def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None
     whose times hold every record of *inner*, or None.
 
     The records are the call's ``must_rows`` in the caller, so each pair is one pass through the call: the last
-    record before it, and the first after.  A log line names no process, so this says only that *inner* ran while
-    the caller was inside that call, on the machine both name -- the caller of :func:`judge` checks that the call
-    can reach *inner*'s function.
+    record before it, and the first after.  A call with no print every path runs on one side -- the next statement
+    calls too, or the prints after it are in arms -- is placed by the run instead (:func:`_between_records`).  A log
+    line names no process, so this says only that *inner* ran while the caller was inside that call, on the machine
+    both name -- the caller of :func:`judge` checks that the call can reach *inner*'s function.
     """
     rel, _, line = site.rpartition(":")
     if rel != caller.fn.rel or not line.isdigit():
@@ -211,6 +212,8 @@ def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None
     if stmt is None:
         return None
     before, after = R.must_rows(caller.fn.node, stmt)
+    if not any(caller.fn.row_at(s) for s in before) or not any(caller.fn.row_at(s) for s in after):
+        return _between_records(caller, inner, stmt)
 
     def printed(stmts: list[ast.stmt]) -> list[int]:
         return sorted(i for s in stmts if (row := caller.fn.row_at(s)) is not None for i in caller.unambiguous.get(row.line, ()))
@@ -222,6 +225,32 @@ def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None
         if i is not None and records[i].stamp <= inner.first and inner.last <= records[j].stamp:
             return i, j
     return None
+
+
+def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, int] | None:
+    """``(i, j)`` for a call with no print every path runs on one side of it: the caller's records just before and
+    just after *inner*, two in a row of the function's (none of its rows read between them), where the call's
+    statement is on a path from the one's print to the other's that prints nothing else (``rows.runs_between``), or
+    None.
+
+    ``updateTaskStatusByContFeeder_JEDI`` ends an arm of feed_contents_to_tasks and the next print is in another arm,
+    so no print every path runs follows it; the run's "set task_status=..." before it and its next record after hold
+    the JediDBProxy run between them."""
+    node, records = caller.fn.node, caller.run.records
+    placed = sorted((x, line) for line, xs in caller.unambiguous.items() for x in xs)
+    before = [p for p in placed if records[p[0]].stamp <= inner.first]
+    after = [p for p in placed if inner.last <= records[p[0]].stamp]
+    if not before or not after or before[-1][0] >= after[0][0]:
+        return None
+    (i, first_line), (j, last_line) = before[-1], after[0]
+    # a row of the function read between the two: it printed there, so the two are not a pass's
+    if any(i < x < j for found in getattr(caller, "hits", {}).values() for x, *_ in found):
+        return None
+    prints = {id(s) for s in R.own_nodes(node) if isinstance(s, ast.stmt) and R.is_print(s) and caller.fn.row_at(s) is not None}
+    first, last = R.statement_at(node, first_line), R.statement_at(node, last_line)
+    if first is None or last is None or id(first) not in prints or id(last) not in prints:
+        return None
+    return (i, j) if R.runs_between(node, first, last, stmt, prints) else None
 
 
 def held_in_calls(
