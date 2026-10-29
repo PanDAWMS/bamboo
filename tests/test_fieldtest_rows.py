@@ -712,6 +712,24 @@ def test_spellings_come_from_each_class_column_list_in_the_pin(tmp_path):
     }
 
 
+def test_a_class_with_no_column_list_of_string_constants_has_no_spelling(tmp_path):
+    # pin m's DataCarousel.py declares its columns as AttributeWithType calls (the map's note, 2026-10-29)
+    pin = tmp_path / "pin"
+    (pin / "pkg").mkdir(parents=True)
+    (pin / "pkg" / "DataCarousel.py").write_text(
+        "class DataCarouselRequestSpec(object):\n"
+        "    attributes_with_types = (AttributeWithType('request_id', int),)\n"
+    )
+    dump = tmp_path / "dump.json"
+    dump.write_text(
+        json.dumps(
+            {"declaration_yields": {"DataCarouselRequestSpec (pkg/DataCarousel.py)": 1}}
+        )
+    )
+    got = RB.column_spellings(pin, dump, ("DataCarouselRequestSpec", "Undeclared"))
+    assert got == {}
+
+
 def test_a_classs_key_tables_creation_and_archive_come_from_the_dumps_tables():
     # what the fetch wrote by hand up to 2026-10-29, the order of the live tables aside
     assert TABLES.key == {

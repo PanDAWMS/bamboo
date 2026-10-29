@@ -136,6 +136,51 @@ def test_a_collection_no_rule_reads_says_why():
     assert not other_key.calls and "not by ['PandaID']" in other_key.why
 
 
+#: S1's ask for the rows of a class its statement joins to the row (querier-nr 6ee4df4)
+S1_ASK = {
+    "kind": "collection",
+    "row": {"entity": "JediTaskSpec", "key": {"jediTaskID": TID}},
+    "attr": None,
+    "entity": "JediDatasetSpec",
+    "where": {"jediTaskID": TID},
+    "via": [{"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.jediTaskID"}],
+}
+
+
+def test_a_joined_class_is_read_where_the_joins_to_columns_hold_the_rows_values():
+    via = [{"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.masterID"}]
+    got = _plan({**S1_ASK, "where": {"masterID": 9}, "via": via})
+    assert [(c.part, c.request) for c in got.calls] == [
+        ("db_read", {"tables": ["JEDI_Datasets"], "where": [["masterID", "=", 9]]})
+    ]
+
+
+def test_a_joined_ask_whose_via_does_not_name_its_where_says_why():
+    no_via = _plan({k: v for k, v in S1_ASK.items() if k != "via"})
+    assert (
+        not no_via.calls
+        and "does not join JediTaskSpec to JediDatasetSpec" in no_via.why
+    )
+    via = [{"from": "JobSpec.jediTaskID", "to": "JediDatasetSpec.jediTaskID"}]
+    other_class = _plan({**S1_ASK, "via": via})
+    assert not other_class.calls and "does not join" in other_class.why
+
+
+def test_a_joined_class_the_rows_answer_holds_is_read_by_the_call_reading_the_row():
+    got = _plan(
+        {
+            "kind": "collection",
+            "row": {"entity": "JobSpec", "key": {"PandaID": PID}},
+            "attr": None,
+            "entity": "FileSpec",
+            "where": {"PandaID": PID},
+            "via": [{"from": "JobSpec.PandaID", "to": "FileSpec.PandaID"}],
+        }
+    )
+    part, request = FE.KEY_REQUEST["JobSpec"]
+    assert [(c.part, c.request) for c in got.calls] == [(part, request(PID))]
+
+
 def test_a_statement_reads_its_tables_by_the_read_sites_column_with_the_calls_values():
     got = _plan(
         _statement(
@@ -315,6 +360,88 @@ async def test_an_sql_answer_names_rs_aggregates_as_l3s_sql_names_them():
         {"gshare": "Express", "currentpriority": 900, "n": 3, "min_pandaid": 11}
     ]
     assert answer["clock"] == RB.DATABASE and answer["as_of"] == "2026-10-13 10:00:00"
+
+
+#: the spellings with a dataset's columns, as the pin's JediDatasetSpec.attributes spells them
+DS_SPELLINGS = {
+    **SPELLINGS,
+    "JediDatasetSpec": {
+        "datasetid": "datasetID",
+        "jeditaskid": "jediTaskID",
+        "type": "type",
+    },
+}
+
+
+def _db_read(tables: dict[str, list[dict]]):
+    async def db_read(queries):
+        answer = {
+            "status": "done",
+            "truncated": False,
+            "tables": [{"table": t, "rows": r} for t, r in tables.items()],
+        }
+        return {"success": True, "data": {"as_of": T(AS_OF), "answers": [answer]}}
+
+    return db_read
+
+
+async def _joined_answer(tables: dict[str, list[dict]]) -> dict:
+    line = _line(S1_ASK)
+    p = RA.plan(line, TABLES, SITES)
+    return await RA.answer(line, p, FE.Parts(db_read=_db_read(tables)), TABLES)
+
+
+async def test_a_joined_classs_rows_are_a_linked_entry_per_table_as_the_class_spells_them():
+    row = {"datasetid": 11, "jeditaskid": TID, "type": "input", "nfiles": 3}
+    got = await _joined_answer({"JEDI_Datasets": [row]})
+    sections, left_out = RB.answered(
+        [_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS
+    )
+    assert left_out == []
+    assert sections["linked"] == [
+        {
+            "class": "JediDatasetSpec",
+            "via": S1_ASK["via"][0],
+            "asked": [TID],
+            "table": "JEDI_Datasets",
+            "source": f"R as of 2026-10-13 10:00:00, where {{'jediTaskID': {TID}}}",
+            "as_of": "2026-10-13 10:00:00",
+            "clock": RB.DATABASE,
+            "rows": [{"datasetID": 11, "jediTaskID": TID, "type": "input"}],
+        }
+    ]
+
+
+async def test_a_joined_table_with_no_row_is_an_entry_too_so_the_querier_does_not_ask_again():
+    got = await _joined_answer({"JEDI_Datasets": []})
+    sections, _ = RB.answered([_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS)
+    assert [(e["table"], e["rows"]) for e in sections["linked"]] == [
+        ("JEDI_Datasets", [])
+    ]
+
+
+async def test_a_joined_answer_no_entry_can_hold_says_why():
+    steps = (await _joined_answer({"JEDI_Datasets": []}))["steps"]
+    two = {**S1_ASK, "via": S1_ASK["via"] * 2}
+    assert RB.joined(two, steps, DS_SPELLINGS)[1].startswith(
+        "a linked entry names one pair"
+    )
+    assert RB.joined(S1_ASK, steps, SPELLINGS) == (
+        [],
+        "no column list of JediDatasetSpec was read from the pin",
+    )
+
+
+def test_the_rows_steps_linked_entries_replace_the_fetchs_of_the_same_pair_values_and_table():
+    a = {
+        "class": "X",
+        "via": {"from": "A.k", "to": "X.k"},
+        "asked": [1],
+        "table": "T",
+        "rows": [1],
+    }
+    b, c = {**a, "rows": [2]}, {**a, "asked": [2], "rows": [3]}
+    assert RB.lay_linked([a, c], [b]) == [b, c]
 
 
 async def test_an_ask_no_rule_reads_asks_nothing_and_is_left_out_with_its_why():

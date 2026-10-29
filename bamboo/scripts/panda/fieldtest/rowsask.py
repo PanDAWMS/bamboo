@@ -9,11 +9,15 @@ each is answered; with ``--records`` it asks PanDA (run it where PanDA's credent
 writes the round's answers to ``rows-r<n>.json`` there, ``n`` one past the directory's last
 (:func:`answer`; :func:`~bamboo.scripts.panda.fieldtest.rows.answered` lays them out):
 
-- ``collection`` -- a row's attribute holding rows (``{"row": {"entity", "key"}, "attr", "entity"}``).  Rows
+- ``collection`` -- a row's attribute holding rows (``{"row": {"entity", "key"}, "attr", "entity"}``), or
+  the rows of a class a statement joins to the row (S1's, ``attr`` null, with ``"where": {column: the row's
+  value}`` and ``"via": [{"from": "<row's class>.<column>", "to": "<class>.<column>"}]``, querier-nr).  Rows
   the row's own answer holds (:data:`~bamboo.scripts.panda.fieldtest.fetch.LINKS` ``held``: a job's
-  ``Files``) are read by the call reading the row by its key.  Else, where the ask names the element class
-  and its tables name a row by the row's key among others (a task's datasets: ``JEDI_Datasets`` by
-  ``datasetID`` and ``jediTaskID``), by ``db_read`` on those tables where that column holds the key.
+  ``Files``, asked by the attribute or by the link's pair) are read by the call reading the row by its key.
+  Else the ask names the element class: a joined class is read by ``db_read`` on its tables where the
+  joins' ``to`` columns hold the row's values; an attribute's, where its tables name a row by the row's key
+  among others (a task's datasets: ``JEDI_Datasets`` by ``datasetID`` and ``jediTaskID``), where that
+  column holds the key.
 - ``statement`` -- the rows a call's statements read, per pass (``{"method", "site", "tables", "binds",
   "at"}``).  The read sites at ``site`` name the columns the statements select by (the dump's
   ``read_sites`` ``keys``: ``JobSpec.jediTaskID``); the call's argument of each one's name gives its values
@@ -122,8 +126,9 @@ def plan(line: dict, tables: Tables, sites: Sites) -> Plan:
 def _collection(ask: dict, tables: Tables) -> Plan:
     cls, attr, element = ask["row"]["entity"], ask["attr"], ask.get("entity")
     key = ask["row"]["key"]
+    via = ask.get("via") or []
     for link in links_from(cls):
-        if link.held == attr:
+        if link.held and (link.held == attr or link.via() in via):
             if cls not in KEY_REQUEST or len(key) != 1:
                 return Plan(
                     ask,
@@ -139,6 +144,8 @@ def _collection(ask: dict, tables: Tables) -> Plan:
         )
     if element not in tables.live:
         return Plan(ask, why=f"the dump gives no tables of {element}")
+    if "where" in ask:
+        return _joined(ask, cls, element, via, tables)
     if not set(key) <= set(tables.identity.get(element, ())):
         return Plan(
             ask,
@@ -147,6 +154,23 @@ def _collection(ask: dict, tables: Tables) -> Plan:
     where = [[c, "=", v] for c, v in sorted(key.items())]
     read = tables.live[element] + tables.archive.get(element, ())
     return Plan(ask, [Call("db_read", "collection", query(read, where))])
+
+
+def _joined(ask: dict, cls: str, element: str, via: list[dict], tables: Tables) -> Plan:
+    """The rows of *element* a statement's joins name from the row: where the joins' ``to`` columns hold the row's
+    values (the ask's ``where``), each join named in ``via`` from the row's class to *element*."""
+    where = ask["where"]
+    ends = {(p["from"].partition(".")[0], p["to"].partition(".")[0]) for p in via}
+    if ends != {(cls, element)} or {p["to"].partition(".")[2] for p in via} != set(
+        where
+    ):
+        return Plan(
+            ask,
+            why=f"the ask's via {via} does not join {cls} to {element} by its where's columns {sorted(where)}",
+        )
+    terms = [[c, "=", v] for c, v in sorted(where.items())]
+    read = tables.live[element] + tables.archive.get(element, ())
+    return Plan(ask, [Call("db_read", "collection", query(read, terms))])
 
 
 def _statement(ask: dict, tables: Tables, sites: Sites) -> Plan:

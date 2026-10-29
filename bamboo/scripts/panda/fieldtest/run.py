@@ -257,22 +257,35 @@ def build_rows(
     from bamboo.scripts.panda.fieldtest import rows, rowsask  # noqa: PLC0415
 
     dump = Path(pair["MAP_DUMP"])
-    spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), dump)
-    tables = rows.Tables.read(dump)
-    record = json.loads(answers.read_text())
-    built = rows.build(record, spellings, tables)
     rounds = sorted(
         (int(m.group(1)), f)
         for f in (records.glob(ROWS_GLOB) if records else [])
         if (m := rowsask.ROUND.match(f.name))
     )
+    docs = [json.loads(f.read_text()) for _, f in rounds]
+    # the classes of the rows laid out: the fetch's, and the ones the rows step's asks name
+    named = {
+        a["ask"]["rows"].get("entity")
+        for d in docs
+        for a in d["answers"]
+        if a["ask"]["rows"]["kind"] == "collection"
+    }
+    classes = tuple(rows.ENTITY) + tuple(
+        sorted(c for c in named - set(rows.ENTITY) if c)
+    )
+    spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), dump, classes)
+    tables = rows.Tables.read(dump)
+    record = json.loads(answers.read_text())
+    built = rows.build(record, spellings, tables)
     if rounds:
         q = record["question"]
-        docs = [json.loads(f.read_text()) for _, f in rounds]
         sections, left_out = rows.answered(
             docs, record["key_class"], q["key"], spellings
         )
         built.setdefault("answers", {}).update(sections.pop("answers", {}))
+        built["linked"] = rows.lay_linked(
+            built.get("linked", []), sections.pop("linked", [])
+        )
         built.update(sections)
         built["about"] += (
             f"  Laid over it: the rows step's answers {[str(f) for _, f in rounds]}."
@@ -335,8 +348,10 @@ def score(result: dict | None) -> dict:
 
     ``terminal`` is ``STOP`` or ``END``; ``code`` names the class of what a stop
     needs (``asks``, a KNOWN_ISSUES number, or None where none is named yet);
-    ``text`` is the ``STOP`` line or the ``END`` lines.  A run with no result,
-    or one of another version, is ``NONE`` and ``why`` says which.
+    ``text`` is the ``STOP`` line or the ``END`` lines; ``possibilities`` is
+    result.json's, each arm a step left open with its rows (code ``one-of``,
+    querier-ab), None otherwise.  A run with no result, or one of another
+    version, is ``NONE`` and ``why`` says which.
     """
     got: dict = {
         "terminal": "NONE",
@@ -349,6 +364,7 @@ def score(result: dict | None) -> dict:
         "hand_used": None,
         "asks": None,
         "rows_asks": None,
+        "possibilities": None,
     }
     if result is None:
         return got | {"why": "no result.json: the run did not finish"}
@@ -367,6 +383,7 @@ def score(result: dict | None) -> dict:
         "hand_used": o["hand_used"],
         "asks": result["asks"],
         "rows_asks": result.get("rows_asks"),
+        "possibilities": result.get("possibilities"),
     }
 
 

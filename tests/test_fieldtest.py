@@ -701,7 +701,9 @@ def test_a_case_with_answers_runs_on_the_rows_file_built_from_them(
         "steps": [],
     }
     answers = _write(tmp_path, "answers.json", record)
-    monkeypatch.setattr(RB, "column_spellings", lambda pin, dump: {"JediTaskSpec": {}})
+    monkeypatch.setattr(
+        RB, "column_spellings", lambda pin, dump, classes=(): {"JediTaskSpec": {}}
+    )
     tables = RB.Tables({"JediTaskSpec": "jediTaskID"}, {}, {}, {}, {})
     monkeypatch.setattr(RB.Tables, "read", lambda dump: tables)
     path = _case(tmp_path)
@@ -898,9 +900,17 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
     from bamboo.scripts.panda.fieldtest import rows as RB
 
     answers = _write(tmp_path, "answers.json", record)
-    monkeypatch.setattr(
-        RB, "column_spellings", lambda pin, dump: {"JobSpec": {}, "FileSpec": {}}
-    )
+    asked_for = []
+
+    def spellings(pin, dump, classes=()):
+        asked_for.extend(classes)
+        return {
+            "JobSpec": {},
+            "FileSpec": {},
+            "JediDatasetSpec": {"datasetid": "datasetID"},
+        }
+
+    monkeypatch.setattr(RB, "column_spellings", spellings)
     monkeypatch.setattr(
         RB.Tables,
         "read",
@@ -909,23 +919,41 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
     records = tmp_path / "records"
     records.mkdir()
 
-    def sql(name: str, rows: list[dict]) -> dict:
-        tables = [{"table": "jobsActive4", "rows": rows}]
+    def read(role: str, table: str, rows: list[dict]) -> dict:
+        tables = [{"table": table, "rows": rows}]
         data = {
             "as_of": {"__datetime__": "2026-10-13T10:00:00"},
             "answers": [{"status": "done", "truncated": False, "tables": tables}],
         }
-        step = {
+        return {
             "part": "db_read",
-            "roles": ["sql"],
+            "roles": [role],
             "request": {},
             "response": {"success": True, "data": data},
         }
+
+    def sql(name: str, rows: list[dict]) -> dict:
         return {
             "ask": {"rows": {"kind": "sql", "name": name}},
             "why": "",
-            "steps": [step],
+            "steps": [read("sql", "jobsActive4", rows)],
         }
+
+    via = {"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.jediTaskID"}
+    datasets = {
+        "ask": {
+            "rows": {
+                "kind": "collection",
+                "row": {"entity": "JediTaskSpec", "key": {"jediTaskID": 5}},
+                "attr": None,
+                "entity": "JediDatasetSpec",
+                "where": {"jediTaskID": 5},
+                "via": [via],
+            }
+        },
+        "why": "",
+        "steps": [read("collection", "JEDI_Datasets", [{"datasetid": 11}])],
+    }
 
     window = {
         "ask": {"rows": {"kind": "sql", "name": "w"}},
@@ -940,7 +968,7 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
     _write(
         records,
         "rows-r2.json",
-        {"answers": [sql("g", [{"gshare": "a", "count(*)": 2}])]},
+        {"answers": [sql("g", [{"gshare": "a", "count(*)": 2}]), datasets]},
     )
     pair = {"MAP_DUMP": "dump.json", "PANDA_PIN": "pin"}
 
@@ -959,5 +987,30 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
         "rows-r1.json" in built["about"]
         and "Left out of them: sql w: no db_read form" in built["about"]
     )
+    # the joined rows go to linked, spelled as their class -- asked of the pin with the fetch's classes
+    assert [(e["class"], e["via"], e["asked"], e["rows"]) for e in built["linked"]] == [
+        ("JediDatasetSpec", via, [5], [{"datasetID": 11}])
+    ]
+    assert asked_for == [*RB.ENTITY, "JediDatasetSpec"]
     alone = json.loads(F.build_rows(answers, pair, tmp_path / "plain.json").read_text())
     assert "answers" not in alone and "rows step" not in alone["about"]
+    assert alone["linked"] == []
+
+
+def test_the_score_carries_an_arms_possibilities():
+    result = {
+        "version": F.RESULT_VERSION,
+        "outcome": {
+            "kind": "stop",
+            "step": "H2",
+            "code": "one-of",
+            "text": "STOP H2: one of",
+            "hand_used": [],
+        },
+        "steps": ["H1", "H2"],
+        "asks": None,
+        "possibilities": [{"arm": "a", "rows": []}],
+    }
+    got = F.score(result)
+    assert (got["code"], got["possibilities"]) == ("one-of", [{"arm": "a", "rows": []}])
+    assert F.score(None)["possibilities"] is None
