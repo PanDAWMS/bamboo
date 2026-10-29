@@ -52,14 +52,9 @@ if TYPE_CHECKING:
 #: though they read different things.  The class is read the way a type checker
 #: reads it -- an annotation, a constructor, a method's return annotation -- by
 #: the walk, which hands it here as ``typed``; the key is the file that declares
-#: the class, so a class of the same name elsewhere is not this one.
-INTERFACE_CLASSES = {
-    "pandaserver/brokerage/SiteMapper.py::SiteMapper": "CRIC site declaration",
-    # ``rucioAPI = RucioAPI()`` at the foot of ``ddm.py``, imported by name
-    # everywhere the server registers, attaches or erases a dataset.  The
-    # attribute table's ``ddmIF`` is JEDI's; the server's never had a name.
-    "pandaserver/dataservice/ddm.py::RucioAPI": "DDM / Rucio",
-}
+#: the class, so a class of the same name elsewhere is not this one.  The
+#: classes are :data:`callfacts.INTERFACE_CLASSES`.
+INTERFACE_CLASSES = callfacts.INTERFACE_CLASSES
 
 #: The system -> the package PanDA reaches it through, where PanDA calls it:
 #: :data:`callfacts.OTHER_SYSTEMS`, the one table the readers of a call read
@@ -68,17 +63,9 @@ INTERFACE_CLASSES = {
 #: declarations already loaded and calls nothing out, so it has none.
 OUTSIDE_PACKAGES = callfacts.OTHER_SYSTEMS
 
-#: ``self.<attribute>`` -> the system on the other side of it.
-#:
-#: The spelling, kept where the class cannot be read yet.  JEDI builds its
-#: ``self.siteMapper`` from ``self.taskBufferIF.get_site_mapper()``, and that
-#: interface forwards every call through ``__getattr__ -> Any``, so no
-#: declaration says what comes back; ``siteMapper`` stays here until PanDA
-#: states it, and ``ddmIF`` until DDM's classes are read the same way.
-EXTERNAL_INTERFACES = {
-    "ddmIF": "DDM / Rucio",
-    "siteMapper": "CRIC site declaration",
-}
+#: ``self.<attribute>`` -> the system on the other side of it, where the class
+#: cannot be read yet (:data:`callfacts.EXTERNAL_INTERFACES` says why each is).
+EXTERNAL_INTERFACES = callfacts.EXTERNAL_INTERFACES
 
 #: Interfaces that land back in PanDA's own database.  A terminal for the
 #: trace and a continuation for the map, which is the point of naming it
@@ -103,11 +90,8 @@ DATABASE_INTERFACES = callfacts.TASK_BUFFER_NAMES | callfacts.CURSOR_NAMES
 #: ``peekJobs`` calls ``peekJob`` once per job, ``querySQL`` calls
 #: ``querySQLS``, and ``getDatasetsWithJediTaskID_JEDI`` calls two.  The JEDI
 #: facade's pool hands out ``JediDBProxy``, a subclass that adds nothing a
-#: facade calls.
-FACADES = {
-    "pandaserver/taskbuffer/TaskBuffer.py::TaskBuffer": ("proxyPool", "pandaserver/taskbuffer/OraDBProxy.py::DBProxy"),
-    "pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer": ("proxyPool", "pandajedi/jedicore/JediDBProxy.py::DBProxy"),
-}
+#: facade calls.  The facades are :data:`callfacts.FACADES`.
+FACADES = callfacts.FACADES
 _POOLS = frozenset(pool for pool, _proxy in FACADES.values())
 
 _CONFIG_CALL = "getConfigValue"

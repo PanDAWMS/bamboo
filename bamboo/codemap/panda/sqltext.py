@@ -53,6 +53,8 @@ _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
 _WHERE = re.compile(r"\bWHERE\b", re.IGNORECASE)
 
 _BARE = re.compile(r"^[A-Za-z_]\w*$")
+#: The database's clocks, as a statement spells them: the time the statement runs at, which the database gives.
+DATABASE_CLOCKS = frozenset({"CURRENT_DATE", "CURRENT_TIMESTAMP", "SYSDATE", "SYSTIMESTAMP"})
 _NUMBER = re.compile(r"^[+-]?\d+(\.\d+)?$")
 # Bare words that are SQL, not columns.  This has to stay a list of *keywords*
 # rather than of names that look like plumbing: ``T_TASK`` really does have a
@@ -60,9 +62,7 @@ _NUMBER = re.compile(r"^[+-]?\d+(\.\d+)?$")
 # both of which are copied into other columns.  ``NULL`` is settled earlier as
 # a literal and never reaches here; it stays listed because what the set means
 # is "not a column name", which is true of it however it is read.
-_KEYWORDS = frozenset(
-    {"NULL", "CURRENT_DATE", "CURRENT_TIMESTAMP", "SYSDATE", "SYSTIMESTAMP", "DEFAULT", "TRUE", "FALSE"}
-)
+_KEYWORDS = DATABASE_CLOCKS | {"NULL", "DEFAULT", "TRUE", "FALSE"}
 
 
 class ColumnValue(BaseModel):
@@ -367,6 +367,10 @@ _JOIN = re.compile(r"\bJOIN\s+([\w{}.]+)", re.IGNORECASE)
 #: backend is not Oracle, which settles what it is.
 _PSEUDO_TABLES = frozenset({"dual"})
 
+#: Oracle's pseudo-columns -- a row's number, its depth in a tree, its address.
+#: Compared with a value they limit or walk the rows; no row holds them.
+_PSEUDO_NAMES = frozenset({"rownum", "level", "rowid"})
+
 #: SQL's own words, written where a column goes.  ``recoverLostFiles`` pads a
 #: ``UNION`` with ``SELECT fileID,datasetID,lfn,NULL`` so its projection lines up
 #: with the branch that selects ``outPandaID`` in that position, and
@@ -378,8 +382,12 @@ _PSEUDO_TABLES = frozenset({"dual"})
 #: as a class would delete real columns: ``get_shares`` selects twelve from
 #: ``GLOBAL_SHARES`` and ``NAME``, ``VALUE`` and ``PARENT`` are three of them,
 #: spelled in upper case exactly like the literals are.  So case cannot be the
-#: filter and a longer list is a liability rather than insurance.
-_PSEUDO_COLUMNS = frozenset({"null", "current_date", "current_timestamp"})
+#: filter and a longer list is a liability rather than insurance.  So it is
+#: ``NULL``, the database's clocks (:data:`DATABASE_CLOCKS`) and Oracle's
+#: pseudo-columns (:data:`_PSEUDO_NAMES`): words no row holds, whatever a
+#: table's columns are called.  sqlglot reads a clock as a clock, never a
+#: column; the text reading of a statement that does not parse does not.
+_PSEUDO_COLUMNS = frozenset({"null"} | {clock.lower() for clock in DATABASE_CLOCKS} | _PSEUDO_NAMES)
 
 
 def _names_a_table(name: str, defined: set[str]) -> bool:
@@ -1443,9 +1451,6 @@ def _plain_span(read: "Parsed", sql: str, start: int, end: int) -> tuple[int, in
 #: sqlglot's word for a part the grammar requires and the text lacks.
 _REQUIRED = "Required keyword"
 
-#: Oracle's pseudo-columns -- a row's number, its depth in a tree, its address.
-#: Compared with a value they limit or walk the rows; no row holds them.
-_PSEUDO_NAMES = frozenset({"rownum", "level", "rowid"})
 
 NOT_PARSED = "the statement does not parse"
 NO_SCHEMA = "no schema was given to say which of the statement's tables holds the column"
@@ -2227,7 +2232,7 @@ def equalities(sql: str) -> tuple[Equality, ...]:
         sides = []
         for column in (left, right):
             name = column.name.lower()
-            if _NAMED_HOLE.search(column.name) or name in _PSEUDO_NAMES:
+            if _NAMED_HOLE.search(column.name) or name in _PSEUDO_COLUMNS:
                 break
             owned, why = _owner(column, scope, root)
             if why or not owned:
@@ -2291,7 +2296,7 @@ def _term(column: exp.Column, scope, root, verb: str, kind: str, regions: tuple 
     # ``tabT.{0}=:{0}`` -- a column Python names at run time, which the
     # reading already reports.  Read as a column called ``__h4``, it
     # came out as a key no table has.
-    if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_NAMES:
+    if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_COLUMNS:
         return None
     holder = _filtering(column)
     if holder is None:
@@ -2647,7 +2652,7 @@ def _own(node: exp.Expression, select: Optional[exp.Expression]) -> list[exp.Col
         for column in node.find_all(exp.Column)
         if column.find_ancestor(exp.Select) is select
         and not _NAMED_HOLE.search(column.name)
-        and column.name.lower() not in _PSEUDO_NAMES
+        and column.name.lower() not in _PSEUDO_COLUMNS
     ]
 
 
@@ -2938,7 +2943,7 @@ def _column_owner(column: exp.Expression, scope, root) -> Optional[str]:
     """The table a plain column of the clause belongs to, or ``None``."""
     if not isinstance(column, exp.Column) or _NAMED_HOLE.search(column.name):
         return None
-    if column.name.lower() in _PSEUDO_NAMES:
+    if column.name.lower() in _PSEUDO_COLUMNS:
         return None
     owners, why = _owner(column, scope, root)
     return owners[0] if owners and not why else None
@@ -3903,7 +3908,7 @@ def order_owners(sql: str) -> tuple[tuple[str, str], ...]:
         if not isinstance(order, exp.Order) or scope is None:
             continue
         for column in order.find_all(exp.Column):
-            if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_NAMES:
+            if _NAMED_HOLE.search(column.name) or column.name.lower() in _PSEUDO_COLUMNS:
                 continue
             owners, why = _owner(column, scope, root)
             if owners and not why and (owners[0], column.name) not in found:

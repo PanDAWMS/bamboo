@@ -35,7 +35,9 @@ what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receive
 method changes its receiver, what a container class holds (:data:`CONTAINERS`), what a ``str`` method's value is
 (:data:`TEXT_METHODS`), a logger's methods and the calls making a logger (:data:`LOG_LEVELS`,
 :data:`LOGGER_MAKERS`), the database's driver, the calls running a statement and those handing back its rows
-(:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), and what a builtin function does with what it is
+(:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), PanDA's conventions -- the other systems' interfaces,
+the task buffer's facades, a spec's row and its declared columns (:data:`INTERFACE_CLASSES`, :data:`FACADES`,
+:data:`ROW_READ`, :data:`SPEC_DECLARATION_NAMES`) --, and what a builtin function does with what it is
 handed -- what its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``),
 the builtin type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name
 is the builtin's (:func:`builtin_function`).
@@ -435,6 +437,10 @@ IMPLICIT_DUNDERS = frozenset(
     | {name for names in OPERATOR_DUNDERS.values() for name in names}
 )  # fmt: skip
 
+#: The systems PanDA reads through an object of its own as well as through a client's package: the names
+#: :data:`OTHER_SYSTEMS` and the interfaces below give them.
+DDM, CRIC = "DDM / Rucio", "CRIC site declaration"
+
 #: The other systems PanDA is a client of -> the packages it reaches each through.  What a client's method is handed
 #: goes to that system: another run's input, not this run's (reach's premise ``cross_run_not_reach``).  Not the
 #: database's drivers (the driver rule says where those go), not a library that works on what it is handed here
@@ -442,7 +448,7 @@ IMPLICIT_DUNDERS = frozenset(
 #: module's name or the start of one: ``pandacommon.pandamsgbkr`` is the broker's, ``pandacommon.pandalogger`` not.
 #: :data:`bamboo.codemap.panda.provenance.OUTSIDE_PACKAGES` reads this table.
 OTHER_SYSTEMS: dict[str, tuple[str, ...]] = {
-    "DDM / Rucio": ("rucio",),
+    DDM: ("rucio",),
     "iDDS": ("idds",),
     "message broker": ("pandacommon.pandamsgbkr",),
     "Kafka": ("pandacommon.kafkapublisher",),
@@ -461,6 +467,42 @@ def other_system(module: str) -> Optional[str]:
         ):
             return system
     return None
+
+
+#: A class of the corpus that is another system's interface, by the file declaring it -> that system: what a call on
+#: one hands back is the system's (:data:`bamboo.codemap.panda.provenance.INTERFACE_CLASSES` says how the walk reads
+#: it).  ``rucioAPI = RucioAPI()`` at the foot of ``ddm.py`` is imported by name everywhere the server registers,
+#: attaches or erases a dataset; :data:`EXTERNAL_INTERFACES`' ``ddmIF`` is JEDI's, the server's never had a name.
+INTERFACE_CLASSES = {
+    "pandaserver/brokerage/SiteMapper.py::SiteMapper": CRIC,
+    "pandaserver/dataservice/ddm.py::RucioAPI": DDM,
+}
+#: ``self.<attribute>`` -> the system on the other side of it: the spelling, kept where the class cannot be read yet.
+#: JEDI builds its ``self.siteMapper`` from ``self.taskBufferIF.get_site_mapper()``, and that interface forwards every
+#: call through ``__getattr__ -> Any``, so no declaration says what comes back; ``siteMapper`` stays here until PanDA
+#: states it, and ``ddmIF`` until DDM's classes are read the same way.
+EXTERNAL_INTERFACES = {"ddmIF": DDM, "siteMapper": CRIC}
+#: The task buffer's facades -> the attribute each borrows a proxy from, and the proxy class whose methods run the
+#: statements: each method of ``TaskBuffer`` and ``JediTaskBuffer`` borrows a connection from ``self.proxyPool`` and
+#: calls methods on it.  The JEDI facade's pool hands out ``JediDBProxy``, a subclass that adds nothing a facade calls.
+FACADES = {
+    "pandaserver/taskbuffer/TaskBuffer.py::TaskBuffer": (
+        "proxyPool",
+        "pandaserver/taskbuffer/OraDBProxy.py::DBProxy",
+    ),
+    "pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer": (
+        "proxyPool",
+        "pandajedi/jedicore/JediDBProxy.py::DBProxy",
+    ),
+}
+#: The spec methods that set every column from a row the database returned.  Declared rather than read: that ``pack``
+#: is handed a row is PanDA's convention, and nothing in its body says where its values came from.
+ROW_READ = ("pack",)
+#: Class-level names a spec uses to say which database columns it holds.  Read together because PanDA uses all three,
+#: and which one a class picks is a matter of when it was written rather than of what it means.
+SPEC_DECLARATION_NAMES = frozenset(
+    {"attributes", "_attributes", "attributes_with_types"}
+)
 
 
 #: The assumptions a reading by this module rests on, as reach's are said (:data:`bamboo.codemap.reach.ASSUMPTIONS`).

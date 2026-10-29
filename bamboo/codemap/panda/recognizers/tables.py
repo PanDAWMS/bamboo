@@ -23,9 +23,7 @@ from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import functions_with_owner
 
 #: The database's clocks a statement can write.
-_DATABASE_CLOCKS = frozenset(
-    {"CURRENT_DATE", "SYSDATE", "CURRENT_TIMESTAMP", "SYSTIMESTAMP"}
-)
+_DATABASE_CLOCKS = sqltext.DATABASE_CLOCKS
 
 
 def records(

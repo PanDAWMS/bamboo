@@ -541,3 +541,33 @@ def test_the_rest_of_the_library_facts_are_said_once():
     assert reach._OPERATORS[ast.Add] == ("__add__", "__radd__", "__iadd__")
     assert reach.IMPLICIT_DUNDERS is callfacts.IMPLICIT_DUNDERS and "__radd__" in reach.IMPLICIT_DUNDERS
     assert sqleval._MUTATORS == callfacts.CHANGING and {"add", "discard", "append"} <= sqleval._MUTATORS
+
+
+def test_pandas_conventions_and_the_databases_words_are_said_once():
+    """The other systems' interfaces, the task buffer's facades, a spec's row and its declared columns are callfacts',
+    the system names OTHER_SYSTEMS gives among them; the database's clocks are sqltext's, every reader's word set holds
+    them, and a word no row holds -- a clock, a pseudo-column -- is not read as a selected column, parsed or not."""
+    import sqlglot
+
+    from bamboo.codemap.panda import provenance, sqltext
+    from bamboo.codemap.panda.recognizers import tables
+    from bamboo.scripts.panda import census_code_map
+
+    assert provenance.INTERFACE_CLASSES is callfacts.INTERFACE_CLASSES
+    assert provenance.EXTERNAL_INTERFACES is callfacts.EXTERNAL_INTERFACES and provenance.FACADES is callfacts.FACADES
+    systems = set(callfacts.INTERFACE_CLASSES.values()) | set(callfacts.EXTERNAL_INTERFACES.values())
+    assert systems == {callfacts.DDM, callfacts.CRIC} and callfacts.DDM in callfacts.OTHER_SYSTEMS
+    assert "attributes_with_types" in callfacts.SPEC_DECLARATION_NAMES and callfacts.ROW_READ == ("pack",)
+    assert census_code_map.callfacts is callfacts
+    clocks = sqltext.DATABASE_CLOCKS
+    assert tables._DATABASE_CLOCKS is clocks and clocks <= sqltext._KEYWORDS
+    assert {clock.lower() for clock in clocks} | sqltext._PSEUDO_NAMES <= sqltext._PSEUDO_COLUMNS
+    for clock in clocks:
+        node = sqlglot.parse_one(f"SELECT a FROM t WHERE b < {clock}", read="oracle").find(
+            sqltext.exp.CurrentDate, sqltext.exp.CurrentTimestamp, sqltext.exp.Systimestamp
+        )
+        assert sqltext._clock_name(node) == clock
+    assert sqltext.reads("SELECT ROWNUM, PandaID FROM ATLAS_PANDA.jobsActive4") == [("jobsActive4", ["PandaID"])]
+    assert sqltext._reads_in_text("SELECT SYSDATE, PandaID FROM ATLAS_PANDA.jobsActive4") == [
+        ("jobsActive4", ["PandaID"])
+    ]

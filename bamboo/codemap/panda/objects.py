@@ -738,7 +738,7 @@ class _Values:
 
         A row a query returns holds, in each column its own ``WHERE`` sets
         equal to one bind (:func:`sqltext.row_tests`), what the bind was
-        filled with.  So where ``O.pack(r)`` (:data:`specwrites.ROW_READ`)
+        filled with.  So where ``O.pack(r)`` (:data:`callfacts.ROW_READ`)
         takes such a row, ``O.PandaID`` holds what ``varMap[":PandaID"]``
         does: ``peekJob``'s ``job.pack(res[0])`` after ``SELECT ... WHERE
         PandaID=:PandaID`` is the ``job.PandaID = pandaID`` its not-found
@@ -762,7 +762,7 @@ class _Values:
         packs: dict[tuple[int, str], dict[str, list[str]]] = {}
         for bound in self.handed.values():
             if (
-                bound.to.rpartition(".")[2] not in specwrites.ROW_READ
+                bound.to.rpartition(".")[2] not in callfacts.ROW_READ
                 or not bound.parameter
                 or bound.at
                 or not bound.path
