@@ -911,6 +911,12 @@ class Forms:
         for each in job.Files + extra:
             each.jobStatus = "file"
 
+    def picks(self, job: JobSpec, jobs: list[JobSpec], other):
+        first = next(iter(jobs), None)
+        first.jobStatus = "first"
+        larger = max(job, other)
+        larger.ddmErrorCode = 4
+
     def generated(self, jobs: list[JobSpec]):
         for one in self.each(jobs):
             one.jobMetrics = "each"
@@ -994,6 +1000,19 @@ def test_or_if_else_a_comprehension_pop_and_plus_carry_what_they_hold(tmp_path):
     assert "last" in element.held[owner]  # jobs.pop()
     files = objects.follow(rows, f"{_FORMS}.plus", "job.Files[]")
     assert "jobStatus" in _assigned(files)  # for each in job.Files + extra
+
+
+def test_a_builtin_function_s_value_is_the_part_of_what_it_is_handed_callfacts_says(
+    tmp_path,
+):
+    """``next(iter(jobs), None)`` is one of the jobs, not the iterator (``callfacts.picked``); ``max(job, other)``
+    is one of the two."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.picks"
+    element = objects.follow(rows, owner, "jobs[]")
+    assert "first" in element.held[owner]
+    assert "jobStatus" in _assigned(element)
+    assert "ddmErrorCode" in _assigned(objects.follow(rows, owner, "job"))
 
 
 def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):

@@ -32,7 +32,9 @@ with no placing -- the trace, what may change a name between two lines -- reads 
 
 The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
 what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
-method changes its receiver, and a logger's methods; the builtin functions still sit with their readers.
+method changes its receiver, a logger's methods, and what a builtin function's value holds of what it is handed --
+``list(xs)``, ``max(a, b)``, ``enumerate(xs)``, ``getattr(x, name)`` (:class:`Function`), read where the name is
+the builtin's (:func:`builtin_function`); what else a builtin function does still sits with its readers.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ import ast
 from typing import TYPE_CHECKING, NamedTuple, Optional
 
 if TYPE_CHECKING:
-    from bamboo.codemap.calls import Calls, Placed
+    from bamboo.codemap.calls import Calls, Placed, Types
 
 #: Where a method puts one of what it is handed: as one element, its elements as elements, as a key, as the value
 #: under a key it is also handed, a mapping's keys and values merged, or the whole of it.
@@ -345,6 +347,91 @@ TAKING = frozenset(
     for (_type, called), method in BUILTIN_METHODS.items()
     if method.gives is not None
 )
+
+
+#: What a builtin function's value holds of what it is handed (:class:`Function`): a new container or iterator of
+#: the first argument's elements, one of them, (position, element) pairs of them, tuples of each argument's elements
+#: in step, a dict of the first argument's pairs and of the keywords, the second argument's elements the first keeps,
+#: what the first makes of each of the second's, the first's attribute the second names.
+COPY, ONE, NUMBERED, ZIPPED, DICT, KEPT, MADE, ATTRIBUTE = (
+    "copy",
+    "one",
+    "numbered",
+    "zipped",
+    "dict",
+    "kept",
+    "made",
+    "attribute",
+)
+
+
+class Function(NamedTuple):
+    """What a builtin function's value holds of what it is handed.
+
+    *gives* is :data:`COPY` (``list(xs)``, ``sorted(xs)``, ``iter(xs)``), :data:`ONE` (one of the first argument's
+    elements; one of the arguments where it is handed several and *default* is none -- ``max(a, b)``),
+    :data:`NUMBERED` (``enumerate(xs)``), :data:`ZIPPED` (``zip(xs, ys)``), :data:`DICT` (``dict(pairs, k=v)``: a
+    mapping's or the (key, value) pairs' and the keywords'), :data:`KEPT` (``filter(f, xs)``), :data:`MADE`
+    (``map(f, xs)``) or :data:`ATTRIBUTE` (``getattr(x, name)``); *default* the position of an argument the value may
+    be instead (``next(it, default)``, ``getattr(x, name, default)``)."""
+
+    gives: str
+    default: Optional[int] = None
+
+
+#: The builtin functions whose value holds a part of what they are handed, by name.
+BUILTIN_FUNCTIONS: dict[str, Function] = {
+    "list": Function(COPY),
+    "tuple": Function(COPY),
+    "set": Function(COPY),
+    "frozenset": Function(COPY),
+    "sorted": Function(COPY),
+    "reversed": Function(COPY),
+    "iter": Function(COPY),
+    "max": Function(ONE),
+    "min": Function(ONE),
+    "next": Function(ONE, 1),
+    "enumerate": Function(NUMBERED),
+    "zip": Function(ZIPPED),
+    "dict": Function(DICT),
+    "filter": Function(KEPT),
+    "map": Function(MADE),
+    "getattr": Function(ATTRIBUTE, 2),
+}
+
+
+def builtin_function(
+    types: "Types", file: str, func: ast.AST, call: ast.Call
+) -> Optional[Function]:
+    """What *call* does where it calls a builtin function by its name -- one no scope binds there
+    (:meth:`calls.Types.is_builtin`); ``None`` for any other call, and for a builtin :data:`BUILTIN_FUNCTIONS` does
+    not say."""
+    called = call.func
+    if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
+        return None
+    return (
+        BUILTIN_FUNCTIONS[called.id]
+        if types.is_builtin(file, func, called.id)
+        else None
+    )
+
+
+def picked(function: Function, call: ast.Call) -> tuple[list[ast.expr], list[ast.expr]]:
+    """For a :data:`ONE` call: the arguments whose element the value may be, and the arguments it may be itself --
+    ``([it], [default])`` for ``next(it, default)``, ``([xs], [])`` for ``max(xs)``, ``([], [a, b])`` for ``max(a,
+    b)``, ``([xs], [a])`` for ``max(*xs, a)``."""
+    args = [one for one in call.args if not isinstance(one, ast.Starred)]
+    starred = [one.value for one in call.args if isinstance(one, ast.Starred)]
+    if starred:
+        return starred, args
+    if function.default is None and len(args) > 1:
+        return [], args
+    beside = (
+        args[function.default : function.default + 1]
+        if function.default is not None
+        else []
+    )
+    return args[:1], beside
 
 
 def round_trip(call: ast.Call) -> Optional[ast.expr]:

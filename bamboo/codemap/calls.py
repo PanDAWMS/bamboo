@@ -31,6 +31,7 @@ built on, and reads the same trees -- :func:`parsed`.
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import json
 import re
@@ -74,6 +75,8 @@ _FORWARDING = (UNPLACED_FORWARDED, UNPLACED_GETATTRIBUTE)
 #: Not a file: no class of the corpus is defined there, so no method of one is
 #: a call's target.
 BUILTIN = "<builtins>"
+#: The names Python's builtins hold: a call of one no scope binds is the builtin's (:meth:`Types.is_builtin`).
+_BUILTIN_NAMES = frozenset(dir(builtins))
 #: The builtin types a call of their name builds, and what each builds.
 _BUILTIN_TYPES = {
     "list": "list",
@@ -2317,6 +2320,9 @@ class Types:
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
         #: :meth:`bound` per function.
         self._bound: dict[int, dict[str, list[ast.expr]]] = {}
+        #: :meth:`is_builtin`'s scopes: the names a function binds, by its id; the names a module binds, by its file.
+        self._local_scope: dict[int, frozenset[str]] = {}
+        self._module_scope: dict[str, frozenset[str]] = {}
         # (file, id(func), name, depth) -> (func, classes): see ``declared``.
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
@@ -2332,6 +2338,37 @@ class Types:
             # A record whose name the corpus does not bind would be read nowhere, and the build would read the
             # code alone under the record's stamp: a module moved or a name renamed since the record was taken.
             raise ValueError(f"the instance record names what no module-level assignment binds: {', '.join(unbound)}")
+
+    def is_builtin(self, file: str, func: ast.AST, name: str) -> bool:
+        """Whether *name*, read in *func* of *file*, is Python's builtin of the name: one ``builtins`` holds that
+        neither the function -- a parameter, a name its own body binds or imports, a ``def`` or ``class`` it runs --
+        nor the module -- a ``def``, a ``class``, an import, an assignment at its level -- binds."""
+        if name not in _BUILTIN_NAMES:
+            return False
+        if not isinstance(func, ast.Module):
+            if id(func) not in self._local_scope:
+                arguments = getattr(func, "args", None)
+                every = (
+                    [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
+                    if arguments is not None
+                    else []
+                )
+                found = {one.arg for one in every if one is not None}
+                found |= {one.name for one in bound_defs(func)}
+                for node in own_nodes(func):
+                    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                        found.add(node.id)
+                    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                        found |= {(alias.asname or alias.name).split(".")[0] for alias in node.names}
+                self._local_scope[id(func)] = frozenset(found)
+            if name in self._local_scope[id(func)]:
+                return False
+        if file not in self._module_scope:
+            tree = self.tree(file)
+            found = set(self._module_names(file)) | set(self.imports(file))
+            found |= {one.name for one in bound_defs(tree)} if tree is not None else set()
+            self._module_scope[file] = frozenset(found)
+        return name not in self._module_scope[file]
 
     def _module_names(self, file: str) -> set[str]:
         """The names an assignment at *file*'s module level binds, whatever the value."""
@@ -3688,16 +3725,8 @@ class Types:
             held = self.imports(file).get(called.id)
             if held is not None:
                 return held[1] if held in _LIBRARY_CONTAINERS else ""
-            if called.id not in _BUILTIN_TYPES or called.id in self.assigned(func):
+            if called.id not in _BUILTIN_TYPES or not self.is_builtin(file, func, called.id):
                 return ""
-            tree = self.tree(file)
-            for node in tree.body if tree is not None else ():
-                defined = (
-                    [node.name] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                    else [one.id for one in pathcond.targets_of(node) if isinstance(one, ast.Name)]
-                )
-                if called.id in defined:
-                    return ""
             return _BUILTIN_TYPES[called.id]
         if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
             held = self.imports(file).get(called.value.id)

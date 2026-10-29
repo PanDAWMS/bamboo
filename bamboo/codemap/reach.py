@@ -678,13 +678,7 @@ class _Receivers:
         return func.name in self._as_values  # type: ignore[attr-defined]
 
     def _is_builtin(self, file: str, func: ast.AST, name: str) -> bool:
-        if name not in _BUILTINS:
-            return False
-        if not isinstance(func, ast.Module) and (
-            name in _parameters(func) or name in self.types.assigned(func)
-        ):
-            return False
-        return name not in self.types._module_bound(file)
+        return self.types.is_builtin(file, func, name)
 
     def _named(
         self, file: str, func: ast.AST, name: str, depth: int
@@ -862,10 +856,6 @@ _KEEPING_BUILTINS = {
     "type", "any", "all", "sum", "format", "abs", "round", "callable", "hasattr", "getattr", "ord", "chr",
     "bin", "hex", "oct", "ascii", "divmod", "pow",
 }  # fmt: skip
-#: Builtins whose value holds the elements of the one value they are handed, each as an element of its own.
-_COPYING_BUILTINS = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
-#: Builtins whose value is one of the elements of what they are handed.
-_PICKING_BUILTINS = {"max", "min", "next"}
 
 
 def _part(gives: callfacts.Give, args: list[ast.expr]) -> Optional[tuple[_Path, _Path]]:
@@ -1187,13 +1177,13 @@ class _Holders:
             isinstance(called, ast.Name)
             and len(value.args) == 1
             and not isinstance(value.args[0], ast.Starred)
-            and self.receivers._is_builtin(file, func, called.id)
+            and (function := callfacts.builtin_function(self.calls.types, file, func, value)) is not None
         ):
-            if called.id in _COPYING_BUILTINS:
+            if function.gives == callfacts.COPY:
                 return [(value.args[0], (None,), (None,))]
-            if called.id == "enumerate":
+            if function.gives == callfacts.NUMBERED:
                 return [(value.args[0], (None,), (None, _SECOND))]
-            if called.id in _PICKING_BUILTINS:
+            if function.gives == callfacts.ONE:
                 return [(value.args[0], (None,), ())]
         return None
 
@@ -1644,14 +1634,18 @@ class _Holders:
             if isinstance(argument, (ast.keyword, ast.Starred)):
                 self._unread(at, of)
                 return None
-            if builtin in _PICKING_BUILTINS and len(call.args) > 1:
-                return (), ()  # max(a, b): one of them
-            if len(call.args) == 1 and builtin in _COPYING_BUILTINS:
+            function = callfacts.BUILTIN_FUNCTIONS.get(builtin)
+            gives = function.gives if function is not None else None
+            if function is not None and gives == callfacts.ONE:
+                elements, whole = callfacts.picked(function, call)
+                if any(argument is one for one in whole):
+                    return (), ()  # max(a, b), next(it, default): one of them
+                if any(argument is one for one in elements):
+                    return (), (None,)
+            if len(call.args) == 1 and gives == callfacts.COPY:
                 return (None,), (None,)
-            if len(call.args) == 1 and builtin == "enumerate":
+            if len(call.args) == 1 and gives == callfacts.NUMBERED:
                 return (None, _SECOND), (None,)
-            if len(call.args) == 1 and builtin in _PICKING_BUILTINS:
-                return (), (None,)
             self._unread(at, of)
             return None
         try:

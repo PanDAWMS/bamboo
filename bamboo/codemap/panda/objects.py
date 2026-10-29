@@ -107,10 +107,6 @@ from bamboo.codemap.panda.recognizers import progress
 #: The classes whose columns an assignment is kept for (tmaeno, 10-18: D1).
 COLUMN_CLASSES = ("JobSpec", "JediTaskSpec", "FileSpec")
 
-#: Builtins that hand back the elements of what they are given, at positions not known.
-_ELEMENTS_OF = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
-#: Builtins that hand back one element of what they are given, or one of their arguments.
-_ONE_OF = {"next", "max", "min"}
 #: How :func:`callfacts.meaning` reads a call that puts into its object (:meth:`_Values._fill`).
 _FILLING = (callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED)
 #: A literal key a path keeps (8,937 of pin k's 8,950); another reads as ``[]``.
@@ -685,22 +681,29 @@ class _Values:
             return [_Carry("", call=call)]
         called = call.func
         args = call.args
-        if isinstance(called, ast.Name) and called.id not in self.names:
-            if called.id in _ELEMENTS_OF and args:
+        function = callfacts.builtin_function(
+            self.reader.types, self.file, self.func, call
+        )
+        if function is not None:
+            # A builtin function, by what its value holds of what it is handed (callfacts.Function).
+            if function.gives == callfacts.COPY and args:
                 return _shift(_index(self.carried(args[0]), "[]"), "[]")
-            if called.id in _ONE_OF and args:
-                if len(args) == 1:
-                    return _index(self.carried(args[0]), "[]")
-                return [carry for one in args for carry in self.carried(one)]
-            if called.id == "enumerate" and args:
+            if function.gives == callfacts.ONE and args:
+                elements, whole = callfacts.picked(function, call)
+                return [
+                    carry
+                    for one in elements
+                    for carry in _index(self.carried(one), "[]")
+                ] + [carry for one in whole for carry in self.carried(one)]
+            if function.gives == callfacts.NUMBERED and args:
                 return _shift(_index(self.carried(args[0]), "[]"), "[][1]")
-            if called.id == "zip":
+            if function.gives == callfacts.ZIPPED:
                 return [
                     carry
                     for index, one in enumerate(args)
                     for carry in _shift(_index(self.carried(one), "[]"), f"[][{index}]")
                 ]
-            if called.id == "dict":
+            if function.gives == callfacts.DICT:
                 # a mapping's values, or the second of each pair; and the keywords under their names
                 found = [
                     carry

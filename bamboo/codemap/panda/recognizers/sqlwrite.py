@@ -4533,10 +4533,6 @@ def _name_kinds(func: ast.AST) -> dict[str, str]:
     return kinds
 
 
-#: Builtins whose value is what they are handed, elements and all.
-_KEEPING = frozenset({"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter", "dict"})
-#: Builtins handing on what they are handed, or its elements: read where their value goes.
-_PASSING_ON = _KEEPING | {"next", "enumerate", "zip", "filter", "map"}
 #: Builtins that tell nothing of the value: its type, whether it has a part.
 _TELLING_NOTHING = frozenset({"isinstance", "issubclass", "hasattr", "callable", "id", "type"})
 #: ``copy.copy`` / ``copy.deepcopy``: the value again, not a use of it.
@@ -4911,9 +4907,10 @@ class _PathCarry:
 
     A call's value is read from where it lands (:class:`_Reading`): what the definition returns of what it is
     handed, what a constructor keeps in its object.  A call no reading places is a builtin's or a hole: a container
-    method takes the part it names, a builtin of :data:`_KEEPING` keeps its argument, an iterator helper outside the
-    corpus (``batched``, ``islice``, ``chain``) is made of its iterables' elements -- not of the count beside them --
-    and any other call's value holds the rows where something it is handed holds them whole -- a part of them
+    method takes the part it names, a builtin function the part of its arguments its value holds
+    (:class:`callfacts.Function`: ``list(xs)`` their elements, ``max(a, b)`` one of them), an iterator helper outside
+    the corpus (``batched``, ``islice``, ``chain``) is made of its iterables' elements -- not of the count beside them
+    -- and any other call's value holds the rows where something it is handed holds them whole -- a part of them
     handed to a hole makes nothing of them.  What the reach record reads as the database gives nothing back of this
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
@@ -5305,27 +5302,36 @@ class _PathCarry:
             if name in _TELLING_NOTHING:
                 return _NOTHING
             as_list = self._as_list
-            if name in _KEEPING:
-                return (held(args[0], at) if name == "dict" else as_list(args[0], at)) if args else _NOTHING
-            if name == "next":
-                return _elements(as_list(args[0], at)) if args else _NOTHING
-            if name in ("filter", "map") and len(args) >= 2:
+            function = callfacts.builtin_function(self.reading.calls.types, self.file, self.func, call)
+            gives = function.gives if function is not None else None
+            if gives == callfacts.COPY:
+                return as_list(args[0], at) if args else _NOTHING
+            if gives == callfacts.DICT:
+                return held(args[0], at) if args else _NOTHING
+            if function is not None and gives == callfacts.ONE:
+                elements, whole = callfacts.picked(function, call)
+                return frozenset(
+                    path
+                    for part in [_elements(as_list(one, at)) for one in elements] + [held(one, at) for one in whole]
+                    for path in part
+                )
+            if gives in (callfacts.KEPT, callfacts.MADE) and len(args) >= 2:
                 return as_list(args[1], at)  # the elements kept, or what is made of each (read as the element)
-            if name in ("min", "max") and len(args) == 1:
-                return _under(_ALL, as_list(args[0], at))
-            if name == "enumerate" and args:
+            if gives == callfacts.NUMBERED and args:
                 return _below((_ALL, "[1]"), _under(_ALL, as_list(args[0], at)))
-            if name == "zip":
+            if gives == callfacts.ZIPPED:
                 return frozenset(
                     path
                     for index, one in enumerate(args)
                     for path in _below((_ALL, f"[{index}]"), _under(_ALL, as_list(one, at)))
                 )
-            if name == "getattr" and len(args) >= 2:
+            if function is not None and gives == callfacts.ATTRIBUTE and len(args) >= 2:
                 attr = args[1]
+                default = function.default
+                beside = held(args[default], at) if default is not None and len(args) > default else _NOTHING
                 if isinstance(attr, ast.Constant) and isinstance(attr.value, str):
-                    return _under("." + attr.value, held(args[0], at))
-                return _any_field(held(args[0], at))
+                    return _under("." + attr.value, held(args[0], at)) | beside
+                return _any_field(held(args[0], at)) | beside
         if isinstance(call.func, ast.Attribute):
             if name in _COPIES and isinstance(call.func.value, ast.Name) and call.func.value.id == "copy":
                 return held(args[0], at) if args else _NOTHING
@@ -5786,8 +5792,8 @@ class _Reading:
             and call.func.value.id == "copy"
         ):
             return False
-        if isinstance(call.func, ast.Name) and name in _PASSING_ON:
-            return self._use_reads(carry, call)
+        if callfacts.builtin_function(self.calls.types, carry.file, carry.func, call) is not None:
+            return self._use_reads(carry, call)  # a builtin handing on what it is handed, or a part of it
         return self._call_reads(carry, call)
 
     def _method_reads(self, carry: _PathCarry, call: ast.Call) -> bool:

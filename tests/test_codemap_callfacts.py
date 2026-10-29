@@ -104,6 +104,85 @@ def test_what_a_method_hands_back_of_its_receiver_is_said_once(name, type_name, 
     assert ({name} <= callfacts.TAKING) is (expected is not None)
 
 
+_SHADOWED = (
+    "from itertools import zip_longest as zip\n\n\n"
+    "def filter(x):\n"
+    "    return x\n\n\n"
+    "def reads(list, xs, it, a, b):\n"
+    "    max = 3\n"
+    "    list(xs)\n"
+    "    max(xs)\n"
+    "    zip(xs)\n"
+    "    filter(xs)\n"
+    "    sorted(xs)\n"
+    "    next(it, None)\n"
+    "    min(a, b)\n"
+    "    getattr(a, 'x', b)\n"
+    "    len(xs)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("callee", "expected"),
+    [
+        ("list", None),
+        ("max", None),
+        ("zip", None),
+        ("filter", None),
+        ("sorted", callfacts.Function(callfacts.COPY)),
+        ("next", callfacts.Function(callfacts.ONE, 1)),
+        ("min", callfacts.Function(callfacts.ONE)),
+        ("getattr", callfacts.Function(callfacts.ATTRIBUTE, 2)),
+        ("len", None),
+    ],
+    ids=[
+        "a-parameter",
+        "a-local-name",
+        "an-import",
+        "a-module-s-function",
+        "the-builtin-copies",
+        "the-builtin-picks-with-a-default",
+        "the-builtin-picks",
+        "the-builtin-takes-an-attribute",
+        "a-builtin-whose-value-holds-nothing-handed",
+    ],
+)
+def test_a_builtin_function_is_read_where_no_scope_binds_its_name(tmp_path, callee, expected):
+    """``list(xs)`` with a parameter ``list``, ``max`` bound in the function, ``zip`` imported, ``filter`` defined
+    in the module: none is the builtin, whose facts say what its value holds of what it is handed."""
+    types = calls_mod.Types(_tree(tmp_path, mod=_SHADOWED), {})
+    file = f"{PACKAGE}/mod.py"
+    func = next(
+        node for node in ast.walk(types.tree(file)) if isinstance(node, ast.FunctionDef) and node.name == "reads"
+    )
+    call = next(
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == callee
+    )
+    assert callfacts.builtin_function(types, file, func, call) == expected
+    assert types.is_builtin(file, func, callee) is (callee in ("sorted", "next", "min", "getattr", "len"))
+
+
+@pytest.mark.parametrize(
+    ("text", "elements", "whole"),
+    [
+        ("next(it, default)", ["it"], ["default"]),
+        ("next(it)", ["it"], []),
+        ("max(xs)", ["xs"], []),
+        ("max(a, b)", [], ["a", "b"]),
+        ("max(*xs, a)", ["xs"], ["a"]),
+    ],
+    ids=["next-or-its-default", "next", "one-of-the-elements", "one-of-the-arguments", "starred"],
+)
+def test_a_picked_value_is_an_element_of_the_first_argument_or_an_argument_itself(text, elements, whole):
+    """``next(it, default)`` is one of ``it``'s elements or the default -- not ``it`` itself, as ``max(a, b)`` is
+    ``a`` or ``b``."""
+    call = _call(text)
+    got = callfacts.picked(callfacts.BUILTIN_FUNCTIONS[call.func.id], call)
+    assert ([ast.unparse(one) for one in got[0]], [ast.unparse(one) for one in got[1]]) == (elements, whole)
+
+
 _MODULE = (
     "import json\n"
     "import smtplib\n"

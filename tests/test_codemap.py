@@ -11051,6 +11051,36 @@ def test_a_popped_pair_s_first_is_the_key_the_rows_are_filed_under(tmp_path):
     assert node.crosses_to == ["pandaserver/c.py::retryTask"]
 
 
+def test_one_of_two_values_a_builtin_picks_holds_what_each_holds(tmp_path):
+    """``max(taskID, 0)`` is ``taskID`` or ``0`` (callfacts.ONE): the task the rows name reaches the call it is
+    handed to, as ``taskID`` itself would; ``next(iter(ids), None)`` is one of the ids or None."""
+    source = (
+        "class TaskModule:\n"
+        "    def getTasks(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        return res\n"
+    )
+    caller = _caller(
+        "Commando",
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        (taskID,) = tasks[0]\n"
+        "        self.retryTask(max(taskID, 0))\n"
+        "        ids = [one for (one,) in tasks]\n"
+        "        self.killTask(next(iter(ids), None))\n",
+        "retryTask",
+        "killTask",
+    )
+    nodes, census = _crossed(tmp_path, source, ["c.py::retryTask", "c.py::killTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/c.py::killTask", "pandaserver/c.py::retryTask"]
+
+
 def test_rows_used_only_to_choose_are_not_handed_back(tmp_path):
     """The rows pick which candidates are kept; the candidates are what is returned.
 
