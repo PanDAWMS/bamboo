@@ -459,3 +459,25 @@ def test_every_reader_of_a_container_name_reads_it_from_one_table(name, mapping,
     assert (name in trace._EMPTY_CALLS, name in sqlwrite._DICT_MAKERS) == (made, made and mapping)
     assert (sqlwrite._annotation_kind(ast.parse(name, mode="eval").body) == sqlwrite._SEQUENCE) is ordered
     assert (name in calls._YIELDING) is generator
+
+
+@pytest.mark.parametrize(
+    ("constant", "folds", "named", "reads"),
+    [
+        ("'ABC'.lower()", ["abc"], "status.lower()", {"status"}),
+        ("'abc'.capitalize()", ["Abc"], "status.capitalize()", {"status"}),
+        ("'abc'.removesuffix('c')", None, "status.removesuffix(x)", {"status", "x"}),
+        ("'abc'.startswith('a')", None, "status.startswith(x)", set()),
+    ],
+    ids=["lower", "capitalize", "removesuffix", "startswith"],
+)
+def test_every_reader_of_a_str_method_reads_it_from_one_table(constant, folds, named, reads):
+    """What a ``str`` method's value is is said once (callfacts.TEXT_METHODS): the trace folds a constant through one
+    changing the receiver and handed nothing, and sqleval reads the text a text method's value is made of -- not a
+    test's (``startswith``).  The evaluator runs methods of the table only."""
+    from bamboo.codemap import trace
+    from bamboo.codemap.panda import sqleval
+
+    assert trace._fold(ast.parse(constant, mode="eval").body, {}) == folds
+    assert sqleval._text_reads(ast.parse(named, mode="eval").body) == reads
+    assert sqleval._STR_METHODS <= set(callfacts.TEXT_METHODS)

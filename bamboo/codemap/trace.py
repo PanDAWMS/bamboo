@@ -1033,8 +1033,11 @@ class _Unknown(NamedTuple):
     expression: str
 
 
-#: Methods of ``str`` a constant can be folded through.
-_FOLDABLE = frozenset({"strip", "lstrip", "rstrip", "lower", "upper"})
+#: Methods of ``str`` a constant can be folded through: the receiver changed, handed nothing
+#: (:data:`callfacts.TEXT_METHODS`).
+_FOLDABLE = frozenset(
+    name for name, one in callfacts.TEXT_METHODS.items() if one.gives == callfacts.TEXT and one.alone
+)
 
 # Why a print row's prefix is empty where its logger may write one
 # (:attr:`SkeletonLine.prefix_hole`).  ``{logger}`` is the receiver as spelled.

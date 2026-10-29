@@ -905,6 +905,8 @@ _MUTATORS = frozenset(
         "setdefault",
     }
 )
+#: The ``str`` methods this evaluator runs (:meth:`method` applies the text's own; of
+#: :data:`callfacts.TEXT_METHODS`).
 _STR_METHODS = frozenset(
     {
         "format",
@@ -1043,9 +1045,7 @@ def _statement_literal(value: ast.AST) -> bool:
 
 #: Methods of a text whose result is the text again, filled in or trimmed: what ``sql = sqlR.format(table)`` makes
 #: of a statement is a statement.
-_TEXT_RESULT = frozenset(
-    {"format", "replace", "join", "strip", "rstrip", "lstrip", "upper", "lower"}
-)
+_TEXT_RESULT = callfacts.text_methods(callfacts.TEXT, callfacts.JOINED)
 
 
 def _text_reads(value: ast.AST) -> set[str]:

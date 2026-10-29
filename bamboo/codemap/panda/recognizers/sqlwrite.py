@@ -4407,7 +4407,7 @@ def _unread_call(call: ast.Call, name: str, function: Optional[callfacts.Functio
     """Whether *call*, which no reading places, makes a value the map cannot read (U1's 4): another system's answer, a
     function of the corpus or a library -- not a builtin (*function*) or a module computing a number, a value read
     again out of a text, a text made by a str method."""
-    if name in _READ_AGAIN or name in ("join", "format"):
+    if name in _READ_AGAIN or name in callfacts.text_methods(callfacts.JOINED):
         return False
     if function is not None and function.gives == callfacts.COMPUTED:
         return False
@@ -5407,7 +5407,7 @@ class _PathCarry:
                 handed = [held(one, at) for one in args]
                 if holding(handed[-1]) and not any(handed[:-1]):
                     return _WHOLE
-            if name in ("join", "format"):
+            if name in callfacts.text_methods(callfacts.JOINED):
                 # A text made by a separator or a template, written here or held in a name.
                 handed = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
                 holders = [part for part in handed if holding(part)]

@@ -32,12 +32,13 @@ with no placing -- the trace, what may change a name between two lines -- reads 
 
 The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
 what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
-method changes its receiver, what a container class holds (:data:`CONTAINERS`), a logger's methods and the calls
-making a logger (:data:`LOG_LEVELS`, :data:`LOGGER_MAKERS`), the database's driver, the calls running a statement
-and those handing back its rows (:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), and what a builtin
-function does with what it is handed -- what its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``,
-``len(xs)``, ``isinstance(x, C)``), the builtin type of its value, whether it calls a function it is handed
-(:class:`Function`) -- read where the name is the builtin's (:func:`builtin_function`).
+method changes its receiver, what a container class holds (:data:`CONTAINERS`), what a ``str`` method's value is
+(:data:`TEXT_METHODS`), a logger's methods and the calls making a logger (:data:`LOG_LEVELS`,
+:data:`LOGGER_MAKERS`), the database's driver, the calls running a statement and those handing back its rows
+(:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), and what a builtin function does with what it is
+handed -- what its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``),
+the builtin type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name
+is the builtin's (:func:`builtin_function`).
 """
 
 from __future__ import annotations
@@ -548,6 +549,45 @@ HANDING_ON = frozenset({COPY, ONE, NUMBERED, ZIPPED, DICT, KEPT, MADE, ATTRIBUTE
 #: The values that are one value as another type -- ``str(pandaID)``, ``int(row[0])``: the same value to a reader
 #: of what a key or a column holds.
 CONVERTING = frozenset({TEXT, NUMBER})
+
+#: What a ``str`` method's value is beside :data:`TEXT` (the receiver changed -- its case, its ends, its parts
+#: replaced, padded) and :data:`NUMBER` (where or how often a text is in it), :data:`TELLS` (a test of it): a text
+#: joining several values -- the argument's elements by the receiver, the receiver's holes filled --, or the texts
+#: cut out of the receiver.
+JOINED, PARTS = "joined", "parts"
+
+
+class TextMethod(NamedTuple):
+    """What a ``str`` method's value is (:data:`TEXT`, :data:`JOINED`, :data:`PARTS`, :data:`NUMBER`,
+    :data:`TELLS`), and whether it may be handed nothing (*alone*: ``strip()``, ``lower()``)."""
+
+    gives: str
+    alone: bool = False
+
+
+#: The ``str`` methods, by their names; they change nothing (a text is never changed).
+TEXT_METHODS: dict[str, TextMethod] = {
+    **{name: TextMethod(TEXT, alone=True) for name in (
+        "strip", "lstrip", "rstrip", "lower", "upper", "casefold", "capitalize", "swapcase", "title", "expandtabs",
+    )},
+    **{name: TextMethod(TEXT) for name in (
+        "replace", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "translate",
+    )},
+    **{name: TextMethod(JOINED) for name in ("join", "format", "format_map")},
+    **{name: TextMethod(PARTS, alone=True) for name in ("split", "rsplit", "splitlines")},
+    **{name: TextMethod(PARTS) for name in ("partition", "rpartition")},
+    **{name: TextMethod(NUMBER) for name in ("count", "find", "rfind", "index", "rindex")},
+    **{name: TextMethod(TELLS) for name in ("startswith", "endswith")},
+    **{name: TextMethod(TELLS, alone=True) for name in (
+        "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "isidentifier", "islower", "isnumeric",
+        "isprintable", "isspace", "istitle", "isupper",
+    )},
+}  # fmt: skip
+
+
+def text_methods(*gives: str) -> frozenset[str]:
+    """The names of :data:`TEXT_METHODS` whose value is one of *gives*."""
+    return frozenset(name for name, one in TEXT_METHODS.items() if one.gives in gives)
 
 
 class Function(NamedTuple):
