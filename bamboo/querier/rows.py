@@ -256,6 +256,133 @@ def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] | None = frozen
     return before, after
 
 
+TRYS = (ast.Try, *((ast.TryStar,) if hasattr(ast, "TryStar") else ()))
+
+
+def _goes_on(node: ast.AST, func: ast.AST) -> list[ast.stmt]:
+    """Where control goes when *node* -- a statement, or an arm of a ``try`` or ``match`` -- is done and falls
+    through: the next statement of its block, or as its holder goes on (a loop's body back to the loop, a try's body
+    to its ``else`` or ``finally``); ``[]`` at the function's end."""
+    while node is not func:
+        parent = node.parent  # type: ignore[attr-defined]
+        if isinstance(node, (ast.ExceptHandler, ast.match_case)):
+            if isinstance(parent, TRYS) and parent.finalbody:
+                return [parent.finalbody[0]]
+            node = parent
+            continue
+        placed = block_of(parent, node)
+        if placed is None:
+            node = parent
+            continue
+        name, block = placed
+        index = block.index(node)
+        if index + 1 < len(block):
+            return [block[index + 1]]
+        if isinstance(parent, LOOPS) and name == "body":
+            return [parent]
+        if isinstance(parent, TRYS):
+            if name == "body" and parent.orelse:
+                return [parent.orelse[0]]
+            if name in ("body", "orelse") and parent.finalbody:
+                return [parent.finalbody[0]]
+        node = parent
+    return []
+
+
+def _loop_of(stmt: ast.AST, func: ast.AST) -> ast.AST | None:
+    """The loop a ``break`` or ``continue`` leaves or goes back to: the nearest one whose body holds it."""
+    node = stmt
+    while node is not func:
+        parent = node.parent  # type: ignore[attr-defined]
+        if isinstance(parent, LOOPS) and node in parent.body:
+            return parent
+        node = parent
+    return None
+
+
+def _header(stmt: ast.stmt) -> list[ast.AST]:
+    """What runs when control reaches *stmt* itself: a compound statement's test, iterable or items, else the whole."""
+    if isinstance(stmt, (ast.If, ast.While)):
+        return [stmt.test]
+    if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        return [stmt.iter]
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        return list(stmt.items)
+    if isinstance(stmt, ast.Match):
+        return [stmt.subject]
+    if isinstance(stmt, TRYS):
+        return []
+    return [stmt]
+
+
+def _caught(stmt: ast.stmt, func: ast.AST) -> list[ast.stmt]:
+    """Where *stmt* goes if it raises: the first statement of each handler, and the ``finally``, of every try whose
+    body holds it."""
+    out: list[ast.stmt] = []
+    node: ast.AST = stmt
+    while node is not func:
+        parent = node.parent  # type: ignore[attr-defined]
+        if isinstance(parent, TRYS) and node in parent.body:
+            out += [h.body[0] for h in parent.handlers if h.body]
+            out += parent.finalbody[:1]
+        node = parent
+    return out
+
+
+def _next(stmt: ast.stmt, func: ast.AST) -> list[ast.stmt]:
+    """The statements that can run next once control reaches *stmt*, raising included where its header calls."""
+    if isinstance(stmt, ast.Return):
+        out = []
+    elif isinstance(stmt, ast.Raise):
+        out = _caught(stmt, func)
+    elif isinstance(stmt, (ast.Break, ast.Continue)):
+        loop = _loop_of(stmt, func)
+        out = [] if loop is None else [loop] if isinstance(stmt, ast.Continue) else _goes_on(loop, func)
+    elif isinstance(stmt, (ast.If, *LOOPS)):
+        out = stmt.body[:1] + (stmt.orelse[:1] if stmt.orelse else _goes_on(stmt, func))
+    elif isinstance(stmt, (ast.With, ast.AsyncWith, *TRYS)):
+        out = stmt.body[:1]
+    elif isinstance(stmt, ast.Match):
+        out = [c.body[0] for c in stmt.cases if c.body] + _goes_on(stmt, func)
+    else:
+        out = _goes_on(stmt, func)
+    calls = any(isinstance(n, ast.Call) and not is_log_call(n) for part in _header(stmt) for n in own_nodes(part))
+    if calls and not isinstance(stmt, ast.Raise):
+        out = out + _caught(stmt, func)
+    return out
+
+
+def _reached(func: ast.AST, sources: list[ast.stmt], stops: set[int]) -> set[int]:
+    """The statements control can reach from *sources*, a statement in *stops* reached but not passed (by id)."""
+    seen: set[int] = set()
+    todo = list(sources)
+    while todo:
+        stmt = todo.pop()
+        if id(stmt) in seen:
+            continue
+        seen.add(id(stmt))
+        if id(stmt) not in stops:
+            todo += _next(stmt, func)
+    return seen
+
+
+def runs_between(func: ast.AST, first: ast.stmt, last: ast.stmt, site: ast.stmt, prints: set[int]) -> bool:
+    """Whether *site* can run after the print *first* and before the print *last* with no other print of *prints*
+    (statements, by id) between: on a path of *func* from *first* on to *last* that passes none of them.
+
+    For a run's two records in a row of a function's prints, so a call with no print every path runs after it --
+    the next statement calls too (must_rows stops there), or the prints after it are in arms -- is still placed between
+    the two its pass printed: ``updateTaskStatusByContFeeder_JEDI`` at the end of an arm, the next print in another.
+    The paths are the statements' own: blocks in order, both arms of an ``if``, a loop's body and back, ``break`` and
+    ``continue``, and a call that raises to each handler and ``finally`` of the trys around it.
+    """
+    if id(site) in prints:
+        return False
+    if id(site) not in _reached(func, _next(first, func), prints):
+        return False
+    return id(last) in _reached(func, _next(site, func), prints)
+
+
 def implying_rows(func: ast.AST, site: ast.stmt) -> list[ast.stmt]:
     """Prints in the site's own block that no path prints without passing the site.
 

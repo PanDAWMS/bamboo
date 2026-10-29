@@ -1150,6 +1150,123 @@ def test_a_run_is_inside_only_the_calls_whose_pass_holds_it_and_calls_no_print_p
     assert check_only is None
 
 
+def test_a_statement_runs_between_two_prints_on_a_path_that_prints_nothing_else(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def f(self, x):
+                self.logger.debug("before")
+                self.tb.update(x)
+                self.lock.release()
+                if x:
+                    self.logger.debug("one")
+                else:
+                    self.logger.debug("two")
+                for y in x:
+                    self.logger.debug("loop")
+                    self.tb.inner(y)
+                try:
+                    self.tb.risky(x)
+                except Exception:
+                    self.logger.error("failed")
+                self.logger.debug("end")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+
+            node = R.functions("pandaserver/a.py", "f")[0]
+            at = lambda line: R.statement_at(node, line)
+            prints = {id(s) for s in R.own_nodes(node) if R.is_print(s)}
+            between = lambda a, b, s: R.runs_between(node, at(a), at(b), at(s), prints)
+            print(json.dumps({
+                "the next statement calls": [between(3, 7, 4), between(3, 9, 5)],
+                "not after the first": between(7, 11, 4),
+                "a loop's next pass": between(11, 11, 12),
+                "after the loop": [between(11, 17, 14), between(11, 16, 14)],
+                "a print on every way": between(3, 17, 14),
+                "a print is no call": between(3, 7, 3),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the update and the release run after "before" and before either arm's print
+    assert got["the next statement calls"] == [True, True]
+    assert got["not after the first"] is False
+    # a loop's body runs again after its own print
+    assert got["a loop's next pass"] is True
+    # the risky call runs before "end", or raises to the handler's print
+    assert got["after the loop"] == [True, True]
+    # every way from "before" to "end" prints an arm's line and the loop's: never two in a row
+    assert got["a print on every way"] is False
+    assert got["a print is no call"] is False
+
+
+def test_a_call_with_no_print_after_it_on_every_path_is_placed_between_the_records_around_the_run(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def f(self, job):
+                self.logger.debug("start")
+                if job.x:
+                    self.logger.debug("set A")
+                    self.tb.update(job)
+                if self.check(job):
+                    self.logger.debug("on hold")
+                self.logger.debug("end")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows as R
+            from bamboo.querier.which_ran import inside_call
+
+            node = R.functions("pandaserver/a.py", "f")[0]
+            fn = N(rel="pandaserver/a.py", node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            stmt = R.statement_at(node, 6)
+            # start, set A, another function's record, end
+            run = N(records=[N(stamp=f"2026-01-01 00:00:{s},000") for s in ["00", "01", "02", "03"]])
+            placed = {3: [0], 5: [1], 9: [3]}
+            hits = {k: [(x, 9, "") for x in v] for k, v in placed.items()}
+            caller = N(fn=fn, run=run, unambiguous=placed, hits=hits)
+            # "on hold" matched the third record too, though not alone: the function may have printed there
+            read_between = N(fn=fn, run=run, unambiguous=placed, hits={**hits, 8: [(2, 9, "")]})
+            inner = lambda a, b: N(first=f"2026-01-01 00:00:{a}", last=f"2026-01-01 00:00:{b}")
+            print(json.dumps([
+                [len(x) for x in R.must_rows(node, stmt)],
+                inside_call(caller, inner("01,200", "01,800"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("00,200", "00,800"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("03,200", "03,800"), "pandaserver/a.py:6"),
+                inside_call(read_between, inner("01,200", "01,800"), "pandaserver/a.py:6"),
+            ]))
+            """,
+        )
+    )
+    shape, inside, before_its_arm, after_the_end, printed_between = json.loads(out.splitlines()[-1])
+    # the call ends an arm and the next statement calls: no print every path runs after it
+    assert shape == [2, 0]
+    # "set A" and "end", two of the function's records in a row, hold the run, and the call is between their prints
+    assert inside == [1, 3]
+    # between "start" and "set A" the call does not run: "set A" is printed first
+    assert before_its_arm is None
+    assert after_the_end is None
+    # a row of the function read between the two: they are not one pass's
+    assert printed_between is None
+
+
 def test_every_call_that_goes_on_into_the_candidate_is_tried_at_each_of_its_lines(tmp_path):
     out = _ok(
         _run(

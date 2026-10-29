@@ -478,9 +478,18 @@ the adder's process_job_report reaches archiveJob from 400 and 471.  A log line 
 inferred: another process on that machine calling the same function for the same key while the call was open would
 be joined too.  Calls between the same two prints (the two arms of an `if`) cannot be told apart by the records, so
 each whose pass holds the inner run is named.  A call with no print every path runs before it, or none after it
-before the next statement that can leave the block (`must_rows` stops there), leaves the runs apart -- 400 above has
-neither, so only 471 places archiveJob -- and so does the file door, whose files name no machine.  Apart, no run is
-the question's, as before (Fr1, 2026-10-14).  The line before still says each candidate is judged on its own run.
+before the next statement that can leave the block (`must_rows` stops there: the next statement calls too, or the
+prints after it are in arms), is placed by the run instead (`which_ran._between_records`): the outer function's two
+records in a row around the inner run, none of its rows read between them, and c on a path from the one's print to
+the other's that prints nothing else (`rows.runs_between`, the function's own statements: blocks, arms, loops, a
+call raising to its handlers).  Other calls can run between the two records, as between c and its print before
+already; only those the map's reach takes to the inner's function are named, so the join rests on the reach for the
+rest.  On x13vi1k such calls are half of what the join tries between two logs of a status's writers, and 9 of
+JediTaskSpec.status's 33 values had no other; a path holds 129 of the 132 lines with no print after, 1 of the 21 with
+none before (out/h2b/h2b-predictions.txt, h2b2 and hb1, 2026-10-29).  A call no such path holds, or a function that
+prints nothing, leaves the runs apart: the adder's 400 (the prints above it each return, so only 471 places
+archiveJob).  So does the file door, whose files name no machine.  Apart, no run is the question's, as before (Fr1,
+2026-10-14).  The line before still says each candidate is judged on its own run.
 
 *Shows:* "one run: <log> <first>..<last> ran inside the call at <file:line>[ or <file:line> ...] of the run in <log>
 (between <record> and <record>), on <machine>", and rule 3 "runs inside the call at ..." for its candidates.
