@@ -98,12 +98,16 @@ class Walk:
 
     def __init__(
         self, steps: list, env: E.Env, collections: dict[str, dict], rows: dict[str, list[dict]], ran: list[tuple[str, int]] = (),
+        ask=None,
     ) -> None:
         self.steps = steps
         self.env = env
         #: canonical iterable (``<job>.Files``) -> {"rows": key in *rows*, "entity": name}
         self.collections = collections
         self.rows = rows
+        #: ``ask(iterable, step, env)``, told of a loop over a collection *collections* does not have
+        #: (``Rerun.ask_collection``)
+        self.ask = ask
         #: (owner, "early-exit at N", test) that held: an early exit on the path to a line a
         #: traceback frame shows running was not taken, so nothing below it was cut off by it.
         #: Only early exits: they carry their line, and a guard's text alone does not say which ``if``.
@@ -142,8 +146,11 @@ class Walk:
         if not loops:
             return [None]
         _, var, iterable = loops[-1].groups()
-        found = self.collections.get(self.env.canonical(iterable.strip()))
+        canonical = self.env.canonical(iterable.strip())
+        found = self.collections.get(canonical)
         if found is None:
+            if self.ask is not None:
+                self.ask(canonical, step, self.env)
             return None
         entity = found["entity"]
         out = []

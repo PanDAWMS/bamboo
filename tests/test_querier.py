@@ -2981,7 +2981,7 @@ class Stray:
             for name, line in (("declared", 8), ("undeclared", 15)):
                 classes, theirs = receiver_methods("updateTask_JEDI", call, "pandajedi/jedidog/Dog.py", line)
                 reading = proxy_reading("updateTask_JEDI", call, theirs if classes else None)
-                got[name] = [classes, sorted(theirs), reading[3]]
+                got[name] = [classes, sorted(theirs), reading[3], reading[5]]
             # a declared class with no method of the name: no facade's at that receiver
             got["not its method"] = proxy_reading("updateTask_JEDI", call, set())
             print(json.dumps(got))
@@ -2989,12 +2989,14 @@ class Stray:
         )
     )
     got = json.loads(out.splitlines()[-1])
-    # JediTaskBuffer's updateTask_JEDI hands updateDEFT=False on: the DEFT table is not read
+    # JediTaskBuffer's updateTask_JEDI hands updateDEFT=False on: the DEFT table is not read, nor its statement run
     assert got["declared"] == [
-        ["pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer"], [["pandajedi/jedicore/JediTaskBuffer.py", 4]], ["JEDI_Tasks"]
+        ["pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer"], [["pandajedi/jedicore/JediTaskBuffer.py", 4]], ["JEDI_Tasks"],
+        ["pandajedi/jedicore/JediDBProxy.py:4"],
     ]
     # no declaration: every facade of the name, TaskBuffer's True among them
-    assert got["undeclared"] == [[], [], ["JEDI_Tasks", "T_TASK"]]
+    assert got["undeclared"] == [[], [], ["JEDI_Tasks", "T_TASK"],
+                                 ["pandaserver/taskbuffer/OraDBProxy.py:4", "pandaserver/taskbuffer/OraDBProxy.py:7", "pandajedi/jedicore/JediDBProxy.py:4"]]
     assert got["not its method"] is None
 
 
@@ -3353,8 +3355,9 @@ def test_a_binding_in_a_loop_over_rows_not_had_is_unknown_and_a_loop_over_no_row
             steps = [N(name=n, owner=owner, kind="binding", line=line, value=v, operator=op, guards=[], unseen=[u] if u else [],
                        reads=[], terminal="", detail="", depth=1, cls="") for n, line, v, op, u in made]
             # the rows file has the job's datasets, none of them, and not its files
+            told = []
             walk = G.Walk(A.given(steps), E.Env(), {"job.Datasets": {"rows": "datasets", "entity": "JediDatasetSpec"}},
-                          {"datasets": []})
+                          {"datasets": []}, ask=lambda iterable, step, env: told.append([iterable, step.line]))
             show = lambda v: "UNKNOWN" if v is E.UNKNOWN else v
             got = {"x": [[o.step.line, show(o.value), show(o.reached), o.why] for o in walk.origins("x", owner)],
                    "chosen": show(walk._choose("x", owner, None, {})[0])}
@@ -3362,11 +3365,14 @@ def test_a_binding_in_a_loop_over_rows_not_had_is_unknown_and_a_loop_over_no_row
                 value, notes = walk.build(name, owner)
                 keys = walk.keys(name, owner)
                 got[name] = [value, notes[:1], [o.value for o in keys.origins], keys.opaque, keys.complete()]
+            got["told"] = sorted(map(list, {tuple(t) for t in told}))
             print(json.dumps(got))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
+    # the walk tells its asker of each loop over the files it does not have, not of the datasets it has
+    assert got["told"] == [["job.Files", 3], ["job.Files", 7]]
     # x = "a" may have run, for files not known: kept, so "b" is not taken as all x held
     assert got["x"] == [[3, "UNKNOWN", "UNKNOWN", "@3 runs in a loop over rows this investigation does not have"],
                         [4, "b", True, ""]]
@@ -3375,6 +3381,41 @@ def test_a_binding_in_a_loop_over_rows_not_had_is_unknown_and_a_loop_over_no_row
     assert got["d"][3] == ["@7 runs in a loop over rows this investigation does not have"] and got["d"][4] is False
     # a loop over no rows ran no write: e is built empty and its key set is whole
     assert got["e"][0] == {} and got["e"][2:] == [[], [], True]
+
+
+def test_a_collection_the_rows_file_lacks_is_asked_by_its_rows_class_key_and_attribute(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import mapdump, parts as PT, rerun
+
+            # the dump's tables name a class's identity
+            mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="FileSpec", identity_attrs=["FileSpec.row_ID"]),
+                                              N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])])]
+            r = object.__new__(rerun.Rerun)
+            r.rows_asks, r.hop = {}, "R2"
+            # the walk spells the case's row by its name in the rows file, whose classes give its class
+            r.data = {"classes": {"job": "JobSpec"}}
+            env = E.Env()
+            env.table["job"] = {"PandaID": E.Value(7, "the rows file"), "jobStatus": E.Value("failed", "the rows file")}
+            step = N(line=7, owner="pandaserver/a.py::f")
+            for iterable in ("<job>.Files", "<job>.Files", "tmp_list"):
+                r.ask_collection(iterable, step, env)
+            # a GroupsNow carries its db_read form; a MovedOn, a window over the history, its SQL only
+            now = PT.GroupsNow("getJobs@2404", "ATLAS_PANDA.jobsActive4", "jobStatus='activated'", [("gshare", "asc")], "pandaid", [])
+            print(json.dumps([list(r.rows_asks.values()), PT.db_read(now)]))
+            """,
+        )
+    )
+    asked, form = json.loads(out.splitlines()[-1])
+    # once, by the job's key the dump names; a local name is no row to ask of
+    assert asked == [{"rows": {"kind": "collection", "row": {"entity": "JobSpec", "key": {"PandaID": 7}}, "attr": "Files", "entity": None},
+                      "step": "R2", "why": "@7 f loops over <job>.Files, which the rows file does not have"}]
+    assert form == {"table": "ATLAS_PANDA.jobsActive4", "where": "jobStatus='activated'", "group_by": ["gshare"], "least": "pandaid"}
 
 
 def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_path):

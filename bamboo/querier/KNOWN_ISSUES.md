@@ -119,6 +119,25 @@ whose run is every call in the window: G's round asked 492 marks, 9 of them a wr
 8 reads no row missing from it), so a mover whose run it is is followed on positive evidence only.  A shared mark
 seen in one piece is still asked, and comes back cut.
 
+## The rows ask (`Rerun.ask_rows`)
+
+### K36. Rows the rows file does not have are asked, and nothing of the querier's answers them
+
+Where a step stops for rows the rows file does not have, it says them as an ask a fetch can answer, written to
+`--rows-asks` (none unless given), each once, `{"rows": {...}, "step", "why"}` (the harness's rows ask, stage 1,
+10-29).  Three places ask: a walk's loop over a row's collection the file lacks (`Walk.elements`: `collection`, the
+row by its class and the key the dump's tables name its identity by, and the attribute; the element's class is
+`null`, not known here), S5's call whose rows, history or counts the file lacks (`statement`: the proxy's statements
+the call runs as `<file>:<line>`, the tables it reads, each argument's value in each pass -- `"unknown"` where the
+run's is not known -- and the passes' times), and L3's answers the file lacks (`sql`: the question's name and SQL, a
+GroupsNow's `db_read` form -- table, WHERE, the columns grouped by, the key it takes the least of -- and none for the
+window over the history).  The fetch that answers them is the harness's (stage 2); until it reads them the file
+keeps its sections as now.  A stop no other rule names, with rows asked, has the code `rows` -- not `asks`, which
+the harness records the logs for.  An iterable the walk does not read as a row's attribute asks nothing.
+
+*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
+*Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).
+
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 
 ### K14. A mover that writes through what it calls is not followed
@@ -565,7 +584,7 @@ make the match two.  H7's implicit else read without the job's file row says the
 stop.
 
 *Shows:* "@<line> runs in a loop over rows this investigation does not have" among a name's origins in R2.
-*Revisit:* when the walk asks the rows file for the collection (the harness's rows ask, stage 1).
+*Revisit:* when the harness's fetch answers the walk's ask for the collection (K36, stage 2).
 
 ## `which_ran`
 

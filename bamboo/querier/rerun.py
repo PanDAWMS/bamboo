@@ -178,9 +178,9 @@ def receiver_methods(method: str, call: ast.Call, file: str, line: int) -> tuple
 
 def proxy_reading(
     method: str, call: ast.Call, theirs: set[tuple[str, int]] | None = None
-) -> tuple[list[str], dict[str, object], list[str], list[str], list[str]] | None:
+) -> tuple[list[str], dict[str, object], list[str], list[str], list[str], list[str]] | None:
     """``(parameters, constants, the statement's tables, the tables this call reads, the proxy methods it reaches
-    whose statements are not read)`` for a call the walk stopped at as the database's, or None where no facade has
+    whose statements are not read, the proxy's statements this call runs as ``<file>:<line>``)`` for a call the walk stopped at as the database's, or None where no facade has
     *method* -- or none of *theirs*, the methods its receiver is declared to have (:func:`receiver_methods`).
 
     The method is the one the walk's stop names, and what it asks the database is what the facades' method of the
@@ -217,6 +217,7 @@ def proxy_reading(
     statement: list[str] = []
     at_call: list[str] = []
     unread: list[str] = []
+    sites: list[str] = []
 
     def add(named: list[str], func: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for run in sql_mod.executions(func):
@@ -243,9 +244,12 @@ def proxy_reading(
                 said[a.id] = handed[a.id]
         with sql_mod.at_call(one.proxy_method, constants):
             add(at_call, one.proxy_method)
+            for run in sql_mod.executions(one.proxy_method):
+                if (site := f"{one.proxy_file}:{run.call.lineno}") not in sites:
+                    sites.append(site)
         if not sql_mod.executions(one.proxy_method) and one.proxy_method.name not in unread:
             unread.append(one.proxy_method.name)
-    return params, said, statement, at_call, unread
+    return params, said, statement, at_call, unread, sites
 
 
 def stop_reading(detail: str) -> tuple[list[str], list[str]]:
@@ -910,9 +914,22 @@ def argument_said(param: str | None, arg: ast.expr, value: object) -> str:
     return f"{param} = {ast.unparse(arg)} = {value!r}"
 
 
+def _said_value(value: object) -> object:
+    """*value* as a rows ask carries it: as JSON holds it, its repr otherwise, ``"unknown"`` where the run's is not
+    known."""
+    if value is E.UNKNOWN:
+        return "unknown"
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return repr(value)
+    return value
+
+
 class Stop(Exception):
     """A step that cannot go on.  *code* names its class where a rule decides it (``asks``: asks of the logs the records
-    do not answer; a KNOWN_ISSUES.md number), for result.json's ``outcome.code``; None where none is named yet."""
+    do not answer; ``rows``: rows the rows file does not have, asked (``Rerun.ask_rows``), where no other rule names
+    it; a KNOWN_ISSUES.md number), for result.json's ``outcome.code``; None where none is named yet."""
 
     def __init__(self, what: str, code: str | None = None) -> None:
         super().__init__(what)
@@ -1389,6 +1406,9 @@ class Rerun:
         self.question = None  # the run the symptom's value changed in
         #: (hop, ask, why) of every ask of the logs the door had no answer for; written to --asks at the end
         self.unanswered: list[tuple[str, object, str]] = []
+        #: the rows the rows file does not have, said so a fetch can answer them (``ask_rows``), each once by its text;
+        #: written to --rows-asks at the end
+        self.rows_asks: dict[str, dict] = {}
         self.windows_said: set = set()
         #: what result.json says besides the outcome: the steps opened, the END lines said (hop, line), each branch's
         #: end, the trees read at the start and the end, and what the steps put there (window, moved_by, movers)
@@ -1522,6 +1542,28 @@ class Rerun:
             n = len({ask.key for ask, _ in unanswered})
             raise Stop(f"{self.hop}: {n} ask(s) of the logs not in the records (written to {self.args.asks})", "asks")
 
+    def ask_rows(self, rows: dict, why: str) -> None:
+        """Keep *rows*, what the rows file does not have said as a fetch can answer it -- a collection of a row, the
+        rows a call returned, or an SQL question -- for --rows-asks (the harness's rows ask, stage 1)."""
+        self.rows_asks.setdefault(json.dumps(rows, sort_keys=True, default=str), {"rows": rows, "step": self.hop, "why": why})
+
+    def ask_collection(self, iterable: str, step, env: E.Env) -> None:
+        """A row's collection a walk's loop runs over and the rows file does not have (``Walk.elements``): the row by
+        its class and its key, the columns the dump's tables name the class's identity, and the attribute.  The walk
+        spells a row by its name in the rows file (``<job>.Files``, ``classes`` giving JobSpec) or, for a loop's
+        element, by its class; an iterable it does not read as a row's attribute is no row to ask of."""
+        m = re.fullmatch(r"<(\w+)>\.(\w+)", iterable)
+        if not m:
+            return
+        name, attr = m[1], m[2]
+        cls = self.data.get("classes", {}).get(name, name)
+        fragment = mapdump.fragment()
+        names = next((t.identity_attrs for t in (fragment.tables if fragment else []) if t.spec_class == cls and t.identity_attrs), [])
+        row = env.table.get(name, {})
+        key = {n: row[n].value for n in (x.partition(".")[2] for x in names) if n in row}
+        self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": attr, "entity": None},
+                      f"@{step.line} {step.owner.split('::')[-1]} loops over {iterable}, which the rows file does not have")
+
     def window(self, asking: W.Asking) -> Window | None:
         """*asking*'s window; where it has none, a stop if the door needs one (the door over files reads none)."""
         if not self.logs.needs_window:
@@ -1577,6 +1619,7 @@ class Rerun:
                 "reach": self.result.get("reach"),
             },
             "asks": {"path": a.asks, "count": len(asks)} if asks else None,
+            "rows_asks": {"path": a.rows_asks or None, "count": len(self.rows_asks)} if self.rows_asks else None,
             "window": self.result.get("window"),
             "values_read_at": _read_at(self.data),
             "readings_at": self.result.get("readings_at"),
@@ -2172,7 +2215,7 @@ class Rerun:
         steps = A.walk(fn, frame.line)
         self.say(f"walk from {fn.name}:{frame.line}: asked by question" + (f"; {steps.note}" if steps.note else ""))
         ran = [(f"{f.rel}::{f.func}", f.line) for f in ch.frames if f.in_corpus]
-        walk = G.Walk(steps, env, self._collections(env), self.data, ran)
+        walk = G.Walk(steps, env, self._collections(env), self.data, ran, ask=self.ask_collection)
         if walk.held:
             self.say(f"held (the traceback's frames ran past them): {sorted(f'{w}: {t}' for _, w, t in walk.held)}")
         drawn = walk.element_of(fg.operand, fn.owner)
@@ -2841,11 +2884,12 @@ class Rerun:
                      f"{', '.join(f'{f}:{n}' for f, n in sorted(theirs)) or 'none'}")
         else:
             self.say(f"the receiver {receiver} declares no class: every facade's {callee}")
-        params, constants, statement, at_call, unread = self.need(
+        params, constants, statement, at_call, unread, sites = self.need(
             f"a facade's {callee}, the method the walk's stop names, and its calls on the proxy",
             proxy_reading(callee, call, theirs if classes else None),
         )
         entry = R.entry_row(fn)
+        binds: dict[str, list] = {}  # each argument's value in each pass, for the rows ask
         for n, (p, env) in enumerate(zip(q.passes, q.envs, strict=False), 1):
             marks = R.prefix_holes(fn, entry, p.records[0]) if entry is not None else {}
             for expr, value in marks.items():
@@ -2853,6 +2897,9 @@ class Rerun:
             args = [argument_said(params[i] if i < len(params) else None, a, E.ev(a, env)) for i, a in enumerate(call.args)]
             args += [argument_said(k.arg, k.value, E.ev(k.value, env)) for k in call.keywords]
             self.say(f"pass {n} ({p.first}): {ast.unparse(call.func)}({', '.join(args)})")
+            named = [(params[i] if i < len(params) else f"#{i}", a) for i, a in enumerate(call.args)] + [(k.arg, k.value) for k in call.keywords]
+            for name, a in named:
+                binds.setdefault(name, []).append(_said_value(E.ev(a, env)))
         self.say(f"the map: {step.detail}")
         if constants:
             dropped = [t for t in statement if t not in at_call]
@@ -2877,6 +2924,12 @@ class Rerun:
         )
         jobs = self.data.get("job_rows", {}).get("rows")
         history = self.data.get("job_statuslog", {}).get("by_pandaid")
+        lacking = [n for n, v in (("job_rows", jobs), ("job_statuslog", history), ("counts", self.data.get("counts", {}).get("rows"))) if not v]
+        if lacking:
+            self.ask_rows({"kind": "statement", "method": callee, "site": sites, "tables": at_call, "binds": binds,
+                           "at": [p.first for p in q.passes]},
+                          f"the rows {callee} returned in each pass, their history and the tables' counts (the rows file lacks "
+                          f"{', '.join(lacking)})")
         self.need(f"the rows {callee} returned in each pass (the rows file has none)", jobs and history)
         self.say(f"rows: {self.data['job_rows']['source']}")
         counts = self.need("the tables' rows of the key by table and jobStatus at one moment (the rows file has no counts)",
@@ -3705,17 +3758,22 @@ class Rerun:
         terms = [f for t, f in zip(query.where, filled, strict=True)
                  if t.columns and all(c.split(".")[-1].lower() in history.held for c in t.columns)]
         miss = q.q
-        asks = {
-            f"{where} groups now": PT.draw(PT.GroupsNow(where, table, cut, cols, key_col, blank, ranked)),
-            f"{where} left {miss.observed!r} in the window, by the value it went to": PT.draw(
-                PT.MovedOn(history, miss.observed, miss.since, miss.moved, terms, cols, key_col)
+        questions = {
+            f"{where} groups now": PT.GroupsNow(where, table, cut, cols, key_col, blank, ranked),
+            f"{where} left {miss.observed!r} in the window, by the value it went to": PT.MovedOn(
+                history, miss.observed, miss.since, miss.moved, terms, cols, key_col
             ),
         }
+        asks = {ask: PT.draw(pq) for ask, pq in questions.items()}
         answers = self.data.get("answers", {})
         for ask, sql in asks.items():
             self.say(f"-- {ask}{' (answered in the rows file)' if ask in answers else ''}")
             for line in sql.splitlines():
                 self.say(f"   {line}")
+            if ask not in answers:
+                form = PT.db_read(questions[ask])
+                self.ask_rows({"kind": "sql", "name": ask, "sql": sql, "binds": {}} | ({"db_read": form} if form else {}),
+                              f"L3's answer {ask!r}, not in the rows file")
         self.need(f"the answers to {list(asks)} in the rows file", all(ask in answers for ask in asks))
         now_ask, window_ask = asks
         now, window = answers[now_ask], answers[window_ask]
@@ -3788,6 +3846,7 @@ def main() -> None:
     door.add_argument("--log", action="append", help="a log file handed in (the door over files)")
     door.add_argument("--records", action="append", help="a file of the recording step's answers (the door over them)")
     ap.add_argument("--asks", default="", help="where the asks no record answers are written (default: --out + .asks.jsonl)")
+    ap.add_argument("--rows-asks", default="", help="where the asks of rows the rows file does not have are written (none unless given)")
     ap.add_argument("--rows", required=True)
     ap.add_argument("--hand", default="")
     ap.add_argument("--patterns", default="outside", choices=R.PATTERN_MODES)
@@ -3800,7 +3859,7 @@ def main() -> None:
     args.asks = args.asks or (f"{args.out}.asks.jsonl" if args.out else "asks.jsonl")
     args.result = args.result or (f"{args.out}.result.json" if args.out else "")
     # a run that does not finish leaves none of its files: a reader never takes an earlier run's for this one's
-    for path in (args.out, args.asks, args.result):
+    for path in (args.out, args.asks, args.result, args.rows_asks):
         if path:
             Path(path).unlink(missing_ok=True)
     mapdump.install_from_env()
@@ -3818,7 +3877,9 @@ def main() -> None:
         for line in A.summary():
             r.say(line)
         r.say(f"STOP {stop}; HAND used {len(r.hand_used)} time(s) {r.hand_used}")
-        outcome = {"kind": "stop", "step": r.hop, "text": r.lines[-1], "code": stop.code}
+        # rows asked and no other rule naming the stop: answering them may move it -- not "asks", which the harness
+        # records the logs for
+        outcome = {"kind": "stop", "step": r.hop, "text": r.lines[-1], "code": stop.code or ("rows" if r.rows_asks else None)}
     r.stamp("end")
     if args.out:
         _write(args.out, "\n".join(r.lines) + "\n")
@@ -3827,6 +3888,8 @@ def main() -> None:
         # every ask once, for the recording step to fetch together (analyzer-handover/stage2-record-format.md)
         asks = {ask.key: {"ask": ask.canonical(), "step": hop, "why": why} for hop, ask, why in r.unanswered}
         _write(args.asks, "".join(json.dumps(a) + "\n" for a in asks.values()))
+    if r.rows_asks and args.rows_asks:
+        _write(args.rows_asks, "".join(json.dumps(a) + "\n" for a in r.rows_asks.values()))
     if args.result:
         outcome |= {"hand_used": r.hand_used, "branches": r.branches or None}
         _write(args.result, json.dumps(r.result_of(outcome, asks), indent=1) + "\n")
