@@ -125,18 +125,29 @@ seen in one piece is still asked, and comes back cut.
 
 Where a step stops for rows the rows file does not have, it says them as an ask a fetch can answer, written to
 `--rows-asks` (none unless given), each once, `{"rows": {...}, "step", "why"}` (the harness's rows ask, stage 1,
-10-29).  Three places ask: a walk's loop over a row's collection the file lacks (`Walk.elements`: `collection`, the
+10-29).  Four places ask: a walk's loop over a row's collection the file lacks (`Walk.elements`: `collection`, the
 row by its class and the key the dump's tables name its identity by, and the attribute; the element's class is
 `null`, not known here), S5's call whose rows, history or counts the file lacks (`statement`: the proxy's statements
 the call runs as `<file>:<line>`, the tables it reads, each argument's value in each pass -- `"unknown"` where the
-run's is not known -- and the passes' times), and L3's answers the file lacks (`sql`: the question's name and SQL, a
+run's is not known -- and the passes' times), L3's answers the file lacks (`sql`: the question's name and SQL, a
 GroupsNow's `db_read` form -- table, WHERE, the columns grouped by, the key it takes the least of -- and none for the
-window over the history).  The fetch that answers them is the harness's (stage 2); until it reads them the file
-keeps its sections as now.  A stop no other rule names, with rows asked, has the code `rows` -- not `asks`, which
-the harness records the logs for.  An iterable the walk does not read as a row's attribute asks nothing.
+window over the history), and a statement S1 or L2 compares with a class the file has no row of (`Rerun.ask_linked`,
+the 4th place, the harness's to-querier-57: `collection` with the attribute `null` and the class named, and `where`,
+the class's columns the statement's joins compare with the row's, with the row's values -- the task's datasets by
+jediTaskID; one per pair of sources the joins meet by).  The 4th place does not stop: the statement stays `not
+settled`, as before.  It asks only where the rows could change the verdict (not for a statement `refused`), and
+not for a class joined to the row only through another table, a class-less table (`T_TASK`: its join side names
+no attribute) or a join column the row does not hold.  On the harness's stuck cases of 10-29 (runs/20261029-150512-m-r1)
+its 51 not-settled judgements lacking rows (JediDatasetSpec 50, FileSpec 1) all join the row directly
+(`out/nrow/nr0-summary.txt`); JediFileSpec and T_TASK appear there only in refused ones.  The fetch that answers
+them is the harness's (stage 2); until it reads them the file keeps its sections as now.  A stop no other rule
+names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
+walk does not read as a row's attribute asks nothing.
 
 *Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
-*Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).
+*Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
+place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
+a comparison that takes the row where some joined row holds the terms, which is not built.
 
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 

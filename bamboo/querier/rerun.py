@@ -1232,6 +1232,12 @@ UTC_CLOCKS = {"naive_utcnow", "datetime.utcnow", "datetime.now(utc)", "CURRENT_D
 GUARDED = "its write requires the value"
 
 
+def _identity_attrs(cls: str) -> list[str]:
+    """The ``Class.attr`` the dump's tables name *cls*'s identity by; none where no table of it names one."""
+    fragment = mapdump.fragment()
+    return next((t.identity_attrs for t in (fragment.tables if fragment else []) if t.spec_class == cls and t.identity_attrs), [])
+
+
 def _statement_subjects(st) -> set[str]:
     """Every subject *st*'s pairs and condition trees read."""
     subjects = {p.partition("=")[0] for p in [*st.selects, *st.excludes, *st.refuses, *st.restricts]}
@@ -1600,12 +1606,44 @@ class Rerun:
             return
         name, attr = m[1], m[2]
         cls = self.data.get("classes", {}).get(name, name)
-        fragment = mapdump.fragment()
-        names = next((t.identity_attrs for t in (fragment.tables if fragment else []) if t.spec_class == cls and t.identity_attrs), [])
         row = env.table.get(name, {})
-        key = {n: row[n].value for n in (x.partition(".")[2] for x in names) if n in row}
+        key = {n: row[n].value for n in (x.partition(".")[2] for x in _identity_attrs(cls)) if n in row}
         self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": attr, "entity": None},
                       f"@{step.line} {step.owner.split('::')[-1]} loops over {iterable}, which the rows file does not have")
+
+    def ask_linked(self, st, subjects: list[str], q: Missed) -> str | None:
+        """The rows of a class *st* compares (*subjects*) and the rows file has no row of (``rows-no-row``): the rows of
+        that class the statement joins to the asked row, by the columns its joins (the map's ``ReadSite.joins``) compare
+        with the row's -- the task's datasets by jediTaskID.  A collection with no attribute, the class named, and
+        ``where`` its columns with the row's values; one per pair of sources the joins meet by (two aliases of one table
+        are two keys).  A class the statement joins to the row only through another table, a class-less table (its
+        join side names no attribute: ``T_TASK``) or a column the row does not hold asks nothing.  The joins are the
+        dump's read site's, by the map's name of it (``ReadSiteNode.make_name``): the follow-up's statement does not
+        carry them; where the dump has none of that name, what is not asked is said (returned, for the caller's lines)."""
+        if not subjects:
+            return None
+        cls = q.subject.partition(".")[0]
+        key = {n: v for n in (x.partition(".")[2] for x in _identity_attrs(cls)) if (v := self._row_value(f"{cls}.{n}", q)) is not None}
+        where = f"{st.owner.split('::')[-1]}@{st.line}"
+        name = f"panda:{st.owner}@{st.line}"
+        fragment = mapdump.fragment()
+        site = next((rs for rs in (fragment.read_sites if fragment else []) if rs.name == name), None)
+        if site is None:
+            return f"the dump has no read site {name}: its joins are not read, and the rows of {', '.join(subjects)} not asked"
+        for lacked in dict.fromkeys(s.partition(".")[0] for s in subjects):
+            on: dict[tuple[str, str], dict] = {}
+            for j in site.joins:
+                for (mine, src), (theirs, their_src) in (((j.a_attr, j.a_source), (j.b_attr, j.b_source)),
+                                                         ((j.b_attr, j.b_source), (j.a_attr, j.a_source))):
+                    if mine.partition(".")[0] == lacked and theirs.partition(".")[0] == cls:
+                        on.setdefault((src, their_src), {})[mine.partition(".")[2]] = self._row_value(theirs, q)
+            compared = ", ".join(s.partition(".")[2] for s in subjects if s.partition(".")[0] == lacked)
+            for by in on.values():
+                if None in by.values():
+                    continue
+                self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": None, "entity": lacked, "where": by},
+                              f"{where} compares {lacked}'s {compared} with the row's, and the rows file has no row of {lacked}")
+        return None
 
     def window(self, asking: W.Asking) -> Window | None:
         """*asking*'s window; where it has none, a stop if the door needs one (the door over files reads none)."""
@@ -3464,9 +3502,13 @@ class Rerun:
                     if st.keys:
                         reasons.append({"code": "K18", "text": f"{where} asks rows by a value known at run time ({', '.join(st.keys)}): "
                                                                "never surely true"})
+                    lacked = []
                     for subject in sorted(_statement_subjects(st)):
                         if why := self._unanswered_why(subject, q):
                             reasons.append({"code": why[0], "text": f"{where}: {subject} not compared ({why[1]})"})
+                            lacked += [subject] if why[0] == "rows-no-row" else []
+                    if kinds.get((st.owner, st.line)) != "refused" and (note := self.ask_linked(st, lacked, q)):
+                        said.append(f"{where}: {note}")
             self.say(f"  {name}: {verdict} -- {'; '.join(said) if said else q.movers.get(owner, 'a writer of another value')}")
             out.append((owner, verdict))
             entries.append({"owner": owner, "reached": "select" if paths else "guard" if owner in guarded else "key",
@@ -3924,14 +3966,18 @@ class Rerun:
             if all(leaf.subject in said_on for leaf in leaves) and KINDS.index(verdict) >= KINDS.index(kind):
                 continue  # said already, as a selected or excluded pair, and no stronger as a condition
             fails(self._tree_words(entry, leaves), "conditions", [entry], entry in st.conditions)
-        # what neither the row nor its history answers is said, not skipped
-        unanswered = {x: why for x in sorted(_statement_subjects(st)) if (why := self._unanswered(x, q))}
+        # what neither the row nor its history answers is said, not skipped; the rows of a class the file has none of
+        # are asked where they could change the verdict
+        unanswered = {x: why for x in sorted(_statement_subjects(st)) if (why := self._unanswered_why(x, q))}
         if unanswered:
-            said.append("not compared: " + "; ".join(f"{x} ({why})" for x, why in unanswered.items()))
+            said.append("not compared: " + "; ".join(f"{x} ({why})" for x, (_, why) in unanswered.items()))
         if kind == "refused":
             return kind, said
         by_call, calls = self._routes(st, q)
-        return min(kind, by_call, key=KINDS.index), calls + said
+        kind = min(kind, by_call, key=KINDS.index)
+        if kind != "refused" and (note := self.ask_linked(st, [x for x, (code, _) in unanswered.items() if code == "rows-no-row"], q)):
+            said.append(note)
+        return kind, calls + said
 
     def ordered(self, q: Ordered):
         self.start("L3", "what it lost to")

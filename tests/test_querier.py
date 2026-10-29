@@ -2640,6 +2640,76 @@ def test_l2_says_each_movers_verdict(tmp_path):
     assert last == "not ruled out: 4 mover(s)"
 
 
+def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_statements_join_to_the_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import mapdump
+    # the joins are the dump's read site's, by the map's name of it; the follow-up's statement carries none
+    sites = []
+    mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])], read_sites=sites)]
+    r.rows_asks, r.hop = {}, "M2"
+    r.data["rows"]["job"]["jediTaskID"] = {"value": 5}
+    ftype = term("equal", "FileSpec.type", "IN", [val("input")])
+
+    def pair(a, b, a_source="f", b_source="j"):
+        return N(a_attr=a, b_attr=b, a_source=a_source, b_source=b_source)
+
+    def files(line, joins, routes=(), trees=(ftype,)):
+        if joins is not None:
+            sites.append(N(name=f"panda:d/a.py::main@{line}", joins=joins))
+        return N(owner="d/a.py::main", line=line, keys=[], selects=[], excludes=[], refuses=[], restricts=[],
+                 conditions=[], condition_trees=[N(entry="e", tree=t) for t in trees], call_readings=list(routes),
+                 callers_complete=True, callers_stop=[])
+
+    by_job = [pair("FileSpec.PandaID", "JobSpec.PandaID"), pair("FileSpec.jediTaskID", "JobSpec.jediTaskID")]
+    said = {}
+    for name, st in {
+        # one key of two columns, the row's values; a second alias of the table, a second key
+        "joined": files(10, by_job + [pair("JobSpec.PandaID", "FileSpec.PandaID", "j", "g")]),
+        # the same rows asked again: once
+        "again": files(11, by_job),
+        # every route refuses the row: nothing the rows could change
+        "refused": files(12, by_job, routes=[N(**vars(route([share])), constants={}, chain=["d/b.py:3"])]),
+        # through another table only, a class-less table, a column the row does not hold
+        "through": files(13, [pair("JediFileSpec.fileID", "FileSpec.fileID")], trees=[term("equal", "JediFileSpec.status", "=", [val("ready")])]),
+        "class-less": files(14, [pair("", "JobSpec.PandaID", "t", "j")], trees=[term("equal", "T_TASK.total_done_jobs", "=", [val("0")])]),
+        "unheld": files(15, [pair("FileSpec.dispatchDBlock", "JobSpec.dispatchDBlock")]),
+        # no read site of its name in the dump: said, not asked
+        "no site": files(18, None),
+    }.items():
+        before = len(r.rows_asks)
+        kind, lines = r._passed_over(st, q)
+        said[name] = [kind, len(r.rows_asks) - before, [x for x in lines if x.startswith(("not compared", "the dump has"))]]
+    asked = list(r.rows_asks.values())
+    # L2's movers: a statement it did not judge asks too, one it judged refused does not
+    r.rows_asks = {}
+    q.movers, q.by_key, q.refusing, q.mover, q.writers = {"d/a.py::open": "main@16 hands the rows it selects to it"}, [], [], "p/w.py::moved", []
+    q.paths = {"d/a.py::open": [files(16, by_job[:1]), files(17, [pair("FileSpec.fileID", "JobSpec.PandaID")])]}
+    r._movers_in_window(q, {("d/a.py::main", 17): "refused"})
+    print(json.dumps([said, asked, [a["rows"]["where"] for a in r.rows_asks.values()]]))
+    """,
+        )
+    )
+    said, asked, by_l2 = json.loads(out.splitlines()[-1])
+    assert by_l2 == [{"PandaID": 1}]
+    assert said["joined"] == ["not settled", 2, ["not compared: FileSpec.type (no row of FileSpec)"]]
+    assert said["again"][:2] == ["not settled", 0]
+    assert said["refused"][:2] == ["refused", 0] and said["refused"][2] == said["joined"][2]
+    assert [said[n][1] for n in ("through", "class-less", "unheld")] == [0, 0, 0]
+    assert said["through"][2] == ["not compared: JediFileSpec.status (no row of JediFileSpec)"]
+    assert said["no site"] == ["not settled", 0, [said["joined"][2][0], "the dump has no read site panda:d/a.py::main@18: its joins "
+                                                  "are not read, and the rows of FileSpec.type not asked"]]
+    why = "main@10 compares FileSpec's type with the row's, and the rows file has no row of FileSpec"
+    row = {"entity": "JobSpec", "key": {"PandaID": 1}}
+    assert asked == [
+        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1, "jediTaskID": 5}},
+         "step": "M2", "why": why},
+        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1}}, "step": "M2", "why": why},
+    ]
+
+
 def test_the_window_end_reads_after_only_at_as_of(tmp_path):
     out = _ok(
         _run(
