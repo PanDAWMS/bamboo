@@ -21,6 +21,15 @@ recording step runs from the tree this module is in, where PanDA's credentials
 load (the home's ``cwd``).  Each case runs into ``<batch>/<name>/``, so the
 cases of a batch have distinct names.
 
+**Rows asks.**  A querier whose run tree takes ``--rows-asks`` (querier-ra) is
+handed ``rows-asks.jsonl`` beside its out.txt, and result.json's
+``rows_asks`` counts what it wrote.  With ``--record``, a round with rows asks
+-- coded ``rows`` when they are all it stops for, ``asks`` when it asks the
+logs too -- is followed by the rows step (:mod:`rowsask`), which answers them
+from production into the records directory (``rows-r<n>.json``), and a case
+whose rows file is built from its answers is built again with every round of
+them (``r<n+1>/rows.json``; :func:`rows.answered`).
+
 **Which code runs.**  A case names its pin, not a map: the map moves on that
 pin as the map session lands, and a case should not be edited for it.
 ``pairs/current.json`` names the pair each pin runs on now; ``--pair`` names
@@ -80,6 +89,8 @@ HERE = Path(__file__).resolve().parents[4]
 ROUNDS = 3
 #: the files of a case's records directory the querier reads, in this order
 RECORDS_GLOB = "records-r*.jsonl"
+#: the rows step's answers in a case's records directory
+ROWS_GLOB = "rows-r*.json"
 
 #: the code that builds a dump and reads it: a dump goes with a run tree whose commit holds this code as the
 #: dump's own commit does
@@ -90,7 +101,9 @@ DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
 #: the shape of result.json read here (agreed with the querier, 2026-10-15)
 RESULT_VERSION = 1
 #: the files a run writes beside its out.txt
-RESULT, ASKS = "result.json", "asks.jsonl"
+RESULT, ASKS, ROWS_ASKS = "result.json", "asks.jsonl", "rows-asks.jsonl"
+#: what a run tree's querier says where it takes the rows asks' file
+ROWS_ASKS_FLAG = "--rows-asks"
 
 #: where a run's Neo4j is: a closed port (bamboo's settings take the environment over .env)
 NO_GRAPH = {"NEO4J_URI": "bolt://127.0.0.1:1"}
@@ -235,24 +248,51 @@ def load_pair(home: Home, name: str) -> dict:
     return pair | {"QUERIER_SHA": querier}
 
 
-def build_rows(answers: Path, pair: dict, out: Path) -> Path:
-    """Lay the fetch record *answers* out as a rows file at *out*, spelled and keyed by the pair's pin and dump."""
+def build_rows(
+    answers: Path, pair: dict, out: Path, records: Path | None = None
+) -> Path:
+    """Lay the fetch record *answers* out as a rows file at *out*, spelled and keyed by the pair's pin and dump, with
+    the rows step's answers in *records* (``rows-r<n>.json``, round by round) laid over it."""
     # here, not at the top: rows imports fetch, which imports this module
-    from bamboo.scripts.panda.fieldtest import rows  # noqa: PLC0415
+    from bamboo.scripts.panda.fieldtest import rows, rowsask  # noqa: PLC0415
 
     dump = Path(pair["MAP_DUMP"])
     spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), dump)
     tables = rows.Tables.read(dump)
-    out.write_text(
-        json.dumps(
-            rows.build(json.loads(answers.read_text()), spellings, tables), indent=1
-        )
-        + "\n"
+    record = json.loads(answers.read_text())
+    built = rows.build(record, spellings, tables)
+    rounds = sorted(
+        (int(m.group(1)), f)
+        for f in (records.glob(ROWS_GLOB) if records else [])
+        if (m := rowsask.ROUND.match(f.name))
     )
+    if rounds:
+        q = record["question"]
+        docs = [json.loads(f.read_text()) for _, f in rounds]
+        sections, left_out = rows.answered(
+            docs, record["key_class"], q["key"], spellings
+        )
+        built.setdefault("answers", {}).update(sections.pop("answers", {}))
+        built.update(sections)
+        built["about"] += (
+            f"  Laid over it: the rows step's answers {[str(f) for _, f in rounds]}."
+        )
+        if left_out:
+            built["about"] += "  Left out of them: " + "; ".join(left_out) + "."
+        if not built["answers"]:
+            del built["answers"]
+    out.write_text(json.dumps(built, indent=1) + "\n")
     return out
 
 
-def command(home: Home, case: dict, out: Path) -> list[str]:
+def takes_rows_asks(pair: dict) -> bool:
+    """Whether the pair's querier takes the rows asks' file (``--rows-asks``, querier-ra)."""
+    rerun = Path(pair["BAMBOO_TREE"]) / "bamboo/querier/rerun.py"
+    # a tree with no querier runs none: the run itself says so
+    return rerun.is_file() and f'"{ROWS_ASKS_FLAG}"' in rerun.read_text()
+
+
+def command(home: Home, case: dict, out: Path, rows_asks: bool = False) -> list[str]:
     """The querier's command for *case*: the output *out*, and the result and the asks beside it, named here rather
     than left to the querier's defaults."""
     q, i, m = case["question"], case["inputs"], case["modes"]
@@ -285,6 +325,8 @@ def command(home: Home, case: dict, out: Path) -> list[str]:
         "--asks",
         str(out.with_name(ASKS)),
     ]
+    if rows_asks:
+        args += [ROWS_ASKS_FLAG, str(out.with_name(ROWS_ASKS))]
     return args
 
 
@@ -306,6 +348,7 @@ def score(result: dict | None) -> dict:
         "hand": None,
         "hand_used": None,
         "asks": None,
+        "rows_asks": None,
     }
     if result is None:
         return got | {"why": "no result.json: the run did not finish"}
@@ -323,6 +366,7 @@ def score(result: dict | None) -> dict:
         "hand": len(o["hand_used"]),
         "hand_used": o["hand_used"],
         "asks": result["asks"],
+        "rows_asks": result.get("rows_asks"),
     }
 
 
@@ -398,9 +442,14 @@ def run_round(home: Home, case: dict, pair: dict, env: dict, where: Path) -> dic
     where.mkdir(parents=True, exist_ok=True)
     out = where / "out.txt"
     # a run that does not finish is not scored from an earlier run's files in the same place
-    for f in (out, out.with_name(RESULT), out.with_name(ASKS)):
+    for f in (
+        out,
+        out.with_name(RESULT),
+        out.with_name(ASKS),
+        out.with_name(ROWS_ASKS),
+    ):
         f.unlink(missing_ok=True)
-    args = command(home, case, out)
+    args = command(home, case, out, takes_rows_asks(pair))
     handed = handed_of(case)
     t0 = time.time()
     with (where / "stdout.log").open("w") as log:
@@ -444,6 +493,47 @@ def record_command(home: Home, asks: Path, records: Path) -> list[str]:
         "--records",
         str(records),
     ]
+
+
+def rows_command(home: Home, asks: Path, dump: Path, records: Path) -> list[str]:
+    """The rows step's command: run as the recording step is, from the tree this module is in."""
+    code = (
+        "import sys, bamboo; assert bamboo.__file__.startswith(sys.argv[1]), bamboo.__file__; "
+        "from bamboo.scripts.panda.fieldtest import rowsask; sys.exit(rowsask.main(sys.argv[2:]))"
+    )
+    return [
+        home.python,
+        "-c",
+        code,
+        str(HERE),
+        str(asks),
+        "--dump",
+        str(dump),
+        "--records",
+        str(records),
+    ]
+
+
+def rows_round(home: Home, asks: Path, pair: dict, records: Path, where: Path) -> dict:
+    """Answer a round's rows *asks* from production into *records*, where PanDA's credentials load."""
+    before = set(records.glob(ROWS_GLOB))
+    args = rows_command(home, asks, Path(pair["MAP_DUMP"]), records)
+    env = {"PYTHONPATH": str(HERE), "PYTHONDONTWRITEBYTECODE": "1"}
+    t0 = time.time()
+    with (where / "rows.log").open("w") as log:
+        rc = subprocess.run(
+            args,
+            cwd=home.cwd,
+            env=os.environ | env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        ).returncode
+    return {
+        "exit": rc,
+        "seconds": round(time.time() - t0, 2),
+        "argv": args,
+        "written": sorted(str(f) for f in set(records.glob(ROWS_GLOB)) - before),
+    }
 
 
 def record_round(home: Home, asks: Path, records: Path, where: Path) -> dict:
@@ -501,7 +591,12 @@ def run_case(
     where.mkdir(parents=True, exist_ok=True)
     built = None
     if "rows" not in case["inputs"]:
-        built = build_rows(Path(case["inputs"]["answers"]), pair, where / "rows.json")
+        built = build_rows(
+            Path(case["inputs"]["answers"]),
+            pair,
+            where / "rows.json",
+            Path(records) if records else None,
+        )
         case = case | {"inputs": case["inputs"] | {"rows": str(built)}}
     env = {k: pair[k] for k in ("PANDA_PIN", "BAMBOO_TREE", "MAP_DUMP")}
     env |= {"PYTHONPATH": pair["BAMBOO_TREE"], "PYTHONDONTWRITEBYTECODE": "1"}
@@ -513,18 +608,48 @@ def run_case(
         done.append(one)
         if not record:
             break
-        if one["score"]["code"] != "asks":
-            ended = "the querier asks nothing more"
+        s = one["score"]
+        logs = s["code"] == "asks"
+        rows_asked = s["code"] in ("asks", "rows") and bool(
+            (s["rows_asks"] or {}).get("count")
+        )
+        hand = rows_asked and built is None
+        if hand:
+            # no answer can be laid over a hand's rows file: the rows asks stay unanswered
+            rows_asked = False
+            one["rows"] = {"skipped": "the case's rows file is a hand's"}
+        if not logs and not rows_asked:
+            ended = (
+                "rows asked of a hand's rows file"
+                if hand
+                else "the querier asks nothing more"
+            )
             break
         if n == rounds:
             ended = f"still asking after {rounds} round(s)"
             break
-        one["record"] = record_round(
-            home, Path(one["score"]["asks"]["path"]), Path(records), where / f"r{n}"
-        )
-        if one["record"]["exit"] != 0:
-            ended = f"the recording step exited {one['record']['exit']}"
-            break
+        if logs:
+            one["record"] = record_round(
+                home, Path(s["asks"]["path"]), Path(records), where / f"r{n}"
+            )
+            if one["record"]["exit"] != 0:
+                ended = f"the recording step exited {one['record']['exit']}"
+                break
+        if rows_asked:
+            one["rows"] = rows_round(
+                home, Path(s["rows_asks"]["path"]), pair, Path(records), where / f"r{n}"
+            )
+            if one["rows"]["exit"] != 0:
+                ended = f"the rows step exited {one['rows']['exit']}"
+                break
+            (where / f"r{n + 1}").mkdir(parents=True, exist_ok=True)
+            built = build_rows(
+                Path(case["inputs"]["answers"]),
+                pair,
+                where / f"r{n + 1}" / "rows.json",
+                Path(records),
+            )
+            case = case | {"inputs": case["inputs"] | {"rows": str(built)}}
     last = done[-1]
     run = {
         "case": str(path),

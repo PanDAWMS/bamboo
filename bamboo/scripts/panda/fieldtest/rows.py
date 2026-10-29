@@ -343,17 +343,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]], tables: Tables) ->
 
     if cls == "JobSpec":
         if raw is not None:
-            out["files"] = [
-                {
-                    c: {"value": v, **read}
-                    for c, v in columns(f, spellings["FileSpec"], other).items()
-                }
-                for f in raw.get(FILES) or []
-            ]
-            out["collections"] = {
-                "about": "JobSpec.Files holds the job's FileSpec rows (PanDA's schema).",
-                "job.Files": {"rows": "files", "entity": "file"},
-            }
+            _job_files(out, raw, read, spellings, other)
     else:
         _task_sections(out, laid, left_out)
     out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings, tables)
@@ -366,6 +356,93 @@ def build(record: dict, spellings: dict[str, dict[str, str]], tables: Tables) ->
     if left_out:
         out["about"] += "  Left out: " + "; ".join(left_out) + "."
     return out
+
+
+def _job_files(
+    out: dict,
+    raw: dict,
+    read: dict,
+    spellings: dict[str, dict[str, str]],
+    other: set[str],
+) -> None:
+    out["files"] = [
+        {
+            c: {"value": v, **read}
+            for c, v in columns(f, spellings["FileSpec"], other).items()
+        }
+        for f in raw.get(FILES) or []
+    ]
+    out["collections"] = {
+        "about": "JobSpec.Files holds the job's FileSpec rows (PanDA's schema).",
+        "job.Files": {"rows": "files", "entity": "file"},
+    }
+
+
+#: how an aggregate's column comes back from R, and what L3 reads it as (its SQL's ``COUNT(*) AS n``,
+#: ``MIN(pandaid) AS min_pandaid``)
+AGGREGATE = re.compile(r"^(?P<function>count|min|max)\((?P<column>[^)]*)\)$")
+
+
+def _aggregate_name(column: str) -> str:
+    m = AGGREGATE.match(column)
+    if m is None:
+        return column
+    return "n" if m["function"] == "count" else f"{m['function']}_{m['column']}"
+
+
+def answered(
+    docs: list[dict], key_class: str, key: str, spellings: dict[str, dict[str, str]]
+) -> tuple[dict, list[str]]:
+    """The sections the answers to the querier's rows asks give, round by round (a later round's over an
+    earlier's), and what is left out and why.
+
+    A statement's rows, their histories and counts are the sections a task's fetch gives (``job_rows``,
+    ``job_statuslog``, ``counts``); the key's job's ``Files``, its ``files`` and ``collections``; an sql
+    ask's groups, ``answers[<name>]``, with R's aggregate columns named as L3's SQL names them.  The rows of
+    another row's collection have no section yet, and are left out.
+    """
+    out: dict[str, Any] = {}
+    left_out: list[str] = []
+    for doc in docs:
+        for a in doc["answers"]:
+            ask = a["ask"]["rows"]
+            name = f"{ask['kind']} {ask.get('name') or ask.get('method') or ask.get('attr')}"
+            if a["why"]:
+                left_out.append(f"{name}: {a['why']}")
+                continue
+            laid = Laid({"steps": a["steps"]})
+            if ask["kind"] == "statement":
+                _task_sections(out, laid, left_out)
+            elif ask["kind"] == "collection":
+                row = ask["row"]
+                mine = row["entity"] == key_class == "JobSpec" and [
+                    str(v) for v in row["key"].values()
+                ] == [str(key)]
+                raw, read, why = (
+                    key_row(laid, key_class, key) if mine else (None, {}, "")
+                )
+                if raw is not None:
+                    _job_files(out, raw, read, spellings, set())
+                else:
+                    left_out.append(
+                        f"{name}: {why or 'no section of the rows file holds the rows of ' + row['entity'] + '.' + ask['attr'] + ' yet'}"
+                    )
+            elif ask["kind"] == "sql":
+                if not laid.complete("sql"):
+                    left_out.append(
+                        f"{name}: {laid.incomplete.get('sql', 'not asked')}"
+                    )
+                    continue
+                out.setdefault("answers", {})[ask["name"]] = {
+                    "source": f"R as of {laid.as_of.get('sql')}, by db_read's form of the ask",
+                    "as_of": down_to_second(laid.as_of.get("sql")),
+                    "clock": DATABASE,
+                    "rows": [
+                        {_aggregate_name(c): text(v) for c, v in r.items()}
+                        for _, r in laid.rows["sql"]
+                    ],
+                }
+    return out, left_out
 
 
 def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:

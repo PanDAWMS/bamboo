@@ -744,3 +744,220 @@ def test_cases_of_one_name_do_not_run_into_one_directory(tmp_path):
     (home / "fieldtest.json").write_text("{}")
     assert F.main(["--home", str(home), "run", str(one), str(two)]) == 2
     assert not (home / "runs").exists()
+
+
+#: a querier that takes --rows-asks: it asks for job_rows until its rows file has them, then ends
+FAKE_ROWS_QUERIER = textwrap.dedent(
+    """
+    import hashlib, json, os, sys
+    from pathlib import Path
+    def arg(name):
+        return sys.argv[sys.argv.index(name) + 1]
+    def sha(p):
+        return hashlib.sha256(open(p, "rb").read()).hexdigest()
+    tree, dump = os.environ["BAMBOO_TREE"], os.environ["MAP_DUMP"]
+    Path(arg("--out")).write_text("== S5 the passes\\n")
+    asking = "job_rows" not in json.loads(Path(arg("--rows")).read_text())
+    if asking and "--rows-asks" in sys.argv:
+        Path(arg("--rows-asks")).write_text(json.dumps({"rows": {"kind": "statement"}, "step": "S5", "why": "w"}) + "\\n")
+    outcome = (
+        {"kind": "stop", "step": "S5", "text": "STOP S5: rows", "code": "rows"}
+        if asking
+        else {"kind": "end", "step": "S5", "text": "END a legitimate wait", "code": None}
+    )
+    result = {
+        "version": 1,
+        "outcome": outcome | {"hand_used": [], "branches": None},
+        "steps": ["S5"],
+        "inputs": {
+            "querier": {"tree": tree, "label": Path(tree, "QUERIER").read_text().strip(), "bamboo_py_sha256": "0" * 64},
+            "map_dump": {"path": dump, "sha256": sha(dump)},
+            "rows": {"path": arg("--rows"), "sha256": sha(arg("--rows"))},
+            "records": {"given": [arg("--records")], "files": []},
+            "logs": None,
+        },
+        "asks": None,
+        "rows_asks": {"path": arg("--rows-asks") if "--rows-asks" in sys.argv else None, "count": 1} if asking else None,
+    }
+    Path(arg("--result")).write_text(json.dumps(result))
+    """
+)
+#: a stand-in for the rows step: one round of answers
+FAKE_ROWS_STEP = textwrap.dedent(
+    """
+    import sys
+    from pathlib import Path
+    asks, records = Path(sys.argv[1]), Path(sys.argv[2])
+    assert asks.read_text()
+    n = len(list(records.glob("rows-r*.json"))) + 1
+    (records / f"rows-r{n}.json").write_text('{"answers": []}')
+    """
+)
+
+
+@pytest.fixture
+def rows_asking(tmp_path, monkeypatch):
+    """A home whose querier asks rows, a rows step stood in for, and a rows file built with job_rows once the records
+    directory holds a round of rows answers."""
+    home = _home(tmp_path)
+    pair = _pair(tmp_path, home)
+    _querier_tree(pair)
+    (Path(pair["BAMBOO_TREE"]) / "bamboo" / "querier" / "rerun.py").write_text(
+        FAKE_ROWS_QUERIER
+    )
+    _write(home.root / "pairs", "current.json", {"abc-f2": "P"})
+    step = _write(tmp_path, "fake_rows.py", FAKE_ROWS_STEP)
+    monkeypatch.setattr(
+        F,
+        "rows_command",
+        lambda home, asks, dump, records: [
+            home.python,
+            str(step),
+            str(asks),
+            str(records),
+        ],
+    )
+
+    def build_rows(answers, pair, out, records=None):
+        answered = records is not None and any(records.glob("rows-r*.json"))
+        out.write_text(json.dumps({"job_rows": {}} if answered else {}))
+        return out
+
+    monkeypatch.setattr(F, "build_rows", build_rows)
+    return home
+
+
+def _rows_case(tmp_path: Path, **inputs) -> Path:
+    records = tmp_path / "records"
+    records.mkdir()
+    answers = _write(tmp_path, "answers.json", "{}")
+    return _case(
+        tmp_path,
+        inputs={"answers": str(answers), "logs": [], "records": str(records)} | inputs,
+    )
+
+
+def test_a_recorded_run_answers_the_rows_asks_and_runs_the_querier_again_on_rows_built_with_them(
+    tmp_path, rows_asking
+):
+    rec = F.run_case(rows_asking, _rows_case(tmp_path), tmp_path / "batch", record=True)
+    first, second = rec["rounds"]
+    assert (
+        first["score"]["code"] == "rows" and first["score"]["rows_asks"]["count"] == 1
+    )
+    assert F.ROWS_ASKS_FLAG in first["argv"] and "record" not in first
+    assert first["rows"]["exit"] == 0 and first["rows"]["written"] == [
+        str(tmp_path / "records" / "rows-r1.json")
+    ]
+    assert second["argv"][second["argv"].index("--rows") + 1] == str(
+        tmp_path / "batch" / "C1" / "r2" / "rows.json"
+    )
+    assert (
+        rec["ended"] == "the querier asks nothing more"
+        and rec["score"]["terminal"] == "END"
+    )
+
+
+def test_a_hands_rows_file_is_not_answered_over(tmp_path, rows_asking):
+    hand = _write(tmp_path, "hand.json", "{}")
+    rec = F.run_case(
+        rows_asking,
+        _rows_case(tmp_path, rows=str(hand)),
+        tmp_path / "batch",
+        record=True,
+    )
+    assert (
+        len(rec["rounds"]) == 1 and rec["ended"] == "rows asked of a hand's rows file"
+    )
+    assert rec["rounds"][0]["rows"] == {"skipped": "the case's rows file is a hand's"}
+    assert not list((tmp_path / "records").glob("rows-r*.json"))
+
+
+def test_a_querier_that_does_not_take_rows_asks_is_not_handed_the_file(
+    tmp_path, recording
+):
+    rec = F.run_case(recording, _records_case(tmp_path), tmp_path / "batch")
+    assert F.ROWS_ASKS_FLAG not in rec["rounds"][0]["argv"]
+
+
+def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
+    tmp_path, monkeypatch
+):
+    record = {
+        "question": {
+            "kind": "late",
+            "subject": "JobSpec.jobStatus",
+            "observed": "activated",
+            "key": "7",
+        },
+        "key_class": "JobSpec",
+        "server": "https://panda.example/api/v1",
+        "started": "2026-10-13T10:00:00+00:00",
+        "steps": [],
+    }
+    from bamboo.scripts.panda.fieldtest import rows as RB
+
+    answers = _write(tmp_path, "answers.json", record)
+    monkeypatch.setattr(
+        RB, "column_spellings", lambda pin, dump: {"JobSpec": {}, "FileSpec": {}}
+    )
+    monkeypatch.setattr(
+        RB.Tables,
+        "read",
+        lambda dump: RB.Tables({"JobSpec": "PandaID"}, {}, {}, {}, {}),
+    )
+    records = tmp_path / "records"
+    records.mkdir()
+
+    def sql(name: str, rows: list[dict]) -> dict:
+        tables = [{"table": "jobsActive4", "rows": rows}]
+        data = {
+            "as_of": {"__datetime__": "2026-10-13T10:00:00"},
+            "answers": [{"status": "done", "truncated": False, "tables": tables}],
+        }
+        step = {
+            "part": "db_read",
+            "roles": ["sql"],
+            "request": {},
+            "response": {"success": True, "data": data},
+        }
+        return {
+            "ask": {"rows": {"kind": "sql", "name": name}},
+            "why": "",
+            "steps": [step],
+        }
+
+    window = {
+        "ask": {"rows": {"kind": "sql", "name": "w"}},
+        "why": "no db_read form",
+        "steps": [],
+    }
+    _write(
+        records,
+        "rows-r1.json",
+        {"answers": [sql("g", [{"gshare": "a", "count(*)": 1}]), window]},
+    )
+    _write(
+        records,
+        "rows-r2.json",
+        {"answers": [sql("g", [{"gshare": "a", "count(*)": 2}])]},
+    )
+    pair = {"MAP_DUMP": "dump.json", "PANDA_PIN": "pin"}
+
+    built = json.loads(
+        F.build_rows(answers, pair, tmp_path / "rows.json", records).read_text()
+    )
+    assert built["answers"] == {
+        "g": {
+            "source": "R as of 2026-10-13 10:00:00, by db_read's form of the ask",
+            "as_of": "2026-10-13 10:00:00",
+            "clock": "database",
+            "rows": [{"gshare": "a", "n": 2}],
+        }
+    }
+    assert (
+        "rows-r1.json" in built["about"]
+        and "Left out of them: sql w: no db_read form" in built["about"]
+    )
+    alone = json.loads(F.build_rows(answers, pair, tmp_path / "plain.json").read_text())
+    assert "answers" not in alone and "rows step" not in alone["about"]

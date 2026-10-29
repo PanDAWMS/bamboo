@@ -10,8 +10,20 @@ from __future__ import annotations
 import datetime
 
 from bamboo.scripts.panda.fieldtest import fetch as FE
+from bamboo.scripts.panda.fieldtest import rows as RB
 from bamboo.scripts.panda.fieldtest import rowsask as RA
-from tests.test_fieldtest_rows import DUMP
+from tests.test_fieldtest_rows import (
+    AS_OF,
+    DUMP,
+    JOB_Q,
+    PID,
+    SPELLINGS,
+    TASK_Q,
+    TID,
+    T,
+    _job_panda,
+    _task_panda,
+)
 
 TABLES = FE.Tables.of(DUMP)
 SITE = "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py:1490"
@@ -208,3 +220,117 @@ def test_an_sql_ask_is_read_by_its_db_read_form_where_its_terms_are_structured()
     assert not text.calls and "SQL text" in text.why
     window = _plan(ask)
     assert not window.calls and "listed for a hand" in window.why
+
+
+# ------------------------------------------------------------------ answers, laid out
+
+
+def _doc(*answers: dict) -> dict:
+    return {"answers": list(answers)}
+
+
+async def test_a_statements_answer_lays_out_as_the_tasks_fetch_lays_out_its_jobs():
+    fetched = RB.build(
+        await FE.fetch(TASK_Q, TABLES, _task_panda().parts()), SPELLINGS, TABLES
+    )
+    panda = _task_panda()
+    line = _line(
+        _statement(
+            ["jobsActive4", "jobsArchived4", "jobsDefined4", "jobsArchived"],
+            {"jediTaskID": [TID]},
+        )
+    )
+    got = await RA.answer(line, RA.plan(line, TABLES, SITES), panda.parts(), TABLES)
+    assert [c[0] for c in panda.calls] == ["db_read", "job_history"]
+    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), SPELLINGS)
+    assert left_out == []
+    for name in ("job_rows", "job_statuslog", "counts"):
+        assert sections[name] == fetched[name], name
+
+
+async def test_the_key_jobs_files_answer_lays_out_as_the_jobs_fetch_lays_them_out():
+    fetched = RB.build(
+        await FE.fetch(JOB_Q, TABLES, _job_panda().parts()), SPELLINGS, TABLES
+    )
+    line = _line(
+        {
+            "kind": "collection",
+            "row": {"entity": "JobSpec", "key": {"PandaID": PID}},
+            "attr": "Files",
+            "entity": None,
+        }
+    )
+    got = await RA.answer(
+        line, RA.plan(line, TABLES, SITES), _job_panda().parts(), TABLES
+    )
+    sections, left_out = RB.answered([_doc(got)], "JobSpec", str(PID), SPELLINGS)
+    assert left_out == [] and sections == {
+        k: fetched[k] for k in ("files", "collections")
+    }
+    other, why = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS)
+    assert (
+        other == {}
+        and "no section of the rows file holds the rows of JobSpec.Files" in why[0]
+    )
+
+
+async def test_an_sql_answer_names_rs_aggregates_as_l3s_sql_names_them():
+    async def db_read(queries):
+        rows = [
+            {
+                "gshare": "Express",
+                "currentpriority": 900,
+                "count(*)": 3,
+                "min(pandaid)": 11,
+            }
+        ]
+        answer = {
+            "status": "done",
+            "truncated": False,
+            "tables": [{"table": "jobsActive4", "rows": rows}],
+        }
+        return {"success": True, "data": {"as_of": T(AS_OF), "answers": [answer]}}
+
+    form = {
+        "table": "ATLAS_PANDA.jobsActive4",
+        "where": [["jobStatus", "=", "activated"]],
+        "group_by": ["gshare", "currentpriority"],
+        "least": "pandaid",
+    }
+    line = _line(
+        {
+            "kind": "sql",
+            "name": "getJobs@2404 groups now",
+            "sql": "SELECT ...",
+            "binds": {},
+            "db_read": form,
+        }
+    )
+    got = await RA.answer(
+        line, RA.plan(line, TABLES, SITES), FE.Parts(db_read=db_read), TABLES
+    )
+    sections, _ = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS)
+    answer = sections["answers"]["getJobs@2404 groups now"]
+    assert answer["rows"] == [
+        {"gshare": "Express", "currentpriority": 900, "n": 3, "min_pandaid": 11}
+    ]
+    assert answer["clock"] == RB.DATABASE and answer["as_of"] == "2026-10-13 10:00:00"
+
+
+async def test_an_ask_no_rule_reads_asks_nothing_and_is_left_out_with_its_why():
+    panda = _task_panda()
+    line = _line({"kind": "sql", "name": "w", "sql": "WITH ...", "binds": {}})
+    got = await RA.answer(line, RA.plan(line, TABLES, SITES), panda.parts(), TABLES)
+    assert panda.calls == [] and got["steps"] == []
+    sections, left_out = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS)
+    assert sections == {} and left_out == [
+        "sql w: no db_read form (a window question): listed for a hand"
+    ]
+
+
+def test_a_round_of_answers_is_one_past_the_last(tmp_path):
+    assert RA.next_round(tmp_path) == 1
+    (tmp_path / "rows-r1.json").write_text("{}")
+    (tmp_path / "rows-r3.json").write_text("{}")
+    (tmp_path / "records-r7.jsonl").write_text("")
+    assert RA.next_round(tmp_path) == 4

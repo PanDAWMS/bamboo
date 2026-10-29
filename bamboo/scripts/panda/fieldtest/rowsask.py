@@ -1,10 +1,13 @@
 """Plan the answers to the querier's rows asks: for each ask, the calls that read the rows it names, or why none can.
 
     python -m bamboo.scripts.panda.fieldtest.rowsask <rows-asks.jsonl> --dump <map dump> [--out <plan.json>]
+        [--records <dir>]
 
 The querier writes a rows ask where a step needs rows its rows file lacks (``--rows-asks``, one JSON line
 each: ``{"rows": {...}, "step", "why"}``; stage 1 of the rows ask).  This says, by rule and not by case, how
-each would be answered -- nothing is asked here:
+each is answered; with ``--records`` it asks PanDA (run it where PanDA's credentials load, as the fetch) and
+writes the round's answers to ``rows-r<n>.json`` there, ``n`` one past the directory's last
+(:func:`answer`; :func:`~bamboo.scripts.panda.fieldtest.rows.answered` lays them out):
 
 - ``collection`` -- a row's attribute holding rows (``{"row": {"entity", "key"}, "attr", "entity"}``).  Rows
   the row's own answer holds (:data:`~bamboo.scripts.panda.fieldtest.fetch.LINKS` ``held``: a job's
@@ -30,22 +33,32 @@ from the runs.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import datetime
 import json
+import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from bamboo.scripts.panda.fieldtest.fetch import (
     CLOCK_SLACK,
+    HISTORY,
     JOB_ROW_COLUMNS,
     KEY_REQUEST,
     NO_CREATION,
+    Parts,
+    Record,
     Tables,
     links_from,
+    made,
     query,
+    rows_of,
     since,
+    value_of,
 )
+from bamboo.scripts.panda.fieldtest.run import sha256
 
 #: a value of an argument the querier did not see in the run
 UNKNOWN = "unknown"
@@ -54,6 +67,13 @@ UNKNOWN = "unknown"
 COLUMNS = {"JobSpec": (JOB_ROW_COLUMNS, "jobStatus", "job_rows", "job_counts")}
 #: how the querier stamps a pass's time (a log record's time)
 PASS_TIME = "%Y-%m-%d %H:%M:%S,%f"
+#: how a plan's call of a part other than db_read is made, from its request
+CALLS = {
+    "jobs": lambda parts, request: parts.jobs(request["job_ids"]),
+    "task": lambda parts, request: parts.task(request["task_id"]),
+}
+#: a round's answers in a records directory
+ROUND = re.compile(r"^rows-r(\d+)\.json$")
 
 
 @dataclass
@@ -245,6 +265,41 @@ def _sql(ask: dict) -> Plan:
     return Plan(ask, [Call("db_read", "sql", request)])
 
 
+async def answer(line: dict, p: Plan, parts: Parts, tables: Tables) -> dict:
+    """Make *p*'s calls for the ask *line*: its db_read queries in one batch, the other parts, then the histories
+    of the rows found; every request and response in order, as a fetch record's steps."""
+    if p.why:
+        return {"ask": line, "why": p.why, "steps": []}
+    rec = Record(line)
+    batch = [(c.role, c.request) for c in p.calls if c.part == "db_read"]
+    got = await rec.read(parts, batch) if batch else []
+    for c in p.calls:
+        if c.part != "db_read":
+            await rec.call(c.part, CALLS[c.part](parts, c.request), c.request)
+    if p.histories:
+        role, key = COLUMNS[p.histories][2], tables.key[p.histories]
+        found = [
+            r
+            for (r_role, _), a in zip(batch, got, strict=True)
+            if r_role == role
+            for _, r in rows_of(a) or []
+        ]
+        if ids := sorted({int(value_of(r, key)) for r in found}):
+            created = made(tables.created[p.histories], found)
+            await HISTORY[p.histories](ids, created, rec, parts)
+    return {"ask": line, "why": "", "steps": rec.steps}
+
+
+def next_round(directory: Path) -> int:
+    """One past the last round of rows answers in *directory*."""
+    done = [
+        int(m.group(1))
+        for f in directory.glob("rows-r*.json")
+        if (m := ROUND.match(f.name))
+    ]
+    return max(done, default=0) + 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m bamboo.scripts.panda.fieldtest.rowsask",
@@ -255,6 +310,11 @@ def main(argv: list[str] | None = None) -> int:
         "--dump", required=True, type=Path, help="the map's dump of the case's pair"
     )
     ap.add_argument("--out", type=Path, help="where to write the plans as JSON")
+    ap.add_argument(
+        "--records",
+        type=Path,
+        help="ask PanDA, and write the answers to rows-r<n>.json in this directory",
+    )
     a = ap.parse_args(argv)
     dump = json.loads(a.dump.read_text())
     tables, sites = Tables.of(dump), Sites(dump)
@@ -269,7 +329,35 @@ def main(argv: list[str] | None = None) -> int:
         a.out.write_text(
             json.dumps([asdict(p) for p in plans], indent=1, default=str) + "\n"
         )
+    if a.records is None or not plans:
+        return 0
+    started = datetime.datetime.now(datetime.timezone.utc)
+    answers = asyncio.run(_answer_all(lines, plans, Parts(), tables))
+    a.records.mkdir(parents=True, exist_ok=True)
+    path = a.records / f"rows-r{next_round(a.records)}.json"
+    doc = {
+        "about": "The answers to the querier's rows asks, every request and response as it came (bamboo.scripts.panda.fieldtest.rowsask).",
+        "asks": {"path": str(a.asks), "sha256": sha256(a.asks)},
+        "tables_from": {"dump": str(a.dump), "sha256": sha256(a.dump)},
+        "server": os.environ.get("PANDA_API_URL_SSL", ""),
+        "started": started.isoformat(),
+        "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "answers": answers,
+    }
+    path.write_text(json.dumps(doc, indent=1) + "\n")
+    print(
+        f"{path}: {sum(not x['why'] for x in answers)} of {len(answers)} ask(s) asked"
+    )
     return 0
+
+
+async def _answer_all(
+    lines: list[dict], plans: list[Plan], parts: Parts, tables: Tables
+) -> list[dict]:
+    return [
+        await answer(line, p, parts, tables)
+        for line, p in zip(lines, plans, strict=True)
+    ]
 
 
 if __name__ == "__main__":
