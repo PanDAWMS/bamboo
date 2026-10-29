@@ -138,6 +138,8 @@ S1 counts a mover's arms in its own function only; `TaskBuffer.killJobs` writes 
   mover says why as before (`kept_without_arms`) and what the reach found: the writers reached, or the calls left open.
   A dump with no `reach_graph` keeps them all, and says so once.
 - Kept for a call left open is not "can move it": the answer is `None`, not a write.
+- A mover whose statements' rows reach none of its arms is asked so too, those arms left out of where the reach ends
+  (K28); where it writes nothing so, it is a writer that takes a row by its key (K16).
 
 *Shows:* a stop at S2 for a mover that writes through its calls; each kept mover's reasons and reach in S1's output; a
 dropped one's line, and its `reach` in result.json.
@@ -186,10 +188,29 @@ are not read as keying its arms: on x13v4k, 16 such records, each of a function 
 already.  Not seen: an arm no KeyFrom names (`datasetManager.run`'s 858, `tmpFile.status = "ready"`; `getCommands`'
 1824, an `IN` list of binds made by a join) -- such an arm is the statement's only inside its region, as before.
 
+A statement of the owner's that takes its rows by a key the statement's rows fill hands them on to a write keyed by
+its own rows (`key_chain`, through the map's read KeyFroms): `resetInputToReGenCoJumbo_JEDI` sets ready at 5038 the
+files of 5026's rows, 5026 takes the job's files by the PandaIDs of 5009's rows, and 5009 takes those by 5001's
+`datasetID` and `fileID` -- another table at each step, so neither the one hop nor `read_again`'s same rows saw that
+5035 is 5001's (the movers re-scan's O6, 2026-10-29).  Whatever column fills a key counts at every step.  The other
+way, an arm whose row the map names by a key it read whole, at every step, that the rows do not fill is not the
+statement's.  Where every way S1 has of a mover is a statement of its own whose rows reach none of its arms so
+(`elsewhere_arms`, `elsewhere_of`), S1 asks the map's reach of it as of a mover with no arm of its own (K14), those
+arms left out of where the reach ends (`Rerun._rows_elsewhere`); where the reach writes no other value with nothing
+left open, the mover is a writer that takes a row by its key (K16), said: `updateJobStatus`'s 294 selects the
+co-jumbo jobs `waiting` and sets their modificationTime alone, 262 the jobset's `activated` ES jobs alike, and its one
+arm, 241, writes the pilot's own job by the `PandaID` it is handed.  On M d62d62d's census (lm10) the class holds 5
+(value, mover) rows: those two and `updateJob` at `JediFileSpec.status=running` (596 checks input files in one branch,
+618 writes output files in its `elif`) move to by key; `insertFilesForDataset_JEDI` at `finished` stays (its reach
+leaves 2 calls open), said; `resetInputToReGenCoJumbo_JEDI` at `running` is keyed through its chain.  An arm whose
+key, or a key on the way, the map did not read keeps the mover as before.
+
 *Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]", or "...
 the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept", or "... no write in the
 function persists the value(s) set at [...] (<object> (<where its fields go>)): kept" (the two joined by ", and "
-where a statement has both).
+where a statement has both); for rows that reach none of the arms, "the rows <statements> select(s) reach none of its
+arms [...]: ..." -- "a writer that takes a row by its key" or "; kept: <the reach>" --, the entry's reason `K16` or
+`K14` with the reach.
 *Revisit:* when a census on a new map finds an arm keyed by another column or at a value in `never_at` (v's fields
 make both readable); with objects followed across a call (a field set on an element of a container handed on, a key of
 an object a call returns).
@@ -249,10 +270,15 @@ there until the reach places those calls.  H2 / F1: 4016 is no candidate for an 
 (A-rec, N-rec: 7 -> 6 readings).  A statement with no route placed (the map leaves it open: reached from outside,
 called from outside the corpus), one some route runs, and a dump without the fields are read as before.  A caller
 outside the map's view (a test handing `simul=True`, a REST call) may still run such a statement: S1 errs on
-dropping there, by the map's word that no placed caller does.
+dropping there, by the map's word that no placed caller does.  The other way, a route the map places counts
+whatever calls the function it comes from: `makeTaskPending_JEDI`'s one route is JEDI's facade
+(`JediTaskBuffer.makeTaskPending_JEDI`, routes 1, none open, no `out_on`), and the facade's one call is in a comment
+(`AtlasTaskWithholderWatchDog` 118), so S1 keeps it a mover of `JediTaskSpec.status` `ready`, `running` and `scouting`
+by its guard (the movers oracle's O2, 2026-10-25; read again 2026-10-29).  Telling a chain no entry runs from one an
+entry outside the corpus does needs the callers above it to an entry point (the map's upward union, K15).
 
 *Shows:* the writer is absent from the movers, as one with births alone (K29); H2 / F1: its line among the births a
-later status leaves out.
+later status leaves out; a writer with no caller above its route stays a mover, said nowhere.
 *Revisit:* a statement some routes run, read per way: none of S1's rows rests on one on pin k (the map's iv,
 2026-10-28), and the way would need the hand-off call's line (`lockJobsForReassign`@846's rows reach `retryJob` at
 copyArchive 814, not from `lockJobsForReassign`).
@@ -300,7 +326,8 @@ alone, not the rest a mover's is asked over: they are mostly the DB proxy's, and
 So a writer that ran and stopped before the last part is not named, and none of them is ruled out (K19's window).
 `by_key_of` is every writer no statement gives rows, not only the per-key ones: on pin k (dce1e07's dump) 32 for
 `jobStatus=running` and 28 for `status=finishing`, bulk methods whose selection the map does not link and the
-setupper's helpers among them, against 3 and 1 movers.
+setupper's helpers among them, against 3 and 1 movers.  A mover whose rows reach none of its arms, and whose reach
+writes nothing else, is taken as one of these (K28): `updateJobStatus` at `waiting`, its 241 the pilot's own job.
 
 *Shows:* said ("... from <the last part's start>, the window's last part, which alone is asked of a writer that takes
 a row by its key"); result.json's `reached` `key`.

@@ -2021,18 +2021,117 @@ def test_rows_read_again_by_their_key_are_handed_on_to_writers_where_the_reread_
     before, (running, scouted), paths = json.loads(out.splitlines()[-1])
     again = "getTasks@1676 selects the value, and {} reads its rows again"
     assert before == {"p/already.py::already": "getTasks@1676 hands the rows it selects to it"}
-    # after every other way: to the writers 1731 calls (not record, which writes nothing; already keeps its first why),
-    # the owner whose write 1745's rows key, and the writer killJob's rows reach through a call (not events)
+    # the owner first: 1745 takes 1676's rows again, so the key of its write at 1746 is 1676's rows' (key_chain), as
+    # the statement is read; after every other way: to the writers 1731 calls (not record, which writes nothing;
+    # already keeps its first why), and the writer killJob's rows reach through a call (not events)
     assert list(running.items()) == [
+        ("p/fin.py::getTasks", "getTasks@1676 selects the value, and its rows fill the key of the write(s) at [1746]"),
         ("p/already.py::already", "getTasks@1676 hands the rows it selects to it"),
         ("p/post.py::post", again.format("getTasks@1731") + " and hands them to it"),
         ("p/consumers.py::consumers", again.format("killJob@991") + " and hands them to it"),
-        ("p/fin.py::getTasks", again.format("getTasks@1745") + ", and they fill the key of the write(s) at [1746]"),
     ]
     # 1731 never runs for a scouted row: post is not reached then
     assert "p/post.py::post" not in scouted and "p/consumers.py::consumers" in scouted
     # the statement whose rows were taken is 1676, for L2 to read
     assert paths["p/post.py::post"] == [1676] and paths["p/fin.py::getTasks"] == [1676]
+
+
+def test_a_key_filled_through_the_functions_reads_is_the_statements_and_an_arm_keyed_elsewhere_is_said(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import elsewhere_of, keyed_arms
+
+    S = "JediFileSpec.status"
+    reset, status, hop, bare = "p/te.py::reset", "p/jc.py::updateStatus", "p/te.py::hop", "p/jc.py::bare"
+    writers[:] = [writer(reset, branch(5035, "ready")), writer(status, branch(241, "failed")),
+                  writer(hop, branch(70, "ready")), writer(bare, branch(90, "ready"))]
+
+    def rows(owner, line):
+        return N(kind="rows", name=f"panda:{owner}@{line}", site_owner=owner, site_line=line)
+
+    def key(owner, term, *sources, writes=None, statement=0, reads=False):
+        return N(owner=owner, term=term, writes=writes or {}, reads=reads, statement=statement, unread="", sources=list(sources))
+
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        # reset: 5001 selects running files, 5009 takes PandaIDs by their datasetID (another table), 5026 the job's
+        # files by those PandaIDs, and 5038 sets them ready by 5026's keys
+        key(reset, "datasetID=:datasetID", rows(reset, 5001), reads=True, statement=5009),
+        key(reset, "PandaID=:PandaID", rows(reset, 5009), reads=True, statement=5026),
+        key(reset, "fileID=:fileID", rows(reset, 5026), writes={S: [5035]}, statement=5038),
+        # updateStatus: its one arm writes the row a parameter names
+        key(status, "PandaID=:PandaID", N(kind="parameter", name="pandaID"), writes={S: [241]}, statement=241),
+        # hop: 60's rows fill 70's key, and 60 takes its rows by a value the map did not follow
+        key(hop, "PandaID=:PandaID", N(kind="unknown", name="ids"), reads=True, statement=60),
+        key(hop, "fileID=:fileID", rows(hop, 60), writes={S: [70]}, statement=71),
+        # bare: no KeyFrom names 90's row
+    ])]
+    follow = N(guarded_by=[], reader_statements=[
+        stmt(reset, 5001, [f"{S}=running"], [4997, 5004]), stmt(status, 294, [f"{S}=running"], [288, 295]),
+        stmt(hop, 50, [f"{S}=running"], [49, 52]), stmt(bare, 80, [f"{S}=running"], [79, 82])])
+    arms = arms_of(writers, reset, S, "running")
+    print(json.dumps([keyed_arms(writers, follow.reader_statements[0], S, arms), movers_of(follow, writers, S, "running"),
+                      elsewhere_of(follow, writers, S, "running")]))
+    """,
+        )
+    )
+    keyed, movers, elsewhere = json.loads(out.splitlines()[-1])
+    # three statements on, 5035's key is still 5001's rows'
+    assert keyed == [[5035], {}, {}]
+    assert movers["p/te.py::reset"] == "reset@5001 selects the value, and its rows fill the key of the write(s) at [5035]"
+    # each stays a mover; only updateStatus's arm is known to name another row -- hop's key may come from 50's rows
+    # through the value not followed, and bare's row is named by nothing the map read
+    assert set(movers) == {"p/te.py::reset", "p/jc.py::updateStatus", "p/te.py::hop", "p/jc.py::bare"}
+    assert elsewhere == {"p/jc.py::updateStatus": [241]}
+
+
+def test_a_mover_whose_rows_reach_none_of_its_arms_is_one_by_key_where_the_reach_without_them_writes_nothing(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap import reach as RE
+            from bamboo.codemap.models import Anchor, ReachHole, ReachNode
+            from bamboo.querier import mapdump, rerun
+
+            def node(owner, start, end, **k):
+                return ReachNode(name=owner, map_id="m", derived_from="d", owner=owner, function=owner.split("::")[-1],
+                                 anchor=Anchor(package="p", file=owner.split("::")[0], line_start=start, line_end=end), **k)
+
+            status, insert = "p/jc.py::updateStatus", "p/jc.py::insert"
+            rows = [node(status, 200, 300), node(insert, 1, 50, holes=[ReachHole(line=9, callee="f", why=RE.HOLE_LOCAL_CALLED)])]
+            RE.moving_off = lambda junctions, graph, subject, value: RE.Destination({status: ["failed@241"], insert: ["ready@30"]}, [])
+            rerun.elsewhere_of = lambda follow, writers, subject, observed: {status: [241], insert: [30]}
+            rerun.defs_holding = lambda rel, func, lines: [object()]
+            mapdump._FRAGMENT[:] = [N(reach_graph=rows, junctions=[])]
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.result, r._reach, r._graph_read = [], {}, None, None
+            q = rerun.Stuck("JobSpec.jobStatus", "waiting", "1")
+            follow = N(reader_statements=[N(owner=status, line=294, selects=["JobSpec.jobStatus=waiting"], result="rows"),
+                                          N(owner=insert, line=20, selects=["JobSpec.jobStatus=waiting"], result="rows")])
+            said = r._rows_elsewhere(q, follow, [], {status: "", insert: ""}, {})
+            print(json.dumps([{o: [to_key, text, reach["own_arms"], reach["writes"]] for o, (to_key, text, reach) in said.items()},
+                              r._reach_of(q, status, [294])["own_arms"]]))
+            """,
+        )
+    )
+    said, own = json.loads(out.splitlines()[-1])
+    # with its arm 241 left out, updateStatus reaches no write with nothing open: a writer by its key, said
+    to_key, text, own_arms, writes = said["p/jc.py::updateStatus"]
+    assert to_key is True and own_arms == [] and writes == []
+    assert text.startswith("the rows updateStatus@294 select(s) reach none of its arms [241]: the map names each one's row by a "
+                           "key they do not fill, and the reach from it, those arms left out, writes no other value")
+    assert text.endswith(": a writer that takes a row by its key (KNOWN_ISSUES.md K16)")
+    # a call left open may go on into a write: insert stays a mover, said why
+    to_key, text, own_arms, writes = said["p/jc.py::insert"]
+    assert to_key is False and writes is None
+    assert "; kept: reach: reaches no write of another value, but 1 call(s) on the way are left open" in text
+    # asked as before, the own arm keeps it
+    assert own == ["p/jc.py::updateStatus"]
 
 
 def test_an_arm_no_write_in_its_function_persists_keeps_the_owner_said_with_where_its_fields_go(tmp_path):

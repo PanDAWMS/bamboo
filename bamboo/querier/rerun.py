@@ -582,11 +582,81 @@ def unborn_junctions(junctions: list, subject: str) -> list:
 #: what the fields of an object no write in its function persists reach, as the map's KeyFrom of no term says
 UNPERSISTED = (KEY_HANDED, KEY_BOUND, KEY_RETURNED, KEY_KEPT, KEY_NO_USE)
 
+#: ``[the key_froms list, {(owner, statement): the read KeyFroms of that statement}]`` -- the list is held so that its id
+#: is never another list's
+_READS: list = [None, {}]
+
+
+def key_chain(kf, rs) -> tuple[bool, list[str]]:
+    """Whether *kf*'s key comes from *rs*'s rows -- a ``rows`` source at *rs*, or at a statement of *rs*'s owner whose
+    rows are taken by a key that comes from them, read through that statement's own KeyFroms (``reads``) --, and the
+    terms the map did not read on the way there (an ``unread``, or a source not followed).  resetInputToReGenCoJumbo_JEDI
+    sets ready at 5038 the files of 5026's rows; 5026 takes the job's files by the PandaIDs of 5009's rows, and 5009
+    takes those by 5001's datasetID and fileID: 5038's key is 5001's rows' (the movers' O6, 2026-10-29).  Whatever
+    column fills a key on the way counts (KNOWN_ISSUES.md K28).  Another function's rows are not followed: *rs*'s rows
+    are its owner's, and come to no statement before it."""
+    kfs = key_froms()
+    if _READS[0] is not kfs:
+        reads: dict[tuple, list] = {}
+        for one in kfs:
+            if getattr(one, "reads", False):
+                reads.setdefault((one.owner, getattr(one, "statement", None)), []).append(one)
+        _READS[:] = [kfs, reads]
+    unread, seen, todo = [], set(), [kf]
+    while todo:
+        one = todo.pop()
+        for s in one.sources:
+            if s.kind != KEY_ROWS or s.site_owner != rs.owner:
+                continue
+            if s.site_line == rs.line:
+                return True, unread
+            if s.site_line in seen:
+                continue
+            seen.add(s.site_line)
+            for back in _READS[1].get((rs.owner, s.site_line), []):
+                if back.unread:
+                    unread.append(f"{back.term} at {s.site_line} ({back.unread})")
+                unread += [f"{back.term} at {s.site_line} (not followed: {x.name})" for x in back.sources if x.kind == KEY_UNKNOWN]
+                todo.append(back)
+    return False, unread
+
+
+def elsewhere_arms(writers: list, rs, subject: str, arms) -> tuple[int, ...]:
+    """*arms* (the arms of *rs*'s owner, by line), where none of them is *rs*'s: none lies in *rs*'s ``region``, and the
+    map names the row of each by a key it read whole that *rs*'s rows do not fill, on the way either (``key_chain``):
+    each writes a row named elsewhere -- ``updateJobStatus``'s 241 the pilot's own job by its ``PandaID``, a parameter,
+    where 294 selects the co-jumbo jobs and sets their modificationTime alone.  ``()`` where any arm may be *rs*'s:
+    in the region, keyed by its rows, with no KeyFrom, or with a term or a term on the way the map did not read."""
+    lo, hi = (list(rs.region) or [rs.line, rs.line])[:2]
+    if not arms or any(lo <= line <= hi for line in arms):
+        return ()
+    named: dict[int, list] = {}
+    for kf in key_froms():
+        if kf.owner != rs.owner or subject not in kf.writes:
+            continue
+        lines = set(kf.writes[subject])
+        for j in writers:
+            if j.owner == rs.owner:
+                for b in j.branches:
+                    if b.line in arms and lines & {b.line, *(getattr(b, "other_lines", None) or [])}:
+                        named.setdefault(b.line, []).append(kf)
+    for line in arms:
+        if not named.get(line):
+            return ()
+        for kf in named[line]:
+            if not kf.term or kf.unread or any(s.kind == KEY_UNKNOWN for s in kf.sources):
+                return ()
+            mine, unread = key_chain(kf, rs)
+            if mine or unread:
+                return ()
+    return tuple(sorted(arms))
+
 
 def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]], dict[int, list[str]]]:
     """``(keyed, unread, unpersisted)`` over *arms*, the arms of *rs*'s owner by line.  *keyed*: those whose write the
     map says names its row by a key filled from *rs*'s rows -- a ``KeyFrom`` of the owner's writing *subject* on a
-    line of the arm's branch (its ``line`` or ``other_lines``), with a ``rows`` source of *rs*'s owner and line
+    line of the arm's branch (its ``line`` or ``other_lines``), with a ``rows`` source of *rs*'s owner and line, or of
+    a statement of the owner's that takes its rows by a key they fill (``key_chain``)
     (prepareTasksToBeFinished_JEDI keys the writes of its later loop by the jediTaskID its statements at 3723 and 3768
     select, past their region).  Whatever column of the rows fills the key counts: the map does not say which
     (KNOWN_ISSUES.md K28).  *unread*: the others with a row-naming term the map did not read -- its ``unread``, or a
@@ -604,7 +674,7 @@ def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[i
         lines = set(kf.writes[subject])
         at = {b.line for j in writers if j.owner == rs.owner for b in j.branches
               if b.line in arms and lines & {b.line, *(getattr(b, "other_lines", None) or [])}}
-        if any(s.kind == KEY_ROWS and s.site_owner == rs.owner and s.site_line == rs.line for s in kf.sources):
+        if key_chain(kf, rs)[0]:
             keyed |= at
             continue
         if not kf.term and kf.unread in UNPERSISTED:
@@ -624,9 +694,21 @@ def _by_line(said: dict[int, list[str]]) -> str:
     return "; ".join(f"{line}: {', '.join(what)}" for line, what in said.items())
 
 
+@dataclass(frozen=True)
+class Way:
+    """A way ``_reached`` gives a function rows: the function, why, the statement whose rows they are (None for a writer
+    whose write requires the value), and, where the statement is the function's own and its rows reach none of the
+    function's arms, those arms (``elsewhere_arms``)."""
+
+    owner: str
+    why: str
+    statement: object
+    elsewhere: tuple = ()
+
+
 def _reached(follow, writers: list, subject: str, observed: str):
-    """``(owner, why, statement)`` for each way the map gives a function rows of *subject* holding *observed*, in the
-    order S1 asks them; *statement* is None for a writer whose write requires the value.  A statement that selects
+    """A ``Way`` for each way the map gives a function rows of *subject* holding *observed*, in the order S1 asks them;
+    its statement is None for a writer whose write requires the value.  A statement that selects
     the value -- ``reader_statements`` also holds an UPDATE-only owner's statements of other values, which give none --
     hands its rows to its owner when an arm of the owner's lies in the statement's ``region``, the span the map reads
     where the rows go next, and to the writers among what the owner calls there (``crosses_to``).  Past the region, an
@@ -634,7 +716,8 @@ def _reached(follow, writers: list, subject: str, observed: str):
     whose key the map did not read, or whose value no write in the function persists, keeps the owner, said
     (``keyed_arms``); either way the statement hands its rows on
     as one whose owner has no arm in the region does: to what it calls there, or it keeps them (a mover with no arm of
-    its own: KNOWN_ISSUES.md K14).  A statement that aggregates (the map's ``result``) gives none: what it hands on is
+    its own: KNOWN_ISSUES.md K14) -- and where the owner has arms, each naming a row the map says the rows do not fill
+    the key of, the way says them (``elsewhere``): S1 asks the map's reach of it as of a mover with none.  A statement that aggregates (the map's ``result``) gives none: what it hands on is
     a value computed from the rows, not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator,
     which picks none of them up); one that varies, or whose result the map did not read, is read as returning rows.
     Then each writer whose write requires the value (``guarded_by``).  Last, a statement that reads a selecting
@@ -649,14 +732,14 @@ def _reached(follow, writers: list, subject: str, observed: str):
         lo, hi = (list(rs.region) or [rs.line, rs.line])[:2]
         arms = arms_of(writers, rs.owner, subject, observed)
         if any(lo <= line <= hi for line in arms):
-            yield rs.owner, f"{reader} selects the value", rs
+            yield Way(rs.owner, f"{reader} selects the value", rs)
             for callee in rs.crosses_to:
                 if callee in writing:
-                    yield callee, f"{reader} hands the rows it selects to it", rs
+                    yield Way(callee, f"{reader} hands the rows it selects to it", rs)
             continue
         keyed, unread, unpersisted = keyed_arms(writers, rs, subject, arms)
         if keyed:
-            yield rs.owner, f"{reader} selects the value, and its rows fill the key of the write(s) at {keyed}", rs
+            yield Way(rs.owner, f"{reader} selects the value, and its rows fill the key of the write(s) at {keyed}", rs)
         elif unread or unpersisted:
             why = []
             if unread:
@@ -665,11 +748,15 @@ def _reached(follow, writers: list, subject: str, observed: str):
             if unpersisted:
                 why.append(f"no write in the function persists the value(s) set at {list(unpersisted)} "
                            f"({_by_line(unpersisted)})")
-            yield rs.owner, f"{reader} selects the value, and {', and '.join(why)}: kept", rs
-        for owner in rs.crosses_to or [rs.owner]:
-            yield owner, f"{reader} hands the rows it selects to it" if rs.crosses_to else f"{reader} selects the value", rs
+            yield Way(rs.owner, f"{reader} selects the value, and {', and '.join(why)}: kept", rs)
+        if rs.crosses_to:
+            for owner in rs.crosses_to:
+                yield Way(owner, f"{reader} hands the rows it selects to it", rs)
+        else:
+            elsewhere = () if keyed or unread or unpersisted else elsewhere_arms(writers, rs, subject, arms)
+            yield Way(rs.owner, f"{reader} selects the value", rs, elsewhere)
     for g in follow.guarded_by:
-        yield g.owner, "its write requires the value", None
+        yield Way(g.owner, "its write requires the value", None)
     for rs in follow.reader_statements:
         if asked in rs.selects and rs.result != RESULT_AGGREGATE:
             yield from read_again(writers, writing, subject, observed, rs)
@@ -722,7 +809,7 @@ def read_again(writers: list, writing: set[str], subject: str, observed: str, rs
         if getattr(s, "via", None):
             for owner in getattr(s, "reaches", None) or []:
                 if owner in writing:
-                    yield owner, f"{said} and hands them to it", rs
+                    yield Way(owner, f"{said} and hands them to it", rs)
             continue
         site = _AGAIN[2].get((kf.owner, kf.statement))
         if site is None:
@@ -731,23 +818,35 @@ def read_again(writers: list, writing: set[str], subject: str, observed: str, rs
         lo, hi = (r.region or [r.line, r.line])[:2]
         arms = arms_of(writers, r.owner, subject, observed)
         if any(lo <= line <= hi for line in arms):
-            yield r.owner, said, rs
+            yield Way(r.owner, said, rs)
         else:
             keyed, _, _ = keyed_arms(writers, r, subject, arms)
             if keyed:
-                yield r.owner, f"{said}, and they fill the key of the write(s) at {keyed}", rs
+                yield Way(r.owner, f"{said}, and they fill the key of the write(s) at {keyed}", rs)
         for owner in r.crosses_to:
             if owner in writing:
-                yield owner, f"{said} and hands them to it", rs
+                yield Way(owner, f"{said} and hands them to it", rs)
 
 
 def movers_of(follow, writers: list, subject: str, observed: str) -> dict[str, str]:
     """The functions that can move *subject* on from *observed*, each with the first way the map gives it rows
     (``_reached``)."""
     found: dict[str, str] = {}
-    for owner, why, _ in _reached(follow, writers, subject, observed):
-        found.setdefault(owner, why)
+    for way in _reached(follow, writers, subject, observed):
+        found.setdefault(way.owner, way.why)
     return found
+
+
+def elsewhere_of(follow, writers: list, subject: str, observed: str) -> dict[str, list[int]]:
+    """The movers every way of which is a statement of their own whose rows reach none of their arms (``Way.elsewhere``),
+    each with those arms: the rows the mover selects stay with it, and its writes name other rows -- updateJobStatus at
+    ``waiting``, its 294 selecting co-jumbo jobs to set their modificationTime, its 241 writing the pilot's own job by
+    its PandaID.  S1 asks the map's reach of each as of a mover with no arm of its own, those arms left out of where it
+    ends (``Rerun._rows_elsewhere``)."""
+    ways: dict[str, list[tuple]] = {}
+    for way in _reached(follow, writers, subject, observed):
+        ways.setdefault(way.owner, []).append(way.elsewhere)
+    return {owner: sorted(set().union(*held)) for owner, held in ways.items() if all(held)}
 
 
 def by_key_of(writers: list, movers, subject: str, observed: str) -> list[str]:
@@ -762,10 +861,10 @@ def paths_of(follow, writers: list, subject: str, observed: str) -> dict[str, li
     """Each mover's selecting statements whose rows reach it (``_reached``); none for a writer whose write requires the
     value and no statement gives it rows."""
     found: dict[str, list] = {}
-    for owner, _, rs in _reached(follow, writers, subject, observed):
-        paths = found.setdefault(owner, [])
-        if rs is not None and rs not in paths:
-            paths.append(rs)
+    for way in _reached(follow, writers, subject, observed):
+        paths = found.setdefault(way.owner, [])
+        if way.statement is not None and way.statement not in paths:
+            paths.append(way.statement)
     return found
 
 
@@ -2205,6 +2304,12 @@ class Rerun:
         strategy_mod.attach_mover_gaps(strategy, R.ROOTS)
         writers = asyncio.run(self._writers_of(q.subject))
         movers = movers_of(follow, writers, q.subject, q.observed)
+        gaps = map_gaps(follow)
+        # a mover whose rows reach none of its arms, and whose reach writes nothing else, takes a row by its key alone
+        elsewhere = self._rows_elsewhere(q, follow, writers, movers, gaps)
+        for owner, (to_key, _, _) in elsewhere.items():
+            if to_key:
+                del movers[owner]
         # a writer that takes a row by its key: asked over the window's last part alone (KNOWN_ISSUES.md K16)
         keyed = by_key_of(writers, movers, q.subject, q.observed)
         # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark
@@ -2214,7 +2319,8 @@ class Rerun:
             self.say(f"  mover {owner}: {why}")
         for owner in keyed:
             self.say(f"  mover {owner}: a writer that takes a row by its key")
-        gaps = map_gaps(follow)
+        for owner, (_, said, _) in elsewhere.items():
+            self.say(f"  {owner.split('::')[-1]}: {said}")
         said_gaps = {owner: strategy_mod.gap_texts(held) for owner, held in gaps.items()}
         self.say(f"where the map could not read them: {said_gaps or 'nowhere'}" + (f" ({follow.gaps_note})" if follow.gaps_note else ""))
         readings = self._read_at_as_of(q, follow, writers, movers)
@@ -2234,6 +2340,11 @@ class Rerun:
                      "statements": [s for s, _ in mine if s], "verdict": None, "reasons": [],
                      "readings": [{"statement": s or None, "verdict": v} for s, v in mine], "premises": None}
             entries.append(entry)
+            if owner in elsewhere:
+                to_key, said, reach = elsewhere[owner]
+                entry["reasons"].append({"code": "K16" if to_key else "K14", "text": said})
+                if reach is not None:
+                    entry["reach"] = reach
             if any(v == "refused" for _, v in mine):
                 entry["reasons"].append({"code": "K17", "text": "refused at the moment read, one moment of the window: not dropped"})
             if made := births_of(writers, owner, q.subject, q.observed):
@@ -2373,13 +2484,41 @@ class Rerun:
             self._calls_into[(start, end)] = [f"{file}:{line}" for line in sorted(lines)]
         return self._calls_into[(start, end)]
 
-    def _reach_of(self, q: Stuck, owner: str, lines: list[int]) -> dict | None:
+    def _rows_elsewhere(self, q: Stuck, follow, writers: list, movers: dict, gaps: dict) -> dict[str, tuple[bool, str, dict | None]]:
+        """For each mover whose statements' rows reach none of its arms (``elsewhere_of``), what the map's reach says of
+        it as of a mover with no arm of its own, those arms left out of where it ends (``_reach_of``'s *without*).
+        Where it reaches no write of another value with nothing left open, and no gap of the map's may hide where its
+        rows go (``reach_said``), the rows it selects stay with it unwritten, and its arms are those of a writer that
+        takes a row by its key (KNOWN_ISSUES.md K16): ``(True, the line saying so, the reach)``.  Else it stays a mover,
+        its arms as before, said why: ``(False, ...)``."""
+        out: dict[str, tuple[bool, str, dict | None]] = {}
+        asked = f"{q.subject}={q.observed}"
+        for owner, arms in elsewhere_of(follow, writers, q.subject, q.observed).items():
+            if owner not in movers:
+                continue
+            mine = [rs for rs in follow.reader_statements if rs.owner == owner and asked in rs.selects and rs.result != RESULT_AGGREGATE]
+            lines = [rs.line for rs in mine]
+            rel, func = owner.split("::", 1)
+            reach = self._reach_of(q, owner, lines, without=arms) if defs_holding(rel, func, lines) else None
+            dropped, said = reach_said(reach, hides_where(gaps.get(owner, [])))
+            whose = (f"the rows {', '.join(f'{func}@{n}' for n in lines)} select(s) reach none of its arms {arms}: the map names "
+                     f"each one's row by a key they do not fill")
+            if dropped:
+                out[owner] = (True, f"{whose}, and the reach from it, those arms left out, writes no other value with nothing "
+                                    f"left open (closure {reach['closure']}; assuming {sorted(reach['assumptions'])}): a writer "
+                                    f"that takes a row by its key (KNOWN_ISSUES.md K16)", reach)
+            else:
+                out[owner] = (False, f"{whose}; kept: {said or 'the reach was not asked'}", reach)
+        return out
+
+    def _reach_of(self, q: Stuck, owner: str, lines: list[int], without: list[int] | tuple = ()) -> dict | None:
         """What the map's reach says of a mover with no arm of its own: from the defs holding its statements at *lines*
         -- every def of its name where it has none, as it takes rows another selects -- does any function it can go on
         into hold an arm moving *q.subject* off *q.observed* (``reach.moving_off``)?  The writes reached (``[]`` for none
         with nothing left open, ``None`` for none with calls left open), the holes, the assumptions the answer relied
         on and the closure's size, the calls it closed by their name (``closed``); ``own_arms`` names a start the
-        junctions give an arm S1 does not count.  The reach
+        junctions give an arm S1 does not count.  *without*: the starts' own arms at those lines are left out of where
+        the reach ends -- the rows do not reach them (``_rows_elsewhere``).  The reach
         reads the junctions without their births (``unborn_junctions``), as ``arms_of`` does.  ``None`` where the dump
         has no ``reach_graph``: said once, as the first ask is (build2-design.md 6)."""
         if self._reach is None:
@@ -2406,6 +2545,11 @@ class Rerun:
         if not starts:
             return {"starts": [], "writes": None, "holes": 1, "first_holes": [f"{owner} -- no function of the reach_graph holds it"],
                     "assumptions": {}, "closure": 0, "own_arms": []}
+        if without:
+            # an arm is "<outcome>@<line>"
+            destination = RE.Destination({f: kept for f, held in destination.arms.items()
+                                          if (kept := [a for a in held if f not in starts or int(a.rpartition("@")[2]) not in without])},
+                                         destination.unmatched)
         answer = graph.reach(starts, destination)
         return {"starts": starts,
                 "writes": None if answer.writes is None else [{"function": w.function, "arms": w.arms, "chain": w.chain}
