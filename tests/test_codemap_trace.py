@@ -4738,3 +4738,26 @@ def test_a_question_spells_a_function_by_its_file_whichever_frame_came_first(tmp
         "Worker.__init__",
     }
     assert f"{PACKAGE}/m.py::start" in owners
+
+
+def test_a_slot_of_a_split_prints_as_a_token_not_as_the_list(tmp_path):
+    """``source, destination = src_dst.split(":")`` (``NetworkConfigurator.process_nws_dump``): a split's value prints
+    as a list, and each slot is one element of it -- a token, read by its own name.  ``f"{parts}"`` of the whole list
+    prints as a text."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(job, log, src_dst):
+    job.status = "failed"
+    source, destination = src_dst.split(":")
+    log.error(f"entry ({source}->{destination}) failed")
+    parts = src_dst.split(":")
+    log.error(f"entry {parts} failed")
+''',
+    )
+
+    (row,) = _rows_at(roots, 4)
+    (whole,) = _rows_at(roots, 6)
+
+    assert [(hole.expression, hole.prints) for hole in row.holes] == [("source", "token"), ("destination", "token")]
+    assert [hole.prints for hole in whole.holes] == ["text"]

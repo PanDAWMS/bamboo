@@ -564,13 +564,32 @@ def literal_length(message: ast.JoinedStr) -> int:
     return sum(len(_literal_text(part).strip()) for part in message.values)
 
 
-#: Calls whose result prints as a Python ``repr`` -- a dict, a list, an
-#: exception's text -- and so may hold spaces, commas and brackets.
-_PRINTS_TEXT = frozenset(
-    {"str", "repr", "sorted", "list", "dict", "set", "tuple", "format_exc", "join", "keys", "values", "items"}
+#: Calls whose result prints as a Python ``repr`` -- a dict, a list, an exception's text -- and so may hold spaces,
+#: commas and brackets, by what callfacts says their value is: a builtin's text of what it is handed or a container
+#: of it, a ``str`` method joining values or cutting the receiver, a dict's view, a library's text.  A text method
+#: changing its receiver prints as the receiver does, a token unless it is one of these.
+_PRINTS_TEXT = (
+    frozenset(
+        name
+        for name, one in callfacts.BUILTIN_FUNCTIONS.items()
+        if one.gives == callfacts.TEXT
+        or (one.result in callfacts.CONTAINER_MAKERS and one.gives in callfacts.HANDING_ON)
+    )
+    | callfacts.text_methods(callfacts.JOINED, callfacts.PARTS)
+    | frozenset(
+        name
+        for (_type, name), one in callfacts.BUILTIN_METHODS.items()
+        if one.gives is not None and one.gives.part in (callfacts.KEYS, callfacts.VALUES, callfacts.ITEMS)
+    )
+    | callfacts.LIBRARY_TEXTS
 )
-#: Calls whose result prints as a number.
-_PRINTS_NUMBER = frozenset({"len", "int", "round", "sum", "count"})
+#: Calls whose result prints as a number: a builtin whose value is an ``int`` or a ``float``, or a number it
+#: computes; a ``str`` method counting or finding.
+_PRINTS_NUMBER = frozenset(
+    name
+    for name, one in callfacts.BUILTIN_FUNCTIONS.items()
+    if one.result in ("int", "float") or (one.gives == callfacts.COMPUTED and not one.result)
+) | callfacts.text_methods(callfacts.NUMBER)
 #: The type letter a format spec ends with when it prints a number.
 _NUMBER_SPEC = frozenset("bcdeEfFgGnoxX%")
 
@@ -1409,6 +1428,14 @@ def _own_nodes(func: ast.AST):
         yield from _own_nodes(child)
 
 
+def _prints_whole(call: ast.Call) -> bool:
+    """Whether a message part that is *call* prints as the call's value -- a hole of the call, how it prints
+    read off its name (:data:`_PRINTS_TEXT`, :data:`_PRINTS_NUMBER`) -- rather than as a value it returned."""
+    called = call.func
+    name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+    return name in _PRINTS_TEXT or name in _PRINTS_NUMBER or (isinstance(called, ast.Name) and called.id in _BUILTINS)
+
+
 def _message_sites(
     func: ast.AST, spelled: str
 ) -> tuple[list[ast.expr], list[ast.expr], list[ast.AST]]:
@@ -1435,11 +1462,13 @@ def _message_sites(
             slot(target.value, None)
         elif isinstance(target, (ast.Tuple, ast.List)):
             # A slot of a literal tuple is that element; a slot of a call is
-            # what the call returns, which is the call's to say.
+            # what the call returns, which is the call's to say -- unless the
+            # call prints as its whole value (:func:`_prints_whole`): one
+            # element of ``src_dst.split(":")`` is no list, and prints as a token.
             if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
                 elements: list[Optional[ast.expr]] = list(value.elts)
             elif isinstance(value, ast.Call):
-                elements = [value] * len(target.elts)
+                elements = [None if _prints_whole(value) else value] * len(target.elts)
             else:
                 elements = [None] * len(target.elts)
             for inner, held in zip(target.elts, elements, strict=True):
@@ -2614,12 +2643,7 @@ class _Walk:
                 if templates and len(ways) == len(templates) and all(w is not None for w in ways):
                     return ways, []  # type: ignore[return-value]
                 return [[_hole(expr)]], []
-            name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
-            if (
-                name in _PRINTS_TEXT
-                or name in _PRINTS_NUMBER
-                or (isinstance(called, ast.Name) and called.id in _BUILTINS)
-            ):
+            if _prints_whole(expr):
                 return [[_hole(expr)]], []
             return [], [REFUSED_RETURNED]
         if isinstance(expr, ast.IfExp):

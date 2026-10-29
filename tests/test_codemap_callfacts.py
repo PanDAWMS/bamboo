@@ -481,3 +481,30 @@ def test_every_reader_of_a_str_method_reads_it_from_one_table(constant, folds, n
     assert trace._fold(ast.parse(constant, mode="eval").body, {}) == folds
     assert sqleval._text_reads(ast.parse(named, mode="eval").body) == reads
     assert sqleval._STR_METHODS <= set(callfacts.TEXT_METHODS)
+
+
+@pytest.mark.parametrize(
+    ("hole", "prints"),
+    [
+        ("id(queue)", "number"),
+        ("abs(delta)", "number"),
+        ("len(rows)", "number"),
+        ("text.find('x')", "number"),
+        ("sorted(rows)", "text"),
+        ("vars(spec)", "text"),
+        ("text.split()", "text"),
+        ("d.keys()", "text"),
+        ("traceback.format_exc()", "text"),
+        ("text.strip()", ""),
+        ("max(a, b)", ""),
+    ],
+)
+def test_how_a_call_in_a_hole_prints_is_read_from_the_facts(hole, prints):
+    """A hole prints as a number where callfacts says the value is one (a builtin's int, float or computed number, a
+    str method finding or counting), as a text with spaces where it is a text of a value or a container, a str method's
+    joined or cut texts, a dict's view or traceback's text -- and as a token otherwise: ``text.strip()`` prints as
+    ``text`` does, ``max(a, b)`` as one of them."""
+    from bamboo.codemap import trace
+
+    part = ast.parse(f'f"x={{{hole}}} y"', mode="eval").body.values[1]
+    assert trace._hole_prints(part) == prints

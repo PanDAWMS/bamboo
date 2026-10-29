@@ -590,6 +590,11 @@ def text_methods(*gives: str) -> frozenset[str]:
     return frozenset(name for name, one in TEXT_METHODS.items() if one.gives in gives)
 
 
+#: The library functions whose value is a text, by their names: ``traceback.format_exc()``, the exception being
+#: handled, its traceback and message.
+LIBRARY_TEXTS = frozenset({"format_exc"})
+
+
 class Function(NamedTuple):
     """What a builtin function does with what it is handed.
 
