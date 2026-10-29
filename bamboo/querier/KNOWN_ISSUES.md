@@ -509,15 +509,35 @@ stretch's first row (`windows.value_held`).  A row holding the value says it was
 which run wrote it, so no machine is named; the pairs of a writer and the history row its run writes,
 which would name the row's time and host, are the map's to say (build2-design.md 7, the second stage).
 A value written after the last row has no row to close the window, and a task's creation time is not
-checked (`parts.History.created`): both stop.  A subject no history records or holds stops ("a statuslog
-time for <value>: no history records or holds <subject>"): the status's rows give it no time, though its
-values may be spelled as the status's.  Until 10-29 H2 took the status's row holding the value as the
-subject's time (`JediTaskSpec.superStatus` 'done', three of the harness's cases; `oldStatus` too).
+checked (`parts.History.created`): both stop.  A subject no history records or holds takes no time from
+the status's rows, though its values may be spelled as the status's: until 10-29 H2 took the status's row
+holding the value as the subject's time (`JediTaskSpec.superStatus` 'done', three of the harness's cases;
+`oldStatus` too).  Its writers' arms are asked instead (K37).
 
-*Shows:* a stop at H2 naming the column, the last row or the creation time, or the subject no history
-records; asks of every machine.
-*Revisit:* when the map says which history row a writer's run writes; when a part says when an attribute
-took a value (57 of the harness's 60 attribute cases stop at H2 for it, 10-29).
+*Shows:* a stop at H2 naming the column, the last row or the creation time; asks of every machine.
+*Revisit:* when the map says which history row a writer's run writes.
+
+### K37. An attribute no history records is timed by its writers' arms, and only where every arm says the time
+
+`attr_time` (the harness's ask b, tmaeno 「おねがいします」 10-29): where every arm H1 names writes the time it runs
+(`runtime(CURRENT_DATE)`, `runtime(naive_utcnow())`), the value is the write's time and H2 asks the run at it, on
+every machine (`windows.value_now`); else each arm is placed on the object's history by the map's HistoryPair (row
+same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
+history call records where they are literals, any row otherwise), and read newest first: the first whose run a
+writer ran in is the write that left the value, and H2 goes on from it as for a status.  Only the last write is
+asked; one of the same value before it is not.  It stops where an arm is on no row of the object -- its pairs are
+another object's, the map does not follow the object to its pass's history call, or it has none: its run may have
+written the value after any row, and asking its logs over the rest of the window (F3) is not built -- and where H1
+names no writer (a value the pilot reports through updateJob's SET, which the map does not read).  A name bound to
+the time earlier in the pass (`timeNow`, `now_time`) or the time less a span (`CURRENT_DATE-1`) is not read as
+the time.  Counted on the harness's 57 (attr-time-shape.md): every arm placed 23, some 13, none 18, no writer 3;
+the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's storeJobs leaves 12 of the 18
+(asked of the map, 10-29).
+
+*Shows:* "-- row n of m" in H2 and its judgement per row; a stop "every writer of <subject> on a history row of the
+object ... (k of n not: K37)" or "a writer of <subject> in the map".
+*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
+arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 
 ### K11. After H4 the next question is always H5, the traceback
 

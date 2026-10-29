@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "asked", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
+    "asked", "attr_time", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
 ]
 
@@ -3451,8 +3451,76 @@ def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_
     got = json.loads(out.splitlines()[-1])
     # the task's status is the history's own: its row for 'done' gives the time
     assert got["JediTaskSpec.status"] == "past H2's time: 2026-01-02 00:00:00"
-    # superStatus is spelled with the status's values, but no history records it: no time, and not the status's
-    assert got["JediTaskSpec.superStatus"] == "H2: a statuslog time for done: no history records or holds JediTaskSpec.superStatus"
+    # superStatus is spelled with the status's values, but no history records it: not the status's time -- its
+    # writers' arms are asked (K37), and with none in the map it stops there
+    assert got["JediTaskSpec.superStatus"] == "H2: a writer of JediTaskSpec.superStatus in the map, to say when it took 'done'"
+
+
+def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_rows_its_writers_passes_write(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rerun
+
+            def branch(line, outcome, *pairs, hole=""):
+                return N(line=line, outcome=outcome, history=list(pairs), history_hole=hole)
+
+            def pair(row, writes=(), why=""):
+                return N(row=row, row_why=why, writes=list(writes), caller="pandajedi/r.py::Refiner.runImpl", call=226,
+                         callee="self.taskBufferIF.updateTask_JEDI", order="after")
+
+            upd = "pandaserver/t.py::TaskModule.updateTask_JEDI:1570"
+            mapdump._FRAGMENT[:] = [N(
+                junctions=[
+                    N(subject="JediTaskSpec.rescueTime", owner="pandaserver/t.py::TaskModule.rescue", branches=[branch(737, "runtime(CURRENT_DATE)")]),
+                    N(subject="JediTaskSpec.transUses", owner="pandajedi/r.py::Refiner.extract", branches=[branch(140, "runtime(p)", pair("can", [upd]))]),
+                    N(subject="JediTaskSpec.walltime", owner="pandajedi/r.py::Refiner.extract", branches=[branch(150, "runtime(w)", pair("can", ["pandaserver/t.py::TaskModule.mark:9"]))]),
+                    N(subject="JediTaskSpec.splitRule", owner="pandajedi/r.py::Refiner.extract", branches=[branch(160, "runtime(s)", pair("can", [upd]))]),
+                    N(subject="JediTaskSpec.splitRule", owner="pandajedi/w.py::Dog.act", branches=[branch(20, "runtime(s)", pair("", why="not followed"))]),
+                ],
+                reach_graph=[N(owner="pandaserver/t.py::TaskModule.updateTask_JEDI", history=[N(line=1570, values=["runtime(taskSpec.status)"])]),
+                             N(owner="pandaserver/t.py::TaskModule.mark", history=[N(line=9, values=["defined"])])],
+            )]
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "H2", {}, []
+            states = [{"status": s, "time": t, "host": "h"} for s, t in
+                      (("defined", "2026-10-29 07:08:40"), ("ready", "2026-10-29 07:08:41"), ("done", "2026-10-29 08:36:33"))]
+            r.data = {"statuslog": {"states": states}}
+            reading = lambda owner, *lines: N(owner=owner, lines=list(lines))
+            asks = {
+                "now": ("JediTaskSpec.rescueTime", "2026-10-29 00:49:09", [reading("pandaserver/t.py::rescue", 737)]),
+                "not a time": ("JediTaskSpec.rescueTime", "soon", [reading("pandaserver/t.py::rescue", 737)]),
+                "any row": ("JediTaskSpec.transUses", "Atlas", [reading("pandajedi/r.py::extract", 140)]),
+                "its rows": ("JediTaskSpec.walltime", "3", [reading("pandajedi/r.py::extract", 150)]),
+                "one not placed": ("JediTaskSpec.splitRule", "x", [reading("pandajedi/r.py::extract", 160), reading("pandajedi/w.py::act", 20)]),
+                "no writer": ("JediTaskSpec.transUses", "Atlas", []),
+            }
+            got = {}
+            for name, (subject, value, readings) in asks.items():
+                try:
+                    tries = r._attribute_tries(subject, subject.split(".")[1], value, readings)
+                    got[name] = [[s["status"] if s else None, a.window, a.machine] for s, a in tries]
+                except rerun.Stop as e:
+                    got[name] = e.args[0]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # every writer writes the time it runs: the value is the time, asked on every machine
+    assert got["now"] == [[None, ["2026-10-29 00:49:09", "2026-10-29 00:49:09"], None]]
+    assert got["not a time"] == "H2: a time for soon: rescueTime='soon', which its writers set to the time they run, is not a time"
+    # a pass that records the task's status at run time can write any row: every row, newest first, at its host
+    assert [g[0] for g in got["any row"]] == ["done", "ready", "defined"] and got["any row"][0][1:] == [["2026-10-29 08:36:33"] * 2, "h"]
+    # one that records 'defined' only: that row
+    assert got["its rows"] == [["defined", ["2026-10-29 07:08:40"] * 2, "h"]]
+    # a writer on no row of the task leaves the time not known
+    assert got["one not placed"] == ("H2: every writer of JediTaskSpec.splitRule on a history row of the object, to say when it took 'x' "
+                                     "(1 of 2 not: KNOWN_ISSUES.md K37)")
+    assert got["no writer"] == "H2: a writer of JediTaskSpec.transUses in the map, to say when it took 'Atlas'"
 
 
 def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_name(tmp_path):

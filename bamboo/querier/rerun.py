@@ -104,6 +104,7 @@ from bamboo.codemap.panda.provenance import facade_calls
 from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
 from bamboo.codemap.reading import containing_function
 from bamboo.querier import asked as A
+from bamboo.querier import attr_time as AT
 from bamboo.querier import census as C
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
@@ -1756,17 +1757,63 @@ class Rerun:
             found = self.need(f"a statuslog time for {value}: {asking.why}", asking.window)
             if isinstance(found, str):  # a time from --hand
                 asking = W.Asking((found, found), None, f"the time handed for {value}, on every machine")
+            tries = [(state, asking)]
+        elif state is None and PT.history(subject) is None:
+            # an attribute no history records or holds: its writers' arms say when it took the value (K37)
+            tries = self._attribute_tries(subject, attr, value, readings)
         else:
             if state is None:
-                # the statuslog's rows are its class's status: an attribute no history records or holds has no time
-                # in them, though its values may be spelled as the status's (superStatus, oldStatus)
-                recorded = PT.history(subject) is not None
-                states = self.data["statuslog"]["states"] if recorded else []
-                unrecorded = "" if recorded else f": no history records or holds {subject}"
-                state = self.need(f"a statuslog time for {value}{unrecorded}", next((s for s in states if s["status"] == value), None))
+                states = self.data["statuslog"]["states"]
+                state = self.need(f"a statuslog time for {value}", next((s for s in states if s["status"] == value), None))
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
-            asking = W.at_transition(state)
+            tries = [(state, W.at_transition(state))]
+        if len(tries) > 1:
+            # every row's asks in one round, for the recording step to answer together; the rows are then read
+            # newest first, and the first whose run a writer ran in is the write that left the value
+            names = list(dict.fromkeys(f for c in self._candidates(readings) for f in c.log_files))
+            self._stop_unanswered([u for _, asking in tries for u in self._ask(key, names, asking)[1]])
+        for n, (state, asking) in enumerate(tries, 1):
+            last = n == len(tries)
+            if len(tries) > 1:
+                self.say(f"-- row {n} of {len(tries)}: {asking.why}")
+            wrote = self._wrote_at(subject, attr, value, key, readings, state, asking, last)
+            if wrote is not None:
+                return wrote
+        raise AssertionError("the last row stops or returns")
+
+    def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking]]:
+        """H2's windows for an attribute no history records (``attr_time``, KNOWN_ISSUES.md K37): the value itself where
+        every writer writes the time it runs, else the statuslog rows the writers' passes can write, newest first."""
+        fragment = mapdump.fragment()
+        found = AT.arms(fragment, subject, readings)
+        self.need(f"a writer of {subject} in the map, to say when it took {value!r}", found)
+        if AT.now_valued(found):
+            asking = W.value_now(attr, value)
+            got = self.need(f"a time for {value}: {asking.why}", asking.window)
+            if isinstance(got, str):  # a time from --hand
+                asking = W.Asking((got, got), None, f"the time handed for {value}, on every machine")
+            self.say(f"{len(found)} writer line(s), each writing the time it runs: {asking.why}")
+            return [(None, asking)]
+        for a in found:
+            self.say(f"  {a.owner.split('::')[-1]}:{a.line} " + (f"is on no history row of the object: {a.unplaced}" if a.unplaced else
+                     "writes in a pass that writes the object's history row (" + ", ".join(sorted({f"{p.caller.split('::')[-1]}:{p.call} "
+                     f"{p.callee.split('.')[-1]} {p.order}" for p in a.placed})) + ")"))
+        unplaced = [a for a in found if a.unplaced]
+        self.need(f"every writer of {subject} on a history row of the object, to say when it took {value!r} "
+                  f"({len(unplaced)} of {len(found)} not: KNOWN_ISSUES.md K37)", not unplaced)
+        states = self.data["statuslog"]["states"]
+        rows = AT.candidate_rows(found, states, AT.recorded_values(fragment))
+        self.say(f"the writers' passes can write {len(rows)} of the {len(states)} statuslog row(s): asked newest first")
+        got = self.need(f"a statuslog row the writers of {subject} can write", rows)
+        if isinstance(got, str):  # a time from --hand
+            return [({"status": value, "time": got}, W.Asking((got, got), None, f"the time handed for {value}, on every machine"))]
+        return [(s, W.at_transition(s)) for s in rows]
+
+    def _wrote_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict | None,
+                  asking: W.Asking, last: bool) -> Wrote | None:
+        """H2 at one window: the run of the key there and which candidate ran.  None, where *last* is not, for a
+        window with no run or no candidate that ran: the next row is tried."""
         readings, said = self._unborn(readings, subject, state)
         if said:
             self.say(said)
@@ -1775,6 +1822,9 @@ class Rerun:
         cands = self._candidates(readings)
         runs = self.runs(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+        if not at and not last:
+            self.say(f"  no run of {key} at {when}")
+            return None
         self.need(f"a run of {key} at {when}", at)
         if len(at) > 1:
             # the row's second holds runs in more than one log, and the machines' clocks are not known finer than a
@@ -1802,6 +1852,9 @@ class Rerun:
             subject=attr, observed=value, question_run=question, env=env, called_at=self._called_at,
         )
         self.say(j.report(question))
+        if j.chosen is None and not last and self.hop not in self.hand:
+            self.say(f"  no writer of {subject} ran at {when}")
+            return None
         chosen = self.pick("which candidate ran", j)
         if question is None:
             question = self.need(f"the run of {chosen.candidate.func} at {when}", j.runs.get(chosen.candidate.owner))
