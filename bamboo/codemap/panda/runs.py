@@ -72,9 +72,10 @@ the key the writer is handed:
   not every call after it -- a loop's map bound again gives that loop's own);
 - at a caller of the arm's function, the object is the path of the caller
   whose follow through the call on the way holds the arm's object there --
-  a path the call is handed, a path below one (``self.job`` for
-  ``self.execute_plugin()``), an element of either, or a name bound to what
-  the call returns;
+  a path the call is handed or a name bound to what it returns, a path below
+  one (``self.job`` for ``self.execute_plugin()``), or an element of any of
+  them (``runImpl``'s ``pandaJobs[]``: the jobs ``doGenerate`` makes come
+  back in the list it returns);
 - ``archiveJob``'s ``updatedJobList.append(job)`` and ``for tmpJob in
   updatedJobList`` make the row of ``tmpJob.PandaID`` one the arm's can be:
   an element among the others, read without the statements' order.
@@ -1064,7 +1065,9 @@ class _Reader:
         """The caller's paths whose follow through the call at *point* holds the arm's object, and its key.
 
         Each with 0 where it is a path the call is handed or a name bound to
-        what it returns, 1 where it is below one or an element of one.
+        what it returns, 1 where it is below one or an element of one: what
+        comes out of the call is read as what goes in -- ``doGenerate``'s
+        jobs come back to ``runImpl`` as the elements of ``pandaJobs``.
         """
         here = self.rows[owner]
         lines = range(point.lineno, (point.end_lineno or point.lineno) + 1)
@@ -1077,17 +1080,27 @@ class _Reader:
             and not call.parameter.startswith("*")
         ]
         handed = {call.path for call in at}
+        results = {
+            binding.name
+            for binding in here.bindings
+            if binding.how == BIND_RESULT and binding.line in lines
+        }
         recorded = (
             {one.path for one in here.assigns}
             | {one.path for one in here.bindings}
             | {one.name for one in here.bindings}
             | {one.path for one in here.call_bindings}
         )
-        below = {
-            one
-            for one in recorded
-            if any(objects._under(path, one) is not None for path in handed)
-        }
+
+        def around(paths: set[str]) -> list[str]:
+            # The paths, the recorded paths below them, and the element of each.
+            below = {
+                one
+                for one in recorded
+                if any(objects._under(path, one) is not None for path in paths)
+            }
+            return sorted(paths | below | {one + "[]" for one in paths | below})
+
         held_objects: dict[str, int] = {}
         held_keys: dict[str, int] = {}
 
@@ -1102,7 +1115,7 @@ class _Reader:
                         if rest is not None:
                             into[start + rest] = min(into.get(start + rest, rank), rank)
 
-        for start in sorted(handed | below | {one + "[]" for one in handed | below}):
+        for start in around(handed):
             held, _spent = objects._held(here, {start})
             for call in at:
                 for one in held:
@@ -1113,9 +1126,8 @@ class _Reader:
                             start,
                             0 if start in handed else 1,
                         )
-        for binding in here.bindings:
-            if binding.how == BIND_RESULT and binding.line in lines:
-                found(self._follow(owner, binding.name), binding.name, 0)
+        for start in around(results):
+            found(self._follow(owner, start), start, 0 if start in results else 1)
         return held_objects, held_keys
 
     def _followed(

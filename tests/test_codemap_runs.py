@@ -529,6 +529,58 @@ def test_an_object_the_callee_builds_is_not_the_callers(tmp_path: Path) -> None:
     assert (pair.row, pair.row_why, pair.object) == ("", runs.ROW_NOT_HANDED, "")
 
 
+MADE = """\
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+
+class Made(DBProxy):
+    def generate(self):
+        made = []
+        job = JobSpec()
+        job.jobStatus = "generated"  # G1
+        made.append(job)
+        return True, made
+
+    def submit(self):
+        ok, jobs = self.generate()  # G2
+        self.archive_all(jobs[0:10])  # G3
+"""
+
+
+def test_an_object_the_callee_builds_and_returns_is_followed_from_the_caller(
+    tmp_path: Path,
+) -> None:
+    """runImpl: doGenerate's jobs come back in a list in a tuple, unpacked, and a slice of the list is stored."""
+    fragment = _build(
+        tmp_path,
+        [("made", "Made.generate", "G1", "JobSpec.jobStatus")],
+        spec=SPEC,
+        proxy=PROXY,
+        made=MADE,
+    )
+    (pair,) = _branch(fragment, "G1").history or []
+    submit, archive_all = (
+        "pkg/made.py::Made.submit",
+        "pkg/proxy.py::DBProxy.archive_all",
+    )
+    assert (pair.level, pair.caller, pair.point, pair.call) == (
+        1,
+        submit,
+        _line(MADE, "G2"),
+        _line(MADE, "G3"),
+    )
+    assert (pair.row, pair.row_why, pair.object) == (HISTORY_ROW_CAN, "", "jobs[]")
+    assert pair.row_via == [
+        f"{submit}:{_line(MADE, 'G3')} -> {archive_all} jobs[]",
+        f"{archive_all}:{_line(PROXY, 'B1')} element job",
+        f"{archive_all}:{_line(PROXY, 'B2')} fill done[]",
+        f"{archive_all}:{_line(PROXY, 'B3')} element one",
+        f"{archive_all}:{_line(PROXY, 'H6')} one.PandaID",
+    ]
+    assert history_pairs_resolve(fragment).passed
+
+
 def test_a_function_handed_on_is_not_the_same_pass(tmp_path: Path) -> None:
     fragment = _proxy(tmp_path, ("DBProxy.handed", "A6"))
     branch = _branch(fragment, "A6")
