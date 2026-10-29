@@ -530,6 +530,22 @@ statement is not the pin's.
 (a pin of the case's own version); when another step keys a reading by a line of the code; when a current case
 reaches R1-R5.
 
+### K34. An exception relayed from another process is read as raised inside the corpus
+
+`pandajedi/jedicore/Interaction.py`'s `__call__` hands a method call to a child process over a pipe and raises the
+class the child returned with the child's string (`raise retException(strException)`, line 272 on pin m).  The
+traceback the parent prints ends at that line, in the corpus, while the exception came from what the child called:
+in an example of 10-29, `AtlasTaskSetupper.doSetup`'s `registerNewDataset` failed by Rucio's ORA-20101.  H5 takes an
+innermost frame in the corpus as the line that raised and goes on to R1-R5, which would read the relay's `raise` as
+panda's own failure; the boundary is the pipe, as WrappedCursor -> oracledb is one H5 sees.  No case has reached it,
+and that example likely would not (not run): doSetup's except returns a code and sets no status, so H5 would find
+no traceback through the function H4 chose.  A traceback raised by panda's own line comes from a bug and is rare
+(tmaeno, 10-29); R1-R5's cases are K and K-rec, read on the pin of their version (8e24aa1a-f2), since K's bug is
+fixed on the current pin (K33).
+
+*Shows:* R1 reading `Interaction.py`'s `raise retException(strException)` as what raised.
+*Revisit:* when a case's traceback ends in a relay of another process's exception.
+
 ## `which_ran`
 
 ### K21. Runs of the key in several logs are one run only where one ran inside a call the other made
