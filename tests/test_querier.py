@@ -3318,6 +3318,102 @@ def test_a_container_is_read_by_the_form_of_each_write_and_not_rebuilt_where_a_p
     assert got["g"][2] == ["a"]
 
 
+_LOOPED = """def f(job):
+    for f in job.Files:
+        x = "a"
+    x = "b"
+    d = {}
+    for f in job.Files:
+        d[f.lfn] = 1
+    e = {}
+    for s in job.Datasets:
+        e[s.name] = 2
+    return x, d, e
+"""
+
+
+def test_a_binding_in_a_loop_over_rows_not_had_is_unknown_and_a_loop_over_no_rows_wrote_nothing(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_LOOPED)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import asked as A
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import false_guard as G
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "walk"
+            owner = "pandaserver/a.py::f"
+            made = [("x", 3, "'a'", "=", "loop at 2: for f in job.Files"), ("x", 4, "'b'", "=", ""),
+                    ("d", 5, "{}", "=", ""), ("d", 7, "1", "=", "loop at 6: for f in job.Files"),
+                    ("e", 8, "{}", "=", ""), ("e", 10, "2", "=", "loop at 9: for s in job.Datasets")]
+            steps = [N(name=n, owner=owner, kind="binding", line=line, value=v, operator=op, guards=[], unseen=[u] if u else [],
+                       reads=[], terminal="", detail="", depth=1, cls="") for n, line, v, op, u in made]
+            # the rows file has the job's datasets, none of them, and not its files
+            walk = G.Walk(A.given(steps), E.Env(), {"job.Datasets": {"rows": "datasets", "entity": "JediDatasetSpec"}},
+                          {"datasets": []})
+            show = lambda v: "UNKNOWN" if v is E.UNKNOWN else v
+            got = {"x": [[o.step.line, show(o.value), show(o.reached), o.why] for o in walk.origins("x", owner)],
+                   "chosen": show(walk._choose("x", owner, None, {})[0])}
+            for name in ("d", "e"):
+                value, notes = walk.build(name, owner)
+                keys = walk.keys(name, owner)
+                got[name] = [value, notes[:1], [o.value for o in keys.origins], keys.opaque, keys.complete()]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # x = "a" may have run, for files not known: kept, so "b" is not taken as all x held
+    assert got["x"] == [[3, "UNKNOWN", "UNKNOWN", "@3 runs in a loop over rows this investigation does not have"],
+                        [4, "b", True, ""]]
+    assert got["chosen"] == "UNKNOWN"
+    assert got["d"][0] is None and got["d"][1] == ["@7 runs over rows this investigation does not have"]
+    assert got["d"][3] == ["@7 runs in a loop over rows this investigation does not have"] and got["d"][4] is False
+    # a loop over no rows ran no write: e is built empty and its key set is whole
+    assert got["e"][0] == {} and got["e"][2:] == [[], [], True]
+
+
+def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rerun
+
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "", {}, []
+            r.data = {"statuslog": {"states": [{"status": "running", "time": "2026-01-01 00:00:00"},
+                                               {"status": "done", "time": "2026-01-02 00:00:00"}]}}
+            r._writers = lambda subject, value, key: []
+
+            def past(readings, subject, state):
+                raise RuntimeError(f"past H2's time: {state['time']}")
+
+            r._unborn = past
+            got = {}
+            for subject in ("JediTaskSpec.status", "JediTaskSpec.superStatus"):
+                try:
+                    r._which_wrote(subject, "done", "1")
+                except rerun.Stop as e:
+                    got[subject] = e.args[0]
+                except RuntimeError as e:
+                    got[subject] = str(e)
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the task's status is the history's own: its row for 'done' gives the time
+    assert got["JediTaskSpec.status"] == "past H2's time: 2026-01-02 00:00:00"
+    # superStatus is spelled with the status's values, but no history records it: no time, and not the status's
+    assert got["JediTaskSpec.superStatus"] == "H2: a statuslog time for done: no history records or holds JediTaskSpec.superStatus"
+
+
 def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_name(tmp_path):
     out = _ok(
         _run(

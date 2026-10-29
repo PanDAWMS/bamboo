@@ -1715,8 +1715,12 @@ class Rerun:
                 asking = W.Asking((found, found), None, f"the time handed for {value}, on every machine")
         else:
             if state is None:
-                states = self.data["statuslog"]["states"]
-                state = self.need(f"a statuslog time for {value}", next((s for s in states if s["status"] == value), None))
+                # the statuslog's rows are its class's status: an attribute no history records or holds has no time
+                # in them, though its values may be spelled as the status's (superStatus, oldStatus)
+                recorded = PT.history(subject) is not None
+                states = self.data["statuslog"]["states"] if recorded else []
+                unrecorded = "" if recorded else f": no history records or holds {subject}"
+                state = self.need(f"a statuslog time for {value}{unrecorded}", next((s for s in states if s["status"] == value), None))
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
             asking = W.at_transition(state)
@@ -2028,6 +2032,8 @@ class Rerun:
             if value is not True:
                 if unread:
                     self.rows_between(env7.at)
+                if file_row is None:
+                    self.say(f"  the rows file has no file row whose destinationDBlock is {obj!r}: its values are not read")
                 self.need(f"the implicit else of {i.lineno}", None)
         cand7 = Candidate(make.rel, make.func, sorted(set(arms)), run=r2)
         j = judge([cand7], {r2.log.name: [r2]}, mode=self.mode, decide=self.decide, question_run=r2, env=env7)

@@ -490,10 +490,15 @@ stretch's first row (`windows.value_held`).  A row holding the value says it was
 which run wrote it, so no machine is named; the pairs of a writer and the history row its run writes,
 which would name the row's time and host, are the map's to say (build2-design.md 7, the second stage).
 A value written after the last row has no row to close the window, and a task's creation time is not
-checked (`parts.History.created`): both stop.  A subject no history holds stops as before.
+checked (`parts.History.created`): both stop.  A subject no history records or holds stops ("a statuslog
+time for <value>: no history records or holds <subject>"): the status's rows give it no time, though its
+values may be spelled as the status's.  Until 10-29 H2 took the status's row holding the value as the
+subject's time (`JediTaskSpec.superStatus` 'done', three of the harness's cases; `oldStatus` too).
 
-*Shows:* a stop at H2 naming the column, the last row or the creation time; asks of every machine.
-*Revisit:* when the map says which history row a writer's run writes.
+*Shows:* a stop at H2 naming the column, the last row or the creation time, or the subject no history
+records; asks of every machine.
+*Revisit:* when the map says which history row a writer's run writes; when a part says when an attribute
+took a value (57 of the harness's 60 attribute cases stop at H2 for it, 10-29).
 
 ### K11. After H4 the next question is always H5, the traceback
 
@@ -545,6 +550,22 @@ fixed on the current pin (K33).
 
 *Shows:* R1 reading `Interaction.py`'s `raise retException(strException)` as what raised.
 *Revisit:* when a case's traceback ends in a relay of another process's exception.
+
+### K35. A binding in a loop over rows the investigation does not have is unknown
+
+`false_guard.Walk.elements` gives the rows a loop around a step ran for, from the rows file's collections.
+A collection the file does not have (None) is kept apart from one of no rows (`[]`): a binding of a name
+in a loop over the first is an origin of unknown value and reach, so the name's other bindings are not
+taken as all it held (`Walk._choose` takes none of them alone); a keyed write there leaves the key set
+opaque and the container not rebuilt, as before.  A loop over no rows ran no write: the container gains
+nothing from it, and its key set can be whole.  The file's rows are taken as the run's, as for any
+collection.  Until 10-29 `origins` left such a binding out and a loop over no rows read as one over rows
+not had.  `G.part` still matches the printed key by value, and a binding of unknown value beside it does not
+make the match two.  H7's implicit else read without the job's file row says the row is missing before its
+stop.
+
+*Shows:* "@<line> runs in a loop over rows this investigation does not have" among a name's origins in R2.
+*Revisit:* when the walk asks the rows file for the collection (the harness's rows ask, stage 1).
 
 ## `which_ran`
 
