@@ -1896,6 +1896,10 @@ class Rerun:
         record = self.need(f"a traceback through {fn.name} in the run", chains[0][0] if chains else None)
         if record.cut:
             self.need(f"the whole traceback of {record.span} (the search cut it after 200 lines)", None)
+        # a traceback prints the lines of the code the run ran: a frame read at another line of the pin says so
+        for f in dict.fromkeys(f"{f.rel}:{f.moved_from} {f.func} is line {f.line} of the pin by its source text"
+                               for ch in record.chains() for f in ch.frames if f.moved_from is not None):
+            self.say(f"frame {f} (the run's code was another version; KNOWN_ISSUES.md K33)")
         boundary = None
         for ch in record.chains():
             for inner, outer in zip(ch.frames, ch.frames[1:], strict=False):

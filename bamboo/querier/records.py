@@ -22,9 +22,11 @@ so in its first line (``merge_wassh.py --about``).
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -119,6 +121,9 @@ class Frame:
     source: str
     rel: str = ""  # the corpus path when the frame is in it
     same_source: bool | None = None  # None when the frame is outside the corpus
+    #: the traceback's own line, where the corpus holds the frame's source at another line (``line``): the run's code
+    #: was another version than the pin's (``_place``)
+    moved_from: int | None = None
 
     @property
     def in_corpus(self) -> bool:
@@ -176,7 +181,27 @@ class Record:
         return _chains(lines)
 
 
-def _place(path: str, line: int, source: str) -> tuple[str, bool | None]:
+@lru_cache(maxsize=None)
+def _corpus_file(target: Path) -> tuple[list[str], dict[str, list[tuple[int, int]]]]:
+    """*target*'s lines and, by name, the spans of its defs."""
+    text = target.read_text(errors="replace")
+    spans: dict[str, list[tuple[int, int]]] = {}
+    try:
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                spans.setdefault(node.name, []).append((node.lineno, node.end_lineno or node.lineno))
+    except SyntaxError:
+        pass
+    return text.splitlines(), spans
+
+
+def _place(path: str, line: int, func: str, source: str) -> tuple[str, bool | None, int, int | None]:
+    """``(rel, same_source, line, moved_from)``: the frame's corpus path, whether the corpus holds the source line the
+    traceback printed, the corpus's line of it, and the traceback's own line where that differs.  The pin is the code
+    the case is read against, and a run's traceback prints the lines of the version it ran: where the corpus's line
+    holds other text, the one line of *func* -- every def of its name in the file -- holding the printed text is the
+    frame's, the traceback's line kept to say so; none, or more than one, leaves the frame not the corpus's source
+    (KNOWN_ISSUES.md K33)."""
     for package in PACKAGES:
         at = path.rfind(package)
         if at < 0:
@@ -184,11 +209,17 @@ def _place(path: str, line: int, source: str) -> tuple[str, bool | None]:
         rel = path[at:]
         target = CORPUS / rel
         if not target.exists():
-            return "", None
-        lines = target.read_text(errors="replace").splitlines()
+            return "", None, line, None
+        lines, spans = _corpus_file(target)
+        printed = source.strip()
         here = lines[line - 1].strip() if 0 < line <= len(lines) else ""
-        return rel, here == source.strip()
-    return "", None
+        if here == printed or not printed:
+            return rel, here == printed, line, None
+        found = sorted({n for lo, hi in spans.get(func, []) for n in range(lo, hi + 1) if lines[n - 1].strip() == printed})
+        if len(found) == 1:
+            return rel, True, found[0], line
+        return rel, False, line, None
+    return "", None, line, None
 
 
 def _chains(lines: list[str]) -> list[Chain]:
@@ -210,8 +241,8 @@ def _chains(lines: list[str]) -> list[Chain]:
             while i < len(lines) and set(lines[i].strip()) <= {"^", "~"} and lines[i].strip():
                 i += 1
             path, line = m["path"], int(m["line"])
-            rel, same = _place(path, line, source)
-            frames.append(Frame(path, line, m["func"], source, rel, same))
+            rel, same, at, moved = _place(path, line, m["func"], source)
+            frames.append(Frame(path, at, m["func"], source, rel, same, moved))
         exc_type, message = "", []
         if i < len(lines):
             m = EXCEPTION.match(lines[i])

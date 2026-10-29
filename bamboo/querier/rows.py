@@ -1172,9 +1172,9 @@ def _seen(fn: Function, run: Run, mode: str, hits: dict[int, list[tuple[int, int
 
 
 def raised_in(fn: Function, run: Run) -> tuple[bool, set[int] | None]:
-    """``(a traceback in *run* names fn, the lines its frames of fn show)``; lines None when a frame of fn
-    is of another version of the code (its source line differs), outside the corpus or of another file of
-    the same name, and cannot be placed."""
+    """``(a traceback in *run* names fn, the lines its frames of fn show)``, at the pin's lines (a frame of another
+    version of the code is read at the one line of fn holding its source, ``records._place``); lines None when a
+    frame of fn cannot be placed so, or is outside the corpus or of another file of the same name."""
     named, lines = False, set()
     base = fn.rel.rsplit("/", 1)[-1]
     for record in run.records:

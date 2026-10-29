@@ -2734,6 +2734,37 @@ def f(self):
 """
 
 
+def test_a_frame_of_another_version_is_read_at_the_one_line_of_its_function_holding_its_source(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "b.py").write_text(
+        "def f(x):\n    a = 1\n    y = h(x)\n    if x:\n        return None\n    return None\n\n\ndef g():\n    y = h(x)\n"
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.records import _chains
+
+            def frame(line, source):
+                tb = ["Traceback (most recent call last):",
+                      f'  File "/opt/panda/lib/python3.11/site-packages/pandaserver/b.py", line {line}, in f',
+                      f"    {source}", "ValueError: no"]
+                f, = _chains(tb)[0].frames
+                return [f.line, f.same_source, f.moved_from]
+
+            print(json.dumps({"moved": frame(7, "y = h(x)"), "same": frame(3, "y = h(x)"),
+                              "twice": frame(9, "return None"), "absent": frame(2, "z = 3")}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the run's code had the line at 7: f holds it once, at 3 (g's own is another function's)
+    assert got["moved"] == [3, True, 7]
+    assert got["same"] == [3, True, None]
+    # printed twice in f, or nowhere: not placed, as before
+    assert got["twice"] == [9, False, None] and got["absent"] == [2, False, None]
+
+
 def test_a_candidates_must_rows_stop_where_a_traceback_of_its_run_shows_the_call_left(tmp_path):
     (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_LEFT)
     stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"

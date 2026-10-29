@@ -503,6 +503,25 @@ way on.
 *Shows:* a stop at H5 ("a traceback through <function> in the run").
 *Revisit:* when a case reaches H4 with a value set without an exception.
 
+### K33. A traceback of another version of the code is placed by its frames' source text, where it is unique
+
+A run's traceback prints the lines of the code it ran, and the pin is the code the case is read against: since the
+pin moved to panda-server 1.1.0 (32907fe6, 2026-10-29), the replay cases' logs (written by 1.0.x on 09-28 .. 10-14)
+are read against code whose lines moved.  K stopped at H5 ("the frame's source line matches the corpus") on lm11:
+`adder_atlas_plugin.py`'s frame named a line that holds other text on pin m.  `records._place` now reads a frame
+whose line holds other text at the one line of its function -- every def of its name in the file -- holding the
+source the traceback printed, keeps the traceback's line (`Frame.moved_from`), and H5 says it ("frame <file>:<the
+traceback's line> <function> is line <n> of the pin by its source text").  `rows.raised_in` places such a frame the
+same way.  A source line printed twice in the function, or not found there, leaves the frame unplaced, as before:
+the version's own lines are not known.  The text matching says the same statement, not the same code around it --
+a guard that changed between the versions is read as the pin has it.  The other position the cases are keyed by is a
+rows file's answer to L3 ("getJobs@<line> ..."): `data/D-rows.build.py` (the analyzer handover's, not this repo's)
+writes D's answers under the statement's line on both pins.
+
+*Shows:* H5's line for each frame placed so; no stop where the source is unique in the function.
+*Revisit:* when a case's logs come from a version whose function no longer holds the printed line, or holds it twice
+(a pin of the case's own version); when another step keys a reading by a line of the code.
+
 ## `which_ran`
 
 ### K21. Runs of the key in several logs are one run only where one ran inside a call the other made
