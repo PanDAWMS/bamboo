@@ -348,6 +348,32 @@ FETCHES: dict[str, Rows] = {
 #: The cursor's count of the rows its statement ran on.
 ROW_COUNT = "rowcount"
 
+#: The standard library's classes whose ``put()`` hands a value to whoever ``get()``s it -- another thread, another
+#: process, another task -- by ``(module, name)``, and their methods putting and getting it.
+QUEUES = frozenset(
+    {
+        ("queue", "Queue"),
+        ("queue", "LifoQueue"),
+        ("queue", "PriorityQueue"),
+        ("queue", "SimpleQueue"),
+        ("multiprocessing", "Queue"),
+        ("multiprocessing", "JoinableQueue"),
+        ("multiprocessing", "SimpleQueue"),
+        ("asyncio", "Queue"),
+        ("asyncio", "LifoQueue"),
+        ("asyncio", "PriorityQueue"),
+    }
+)
+QUEUE_PUTS, QUEUE_GETS = (
+    frozenset({"put", "put_nowait"}),
+    frozenset({"get", "get_nowait"}),
+)
+#: The standard library's classes whose ``start()`` has the object's ``run`` called on a new thread, or in a new
+#: process, and returns -- Python's rule, as ``C(...)`` runs ``C.__init__`` -- and whose ``join()`` waits for it, by
+#: ``(module, name)``.  ``pandacommon``'s ``GenericThread`` is one too, but outside the corpus nothing says so.
+STARTERS = frozenset({("threading", "Thread"), ("multiprocessing", "Process")})
+START, RUN, JOIN = "start", "run", "join"
+
 #: The other systems PanDA is a client of -> the packages it reaches each through.  What a client's method is handed
 #: goes to that system: another run's input, not this run's (reach's premise ``cross_run_not_reach``).  Not the
 #: database's drivers (the driver rule says where those go), not a library that works on what it is handed here

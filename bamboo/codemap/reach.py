@@ -115,22 +115,8 @@ HOLE_STATEMENT_NOT_READ = "the statement is not read"
 _NOT_BY_NAME = (HOLE_QUEUE, HOLE_OUTSIDE_START, HOLE_STATEMENT_NOT_READ)
 _HOLE_TEXT = re.compile(r"^(?P<owner>.*?):(?P<line>\d+) (?P<callee>.*?) -- (?P<why>.*)$")
 
-#: The library classes whose ``put()`` hands a value to whoever ``get()``s it
-#: -- another thread, another process, another task.
-_QUEUES = {
-    ("queue", "Queue"),
-    ("queue", "LifoQueue"),
-    ("queue", "PriorityQueue"),
-    ("queue", "SimpleQueue"),
-    ("multiprocessing", "Queue"),
-    ("multiprocessing", "JoinableQueue"),
-    ("multiprocessing", "SimpleQueue"),
-    ("asyncio", "Queue"),
-    ("asyncio", "LifoQueue"),
-    ("asyncio", "PriorityQueue"),
-}
-_PUTS = {"put", "put_nowait"}
-_GETS = {"get", "get_nowait"}
+#: The library classes whose ``put()`` hands a value to whoever ``get()``s it (:data:`callfacts.QUEUES`).
+_QUEUES, _PUTS, _GETS = callfacts.QUEUES, callfacts.QUEUE_PUTS, callfacts.QUEUE_GETS
 _BUILTINS = set(dir(builtins))
 #: The builtin types and the typing and collections names a builtin value is annotated with: the scalars, and the
 #: containers holding keys, elements or positions (:data:`callfacts.CONTAINERS`).
@@ -2541,8 +2527,8 @@ def _close(
         asked = _asked(receivers.calls, file, func, call, selfs)
         types = receivers.types
         if (
-            called.attr == "start"
-            and any(types.method(*one, "run") is not None for one in asked)
+            called.attr == callfacts.START
+            and any(types.method(*one, callfacts.RUN) is not None for one in asked)
             and any(types.built_outside(*one) for one in asked)
         ):
             row.hole(call, HOLE_OUTSIDE_START, for_classes)

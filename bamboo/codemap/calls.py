@@ -81,11 +81,9 @@ _BUILTIN_NAMES = frozenset(dir(builtins))
 #: The standard library's container classes, by the module they are imported from (:data:`callfacts.CONTAINERS`).
 _LIBRARY_CONTAINERS = {(one.module, name) for name, one in callfacts.CONTAINERS.items() if one.module == "collections"}
 #: The library classes whose ``start()`` runs the object's ``run`` on another
-#: thread or process -- Python's rule, as ``C(...)`` runs ``C.__init__``.  A
-#: class built on one that defines ``run`` in the corpus has its ``start()``
-#: placed there (:attr:`Placed.thread`).  ``pandacommon``'s ``GenericThread``
-#: is one too, but outside the corpus nothing says so.
-_STARTERS = {("threading", "Thread"), ("multiprocessing", "Process")}
+#: thread or process (:data:`callfacts.STARTERS`).  A class built on one that
+#: defines ``run`` in the corpus has its ``start()`` placed there (:attr:`Placed.thread`).
+_STARTERS = callfacts.STARTERS
 #: The standard library's copies, and the method a class defines to copy
 #: itself some other way.  ``copy.copy(x)`` is an object of ``x``'s class --
 #: typeshed states ``def copy(x: _T) -> _T`` -- unless that class defines the
@@ -873,10 +871,10 @@ class Calls:
         in the corpus -- ``Thread(target=f)`` runs the ``f`` it was handed,
         which is not a call this reads.
         """
-        if name != "start":
+        if name != callfacts.START:
             return None
         starting = [one for one in classes if self.starts_run(one)]
-        placed = self._method_of_any(starting, "run") if starting else None
+        placed = self._method_of_any(starting, callfacts.RUN) if starting else None
         if placed is None or not placed.targets:
             return None
         return placed._replace(thread=True)
@@ -1008,7 +1006,7 @@ class Calls:
                 and {one.arg: getattr(one.value, "id", None) for one in value.keywords}
                 == {"target": own, "args": var, **({"kwargs": kw} if kw else {})}
                 and [_called_on(one) for one in body[index + 1 : index + 3]]
-                == [(statement.targets[0].id, "start"), (statement.targets[0].id, "join")]
+                == [(statement.targets[0].id, callfacts.START), (statement.targets[0].id, callfacts.JOIN)]
             ):
                 found = self._handing_on(declared, "__call__", depth + 1)
             else:
@@ -1474,11 +1472,11 @@ class Calls:
         name = target.func.name  # type: ignore[attr-defined]
         if name == "__init__" and target.cls is not None:
             seeds = [target.cls.name, *self._built_through(target)]
-        elif name == "run" and target.cls is not None and any(
+        elif name == callfacts.RUN and target.cls is not None and any(
             self.starts_run(one) for one in self.objects_of((target.file, target.cls))
         ):
             # ``thr.start()`` runs it (:meth:`_started`).
-            seeds = [name, "start"]
+            seeds = [name, callfacts.START]
         else:
             seeds = [name]
         aliases = self._aliases()

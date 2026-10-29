@@ -508,3 +508,15 @@ def test_how_a_call_in_a_hole_prints_is_read_from_the_facts(hole, prints):
 
     part = ast.parse(f'f"x={{{hole}}} y"', mode="eval").body.values[1]
     assert trace._hole_prints(part) == prints
+
+
+def test_a_queue_and_a_thread_are_said_once():
+    """A queue's put and get and a thread's start, run and join are callfacts' (QUEUES, STARTERS): reach's queue
+    receivers, calls' started runs and trigger's dispatch read them there."""
+    from bamboo.codemap import calls, reach
+    from bamboo.codemap.panda.recognizers import trigger
+
+    assert (reach._QUEUES, reach._PUTS, reach._GETS) == (callfacts.QUEUES, callfacts.QUEUE_PUTS, callfacts.QUEUE_GETS)
+    assert ("queue", "Queue") in callfacts.QUEUES and ("asyncio", "Queue") in callfacts.QUEUES
+    assert calls._STARTERS == callfacts.STARTERS == {("threading", "Thread"), ("multiprocessing", "Process")}
+    assert trigger._DISPATCH == {callfacts.START, callfacts.RUN}
