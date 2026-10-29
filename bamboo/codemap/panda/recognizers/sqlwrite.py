@@ -4475,7 +4475,8 @@ def _annotation_kind(annotation: Optional[ast.AST]) -> Optional[str]:
     name = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", None)
     if name == "Optional" and isinstance(annotation, ast.Subscript):
         return _annotation_kind(annotation.slice)
-    if name in ("list", "List", "tuple", "Tuple", "Sequence"):
+    held = callfacts.CONTAINERS.get(name) if name is not None else None
+    if held is not None and held.ordered:  # its elements at positions, joined by ``+``
         return _SEQUENCE
     if name in ("int", "float"):
         return _NUMBER
@@ -4589,10 +4590,10 @@ def _keys(paths: _Paths) -> _Paths:
     return _under(_KEY, paths)
 
 
+#: Annotations naming a dict (:data:`callfacts.CONTAINERS`).
+_DICT_TYPES = callfacts.containers(callfacts.MAPPING)
 #: Calls making a dict.
-_DICT_MAKERS = frozenset({"dict", "defaultdict", "OrderedDict", "Counter"})
-#: Annotations naming a dict.
-_DICT_TYPES = _DICT_MAKERS | {"Dict", "DefaultDict", "Mapping", "MutableMapping"}
+_DICT_MAKERS = _DICT_TYPES & callfacts.CONTAINER_MAKERS
 
 
 def _dict_type(annotation: Optional[ast.AST]) -> bool:

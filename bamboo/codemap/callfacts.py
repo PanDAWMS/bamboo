@@ -32,12 +32,12 @@ with no placing -- the trace, what may change a name between two lines -- reads 
 
 The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
 what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
-method changes its receiver, a logger's methods and the calls making a logger (:data:`LOG_LEVELS`,
-:data:`LOGGER_MAKERS`), the database's driver, the calls running a statement and those handing back its rows
-(:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), and what a builtin function does with what it is
-handed -- what its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``),
-the builtin type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name
-is the builtin's (:func:`builtin_function`).
+method changes its receiver, what a container class holds (:data:`CONTAINERS`), a logger's methods and the calls
+making a logger (:data:`LOG_LEVELS`, :data:`LOGGER_MAKERS`), the database's driver, the calls running a statement
+and those handing back its rows (:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), and what a builtin
+function does with what it is handed -- what its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``,
+``len(xs)``, ``isinstance(x, C)``), the builtin type of its value, whether it calls a function it is handed
+(:class:`Function`) -- read where the name is the builtin's (:func:`builtin_function`).
 """
 
 from __future__ import annotations
@@ -164,6 +164,80 @@ BUILTIN_METHODS: dict[tuple[str, str], Method] = {
 #: What a method of a class outside the corpus does where this table says nothing of it: it keeps every argument it is
 #: handed in its object, whole (:data:`ASSUMPTIONS` ``library_keeps_what_it_is_handed``).
 KEEPS_ALL = Method((Put(EVERY_POSITIONAL, WHOLE), Put(EVERY_KEYWORD, WHOLE)), True)
+
+#: What a container holds, as its annotation's subscript says: keys, with the value under one its second argument
+#: (``dict[K, V]``); elements, its first (``list[T]``, ``Generator[Y, S, R]``); each argument at its own position
+#: (``tuple[A, B]``); a signature, holding none of them (``Callable[[A], R]``); or, a context manager, what ``with``
+#: hands out, its first.
+MAPPING, COLLECTION, RECORD, SIGNATURE, CONTEXT = (
+    "mapping",
+    "collection",
+    "record",
+    "signature",
+    "context",
+)
+
+
+class Container(NamedTuple):
+    """A container class, by what its value holds (:data:`MAPPING`, :data:`COLLECTION`, :data:`RECORD`,
+    :data:`SIGNATURE`, :data:`CONTEXT`).
+
+    *builtin* is the builtin or standard class a value of it is (``Dict`` a ``dict``), ``""`` for an abstract one
+    (``Mapping``, ``Iterable``) -- a call of a name that is its own *builtin* makes one, empty when handed nothing;
+    *module* the module the name comes from, ``""`` for a builtin; *ordered* whether its elements sit at positions and
+    ``+`` joins two (``list``, ``tuple``, ``Sequence``); *generator* whether a generator function is declared to return
+    it (``Iterator[Y]``, a ``contextmanager``'s too)."""
+
+    holds: str
+    builtin: str = ""
+    module: str = ""
+    ordered: bool = False
+    generator: bool = False
+
+
+#: The builtin, ``typing`` and ``collections`` containers, by their names.  ``collections.abc``'s abstract ones are
+#: ``typing``'s names.
+CONTAINERS: dict[str, Container] = {
+    "dict": Container(MAPPING, "dict"),
+    "Dict": Container(MAPPING, "dict", "typing"),
+    "DefaultDict": Container(MAPPING, "defaultdict", "typing"),
+    "Mapping": Container(MAPPING, "", "typing"),
+    "MutableMapping": Container(MAPPING, "", "typing"),
+    "defaultdict": Container(MAPPING, "defaultdict", "collections"),
+    "OrderedDict": Container(MAPPING, "OrderedDict", "collections"),
+    "Counter": Container(MAPPING, "Counter", "collections"),
+    "list": Container(COLLECTION, "list", ordered=True),
+    "List": Container(COLLECTION, "list", "typing", ordered=True),
+    "Sequence": Container(COLLECTION, "", "typing", ordered=True),
+    "deque": Container(COLLECTION, "deque", "collections", ordered=True),
+    "set": Container(COLLECTION, "set"),
+    "Set": Container(COLLECTION, "set", "typing"),
+    "frozenset": Container(COLLECTION, "frozenset"),
+    "FrozenSet": Container(COLLECTION, "frozenset", "typing"),
+    "Collection": Container(COLLECTION, "", "typing"),
+    "Iterable": Container(COLLECTION, "", "typing", generator=True),
+    "Iterator": Container(COLLECTION, "", "typing", generator=True),
+    "Generator": Container(COLLECTION, "", "typing", generator=True),
+    "AsyncIterable": Container(COLLECTION, "", "typing", generator=True),
+    "AsyncIterator": Container(COLLECTION, "", "typing", generator=True),
+    "AsyncGenerator": Container(COLLECTION, "", "typing", generator=True),
+    "tuple": Container(RECORD, "tuple", ordered=True),
+    "Tuple": Container(RECORD, "tuple", "typing", ordered=True),
+    "Callable": Container(SIGNATURE, "", "typing"),
+    "ContextManager": Container(CONTEXT, "", "typing"),
+    "AbstractContextManager": Container(CONTEXT, "", "contextlib"),
+}
+
+
+def containers(*holds: str) -> frozenset[str]:
+    """The names of :data:`CONTAINERS` holding as one of *holds* says."""
+    return frozenset(name for name, one in CONTAINERS.items() if one.holds in holds)
+
+
+#: The names whose call makes one of them, empty when handed nothing: ``dict()``, ``defaultdict(list)``.
+CONTAINER_MAKERS = frozenset(
+    name for name, one in CONTAINERS.items() if one.builtin == name
+)
 
 #: A logger's methods writing one line to its file at a level of their own, by their names -> that level, as the line
 #: spells it lower-cased: ``exception`` writes at ``error`` (the traceback too), ``warn`` is ``warning``'s old name.

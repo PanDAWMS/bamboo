@@ -429,3 +429,33 @@ def test_the_runners_where_no_corpus_is_read_are_the_cursors_and_the_task_buffer
     }
     assert sqleval._RUNNERS == frozenset(runners)
     assert sql.CURSOR_RUNNERS == {"execute", "executemany"}
+
+
+@pytest.mark.parametrize(
+    ("name", "mapping", "collection", "record", "made", "ordered", "generator"),
+    [
+        ("Counter", True, False, False, True, False, False),
+        ("DefaultDict", True, False, False, False, False, False),
+        ("Collection", False, True, False, False, False, False),
+        ("frozenset", False, True, False, True, False, False),
+        ("deque", False, True, False, True, True, False),
+        ("Iterable", False, True, False, False, False, True),
+        ("Tuple", False, False, True, False, True, False),
+    ],
+)
+def test_every_reader_of_a_container_name_reads_it_from_one_table(name, mapping, collection, record, made, ordered,
+                                                                   generator):
+    """What a container holds is said once (callfacts.CONTAINERS) and each reader asks it its own question: calls'
+    loops and subscripts, reach's builtin values, sqlwrite's dicts and sequences, trace's empty constructors and
+    attribution's records and contextmanager returns."""
+    from bamboo.codemap import calls, reach, trace
+    from bamboo.codemap.panda import attribution
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    assert (name in calls._MAPPINGS, name in sqlwrite._DICT_TYPES) == (mapping, mapping)
+    assert (name in calls._COLLECTIONS) is collection
+    assert (name in calls._RECORDS, name in attribution._RECORD_WRAPPERS) == (record, record)
+    assert (name in reach._BUILTIN_ANNOTATIONS) is (mapping or collection or record)
+    assert (name in trace._EMPTY_CALLS, name in sqlwrite._DICT_MAKERS) == (made, made and mapping)
+    assert (sqlwrite._annotation_kind(ast.parse(name, mode="eval").body) == sqlwrite._SEQUENCE) is ordered
+    assert (name in calls._YIELDING) is generator

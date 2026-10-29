@@ -1633,8 +1633,8 @@ def _put_values(call: ast.Call) -> list[ast.expr]:
     ]
 
 
-#: The constructors an empty container is spelled with.
-_EMPTY_CALLS = ("set", "dict", "list", "tuple", "defaultdict", "OrderedDict")
+#: The constructors an empty container is spelled with (:data:`callfacts.CONTAINER_MAKERS`).
+_EMPTY_CALLS = callfacts.CONTAINER_MAKERS
 
 
 def _is_empty_container(node: ast.expr) -> bool:

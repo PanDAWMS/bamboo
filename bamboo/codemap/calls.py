@@ -78,13 +78,8 @@ _FORWARDING = (UNPLACED_FORWARDED, UNPLACED_GETATTRIBUTE)
 BUILTIN = "<builtins>"
 #: The names Python's builtins hold: a call of one no scope binds is the builtin's (:meth:`Types.is_builtin`).
 _BUILTIN_NAMES = frozenset(dir(builtins))
-#: The standard library's container classes, by the module they are imported from.
-_LIBRARY_CONTAINERS = {
-    ("collections", "defaultdict"),
-    ("collections", "OrderedDict"),
-    ("collections", "deque"),
-    ("collections", "Counter"),
-}
+#: The standard library's container classes, by the module they are imported from (:data:`callfacts.CONTAINERS`).
+_LIBRARY_CONTAINERS = {(one.module, name) for name, one in callfacts.CONTAINERS.items() if one.module == "collections"}
 #: The library classes whose ``start()`` runs the object's ``run`` on another
 #: thread or process -- Python's rule, as ``C(...)`` runs ``C.__init__``.  A
 #: class built on one that defines ``run`` in the corpus has its ``start()``
@@ -2143,18 +2138,24 @@ def _element_annotation(annotation: ast.expr) -> Optional[ast.expr]:
     wrapper = annotation.value
     name = wrapper.attr if isinstance(wrapper, ast.Attribute) else getattr(wrapper, "id", "")
     inner = annotation.slice
-    if name in ("dict", "Dict", "Mapping", "MutableMapping", "defaultdict", "OrderedDict"):
+    if name in _MAPPINGS:
         return inner.elts[1] if isinstance(inner, ast.Tuple) and len(inner.elts) == 2 else None
-    if name in ("list", "List", "Sequence", "set", "Set", "frozenset", "Iterable"):
-        return inner
+    if name in _COLLECTIONS:
+        return _first_argument(inner)
     return None
 
 
-#: Containers a loop takes its target from, by the annotation's name -- :meth:`Types._iterated`.
-_MAPPINGS = frozenset({"dict", "Dict", "Mapping", "MutableMapping", "defaultdict", "OrderedDict"})
-_SEQUENCES = frozenset(
-    {"list", "List", "Sequence", "set", "Set", "frozenset", "FrozenSet", "Iterable", "Iterator", "Generator"}
-)
+def _first_argument(inner: ast.expr) -> ast.expr:
+    """The first argument of a subscript whose arguments are *inner*: ``Generator[Y, S, R]``'s ``Y``."""
+    return inner.elts[0] if isinstance(inner, ast.Tuple) and inner.elts else inner
+
+
+#: Containers a loop takes its target from, by the annotation's name -- :meth:`Types._iterated` -- and a subscript
+#: its value (:data:`callfacts.CONTAINERS`): a mapping its keys, the value under one; a collection its elements.
+_MAPPINGS = callfacts.containers(callfacts.MAPPING)
+_COLLECTIONS = callfacts.containers(callfacts.COLLECTION)
+#: The containers holding each argument at its own position: ``tuple[A, B]``.
+_RECORDS = callfacts.containers(callfacts.RECORD)
 
 
 def _slot_of(annotation: ast.expr, slot: Optional[int]) -> Optional[ast.expr]:
@@ -2163,7 +2164,7 @@ def _slot_of(annotation: ast.expr, slot: Optional[int]) -> Optional[ast.expr]:
     if (
         slot is None
         or not isinstance(annotation, ast.Subscript)
-        or getattr(annotation.value, "id", getattr(annotation.value, "attr", "")) not in ("tuple", "Tuple")
+        or getattr(annotation.value, "id", getattr(annotation.value, "attr", "")) not in _RECORDS
         or not isinstance(annotation.slice, ast.Tuple)
         or slot >= len(annotation.slice.elts)
         or any(isinstance(one, ast.Constant) and one.value is Ellipsis for one in annotation.slice.elts)
@@ -2172,10 +2173,11 @@ def _slot_of(annotation: ast.expr, slot: Optional[int]) -> Optional[ast.expr]:
     return annotation.slice.elts[slot]
 
 
-#: What a context manager is declared to yield its element through.
-_YIELDING = frozenset(
-    {"Iterator", "Generator", "ContextManager", "AbstractContextManager", "Iterable"}
-)
+#: What a context manager is declared to yield its element through: a context manager, or what a generator function
+#: (a ``contextmanager``) is declared to return.
+_YIELDING = callfacts.containers(callfacts.CONTEXT) | {
+    name for name, one in callfacts.CONTAINERS.items() if one.generator
+}
 
 #: The classes a declaration states -- one, or each member of a union.
 Classes = frozenset[tuple[str, ast.ClassDef]]
@@ -3445,8 +3447,9 @@ class Types:
             else:
                 element = value if view == "values" else key
                 element = None if unpacked else element
-        elif kind in _SEQUENCES and not view:
-            element = inner if not unpacked else _slot_of(inner, slot)
+        elif kind in _COLLECTIONS and not view:
+            first = _first_argument(inner)
+            element = first if not unpacked else _slot_of(first, slot)
         else:
             element = None
         return self.annotated_all(where, element) if element is not None else None

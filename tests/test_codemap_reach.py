@@ -1344,3 +1344,25 @@ def test_the_keys_a_mapping_may_hold_are_read_from_every_put_into_every_name_hol
     assert keys("first") == keys("update")
     for owner in ("by_fstring", "by_parameter", "outside", "returned"):
         assert keys(owner) is None, owner
+
+
+def test_a_value_declared_a_collection_is_a_builtin_as_a_sequence_is(tmp_path):
+    """``Collection[str]`` from ``collections.abc`` names a builtin container, as ``Sequence[str]`` does, not a class
+    outside the corpus; ``DefaultDict`` and ``FrozenSet`` are a ``defaultdict`` and a ``frozenset``
+    (callfacts.CONTAINERS)."""
+    mod = (
+        "from collections.abc import Collection, Sequence\n"
+        "from typing import DefaultDict, FrozenSet\n\n"
+        "def f(a: Collection[str], b: Sequence[str], c: DefaultDict[str, int], d: FrozenSet[str]):\n"
+        "    pass\n"
+    )
+    calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, mod=mod), {}))
+    receivers = reach._Receivers(calls, None)
+    func = calls.types.tree("pkg/mod.py").body[2]
+    kinds = [receivers.annotation("pkg/mod.py", arg.annotation) for arg in func.args.args]
+    assert kinds == [
+        ("builtin", "Collection"),
+        ("builtin", "Sequence"),
+        ("builtin", "defaultdict"),
+        ("builtin", "frozenset"),
+    ]

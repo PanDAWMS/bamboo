@@ -132,13 +132,11 @@ _QUEUES = {
 _PUTS = {"put", "put_nowait"}
 _GETS = {"get", "get_nowait"}
 _BUILTINS = set(dir(builtins))
-#: The builtin types and the typing and collections names a builtin value is annotated with.
+#: The builtin types and the typing and collections names a builtin value is annotated with: the scalars, and the
+#: containers holding keys, elements or positions (:data:`callfacts.CONTAINERS`).
 _BUILTIN_ANNOTATIONS = {
-    "str", "int", "float", "bool", "bytes", "bytearray", "complex", "dict", "list", "set", "tuple",
-    "frozenset", "range", "None", "NoneType", "Dict", "List", "Set", "Tuple", "FrozenSet", "Iterable",
-    "Iterator", "Sequence", "Mapping", "MutableMapping", "Generator", "defaultdict", "OrderedDict",
-    "Counter", "deque", "DefaultDict",
-}  # fmt: skip
+    "str", "int", "float", "bool", "bytes", "bytearray", "complex", "range", "None", "NoneType",
+} | callfacts.containers(callfacts.MAPPING, callfacts.COLLECTION, callfacts.RECORD)  # fmt: skip
 _SCALARS = {"str", "int", "float", "bool", "bytes", "complex", "NoneType"}
 #: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
 _OPERATORS: dict[type, tuple[str, ...]] = {
@@ -343,12 +341,8 @@ class _Receivers:
         if named in _BUILTIN_ANNOTATIONS and (
             library is None or library[0].split(".")[0] in ("typing", "collections")
         ):
-            return _BUILTIN, {
-                "Dict": "dict",
-                "List": "list",
-                "Set": "set",
-                "Tuple": "tuple",
-            }.get(named, named)
+            held = callfacts.CONTAINERS.get(named)
+            return _BUILTIN, (held.builtin if held is not None and held.builtin else named)
         if self.types.annotated_all(file, head):
             return _UNKNOWN, f"declared {ast.unparse(head)}, a class of the corpus"
         if library is not None:

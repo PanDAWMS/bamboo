@@ -3553,3 +3553,33 @@ def test_a_wrapper_or_an_object_whose_function_may_be_called_some_other_way_is_n
         placed = _placed(calls, "api", "update", "timed.run")
         assert placed.forwarded == (), name
         assert calls.forwarded_reads() == set(), name
+
+
+_CONTAINERS_DECLARED = '''
+from collections.abc import Collection
+from typing import Generator, Iterator
+
+class Spec:
+    def check(self):
+        pass
+
+def made() -> Generator[Spec, None, None]:
+    yield Spec()
+
+def run(specs: Collection[Spec], queue: Iterator[Spec], by_name: dict[str, Spec]):
+    for spec in specs:
+        spec.check()
+    for one in made():
+        one.check()
+    for other in queue:
+        other.check()
+    by_name["x"].check()
+'''
+
+
+def test_a_loop_takes_a_collections_element_and_a_generators_first_argument(tmp_path):
+    """``Collection[Spec]`` holds ``Spec``s as ``list[Spec]`` does, ``Generator[Spec, None, None]`` yields its first
+    argument, not the three, and ``dict[str, Spec]``'s subscript is its value (callfacts.CONTAINERS)."""
+    calls = _calls(_tree(tmp_path, m=_CONTAINERS_DECLARED))
+    for text in ("spec.check", "one.check", "other.check", "by_name['x'].check"):
+        assert _where(_placed(calls, "m", "run", text)) == [("Spec", "check")], text
