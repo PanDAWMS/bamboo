@@ -149,10 +149,26 @@ them is the harness's (stage 2); until it reads them the file keeps its sections
 names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
 walk does not read as a row's attribute asks nothing.
 
-*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
+L3's `db_read` form gives the WHERE as db_read's conditions, `[column, op]` or `[column, op, value]`, all of which
+hold (the harness's ask 4, 10-29: a WHERE in text is not passed to db_read), where every term is one column tested
+against a value: each term read as the map reads a WHERE (`sqltext.row_tests`), a bind's value the run's as its
+print holds it, a quoted constant a text and another a number (`parts.condition`).  db_read takes `=`, `!=`, `<`,
+`<=`, `>`, `>=`, `in`, `is null`, `is not null`.  A term that is none -- an OR, `NOT IN`, an expression of columns,
+the database's clock, another column, a value that is no number or text -- keeps the form's WHERE text, and L3 says
+each such term under the SQL ("db_read takes no ..."): a term is said whole or not at all, since dropping one
+counts rows the call did not pass.  db_read refuses a value whose type is not its column's (`bad_value`); the
+querier gives the run's, not knowing the column's type.  On pin m one statement reaches L3, getJobs@2404, and only
+D and D-rec of the querier's and the harness's cases reach it, with three terms, all said.  The harness's records
+hold 293 of getJobs' prints: 291 of that shape; 2 (the unified pilot's, in N-rec and A-rec) with
+`(minRamCount<=:minRamCount OR minRamCount=0)` and `(maxDiskCount<=:maxDiskCount OR maxDiskCount=0)`, which keep
+the text (out/dw/dw-predictions.txt).
+
+*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`; "-- db_read takes no ..." under L3's SQL.
 *Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
 place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
-a comparison that takes the row where some joined row holds the terms, which is not built.
+a comparison that takes the row where some joined row holds the terms, which is not built.  When a case reaches L3
+with an OR: db_read could still answer it, the OR's columns grouped by and the groups that fail the OR dropped by the
+querier, or the OR's branches asked apart where no row can pass two; neither is built.
 
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 

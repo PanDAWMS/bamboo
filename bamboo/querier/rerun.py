@@ -1415,6 +1415,23 @@ def _same_order(mine: tuple, ran: tuple) -> bool:
     )
 
 
+def _db_read_where(query, binds: dict) -> tuple[list[list], list[tuple[str, str]]]:
+    """The WHERE of *query*, a printed query of one table, as db_read's conditions with the run's *binds*
+    (:func:`parts.condition`), and each term none says, with why.  Each term is read as the map reads a WHERE
+    (``sqltext.row_tests``) and said whole or not at all: an OR is no one test, and dropping a term would count rows
+    the call did not pass."""
+    said, unsaid = [], []
+    for term in query.where:
+        tests = sqltext.row_tests(f"SELECT * FROM {query.spelled[0]} WHERE {term.text}")
+        got = [PT.condition(test, binds) for test in tests]
+        why = next((c for c in got if isinstance(c, str)), "" if tests else "an OR, or no one column's test")
+        if why:
+            unsaid.append((term.text, why))
+        else:
+            said += got
+    return said, unsaid
+
+
 def _intersect(a: list, b: list) -> list:
     """The spans (closed, ``(start, end)``) both lists hold."""
     return [(max(x0, y0), min(x1, y1)) for x0, x1 in a for y0, y1 in b if max(x0, y0) <= min(x1, y1)]
@@ -4039,6 +4056,7 @@ class Rerun:
         self.need("the table, WHERE and binds of the call that moved it on"
                   + (f" ({read.failure})" if read.failure else ""), table and cut and key_col)
         self.say(f"  the call's WHERE: {cut}")
+        conditions, unsaid = _db_read_where(query, binds)
         # a blanked item the map's order_holes says ranks by a column of the row (getJobs' (CASE ...) by gshare):
         # grouped by, its ranking computed at run time -- a row of another value is neither ahead nor behind here
         holes = {h.item: h for h in getattr(st, "order_holes", None) or [] if h.order == other}
@@ -4063,7 +4081,7 @@ class Rerun:
                  if t.columns and all(c.split(".")[-1].lower() in history.held for c in t.columns)]
         miss = q.q
         questions = {
-            f"{where} groups now": PT.GroupsNow(where, table, cut, cols, key_col, blank, ranked),
+            f"{where} groups now": PT.GroupsNow(where, table, cut, cols, key_col, blank, ranked, None if unsaid else conditions),
             f"{where} left {miss.observed!r} in the window, by the value it went to": PT.MovedOn(
                 history, miss.observed, miss.since, miss.moved, terms, cols, key_col
             ),
@@ -4076,6 +4094,8 @@ class Rerun:
                 self.say(f"   {line}")
             if ask not in answers:
                 form = PT.db_read(questions[ask])
+                for text, why in unsaid if form else []:
+                    self.say(f"   -- db_read takes no {text!r} ({why}): its form keeps the WHERE as text")
                 self.ask_rows({"kind": "sql", "name": ask, "sql": sql, "binds": {}} | ({"db_read": form} if form else {}),
                               f"L3's answer {ask!r}, not in the rows file")
         self.need(f"the answers to {list(asks)} in the rows file", all(ask in answers for ask in asks))
