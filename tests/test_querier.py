@@ -2641,6 +2641,87 @@ def test_h6_names_a_rows_host_only_for_a_door_that_asks_by_machine(tmp_path):
     ]
 
 
+_PROXY = '''\
+class DBProxy:
+    def updateTask_JEDI(self, spec, criteria, updateDEFT):
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID"
+        self.cur.execute(sql, {})
+        if updateDEFT:
+            sqlD = "UPDATE ATLAS_DEFT.T_TASK SET status=:status WHERE taskid=:jediTaskID"
+            self.cur.execute(sqlD, {})
+'''
+
+
+def test_s5_reads_the_facade_the_receiver_is_declared_to_be(tmp_path):
+    corpus = _corpus(tmp_path)
+    files = {
+        "pandaserver/taskbuffer/OraDBProxy.py": _PROXY,
+        "pandajedi/jedicore/JediDBProxy.py": _PROXY,
+        "pandaserver/taskbuffer/TaskBuffer.py": '''\
+class TaskBuffer:
+    def updateTask_JEDI(self, spec, criteria, updateDEFT=True):
+        with self.proxyPool.get() as proxy:
+            return proxy.updateTask_JEDI(spec, criteria, updateDEFT)
+''',
+        "pandajedi/jedicore/JediTaskBuffer.py": '''\
+from pandaserver.taskbuffer.TaskBuffer import TaskBuffer
+
+class JediTaskBuffer(TaskBuffer):
+    def updateTask_JEDI(self, spec, criteria, updateDEFT=False):
+        with self.proxyPool.get() as proxy:
+            return proxy.updateTask_JEDI(spec, criteria, updateDEFT)
+''',
+        "pandajedi/jedidog/Dog.py": '''\
+from pandajedi.jedicore.JediTaskBuffer import JediTaskBuffer
+
+class Dog:
+    def __init__(self, taskBufferIF: JediTaskBuffer):
+        self.taskBufferIF = taskBufferIF
+
+    def run(self, spec):
+        return self.taskBufferIF.updateTask_JEDI(spec, {})
+
+class Stray:
+    def __init__(self, taskBufferIF):
+        self.taskBufferIF = taskBufferIF
+
+    def run(self, spec):
+        return self.taskBufferIF.updateTask_JEDI(spec, {})
+''',
+    }
+    for rel, text in files.items():
+        (corpus / rel).parent.mkdir(parents=True, exist_ok=True)
+        (corpus / rel).write_text(text)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast
+            import json
+            from bamboo.querier.rerun import proxy_reading, receiver_methods
+
+            call = ast.parse("self.taskBufferIF.updateTask_JEDI(spec, {})", mode="eval").body
+            got = {}
+            for name, line in (("declared", 8), ("undeclared", 15)):
+                classes, theirs = receiver_methods("updateTask_JEDI", call, "pandajedi/jedidog/Dog.py", line)
+                reading = proxy_reading("updateTask_JEDI", call, theirs if classes else None)
+                got[name] = [classes, sorted(theirs), reading[3]]
+            # a declared class with no method of the name: no facade's at that receiver
+            got["not its method"] = proxy_reading("updateTask_JEDI", call, set())
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # JediTaskBuffer's updateTask_JEDI hands updateDEFT=False on: the DEFT table is not read
+    assert got["declared"] == [
+        ["pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer"], [["pandajedi/jedicore/JediTaskBuffer.py", 4]], ["JEDI_Tasks"]
+    ]
+    # no declaration: every facade of the name, TaskBuffer's True among them
+    assert got["undeclared"] == [[], [], ["JEDI_Tasks", "T_TASK"]]
+    assert got["not its method"] is None
+
+
 def test_stuck_reads_at_the_moment_the_rows_file_says_its_values_were_read(tmp_path):
     out = _ok(
         _run(
