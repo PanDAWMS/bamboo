@@ -383,6 +383,16 @@ def runs_between(func: ast.AST, first: ast.stmt, last: ast.stmt, site: ast.stmt,
     return id(last) in _reached(func, _next(site, func), prints)
 
 
+def passes_through(func: ast.AST, first: ast.stmt, last: ast.stmt, site: ast.stmt, prints: set[int]) -> bool:
+    """Whether every path from the print *first* on to the print *last* that passes no other print of *prints* runs
+    *site* (:func:`runs_between`, and *last* not reached from *first* with *site* a stop): two records in a row of a
+    function's prints then say its pass ran *site*.
+
+    ``TaskRefinerThread.runImpl`` prints "extracting common" at 205 and calls ``extractCommon``, which prints nothing,
+    at 211: a run printing 205 and then 563 with no row of it between passed 211."""
+    return runs_between(func, first, last, site, prints) and id(last) not in _reached(func, _next(first, func), prints | {id(site)})
+
+
 def implying_rows(func: ast.AST, site: ast.stmt) -> list[ast.stmt]:
     """Prints in the site's own block that no path prints without passing the site.
 

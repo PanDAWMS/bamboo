@@ -930,7 +930,8 @@ def _said_value(value: object) -> object:
 class Stop(Exception):
     """A step that cannot go on.  *code* names its class where a rule decides it (``asks``: asks of the logs the records
     do not answer; ``rows``: rows the rows file does not have, asked (``Rerun.ask_rows``), where no other rule names
-    it; a KNOWN_ISSUES.md number), for result.json's ``outcome.code``; None where none is named yet."""
+    it; ``one-of``: H2 names the arms that wrote last or may have, KNOWN_ISSUES.md K38; a KNOWN_ISSUES.md number), for
+    result.json's ``outcome.code``; None where none is named yet."""
 
     def __init__(self, what: str, code: str | None = None) -> None:
         super().__init__(what)
@@ -1144,6 +1145,47 @@ class Wrote:
     def reading(self):
         c = self.chosen.candidate
         return next(r for r in self.readings if r.file == c.rel and r.owner.endswith("::" + c.func))
+
+
+@dataclass(frozen=True)
+class StandIn:
+    """A writer arm whose function prints nothing (KNOWN_ISSUES.md K25), read on the run of the caller a history pair
+    names, at the call on the way to it (``HistoryPair.caller``, ``point``; attr-time-shape.md 5).  That call shown run
+    says the writer was called, not that the arm wrote: its own path condition, and above level 1 the functions
+    between, are left open unless the values read decide them."""
+
+    arm: str  # the writer's ``file::function:line``
+    level: int
+    guards: tuple[str, ...]
+
+    def left(self, env: E.Env) -> list[str] | None:
+        """What stays open of the arm once its call ran, or None where a guard is false in *env* (it did not write)."""
+        out = []
+        for g in self.guards:
+            try:
+                got = E.evaluate(g, env)
+            except SyntaxError:
+                got = E.UNKNOWN
+            if got is False:
+                return None
+            if got is not True:
+                out.append(f"its condition {g!r} not read")
+        if self.level > 1:
+            out.append(f"the {self.level - 1} function(s) between the call and it not read")
+        return out
+
+
+@dataclass
+class Possible:
+    """A writer arm that wrote, or may have, in the pass of one statuslog row (H2's scan of the rows)."""
+
+    arm: str
+    row: dict | None
+    wrote: bool
+    #: what is open where it may have: a condition not read, a log not searched whole, the run not showing the line
+    premises: list[str]
+    #: the answer for a writer that prints and was shown to write, for the steps after H2
+    answer: Wrote | None = None
 
 
 @dataclass
@@ -1624,6 +1666,7 @@ class Rerun:
             "window": self.result.get("window"),
             "values_read_at": _read_at(self.data),
             "readings_at": self.result.get("readings_at"),
+            "possibilities": self.result.get("possibilities"),
             "moved_by": self.result.get("moved_by"),
             "movers": self.result.get("movers"),
         }
@@ -1768,28 +1811,162 @@ class Rerun:
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
             tries = [(state, W.at_transition(state))]
-        names = self._writer_logs(subject, readings)
+        self._stand_ins: dict[tuple[str, int], list[StandIn]] = {}
+        names = self._writer_logs(subject, readings, self._h2_candidates(subject, readings) if readings else [])
         if len(tries) > 1:
             # every row's asks in one round, for the recording step to answer together; the rows are then read
-            # newest first, and the first whose run a writer ran in is the write that left the value
+            # newest first, and the first whose pass a writer is shown to write in ends the scan
             self._stop_unanswered([u for _, asking in tries for u in self._ask(key, names, asking)[1]])
-        for n, (state, asking) in enumerate(tries, 1):
-            last = n == len(tries)
-            if len(tries) > 1:
-                self.say(f"-- row {n} of {len(tries)}: {asking.why}")
-            wrote = self._wrote_at(subject, attr, value, key, readings, state, asking, last)
-            if wrote is not None:
-                return wrote
-        raise AssertionError("the last row stops or returns")
+            return self._scan(subject, attr, value, key, readings, tries)
+        state, asking = tries[0]
+        wrote = self._wrote_at(subject, attr, value, key, readings, state, asking, True)
+        if (wrote.chosen.candidate.owner, wrote.chosen.line) in self._stand_ins:
+            self._one_of(subject, value, self._possibles(wrote.chosen, state, wrote.env), 1)
+        return wrote
 
-    def _writer_logs(self, subject: str, readings: list) -> list[str]:
-        """The logs H2 looks for a run of *subject*'s writers in.  A writer that prints nothing of its own, whose reading
-        names no log, has no run a log holds (KNOWN_ISSUES.md K25): where no writer has a log, H2 stops on that -- not on
-        the logs holding no run of the key, which none was asked for; and with no writer at all, on that.  A time
-        handed for H2 gives no log."""
+    def _h2_candidates(self, subject: str, readings: list) -> list[Candidate]:
+        """H2's candidates, one per function: each reading's, where its runs are; and for a writer that prints nothing,
+        whose arm a history pair places (``attr_time.arms``), the pair's caller at the call on the way to it, read on
+        the caller's run (:class:`StandIn`, kept in ``_stand_ins`` by the caller's owner and line).  Only where the map
+        places the prints (``rows.own_log_files``): else the readings' logs stand, as before."""
+        silent = [r for r in readings if prints_nothing(r.owner, r.lines)] if R.OWN_FILES and R.ROWS_FROM == "graph" else []
+        arms = {(a.owner, a.line): a for a in AT.arms(mapdump.fragment(), subject, silent)} if silent else {}
+        found: dict[str, Candidate] = {}
+
+        def add(rel: str, func: str, line: int, files: list[str]) -> None:
+            c = found.setdefault(f"{rel}::{func}", Candidate(rel, func, [], []))
+            c.lines += [line] if line not in c.lines else []
+            c.log_files += [f for f in files if f not in c.log_files]
+
+        for r in readings:
+            func = r.owner.split("::")[-1]
+            own = self.files_of(r.owner, r.log_files, r.lines)
+            for line in r.lines:
+                a = arms.get((r.owner, line))
+                if a is None or not a.placed:
+                    add(r.file, func, line, own)
+                    continue
+                node = next((f for f in R.functions(r.file, func) if f.lineno <= line <= f.end_lineno), None)
+                stmt = R.statement_at(node, line) if node is not None else None
+                guards = tuple(pathcond.path_condition(stmt)) if stmt is not None else ()
+                for caller, point, level in sorted({(p.caller, p.point, p.level) for p in a.placed}):
+                    rel, _, qual = caller.partition("::")
+                    name = qual.rpartition(".")[2]
+                    add(rel, name, point, self.files_of(f"{rel}::{name}", list(r.log_files), [point]))
+                    stand = self._stand_ins.setdefault((f"{rel}::{name}", point), [])
+                    if (s := StandIn(f"{r.owner}:{line}", level, guards)) not in stand:
+                        stand.append(s)
+        return list(found.values())
+
+    def _possibles(self, v, state: dict | None, env: E.Env, answer: Wrote | None = None) -> list[Possible]:
+        """The arms verdict *v* says wrote, or may have, in the pass of the row *state*: its own line, or the arms of the
+        writers that print nothing it stands in for, less those a guard read false shows did not."""
+        kept = [] if v.kind == "positive" else [f"its run does not show the line ran ({v.reasons[-1] if v.reasons else v.kind})"]
+        stands = self._stand_ins.get((v.candidate.owner, v.line))
+        if not stands:
+            return [Possible(f"{Path(v.candidate.rel).name}::{v.candidate.func}:{v.line}", state, not kept, kept, answer if not kept else None)]
+        out = []
+        for s in stands:
+            left = s.left(env)
+            if left is None:
+                continue
+            premises = kept + left
+            out.append(Possible(f"{Path(s.arm.split('::')[0]).name}::{s.arm.split('::')[-1]}", state, not premises, premises))
+        return out
+
+    def _scan(self, subject: str, attr: str, value: str, key: str, readings: list, tries: list) -> Wrote:
+        """H2 over the statuslog rows the writers' passes can write, newest first (attr-time-shape.md 5): a row whose pass
+        a writer is shown to write in ends the scan; one shown to have no writer's pass goes; one that may have stays.
+        The answer is a writer that prints shown to write, with nothing newer that may have; else the arms left are
+        named (:meth:`_one_of`)."""
+        left: list[Possible] = []
+        for n, (state, asking) in enumerate(tries, 1):
+            self.say(f"-- row {n} of {len(tries)}: {asking.why}")
+            found = self._row_at(subject, attr, value, key, readings, state, asking)
+            left += found
+            if any(p.wrote for p in found):
+                break
+        if len(left) == 1 and left[0].answer is not None:
+            self.question = left[0].answer.question
+            return left[0].answer
+        self._one_of(subject, value, left, len(tries))
+        raise AssertionError("_one_of stops")
+
+    def _row_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict, asking: W.Asking) -> list[Possible]:
+        """One row of :meth:`_scan`: the arms whose pass at the row wrote, or may have.  No run of the key there, in logs
+        searched whole, is no writer's pass; a log not searched whole leaves its writers open."""
+        readings, said = self._unborn(readings, subject, state)
+        if said:
+            self.say(said)
+        lo, hi = asking.window
+        when = hi if lo == hi else f"{lo}..{hi}"
+        cands = self._h2_candidates(subject, readings)
+        runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+        if not at and not holes:
+            self.say(f"  no run of {key} at {when}: no writer's pass")
+            return []
+        # as _wrote_at: runs in several logs, or several in a window, are each judged on their own; else the one
+        question = None if len(at) != 1 or (lo != hi and len(next(iter(at.values()))) > 1) else next(iter(at.values()))[0]
+        if question is not None:
+            self.say(f"the run: {question.describe()}")
+        at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
+        for c in cands:
+            if any(name in c.log_files for name in at):
+                self.warn_split(c.owner, c.lines)
+        env = self.base_env(at=state["time"])
+        stable_holes([R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
+                      for c in cands for run in at_hand if run.log.name in c.log_files], env)
+        j = judge(
+            cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi), subject=attr, observed=value,
+            question_run=question, env=env, called_at=self._called_at,
+        )
+        self.say(j.report(question))
+        out = []
+        for v in j.verdicts:
+            if v.kind == "excluded" or (v.kind == "unexamined" and not any(f in holes for f in v.candidate.log_files)):
+                continue
+            run = question if question is not None and question.log.name in v.candidate.log_files else j.runs.get(v.candidate.owner)
+            answer = Wrote(readings, run, cands, env, v) if run is not None else None
+            if v.kind == "unexamined":
+                v.reasons.append(f"not searched whole: {', '.join(f for f in v.candidate.log_files if f in holes)}")
+            out += self._possibles(v, state, env, answer)
+        for p in out:
+            self.say(f"  {'wrote' if p.wrote else 'may have written'}: {p.arm}" + (f" ({'; '.join(p.premises)})" if p.premises else ""))
+        return out
+
+    def _one_of(self, subject: str, value: str, left: list[Possible], rows: int) -> None:
+        """Stop H2 naming the arms that wrote *value* last or may have, each with its rows (KNOWN_ISSUES.md K38): the
+        steps after H2 read one arm's run, and are not run for each (attr-time-shape.md 5, the second stage)."""
+        arms: dict[str, list[Possible]] = {}
+        for p in left:
+            arms.setdefault(p.arm, []).append(p)
+        self.result["possibilities"] = [
+            {"arm": arm, "rows": [{"status": p.row["status"] if p.row else None, "time": p.row["time"] if p.row else None,
+                                   "wrote": p.wrote, "premises": p.premises} for p in ps]}
+            for arm, ps in arms.items()
+        ]
+        if not arms:
+            raise Stop(f"{self.hop}: a pass that wrote {subject}={value!r} at the {rows} statuslog row(s) its writers' passes "
+                       f"can write (none shows a writer's pass: KNOWN_ISSUES.md K38)", "one-of")
+        said = []
+        for arm, ps in arms.items():
+            at = ", ".join(f"{'wrote' if p.wrote else 'may have'} at {p.row['status']!r} {p.row['time']}" if p.row else
+                           ("wrote" if p.wrote else "may have") for p in ps)
+            said.append(f"{arm} ({at})")
+        raise Stop(f"{self.hop}: one arm that wrote {subject}={value!r} last, of {len(arms)} left: {'; '.join(said)} "
+                   f"(KNOWN_ISSUES.md K38)", "one-of")
+
+    def _writer_logs(self, subject: str, readings: list, cands: list | None = None) -> list[str]:
+        """The logs H2 looks for a run of *subject*'s writers in (*cands*, ``_candidates`` of *readings* where not
+        given).  A writer that prints nothing of its own, whose reading names no log and whose arm no history pair
+        places, has no run a log holds (KNOWN_ISSUES.md K25): where no writer has a log, H2 stops on that -- not on the
+        logs holding no run of the key, which none was asked for; and with no writer at all, on that.  A time handed
+        for H2 gives no log."""
         if not readings:
             raise Stop(f"{self.hop}: a writer of {subject} in the map")
-        names = list(dict.fromkeys(f for c in self._candidates(readings) for f in c.log_files))
+        cands = self._candidates(readings) if cands is None else cands
+        names = list(dict.fromkeys(f for c in cands for f in c.log_files))
         if not names:
             funcs = ", ".join(dict.fromkeys(r.owner.split("::")[-1] for r in readings))
             raise Stop(f"{self.hop}: a log to look for a run of a writer of {subject} in ({funcs}: the map names none; "
@@ -1833,7 +2010,7 @@ class Rerun:
             self.say(said)
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
-        cands = self._candidates(readings)
+        cands = self._h2_candidates(subject, readings)
         runs = self.runs(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
         if not at and not last:
@@ -1854,9 +2031,9 @@ class Rerun:
             (question, *_), = at.values()
             self.say(f"the run: {question.describe()}")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
-        for r, c in zip(readings, cands, strict=False):
+        for c in cands:
             if any(name in c.log_files for name in at):
-                self.warn_split(r.owner, r.lines)
+                self.warn_split(c.owner, c.lines)
         env = self.base_env(at=state["time"] if state else None)
         seens = [R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
                  for c in cands for run in at_hand if run.log.name in c.log_files]

@@ -416,20 +416,26 @@ read at all.  On pin k (dce1e07's dump): 2 of the 60 writers that take a row by 
 (setOnHold, adder_gen's finalize_job_status) and 1 of the movers S1 keeps over the census (TaskBuffer.updateJobs, one
 value of `JobSpec.jobStatus`).
 
-H2 looks for such a writer's run in the logs its reading names (`rows.own_log_files`).  Where no writer of the subject
-has a log -- each prints nothing and its reading names none -- H2 stops on that before it asks (`_writer_logs`);
-before, it asked no log and stopped on "a run of <key> at <t>", as if the logs had held none.  The harness's attribute
-cases on pin m (x13M110m, 2026-10-29): 4 of 60, setSuperStatus_JEDI's three `JediTaskSpec.superStatus` and
-set_input_output_file_types' `JobSpec.inputFileType`.  A writer whose reading names a log is asked there, and a run
-there is a caller's: the refiners' extractCommon, the only writer of 11 of the 20 that ask the rows their writers'
-passes write (K37), is asked in panda-TaskRefiner.log, whose run is TaskRefinerThread.runImpl's and proves no row of
-extractCommon's -- read, not run: their records come with the harness's next round.
+H2 reads such a writer, where the map's history pair places its arm (`attr_time.arms`), at the pair's caller: the
+call on the way to it (`HistoryPair.point`) is the candidate, judged on the caller's run (`Rerun._h2_candidates`,
+`StandIn`; attr-time-shape.md 5).  The call is shown run by a row on every path through it, or by two of the caller's
+rows printed in a row that only a path through it prints (`which_ran.rows_around`, `rows.passes_through`:
+TaskRefinerThread.runImpl's 205 and 563 around 211, extractCommon).  That says the writer was called, not that its arm
+wrote: the arm's own path condition is read in the row's values, and what is not read -- or, above level 1, the
+functions between the call and the writer -- is left open, a premise of "may have written" (K38).  Counted on the
+harness's attribute cases (pin m, x13M110m, 2026-10-29, out/attr/attr-pass-summary.txt): 41 of the 46 arms that print
+nothing are placed, at 24 calls; at 10 of them two rows can show the call ran, at all 24 two rows can stand around it.
+A writer no pair places is asked in the logs its reading names (`rows.own_log_files`).  Where no writer of the subject
+has a log -- each prints nothing, no pair places it and its reading names none -- H2 stops on that before it asks
+(`_writer_logs`); before, it asked no log and stopped on "a run of <key> at <t>", as if the logs had held none.  Only
+where the map places the prints (`ROWS_FROM=graph`, `ROWS_OWN_FILES`): else the readings' logs stand.
 
 *Shows:* said ("the map has no prints of its own for it, so no run in a log is its own: not followed"); result.json's
-verdict `prints-nothing`.  H2: "a log to look for a run of a writer of <subject> in (<functions>: the map names none;
+verdict `prints-nothing`.  H2: the caller's line among the candidates, "rows a and b printed in a row, which only a
+path through it prints"; "a log to look for a run of a writer of <subject> in (<functions>: the map names none;
 KNOWN_ISSUES.md K25)".
-*Revisit:* where a caller's junction does not place the function's write; for H2, when a writer's call is read on its
-caller's run (the history pair's caller, its records around the call).
+*Revisit:* where a caller's junction does not place the function's write; for H2, when the functions between a
+level-2 pair's call and the writer are read.
 
 ### K26. S3 reads what an arm that ran wrote only from a row after it in its own block
 
@@ -534,8 +540,8 @@ holding the value as the subject's time (`JediTaskSpec.superStatus` 'done', thre
 (`runtime(CURRENT_DATE)`, `runtime(naive_utcnow())`), the value is the write's time and H2 asks the run at it, on
 every machine (`windows.value_now`); else each arm is placed on the object's history by the map's HistoryPair (row
 same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
-history call records where they are literals, any row otherwise), and read newest first: the first whose run a
-writer ran in is the write that left the value, and H2 goes on from it as for a status.  Only the last write is
+history call records where they are literals, any row otherwise), and read newest first (K38): the first whose pass a
+writer is shown to write in is the write that left the value, and H2 goes on from it as for a status.  Only the last write is
 asked; one of the same value before it is not.  It stops where an arm is on no row of the object -- its pairs are
 another object's, the map does not follow the object to its pass's history call, or it has none: its run may have
 written the value after any row, and asking its logs over the rest of the window (F3) is not built -- and where H1
@@ -549,6 +555,27 @@ the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's 
 object ... (k of n not: K37)" or "a writer of <subject> in the map".
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
 arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
+
+### K38. H2's scan of the rows names the arms that wrote last or may have, and goes on from none of them but one
+
+Over the statuslog rows a writer's pass can write (K37), newest first, each row's pass is read three ways
+(`Rerun._scan`, `_row_at`, attr-time-shape.md 5; tmaeno 「可能性としての Fork でしょうね」, 10-29): an arm shown to
+write ends the scan; a row whose logs, searched whole, hold no run of the key, or whose arms are excluded, has no
+write and goes; an arm the run does not show ran (kept), whose own condition is not read (K25's stand-ins), or whose
+logs were not searched whole may have written and stays, with what is open named.  Before (querier-at), a row where
+the judge chose no writer was passed over as "no writer ran" -- for a judgement that could not decide too -- and an
+older row's write was taken as the last.  Where one printing writer is shown to write and nothing newer may have,
+H2 goes on from it; else it stops naming each arm left with its rows, code `one-of`, and result.json's
+`possibilities` lists them (arm, rows, premises).  Arms, not rows, are the possibilities: the steps after H2 explain
+an arm, and an arm's passes differ only in the run read.  An arm whose passes are all older than the newest shown
+write is not among them.  None read on any row: "a pass that wrote ... (none shows a writer's pass)".  A single
+window (a status's row, a value held, a value that is its time) is judged as before; a stand-in chosen there is named
+the same way.  The steps after H2 run for no arm of several, and for a stand-in for none: the second stage, a fork
+whose branches are the arms and whose undecided branches end open rather than stopping the run, is not built.
+
+*Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row; a stop "one arm that
+wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)".
+*Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it).
 
 ### K11. After H4 the next question is always H5, the traceback
 

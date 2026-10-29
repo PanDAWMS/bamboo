@@ -1267,6 +1267,65 @@ def test_a_call_with_no_print_after_it_on_every_path_is_placed_between_the_recor
     assert printed_between is None
 
 
+def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_their_prints_runs_it(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "r.py").write_text(
+        textwrap.dedent(
+            """
+            def run(self, task):
+                self.logger.info("extracting common")
+                try:
+                    self.impl.extract(task)
+                except Exception:
+                    self.logger.error("failed")
+                    return
+                if task.x:
+                    self.tb.update(task)
+                self.logger.info("checking length")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows as R
+            from bamboo.querier.which_ran import rows_around
+
+            node = R.functions("pandajedi/r.py", "run")[0]
+            at = lambda line: R.statement_at(node, line)
+            prints = {id(s) for s in R.own_nodes(node) if R.is_print(s)}
+            through = lambda a, b, s: R.passes_through(node, at(a), at(b), at(s), prints)
+            fn = N(node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            # record 1 is another function's (the callee's, say)
+            placed = {3: [0], 11: [2]}
+            hits = {k: [(x, 9, "") for x in v] for k, v in placed.items()}
+            print(json.dumps({
+                "the call": through(3, 11, 5),
+                "an arm": through(3, 11, 10),
+                "raised to the handler": through(3, 7, 5),
+                "around the call": rows_around(fn, N(unambiguous=placed, hits=hits), at(5)),
+                "around the arm": rows_around(fn, N(unambiguous=placed, hits=hits), at(10)),
+                "a row read between": rows_around(fn, N(unambiguous=placed, hits={**hits, 7: [(1, 9, "")]}), at(5)),
+                "only the first": rows_around(fn, N(unambiguous={3: [0]}, hits={3: [(0, 9, "")]}), at(5)),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # "extracting common" then "checking length" with nothing of it between: the call ran (and returned)
+    assert got["the call"] is True and got["around the call"] == [3, 11]
+    # the update is one arm's: a pass from 3 to 11 need not run it
+    assert got["an arm"] is False and got["around the arm"] is None
+    # the handler's print after 3 is reached only by the call raising
+    assert got["raised to the handler"] is True
+    # no two rows in a row: nothing shown; "failed" matched the record between, though not alone: not a pass's two
+    assert got["only the first"] is None
+    assert got["a row read between"] is None
+
+
 def test_every_call_that_goes_on_into_the_candidate_is_tried_at_each_of_its_lines(tmp_path):
     out = _ok(
         _run(
@@ -3558,6 +3617,117 @@ def test_h2_stops_on_no_log_for_its_writers_and_not_on_no_run_in_logs_it_never_a
     assert got["none"] == ("H2: a log to look for a run of a writer of JediTaskSpec.superStatus in (setSuperStatus_JEDI: the map "
                            "names none; KNOWN_ISSUES.md K25)")
     assert got["no writer"] == "H2: a writer of JediTaskSpec.superStatus in the map"
+
+
+def test_a_writer_that_prints_nothing_is_read_at_its_history_pairs_call_and_its_own_condition_is_left_open(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "r.py").write_text(
+        textwrap.dedent(
+            """
+            class Refiner:
+                def extract(self, task, taskParamMap):
+                    if task.x:
+                        self.taskSpec.transPath = taskParamMap["transPath"]
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import mapdump, rerun
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "graph"
+            rerun.prints_nothing = lambda owner, lines: owner.endswith("::extract")
+            pair = N(row="can", row_why="", writes=[], caller="pandajedi/o.py::RefinerThread.runImpl", point=211, call=226,
+                     level=1, callee="self.taskBufferIF.updateTask_JEDI", order="after")
+            mapdump._FRAGMENT[:] = [N(junctions=[N(subject="JediTaskSpec.transPath", owner="pandajedi/r.py::Refiner.extract",
+                                                   branches=[N(line=5, outcome="runtime(taskParamMap['transPath'])", history=[pair], history_hole="")])],
+                                      reach_graph=[])]
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used, r._stand_ins = [], [], "H2", {}, [], {}
+            r.files_of = lambda owner, today, lines: list(today) or [owner.split("::")[-1] + ".log"]
+            silent = N(file="pandajedi/r.py", owner="pandajedi/r.py::extract", lines=[5], log_files=["panda-TaskRefiner.log"])
+            printing = N(file="pandaserver/t.py", owner="pandaserver/t.py::setPath", lines=[9], log_files=[])
+            cands = r._h2_candidates("JediTaskSpec.transPath", [silent, printing])
+            row = {"status": "ready", "time": "2026-10-29 10:06:19"}
+            v = lambda kind: N(candidate=cands[0], line=211, kind=kind, reasons=["rows 205 and 563 printed in a row"])
+            said = lambda ps: [[p.arm, p.wrote, p.premises] for p in ps]
+            print(json.dumps({
+                "candidates": [[c.owner, c.lines, c.log_files] for c in cands],
+                "shown, not read": said(r._possibles(v("positive"), row, E.Env())),
+                "shown, read false": said(r._possibles(v("positive"), row, E.Env({"task.x": E.Value(False, "row")}))),
+                "shown, read true": said(r._possibles(v("positive"), row, E.Env({"task.x": E.Value(True, "row")}))),
+                "kept": said(r._possibles(v("kept"), row, E.Env({"task.x": E.Value(True, "row")}))),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the writer stands in at its pair's caller, on the logs its reading names; the printing writer stays itself
+    assert got["candidates"] == [["pandajedi/o.py::runImpl", [211], ["panda-TaskRefiner.log"]],
+                                 ["pandaserver/t.py::setPath", [9], ["setPath.log"]]]
+    # the call shown run: the arm wrote only where its own condition is read true
+    assert got["shown, not read"] == [["r.py::extract:5", False, ["its condition 'task.x' not read"]]]
+    assert got["shown, read false"] == []
+    assert got["shown, read true"] == [["r.py::extract:5", True, []]]
+    assert got["kept"] == [["r.py::extract:5", False, ["its run does not show the line ran (rows 205 and 563 printed in a row)"]]]
+
+
+def test_h2_reads_the_rows_newest_first_keeping_those_that_may_have_and_names_the_arms_left(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+
+            P = rerun.Possible
+            rows = [{"status": s, "time": t} for s, t in (("running", "11:38"), ("scouting", "10:06"), ("ready", "10:05"), ("defined", "04:10"))]
+            tries = [(s, N(why=f"the statuslog's {s['status']!r}")) for s in rows]
+            answer = N(question="the run")
+
+            def scan(found):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result, r.question = [], [], "H2", {}, [], {}, None
+                r._row_at = lambda subject, attr, value, key, readings, state, asking: found(state)
+                try:
+                    got = r._scan("JediTaskSpec.cloud", "cloud", "WORLD", "1", [], tries)
+                    return ["answer", got is answer, r.question]
+                except rerun.Stop as e:
+                    return [e.code, e.args[0], r.result.get("possibilities")]
+
+            def table(by):
+                return lambda state: by.get(state["status"], [])
+
+            print(json.dumps({
+                "the newest shows a printing writer": scan(table({"running": [P("a.py::gen:44", rows[0], True, [], answer)]})),
+                "one that may have, then one shown": scan(table({
+                    "running": [P("a.py::gen:44", rows[0], False, ["its condition 'x' not read"])],
+                    "ready": [P("r.py::extract:226", rows[2], True, [])],
+                    "defined": [P("o.py::old:1", rows[3], True, [], answer)],
+                })),
+                "none": scan(table({})),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["the newest shows a printing writer"] == ["answer", True, "the run"]
+    # the newer that may have stays; the scan ends at the row shown; the older is not read
+    code, text, possibilities = got["one that may have, then one shown"]
+    assert code == "one-of"
+    assert text == ("H2: one arm that wrote JediTaskSpec.cloud='WORLD' last, of 2 left: a.py::gen:44 (may have at 'running' 11:38); "
+                    "r.py::extract:226 (wrote at 'ready' 10:05) (KNOWN_ISSUES.md K38)")
+    assert [p["arm"] for p in possibilities] == ["a.py::gen:44", "r.py::extract:226"]
+    assert possibilities[0]["rows"] == [{"status": "running", "time": "11:38", "wrote": False, "premises": ["its condition 'x' not read"]}]
+    assert got["none"][:2] == ["one-of", "H2: a pass that wrote JediTaskSpec.cloud='WORLD' at the 4 statuslog row(s) its writers' passes "
+                                         "can write (none shows a writer's pass: KNOWN_ISSUES.md K38)"]
 
 
 def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_name(tmp_path):
