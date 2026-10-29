@@ -403,7 +403,7 @@ says, for each mover with no run found, which of the three hold (`premises`: `wi
 it did not run (judgement 3)"); result.json's verdict `no-run-found` or `did-not-run`, with its `premises`.
 *Revisit:* when the map pairs a run's mark and an SQL statement's key bind with the written row.
 
-### K25. S1 does not follow a function that prints nothing of its own
+### K25. S1 does not follow a function that prints nothing of its own, and H2 stops where no writer has a log
 
 A function the map has no prints of its own for (`prints_nothing`) has no run of its own in a log, so S1 does not
 follow it.  Before, a run found in its logs was read as its own wherever the run's mark named no method (`_of_mover`),
@@ -416,9 +416,20 @@ read at all.  On pin k (dce1e07's dump): 2 of the 60 writers that take a row by 
 (setOnHold, adder_gen's finalize_job_status) and 1 of the movers S1 keeps over the census (TaskBuffer.updateJobs, one
 value of `JobSpec.jobStatus`).
 
+H2 looks for such a writer's run in the logs its reading names (`rows.own_log_files`).  Where no writer of the subject
+has a log -- each prints nothing and its reading names none -- H2 stops on that before it asks (`_writer_logs`);
+before, it asked no log and stopped on "a run of <key> at <t>", as if the logs had held none.  The harness's attribute
+cases on pin m (x13M110m, 2026-10-29): 4 of 60, setSuperStatus_JEDI's three `JediTaskSpec.superStatus` and
+set_input_output_file_types' `JobSpec.inputFileType`.  A writer whose reading names a log is asked there, and a run
+there is a caller's: the refiners' extractCommon, the only writer of 11 of the 20 that ask the rows their writers'
+passes write (K37), is asked in panda-TaskRefiner.log, whose run is TaskRefinerThread.runImpl's and proves no row of
+extractCommon's -- read, not run: their records come with the harness's next round.
+
 *Shows:* said ("the map has no prints of its own for it, so no run in a log is its own: not followed"); result.json's
-verdict `prints-nothing`.
-*Revisit:* where a caller's junction does not place the function's write.
+verdict `prints-nothing`.  H2: "a log to look for a run of a writer of <subject> in (<functions>: the map names none;
+KNOWN_ISSUES.md K25)".
+*Revisit:* where a caller's junction does not place the function's write; for H2, when a writer's call is read on its
+caller's run (the history pair's caller, its records around the call).
 
 ### K26. S3 reads what an arm that ran wrote only from a row after it in its own block
 

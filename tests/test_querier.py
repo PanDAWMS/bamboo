@@ -3424,13 +3424,17 @@ def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_
             tmp_path,
             """
             import json
+            from types import SimpleNamespace as N
             from bamboo.querier import rerun
+            from bamboo.querier import rows as R
 
+            R.ROWS_FROM = "walk"  # the reading's logs
             r = object.__new__(rerun.Rerun)
             r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "", {}, []
             r.data = {"statuslog": {"states": [{"status": "running", "time": "2026-01-01 00:00:00"},
                                                {"status": "done", "time": "2026-01-02 00:00:00"}]}}
-            r._writers = lambda subject, value, key: []
+            logged = N(file="pandaserver/t.py", owner="pandaserver/t.py::TaskModule.updateTask_JEDI", lines=[1], log_files=["panda-DBProxy.log"])
+            r._writers = lambda subject, value, key: [logged] if subject == "JediTaskSpec.status" else []
 
             def past(readings, subject, state):
                 raise RuntimeError(f"past H2's time: {state['time']}")
@@ -3521,6 +3525,39 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
     assert got["one not placed"] == ("H2: every writer of JediTaskSpec.splitRule on a history row of the object, to say when it took 'x' "
                                      "(1 of 2 not: KNOWN_ISSUES.md K37)")
     assert got["no writer"] == "H2: a writer of JediTaskSpec.transUses in the map, to say when it took 'Atlas'"
+
+
+def test_h2_stops_on_no_log_for_its_writers_and_not_on_no_run_in_logs_it_never_asked(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "walk"  # the reading's logs, as for a function the map has no prints of its own for
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "H2", {"H2": "2026-10-29 00:48:00"}, []
+            reading = lambda owner, *logs: N(file=owner.partition("::")[0], owner=owner, lines=[939], log_files=list(logs))
+            silent = reading("pandaserver/b.py::setSuperStatus_JEDI")
+            got = {"one logged": r._writer_logs("JediTaskSpec.superStatus", [silent, reading("pandajedi/r.py::extract", "panda-TaskRefiner.log")])}
+            for name, readings in (("none", [silent]), ("no writer", [])):
+                try:
+                    r._writer_logs("JediTaskSpec.superStatus", readings)
+                except rerun.Stop as e:
+                    got[name] = e.args[0]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["one logged"] == ["panda-TaskRefiner.log"]
+    # no writer has a log: no log is asked, and a time handed for H2 gives none
+    assert got["none"] == ("H2: a log to look for a run of a writer of JediTaskSpec.superStatus in (setSuperStatus_JEDI: the map "
+                           "names none; KNOWN_ISSUES.md K25)")
+    assert got["no writer"] == "H2: a writer of JediTaskSpec.superStatus in the map"
 
 
 def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_name(tmp_path):

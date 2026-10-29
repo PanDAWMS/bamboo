@@ -1768,10 +1768,10 @@ class Rerun:
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
             tries = [(state, W.at_transition(state))]
+        names = self._writer_logs(subject, readings)
         if len(tries) > 1:
             # every row's asks in one round, for the recording step to answer together; the rows are then read
             # newest first, and the first whose run a writer ran in is the write that left the value
-            names = list(dict.fromkeys(f for c in self._candidates(readings) for f in c.log_files))
             self._stop_unanswered([u for _, asking in tries for u in self._ask(key, names, asking)[1]])
         for n, (state, asking) in enumerate(tries, 1):
             last = n == len(tries)
@@ -1781,6 +1781,20 @@ class Rerun:
             if wrote is not None:
                 return wrote
         raise AssertionError("the last row stops or returns")
+
+    def _writer_logs(self, subject: str, readings: list) -> list[str]:
+        """The logs H2 looks for a run of *subject*'s writers in.  A writer that prints nothing of its own, whose reading
+        names no log, has no run a log holds (KNOWN_ISSUES.md K25): where no writer has a log, H2 stops on that -- not on
+        the logs holding no run of the key, which none was asked for; and with no writer at all, on that.  A time
+        handed for H2 gives no log."""
+        if not readings:
+            raise Stop(f"{self.hop}: a writer of {subject} in the map")
+        names = list(dict.fromkeys(f for c in self._candidates(readings) for f in c.log_files))
+        if not names:
+            funcs = ", ".join(dict.fromkeys(r.owner.split("::")[-1] for r in readings))
+            raise Stop(f"{self.hop}: a log to look for a run of a writer of {subject} in ({funcs}: the map names none; "
+                       f"KNOWN_ISSUES.md K25)")
+        return names
 
     def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking]]:
         """H2's windows for an attribute no history records (``attr_time``, KNOWN_ISSUES.md K37): the value itself where
