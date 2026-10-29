@@ -61,7 +61,9 @@ class Tables:
     each row by one; *created*, the attribute saying when a row was made;
     *live*, the tables of the class's family that rows are inserted into;
     *archive*, the family's tables none is inserted into; *since*, the
-    attribute the archive is partitioned by.  A table is spelled as PanDA's
+    attribute the archive is partitioned by; *identity*, every attribute the
+    class's tables name a row by (a dataset of a task: ``datasetID`` and
+    ``jediTaskID``).  A table is spelled as PanDA's
     code spells it, as ``db_read`` takes it, in the order of its name.  A class
     the dump gives none of these, or no one family spelled one way, has no
     entry.  The rules are the harness's reading of the dump, which the map
@@ -73,6 +75,7 @@ class Tables:
     live: dict[str, tuple[str, ...]]
     archive: dict[str, tuple[str, ...]]
     since: dict[str, str]
+    identity: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @classmethod
     def read(cls, dump: Path) -> Tables:
@@ -88,6 +91,8 @@ class Tables:
         for c, tables in by_class.items():
             if attr := _one(a for t in tables for a in t["identity_attrs"]):
                 out.key[c] = attr
+            if named := sorted({a for t in tables for a in t["identity_attrs"]}):
+                out.identity[c] = tuple(a.partition(".")[2] for a in named)
             if attr := _one(a for t in tables for a in t["creation"]):
                 out.created[c] = attr
             spelled = [
@@ -288,13 +293,22 @@ class Asked:
     response: dict
 
 
+#: the part reading a key's row, and its request, by the row's class
+KEY_REQUEST: dict[str, tuple[str, Callable[[Any], dict]]] = {
+    "JobSpec": ("jobs", lambda key: {"job_ids": [key]}),
+    "JediTaskSpec": ("task", lambda key: {"task_id": key}),
+}
+
+
 async def _job_row(key: int, rec: Record, parts: Parts) -> tuple[dict | None, dict]:
-    response = await rec.call("jobs", parts.jobs([key]), {"job_ids": [key]})
+    part, request = KEY_REQUEST["JobSpec"]
+    response = await rec.call(part, parts.jobs([key]), request(key))
     return job_of(response, key)[0], response
 
 
 async def _task_row(key: int, rec: Record, parts: Parts) -> tuple[dict | None, dict]:
-    response = await rec.call("task", parts.task(key), {"task_id": key})
+    part, request = KEY_REQUEST["JediTaskSpec"]
+    response = await rec.call(part, parts.task(key), request(key))
     return task_of(response)[0], response
 
 
