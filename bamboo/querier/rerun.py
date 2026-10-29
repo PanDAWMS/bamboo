@@ -1611,17 +1611,20 @@ class Rerun:
         self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": attr, "entity": None},
                       f"@{step.line} {step.owner.split('::')[-1]} loops over {iterable}, which the rows file does not have")
 
-    def ask_linked(self, st, subjects: list[str], q: Missed) -> str | None:
+    def ask_linked(self, st, subjects: list[str], q: Missed) -> list[str]:
         """The rows of a class *st* compares (*subjects*) and the rows file has no row of (``rows-no-row``): the rows of
         that class the statement joins to the asked row, by the columns its joins (the map's ``ReadSite.joins``) compare
-        with the row's -- the task's datasets by jediTaskID.  A collection with no attribute, the class named, and
-        ``where`` its columns with the row's values; one per pair of sources the joins meet by (two aliases of one table
-        are two keys).  A class the statement joins to the row only through another table, a class-less table (its
-        join side names no attribute: ``T_TASK``) or a column the row does not hold asks nothing.  The joins are the
-        dump's read site's, by the map's name of it (``ReadSiteNode.make_name``): the follow-up's statement does not
-        carry them; where the dump has none of that name, what is not asked is said (returned, for the caller's lines)."""
+        with the row's -- the task's datasets by jediTaskID.  A collection with no attribute, the class named, ``where``
+        its columns with the row's values and ``via`` each pair of columns by name (``from`` the row's class, ``to`` the
+        asked class, as the rows file's ``linked`` names them); one per pair of sources the joins meet by (two aliases
+        of one table are two keys).  A class the statement joins to the row only through another table, a class-less
+        table (its join side names no attribute: ``T_TASK``) or a column the row does not hold asks nothing; nor do rows
+        the file's ``linked`` holds by one of those pairs for the row's value, which no step compares yet (K36).  The
+        joins are the dump's read site's, by the map's name of it (``ReadSiteNode.make_name``): the follow-up's
+        statement does not carry them.  What is not asked for a reason the caller would not see -- no read site, rows
+        held -- is said (returned, for the caller's lines)."""
         if not subjects:
-            return None
+            return []
         cls = q.subject.partition(".")[0]
         key = {n: v for n in (x.partition(".")[2] for x in _identity_attrs(cls)) if (v := self._row_value(f"{cls}.{n}", q)) is not None}
         where = f"{st.owner.split('::')[-1]}@{st.line}"
@@ -1629,21 +1632,32 @@ class Rerun:
         fragment = mapdump.fragment()
         site = next((rs for rs in (fragment.read_sites if fragment else []) if rs.name == name), None)
         if site is None:
-            return f"the dump has no read site {name}: its joins are not read, and the rows of {', '.join(subjects)} not asked"
+            return [f"the dump has no read site {name}: its joins are not read, and the rows of {', '.join(subjects)} not asked"]
+        notes = []
         for lacked in dict.fromkeys(s.partition(".")[0] for s in subjects):
-            on: dict[tuple[str, str], dict] = {}
+            on: dict[tuple[str, str], list[tuple[str, str]]] = {}
             for j in site.joins:
                 for (mine, src), (theirs, their_src) in (((j.a_attr, j.a_source), (j.b_attr, j.b_source)),
                                                          ((j.b_attr, j.b_source), (j.a_attr, j.a_source))):
                     if mine.partition(".")[0] == lacked and theirs.partition(".")[0] == cls:
-                        on.setdefault((src, their_src), {})[mine.partition(".")[2]] = self._row_value(theirs, q)
+                        on.setdefault((src, their_src), []).append((theirs, mine))
             compared = ", ".join(s.partition(".")[2] for s in subjects if s.partition(".")[0] == lacked)
-            for by in on.values():
+            for pairs in on.values():
+                by = {to.partition(".")[2]: self._row_value(frm, q) for frm, to in pairs}
                 if None in by.values():
                     continue
-                self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": None, "entity": lacked, "where": by},
-                              f"{where} compares {lacked}'s {compared} with the row's, and the rows file has no row of {lacked}")
-        return None
+                via = [{"from": frm, "to": to} for frm, to in pairs]
+                held = next((e["via"] for e in self.data.get("linked") or [] if e.get("class") == lacked and e.get("via") in via
+                             and self._row_value(e["via"]["from"], q) in (e.get("asked") or [])), None)
+                if held:
+                    notes.append(f"the rows file's linked holds {lacked}'s rows by {held['from']} -> {held['to']}, which this step "
+                                 "does not compare (KNOWN_ISSUES.md K36)")
+                    continue
+                self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": None, "entity": lacked, "where": by,
+                               "via": via},
+                              f"{where} compares {lacked}'s {compared} with the row's, and neither the rows file's rows nor its "
+                              f"linked hold {lacked}'s")
+        return list(dict.fromkeys(notes))
 
     def window(self, asking: W.Asking) -> Window | None:
         """*asking*'s window; where it has none, a stop if the door needs one (the door over files reads none)."""
@@ -3507,8 +3521,8 @@ class Rerun:
                         if why := self._unanswered_why(subject, q):
                             reasons.append({"code": why[0], "text": f"{where}: {subject} not compared ({why[1]})"})
                             lacked += [subject] if why[0] == "rows-no-row" else []
-                    if kinds.get((st.owner, st.line)) != "refused" and (note := self.ask_linked(st, lacked, q)):
-                        said.append(f"{where}: {note}")
+                    if kinds.get((st.owner, st.line)) != "refused":
+                        said += [f"{where}: {note}" for note in self.ask_linked(st, lacked, q)]
             self.say(f"  {name}: {verdict} -- {'; '.join(said) if said else q.movers.get(owner, 'a writer of another value')}")
             out.append((owner, verdict))
             entries.append({"owner": owner, "reached": "select" if paths else "guard" if owner in guarded else "key",
@@ -3975,8 +3989,8 @@ class Rerun:
             return kind, said
         by_call, calls = self._routes(st, q)
         kind = min(kind, by_call, key=KINDS.index)
-        if kind != "refused" and (note := self.ask_linked(st, [x for x, (code, _) in unanswered.items() if code == "rows-no-row"], q)):
-            said.append(note)
+        if kind != "refused":
+            said += self.ask_linked(st, [x for x, (code, _) in unanswered.items() if code == "rows-no-row"], q)
         return kind, calls + said
 
     def ordered(self, q: Ordered):

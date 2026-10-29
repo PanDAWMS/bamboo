@@ -2651,6 +2651,7 @@ def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_st
     mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])], read_sites=sites)]
     r.rows_asks, r.hop = {}, "M2"
     r.data["rows"]["job"]["jediTaskID"] = {"value": 5}
+    r.data["classes"]["task"], r.data["rows"]["task"] = "JediTaskSpec", {"jediTaskID": {"value": 5}}
     ftype = term("equal", "FileSpec.type", "IN", [val("input")])
 
     def pair(a, b, a_source="f", b_source="j"):
@@ -2670,10 +2671,11 @@ def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_st
         "joined": files(10, by_job + [pair("JobSpec.PandaID", "FileSpec.PandaID", "j", "g")]),
         # the same rows asked again: once
         "again": files(11, by_job),
-        # every route refuses the row: nothing the rows could change
-        "refused": files(12, by_job, routes=[N(**vars(route([share])), constants={}, chain=["d/b.py:3"])]),
-        # through another table only, a class-less table, a column the row does not hold
-        "through": files(13, [pair("JediFileSpec.fileID", "FileSpec.fileID")], trees=[term("equal", "JediFileSpec.status", "=", [val("ready")])]),
+        # every route refuses the row: nothing the rows could change (rows no other statement asks)
+        "refused": files(12, by_job[1:], routes=[N(**vars(route([share])), constants={}, chain=["d/b.py:3"])]),
+        # through another table only (the task's, whose row the file holds: not the row asked), a class-less table, a
+        # column the row does not hold
+        "through": files(13, [pair("JediFileSpec.jediTaskID", "JediTaskSpec.jediTaskID")], trees=[term("equal", "JediFileSpec.status", "=", [val("ready")])]),
         "class-less": files(14, [pair("", "JobSpec.PandaID", "t", "j")], trees=[term("equal", "T_TASK.total_done_jobs", "=", [val("0")])]),
         "unheld": files(15, [pair("FileSpec.dispatchDBlock", "JobSpec.dispatchDBlock")]),
         # no read site of its name in the dump: said, not asked
@@ -2683,17 +2685,26 @@ def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_st
         kind, lines = r._passed_over(st, q)
         said[name] = [kind, len(r.rows_asks) - before, [x for x in lines if x.startswith(("not compared", "the dump has"))]]
     asked = list(r.rows_asks.values())
+    # rows the file's linked holds by a pair the statement joins on, for the row's value: said, not asked; another
+    # pair, or another value, is asked
+    r.data["linked"] = [{"class": "FileSpec", "via": {"from": "JobSpec.PandaID", "to": "FileSpec.PandaID"}, "asked": [1], "rows": []},
+                        {"class": "FileSpec", "via": {"from": "JobSpec.jediTaskID", "to": "FileSpec.jediTaskID"}, "asked": [6], "rows": []}]
+    r.rows_asks = {}
+    held = [r._passed_over(files(19, by_job[:1]), q)[1][-1], len(r.rows_asks), r._passed_over(files(20, by_job[1:]), q)[1][-1], len(r.rows_asks)]
+    r.data.pop("linked")
     # L2's movers: a statement it did not judge asks too, one it judged refused does not
     r.rows_asks = {}
     q.movers, q.by_key, q.refusing, q.mover, q.writers = {"d/a.py::open": "main@16 hands the rows it selects to it"}, [], [], "p/w.py::moved", []
     q.paths = {"d/a.py::open": [files(16, by_job[:1]), files(17, [pair("FileSpec.fileID", "JobSpec.PandaID")])]}
     r._movers_in_window(q, {("d/a.py::main", 17): "refused"})
-    print(json.dumps([said, asked, [a["rows"]["where"] for a in r.rows_asks.values()]]))
+    print(json.dumps([said, asked, [a["rows"]["where"] for a in r.rows_asks.values()], held]))
     """,
         )
     )
-    said, asked, by_l2 = json.loads(out.splitlines()[-1])
+    said, asked, by_l2, held = json.loads(out.splitlines()[-1])
     assert by_l2 == [{"PandaID": 1}]
+    assert held == ["the rows file's linked holds FileSpec's rows by JobSpec.PandaID -> FileSpec.PandaID, which this step does not "
+                    "compare (KNOWN_ISSUES.md K36)", 0, "not compared: FileSpec.type (no row of FileSpec)", 1]
     assert said["joined"] == ["not settled", 2, ["not compared: FileSpec.type (no row of FileSpec)"]]
     assert said["again"][:2] == ["not settled", 0]
     assert said["refused"][:2] == ["refused", 0] and said["refused"][2] == said["joined"][2]
@@ -2701,12 +2712,14 @@ def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_st
     assert said["through"][2] == ["not compared: JediFileSpec.status (no row of JediFileSpec)"]
     assert said["no site"] == ["not settled", 0, [said["joined"][2][0], "the dump has no read site panda:d/a.py::main@18: its joins "
                                                   "are not read, and the rows of FileSpec.type not asked"]]
-    why = "main@10 compares FileSpec's type with the row's, and the rows file has no row of FileSpec"
+    why = "main@10 compares FileSpec's type with the row's, and neither the rows file's rows nor its linked hold FileSpec's"
     row = {"entity": "JobSpec", "key": {"PandaID": 1}}
+    by_id = {"from": "JobSpec.PandaID", "to": "FileSpec.PandaID"}
     assert asked == [
-        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1, "jediTaskID": 5}},
+        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1, "jediTaskID": 5},
+                  "via": [by_id, {"from": "JobSpec.jediTaskID", "to": "FileSpec.jediTaskID"}]}, "step": "M2", "why": why},
+        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1}, "via": [by_id]},
          "step": "M2", "why": why},
-        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1}}, "step": "M2", "why": why},
     ]
 
 
