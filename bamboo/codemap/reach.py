@@ -39,6 +39,7 @@ import re
 from collections import Counter, deque
 from typing import Callable, Iterable, Iterator, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap import calls as C
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
@@ -877,9 +878,8 @@ _KEEPING_BUILTINS = {
 _COPYING_BUILTINS = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
 #: Builtins whose value is one of the elements of what they are handed.
 _PICKING_BUILTINS = {"max", "min", "next"}
-#: A builtin container's methods that put what they are handed into it.
-_PUTTING_METHODS = {"append", "add", "insert", "extend", "setdefault", "update"}
-#: ... and those that hand back a part of it: (the part's place below the receiver, the value's place below the part).
+#: A builtin container's methods that hand back a part of it (what they put into it is :mod:`callfacts`'s): (the
+#: part's place below the receiver, the value's place below the part).
 _PARTS: dict[str, tuple[_Path, _Path]] = {
     "copy": ((), ()),
     "values": ((None,), (None,)),
@@ -1676,16 +1676,30 @@ class _Holders:
             receiver = self.receivers.of(file, func, called.value)
             if receiver[0] == _BUILTIN and receiver[1] in _SCALARS:
                 return None  # a text's method: ", ".join(xs)
-            if receiver[0] == _BUILTIN and not called.attr.startswith("__"):
-                if called.attr in _PUTTING_METHODS:
-                    self._put_into(file, func, call, argument, at, of)
+            if receiver[0] == _QUEUE:
+                self._unread(at, of)  # handed to whoever gets it: HOLE_QUEUE
+                return None
+            meant = callfacts.meaning(self.calls, file, func, call, placed)
+            if (
+                receiver[0] == _BUILTIN
+                and not called.attr.startswith("__")
+                and meant.kind != callfacts.LIBRARY
+            ):
+                # The builtin this reading says the receiver is: its type's method.
+                method = callfacts.builtin_method(receiver[1], called.attr)
+                if method is not None and method.puts:
+                    self._put_into(file, func, call, argument, at, of, method)
                 return None  # a key, a test: y.index(x), y.remove(x)
             if (
-                receiver[0] == _UNKNOWN
-                and called.attr in _PUTTING_METHODS
-                and placed.unplaced == C.UNPLACED_RECEIVER
+                meant.kind
+                in (callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED)
+                and meant.method is not None
+                and meant.method.puts
             ):
-                self._put_into(file, func, call, argument, at, of, held=True)
+                assumed = meant.kind == callfacts.ASSUMED
+                self._put_into(
+                    file, func, call, argument, at, of, meant.method, held=assumed
+                )
                 return None
         self._unread(at, of)
         return None
@@ -1698,50 +1712,54 @@ class _Holders:
         argument: ast.AST,
         at: _Path,
         of: _Path,
+        method: callfacts.Method,
         held: bool = False,
     ) -> None:
-        """``y.append(here)`` and the like on a builtin container *y*: *y* holds it.
+        """``y.append(here)`` and the like: *y* holds it where *method* puts it (:class:`callfacts.Put`) -- one
+        element, its elements as elements, the value under the key handed beside it, *y* itself merged or keeping it
+        whole; a key holds nothing of it.
 
         *held*: *y*'s class is not read (``kwargs.update(new_kwargs)``, ``kwargs`` one of a list declared ``Any``).
         The put is read only where *y* is a holder of the same place anyway, reached by another move: its own walk
         reads what it is bound to, and any binding not a literal makes the answer what it holds, not a builtin.
         Asked at the walk's end (:meth:`values`), so the order the holders are read in does not decide it."""
         called = call.func
-        method = called.attr  # type: ignore[attr-defined]
-        if not isinstance(argument, ast.expr) or isinstance(argument, ast.Starred):
+        if isinstance(argument, ast.Starred):
             self._unread(at, of)
             return
-        position = next(i for i, one in enumerate(call.args) if one is argument)
-        if method in ("append", "add") or (method == "insert" and position == 1):
-            link: Optional[tuple[_Path, _Path]] = ((None,), ())
-        elif method == "extend":
-            link = ((None,), (None,))
-        elif method == "setdefault" and position == 1:
-            link = ((call.args[0],), ())
-        elif method == "update":
-            link = ((), ())
-        else:
-            link = None  # a key
-        if link is None:
-            return
-        moved = _composed(link[0], link[1], at, of)
-        if moved is None:
-            return
-        if not held:
-            self._into(file, func, called.value, *moved)  # type: ignore[attr-defined]
-            return
-        chain = _chain(called.value)  # type: ignore[attr-defined]
-        if chain is None:
-            self._unread(*moved)
-        elif self._bears(chain[1] + moved[0], moved[1]) == "holder":
-            self.required.add(
-                (
-                    id(func),
-                    chain[0].id,
-                    _spelled(chain[1] + moved[0]),
-                    _spelled(moved[1]),
+        value = argument.value if isinstance(argument, ast.keyword) else argument
+        links: list[tuple[_Path, _Path]] = []
+        for one, put, key, keyword in callfacts.put_arguments(method, call):
+            if one is not value:
+                continue
+            if put.into == callfacts.ELEMENT:
+                links.append(((None,), ()))
+            elif put.into == callfacts.ELEMENTS:
+                links.append(((None,), (None,)))
+            elif put.into == callfacts.VALUE:
+                under = key if key is not None else ast.Constant(value=keyword) if keyword else None
+                links.append(((under,), ()))
+            elif put.into in (callfacts.MERGE, callfacts.WHOLE):
+                links.append(((), ()))
+        for link in links:
+            moved = _composed(link[0], link[1], at, of)
+            if moved is None:
+                continue
+            if not held:
+                self._into(file, func, called.value, *moved)  # type: ignore[attr-defined]
+                continue
+            chain = _chain(called.value)  # type: ignore[attr-defined]
+            if chain is None:
+                self._unread(*moved)
+            elif self._bears(chain[1] + moved[0], moved[1]) == "holder":
+                self.required.add(
+                    (
+                        id(func),
+                        chain[0].id,
+                        _spelled(chain[1] + moved[0]),
+                        _spelled(moved[1]),
+                    )
                 )
-            )
 
     def _parameters(
         self,

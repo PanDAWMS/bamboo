@@ -88,6 +88,7 @@ from typing import Optional
 
 import click
 
+from bamboo.codemap import callfacts
 from bamboo.codemap import models as models_mod
 from bamboo.codemap import reading as reading_mod
 from bamboo.codemap import trace as trace_mod
@@ -797,7 +798,7 @@ def _binding_lines(func: ast.AST, name: str) -> dict[int, str]:
             # sample, all naming a line that does put a value there.
             held = node.func.value
             if (
-                node.func.attr in trace_mod._FILLERS
+                node.func.attr in callfacts.PUTTING
                 and isinstance(held, ast.Name)
                 and held.id == name
             ):

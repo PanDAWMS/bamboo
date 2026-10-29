@@ -10104,6 +10104,210 @@ def test_a_method_an_outside_base_supplies_keeps_what_it_is_handed_in_its_object
     assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
 
 
+def _sweeping(lines: str, imports: str = "") -> str:
+    """The task module of these tests: its statement at line 7, its rows ``res``, then *lines*."""
+    return (
+        _typed(
+            (
+                "class TaskModule:\n"
+                "    def sweep(self):\n"
+                "        varMap = {}\n"
+                "        varMap[':status'] = 'pending'\n"
+                "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+                "        sqlA += 'WHERE status=:status '\n"
+                "        self.cur.execute(sqlA + comment, varMap)\n"
+                "        res = self.cur.fetchall()\n"
+                f"{lines}"
+                f"{_NEXT_STATEMENT}"
+            )
+            + _EXIT_TAIL,
+            ("retrier", "Retry", "r"),
+        )
+        + imports
+    )
+
+
+_RETRY_TESTING = "class Retry:\n    def retryTask(self, t):\n        if t:\n            pass\n"
+
+
+@pytest.mark.parametrize(
+    ("declared", "crosses"),
+    [("def declares(lists: WeightedLists) -> None:\n    pass\n", True), ("", False)],
+    ids=["a-class-the-corpus-annotates", "a-name-the-corpus-never-annotates"],
+)
+def test_a_library_object_keeps_what_its_method_is_handed(tmp_path, declared, crosses):
+    """add_main's ``jor_lists = WeightedLists(lock)`` then ``jor_lists.add(3, jor_list)``: pandacommon's
+    ``WeightedLists.add(weight, list_data)`` is no builtin's, and nothing says what it does with the rows, so the
+    object keeps them, whole (:mod:`callfacts`).  It is a class's object because the corpus declares a parameter
+    ``WeightedLists`` somewhere; where nothing does, the call reads as ``set.add`` by its name, which puts the 3."""
+    source = _sweeping(
+        "        lists = WeightedLists(lock)\n"
+        "        lists.add(3, res)\n"
+        "        self.retrier.retryTask(lists.pop())\n",
+        "from pandacommon.pandautils.thread_utils import WeightedLists\n\n\n" + declared,
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(_RETRY_TESTING, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+@pytest.mark.parametrize(
+    ("target", "crosses"),
+    [("self.run", True), ("self.done", False)],
+    ids=["the-method-handing-the-rows-on", "one-handing-nothing"],
+)
+def test_a_method_handed_bound_is_entered_with_its_object(tmp_path, target, crosses):
+    """AdderThread is built with the job output reports, and ``proc_launch`` hands
+    ``multiprocessing.Process(target=self.run)``: ``run`` runs with the object holding them, and hands one on.  The
+    walk enters a method handed bound to an object holding a part of the rows, its object that, as the reach
+    record's ``handed`` edge does."""
+    source = _sweeping("        worker = Worker(res)\n        worker.launch()\n", "from pandaserver.w import Worker\n")
+    worker = (
+        "from multiprocessing import Process\n\n"
+        "from pandaserver.r import Retry\n\n\n"
+        "class Worker:\n"
+        "    def __init__(self, rows):\n"
+        "        self.rows = rows\n\n"
+        "    def launch(self):\n"
+        f"        Process(target={target}).start()\n\n"
+        "    def run(self):\n"
+        "        Retry().retryTask(self.rows)\n\n"
+        "    def done(self):\n"
+        "        pass\n"
+    )
+    nodes, _census = _crossed(
+        tmp_path, source, ["r.py::retryTask"], others=[(worker, "w.py"), (_RETRY_TESTING, "r.py")]
+    )
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+@pytest.mark.parametrize(
+    ("read", "crosses"),
+    [("status", True), ("label", False)],
+    ids=["the-attribute-the-rows-are-in", "another"],
+)
+def test_the_pickle_round_trip_copies_what_it_is_handed_attribute_for_attribute(tmp_path, read, crosses):
+    """``PickleJobSpec.update(spec)`` is ``self.__setstate__(spec.__getstate__())``: both bodies go over
+    ``_attributes`` by a name the loop holds, and read so the copy would hold every part of the spec under every
+    attribute.  Read as pickle's round trip, it holds what the spec holds where the spec holds it: ``status``
+    carries the rows, ``label`` nothing."""
+    source = _sweeping(
+        "        spec = Spec()\n"
+        "        spec.status = res[0]\n"
+        "        spec.label = 'x'\n"
+        "        copied = Copy()\n"
+        "        copied.update(spec)\n"
+        "        self.retrier.retryTask(copied)\n",
+        "from pandaserver.s import Copy, Spec\n",
+    )
+    specs = (
+        "class Spec:\n"
+        "    _attributes = ('status', 'label')\n\n"
+        "    def __getstate__(self):\n"
+        "        state = []\n"
+        "        for attr in self._attributes:\n"
+        "            state.append(getattr(self, attr))\n"
+        "        return state\n\n"
+        "    def __setstate__(self, state):\n"
+        "        for i in range(len(self._attributes)):\n"
+        "            object.__setattr__(self, self._attributes[i], state[i])\n\n\n"
+        "class Copy(Spec):\n"
+        "    def update(self, spec):\n"
+        "        self.__setstate__(spec.__getstate__())\n"
+    )
+    retrier = f"class Retry:\n    def retryTask(self, t):\n        if t.{read}:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(specs, "s.py"), (retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == (["pandaserver/r.py::retryTask"] if crosses else [])
+
+
+def test_the_pickle_round_trip_is_no_read_of_what_it_copies(tmp_path):
+    """Setupper's ``p_job.update(job_spec)``: ``PickleFileSpec.update`` copies each file, and ``FileSpec.__getstate__``
+    tests a field on the way.  Read by the bodies, ``storeJobs`` -- which only hands its jobs to the Setupper --
+    read the rows, and the walk stopped there.  The round trip is a copy, either half: what copies the rows and does
+    nothing else with them reads none of them."""
+    source = _sweeping(
+        "        spec = Spec()\n        spec.status = res[0]\n        self.retrier.retryTask(spec)\n",
+        "from pandaserver.s import Spec\n",
+    )
+    specs = (
+        "class Spec:\n"
+        "    _attributes = ('status', 'label')\n\n"
+        "    def __getstate__(self):\n"
+        "        state = []\n"
+        "        for attr in self._attributes:\n"
+        "            value = getattr(self, attr)\n"
+        "            if value is None:\n"
+        "                value = 'NULL'\n"
+        "            state.append(value)\n"
+        "        return state\n\n"
+        "    def __setstate__(self, state):\n"
+        "        for i in range(len(self._attributes)):\n"
+        "            object.__setattr__(self, self._attributes[i], state[i])\n\n\n"
+        "class Copy(Spec):\n"
+        "    def update(self, spec: Spec):\n"
+        "        self.__setstate__(spec.__getstate__())\n"
+    )
+    retrier = (
+        "from pandaserver.s import Copy\n\n\n"
+        "class Retry:\n"
+        "    def retryTask(self, t):\n"
+        "        copied = Copy()\n"
+        "        copied.update(t)\n"
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(specs, "s.py"), (retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == []
+
+
+def test_a_function_keeps_what_it_is_handed_in_an_object_it_is_handed(tmp_path):
+    """getScoutJobData_JEDI's nested ``addTag(jobTagMap, cpuEffDict, ...)`` files each job's PandaID under
+    ``jobTagMap``, whose keys go on to ``updateJobMetrics_JEDI``: a function of the corpus, not only a method, is read
+    by its body for what it keeps in what it is handed."""
+    source = _sweeping(
+        "        box = {}\n        fill(box, res)\n        self.retrier.retryTask(box)\n",
+        "from pandaserver.h import fill\n",
+    )
+    filler = "def fill(d, rows):\n    d['rows'] = rows\n"
+    retrier = "class Retry:\n    def retryTask(self, t):\n        if t['rows']:\n            pass\n"
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(filler, "h.py"), (retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/r.py::retryTask"]
+
+
+def test_a_method_of_the_corpus_named_as_a_container_s_is_read_by_its_body(tmp_path):
+    """JEDI's ``ListWithLock.append(item)`` puts the item into ``self.dataList``, and its ``get`` hands back a slice
+    of that: read by its body -- not as ``list.append`` by its name, which put the rows where ``get`` does not look
+    -- the rows go into the shelf and come out to ``retryTask``."""
+    source = _sweeping(
+        "        shelf = Shelf()\n        shelf.append(res)\n        self.retrier.retryTask(shelf.get(1))\n",
+        "from pandaserver.l import Shelf\n",
+    )
+    shelf = (
+        "class Shelf:\n"
+        "    def __init__(self):\n"
+        "        self.dataList = []\n\n"
+        "    def append(self, item):\n"
+        "        if item not in self.dataList:\n"
+        "            self.dataList.append(item)\n\n"
+        "    def get(self, num):\n"
+        "        return self.dataList[:num]\n"
+    )
+    retrier = (
+        "class Retry:\n    def retryTask(self, t):\n        for one in t:\n            if one:\n                pass\n"
+    )
+    nodes, _census = _crossed(tmp_path, source, ["r.py::retryTask"], others=[(shelf, "l.py"), (retrier, "r.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/r.py::retryTask"]
+
+
 def test_a_function_gone_through_is_read_for_each_way_in(tmp_path):
     """Entered once a statement for what it is handed, not once: ``handle`` given the rows as ``first`` and then as
     ``second`` reaches both.  Keyed by the definition alone, the second way in was not taken, and which came first
