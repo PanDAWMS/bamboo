@@ -12,14 +12,18 @@ one order:
 2. a definition of the corpus the call lands at: its body says what it does (:data:`DEFINITION`);
 3. a logger's method, by its name (:data:`LOG_METHODS`), where no definition answers: it writes a line and keeps
    nothing it is handed (:data:`LOGGER`, the assumption ``logger_keeps_nothing``) -- ``LogWrapper`` is a library
-   class, and step 4 would read ``tmp_log.debug(msg)`` as keeping the message;
-4. an object of a class outside the corpus (:meth:`calls.Types.library_classes`), or of a class of the corpus built
-   on a base outside it that supplies the method (:meth:`calls.Types.built_outside`): nothing here says what the
-   method does with what it is handed, so it keeps all of it (:data:`LIBRARY`);
-5. a builtin container: its type's method (:data:`BUILTIN`);
-6. an object whose class cannot be said, or a value a call outside the corpus made -- ``json.loads``', a row the
+   class, and step 5 would read ``tmp_log.debug(msg)`` as keeping the message;
+4. an object of another system's client -- its class, or the base outside the corpus a class of the corpus is built
+   on, defined in a package :data:`OTHER_SYSTEMS` names: it hands what it is given to that system, another run's
+   input, and keeps nothing of it (:data:`CLIENT`, the assumption ``other_systems_keep_nothing``) -- Rucio's
+   ``Client``, ``smtplib.SMTP``, the message broker's agent;
+5. an object of any other class outside the corpus (:meth:`calls.Types.library_classes`), or of a class of the
+   corpus built on a base outside it that supplies the method (:meth:`calls.Types.built_outside`): nothing here says
+   what the method does with what it is handed, so it keeps all of it (:data:`LIBRARY`);
+6. a builtin container: its type's method (:data:`BUILTIN`);
+7. an object whose class cannot be said, or a value a call outside the corpus made -- ``json.loads``', a row the
    database returned: the builtin's method of the name (:data:`ASSUMED`, the assumption ``builtin_by_name``);
-7. anything else: nothing is said (:data:`UNKNOWN`) -- a module's function, a method read off a class, a class of
+8. anything else: nothing is said (:data:`UNKNOWN`) -- a module's function, a method read off a class, a class of
    the corpus that has no such method.
 
 Each reader keeps its question and answers it from the :class:`Method` it is given.  A reader that reads text alone,
@@ -137,11 +141,43 @@ LOG_METHODS = frozenset(
     }
 )
 
+#: The other systems PanDA is a client of -> the packages it reaches each through.  What a client's method is handed
+#: goes to that system: another run's input, not this run's (reach's premise ``cross_run_not_reach``).  Not the
+#: database's drivers (the driver rule says where those go), not a library that works on what it is handed here
+#: (``numpy``, ``yaml``, ``snakemake``), not a server the corpus runs (``fastmcp``, ``uvicorn``).  A package is a
+#: module's name or the start of one: ``pandacommon.pandamsgbkr`` is the broker's, ``pandacommon.pandalogger`` not.
+#: :data:`bamboo.codemap.panda.provenance.OUTSIDE_PACKAGES` reads this table.
+OTHER_SYSTEMS: dict[str, tuple[str, ...]] = {
+    "DDM / Rucio": ("rucio",),
+    "iDDS": ("idds",),
+    "message broker": ("pandacommon.pandamsgbkr",),
+    "Kafka": ("pandacommon.kafkapublisher",),
+    "PanDA's API": ("pandaclient",),
+    "HTTP": ("requests", "urllib3", "httpx"),
+    "mail": ("smtplib",),
+}
+
+
+def other_system(module: str) -> Optional[str]:
+    """The system of :data:`OTHER_SYSTEMS` whose package *module* is in, or ``None``."""
+    for system, packages in OTHER_SYSTEMS.items():
+        if any(
+            module == package or module.startswith(f"{package}.")
+            for package in packages
+        ):
+            return system
+    return None
+
+
 #: The assumptions a reading by this module rests on, as reach's are said (:data:`bamboo.codemap.reach.ASSUMPTIONS`).
 ASSUMPTIONS: dict[str, str] = {
     "builtin_by_name": (
         "A method whose receiver's class cannot be said -- or a value a call outside the corpus made -- is the "
         "builtin container's of its name."
+    ),
+    "other_systems_keep_nothing": (
+        "A method of another system's client (OTHER_SYSTEMS: its class, or the base outside the corpus a class of the "
+        "corpus is built on, is in one of its packages) hands what it is given to that system and keeps nothing of it."
     ),
     "library_keeps_what_it_is_handed": (
         "A method of an object whose class is outside the corpus, or is built on a base outside it that supplies the "
@@ -158,10 +194,11 @@ ASSUMPTIONS: dict[str, str] = {
 }
 
 #: How :func:`meaning` reads a call (the module's order).
-PROTOCOL, DEFINITION, LOGGER, LIBRARY, BUILTIN, ASSUMED, UNKNOWN = (
+PROTOCOL, DEFINITION, LOGGER, CLIENT, LIBRARY, BUILTIN, ASSUMED, UNKNOWN = (
     "protocol",
     "definition",
     "logger",
+    "client",
     "library",
     "builtin",
     "assumed",
@@ -173,8 +210,9 @@ PICKLE_ROUND_TRIP = "pickle_round_trip"
 
 class Meaning(NamedTuple):
     """What a call does, as :func:`meaning` reads it: *kind* the step that answered, *method* the fact for
-    :data:`LOGGER`, :data:`LIBRARY`, :data:`BUILTIN` and :data:`ASSUMED`, *assumption* the :data:`ASSUMPTIONS` key
-    the answer rests on, *copied_from* the ``y`` a :data:`PROTOCOL` copies into the call's receiver."""
+    :data:`LOGGER`, :data:`CLIENT`, :data:`LIBRARY`, :data:`BUILTIN` and :data:`ASSUMED`, *assumption* the
+    :data:`ASSUMPTIONS` key the answer rests on, *copied_from* the ``y`` a :data:`PROTOCOL` copies into the call's
+    receiver."""
 
     kind: str
     method: Optional[Method] = None
@@ -337,6 +375,8 @@ def meaning(
     except Exception:  # noqa: BLE001
         library = None
     if library:
+        if all(other_system(module) for module, _name in library):
+            return Meaning(CLIENT, Method(), "other_systems_keep_nothing")
         return Meaning(LIBRARY, KEEPS_ALL, "library_keeps_what_it_is_handed")
     if placed.unplaced == UNPLACED_NO_METHOD:
         try:
@@ -345,6 +385,12 @@ def meaning(
             declared = None
         classes = [one for each in declared or () for one in calls.objects_of(each)]
         if classes and all(types.built_outside(*one) for one in classes):
+            bases = [types.outside_bases(*one) for one in classes]
+            if all(
+                based and all(other_system(module) for module, _name in based)
+                for based in bases
+            ):
+                return Meaning(CLIENT, Method(), "other_systems_keep_nothing")
             return Meaning(LIBRARY, KEEPS_ALL, "library_keeps_what_it_is_handed")
         return _UNKNOWN
     literal = _literal_type(receiver)

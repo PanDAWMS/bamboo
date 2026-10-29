@@ -2724,12 +2724,12 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
     # ``sim`` is handed on as it came, so the route goes on out to ``run``, which hands a display: the
     # binding runs, and ``lock`` gets what it binds, not what ``run`` handed ``flag``.
     rebound = constants("rebound")
-    assert rebound.pop("flag") is True and repr(rebound.pop("other")) == "<a display of 1 item(s)>"
+    assert rebound.pop("flag") is True and repr(rebound.pop("other")) == "[...]"
     assert rebound == {"more": None}
     # Bound again under a test the route leaves open, or in a loop: it is no one's.
     assert constants("opened") == {"more": None}
     looped = constants("looped")
-    assert repr(looped.pop("other")) == "<a display of 1 item(s)>" and looped == {"more": None}
+    assert repr(looped.pop("other")) == "[...]" and looped == {"more": None}
     # The same binding under a test the route's own constant rules out is not on the route.
     assert constants("maybe") == {"flag": False, "other": None, "more": None}
     # ``other`` is handed on as it came: the outer call's.

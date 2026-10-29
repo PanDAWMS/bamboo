@@ -371,7 +371,7 @@ class _Receivers:
         if library in _QUEUES:
             return _QUEUE, ".".join(library)
         if named in _BUILTIN_ANNOTATIONS and (
-            library is None or library[0] in ("typing", "collections")
+            library is None or library[0].split(".")[0] in ("typing", "collections")
         ):
             return _BUILTIN, {
                 "Dict": "dict",
@@ -1680,6 +1680,8 @@ class _Holders:
                 self._unread(at, of)  # handed to whoever gets it: HOLE_QUEUE
                 return None
             meant = callfacts.meaning(self.calls, file, func, call, placed)
+            if meant.kind in (callfacts.LOGGER, callfacts.CLIENT):
+                return None  # a line written, another system handed it: it holds nothing of it here
             if (
                 receiver[0] == _BUILTIN
                 and not called.attr.startswith("__")

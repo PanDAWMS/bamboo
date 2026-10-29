@@ -227,7 +227,8 @@ class Displayed(list):
     ``simTasks=[tmpTaskItem]`` (TaskBroker 259) under ``if simTasks is not None``.  An item read as a value is
     unknown (:func:`~bamboo.codemap.panda.sqleval.from_py` reads one so).  Equal to no string, number or ``None``;
     against a container its items would decide, so it raises the ``TypeError``
-    :func:`~bamboo.codemap.panda.pathcond.decided` reads as undecided.
+    :func:`~bamboo.codemap.panda.pathcond.decided` reads as undecided.  Spelled as a list of as many ``...``: a
+    route's constants are kept as their reprs, a record, not words.
     """
 
     def __init__(self, items: int) -> None:
@@ -246,7 +247,7 @@ class Displayed(list):
     __hash__ = None  # type: ignore[assignment]
 
     def __repr__(self) -> str:
-        return f"<a display of {len(self)} item(s)>"
+        return "[" + ", ".join(["..."] * len(self)) + "]"
 
 
 class Target(NamedTuple):
@@ -2511,16 +2512,20 @@ class Types:
         """``(module, name)`` of the imported class *expression* names in *file*, or ``None``.
 
         ``threading.Thread`` under ``import threading``, ``Thread`` under
-        ``from threading import Thread``: read through the imports alone, so
-        a name bound any other way is ``None``.
+        ``from threading import Thread``, ``msg_processor.MsgProcAgentBase``
+        under ``from pandacommon.pandamsgbkr import msg_processor`` (the
+        module ``pandacommon.pandamsgbkr.msg_processor``'s, as under ``import
+        ... as msg_processor``; a class nested in an imported class reads the
+        same): read through the imports alone, so a name bound any other way
+        is ``None``.
         """
         if isinstance(expression, ast.Name):
             held = self.imports(file).get(expression.id)
             return held if held is not None and held[1] else None
         if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
             held = self.imports(file).get(expression.value.id)
-            if held is not None and not held[1]:
-                return held[0], expression.attr
+            if held is not None:
+                return (f"{held[0]}.{held[1]}" if held[1] else held[0]), expression.attr
         return None
 
     # -- classes -----------------------------------------------------------
@@ -2833,6 +2838,23 @@ class Types:
                     continue
                 return True
         return False
+
+    def outside_bases(self, file: str, cls: ast.ClassDef) -> Optional[frozenset[tuple[str, str]]]:
+        """``(module, name)`` of each base outside the corpus in *cls*'s order (:meth:`built_outside`'s), read through
+        the imports (:meth:`library_class`); ``None`` where one cannot be read so -- ``class MySMTP(smtplib.SMTP)``
+        is ``("smtplib", "SMTP")``."""
+        found: set[tuple[str, str]] = set()
+        for where, holder in self.mro(file, cls):
+            for base in holder.bases:
+                head = pathcond.unsubscripted(base)
+                named = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", "")
+                if named in ("object", "Generic", "Protocol") or self.class_named(where, head) is not None:
+                    continue
+                library = self.library_class(where, head) if isinstance(head, (ast.Name, ast.Attribute)) else None
+                if library is None:
+                    return None
+                found.add(library)
+        return frozenset(found) or None
 
     def library_classes(self, file: str, func: ast.AST, expression: ast.expr) -> Optional[frozenset[tuple[str, str]]]:
         """``(module, name)`` of each class outside the corpus *expression*'s object can be, where every one it can be

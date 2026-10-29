@@ -35,6 +35,7 @@ import ast
 import builtins
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
 from bamboo.codemap.panda.pathcond import names_bound_by, targets_of, written_value
@@ -60,13 +61,12 @@ INTERFACE_CLASSES = {
     "pandaserver/dataservice/ddm.py::RucioAPI": "DDM / Rucio",
 }
 
-#: The system -> the package PanDA reaches it through, where PanDA calls it.
-#: Declared beside the interface, because "outside the corpus" alone takes in
-#: pandacommon's logger as readily as the Rucio client.  ``SiteMapper`` reads
-#: CRIC's declarations already loaded and calls nothing out, so it has none.
-OUTSIDE_PACKAGES = {
-    "DDM / Rucio": ("rucio",),
-}
+#: The system -> the package PanDA reaches it through, where PanDA calls it:
+#: :data:`callfacts.OTHER_SYSTEMS`, the one table the readers of a call read
+#: too.  Named, because "outside the corpus" alone takes in pandacommon's
+#: logger as readily as the Rucio client.  ``SiteMapper`` reads CRIC's
+#: declarations already loaded and calls nothing out, so it has none.
+OUTSIDE_PACKAGES = callfacts.OTHER_SYSTEMS
 
 #: ``self.<attribute>`` -> the system on the other side of it.
 #:

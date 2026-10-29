@@ -71,6 +71,9 @@ def test_what_a_call_puts_is_its_arguments_where_the_method_puts_them(name, text
 
 _MODULE = (
     "import json\n"
+    "import smtplib\n"
+    "from rucio.client import Client as RucioClient\n"
+    "from pandacommon.pandamsgbkr import msg_processor\n"
     "from pandacommon.pandalogger.LogWrapper import LogWrapper\n"
     "from pandacommon.pandautils.base import SpecBase\n"
     "from pandacommon.pandautils.thread_utils import WeightedLists\n\n\n"
@@ -81,7 +84,11 @@ _MODULE = (
     "    pass\n\n\n"
     "class Spec(SpecBase):\n"
     "    pass\n\n\n"
-    "def declares(lists: WeightedLists, log: LogWrapper) -> None:\n"
+    "class Mailer(smtplib.SMTP):\n"
+    "    pass\n\n\n"
+    "class Agent(msg_processor.MsgProcAgentBase):\n"
+    "    pass\n\n\n"
+    "def declares(lists: WeightedLists, log: LogWrapper, rucio: RucioClient) -> None:\n"
     "    pass\n\n\n"
     "def fills(d, v):\n"
     "    d['k'] = v\n\n\n"
@@ -101,6 +108,12 @@ _MODULE = (
     "    spec = Spec()\n"
     "    spec.pack(v)\n"
     "    spec.__setstate__(other.__getstate__())\n"
+    "    rucio = RucioClient()\n"
+    "    rucio.add_files_to_dataset(v)\n"
+    "    mailer = Mailer()\n"
+    "    mailer.sendmail(v)\n"
+    "    agent = Agent()\n"
+    "    agent.start_passive_mode(v)\n"
     "    json.dumps(v)\n"
     "    fills(plain, v)\n"
 )
@@ -112,6 +125,9 @@ _MODULE = (
         ("plain.append", callfacts.BUILTIN, None),
         ("lists.add", callfacts.LIBRARY, "library_keeps_what_it_is_handed"),
         ("log.debug", callfacts.LOGGER, "logger_keeps_nothing"),
+        ("rucio.add_files_to_dataset", callfacts.CLIENT, "other_systems_keep_nothing"),
+        ("mailer.sendmail", callfacts.CLIENT, "other_systems_keep_nothing"),
+        ("agent.start_passive_mode", callfacts.CLIENT, "other_systems_keep_nothing"),
         ("loaded.update", callfacts.ASSUMED, "builtin_by_name"),
         ("taker.append", callfacts.DEFINITION, None),
         ("holder.add", callfacts.UNKNOWN, None),
@@ -124,6 +140,9 @@ _MODULE = (
         "a-builtin-container",
         "a-library-class-the-corpus-annotates",
         "a-logger-s-method-of-a-library-class",
+        "another-system-s-client",
+        "a-base-another-system-s-client",
+        "a-base-of-a-module-imported-from-its-package",
         "a-value-a-call-outside-the-corpus-made",
         "a-definition-of-the-corpus",
         "a-class-of-the-corpus-with-no-such-method",
@@ -134,9 +153,11 @@ _MODULE = (
     ],
 )
 def test_a_call_is_read_in_one_order(tmp_path, callee, kind, assumption):
-    """The protocol first, then the definition the call lands at, a logger's method, a library object, a builtin
-    container, the builtin of the name where the class cannot be said: ``WeightedLists(lock)`` is a library class's
-    object because the corpus declares a parameter so -- ``json.loads(text)`` reads the same and is not."""
+    """The protocol first, then the definition the call lands at, a logger's method, another system's client (Rucio's
+    ``Client``, a class built on ``smtplib.SMTP`` or on ``msg_processor.MsgProcAgentBase``) keeping nothing, a library
+    object, a builtin container, the builtin of the name where the class cannot be said: ``WeightedLists(lock)`` is
+    a library class's object because the corpus declares a parameter so -- ``json.loads(text)`` reads the same and is
+    not."""
     calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, mod=_MODULE), {}))
     file = f"{PACKAGE}/mod.py"
     func = next(

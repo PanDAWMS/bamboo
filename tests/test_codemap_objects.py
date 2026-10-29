@@ -1008,13 +1008,15 @@ def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):
 _KEEPER = """\
 from pandacommon.pandalogger.LogWrapper import LogWrapper
 from pandacommon.pandautils.thread_utils import WeightedLists
+from rucio.client import Client as RucioClient
 
 
 class Keeper:
-    def keep(self, job, lists: WeightedLists, log: LogWrapper):
+    def keep(self, job, lists: WeightedLists, log: LogWrapper, rucio: RucioClient):
         lists.add(3, job)
         log.debug(job)
         log.keepMsg(job)
+        rucio.add_files_to_dataset(job)
 """
 
 
@@ -1022,7 +1024,8 @@ def test_a_library_object_keeps_what_its_method_is_handed_and_a_logger_keeps_not
     tmp_path,
 ):
     """``lists.add(3, job)`` on a library class's object keeps the job in it, as nothing says what ``add`` does
-    there; ``log.debug(job)`` writes a line -- a logger's method, by its name, keeps nothing."""
+    there; ``log.debug(job)`` writes a line -- a logger's method, by its name, keeps nothing; and
+    ``rucio.add_files_to_dataset(job)`` hands it to another system, which keeps nothing of it here."""
     fragment = _build(tmp_path, keeper=_KEEPER)
     (row,) = [one for one in fragment.reach_graph if one.owner.endswith("Keeper.keep")]
     assert {(b.name, b.path) for b in row.bindings if b.how == BIND_FILL} == {
