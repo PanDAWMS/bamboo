@@ -754,6 +754,16 @@ class Branch(BaseModel):
             "the block records about the decision rather than what it writes."
         ),
     )
+    value_cuts: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lengths the code itself cuts the whole value to on its way "
+            "to the write (``newSH = newSH[:500]``), beside the cut a spec "
+            "makes (``SubjectNode.truncated_to``): a value of one of them may "
+            "be the head of a frame, not all of it.  Read with "
+            "``value_frames``; ``[]`` where nothing cuts it."
+        ),
+    )
     must_prints: Optional[list[int]] = Field(
         default=None,
         description=(
@@ -818,6 +828,11 @@ def pooled_frames(one: list[str], other: list[str]) -> list[str]:
     return sorted(set(one) | set(other))
 
 
+def pooled_cuts(one: list[int], other: list[int]) -> list[int]:
+    """The cuts of two branches kept as one: a value either write cuts may be a head (:attr:`Branch.value_cuts`)."""
+    return sorted(set(one) | set(other))
+
+
 def branch_excludes(branch: Branch, value: str, truncated_to: Optional[int] = None) -> bool:
     """Whether a tier-2 branch's own frames prove it cannot have produced *value*.
 
@@ -848,7 +863,9 @@ def branch_excludes(branch: Branch, value: str, truncated_to: Optional[int] = No
     that wrote a long ``ddmErrorDiag`` -- ``JobSpec`` keeps 500 characters and
     the frame's tail is in what it dropped.  Reading every value as a head
     gives up 26 eliminations the map makes, ``es_merge`` against
-    ``es_merge_{}`` among them.
+    ``es_merge_{}`` among them.  The code can cut a value itself, where the
+    spec does not (``updateJobMetrics_JEDI``'s ``newSH[:500]``): a value of
+    one of :attr:`Branch.value_cuts`' lengths is read as a head too.
     """
     if branch.tier != 2 or not branch.value_frames:
         return False
@@ -859,7 +876,7 @@ def fitting_frames(branch: Branch, value: str, truncated_to: Optional[int] = Non
     """The frames of a tier-2 *branch* that *value* fits, read as :func:`branch_excludes` reads them."""
     if branch.tier != 2:
         return []
-    cut = truncated_to is not None and len(value) == truncated_to
+    cut = (truncated_to is not None and len(value) == truncated_to) or len(value) in branch.value_cuts
     return [frame for frame in branch.value_frames if _fits(frame.split(_HOLE), value, cut)]
 
 

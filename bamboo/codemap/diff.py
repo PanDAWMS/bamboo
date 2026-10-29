@@ -265,7 +265,8 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 #: What a branch says, compared between two branches of one outcome.  ``tags``
 #: and ``messages`` are the signature production writes when the branch fires,
 #: so a reworded message is a branch a reader can no longer name from a log.
-#: ``value_frames`` is what an observed value rules the branch out by.
+#: ``value_frames`` is what an observed value rules the branch out by, and
+#: ``value_cuts`` which lengths of it are read as a frame's head.
 BRANCH_FIELDS: tuple[str, ...] = (
     "path_condition",
     "row_precondition",
@@ -276,6 +277,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "tags",
     "messages",
     "value_frames",
+    "value_cuts",
     # Lines, as a FunctionPrints node's statements are: between two builds of
     # one tree they do not move.
     "other_lines",

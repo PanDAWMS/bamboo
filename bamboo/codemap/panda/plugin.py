@@ -39,6 +39,7 @@ from bamboo.codemap.models import (
     MapFragment,
     SourceModule,
     SubjectNode,
+    pooled_cuts,
     pooled_frames,
 )
 from bamboo.codemap.panda import mustprints, objects, promotion, runs, sql, sqltext
@@ -151,6 +152,7 @@ def _merge_junctions(junctions: list[JunctionNode]) -> list[JunctionNode]:
             held = known.get((branch.outcome, tuple(branch.path_condition)))
             if held is not None:
                 held.value_frames = pooled_frames(held.value_frames, branch.value_frames)
+                held.value_cuts = pooled_cuts(held.value_cuts, branch.value_cuts)
                 held.other_lines = sorted(
                     {*held.other_lines, *[line for line in (branch.line, *branch.other_lines) if line is not None]}
                     - {held.line}
