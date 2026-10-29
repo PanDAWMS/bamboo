@@ -702,6 +702,8 @@ def test_a_case_with_answers_runs_on_the_rows_file_built_from_them(
     }
     answers = _write(tmp_path, "answers.json", record)
     monkeypatch.setattr(RB, "column_spellings", lambda pin, dump: {"JediTaskSpec": {}})
+    tables = RB.Tables({"JediTaskSpec": "jediTaskID"}, {}, {}, {}, {})
+    monkeypatch.setattr(RB.Tables, "read", lambda dump: tables)
     path = _case(tmp_path)
     case = json.loads(path.read_text())
     del case["inputs"]["rows"]

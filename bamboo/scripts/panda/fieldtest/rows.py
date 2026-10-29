@@ -66,7 +66,7 @@ from typing import Any
 
 from bamboo.scripts.panda.fieldtest.fetch import (
     FILES,
-    KEY,
+    Tables,
     held_rows,
     job_of,
     links_from,
@@ -294,7 +294,7 @@ def bounds_of(response: dict) -> dict[str, str | None]:
     }
 
 
-def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
+def build(record: dict, spellings: dict[str, dict[str, str]], tables: Tables) -> dict:
     q = record["question"]
     cls = record["key_class"]
     entity = ENTITY[cls]
@@ -333,7 +333,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
     raw, read, why = key_row(laid, cls, q["key"])
     if raw is None:
         left_out.append(
-            f"rows.{entity}{', files' if cls == 'JobSpec' else ''}: {KEY[cls]}={q['key']}: {why}"
+            f"rows.{entity}{', files' if cls == 'JobSpec' else ''}: {tables.key[cls]}={q['key']}: {why}"
         )
     else:
         row = columns(
@@ -356,8 +356,8 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
             }
     else:
         _task_sections(out, laid, left_out)
-    out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings)
-    out["statuslogs"] = statuslogs(laid, int(q["key"]))
+    out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings, tables)
+    out["statuslogs"] = statuslogs(laid, int(q["key"]), tables)
 
     if other:
         out["about"] += (
@@ -458,6 +458,7 @@ def linked(
     raw: dict | None,
     read: dict,
     spellings: dict[str, dict[str, str]],
+    tables: Tables,
 ) -> list[dict]:
     """The rows each link from the key's rows named: one entry per link and table, with the values it asked.
 
@@ -469,7 +470,7 @@ def linked(
     out = []
     for cls, got in held.items():
         for link in links_from(cls):
-            values = sorted(values_by(link, got, key_class, key))
+            values = sorted(values_by(link, got, key_class, key, tables))
             if not values or (link.held and not got):
                 continue
             if link.held:
@@ -508,7 +509,7 @@ def linked(
     return out
 
 
-def statuslogs(laid: Laid, key: int) -> dict:
+def statuslogs(laid: Laid, key: int, tables: Tables) -> dict:
     """Each class's status histories that were answered, by the key of the row each belongs to; every key asked is there."""
     out = {}
     for cls, (part, kind) in HISTORIES.items():
@@ -524,7 +525,7 @@ def statuslogs(laid: Laid, key: int) -> dict:
                 {k: v for k, v in s.items() if k != "pandaid"}
             )
         out[cls] = {
-            "key": f"{cls}.{KEY[cls]}",
+            "key": f"{cls}.{tables.key[cls]}",
             "source": source,
             **bounds_of(laid.responses[part]),
             "by_key": by_key,

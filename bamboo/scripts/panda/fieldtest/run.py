@@ -236,13 +236,17 @@ def load_pair(home: Home, name: str) -> dict:
 
 
 def build_rows(answers: Path, pair: dict, out: Path) -> Path:
-    """Lay the fetch record *answers* out as a rows file at *out*, spelled by the pair's pin and dump."""
+    """Lay the fetch record *answers* out as a rows file at *out*, spelled and keyed by the pair's pin and dump."""
     # here, not at the top: rows imports fetch, which imports this module
     from bamboo.scripts.panda.fieldtest import rows  # noqa: PLC0415
 
-    spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), Path(pair["MAP_DUMP"]))
+    dump = Path(pair["MAP_DUMP"])
+    spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), dump)
+    tables = rows.Tables.read(dump)
     out.write_text(
-        json.dumps(rows.build(json.loads(answers.read_text()), spellings), indent=1)
+        json.dumps(
+            rows.build(json.loads(answers.read_text()), spellings, tables), indent=1
+        )
         + "\n"
     )
     return out
