@@ -309,6 +309,17 @@ K14 to drop or keep by its reach, and D's L2 no longer ruled out `updateRelatedE
 `activated`) nor `recordStatusChange`: hence writers only.  A miss costs more than an overclaim here: a mover kept
 is asked, one left out is not looked at again.
 
+A selecting statement's own crossings no longer overclaim so where the map reads the routes back up: a crossing takes
+only the values those routes select (`crossing_values`, the map's `crossing_selects`, XB, 2026-10-29).  1898 in
+`_get_tasks_datasets_with_unprocessed_inputs` adds `tabT.status IN (statusForJobGenerator())` only where no
+`target_tasks` is given, and its rows reach `setCloudToTasks_JEDI` only back up TaskBroker 259, which hands
+`simTasks`: S1 kept it a mover of `JediTaskSpec.status` `preprocessing`, `running`, `scouting` and `topreprocess`, and
+no more; `getPandaIDsWithTaskID`@95 filters failed / cancelled / closed only under `unsuccessful_only`, which task_api
+432 hands `killJobs` False.  An owner the map gives no values (reached from the statement's function, by a way no
+route matches, or from a statement with no route read) takes all the statement selects, as before.  A re-read's
+crossings are not narrowed so: the map gives the field on a selecting statement, and a statement reading rows again
+by their key selects no value of its own.
+
 *Shows:* the mover's line "<statement> selects the value, and <statement> reads its rows again and hands them to it",
 or "..., and they fill the key of the write(s) at [...]".
 *Revisit:* with a reading of the test a call runs under on the rows' values, through what a set the function fills

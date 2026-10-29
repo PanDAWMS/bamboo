@@ -706,6 +706,14 @@ class Way:
     elsewhere: tuple = ()
 
 
+def crossing_values(rs, owner: str) -> list[str]:
+    """The values *rs*'s rows hold where they reach *owner*, one of its ``crosses_to``: those the routes back up to it
+    select (the map's ``crossing_selects``, XB, 2026-10-29), or the statement's own ``selects`` for an owner the map
+    gives none -- one reached from the statement's function, by a way no route matches, or from a statement with no
+    route read -- and for every owner of a dump that has no such field."""
+    return (getattr(rs, "crossing_selects", None) or {}).get(owner, rs.selects)
+
+
 def _reached(follow, writers: list, subject: str, observed: str):
     """A ``Way`` for each way the map gives a function rows of *subject* holding *observed*, in the order S1 asks them;
     its statement is None for a writer whose write requires the value.  A statement that selects
@@ -717,9 +725,12 @@ def _reached(follow, writers: list, subject: str, observed: str):
     (``keyed_arms``); either way the statement hands its rows on
     as one whose owner has no arm in the region does: to what it calls there, or it keeps them (a mover with no arm of
     its own: KNOWN_ISSUES.md K14) -- and where the owner has arms, each naming a row the map says the rows do not fill
-    the key of, the way says them (``elsewhere``): S1 asks the map's reach of it as of a mover with none.  A statement that aggregates (the map's ``result``) gives none: what it hands on is
-    a value computed from the rows, not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator,
-    which picks none of them up); one that varies, or whose result the map did not read, is read as returning rows.
+    the key of, the way says them (``elsewhere``): S1 asks the map's reach of it as of a mover with none.  A crossing
+    hands on the value only where the routes back up to it select it (``crossing_values``): 1898's rows reach
+    setCloudToTasks_JEDI only back up TaskBroker 259, whose simTasks take the branch that selects no status.  A
+    statement that aggregates (the map's ``result``) gives none: what it hands on is a value computed from the rows,
+    not a row (getSiteToRunRateStats' count of a site's jobs goes to JobGenerator, which picks none of them up); one
+    that varies, or whose result the map did not read, is read as returning rows.
     Then each writer whose write requires the value (``guarded_by``).  Last, a statement that reads a selecting
     statement's rows again hands them on to writers (``read_again``).  A writer that takes a row by its key alone is in
     none (KNOWN_ISSUES.md K16)."""
@@ -734,7 +745,7 @@ def _reached(follow, writers: list, subject: str, observed: str):
         if any(lo <= line <= hi for line in arms):
             yield Way(rs.owner, f"{reader} selects the value", rs)
             for callee in rs.crosses_to:
-                if callee in writing:
+                if callee in writing and asked in crossing_values(rs, callee):
                     yield Way(callee, f"{reader} hands the rows it selects to it", rs)
             continue
         keyed, unread, unpersisted = keyed_arms(writers, rs, subject, arms)
@@ -751,7 +762,8 @@ def _reached(follow, writers: list, subject: str, observed: str):
             yield Way(rs.owner, f"{reader} selects the value, and {', and '.join(why)}: kept", rs)
         if rs.crosses_to:
             for owner in rs.crosses_to:
-                yield Way(owner, f"{reader} hands the rows it selects to it", rs)
+                if asked in crossing_values(rs, owner):
+                    yield Way(owner, f"{reader} hands the rows it selects to it", rs)
         else:
             elsewhere = () if keyed or unread or unpersisted else elsewhere_arms(writers, rs, subject, arms)
             yield Way(rs.owner, f"{reader} selects the value", rs, elsewhere)

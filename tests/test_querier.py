@@ -2087,6 +2087,35 @@ def test_a_key_filled_through_the_functions_reads_is_the_statements_and_an_arm_k
     assert elsewhere == {"p/jc.py::updateStatus": [241]}
 
 
+def test_a_crossing_hands_on_only_the_values_its_routes_back_up_select(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    S = "JediTaskSpec.status"
+    writers[:] = [writer("p/tc.py::getTasks", branch(1900, "ready")), writer("p/tb.py::setCloud", branch(204, "assigning")),
+                  writer("p/jg.py::run", branch(90, "ready")), writer("p/kill.py::killJobs", branch(5, "aborted"))]
+    # 1898 has an arm of its owner's in its region; 95's owner has none
+    region = stmt("p/tc.py::getTasks", 1898, [f"{S}=running", f"{S}=scouting"], [1890, 1910], ["p/tb.py::setCloud", "p/jg.py::run"])
+    past = stmt("p/tc.py::other", 95, [f"{S}=running", f"{S}=failed"], [93, 96], ["p/kill.py::killJobs", "p/jg.py::run"])
+    follow = N(guarded_by=[], reader_statements=[region, past])
+    before = [movers_of(follow, writers, S, v) for v in ("running", "failed")]
+    # setCloud is reached only back up a route that selects no status; killJobs only back up one that selects running
+    region.crossing_selects = {"p/tb.py::setCloud": []}
+    past.crossing_selects = {"p/kill.py::killJobs": [f"{S}=running"]}
+    after = [movers_of(follow, writers, S, v) for v in ("running", "failed")]
+    print(json.dumps([[sorted(m) for m in before], [sorted(m) for m in after]]))
+    """,
+        )
+    )
+    before, after = json.loads(out.splitlines()[-1])
+    # a dump with no crossing_selects pairs every crossing with every value the statement selects
+    assert before == [["p/jg.py::run", "p/kill.py::killJobs", "p/tb.py::setCloud", "p/tc.py::getTasks"],
+                      ["p/jg.py::run", "p/kill.py::killJobs"]]
+    # in the region and past it, a crossing takes only what its routes select; one the map names none of takes all
+    assert after == [["p/jg.py::run", "p/kill.py::killJobs", "p/tc.py::getTasks"], ["p/jg.py::run"]]
+
+
 def test_a_mover_whose_rows_reach_none_of_its_arms_is_one_by_key_where_the_reach_without_them_writes_nothing(tmp_path):
     out = _ok(
         _run(
