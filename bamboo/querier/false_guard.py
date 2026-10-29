@@ -98,12 +98,16 @@ class Walk:
 
     def __init__(
         self, steps: list, env: E.Env, collections: dict[str, dict], rows: dict[str, list[dict]], ran: list[tuple[str, int]] = (),
+        ask=None,
     ) -> None:
         self.steps = steps
         self.env = env
         #: canonical iterable (``<job>.Files``) -> {"rows": key in *rows*, "entity": name}
         self.collections = collections
         self.rows = rows
+        #: ``ask(iterable, step, env)``, told of a loop over a collection *collections* does not have
+        #: (``Rerun.ask_collection``)
+        self.ask = ask
         #: (owner, "early-exit at N", test) that held: an early exit on the path to a line a
         #: traceback frame shows running was not taken, so nothing below it was cut off by it.
         #: Only early exits: they carry their line, and a guard's text alone does not say which ``if``.
@@ -135,15 +139,19 @@ class Walk:
         return [s for s in self.steps if s.kind == "handover" and s.name == name and s.owner != owner]
 
     # ------------------------------------------------------------ one row of a loop
-    def elements(self, step) -> list[Element | None]:
-        """The rows the loops around *step* ran for; ``[None]`` when it is in no loop."""
+    def elements(self, step) -> list[Element | None] | None:
+        """The rows the loops around *step* ran for; ``[None]`` when it is in no loop, ``[]`` for a collection of no
+        rows, and None for one the rows file does not have."""
         loops = [m for u in step.unseen if (m := LOOP.match(u))]
         if not loops:
             return [None]
         _, var, iterable = loops[-1].groups()
-        found = self.collections.get(self.env.canonical(iterable.strip()))
+        canonical = self.env.canonical(iterable.strip())
+        found = self.collections.get(canonical)
         if found is None:
-            return []
+            if self.ask is not None:
+                self.ask(canonical, step, self.env)
+            return None
         entity = found["entity"]
         out = []
         for row in self.rows[found["rows"]]:
@@ -191,7 +199,13 @@ class Walk:
                 out.extend(self.origins(h.value, h.owner, element) if h.value.isidentifier() else [])
             return out
         for s in defs:
-            for el in [element] if element is not None else self.elements(s):
+            elements = [element] if element is not None else self.elements(s)
+            if elements is None:
+                # the binding may have run, for rows not known: left out, the name's other bindings would look like
+                # all it held
+                out.append(Origin(s, s.value, None, E.UNKNOWN, E.UNKNOWN, f"@{s.line} runs in a loop over rows this investigation does not have"))
+                continue
+            for el in elements:
                 env = self.env_for(el)
                 reached, why, failed = self.reach(s, env)
                 o = Origin(s, s.value, el, E.UNKNOWN, reached, why, failed=failed)
@@ -228,8 +242,9 @@ class Walk:
                 found.opaque.append(f"@{s.line} {_shown(container, s)} does not say its keys")
                 continue
             elements = self.elements(s)
-            if not elements:
+            if elements is None:
                 found.opaque.append(f"@{s.line} runs in a loop over rows this investigation does not have")
+                continue
             for el in elements:
                 env = self.env_for(el)
                 reached, why, failed = self.reach(s, env)
@@ -290,7 +305,7 @@ class Walk:
                     continue
                 return None, [f"@{s.line} {_shown(name, s)} is not a keyed write"]
             elements = self.elements(s)
-            if not elements:
+            if elements is None:
                 return None, [f"@{s.line} runs over rows this investigation does not have"]
             for el in elements:
                 env = self.env_for(el)
