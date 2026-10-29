@@ -1150,6 +1150,123 @@ def test_a_run_is_inside_only_the_calls_whose_pass_holds_it_and_calls_no_print_p
     assert check_only is None
 
 
+def test_a_statement_runs_between_two_prints_on_a_path_that_prints_nothing_else(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def f(self, x):
+                self.logger.debug("before")
+                self.tb.update(x)
+                self.lock.release()
+                if x:
+                    self.logger.debug("one")
+                else:
+                    self.logger.debug("two")
+                for y in x:
+                    self.logger.debug("loop")
+                    self.tb.inner(y)
+                try:
+                    self.tb.risky(x)
+                except Exception:
+                    self.logger.error("failed")
+                self.logger.debug("end")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+
+            node = R.functions("pandaserver/a.py", "f")[0]
+            at = lambda line: R.statement_at(node, line)
+            prints = {id(s) for s in R.own_nodes(node) if R.is_print(s)}
+            between = lambda a, b, s: R.runs_between(node, at(a), at(b), at(s), prints)
+            print(json.dumps({
+                "the next statement calls": [between(3, 7, 4), between(3, 9, 5)],
+                "not after the first": between(7, 11, 4),
+                "a loop's next pass": between(11, 11, 12),
+                "after the loop": [between(11, 17, 14), between(11, 16, 14)],
+                "a print on every way": between(3, 17, 14),
+                "a print is no call": between(3, 7, 3),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the update and the release run after "before" and before either arm's print
+    assert got["the next statement calls"] == [True, True]
+    assert got["not after the first"] is False
+    # a loop's body runs again after its own print
+    assert got["a loop's next pass"] is True
+    # the risky call runs before "end", or raises to the handler's print
+    assert got["after the loop"] == [True, True]
+    # every way from "before" to "end" prints an arm's line and the loop's: never two in a row
+    assert got["a print on every way"] is False
+    assert got["a print is no call"] is False
+
+
+def test_a_call_with_no_print_after_it_on_every_path_is_placed_between_the_records_around_the_run(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def f(self, job):
+                self.logger.debug("start")
+                if job.x:
+                    self.logger.debug("set A")
+                    self.tb.update(job)
+                if self.check(job):
+                    self.logger.debug("on hold")
+                self.logger.debug("end")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows as R
+            from bamboo.querier.which_ran import inside_call
+
+            node = R.functions("pandaserver/a.py", "f")[0]
+            fn = N(rel="pandaserver/a.py", node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            stmt = R.statement_at(node, 6)
+            # start, set A, another function's record, end
+            run = N(records=[N(stamp=f"2026-01-01 00:00:{s},000") for s in ["00", "01", "02", "03"]])
+            placed = {3: [0], 5: [1], 9: [3]}
+            hits = {k: [(x, 9, "") for x in v] for k, v in placed.items()}
+            caller = N(fn=fn, run=run, unambiguous=placed, hits=hits)
+            # "on hold" matched the third record too, though not alone: the function may have printed there
+            read_between = N(fn=fn, run=run, unambiguous=placed, hits={**hits, 8: [(2, 9, "")]})
+            inner = lambda a, b: N(first=f"2026-01-01 00:00:{a}", last=f"2026-01-01 00:00:{b}")
+            print(json.dumps([
+                [len(x) for x in R.must_rows(node, stmt)],
+                inside_call(caller, inner("01,200", "01,800"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("00,200", "00,800"), "pandaserver/a.py:6"),
+                inside_call(caller, inner("03,200", "03,800"), "pandaserver/a.py:6"),
+                inside_call(read_between, inner("01,200", "01,800"), "pandaserver/a.py:6"),
+            ]))
+            """,
+        )
+    )
+    shape, inside, before_its_arm, after_the_end, printed_between = json.loads(out.splitlines()[-1])
+    # the call ends an arm and the next statement calls: no print every path runs after it
+    assert shape == [2, 0]
+    # "set A" and "end", two of the function's records in a row, hold the run, and the call is between their prints
+    assert inside == [1, 3]
+    # between "start" and "set A" the call does not run: "set A" is printed first
+    assert before_its_arm is None
+    assert after_the_end is None
+    # a row of the function read between the two: they are not one pass's
+    assert printed_between is None
+
+
 def test_every_call_that_goes_on_into_the_candidate_is_tried_at_each_of_its_lines(tmp_path):
     out = _ok(
         _run(
@@ -2592,6 +2709,134 @@ def test_a_row_is_missing_only_from_a_run_of_a_file_the_map_places_it_in(tmp_pat
     assert row3 == [[True, ""], [False, "another file"]]
     assert row5 == [[False, "another file"], [True, ""]]
     assert row7 == [True, True]
+
+
+def test_h6_names_a_rows_host_only_for_a_door_that_asks_by_machine(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    r.opened = []
+    r.data["statuslog"]["states"] = [
+        {"status": "pending", "time": "2026-10-07 13:06:45", "host": "aipanda087.cern.ch"},
+        {"status": "defined", "time": "2026-10-07 13:06:45", "host": "aipanda093.cern.ch"},
+        {"status": "failed", "time": "2026-10-07 13:08:03"},
+    ]
+    # no make call: every row is asked, and the stop is at the makers' need
+    rerun.O.instances_in = lambda rel: ["Setupper"]
+    rerun.O.calls_through = lambda receiver: []
+    r._ask = lambda obj, logs, asking: ({}, [], {})
+    q = rerun.Missing("user.x_sub01", N(rel="pandaserver/dataservice/setupper.py"), N(last="2026-10-07 13:08:04,059"))
+    said = []
+    for door in (True, False):
+        r.lines, r.logs = [], N(needs_window=door)
+        try:
+            r.missing(q)
+        except rerun.Stop:
+            pass
+        said.append([line for line in r.lines if line.startswith("-- ") or "statuslog row(s)" in line])
+    print(json.dumps(said))
+    """,
+        )
+    )
+    by_machine, files = json.loads(out.splitlines()[-1])
+    rows = "3 statuslog row(s) by the run's last record 2026-10-07 13:08:04,059: each asked at its second, in turn, until a run holds it"
+    none = ": 0 run(s) of the name hold that second, 0 with a make call's print and the job's key"
+    # the door that asks by machine asks each row on its host, every machine where the row names none
+    assert by_machine == [
+        rows,
+        "-- 'pending' at 2026-10-07 13:06:45 on aipanda087.cern.ch" + none,
+        "-- 'defined' at 2026-10-07 13:06:45 on aipanda093.cern.ch" + none,
+        "-- 'failed' at 2026-10-07 13:08:03 on every machine" + none,
+    ]
+    # the door over files reads the files given, whatever machine wrote them
+    assert files == [
+        rows,
+        "-- 'pending' at 2026-10-07 13:06:45 in the files given, their machine not known" + none,
+        "-- 'defined' at 2026-10-07 13:06:45 in the files given, their machine not known" + none,
+        "-- 'failed' at 2026-10-07 13:08:03 in the files given, their machine not known" + none,
+    ]
+
+
+_PROXY = '''\
+class DBProxy:
+    def updateTask_JEDI(self, spec, criteria, updateDEFT):
+        sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID"
+        self.cur.execute(sql, {})
+        if updateDEFT:
+            sqlD = "UPDATE ATLAS_DEFT.T_TASK SET status=:status WHERE taskid=:jediTaskID"
+            self.cur.execute(sqlD, {})
+'''
+
+
+def test_s5_reads_the_facade_the_receiver_is_declared_to_be(tmp_path):
+    corpus = _corpus(tmp_path)
+    files = {
+        "pandaserver/taskbuffer/OraDBProxy.py": _PROXY,
+        "pandajedi/jedicore/JediDBProxy.py": _PROXY,
+        "pandaserver/taskbuffer/TaskBuffer.py": '''\
+class TaskBuffer:
+    def updateTask_JEDI(self, spec, criteria, updateDEFT=True):
+        with self.proxyPool.get() as proxy:
+            return proxy.updateTask_JEDI(spec, criteria, updateDEFT)
+''',
+        "pandajedi/jedicore/JediTaskBuffer.py": '''\
+from pandaserver.taskbuffer.TaskBuffer import TaskBuffer
+
+class JediTaskBuffer(TaskBuffer):
+    def updateTask_JEDI(self, spec, criteria, updateDEFT=False):
+        with self.proxyPool.get() as proxy:
+            return proxy.updateTask_JEDI(spec, criteria, updateDEFT)
+''',
+        "pandajedi/jedidog/Dog.py": '''\
+from pandajedi.jedicore.JediTaskBuffer import JediTaskBuffer
+
+class Dog:
+    def __init__(self, taskBufferIF: JediTaskBuffer):
+        self.taskBufferIF = taskBufferIF
+
+    def run(self, spec):
+        return self.taskBufferIF.updateTask_JEDI(spec, {})
+
+class Stray:
+    def __init__(self, taskBufferIF):
+        self.taskBufferIF = taskBufferIF
+
+    def run(self, spec):
+        return self.taskBufferIF.updateTask_JEDI(spec, {})
+''',
+    }
+    for rel, text in files.items():
+        (corpus / rel).parent.mkdir(parents=True, exist_ok=True)
+        (corpus / rel).write_text(text)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast
+            import json
+            from bamboo.querier.rerun import proxy_reading, receiver_methods
+
+            call = ast.parse("self.taskBufferIF.updateTask_JEDI(spec, {})", mode="eval").body
+            got = {}
+            for name, line in (("declared", 8), ("undeclared", 15)):
+                classes, theirs = receiver_methods("updateTask_JEDI", call, "pandajedi/jedidog/Dog.py", line)
+                reading = proxy_reading("updateTask_JEDI", call, theirs if classes else None)
+                got[name] = [classes, sorted(theirs), reading[3]]
+            # a declared class with no method of the name: no facade's at that receiver
+            got["not its method"] = proxy_reading("updateTask_JEDI", call, set())
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # JediTaskBuffer's updateTask_JEDI hands updateDEFT=False on: the DEFT table is not read
+    assert got["declared"] == [
+        ["pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer"], [["pandajedi/jedicore/JediTaskBuffer.py", 4]], ["JEDI_Tasks"]
+    ]
+    # no declaration: every facade of the name, TaskBuffer's True among them
+    assert got["undeclared"] == [[], [], ["JEDI_Tasks", "T_TASK"]]
+    assert got["not its method"] is None
 
 
 def test_stuck_reads_at_the_moment_the_rows_file_says_its_values_were_read(tmp_path):

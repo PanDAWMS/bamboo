@@ -37,6 +37,7 @@ import re
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import pathcond
 
@@ -1857,8 +1858,14 @@ class Calls:
                         found.append((field, value, node, target))
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 field = _self_field(node.func.value)
-                if field and node.func.attr in FILLERS and node.args:
-                    found.append((field, node.args[-1], node, target))
+                filled = callfacts.by_name(node.func.attr) if field else None
+                if filled is not None and filled.puts:
+                    # Read by the name: the field's class is what is being read.
+                    found.extend(
+                        (field, value, node, target)
+                        for value, put, _key, _keyword in callfacts.put_arguments(filled, node)
+                        if put.into != callfacts.KEY
+                    )
                 elif (
                     isinstance(node.func.value, ast.Name)
                     and node.func.value.id == "self"
@@ -1886,11 +1893,6 @@ def _on(receivers: dict[str, int]) -> str:
     ranked = sorted(receivers.items(), key=lambda one: (-one[1], one[0]))
     said = ", ".join(f"{receiver} {count}" for receiver, count in ranked[:_RECEIVERS])
     return said + (f", … {len(ranked) - _RECEIVERS} more" if len(ranked) > _RECEIVERS else "")
-
-
-#: The methods that put a value into a container.  The removals take one out
-#: and so answer no question about where a value came from.
-FILLERS = ("append", "add", "update", "extend", "setdefault", "insert")
 
 
 def _parameter_names(func: ast.AST) -> set[str]:
@@ -2105,6 +2107,29 @@ def _grouped(found_for: list[tuple[Target, tuple[str, ast.ClassDef]]]) -> tuple[
     return tuple(held[key][0]._replace(bound=tuple(sorted(held[key][1], key=_class_key))) for key in order)
 
 
+def _members(annotation: ast.expr) -> list[ast.expr]:
+    """Every member of a union annotation, through quotes and nested unions, ``None`` left out."""
+    annotation = _unquoted(annotation)
+    members = _union_members(annotation)
+    if members is None:
+        return [] if isinstance(annotation, ast.Constant) and annotation.value is None else [annotation]
+    return [one for member in members for one in _members(member)]
+
+
+def _annotation_names(annotation: ast.expr) -> list[ast.expr]:
+    """Every name and dotted name an annotation spells, through quotes: ``"dict[str, PassiveProxies] | None"`` has
+    ``dict``, ``str`` and ``PassiveProxies``."""
+    found: list[ast.expr] = []
+    for node in walk(_unquoted(annotation)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            unquoted = _unquoted(node)
+            if unquoted is not node:
+                found.extend(_annotation_names(unquoted))
+        elif isinstance(node, (ast.Name, ast.Attribute)):
+            found.append(node)
+    return found
+
+
 def _union_members(annotation: ast.expr) -> Optional[list[ast.expr]]:
     """The members of ``A | B``, ``Union[A, B]`` or ``Optional[A]``; ``None`` for anything else."""
     if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
@@ -2193,6 +2218,8 @@ class Types:
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
         self._files: dict[int, str] = {}
         self._mro: dict[int, tuple[ast.ClassDef, list[tuple[str, ast.ClassDef]]]] = {}
+        #: :meth:`annotated_libraries`, once a tree.
+        self._annotated: Optional[frozenset[tuple[str, str]]] = None
         #: The classes the calls of a function hand its parameter declared
         #: ``Any`` -- :meth:`Calls.handed_classes`, set by the :class:`Calls`
         #: that reads this tree; ``None`` reads the declaration alone.
@@ -2687,6 +2714,89 @@ class Types:
             order.append(found)
             queue.extend((found[0], one) for one in found[1].bases)
         return order
+
+    def built_outside(self, file: str, cls: ast.ClassDef) -> bool:
+        """Whether a class in *cls*'s order has a base outside the corpus that may supply methods.
+
+        A base is read as :meth:`lineage` reads it, a subscript taken off --
+        ``FactoryBase[JobBrokerBase]`` is FactoryBase.  ``object`` and the
+        typing bases a class is declared generic or a protocol with supply no
+        method.
+        """
+        for where, holder in self.mro(file, cls):
+            for base in holder.bases:
+                head = pathcond.unsubscripted(base)
+                named = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", "")
+                if named in ("object", "Generic", "Protocol") or self.class_named(where, head) is not None:
+                    continue
+                return True
+        return False
+
+    def library_classes(self, file: str, func: ast.AST, expression: ast.expr) -> Optional[frozenset[tuple[str, str]]]:
+        """``(module, name)`` of each class outside the corpus *expression*'s object can be, where every one it can be
+        is such a class; ``None`` otherwise.
+
+        Declared so -- a field's, a parameter's or a local's annotation, each member of a union a class outside the
+        corpus, none typing's or collections' (their values are the builtins') -- or a local bound only to calls of
+        a name outside the corpus that the corpus uses as an annotation somewhere.  A call alone cannot tell a class
+        from a function there: ``WeightedLists(lock)`` and ``json.loads(text)`` read the same, and the corpus does
+        not hold their modules.  An annotation can: AdderThread declares ``job_output_reports: WeightedLists``.
+        """
+        declared = self._annotation_of(file, func, expression)
+        if declared is not None:
+            where, annotation = declared
+            found: set[tuple[str, str]] = set()
+            for member in _members(annotation):
+                head = member.value if isinstance(member, ast.Subscript) else member
+                library = self.library_class(where, head) if isinstance(head, (ast.Name, ast.Attribute)) else None
+                if library is None or not self._library(library):
+                    return None
+                found.add(library)
+            return frozenset(found) or None
+        if not isinstance(expression, ast.Name):
+            return None
+        values = self.bound(func).get(expression.id)
+        if not values:
+            return None
+        found = set()
+        for value in values:
+            if not isinstance(value, ast.Call) or not isinstance(value.func, (ast.Name, ast.Attribute)):
+                return None
+            library = self.library_class(file, value.func)
+            if library is None or not self._library(library) or library not in self.annotated_libraries():
+                return None
+            found.add(library)
+        return frozenset(found)
+
+    def _library(self, library: tuple[str, str]) -> bool:
+        top = library[0].split(".")[0]
+        return top not in self.roots and top not in ("typing", "collections", "builtins")
+
+    def annotated_libraries(self) -> frozenset[tuple[str, str]]:
+        """``(module, name)`` of each name outside the corpus the corpus uses in an annotation: a parameter's, a
+        return's, a local's or a field's, quoted or not."""
+        if self._annotated is None:
+            found: set[tuple[str, str]] = set()
+            for file in self.corpus_files():
+                tree = self.tree(file)
+                for node in walk(tree) if tree is not None else ():
+                    annotations: list[ast.expr] = []
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        arguments = node.args
+                        every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+                        every += [one for one in (arguments.vararg, arguments.kwarg) if one is not None]
+                        annotations += [one.annotation for one in every if one.annotation is not None]
+                        if node.returns is not None:
+                            annotations.append(node.returns)
+                    elif isinstance(node, ast.AnnAssign):
+                        annotations.append(node.annotation)
+                    for annotation in annotations:
+                        for named in _annotation_names(annotation):
+                            library = self.library_class(file, named)
+                            if library is not None and self._library(library):
+                                found.add(library)
+            self._annotated = frozenset(found)
+        return self._annotated
 
     def mro(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
         """*cls* and its corpus bases in the order Python resolves a method on an object of *cls*.

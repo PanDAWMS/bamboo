@@ -9,6 +9,7 @@ from bamboo.codemap import objects, reach
 from bamboo.codemap.gates import object_records_resolve
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
+    BIND_FILL,
     MAP_KEY,
     CallBinding,
     EntityNode,
@@ -1002,6 +1003,31 @@ def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):
     assert [(b.how, b.path, b.to) for b in stored] == [
         ("result", "", ["pkg/forms.py::Store.get"])
     ]
+
+
+_KEEPER = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+from pandacommon.pandautils.thread_utils import WeightedLists
+
+
+class Keeper:
+    def keep(self, job, lists: WeightedLists, log: LogWrapper):
+        lists.add(3, job)
+        log.debug(job)
+        log.keepMsg(job)
+"""
+
+
+def test_a_library_object_keeps_what_its_method_is_handed_and_a_logger_keeps_nothing(
+    tmp_path,
+):
+    """``lists.add(3, job)`` on a library class's object keeps the job in it, as nothing says what ``add`` does
+    there; ``log.debug(job)`` writes a line -- a logger's method, by its name, keeps nothing."""
+    fragment = _build(tmp_path, keeper=_KEEPER)
+    (row,) = [one for one in fragment.reach_graph if one.owner.endswith("Keeper.keep")]
+    assert {(b.name, b.path) for b in row.bindings if b.how == BIND_FILL} == {
+        ("lists", "job")
+    }
 
 
 def test_what_a_generator_yields_are_the_elements_of_its_result(tmp_path):

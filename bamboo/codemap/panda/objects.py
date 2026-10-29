@@ -83,8 +83,8 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
+from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as C
-from bamboo.codemap import reach
 from bamboo.codemap.models import (
     BIND_ALIAS,
     BIND_ELEMENT,
@@ -111,9 +111,8 @@ COLUMN_CLASSES = ("JobSpec", "JediTaskSpec", "FileSpec")
 _ELEMENTS_OF = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
 #: Builtins that hand back one element of what they are given, or one of their arguments.
 _ONE_OF = {"next", "max", "min"}
-#: A builtin container's own methods that put their argument into it (``extend``, ``update`` and
-#: ``setdefault`` too, read in :meth:`_Values._fill`).
-_FILLERS = {"append", "insert", "add"}
+#: How :func:`callfacts.meaning` reads a call that puts into its object (:meth:`_Values._fill`).
+_FILLING = (callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED)
 #: A builtin container's own methods that hand back what is in it.
 _TAKERS = {"pop", "popleft", "get", "setdefault", "values", "copy", "items", "popitem"}
 #: A literal key a path keeps (8,937 of pin k's 8,950); another reads as ``[]``.
@@ -1087,33 +1086,29 @@ class _Values:
         )
 
     def _fill(self, call: ast.Call, line: int) -> None:
-        """A builtin container's own method that puts what it is handed into it."""
+        """What a method no definition of the corpus is placed at puts into the object it is made on, as
+        :func:`callfacts.meaning` reads it: a builtin container's, a library object's (kept whole)."""
         called = call.func
-        method = called.attr  # type: ignore[attr-defined]
-        args = call.args
-        if method in _FILLERS and args:
-            items = _shift(self.carried(args[-1]), "[]")
-        elif method == "extend" and args:
-            items = _shift(_index(self.carried(args[0]), "[]"), "[]")
-        elif method == "update":
-            items = [
-                carry
-                for one in args[:1]
-                for carry in (
-                    self.carried(one)  # a dict literal's values under their keys
-                    if isinstance(one, ast.Dict)
-                    else _shift(_index(self.carried(one), "[]"), "[]")
-                )
-            ]
-            items += [
-                carry
-                for keyword in call.keywords
-                if keyword.arg is not None
-                for carry in _shift(self.carried(keyword.value), _named(keyword.arg))
-            ]
-        elif method == "setdefault" and len(args) > 1:
-            items = _shift(self.carried(args[1]), _subscript(args[0], store=True))
-        else:
+        meant = callfacts.meaning(
+            self.reader.calls, self.file, self.func, call, self.placed(call)
+        )
+        if meant.method is None or meant.kind not in _FILLING:
+            return
+        items = []
+        for value, put, key, keyword in callfacts.put_arguments(meant.method, call):
+            if put.into == callfacts.ELEMENT:
+                items += _shift(self.carried(value), "[]")
+            elif put.into == callfacts.MERGE and isinstance(value, ast.Dict):
+                items += self.carried(value)  # a dict literal's values under their keys
+            elif put.into in (callfacts.ELEMENTS, callfacts.MERGE):
+                items += _shift(_index(self.carried(value), "[]"), "[]")
+            elif put.into == callfacts.VALUE and keyword:
+                items += _shift(self.carried(value), _named(keyword))
+            elif put.into == callfacts.VALUE and key is not None:
+                items += _shift(self.carried(value), _subscript(key, store=True))
+            elif put.into == callfacts.WHOLE:
+                items += self.carried(value)
+        if not items:
             return
         for base in self.target_paths(called.value):  # type: ignore[attr-defined]
             self.put(line, base, items, BIND_FILL)

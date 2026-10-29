@@ -60,7 +60,7 @@ from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence
 
-from bamboo.codemap import astwalk
+from bamboo.codemap import astwalk, callfacts
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.calls import Types as _Types
 from bamboo.codemap.gitsource import blob_sha as git_blob_sha
@@ -336,7 +336,7 @@ def _operator(site: ast.AST) -> str:
     """
     if isinstance(site, ast.Expr) and isinstance(site.value, ast.Call):
         called = site.value.func
-        if isinstance(called, ast.Attribute) and called.attr in _FILLERS:
+        if isinstance(called, ast.Attribute) and called.attr in callfacts.PUTTING:
             return f".{called.attr}"
     if not isinstance(site, ast.AugAssign):
         return "="
@@ -1370,14 +1370,13 @@ def _self_fills(method: ast.AST, field: str) -> list[ast.expr]:
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _FILLERS
+            and node.func.attr in callfacts.PUTTING
             and isinstance(node.func.value, ast.Attribute)
             and isinstance(node.func.value.value, ast.Name)
             and node.func.value.value.id == "self"
             and node.func.value.attr == field
-            and node.args
         ):
-            found.append(node.args[-1])
+            found.extend(_put_values(node))
     return found
 
 
@@ -1615,11 +1614,19 @@ def _walrus_bindings(func: ast.AST, name: str) -> list[ast.expr]:
     ]
 
 
-#: How a name that is never re-assigned still gets its members.  The same set
-#: :mod:`~bamboo.codemap.panda.recognizers.sqlwrite` carries a row on, less
-#: the removals -- those take a value out and so answer no question about
-#: where one came from.
-_FILLERS = ("append", "add", "update", "extend", "setdefault")
+def _put_values(call: ast.Call) -> list[ast.expr]:
+    """What a builtin container's method of *call*'s name puts into its receiver
+    (:func:`callfacts.by_name`: the trace reads text, and places no call) -- an
+    element, the value under a key, the elements of what it is handed; not a key.
+    How a name that is never re-assigned still gets its members."""
+    method = callfacts.by_name(call.func.attr)  # type: ignore[attr-defined]
+    if method is None:
+        return []
+    return [
+        value
+        for value, put, _key, _keyword in callfacts.put_arguments(method, call)
+        if put.into != callfacts.KEY
+    ]
 
 
 #: The constructors an empty container is spelled with.
@@ -1671,16 +1678,13 @@ def _mutated_bindings(func: ast.AST, name: str) -> list[ast.expr]:
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         held = node.func.value
-        if node.func.attr not in _FILLERS or not isinstance(held, ast.Name):
+        if node.func.attr not in callfacts.PUTTING or not isinstance(held, ast.Name):
             continue
-        if held.id != name or not node.args:
+        if held.id != name:
             continue
-        # ``d.setdefault(key)`` names a key and no value; its last argument is
-        # the key, and reporting that as what the container holds would be a
-        # wrong answer rather than a short one.
-        if node.func.attr == "setdefault" and len(node.args) < 2:
-            continue
-        found.append(node.args[-1])
+        # ``d.setdefault(key)`` names a key and no value: reporting the key as
+        # what the container holds would be a wrong answer rather than a short one.
+        found.extend(_put_values(node))
     return found
 
 

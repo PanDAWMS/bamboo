@@ -8,16 +8,15 @@ read only from /Users/tmaeno/bamboo or below.
 **What is asked.**  One plan for every class (:func:`fetch_key`): the key's
 row, the rows its links name one step on, then the status histories -- the
 key's, and those of the rows the links found.  For a job that is its file rows
-(in its own answer), the datasets they and it name, and its history; for a
-task, its jobs and their number by table and status, its history, and the
-jobs' histories.  These are the rows the querier's rows file holds.  Nothing
+(in its own answer) and its history; for a task, its jobs and their number by
+table and status, its history, and the jobs' histories.  These are the rows the querier's rows file holds.  Nothing
 here knows a case: the key's class (the question's subject) picks the calls.
 Which column of a row names which rows of another class is PanDA's schema,
 written here (:data:`LINKS`, with :data:`KEY`, :data:`LIVE`, :data:`ARCHIVE`
 and :data:`CREATED`) until the map exports it.
 
-**Two ways in.**  A row read by its key -- a job with its files, a task, a
-dataset -- comes from a plain endpoint, answered at once.  The task's jobs and
+**Two ways in.**  A row read by its key -- a job with its files, a task --
+comes from a plain endpoint, answered at once.  The task's jobs and
 their counts are read through ``db_read``, which runs in the async daemon's
 cycle and may wait behind its greps; one batch holds all four of its queries.
 
@@ -89,20 +88,11 @@ class Link:
         return {"from": self.src, "to": self.dst}
 
 
-#: which column of a class's rows names which rows of another
+#: which column of a class's rows names which rows of another.  The datasets a job's rows name
+#: (prodDBlock, dispatchDBlock, destinationDBlock, dataset -> DatasetSpec.name) are not asked:
+#: the querier reads no Datasets row (its H6 times a maker by the job's statuslog, querier-vi)
 LINKS = (
     Link("JobSpec.PandaID", "FileSpec.PandaID", held=FILES),
-    *(
-        Link(f"{cls}.{c}", "DatasetSpec.name")
-        for cls, cols in (
-            ("JobSpec", ("prodDBlock", "dispatchDBlock", "destinationDBlock")),
-            (
-                "FileSpec",
-                ("dataset", "prodDBlock", "dispatchDBlock", "destinationDBlock"),
-            ),
-        )
-        for c in cols
-    ),
     Link("JediTaskSpec.jediTaskID", "JobSpec.jediTaskID"),
 )
 #: the columns of a task's jobs: the querier reads pandaid and creationtime, people the rest
@@ -130,7 +120,6 @@ class Parts:
     db_read: Callable[[list], Awaitable[dict]] = PC.db_read
     jobs: Callable[[list], Awaitable[dict]] = PC.get_jobs_incl_archive
     task: Callable[[int], Awaitable[dict]] = PC.get_task_detailed_info
-    datasets: Callable[[list], Awaitable[dict]] = PC.get_datasets_by_name
     job_history: Callable[..., Awaitable[dict]] = PC.get_job_status_history
     task_history: Callable[[int], Awaitable[dict]] = PC.get_task_status_history
 
@@ -214,23 +203,6 @@ def value_of(row: dict, attr: str) -> Any:
     return row.get(attr, row.get(attr.lower()))
 
 
-def with_and_without_scope(name: str) -> list[str]:
-    """A dataset's name as written, and without its scope (``scope:name``) where it has one."""
-    return [name, name.split(":")[-1]] if ":" in name else [name]
-
-
-#: the forms a value is asked by where a link leads, where a row may be keyed by more than one: a dataset's
-#: name with and without its scope, as PanDA asks one by name (``datasetName IN (:name1,:name2)``,
-#: resetFileStatusInJEDI), since the Datasets rows are keyed by either
-ASKED_AS = {"DatasetSpec.name": with_and_without_scope}
-
-
-def asked_as(dst: str, values: set) -> set:
-    """Every form *values* are asked by where *dst* leads."""
-    form = ASKED_AS.get(dst)
-    return {f for v in values for f in form(v)} if form else set(values)
-
-
 def asked_at(response: dict) -> datetime.datetime:
     return datetime.datetime.strptime(response["asked_at"], "%Y-%m-%d %H:%M:%S")
 
@@ -269,13 +241,6 @@ async def _job_row(key: int, rec: Record, parts: Parts) -> tuple[dict | None, di
 async def _task_row(key: int, rec: Record, parts: Parts) -> tuple[dict | None, dict]:
     response = await rec.call("task", parts.task(key), {"task_id": key})
     return task_of(response)[0], response
-
-
-async def _datasets(
-    values: list, asked: Asked, rec: Record, parts: Parts
-) -> list[dict]:
-    response = await rec.call("datasets", parts.datasets(values), {"names": values})
-    return (response.get("rows") or []) if response.get("success") else []
 
 
 async def _task_jobs(
@@ -323,7 +288,7 @@ async def _task_history(
 #: the call reading a key's row, by its class: the row (None when there is none) and the response
 KEY_ROW = {"JobSpec": _job_row, "JediTaskSpec": _task_row}
 #: the call reading the rows a link names, by where it leads: the rows found
-LINK_ROWS = {"DatasetSpec.name": _datasets, "JobSpec.jediTaskID": _task_jobs}
+LINK_ROWS = {"JobSpec.jediTaskID": _task_jobs}
 #: the call reading the status histories of a class's rows, from the first one's creation where it takes a bound
 HISTORY = {"JobSpec": _job_history, "JediTaskSpec": _task_history}
 
@@ -357,12 +322,12 @@ def values_by(link: Link, got: list[dict], key_class: str, key: int) -> set:
 
 
 def link_values(rows: dict[str, list[dict]], dst: str, asked: Asked) -> list:
-    """Every value the links leading to *dst* hold in *rows*, in every form it is asked by, once each."""
+    """Every value the links leading to *dst* hold in *rows*, once each."""
     held = set()
     for cls, got in rows.items():
         for link in links_from(cls):
             if link.dst == dst and not link.held:
-                held |= asked_as(dst, values_by(link, got, asked.cls, asked.key))
+                held |= values_by(link, got, asked.cls, asked.key)
     return sorted(held)
 
 

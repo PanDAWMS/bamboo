@@ -54,9 +54,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
-    FILLERS,
     UNSET,
     Calls,
     CallSite,
@@ -2528,8 +2528,10 @@ def _changed_between(func: ast.AST, names: set[str], low: int, high: int) -> boo
             targets = node.targets
         elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor)):
             targets = [node.target]
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in FILLERS + (
-            "pop", "popitem", "clear", "remove", "discard"
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in callfacts.CHANGING  # read by the name: no placing here
         ):
             targets = [node.func.value]
         for target in targets:
@@ -4367,12 +4369,6 @@ class CrossingCensus(NamedTuple):
     opened: int
 
 
-#: How a row leaves the name the statement first bound it to.  Assignment and
-#: a loop target are the obvious two; the rest are how the corpus writes "put
-#: this row in the bucket it belongs to" before handing the bucket back.
-_CARRIERS = ("append", "add", "update", "extend", "setdefault")
-
-
 
 
 #: How many steps of an access path a holding tells apart -- ``res[0].Files[*].lfn`` is four.  A longer path is cut
@@ -4389,8 +4385,6 @@ _Paths = frozenset[tuple[str, ...]]
 _WHOLE: _Paths = frozenset({()})
 _NOTHING: _Paths = frozenset()
 
-#: Calls a value goes into without being used: a log line.
-_LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "sendMsg", "keepMsg", "log"})
 #: Calls making a logger whose tag is the value: the tag is a log line's.  ``create_tagged_logger`` tests ``if tag is
 #: None`` and ``MsgWrapper.__init__`` its token, which read as using it.
 _LOG_MAKERS = frozenset({"create_tagged_logger", "MsgWrapper", "LogWrapper"})
@@ -4750,6 +4744,39 @@ def _access_path(expression: Optional[ast.AST]) -> Optional[tuple[str, tuple[str
     return (expression.id, tuple(reversed(steps))) if isinstance(expression, ast.Name) else None
 
 
+def _receiver_path(call: ast.Call) -> Optional[tuple[str, tuple[str, ...]]]:
+    """The access path of the object the method *call* is made on: ``d[*]`` for ``d.setdefault(k, []).append(v)``,
+    the element setdefault hands back being one ``d`` holds."""
+    made = call.func.value  # type: ignore[attr-defined]
+    found = _access_path(made)
+    if (
+        found is None
+        and isinstance(made, ast.Call)
+        and isinstance(made.func, ast.Attribute)
+        and made.func.attr == "setdefault"
+        and (inner := _access_path(made.func.value)) is not None
+    ):
+        found = (inner[0], inner[1] + (_ALL,))
+    return found
+
+
+def _state_handed_across(call: ast.Call) -> bool:
+    """Whether *call* is the ``y.__getstate__()`` of ``x.__setstate__(y.__getstate__())``."""
+    parent = getattr(call, "parent", None)
+    return isinstance(parent, ast.Call) and callfacts.round_trip(parent) is not None and parent.args[0] is call
+
+
+def _put_paths(put: callfacts.Put, paths: _Paths) -> _Paths:
+    """Where in its receiver what a method puts sits (:class:`callfacts.Put`), *paths* where the rows sit in what
+    it is handed: an element's, a key's, the value under a key the run chooses -- or where they were, the elements
+    put as elements, a mapping merged, an argument a library's method keeps whole."""
+    if put.into in (callfacts.ELEMENT, callfacts.VALUE):
+        return _below((_ALL,), paths)
+    if put.into == callfacts.KEY:
+        return _below((_KEY,), paths)
+    return frozenset(paths)
+
+
 def _callee_name(call: ast.Call) -> Optional[str]:
     callee = call.func
     return callee.id if isinstance(callee, ast.Name) else callee.attr if isinstance(callee, ast.Attribute) else None
@@ -4884,7 +4911,9 @@ class _PathCarry:
     handed to a hole makes nothing of them.  What the reach record reads as the database gives nothing back of this
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
-    *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.
+    *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.  So
+    does a method the object's class gets from a base outside the corpus, with all it is handed:
+    ``dc_req_spec.pack(row)`` on pandacommon's ``SpecBase`` fills ``dc_req_spec``.
 
     With *item*, the statement's seeds hold its select item of that position where it sits in what they are given,
     not the rows whole (:func:`_item_seed`): a value held whole is that column of a row.
@@ -5067,33 +5096,14 @@ class _PathCarry:
 
     def _call_writes(self, call: ast.Call) -> None:
         statement = site_of(call)
-        name = _callee_name(call)
-        if isinstance(call.func, ast.Attribute):
-            found = _access_path(call.func.value)
-            made = call.func.value
-            if (
-                found is None
-                and isinstance(made, ast.Call)
-                and isinstance(made.func, ast.Attribute)
-                and made.func.attr == "setdefault"
-                and (inner := _access_path(made.func.value)) is not None
-            ):
-                # ``d.setdefault(k, []).append(v)``: the element setdefault hands back is one ``d`` holds.
-                found = (inner[0], inner[1] + (_ALL,))
-            if found is not None and name in _CARRIERS + ("insert",):
-                base, steps = found
-                if name in ("append", "add") and call.args:
-                    self._add(_Write(base, statement, steps + (_ALL,), call.args[0], _same, True))
-                elif name == "insert" and len(call.args) >= 2:
-                    self._add(_Write(base, statement, steps + (_ALL,), call.args[1], _same, True))
-                elif name in ("extend", "update") and call.args:
-                    self._add(_Write(base, statement, steps, call.args[0], _same, True))
-                elif name == "setdefault" and len(call.args) >= 2:
-                    self._add(_Write(base, statement, steps + (_ALL,), call.args[1], _same, True))
-                if name == "setdefault" and call.args:
-                    self._add(_Write(base, statement, steps + (_KEY,), call.args[0], _same, True))
-                self._keys_put(made, statement)
-                return
+        if isinstance(call.func, ast.Attribute) and _callee_name(call) in callfacts.PUTTING:
+            # What it puts into its receiver is asked where the write's value is (:meth:`_Reading.kept_by`): the
+            # definition it lands at, a library object's method, a builtin container's of its name.
+            found = _receiver_path(call)
+            if found is not None:
+                self._keys_put(call.func.value, statement)
+                if found != _access_path(call.func.value):
+                    self._add(_Write(found[0], statement, found[1], None, None, True, call))
         parts = _setattr_parts(call)
         if parts is not None:
             holder, value = parts
@@ -5108,7 +5118,8 @@ class _PathCarry:
                 )
                 self._add(_Write(base, statement, steps + field, value, _same, True))
             return
-        # A call whose definition may keep what it is handed in an object named here (its summary's *kept*).
+        # A call that may keep what it is handed in an object named here: its definition's summary's *kept*, a
+        # library object's method, a builtin container's (:meth:`_Reading.kept_by`).
         for expression in [*call.args, *(keyword.value for keyword in call.keywords)] + (
             [call.func.value] if isinstance(call.func, ast.Attribute) else []
         ):
@@ -5403,6 +5414,22 @@ class _PathCarry:
             return True
         return isinstance(call.func, ast.Attribute) and bool(self.held(call.func.value, at))
 
+    def handed_bound(self, call: ast.Call) -> list[ast.Attribute]:
+        """The methods *call* is handed bound to an object that holds a part of the rows, not called:
+        ``multiprocessing.Process(target=self.run)`` hands ``run`` the object ``self`` is -- AdderThread holding the
+        job output reports it was built with (:meth:`_Crossings.into` enters them with it)."""
+        found = []
+        for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
+            value = argument.value if isinstance(argument, ast.Starred) else argument
+            if isinstance(value, ast.Attribute) and self.held(value.value, call) and not self.held(value, call):
+                found.append(value)
+        return found
+
+    def follows(self, call: ast.Call) -> bool:
+        """Whether a walk carrying the rows follows *call*: it is handed a part of them (:meth:`handed_any`), or a
+        method bound to an object holding them (:meth:`handed_bound`)."""
+        return self.handed_any(call) or bool(self.handed_bound(call))
+
     def returns(self) -> _Paths:
         """What a call of the function gives back of the rows: its returns, and a generator's yields as elements."""
         found: set[tuple[str, ...]] = set()
@@ -5436,8 +5463,9 @@ class _Reading:
     A function **reads** what it is handed where its value decides something there: a test on it whole (``if
     rows:``), an index it chooses, a call that uses it -- the database's (a bind), a method of the value
     (``job.valuesMap()``), a function owning no junction that reads it in its body; else what a call makes of it is
-    read where that goes.  Not a read: a log line (:data:`_LOG_METHODS`, :data:`_LOG_MAKERS`), a builtin telling
-    nothing of it, a copy, a value put into a container or handed on -- to a name, a loop, a ``return``, the caller.
+    read where that goes.  Not a read: a log line (:data:`callfacts.LOG_METHODS`, :data:`_LOG_MAKERS`), a builtin
+    telling nothing of it, a copy, a value put into a container or handed on -- to a name, a loop, a ``return``, the
+    caller.
     A definition is read while it is read: a call of itself gets nothing back and reads nothing.
     """
 
@@ -5449,6 +5477,7 @@ class _Reading:
         self._summaries: dict[tuple, _Summary] = {}
         self._reads: dict[tuple, bool] = {}
         self._placed: dict[tuple, Optional[Placed]] = {}
+        self._meanings: dict[tuple, callfacts.Meaning] = {}
         #: Keyed by node ids, each holding the node, so that no id is reused while the build runs.
         self._writes: dict[int, tuple[ast.AST, list[_Write]]] = {}
         self._dicts: dict[int, tuple[ast.AST, frozenset[str]]] = {}
@@ -5572,15 +5601,47 @@ class _Reading:
         self._summaries[key] = got
         return got
 
+    def meaning(self, carry: _PathCarry, call: ast.Call) -> callfacts.Meaning:
+        """What *call* does (:func:`callfacts.meaning`); nothing said of the database's call or one no reading
+        places."""
+        key = (id(call), carry.bound)
+        if key not in self._meanings:
+            placed = self.place(carry, call)
+            if callfacts.round_trip(call) is None and placed is None:
+                self._meanings[key] = callfacts.Meaning(callfacts.UNKNOWN)
+            else:
+                self._meanings[key] = callfacts.meaning(
+                    self.calls, carry.file, carry.func, call, placed, carry.bound
+                )
+        return self._meanings[key]
+
     def kept_by(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
-        """``{(name, steps): paths}`` the definitions *call* lands at put into the objects *carry*'s function names."""
+        """``{(name, steps): paths}`` what *call* puts into the objects *carry*'s function names, as
+        :func:`callfacts.meaning` reads it: what the definitions it lands at keep (their summaries), the object a
+        protocol copies into, what a library object's or a builtin container's method puts into its object."""
         name = _callee_name(call)
-        if name in _LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
             return {}
-        if not carry.handed_any(call):
+        # The pickle round trip copies what ``y`` holds, whatever ``y.__getstate__()`` is read as.
+        copied = callfacts.round_trip(call)
+        if copied is None and not carry.handed_any(call):
             return {}
+        meant = self.meaning(carry, call)
+        if meant.kind != callfacts.DEFINITION:
+            where = _receiver_path(call) if isinstance(call.func, ast.Attribute) else None
+            if where is None:
+                return {}
+            if meant.kind == callfacts.PROTOCOL and meant.copied_from is not None:
+                held = carry.held(meant.copied_from, call)
+            elif meant.method is not None:
+                held = _NOTHING
+                for value, put, _key, _keyword in callfacts.put_arguments(meant.method, call):
+                    held |= _put_paths(put, carry.held(value, call))
+            else:
+                return {}
+            return {where: held} if held else {}
         placed = self.place(carry, call)
-        if placed is None or not placed.targets:
+        if placed is None:
             return {}
         found: dict[tuple[str, tuple[str, ...]], _Paths] = {}
         for target in placed.targets:
@@ -5703,12 +5764,12 @@ class _Reading:
 
     def _argument_reads(self, carry: _PathCarry, call: ast.Call, child: ast.AST) -> bool:
         name = _callee_name(call)
-        if name in _LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
             return False
         if isinstance(call.func, ast.Name) and name in _TELLING_NOTHING:
             return False
-        if isinstance(call.func, ast.Attribute) and name in _CARRIERS + ("insert",):
-            return False  # put into a container: read where that is used
+        if isinstance(call.func, ast.Attribute) and self._puts_or_copies(carry, call):
+            return False  # put into a container, or copied: read where that is used
         if (
             name in _COPIES
             and isinstance(call.func, ast.Attribute)
@@ -5722,16 +5783,27 @@ class _Reading:
 
     def _method_reads(self, carry: _PathCarry, call: ast.Call) -> bool:
         name = _callee_name(call)
-        if name in _LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
             return False
+        if callfacts.round_trip(call) is not None or _state_handed_across(call):
+            return False  # pickle's round trip, either half: a copy, read where the copy is used
         placed = self.place(carry, call)
         if placed is not None and placed.targets:
             return self._call_reads(carry, call)
         if name in {"values", "keys", "items"} | _CONTAINER_ELEMENT | _CONTAINER_KEEPING:
             return self._use_reads(carry, call)
-        if name in _CARRIERS + ("insert",):
+        if self._puts_or_copies(carry, call):
             return False
         return self._call_reads(carry, call)
+
+    def _puts_or_copies(self, carry: _PathCarry, call: ast.Call) -> bool:
+        """Whether *call* is a builtin container's method putting into it, by its type or, where that cannot be
+        said, by its name, or a copy by a protocol (:func:`callfacts.meaning`): what it is handed is read where its
+        receiver is."""
+        meant = self.meaning(carry, call)
+        if meant.kind == callfacts.PROTOCOL:
+            return True
+        return meant.kind in (callfacts.BUILTIN, callfacts.ASSUMED) and bool(meant.method and meant.method.puts)
 
     def _call_reads(self, carry: _PathCarry, call: ast.Call) -> bool:
         """A call handed what holds them: the database reads it (a bind is a use); a function owning no junction
@@ -5836,7 +5908,10 @@ class _Crossings:
             self.found_back.add(owner)
 
     def into(self, carry: _PathCarry, call: ast.Call, everything: bool = False) -> None:
-        """Follow *call*, made in *carry*'s function, handed what *carry* holds there -- all of it, *everything*."""
+        """Follow *call*, made in *carry*'s function, handed what *carry* holds there -- all of it, *everything* --
+        and each method it is handed bound to an object holding a part of them (:meth:`_PathCarry.handed_bound`),
+        entered as a call of the method would be, its object what the receiver holds: the reach record's
+        ``handed`` edge, ``Process(target=self.run)`` to ``run``."""
         reading = self.reading
         if reading.record.is_database(carry.file, call):
             if self.landing and self._way:
@@ -5847,23 +5922,38 @@ class _Crossings:
         hole = reading.record.hole_at(carry.file, call)
         if hole is not None and (not isinstance(call.func, ast.Attribute) or call.func.attr in reading.owner_names):
             self.open[hole] = None
+        for value in carry.handed_bound(call) if not everything else ():
+            try:
+                bound = reading.calls.named_callables(carry.file, carry.func, value, carry.bound)
+            except Exception:  # noqa: BLE001 -- the record has the call as a hole
+                bound = ()
+            paths = carry.held(value.value, call)
+            for target in bound:
+                receiver = receiver_parameter(target)
+                if receiver is not None:
+                    self._enter(carry, call, target, {receiver: paths})
         placed = reading.place(carry, call)
         if placed is None:
             return
         for target in placed.targets:
             given = reading.given(carry, call, placed, target, everything)
-            if not given:
-                continue
-            self._way.append(("into", carry.file, carry.func, call))
-            try:
-                if target.owner in reading.owners and reading.reads(target, given):
-                    self._cross(target.owner)
-                    if self.landing:
-                        self._land_in(target, given)
-                    continue
-                self._through(target, given)
-            finally:
-                self._way.pop()
+            if given:
+                self._enter(carry, call, target, given)
+
+    def _enter(self, carry: _PathCarry, call: ast.Call, target: Target, given: dict[str, _Paths]) -> None:
+        """*target*, which *call* in *carry*'s function runs, given *given*: a crossing where it is a junction's
+        owner reading them, else gone through."""
+        reading = self.reading
+        self._way.append(("into", carry.file, carry.func, call))
+        try:
+            if target.owner in reading.owners and reading.reads(target, given):
+                self._cross(target.owner)
+                if self.landing:
+                    self._land_in(target, given)
+                return
+            self._through(target, given)
+        finally:
+            self._way.pop()
 
     def _land_in(self, target: Target, given: dict[str, _Paths]) -> None:
         """Where what a junction's owner crossed to is given reaches the database in its own statements: not gone
@@ -5887,7 +5977,7 @@ class _Crossings:
         self._entered.add(key)
         carry = self.reading.summary(target, given).carry or self.reading.carry(target, given)
         for call in _own_calls(target.func):
-            if carry.handed_any(call):
+            if carry.follows(call):
                 self.into(carry, call)
 
     def back(self, file: str, func: ast.AST, paths: _Paths) -> None:
@@ -5913,7 +6003,7 @@ class _Crossings:
                 if owner in reading.owners and reading.reads_in(carry):
                     self._cross(owner)
                 for call in _own_calls(site.func):
-                    if call is not site.call and carry.handed_any(call):
+                    if call is not site.call and carry.follows(call):
                         self.into(carry, call)
                 returned = carry.returns()
                 if returned:
@@ -5944,7 +6034,7 @@ def _walk(
             # queryTasksToPreassign_JEDI``, which hands it to the proxy that
             # updates the tasks it picks.
             crossings.into(carry, call, everything=True)
-        elif rows and carry.handed_any(call):
+        elif rows and carry.follows(call):
             crossings.into(carry, call)
     returned = carry.returns() if rows else _NOTHING
     if returned:
@@ -6648,7 +6738,7 @@ def _reaches(
     rows = _rows_written(func, line, site.region[1]) if site.region else []  # type: ignore[arg-type]
     carry = _PathCarry(reading, site.anchor.file, func, (), start=rows)
     for call in _own_calls(func):
-        if call.lineno != line and rows and carry.handed_any(call):
+        if call.lineno != line and rows and carry.follows(call):
             crossings.into(carry, call)
     returned = carry.returns() if rows else _NOTHING
     for kind, file, step, call in reversed(way):
@@ -6663,7 +6753,7 @@ def _reaches(
         if owner in reading.owners and reading.reads_in(carry):
             crossings._cross(owner)
         for other in _own_calls(step):
-            if other is not call and carry.handed_any(other):
+            if other is not call and carry.follows(other):
                 crossings.into(carry, other)
         returned = carry.returns()
     if returned:

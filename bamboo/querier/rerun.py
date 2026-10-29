@@ -102,6 +102,7 @@ from bamboo.codemap.panda import pathcond, sqltext
 from bamboo.codemap.panda import sql as sql_mod
 from bamboo.codemap.panda.provenance import facade_calls
 from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
+from bamboo.codemap.reading import containing_function
 from bamboo.querier import asked as A
 from bamboo.querier import census as C
 from bamboo.querier import evaluate as E
@@ -156,14 +157,38 @@ def handed_to(func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call) -> d
     return stated | handed
 
 
-def proxy_reading(method: str, call: ast.Call) -> tuple[list[str], dict[str, object], list[str], list[str], list[str]] | None:
+def receiver_methods(method: str, call: ast.Call, file: str, line: int) -> tuple[list[str], set[tuple[str, int]]]:
+    """``(the classes the receiver of *call* is declared to be, as file::Class; their methods named *method*, as
+    (file, line))``, read with the map's Types in the def of *file* holding *line*; both empty where it declares none.
+
+    The walk stops at the database by the receiver's name (``provenance.DATABASE_INTERFACES``), which does not say
+    which facade it is; its declaration does.  JEDI's ``self.taskBufferIF`` is a ``JediTaskBufferInterface``, a
+    ``JediTaskBuffer`` to a type checker, so its ``updateTask_JEDI`` is ``JediTaskBuffer``'s and its ``peekJobs`` the
+    one it inherits from ``TaskBuffer``.
+    """
+    types = A._types()
+    tree = types.tree(file)
+    func = containing_function(tree, line, "") if tree is not None else None
+    if func is None or not isinstance(call.func, ast.Attribute):
+        return [], set()
+    classes = types.declared(file, func, call.func.value) or frozenset()
+    found = [types.method(where, cls, method) for where, cls in classes]
+    return sorted(f"{where}::{cls.name}" for where, cls in classes), {(f[0], f[1].lineno) for f in found if f is not None}
+
+
+def proxy_reading(
+    method: str, call: ast.Call, theirs: set[tuple[str, int]] | None = None
+) -> tuple[list[str], dict[str, object], list[str], list[str], list[str]] | None:
     """``(parameters, constants, the statement's tables, the tables this call reads, the proxy methods it reaches
     whose statements are not read)`` for a call the walk stopped at as the database's, or None where no facade has
-    *method*.
+    *method* -- or none of *theirs*, the methods its receiver is declared to have (:func:`receiver_methods`).
 
     The method is the one the walk's stop names, and what it asks the database is what the facades' method of the
     name calls on the proxy it borrows (``provenance.facade_calls``, as ``trace._Walk.database_asked`` reads it):
-    ``peekJobs`` reads what ``peekJob`` does.  The call is bound to the facade's parameters, with the
+    ``peekJobs`` reads what ``peekJob`` does.  Where the receiver declares its class, the facade is the one it is:
+    ``TaskBuffer.updateTask_JEDI`` hands the proxy ``updateDEFT=True`` by default and ``JediTaskBuffer``'s False, so
+    the two read together name two tables a JEDI caller's call never reads.  Where it declares none, every facade's
+    method of the name, as the stop was found.  The call is bound to the facade's parameters, with the
     defaults the facade states, and each call the facade makes on the proxy hands the proxy's parameters a constant
     it writes, a parameter of its own it never rebinds, or the proxy's default.  Bound to the proxy's parameters
     directly, a signature the two do not share flips a flag: ``updateTask_JEDI``'s ``updateDEFT`` defaults to False in
@@ -183,6 +208,8 @@ def proxy_reading(method: str, call: ast.Call) -> tuple[list[str], dict[str, obj
     constants all rule out runs nothing here and is not named.
     """
     made = facade_calls(Types(R.ROOTS, {}), method)
+    if theirs is not None:
+        made = [one for one in made if (one.file, one.method.lineno) in theirs]
     if not made:
         return None
     params = [a.arg for a in (*made[0].method.args.posonlyargs, *made[0].method.args.args)][1:]
@@ -1800,8 +1827,8 @@ class Rerun:
         self.say(f"{receiver}: {len(calls)} make call(s)")
         logs = list(dict.fromkeys(f for x in calls for f in self.files_of(f"{x.rel}::{x.func}", [], [x.line])))
         rows = W.rows_until(states, question.last)
-        self.say(f"{len(rows)} statuslog row(s) by the run's last record {question.last}: each asked at its second on its "
-                 f"host, in turn, until a run holds it")
+        self.say(f"{len(rows)} statuslog row(s) by the run's last record {question.last}: each asked at its second, in "
+                 f"turn, until a run holds it")
         job = keyed(self.args.key)
         makers, unanswered = [], []
         for state, asking in rows:
@@ -1825,8 +1852,10 @@ class Rerun:
                                  f"another job's, {r2.describe()}")
                         continue
                     found.append((x, f2, r2, hits))
-            self.say(f"-- {state['status']!r} at {hi} on {asking.machine or 'every machine'}: {len(held)} run(s) of the name "
-                     f"hold that second, {len(found)} with a make call's print and the job's key")
+            # the door over files reads the files given whatever machine wrote them: the row's host is not where it looked
+            where = f"on {asking.machine or 'every machine'}" if self.logs.needs_window else "in the files given, their machine not known"
+            self.say(f"-- {state['status']!r} at {hi} {where}: {len(held)} run(s) of the name hold that second, {len(found)} "
+                     f"with a make call's print and the job's key")
             if found:
                 makers = found
                 break
@@ -2634,8 +2663,17 @@ class Rerun:
         call = ast.parse(step.value, mode="eval").body
         self.need(f"a call behind {q.name}", isinstance(call, ast.Call))
         callee = ast.unparse(call.func).split(".")[-1]
+        # the facade is the one the receiver is declared to be, where it declares one (the stop found it by its name)
+        classes, theirs = receiver_methods(callee, call, step.file or fn.rel, step.line)
+        receiver = ast.unparse(call.func.value) if isinstance(call.func, ast.Attribute) else ast.unparse(call.func)
+        if classes:
+            self.say(f"the receiver {receiver} is declared {', '.join(classes)}: its {callee} at "
+                     f"{', '.join(f'{f}:{n}' for f, n in sorted(theirs)) or 'none'}")
+        else:
+            self.say(f"the receiver {receiver} declares no class: every facade's {callee}")
         params, constants, statement, at_call, unread = self.need(
-            f"a facade's {callee}, the method the walk's stop names, and its calls on the proxy", proxy_reading(callee, call)
+            f"a facade's {callee}, the method the walk's stop names, and its calls on the proxy",
+            proxy_reading(callee, call, theirs if classes else None),
         )
         entry = R.entry_row(fn)
         for n, (p, env) in enumerate(zip(q.passes, q.envs, strict=False), 1):
