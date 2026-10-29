@@ -124,6 +124,8 @@ class Frame:
     #: the traceback's own line, where the corpus holds the frame's source at another line (``line``): the run's code
     #: was another version than the pin's (``_place``)
     moved_from: int | None = None
+    #: where the frame is not placed so: the lines of its function holding the printed source, none or more than one
+    printed_at: tuple[int, ...] = ()
 
     @property
     def in_corpus(self) -> bool:
@@ -195,13 +197,13 @@ def _corpus_file(target: Path) -> tuple[list[str], dict[str, list[tuple[int, int
     return text.splitlines(), spans
 
 
-def _place(path: str, line: int, func: str, source: str) -> tuple[str, bool | None, int, int | None]:
-    """``(rel, same_source, line, moved_from)``: the frame's corpus path, whether the corpus holds the source line the
-    traceback printed, the corpus's line of it, and the traceback's own line where that differs.  The pin is the code
-    the case is read against, and a run's traceback prints the lines of the version it ran: where the corpus's line
-    holds other text, the one line of *func* -- every def of its name in the file -- holding the printed text is the
-    frame's, the traceback's line kept to say so; none, or more than one, leaves the frame not the corpus's source
-    (KNOWN_ISSUES.md K33)."""
+def _place(path: str, line: int, func: str, source: str) -> tuple[str, bool | None, int, int | None, tuple[int, ...]]:
+    """``(rel, same_source, line, moved_from, printed_at)``: the frame's corpus path, whether the corpus holds the
+    source line the traceback printed, the corpus's line of it, and the traceback's own line where that differs.  The
+    pin is the code the case is read against, and a run's traceback prints the lines of the version it ran: where the
+    corpus's line holds other text, the one line of *func* -- every def of its name in the file -- holding the printed
+    text is the frame's, the traceback's line kept to say so; none, or more than one, leaves the frame not the corpus's
+    source, with those lines (``printed_at``) (KNOWN_ISSUES.md K33)."""
     for package in PACKAGES:
         at = path.rfind(package)
         if at < 0:
@@ -209,17 +211,17 @@ def _place(path: str, line: int, func: str, source: str) -> tuple[str, bool | No
         rel = path[at:]
         target = CORPUS / rel
         if not target.exists():
-            return "", None, line, None
+            return "", None, line, None, ()
         lines, spans = _corpus_file(target)
         printed = source.strip()
         here = lines[line - 1].strip() if 0 < line <= len(lines) else ""
         if here == printed or not printed:
-            return rel, here == printed, line, None
+            return rel, here == printed, line, None, ()
         found = sorted({n for lo, hi in spans.get(func, []) for n in range(lo, hi + 1) if lines[n - 1].strip() == printed})
         if len(found) == 1:
-            return rel, True, found[0], line
-        return rel, False, line, None
-    return "", None, line, None
+            return rel, True, found[0], line, ()
+        return rel, False, line, None, tuple(found)
+    return "", None, line, None, ()
 
 
 def _chains(lines: list[str]) -> list[Chain]:
@@ -241,8 +243,8 @@ def _chains(lines: list[str]) -> list[Chain]:
             while i < len(lines) and set(lines[i].strip()) <= {"^", "~"} and lines[i].strip():
                 i += 1
             path, line = m["path"], int(m["line"])
-            rel, same, at, moved = _place(path, line, m["func"], source)
-            frames.append(Frame(path, at, m["func"], source, rel, same, moved))
+            rel, same, at, moved, printed_at = _place(path, line, m["func"], source)
+            frames.append(Frame(path, at, m["func"], source, rel, same, moved, printed_at))
         exc_type, message = "", []
         if i < len(lines):
             m = EXCEPTION.match(lines[i])

@@ -506,21 +506,29 @@ way on.
 ### K33. A traceback of another version of the code is placed by its frames' source text, where it is unique
 
 A run's traceback prints the lines of the code it ran, and the pin is the code the case is read against: since the
-pin moved to panda-server 1.1.0 (32907fe6, 2026-10-29), the replay cases' logs (written by 1.0.x on 09-28 .. 10-14)
-are read against code whose lines moved.  K stopped at H5 ("the frame's source line matches the corpus") on lm11:
-`adder_atlas_plugin.py`'s frame named a line that holds other text on pin m.  `records._place` now reads a frame
-whose line holds other text at the one line of its function -- every def of its name in the file -- holding the
-source the traceback printed, keeps the traceback's line (`Frame.moved_from`), and H5 says it ("frame <file>:<the
-traceback's line> <function> is line <n> of the pin by its source text").  `rows.raised_in` places such a frame the
-same way.  A source line printed twice in the function, or not found there, leaves the frame unplaced, as before:
-the version's own lines are not known.  The text matching says the same statement, not the same code around it --
-a guard that changed between the versions is read as the pin has it.  The other position the cases are keyed by is a
-rows file's answer to L3 ("getJobs@<line> ..."): `data/D-rows.build.py` (the analyzer handover's, not this repo's)
-writes D's answers under the statement's line on both pins.
+pin moved to panda-server 32907fe6 (tag 1.1.0 and #841, 2026-10-29), the replay cases' logs (written by 1.0.x on
+09-28 .. 10-14) are read against other code, and a log of 1.1.0 itself is too: #841 moves lines in 8 files
+(`adder_gen.py`, `job_complex_module.py`, `base_module.py`, ...).  `records._place` reads a frame whose line holds
+other text at the one line of its function -- every def of its name in the file -- holding the source the traceback
+printed, keeps the traceback's line (`Frame.moved_from`), and H5 says it ("frame <file>:<the traceback's line>
+<function> is line <n> of the pin by its source text").  `rows.raised_in` places such a frame the same way.  A
+source line printed twice in the function, or not found there, leaves the frame unplaced, as before -- the version's
+own lines are not known -- and H5 says, on the line before its stop ("the frame's source line matches the corpus"),
+the lines of the function holding it ("at no line" or "at lines <a>, <b>").  The text matching says the same
+statement, not the same code around it: a guard that changed between the versions is read as the pin has it.
 
-*Shows:* H5's line for each frame placed so; no stop where the source is unique in the function.
+No case's frame has moved so far.  K's stop on the new pin is not a moved line: its statement is gone.  8ec5f109
+("Fix KeyError in decompose_id_map for alternatively staged-out outputs", 2026-09-30) is K's own failure fixed, and
+pin m's `decompose_id_map` holds the printed `sub_to_dataset_map[tmp_dataset]` at no line.  So K and K-rec, the only
+cases that reach R1-R5, stop at H5 on the pin.  The other position the cases are keyed by is a rows file's answer
+to L3 ("getJobs@<line> ..."): `data/D-rows.build.py` (the analyzer handover's, not this repo's) writes D's answers
+under the statement's line on both pins.
+
+*Shows:* H5's line for each frame placed so; H5's "holds the printed source at no line" before a stop where the run's
+statement is not the pin's.
 *Revisit:* when a case's logs come from a version whose function no longer holds the printed line, or holds it twice
-(a pin of the case's own version); when another step keys a reading by a line of the code.
+(a pin of the case's own version); when another step keys a reading by a line of the code; when a current case
+reaches R1-R5.
 
 ## `which_ran`
 

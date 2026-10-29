@@ -2750,7 +2750,7 @@ def test_a_frame_of_another_version_is_read_at_the_one_line_of_its_function_hold
                       f'  File "/opt/panda/lib/python3.11/site-packages/pandaserver/b.py", line {line}, in f',
                       f"    {source}", "ValueError: no"]
                 f, = _chains(tb)[0].frames
-                return [f.line, f.same_source, f.moved_from]
+                return [f.line, f.same_source, f.moved_from, f.printed_at]
 
             print(json.dumps({"moved": frame(7, "y = h(x)"), "same": frame(3, "y = h(x)"),
                               "twice": frame(9, "return None"), "absent": frame(2, "z = 3")}))
@@ -2759,10 +2759,10 @@ def test_a_frame_of_another_version_is_read_at_the_one_line_of_its_function_hold
     )
     got = json.loads(out.splitlines()[-1])
     # the run's code had the line at 7: f holds it once, at 3 (g's own is another function's)
-    assert got["moved"] == [3, True, 7]
-    assert got["same"] == [3, True, None]
-    # printed twice in f, or nowhere: not placed, as before
-    assert got["twice"] == [9, False, None] and got["absent"] == [2, False, None]
+    assert got["moved"] == [3, True, 7, []]
+    assert got["same"] == [3, True, None, []]
+    # printed twice in f, or nowhere: not placed, as before, with the lines of f that hold it
+    assert got["twice"] == [9, False, None, [5, 6]] and got["absent"] == [2, False, None, []]
 
 
 def test_a_candidates_must_rows_stop_where_a_traceback_of_its_run_shows_the_call_left(tmp_path):

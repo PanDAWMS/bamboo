@@ -1913,6 +1913,10 @@ class Rerun:
             self.say(f"raised inside the corpus: {last.rel}:{last.line} {last.func} ({last.source})")
             self.say(f"exception: {ch.exc_type}: {ch.exc_message.splitlines()[-1] if ch.exc_message else ''}")
             if not last.same_source:
+                if last.source:
+                    held = f"at lines {', '.join(map(str, last.printed_at))}" if last.printed_at else "at no line"
+                    self.say(f"the pin's line {last.line} holds other text; its {last.func} holds the printed source"
+                             f" {held} (the run's code was another version; KNOWN_ISSUES.md K33)")
                 self.need("the frame's source line matches the corpus", None)
             return FalseAtom(last, ch, question)
         inner, outer, ch = boundary
