@@ -35,6 +35,7 @@ import ast
 import builtins
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
 from bamboo.codemap.panda.pathcond import names_bound_by, targets_of, written_value
@@ -51,34 +52,20 @@ if TYPE_CHECKING:
 #: though they read different things.  The class is read the way a type checker
 #: reads it -- an annotation, a constructor, a method's return annotation -- by
 #: the walk, which hands it here as ``typed``; the key is the file that declares
-#: the class, so a class of the same name elsewhere is not this one.
-INTERFACE_CLASSES = {
-    "pandaserver/brokerage/SiteMapper.py::SiteMapper": "CRIC site declaration",
-    # ``rucioAPI = RucioAPI()`` at the foot of ``ddm.py``, imported by name
-    # everywhere the server registers, attaches or erases a dataset.  The
-    # attribute table's ``ddmIF`` is JEDI's; the server's never had a name.
-    "pandaserver/dataservice/ddm.py::RucioAPI": "DDM / Rucio",
-}
+#: the class, so a class of the same name elsewhere is not this one.  The
+#: classes are :data:`callfacts.INTERFACE_CLASSES`.
+INTERFACE_CLASSES = callfacts.INTERFACE_CLASSES
 
-#: The system -> the package PanDA reaches it through, where PanDA calls it.
-#: Declared beside the interface, because "outside the corpus" alone takes in
-#: pandacommon's logger as readily as the Rucio client.  ``SiteMapper`` reads
-#: CRIC's declarations already loaded and calls nothing out, so it has none.
-OUTSIDE_PACKAGES = {
-    "DDM / Rucio": ("rucio",),
-}
+#: The system -> the package PanDA reaches it through, where PanDA calls it:
+#: :data:`callfacts.OTHER_SYSTEMS`, the one table the readers of a call read
+#: too.  Named, because "outside the corpus" alone takes in pandacommon's
+#: logger as readily as the Rucio client.  ``SiteMapper`` reads CRIC's
+#: declarations already loaded and calls nothing out, so it has none.
+OUTSIDE_PACKAGES = callfacts.OTHER_SYSTEMS
 
-#: ``self.<attribute>`` -> the system on the other side of it.
-#:
-#: The spelling, kept where the class cannot be read yet.  JEDI builds its
-#: ``self.siteMapper`` from ``self.taskBufferIF.get_site_mapper()``, and that
-#: interface forwards every call through ``__getattr__ -> Any``, so no
-#: declaration says what comes back; ``siteMapper`` stays here until PanDA
-#: states it, and ``ddmIF`` until DDM's classes are read the same way.
-EXTERNAL_INTERFACES = {
-    "ddmIF": "DDM / Rucio",
-    "siteMapper": "CRIC site declaration",
-}
+#: ``self.<attribute>`` -> the system on the other side of it, where the class
+#: cannot be read yet (:data:`callfacts.EXTERNAL_INTERFACES` says why each is).
+EXTERNAL_INTERFACES = callfacts.EXTERNAL_INTERFACES
 
 #: Interfaces that land back in PanDA's own database.  A terminal for the
 #: trace and a continuation for the map, which is the point of naming it
@@ -89,7 +76,7 @@ EXTERNAL_INTERFACES = {
 #: those come back as "chosen by whoever called or built this", which is true
 #: of the cursor object and false of the row: the row came from the statement
 #: executed a few lines above, and the map has read that statement.
-DATABASE_INTERFACES = {"taskBufferIF", "taskBuffer", "cur"}
+DATABASE_INTERFACES = callfacts.TASK_BUFFER_NAMES | callfacts.CURSOR_NAMES
 
 #: The task buffer's facades -> the attribute each borrows a proxy from, and
 #: the proxy class whose methods run the statements.
@@ -103,11 +90,8 @@ DATABASE_INTERFACES = {"taskBufferIF", "taskBuffer", "cur"}
 #: ``peekJobs`` calls ``peekJob`` once per job, ``querySQL`` calls
 #: ``querySQLS``, and ``getDatasetsWithJediTaskID_JEDI`` calls two.  The JEDI
 #: facade's pool hands out ``JediDBProxy``, a subclass that adds nothing a
-#: facade calls.
-FACADES = {
-    "pandaserver/taskbuffer/TaskBuffer.py::TaskBuffer": ("proxyPool", "pandaserver/taskbuffer/OraDBProxy.py::DBProxy"),
-    "pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer": ("proxyPool", "pandajedi/jedicore/JediDBProxy.py::DBProxy"),
-}
+#: facade calls.  The facades are :data:`callfacts.FACADES`.
+FACADES = callfacts.FACADES
 _POOLS = frozenset(pool for pool, _proxy in FACADES.values())
 
 _CONFIG_CALL = "getConfigValue"

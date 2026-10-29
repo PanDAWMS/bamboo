@@ -12,23 +12,35 @@ one order:
 2. a definition of the corpus the call lands at: its body says what it does (:data:`DEFINITION`);
 3. a logger's method, by its name (:data:`LOG_METHODS`), where no definition answers: it writes a line and keeps
    nothing it is handed (:data:`LOGGER`, the assumption ``logger_keeps_nothing``) -- ``LogWrapper`` is a library
-   class, and step 4 would read ``tmp_log.debug(msg)`` as keeping the message;
-4. an object of a class outside the corpus (:meth:`calls.Types.library_classes`), or of a class of the corpus built
-   on a base outside it that supplies the method (:meth:`calls.Types.built_outside`): nothing here says what the
-   method does with what it is handed, so it keeps all of it (:data:`LIBRARY`);
-5. a builtin container: its type's method (:data:`BUILTIN`);
-6. an object whose class cannot be said, or a value a call outside the corpus made -- ``json.loads``', a row the
+   class, and step 5 would read ``tmp_log.debug(msg)`` as keeping the message;
+4. an object of another system's client -- its class, or the base outside the corpus a class of the corpus is built
+   on, defined in a package :data:`OTHER_SYSTEMS` names: it hands what it is given to that system, another run's
+   input, and keeps nothing of it (:data:`CLIENT`, the assumption ``other_systems_keep_nothing``) -- Rucio's
+   ``Client``, ``smtplib.SMTP``, the message broker's agent;
+5. an object of any other class outside the corpus (:meth:`calls.Types.library_classes`), or of a class of the
+   corpus built on a base outside it that supplies the method (:meth:`calls.Types.built_outside`): nothing here says
+   what the method does with what it is handed, so it keeps all of it (:data:`LIBRARY`);
+6. a builtin container: its type's method (:data:`BUILTIN`);
+7. an object whose class cannot be said, or a value a call outside the corpus made -- ``json.loads``', a row the
    database returned: the builtin's method of the name (:data:`ASSUMED`, the assumption ``builtin_by_name``);
-7. anything else: nothing is said (:data:`UNKNOWN`) -- a module's function, a method read off a class, a class of
+8. anything else: nothing is said (:data:`UNKNOWN`) -- a module's function, a method read off a class, a class of
    the corpus that has no such method.
 
 Each reader keeps its question and answers it from the :class:`Method` it is given.  A reader that reads text alone,
 with no placing -- the trace, what may change a name between two lines -- reads the facts by the name
-(:func:`by_name`), which is step 6's assumption for every call.
+(:func:`by_name`), which is step 7's assumption for every call.
 
-The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, whether a method
-changes its receiver, and a logger's methods; the taking ones (``get``, ``pop``, ``items``) and the builtin functions
-still sit with their readers.
+The facts here are the putting ones, which ``append``, ``add``, ``update`` and the like are, the taking ones --
+what ``get``, ``pop``, ``items``, ``copy`` and the like hand back of the receiver (:class:`Give`) --, whether a
+method changes its receiver, what a container class holds (:data:`CONTAINERS`), what a ``str`` method's value is
+(:data:`TEXT_METHODS`), a logger's methods and the calls making a logger (:data:`LOG_LEVELS`,
+:data:`LOGGER_MAKERS`), the database's driver, the calls running a statement and those handing back its rows
+(:data:`DRIVER_CLASSES`, :data:`CURSOR_RUNS`, :data:`FETCHES`), PanDA's conventions -- the other systems' interfaces,
+the task buffer's facades, a spec's row and its declared columns (:data:`INTERFACE_CLASSES`, :data:`FACADES`,
+:data:`ROW_READ`, :data:`SPEC_DECLARATION_NAMES`) --, and what a builtin function does with what it is
+handed -- what its value holds of it (``list(xs)``, ``max(a, b)``, ``str(x)``, ``len(xs)``, ``isinstance(x, C)``),
+the builtin type of its value, whether it calls a function it is handed (:class:`Function`) -- read where the name
+is the builtin's (:func:`builtin_function`).
 """
 
 from __future__ import annotations
@@ -37,7 +49,7 @@ import ast
 from typing import TYPE_CHECKING, NamedTuple, Optional
 
 if TYPE_CHECKING:
-    from bamboo.codemap.calls import Calls, Placed
+    from bamboo.codemap.calls import Calls, Placed, Types
 
 #: Where a method puts one of what it is handed: as one element, its elements as elements, as a key, as the value
 #: under a key it is also handed, a mapping's keys and values merged, or the whole of it.
@@ -66,29 +78,55 @@ class Put(NamedTuple):
     at: Optional[int] = None
 
 
+#: What a method hands back of its receiver: another of the same make-up, one of what it holds, a view of its keys,
+#: values or (key, value) pairs, or one (key, value) pair.
+SELF, AT, KEYS, VALUES, ITEMS, ITEM = ("self", "at", "keys", "values", "items", "item")
+
+
+class Give(NamedTuple):
+    """What a method hands back of its receiver.
+
+    *part* is :data:`SELF` (a copy), :data:`AT` (one of what it holds: the one the argument at position *key* names,
+    any one where the call hands none -- ``d.get(k)``, ``xs.pop()``), :data:`KEYS` / :data:`VALUES` / :data:`ITEMS`
+    (a view whose elements are its keys, its values, its (key, value) pairs) or :data:`ITEM` (one such pair);
+    *default* the position of an argument the value may be instead (``d.get(k, default)``)."""
+
+    part: str
+    key: Optional[int] = None
+    default: Optional[int] = None
+
+
 class Method(NamedTuple):
-    """What a method of a class the corpus does not hold does: what it puts into its receiver, and whether it changes
-    the receiver at all."""
+    """What a method of a class the corpus does not hold does: what it puts into its receiver, whether it changes
+    the receiver at all, and what it hands back of it."""
 
     puts: tuple[Put, ...] = ()
     changes: bool = False
+    gives: Optional[Give] = None
 
 
-def _changing() -> Method:
-    return Method((), True)
+def _changing(gives: Optional[Give] = None) -> Method:
+    return Method((), True, gives)
 
 
-#: The builtin containers' methods that put into them or change them, by ``(type, name)``.  ``collections.deque``'s
-#: are here too: :meth:`calls.Types.library_classes` reads ``collections`` as the builtins' (its values are).
+def _giving(gives: Give) -> Method:
+    return Method((), False, gives)
+
+
+#: The builtin containers' methods that put into them, change them or hand back a part of them, by ``(type, name)``.
+#: ``collections.deque``'s are here too: :meth:`calls.Types.library_classes` reads ``collections`` as the builtins'
+#: (its values are).
 BUILTIN_METHODS: dict[tuple[str, str], Method] = {
     ("list", "append"): Method((Put(0, ELEMENT),), True),
     ("list", "insert"): Method((Put(1, ELEMENT),), True),
     ("list", "extend"): Method((Put(0, ELEMENTS),), True),
-    ("list", "pop"): _changing(),
+    ("list", "pop"): _changing(Give(AT, 0)),
     ("list", "remove"): _changing(),
     ("list", "clear"): _changing(),
     ("list", "sort"): _changing(),
     ("list", "reverse"): _changing(),
+    ("list", "copy"): _giving(Give(SELF)),
+    ("list", "__getitem__"): _giving(Give(AT, 0)),
     ("set", "add"): Method((Put(0, ELEMENT),), True),
     ("set", "update"): Method((Put(EVERY_POSITIONAL, ELEMENTS),), True),
     ("set", "symmetric_difference_update"): Method((Put(0, ELEMENTS),), True),
@@ -96,52 +134,386 @@ BUILTIN_METHODS: dict[tuple[str, str], Method] = {
     ("set", "intersection_update"): _changing(),
     ("set", "discard"): _changing(),
     ("set", "remove"): _changing(),
-    ("set", "pop"): _changing(),
+    ("set", "pop"): _changing(Give(AT)),
     ("set", "clear"): _changing(),
+    ("set", "copy"): _giving(Give(SELF)),
     ("dict", "update"): Method((Put(0, MERGE), Put(EVERY_KEYWORD, VALUE)), True),
-    ("dict", "setdefault"): Method((Put(0, KEY), Put(1, VALUE, at=0)), True),
-    ("dict", "pop"): _changing(),
-    ("dict", "popitem"): _changing(),
+    ("dict", "setdefault"): Method(
+        (Put(0, KEY), Put(1, VALUE, at=0)), True, Give(AT, 0, 1)
+    ),
+    ("dict", "pop"): _changing(Give(AT, 0, 1)),
+    ("dict", "popitem"): _changing(Give(ITEM)),
     ("dict", "clear"): _changing(),
+    ("dict", "get"): _giving(Give(AT, 0, 1)),
+    ("dict", "__getitem__"): _giving(Give(AT, 0)),
+    ("dict", "keys"): _giving(Give(KEYS)),
+    ("dict", "values"): _giving(Give(VALUES)),
+    ("dict", "items"): _giving(Give(ITEMS)),
+    ("dict", "copy"): _giving(Give(SELF)),
     ("deque", "append"): Method((Put(0, ELEMENT),), True),
     ("deque", "appendleft"): Method((Put(0, ELEMENT),), True),
     ("deque", "insert"): Method((Put(1, ELEMENT),), True),
     ("deque", "extend"): Method((Put(0, ELEMENTS),), True),
     ("deque", "extendleft"): Method((Put(0, ELEMENTS),), True),
-    ("deque", "pop"): _changing(),
-    ("deque", "popleft"): _changing(),
+    ("deque", "pop"): _changing(Give(AT)),
+    ("deque", "popleft"): _changing(Give(AT)),
     ("deque", "remove"): _changing(),
     ("deque", "clear"): _changing(),
     ("deque", "rotate"): _changing(),
     ("deque", "reverse"): _changing(),
+    ("deque", "copy"): _giving(Give(SELF)),
 }
 
 #: What a method of a class outside the corpus does where this table says nothing of it: it keeps every argument it is
 #: handed in its object, whole (:data:`ASSUMPTIONS` ``library_keeps_what_it_is_handed``).
 KEEPS_ALL = Method((Put(EVERY_POSITIONAL, WHOLE), Put(EVERY_KEYWORD, WHOLE)), True)
 
-#: A logger's methods, by their names: a call of one writes a line and keeps nothing it is handed (:data:`ASSUMPTIONS`
-#: ``logger_keeps_nothing``).  ``sendMsg`` / ``keepMsg`` are JEDI's ``MsgWrapper``'s, ``log`` ``logging.Logger``'s.
-LOG_METHODS = frozenset(
+#: What a container holds, as its annotation's subscript says: keys, with the value under one its second argument
+#: (``dict[K, V]``); elements, its first (``list[T]``, ``Generator[Y, S, R]``); each argument at its own position
+#: (``tuple[A, B]``); a signature, holding none of them (``Callable[[A], R]``); or, a context manager, what ``with``
+#: hands out, its first.
+MAPPING, COLLECTION, RECORD, SIGNATURE, CONTEXT = (
+    "mapping",
+    "collection",
+    "record",
+    "signature",
+    "context",
+)
+
+
+class Container(NamedTuple):
+    """A container class, by what its value holds (:data:`MAPPING`, :data:`COLLECTION`, :data:`RECORD`,
+    :data:`SIGNATURE`, :data:`CONTEXT`).
+
+    *builtin* is the builtin or standard class a value of it is (``Dict`` a ``dict``), ``""`` for an abstract one
+    (``Mapping``, ``Iterable``) -- a call of a name that is its own *builtin* makes one, empty when handed nothing;
+    *module* the module the name comes from, ``""`` for a builtin; *ordered* whether its elements sit at positions and
+    ``+`` joins two (``list``, ``tuple``, ``Sequence``); *generator* whether a generator function is declared to return
+    it (``Iterator[Y]``, a ``contextmanager``'s too)."""
+
+    holds: str
+    builtin: str = ""
+    module: str = ""
+    ordered: bool = False
+    generator: bool = False
+
+
+#: The builtin, ``typing`` and ``collections`` containers, by their names.  ``collections.abc``'s abstract ones are
+#: ``typing``'s names.
+CONTAINERS: dict[str, Container] = {
+    "dict": Container(MAPPING, "dict"),
+    "Dict": Container(MAPPING, "dict", "typing"),
+    "DefaultDict": Container(MAPPING, "defaultdict", "typing"),
+    "Mapping": Container(MAPPING, "", "typing"),
+    "MutableMapping": Container(MAPPING, "", "typing"),
+    "defaultdict": Container(MAPPING, "defaultdict", "collections"),
+    "OrderedDict": Container(MAPPING, "OrderedDict", "collections"),
+    "Counter": Container(MAPPING, "Counter", "collections"),
+    "list": Container(COLLECTION, "list", ordered=True),
+    "List": Container(COLLECTION, "list", "typing", ordered=True),
+    "Sequence": Container(COLLECTION, "", "typing", ordered=True),
+    "deque": Container(COLLECTION, "deque", "collections", ordered=True),
+    "set": Container(COLLECTION, "set"),
+    "Set": Container(COLLECTION, "set", "typing"),
+    "frozenset": Container(COLLECTION, "frozenset"),
+    "FrozenSet": Container(COLLECTION, "frozenset", "typing"),
+    "Collection": Container(COLLECTION, "", "typing"),
+    "Iterable": Container(COLLECTION, "", "typing", generator=True),
+    "Iterator": Container(COLLECTION, "", "typing", generator=True),
+    "Generator": Container(COLLECTION, "", "typing", generator=True),
+    "AsyncIterable": Container(COLLECTION, "", "typing", generator=True),
+    "AsyncIterator": Container(COLLECTION, "", "typing", generator=True),
+    "AsyncGenerator": Container(COLLECTION, "", "typing", generator=True),
+    "tuple": Container(RECORD, "tuple", ordered=True),
+    "Tuple": Container(RECORD, "tuple", "typing", ordered=True),
+    "Callable": Container(SIGNATURE, "", "typing"),
+    "ContextManager": Container(CONTEXT, "", "typing"),
+    "AbstractContextManager": Container(CONTEXT, "", "contextlib"),
+}
+
+
+def containers(*holds: str) -> frozenset[str]:
+    """The names of :data:`CONTAINERS` holding as one of *holds* says."""
+    return frozenset(name for name, one in CONTAINERS.items() if one.holds in holds)
+
+
+#: The names whose call makes one of them, empty when handed nothing: ``dict()``, ``defaultdict(list)``.
+CONTAINER_MAKERS = frozenset(
+    name for name, one in CONTAINERS.items() if one.builtin == name
+)
+
+#: A logger's methods writing one line to its file at a level of their own, by their names -> that level, as the line
+#: spells it lower-cased: ``exception`` writes at ``error`` (the traceback too), ``warn`` is ``warning``'s old name.
+LOG_LEVELS: dict[str, str] = {
+    "debug": "debug",
+    "info": "info",
+    "warning": "warning",
+    "warn": "warning",
+    "error": "error",
+    "exception": "error",
+    "critical": "critical",
+}
+#: A logger's methods, by their names: a call of one writes a line, or keeps one to write later, and keeps nothing it
+#: is handed (:data:`ASSUMPTIONS` ``logger_keeps_nothing``).  Beside :data:`LOG_LEVELS`': ``log``, ``logging.Logger``'s,
+#: whose level is its first argument and the line its second; ``sendMsg``, ``MsgWrapper``'s and ``LogWrapper``'s,
+#: which sends the line to the HTTP logger, not the file; ``keepMsg``, theirs too, which keeps it and writes nothing.
+LOG_METHODS = frozenset(LOG_LEVELS) | {"log", "sendMsg", "keepMsg"}
+
+
+#: A logger maker's mark when it is given none, or ``None``: the time the logger is made, or no mark.
+STAMP, NO_MARK = "stamp", ""
+
+
+class Mark(NamedTuple):
+    """Where a logger maker takes the mark it writes on each line: the argument at *position* or *keyword*; *absent*
+    what it marks lines with when given neither, *none* when given ``None`` (:data:`STAMP` or :data:`NO_MARK`)."""
+
+    position: int
+    keyword: str
+    absent: str
+    none: str
+
+
+class LoggerMaker(NamedTuple):
+    """What a call making a logger does: *logger* the position of the logger it writes through, ``None`` where its
+    body says (``create_tagged_logger``'s ``self._log_stream``) or it opens a file; *mark* where it takes each line's
+    mark, ``None`` for none; *opens* whether it opens PandaLogger's file of the name it is handed first."""
+
+    logger: Optional[int]
+    mark: Optional[Mark]
+    opens: bool = False
+
+
+#: The calls making a logger, by their names: what they are handed is a log line's -- a mark, a name, a logger -- and
+#: the logger holds none of it as a value.  ``LogWrapper`` and ``make_logger`` are pandacommon's, ``MsgWrapper`` JEDI's,
+#: ``create_tagged_logger`` the database proxy's; ``getLogger`` is ``PandaLogger``'s and ``logging``'s alike.
+LOGGER_MAKERS: dict[str, LoggerMaker] = {
+    # LogWrapper(log, prefix="", ...): a prefix of None is the time.
+    "LogWrapper": LoggerMaker(0, Mark(1, "prefix", NO_MARK, STAMP)),
+    # MsgWrapper(logger, token=None, ...): "<time>" for none.
+    "MsgWrapper": LoggerMaker(0, Mark(1, "token", STAMP, STAMP)),
+    # make_logger(tmp_log, token=None, ...): "method <token>", "method :" for none.
+    "make_logger": LoggerMaker(0, Mark(1, "token", NO_MARK, NO_MARK)),
+    # DBProxy.create_tagged_logger(comment, tag=None): "method < tag >", the time for none.
+    "create_tagged_logger": LoggerMaker(None, Mark(1, "tag", STAMP, STAMP)),
+    # PandaLogger().getLogger(name) opens "<logdir>/panda-<name>.log"; setup_logger(name) too, its caller's module's
+    # name for none.
+    "getLogger": LoggerMaker(None, None, opens=True),
+    "setup_logger": LoggerMaker(None, None, opens=True),
+}
+
+#: The classes PanDA's proxies talk to the database through (``pandaserver/taskbuffer``'s wrappers of the driver): a
+#: call on one goes only to the database.
+DRIVER_CLASSES = frozenset(
+    {"WrappedCursor", "WrappedOracleConn", "WrappedPostgresConn"}
+)
+#: The names a cursor and a connection are held under, a field or a local, read where the class cannot be: a call on
+#: either goes only to the database; a value a cursor hands back is a statement's rows, a connection's none.
+CURSOR_NAMES, CONNECTION_NAMES = frozenset({"cur"}), frozenset({"conn"})
+#: The names the task buffer is held under: what a call on it hands back comes from the database.
+TASK_BUFFER_NAMES = frozenset({"taskBufferIF", "taskBuffer"})
+
+#: What a call gives of a statement's rows: one row, or the rows.
+ROW, ROWS = "row", "rows"
+
+
+class Rows(NamedTuple):
+    """What a call gives of the rows of the statement run: *gives* :data:`ROW` or :data:`ROWS`, at position *at* of
+    what it hands back, ``None`` for the whole of it (``querySQLS``'s ``(status, rows)`` holds them at 1)."""
+
+    gives: str
+    at: Optional[int] = None
+
+
+class Run(NamedTuple):
+    """A call running the statement it is handed: *many*, its binds a list of maps, one per row; *rows*, what it hands
+    back of the rows, ``None`` where they are fetched (:data:`FETCHES`)."""
+
+    many: bool = False
+    rows: Optional[Rows] = None
+
+
+#: The cursor's methods running a statement, by their names: the driver's, never a function of the corpus so named.
+CURSOR_RUNS: dict[str, Run] = {"execute": Run(), "executemany": Run(many=True)}
+#: The task buffer's, said where no corpus is read; a corpus says its own (:func:`bamboo.codemap.panda.sql.runners`).
+TASK_BUFFER_RUNS: dict[str, Run] = {
+    "querySQL": Run(rows=Rows(ROWS)),
+    "querySQLS": Run(rows=Rows(ROWS, 1)),
+}
+#: The cursor's methods handing back the rows of the statement it ran: ``self.cur.execute(sql, varMap)`` binds
+#: nothing at the call, ``res = self.cur.fetchall()`` the rows.
+FETCHES: dict[str, Rows] = {
+    "fetchone": Rows(ROW),
+    "fetchall": Rows(ROWS),
+    "fetchmany": Rows(ROWS),
+}
+#: The cursor's count of the rows its statement ran on.
+ROW_COUNT = "rowcount"
+
+#: The standard library's classes whose ``put()`` hands a value to whoever ``get()``s it -- another thread, another
+#: process, another task -- by ``(module, name)``, and their methods putting and getting it.
+QUEUES = frozenset(
     {
-        "debug",
-        "info",
-        "warning",
-        "warn",
-        "error",
-        "exception",
-        "critical",
-        "sendMsg",
-        "keepMsg",
-        "log",
+        ("queue", "Queue"),
+        ("queue", "LifoQueue"),
+        ("queue", "PriorityQueue"),
+        ("queue", "SimpleQueue"),
+        ("multiprocessing", "Queue"),
+        ("multiprocessing", "JoinableQueue"),
+        ("multiprocessing", "SimpleQueue"),
+        ("asyncio", "Queue"),
+        ("asyncio", "LifoQueue"),
+        ("asyncio", "PriorityQueue"),
     }
 )
+QUEUE_PUTS, QUEUE_GETS = (
+    frozenset({"put", "put_nowait"}),
+    frozenset({"get", "get_nowait"}),
+)
+#: The standard library's classes whose ``start()`` has the object's ``run`` called on a new thread, or in a new
+#: process, and returns -- Python's rule, as ``C(...)`` runs ``C.__init__`` -- and whose ``join()`` waits for it, by
+#: ``(module, name)``.  ``pandacommon``'s ``GenericThread`` is one too, but outside the corpus nothing says so.
+STARTERS = frozenset({("threading", "Thread"), ("multiprocessing", "Process")})
+START, RUN, JOIN = "start", "run", "join"
+
+#: The ``copy`` module's functions -> the method a class defines to be copied some other way: ``copy.copy(x)`` is an
+#: object of ``x``'s class -- typeshed states ``def copy(x: _T) -> _T`` -- unless that class defines the hook, and
+#: then it is what the hook returns.
+COPIES = {("copy", "copy"): "__copy__", ("copy", "deepcopy"): "__deepcopy__"}
+#: Calls reading a value again out of a text -- a column's content parsed or decoded, a value of its own: ``json``'s
+#: and ``pickle``'s ``loads`` / ``load``, ``ast.literal_eval``, ``yaml.safe_load``, ``base64.b64decode``,
+#: ``bytes.decode``, ``urllib.parse.unquote``, ``datetime``'s ``fromisoformat`` / ``strptime``; by their names.
+READ_AGAIN = frozenset(
+    {
+        "loads",
+        "load",
+        "literal_eval",
+        "safe_load",
+        "b64decode",
+        "decode",
+        "unquote",
+        "fromisoformat",
+        "strptime",
+    }
+)
+#: A call writing a value out whole, every part of it read, as a builtin's text of it does (:data:`TEXT`):
+#: ``json.dumps``.
+SERIALIZING = "dumps"
+#: Modules computing a number from what they are handed, as a builtin does (:data:`COMPUTED`).
+COMPUTING_MODULES = frozenset({"math", "statistics", "numpy", "np"})
+#: Iterator helpers outside the corpus (``itertools``', ``pandacommon``'s ``batched``) whose value is made of the first
+#: argument's elements -- in chunks (``batched(items, chunk_size)``), or as they come (``islice``) -- and, for
+#: ``chain``, of every argument's; a count handed beside them makes nothing.
+CHUNKING, SLICING, CHAINING = (
+    frozenset({"batched"}),
+    frozenset({"islice"}),
+    frozenset({"chain"}),
+)
+#: The exception classes a handler catching every exception names: ``except Exception``.
+CATCH_ALL = frozenset({"Exception", "BaseException"})
+
+#: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
+OPERATOR_DUNDERS: dict[type, tuple[str, ...]] = {
+    op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
+    for op, name in (
+        (ast.Add, "add"), (ast.Sub, "sub"), (ast.Mult, "mul"), (ast.MatMult, "matmul"), (ast.Div, "truediv"),
+        (ast.FloorDiv, "floordiv"), (ast.Mod, "mod"), (ast.Pow, "pow"), (ast.LShift, "lshift"),
+        (ast.RShift, "rshift"), (ast.BitAnd, "and"), (ast.BitXor, "xor"), (ast.BitOr, "or"),
+    )
+} | {ast.USub: ("__neg__",), ast.UAdd: ("__pos__",), ast.Invert: ("__invert__",)}  # fmt: skip
+
+#: The dunders Python runs with no call naming them -- ``with``, ``for``, ``in``, ``x[k]``, ``str(x)``, an operator,
+#: comparing, hashing, pickling and copying (:data:`bamboo.codemap.reach.IMPLICIT_DUNDERS` says what the walk takes
+#: of them).
+IMPLICIT_DUNDERS = frozenset(
+    {
+        "__enter__", "__exit__", "__aenter__", "__aexit__", "__iter__", "__next__", "__aiter__", "__anext__",
+        "__getitem__", "__setitem__", "__delitem__", "__contains__", "__len__", "__bool__", "__eq__", "__ne__",
+        "__lt__", "__le__", "__gt__", "__ge__", "__hash__", "__str__", "__repr__", "__format__", "__del__",
+        "__call__", "__getattr__", "__getattribute__", "__setattr__", "__delattr__", "__reduce__",
+        "__reduce_ex__", "__getstate__", "__setstate__", "__copy__", "__deepcopy__", "__new__", "__post_init__",
+        "__await__", "__index__", "__int__", "__float__", "__init_subclass__",
+    }
+    | {name for names in OPERATOR_DUNDERS.values() for name in names}
+)  # fmt: skip
+
+#: The systems PanDA reads through an object of its own as well as through a client's package: the names
+#: :data:`OTHER_SYSTEMS` and the interfaces below give them.
+DDM, CRIC = "DDM / Rucio", "CRIC site declaration"
+
+#: The other systems PanDA is a client of -> the packages it reaches each through.  What a client's method is handed
+#: goes to that system: another run's input, not this run's (reach's premise ``cross_run_not_reach``).  Not the
+#: database's drivers (the driver rule says where those go), not a library that works on what it is handed here
+#: (``numpy``, ``yaml``, ``snakemake``), not a server the corpus runs (``fastmcp``, ``uvicorn``).  A package is a
+#: module's name or the start of one: ``pandacommon.pandamsgbkr`` is the broker's, ``pandacommon.pandalogger`` not.
+#: :data:`bamboo.codemap.panda.provenance.OUTSIDE_PACKAGES` reads this table.
+OTHER_SYSTEMS: dict[str, tuple[str, ...]] = {
+    DDM: ("rucio",),
+    "iDDS": ("idds",),
+    "message broker": ("pandacommon.pandamsgbkr",),
+    "Kafka": ("pandacommon.kafkapublisher",),
+    "PanDA's API": ("pandaclient",),
+    "HTTP": ("requests", "urllib3", "httpx"),
+    "mail": ("smtplib",),
+}
+
+
+def other_system(module: str) -> Optional[str]:
+    """The system of :data:`OTHER_SYSTEMS` whose package *module* is in, or ``None``."""
+    for system, packages in OTHER_SYSTEMS.items():
+        if any(
+            module == package or module.startswith(f"{package}.")
+            for package in packages
+        ):
+            return system
+    return None
+
+
+#: A class of the corpus that is another system's interface, by the file declaring it -> that system: what a call on
+#: one hands back is the system's (:data:`bamboo.codemap.panda.provenance.INTERFACE_CLASSES` says how the walk reads
+#: it).  ``rucioAPI = RucioAPI()`` at the foot of ``ddm.py`` is imported by name everywhere the server registers,
+#: attaches or erases a dataset; :data:`EXTERNAL_INTERFACES`' ``ddmIF`` is JEDI's, the server's never had a name.
+INTERFACE_CLASSES = {
+    "pandaserver/brokerage/SiteMapper.py::SiteMapper": CRIC,
+    "pandaserver/dataservice/ddm.py::RucioAPI": DDM,
+}
+#: ``self.<attribute>`` -> the system on the other side of it: the spelling, kept where the class cannot be read yet.
+#: JEDI builds its ``self.siteMapper`` from ``self.taskBufferIF.get_site_mapper()``, and that interface forwards every
+#: call through ``__getattr__ -> Any``, so no declaration says what comes back; ``siteMapper`` stays here until PanDA
+#: states it, and ``ddmIF`` until DDM's classes are read the same way.
+EXTERNAL_INTERFACES = {"ddmIF": DDM, "siteMapper": CRIC}
+#: The task buffer's facades -> the attribute each borrows a proxy from, and the proxy class whose methods run the
+#: statements: each method of ``TaskBuffer`` and ``JediTaskBuffer`` borrows a connection from ``self.proxyPool`` and
+#: calls methods on it.  The JEDI facade's pool hands out ``JediDBProxy``, a subclass that adds nothing a facade calls.
+FACADES = {
+    "pandaserver/taskbuffer/TaskBuffer.py::TaskBuffer": (
+        "proxyPool",
+        "pandaserver/taskbuffer/OraDBProxy.py::DBProxy",
+    ),
+    "pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer": (
+        "proxyPool",
+        "pandajedi/jedicore/JediDBProxy.py::DBProxy",
+    ),
+}
+#: The spec methods that set every column from a row the database returned.  Declared rather than read: that ``pack``
+#: is handed a row is PanDA's convention, and nothing in its body says where its values came from.
+ROW_READ = ("pack",)
+#: Class-level names a spec uses to say which database columns it holds.  Read together because PanDA uses all three,
+#: and which one a class picks is a matter of when it was written rather than of what it means.
+SPEC_DECLARATION_NAMES = frozenset(
+    {"attributes", "_attributes", "attributes_with_types"}
+)
+
 
 #: The assumptions a reading by this module rests on, as reach's are said (:data:`bamboo.codemap.reach.ASSUMPTIONS`).
 ASSUMPTIONS: dict[str, str] = {
     "builtin_by_name": (
         "A method whose receiver's class cannot be said -- or a value a call outside the corpus made -- is the "
         "builtin container's of its name."
+    ),
+    "other_systems_keep_nothing": (
+        "A method of another system's client (OTHER_SYSTEMS: its class, or the base outside the corpus a class of the "
+        "corpus is built on, is in one of its packages) hands what it is given to that system and keeps nothing of it."
     ),
     "library_keeps_what_it_is_handed": (
         "A method of an object whose class is outside the corpus, or is built on a base outside it that supplies the "
@@ -158,10 +530,11 @@ ASSUMPTIONS: dict[str, str] = {
 }
 
 #: How :func:`meaning` reads a call (the module's order).
-PROTOCOL, DEFINITION, LOGGER, LIBRARY, BUILTIN, ASSUMED, UNKNOWN = (
+PROTOCOL, DEFINITION, LOGGER, CLIENT, LIBRARY, BUILTIN, ASSUMED, UNKNOWN = (
     "protocol",
     "definition",
     "logger",
+    "client",
     "library",
     "builtin",
     "assumed",
@@ -173,8 +546,9 @@ PICKLE_ROUND_TRIP = "pickle_round_trip"
 
 class Meaning(NamedTuple):
     """What a call does, as :func:`meaning` reads it: *kind* the step that answered, *method* the fact for
-    :data:`LOGGER`, :data:`LIBRARY`, :data:`BUILTIN` and :data:`ASSUMED`, *assumption* the :data:`ASSUMPTIONS` key
-    the answer rests on, *copied_from* the ``y`` a :data:`PROTOCOL` copies into the call's receiver."""
+    :data:`LOGGER`, :data:`CLIENT`, :data:`LIBRARY`, :data:`BUILTIN` and :data:`ASSUMED`, *assumption* the
+    :data:`ASSUMPTIONS` key the answer rests on, *copied_from* the ``y`` a :data:`PROTOCOL` copies into the call's
+    receiver."""
 
     kind: str
     method: Optional[Method] = None
@@ -191,10 +565,7 @@ def by_name(name: str) -> Optional[Method]:
     found = [
         method for (_type, called), method in BUILTIN_METHODS.items() if called == name
     ]
-    if not found:
-        return None
-    puts = tuple(dict.fromkeys(put for method in found for put in method.puts))
-    return Method(puts, any(method.changes for method in found))
+    return _together(found)
 
 
 def _of_types(names: frozenset[str], name: str) -> Optional[Method]:
@@ -203,11 +574,38 @@ def _of_types(names: frozenset[str], name: str) -> Optional[Method]:
         for one in sorted(names)
         if (one, name) in BUILTIN_METHODS
     ]
+    return _together(found)
+
+
+def _together(found: list[Method]) -> Optional[Method]:
+    """Several types' facts of one name as one: every put, a change where one changes, and what they hand back where
+    every one hands back the same part -- ``pop`` is one of what it holds for each, at the key a dict's is handed."""
     if not found:
         return None
+    parts = {
+        method.gives.part if method.gives is not None else None for method in found
+    }
+    gives = None
+    if len(parts) == 1 and None not in parts:
+        gives = Give(
+            parts.pop(),
+            next(
+                (m.gives.key for m in found if m.gives and m.gives.key is not None),
+                None,
+            ),
+            next(
+                (
+                    m.gives.default
+                    for m in found
+                    if m.gives and m.gives.default is not None
+                ),
+                None,
+            ),
+        )
     return Method(
         tuple(dict.fromkeys(put for method in found for put in method.puts)),
         any(m.changes for m in found),
+        gives,
     )
 
 
@@ -223,13 +621,271 @@ def builtin_method(type_name: str, name: str) -> Optional[Method]:
     return by_name(name)
 
 
-#: The names some builtin container's method puts with, and the names some changes its receiver with.
+def taken(name: str, type_name: Optional[str] = None) -> Optional[Give]:
+    """What a builtin container's method *name* hands back of its receiver: *type_name*'s where a reader knows the
+    builtin type and the type has the method, every type's of the name together otherwise -- a receiver read as a
+    list and handed ``.get`` is not read right, and the name says more than the type there.  ``None`` where no
+    builtin's method of the name hands back any."""
+    if type_name in _TYPES and (type_name, name) in BUILTIN_METHODS:
+        return BUILTIN_METHODS[(type_name, name)].gives
+    method = by_name(name)
+    return method.gives if method is not None else None
+
+
+#: The names some builtin container's method puts with, the names some changes its receiver with, and the names
+#: some hands back a part of its receiver with.
 PUTTING = frozenset(
     called for (_type, called), method in BUILTIN_METHODS.items() if method.puts
 )
 CHANGING = frozenset(
     called for (_type, called), method in BUILTIN_METHODS.items() if method.changes
 )
+TAKING = frozenset(
+    called
+    for (_type, called), method in BUILTIN_METHODS.items()
+    if method.gives is not None
+)
+
+
+#: What a builtin function's value holds of what it is handed (:class:`Function`): a new container or iterator of
+#: the first argument's elements, one of them, (position, element) pairs of them, tuples of each argument's elements
+#: in step, a dict of the first argument's pairs and of the keywords, the second argument's elements the first keeps,
+#: what the first makes of each of the second's, the first's attribute the second names; a text of all of the first,
+#: the first's number as another type, a value computed from them that holds none of them, what tells only their
+#: class, identity or whether they have an attribute, nothing (``None``), the second argument as its class's base.
+COPY, ONE, NUMBERED, ZIPPED, DICT, KEPT, MADE, ATTRIBUTE = (
+    "copy",
+    "one",
+    "numbered",
+    "zipped",
+    "dict",
+    "kept",
+    "made",
+    "attribute",
+)
+TEXT, NUMBER, COMPUTED, TELLS, NOTHING, BOUND = (
+    "text",
+    "number",
+    "computed",
+    "tells",
+    "nothing",
+    "bound",
+)
+#: The values holding none of what they are handed: a text, a number, a count or a test of it, nothing.
+HOLDING_NONE = frozenset({TEXT, NUMBER, COMPUTED, TELLS, NOTHING})
+#: The values holding what they are handed or a part of it, a part a reader follows into the value.
+HANDING_ON = frozenset({COPY, ONE, NUMBERED, ZIPPED, DICT, KEPT, MADE, ATTRIBUTE})
+#: The values that are one value as another type -- ``str(pandaID)``, ``int(row[0])``: the same value to a reader
+#: of what a key or a column holds.
+CONVERTING = frozenset({TEXT, NUMBER})
+
+#: What a ``str`` method's value is beside :data:`TEXT` (the receiver changed -- its case, its ends, its parts
+#: replaced, padded) and :data:`NUMBER` (where or how often a text is in it), :data:`TELLS` (a test of it): a text
+#: joining several values -- the argument's elements by the receiver, the receiver's holes filled --, or the texts
+#: cut out of the receiver.
+JOINED, PARTS = "joined", "parts"
+
+
+class TextMethod(NamedTuple):
+    """What a ``str`` method's value is (:data:`TEXT`, :data:`JOINED`, :data:`PARTS`, :data:`NUMBER`,
+    :data:`TELLS`), and whether it may be handed nothing (*alone*: ``strip()``, ``lower()``)."""
+
+    gives: str
+    alone: bool = False
+
+
+#: The ``str`` methods, by their names; they change nothing (a text is never changed).
+TEXT_METHODS: dict[str, TextMethod] = {
+    **{name: TextMethod(TEXT, alone=True) for name in (
+        "strip", "lstrip", "rstrip", "lower", "upper", "casefold", "capitalize", "swapcase", "title", "expandtabs",
+    )},
+    **{name: TextMethod(TEXT) for name in (
+        "replace", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "translate",
+    )},
+    **{name: TextMethod(JOINED) for name in ("join", "format", "format_map")},
+    **{name: TextMethod(PARTS, alone=True) for name in ("split", "rsplit", "splitlines")},
+    **{name: TextMethod(PARTS) for name in ("partition", "rpartition")},
+    **{name: TextMethod(NUMBER) for name in ("count", "find", "rfind", "index", "rindex")},
+    **{name: TextMethod(TELLS) for name in ("startswith", "endswith")},
+    **{name: TextMethod(TELLS, alone=True) for name in (
+        "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "isidentifier", "islower", "isnumeric",
+        "isprintable", "isspace", "istitle", "isupper",
+    )},
+}  # fmt: skip
+
+
+def text_methods(*gives: str) -> frozenset[str]:
+    """The names of :data:`TEXT_METHODS` whose value is one of *gives*."""
+    return frozenset(name for name, one in TEXT_METHODS.items() if one.gives in gives)
+
+
+#: The library functions whose value is a text, by their names: ``traceback.format_exc()``, the exception being
+#: handled, its traceback and message.
+LIBRARY_TEXTS = frozenset({"format_exc"})
+
+
+class Function(NamedTuple):
+    """What a builtin function does with what it is handed.
+
+    *gives* is what its value holds of it: :data:`COPY` (``list(xs)``, ``sorted(xs)``, ``iter(xs)``), :data:`ONE`
+    (one of the first argument's elements; one of the arguments where it is handed several and *default* is none --
+    ``max(a, b)``), :data:`NUMBERED` (``enumerate(xs)``), :data:`ZIPPED` (``zip(xs, ys)``), :data:`DICT`
+    (``dict(pairs, k=v)``: a mapping's or the (key, value) pairs' and the keywords'), :data:`KEPT` (``filter(f,
+    xs)``), :data:`MADE` (``map(f, xs)``), :data:`ATTRIBUTE` (``getattr(x, name)``; ``vars(x)``, every one),
+    :data:`TEXT` (``str(x)``), :data:`NUMBER` (``int(x)``), :data:`COMPUTED` (``len(xs)``), :data:`TELLS`
+    (``isinstance(x, C)``), :data:`NOTHING` (``print(x)``) or :data:`BOUND` (``super(C, self)``) -- ``None`` where
+    it is not said (``open(path)``); *default* the position of an argument the value may be instead (``next(it,
+    default)``, ``getattr(x, name, default)``).  *result* is the builtin type of the value, ``""`` for a builtin of
+    a type not said (``sum(xs)``), ``None`` where it is not said (``max(xs)``, ``type(x)``: a class, which
+    ``type(self)()`` builds).  *calls*: it may call a function it is handed (``map(f, xs)``, ``sorted(xs,
+    key=f)``)."""
+
+    gives: Optional[str]
+    default: Optional[int] = None
+    result: Optional[str] = None
+    calls: bool = False
+
+
+#: The builtin functions this says something of, by name; a builtin not here is said nothing of (``setattr``).
+BUILTIN_FUNCTIONS: dict[str, Function] = {
+    "list": Function(COPY, result="list"),
+    "tuple": Function(COPY, result="tuple"),
+    "set": Function(COPY, result="set"),
+    "frozenset": Function(COPY, result="frozenset"),
+    "sorted": Function(COPY, result="list", calls=True),
+    "reversed": Function(COPY, result="iterator"),
+    "iter": Function(COPY, result="iterator", calls=True),
+    "max": Function(ONE, calls=True),
+    "min": Function(ONE, calls=True),
+    "next": Function(ONE, 1),
+    "enumerate": Function(NUMBERED, result="iterator"),
+    "zip": Function(ZIPPED, result="iterator"),
+    "dict": Function(DICT, result="dict"),
+    "filter": Function(KEPT, result="iterator", calls=True),
+    "map": Function(MADE, result="iterator", calls=True),
+    "getattr": Function(ATTRIBUTE, 2),
+    "vars": Function(ATTRIBUTE, result="dict"),
+    "str": Function(TEXT, result="str"),
+    "repr": Function(TEXT, result="str"),
+    "ascii": Function(TEXT, result="str"),
+    "format": Function(TEXT, result="str"),
+    "int": Function(NUMBER, result="int"),
+    "float": Function(NUMBER, result="float"),
+    "len": Function(COMPUTED, result="int"),
+    "sum": Function(COMPUTED, result=""),
+    "abs": Function(COMPUTED, result=""),
+    "round": Function(COMPUTED, result=""),
+    "divmod": Function(COMPUTED, result="tuple"),
+    "pow": Function(COMPUTED, result=""),
+    "any": Function(COMPUTED, result="bool"),
+    "all": Function(COMPUTED, result="bool"),
+    "bool": Function(COMPUTED, result="bool"),
+    "hash": Function(COMPUTED, result="int"),
+    "ord": Function(COMPUTED, result="int"),
+    "chr": Function(COMPUTED, result="str"),
+    "hex": Function(COMPUTED, result="str"),
+    "oct": Function(COMPUTED, result="str"),
+    "bin": Function(COMPUTED, result="str"),
+    "range": Function(COMPUTED, result="range"),
+    "dir": Function(COMPUTED, result="list"),
+    "bytes": Function(COMPUTED, result="bytes"),
+    "isinstance": Function(TELLS, result="bool"),
+    "issubclass": Function(TELLS, result="bool"),
+    "hasattr": Function(TELLS, result="bool"),
+    "callable": Function(TELLS, result="bool"),
+    "id": Function(TELLS, result="int"),
+    "type": Function(TELLS),
+    "print": Function(NOTHING, result="NoneType"),
+    "delattr": Function(NOTHING, result="NoneType"),
+    "super": Function(BOUND),
+    "open": Function(None, result="file"),
+    "input": Function(None, result="str"),
+}
+
+
+def builtin_function(
+    types: "Types", file: str, func: ast.AST, call: ast.Call
+) -> Optional[Function]:
+    """What *call* does where it calls a builtin function by its name -- one no scope binds there
+    (:meth:`calls.Types.is_builtin`); ``None`` for any other call, and for a builtin :data:`BUILTIN_FUNCTIONS` does
+    not say."""
+    called = call.func
+    if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
+        return None
+    return (
+        BUILTIN_FUNCTIONS[called.id]
+        if types.is_builtin(file, func, called.id)
+        else None
+    )
+
+
+def builtin_function_at(call: ast.Call) -> Optional[Function]:
+    """:func:`builtin_function` where a reader has no :class:`calls.Types` at hand: the scopes read off the call's
+    parents (:func:`calls.is_builtin_at`)."""
+    from bamboo.codemap.calls import is_builtin_at
+
+    called = call.func
+    if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
+        return None
+    return BUILTIN_FUNCTIONS[called.id] if is_builtin_at(call, called.id) else None
+
+
+def picked(function: Function, call: ast.Call) -> tuple[list[ast.expr], list[ast.expr]]:
+    """For a :data:`ONE` call: the arguments whose element the value may be, and the arguments it may be itself --
+    ``([it], [default])`` for ``next(it, default)``, ``([xs], [])`` for ``max(xs)``, ``([], [a, b])`` for ``max(a,
+    b)``, ``([xs], [a])`` for ``max(*xs, a)``."""
+    args = [one for one in call.args if not isinstance(one, ast.Starred)]
+    starred = [one.value for one in call.args if isinstance(one, ast.Starred)]
+    if starred:
+        return starred, args
+    if function.default is None and len(args) > 1:
+        return [], args
+    beside = (
+        args[function.default : function.default + 1]
+        if function.default is not None
+        else []
+    )
+    return args[:1], beside
+
+
+def builds_nothing(function: Function, call: ast.Call, argument: ast.expr) -> bool:
+    """Whether *argument*, handed to the builtin *call*, is neither called by it nor held as it is by its value: a
+    class handed so is no constructor run, now or later -- ``isinstance(x, C)``, ``hasattr(C, name)``, ``str(C)``,
+    ``getattr(C, name)`` (an attribute of it), ``super(C, self)`` (the object, not the class)."""
+    if function.calls or function.gives is None:
+        return False
+    if function.gives in HOLDING_NONE:
+        return True
+    positional = [one for one in call.args if not isinstance(one, ast.Starred)]
+    if len(positional) != len(call.args) or not any(
+        argument is one for one in positional
+    ):
+        return False
+    if function.gives == ATTRIBUTE:
+        default = function.default
+        return (
+            default is None
+            or len(positional) <= default
+            or argument is not positional[default]
+        )
+    if function.gives == BOUND:
+        return argument is positional[0]
+    return False
+
+
+def unconverted(types: "Types", file: str, func: ast.AST, node: ast.expr) -> ast.expr:
+    """*node* without the builtin conversions that hand one value on as another type (:data:`CONVERTING`):
+    ``str(pandaID)``, ``int(row[0])``."""
+    while (
+        isinstance(node, ast.Call)
+        and len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and not node.keywords
+        and (function := builtin_function(types, file, func, node)) is not None
+        and function.gives in CONVERTING
+    ):
+        node = node.args[0]
+    return node
 
 
 def round_trip(call: ast.Call) -> Optional[ast.expr]:
@@ -337,6 +993,8 @@ def meaning(
     except Exception:  # noqa: BLE001
         library = None
     if library:
+        if all(other_system(module) for module, _name in library):
+            return Meaning(CLIENT, Method(), "other_systems_keep_nothing")
         return Meaning(LIBRARY, KEEPS_ALL, "library_keeps_what_it_is_handed")
     if placed.unplaced == UNPLACED_NO_METHOD:
         try:
@@ -345,6 +1003,12 @@ def meaning(
             declared = None
         classes = [one for each in declared or () for one in calls.objects_of(each)]
         if classes and all(types.built_outside(*one) for one in classes):
+            bases = [types.outside_bases(*one) for one in classes]
+            if all(
+                based and all(other_system(module) for module, _name in based)
+                for based in bases
+            ):
+                return Meaning(CLIENT, Method(), "other_systems_keep_nothing")
             return Meaning(LIBRARY, KEEPS_ALL, "library_keeps_what_it_is_handed")
         return _UNKNOWN
     literal = _literal_type(receiver)

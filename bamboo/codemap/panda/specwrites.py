@@ -17,7 +17,7 @@ Each write gets a role:
     In ``__init__`` / ``__setstate__``: the first values, or the values a
     pickle held.
 ``row_read``
-    In a method :data:`ROW_READ` names: every column set to what the row held
+    In a method :data:`callfacts.ROW_READ` names: every column set to what the row held
     when it was read.  An assignment, but of the row's own value -- which is
     what tells a flush that writes a value back from one that changes it.
 ``copy``
@@ -49,18 +49,11 @@ import itertools
 import operator
 from typing import Iterator, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import BUILTIN, Types, own_nodes
 from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.recognizers.progress import (
-    SPEC_DECLARATION_NAMES,
-    _declared_names,
-)
-
-#: The spec methods that set every column from a row the database returned.
-#: Declared rather than read: that ``pack`` is handed a row is PanDA's
-#: convention, and nothing in its body says where its values came from.
-ROW_READ = ("pack",)
+from bamboo.codemap.panda.recognizers.progress import _declared_names
 
 MECHANISM = "mechanism"
 CONSTRUCT = "construct"
@@ -159,7 +152,7 @@ def _declarations(types: Types, file: str, cls: ast.ClassDef) -> Iterator[ast.ex
             names = {
                 t.id for t in pathcond.targets_of(statement) if isinstance(t, ast.Name)
             }
-            names = (names & SPEC_DECLARATION_NAMES) - named
+            names = (names & callfacts.SPEC_DECLARATION_NAMES) - named
             if names and value is not None:
                 named |= names
                 yield value
@@ -270,7 +263,7 @@ def _own_role(types: Types, file: str, func: ast.AST, target: ast.expr) -> str:
     ):
         return NO_ROLE
     name = getattr(func, "name", "")
-    if name in ROW_READ:
+    if name in callfacts.ROW_READ:
         return READS_ROW
     return _BY_METHOD.get(name, NO_ROLE)
 
@@ -377,7 +370,10 @@ def _sequence(
     ):
         if node.func.attr in ("keys", "values"):
             return _sequence(types, file, func, node.func.value, node.func.attr)
-    if isinstance(node, ast.Attribute) and node.attr in SPEC_DECLARATION_NAMES:
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr in callfacts.SPEC_DECLARATION_NAMES
+    ):
         classes, _opened = _classes(types, file, func, node.value)
         specs = [(where, cls) for where, cls in classes if is_spec(types, where, cls)]
         if not specs:

@@ -246,6 +246,78 @@ SPELLINGS = {
         "splitrule": "splitRule",
     },
 }
+
+
+def _table(
+    name, spelled, rows_of, identity, inserted, family, creation, partitioned=()
+):
+    """A map dump's ``tables`` entry, cut to the fields the fetch reads."""
+    return {
+        "name": name,
+        "spellings": [*spelled, name],
+        "rows_of": rows_of,
+        "identity_attrs": list(identity),
+        "inserted": inserted,
+        "family": list(family),
+        "creation": list(creation),
+        "partitioned_by_attrs": list(partitioned),
+    }
+
+
+JOBS = {
+    "jobsactive4": "jobsActive4",
+    "jobsarchived": "jobsArchived",
+    "jobsarchived4": "jobsArchived4",
+    "jobsdefined4": "jobsDefined4",
+}
+#: the dump's tables of a job and a task (x13vii3k), and two the fetch has no single key or spelling for
+DUMP = {
+    "tables": [
+        *(
+            _table(
+                n,
+                [s],
+                "JobSpec",
+                [] if n == "jobsarchived" else ["JobSpec.PandaID"],
+                n != "jobsarchived",
+                [f for f in JOBS if f != n],
+                ["JobSpec.creationTime"],
+                ["JobSpec.modificationTime"] if "archived" in n else [],
+            )
+            for n, s in JOBS.items()
+        ),
+        _table(
+            "jedi_tasks",
+            ["JEDI_Tasks"],
+            "JediTaskSpec",
+            ["JediTaskSpec.jediTaskID"],
+            True,
+            [],
+            ["JediTaskSpec.creationDate"],
+            ["JediTaskSpec.jediTaskID"],
+        ),
+        _table(
+            "jedi_datasets",
+            ["JEDI_Datasets"],
+            "JediDatasetSpec",
+            ["JediDatasetSpec.datasetID", "JediDatasetSpec.jediTaskID"],
+            True,
+            [],
+            ["JediDatasetSpec.creationTime"],
+        ),
+        _table(
+            "filestable_arch",
+            ["filesTable_ARCH", "filesTable_Arch"],
+            "FileSpec",
+            ["FileSpec.row_ID"],
+            False,
+            [],
+            [],
+        ),
+        _table("users", ["users"], None, [], True, [], []),
+    ]
+}
+TABLES = FE.Tables.of(DUMP)
 JOB_Q = {
     "kind": "default",
     "subject": "JobSpec.jobStatus",
@@ -259,7 +331,7 @@ def _job_panda(job: dict | None = JOB) -> FakePanda:
 
 
 async def _fetch(panda: FakePanda, question: dict) -> dict:
-    return await FE.fetch(question, panda.parts())
+    return await FE.fetch(question, TABLES, panda.parts())
 
 
 # ------------------------------------------------------------------ a job's key
@@ -284,7 +356,7 @@ async def test_a_job_not_found_or_not_read_is_left_out_with_why_and_its_history_
         ({"error": "ORA-03113"}, "the database failed reading it: ORA-03113"),
     ):
         panda = _job_panda(job)
-        out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS)
+        out = RB.build(await _fetch(panda, JOB_Q), SPELLINGS, TABLES)
         # no creation time to start the history at
         assert [c[0] for c in panda.calls] == ["jobs", "job_history"]
         assert panda.calls[1][1] == {"job_ids": [PID], "since": None}
@@ -298,7 +370,7 @@ async def test_a_job_not_found_or_not_read_is_left_out_with_why_and_its_history_
 
 
 async def test_a_jobs_rows_file_keeps_the_class_columns_formats_its_times_and_says_when_each_was_read():
-    out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS)
+    out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS, TABLES)
     assert out["classes"]["job"] == "JobSpec" and out["spellings"]["job"] == [
         "job",
         "self.job",
@@ -351,12 +423,12 @@ async def test_a_record_that_asked_the_datasets_lays_out_none():
             *rec["steps"][1:],
         ]
     }
-    assert RB.build(old, SPELLINGS) == RB.build(rec, SPELLINGS)
+    assert RB.build(old, SPELLINGS, TABLES) == RB.build(rec, SPELLINGS, TABLES)
 
 
 async def test_a_jobs_files_hold_only_their_class_columns():
     job = JOB | {"Files": [FILES[0] | {"modificationTime": T("2026-10-07T13:08:03")}]}
-    out = RB.build(await _fetch(_job_panda(job), JOB_Q), SPELLINGS)
+    out = RB.build(await _fetch(_job_panda(job), JOB_Q), SPELLINGS, TABLES)
     assert "modificationTime" not in out["files"][0]
     assert (
         "1 key(s) of the answers that are not columns of their class, left out: ['modificationTime']"
@@ -377,7 +449,7 @@ async def test_a_failed_history_leaves_the_statuslog_out_rather_than_empty():
 
     panda_parts = panda.parts()
     panda_parts.job_history = refused
-    out = RB.build(await FE.fetch(JOB_Q, panda_parts), SPELLINGS)
+    out = RB.build(await FE.fetch(JOB_Q, TABLES, panda_parts), SPELLINGS, TABLES)
     assert "statuslog" not in out and "statuslog: over budget" in out["about"]
 
 
@@ -501,7 +573,8 @@ async def test_a_task_is_asked_by_its_key_then_its_jobs_in_every_table_in_one_ba
     assert kinds == ["task", "db_read", "task_history", "job_history"]
     assert panda.calls[0][1] == TID
     batch = panda.calls[1][1]
-    live = ["jobsDefined4", "jobsActive4", "jobsArchived4"]
+    # the dump's tables, in the order of their names
+    live = ["jobsActive4", "jobsArchived4", "jobsDefined4"]
     assert [q["tables"] for q in batch] == [
         live,
         live,
@@ -518,7 +591,7 @@ async def test_a_task_is_asked_by_its_key_then_its_jobs_in_every_table_in_one_ba
 
 async def test_a_task_not_answered_bounds_the_archive_from_100_days_before_it_was_asked():
     panda = _task_panda(task=None)
-    out = RB.build(await _fetch(panda, TASK_Q), SPELLINGS)
+    out = RB.build(await _fetch(panda, TASK_Q), SPELLINGS, TABLES)
     assert panda.calls[1][1][2]["where"][1] == [
         "modificationTime",
         ">=",
@@ -535,7 +608,7 @@ async def test_a_task_not_answered_bounds_the_archive_from_100_days_before_it_wa
 
 async def test_a_cut_answer_is_left_out_and_said():
     out = RB.build(
-        await _fetch(_task_panda(truncate={"jobsArchived"}), TASK_Q), SPELLINGS
+        await _fetch(_task_panda(truncate={"jobsArchived"}), TASK_Q), SPELLINGS, TABLES
     )
     assert "job_rows" not in out and "job_statuslog" not in out
     assert "job_rows, job_statuslog: ['truncated']" in out["about"]
@@ -545,7 +618,7 @@ async def test_a_cut_answer_is_left_out_and_said():
 async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
     panda = _task_panda()
     panda.read_as_of = "2026-10-13T10:00:00.900000"
-    out = RB.build(await _fetch(panda, TASK_Q), SPELLINGS)
+    out = RB.build(await _fetch(panda, TASK_Q), SPELLINGS, TABLES)
     # the moment R read the counts and the rows, cut down to its second
     assert out["counts"]["as_of"] == out["job_rows"]["as_of"] == "2026-10-13 10:00:00"
     assert out["counts"]["clock"] == out["job_rows"]["clock"] == "database"
@@ -639,24 +712,68 @@ def test_spellings_come_from_each_class_column_list_in_the_pin(tmp_path):
     }
 
 
+def test_a_class_with_no_column_list_of_string_constants_has_no_spelling(tmp_path):
+    # pin m's DataCarousel.py declares its columns as AttributeWithType calls (the map's note, 2026-10-29)
+    pin = tmp_path / "pin"
+    (pin / "pkg").mkdir(parents=True)
+    (pin / "pkg" / "DataCarousel.py").write_text(
+        "class DataCarouselRequestSpec(object):\n"
+        "    attributes_with_types = (AttributeWithType('request_id', int),)\n"
+    )
+    dump = tmp_path / "dump.json"
+    dump.write_text(
+        json.dumps(
+            {"declaration_yields": {"DataCarouselRequestSpec (pkg/DataCarousel.py)": 1}}
+        )
+    )
+    got = RB.column_spellings(pin, dump, ("DataCarouselRequestSpec", "Undeclared"))
+    assert got == {}
+
+
+def test_a_classs_key_tables_creation_and_archive_come_from_the_dumps_tables():
+    # what the fetch wrote by hand up to 2026-10-29, the order of the live tables aside
+    assert TABLES.key == {
+        "JobSpec": "PandaID",
+        "JediTaskSpec": "jediTaskID",
+        "FileSpec": "row_ID",
+    }
+    assert TABLES.created == {
+        "JobSpec": "creationTime",
+        "JediTaskSpec": "creationDate",
+        "JediDatasetSpec": "creationTime",
+    }
+    assert TABLES.live["JobSpec"] == ("jobsActive4", "jobsArchived4", "jobsDefined4")
+    assert TABLES.archive["JobSpec"] == ("jobsArchived",)
+    assert TABLES.since == {"JobSpec": "modificationTime"}
+    # a task's table is its own family, with no archive to bound
+    assert (
+        TABLES.live["JediTaskSpec"] == ("JEDI_Tasks",)
+        and not TABLES.archive["JediTaskSpec"]
+    )
+    # a row named by two columns has no key; a table the code spells two ways gives its class no tables
+    assert "JediDatasetSpec" not in TABLES.key and "FileSpec" not in TABLES.live
+    assert FE.Tables.of({}) == FE.Tables({}, {}, {}, {}, {})
+
+
 def test_a_key_of_a_class_with_no_plan_yet_is_refused():
     with pytest.raises(FE.FieldTestError, match="no plan yet for a key of FileSpec"):
         FE.asyncio.run(
             FE.fetch(
                 {"subject": "FileSpec.status", "key": "1"},
+                TABLES,
                 FakePanda({}, [], []).parts(),
             )
         )
 
 
 def test_the_fetch_record_holds_every_request_and_response(tmp_path):
-    rec = FE.asyncio.run(FE.fetch(JOB_Q, _job_panda().parts()))
+    rec = FE.asyncio.run(FE.fetch(JOB_Q, TABLES, _job_panda().parts()))
     path = tmp_path / "answers.json"
     path.write_text(json.dumps(rec))
     again = json.loads(Path(path).read_text())
     # JSON spells the job's ID as a string; the rows file is the same
     assert list(again["steps"][0]["response"]["jobs"]) == [str(PID)]
-    assert RB.build(again, SPELLINGS) == RB.build(rec, SPELLINGS)
+    assert RB.build(again, SPELLINGS, TABLES) == RB.build(rec, SPELLINGS, TABLES)
     assert again["steps"][0]["request"] == {"job_ids": [PID]}
     assert again["steps"][1]["response"]["rows"][0]["jobStatus"] == "pending"
 
@@ -665,7 +782,7 @@ def test_the_fetch_record_holds_every_request_and_response(tmp_path):
 
 
 async def test_a_jobs_rows_file_says_its_files_again_by_the_link_that_named_them():
-    out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS)
+    out = RB.build(await _fetch(_job_panda(), JOB_Q), SPELLINGS, TABLES)
     by_via = {(e["via"]["from"], e["via"]["to"]): e for e in out["linked"]}
     # the files are a job's one link: its rows name no dataset that is asked
     assert list(by_via) == [("JobSpec.PandaID", "FileSpec.PandaID")]
@@ -685,13 +802,13 @@ async def test_a_jobs_rows_file_says_its_files_again_by_the_link_that_named_them
 
 
 async def test_a_job_not_answered_links_nothing_and_its_history_stands_by_its_key():
-    out = RB.build(await _fetch(_job_panda(job=None), JOB_Q), SPELLINGS)
+    out = RB.build(await _fetch(_job_panda(job=None), JOB_Q), SPELLINGS, TABLES)
     assert out["linked"] == []
     assert list(out["statuslogs"]["JobSpec"]["by_key"]) == [str(PID)]
 
 
 async def test_a_tasks_rows_file_says_its_jobs_again_by_link_and_table_and_each_history_by_its_rows_key():
-    out = RB.build(await _fetch(_task_panda(), TASK_Q), SPELLINGS)
+    out = RB.build(await _fetch(_task_panda(), TASK_Q), SPELLINGS, TABLES)
     via = {"from": "JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"}
     jobs = [e for e in out["linked"] if e["via"] == via]
     # read by the task's key, so every row R gave is the link's; a PandaID in two tables is in both

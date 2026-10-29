@@ -591,6 +591,44 @@ class Elsewhere:
     ]
 
 
+
+def test_a_class_a_builtin_holds_none_of_is_not_read_as_a_value(tmp_path):
+    """``hasattr(Probed, name)``, ``getattr(Probed, name)`` and ``str(Named)`` read the class and hold none of it
+    (:func:`callfacts.builds_nothing`): reached from outside.  ``getattr(x, name, Kept)`` may be ``Kept``."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m='''\
+class Probed:
+    def __init__(self, job):
+        self.job = job
+
+class Named:
+    def __init__(self, job):
+        self.job = job
+
+class Kept:
+    def __init__(self, job):
+        self.job = job
+
+def look(x, name):
+    if hasattr(Probed, name):
+        return getattr(Probed, name)
+    print(str(Named))
+    return getattr(x, name, Kept)
+''',
+        )
+    )
+
+    for name in ("Probed", "Named"):
+        assert calls.missed(_method(calls, "m", name, "__init__")) == [
+            f"{name}: no call in the corpus names it -- reached from outside"
+        ]
+    assert calls.missed(_method(calls, "m", "Kept", "__init__")) == [
+        "Kept: no call in the corpus names it; the class is read as a value at pkg/m.py:17, "
+        "and a call of that value may build one"
+    ]
+
 def test_super_lands_at_the_next_class_in_the_order_of_every_object_it_runs_on(tmp_path):
     """A mixin's ``super().__init__`` reaches its base on its own and the next mixin on a class with both."""
     calls = _calls(
@@ -1664,6 +1702,44 @@ def test_the_build_lists_every_call_to_its_own_functions_it_cannot_place(tmp_pat
     assert stops[0].owner == f"{PACKAGE}/m.py::run"
 
 
+@pytest.mark.parametrize("method", ["sendMsg", "keepMsg"])
+def test_a_loggers_method_is_no_stop_though_the_corpus_defines_one_so_named(tmp_path, method):
+    """``tmp_log.sendMsg(msg, ...)`` sends the line to the HTTP logger and ``keepMsg`` keeps it: a logger's methods
+    (callfacts.LOG_METHODS) as ``debug`` is, which say nothing about a value wherever they land -- JEDI's
+    ``MsgWrapper`` defines both, and a receiver not declared is not a stop for them."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import plugin
+
+    texts = {
+        "m": (
+            "class MsgWrapper:\n"
+            f"    def {method}(self, msg):\n        return msg\n\n"
+            "def helper():\n    return 1\n\n"
+            "def run(spec, tmp_log):\n"
+            "    spec.helper()\n"
+            f"    tmp_log.{method}('x')\n"
+        ),
+    }
+    roots = _tree(tmp_path, **texts)
+    calls = _calls(roots)
+    modules = [
+        SourceModule(
+            package=PACKAGE,
+            rel_path=f"{PACKAGE}/{name}.py",
+            tree=calls.types.tree(f"{PACKAGE}/{name}.py"),
+            source=text,
+            blob_sha=blob_sha(text),
+        )
+        for name, text in texts.items()
+    ]
+
+    considered, stops, opened = plugin._call_stops(calls, modules)
+
+    assert considered == 1  # ``spec.helper()``
+    assert [(stop.line, stop.callee) for stop in stops] == [(9, "spec.helper")]
+
+
 def test_a_term_a_callee_or_a_local_appends_on_some_paths_is_not_required(tmp_path):
     """``getJobs`` appends what ``construct_where_clause`` returns, through a closure.
 
@@ -2682,7 +2758,8 @@ def test_a_fragment_under_a_test_no_pass_of_its_loop_decides_is_added_under_it_n
 
 
 def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path):
-    """Renamed and passed by position, it is the caller's; bound again on the route, it is no one's; a literal or a default is the forwarder's."""
+    """Renamed and passed by position, it is the caller's; bound again on the route, it is what the one binding the
+    route runs binds, else no one's; a literal or a default is the forwarder's."""
     roots = _tree(
         tmp_path,
         db="def lock(flag, other=False, more=None):\n    if flag or other or more:\n        return 1\n",
@@ -2695,14 +2772,19 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
             "\n"
             "def maybe(flag, sim):\n    if sim:\n        flag = True\n    return lock(flag, sim)\n"
             "\n"
+            "def opened(flag, sim):\n    if sim:\n        flag = True\n    return lock(flag, sim)\n"
+            "\n"
+            "def looped(flag, sim):\n    for one in sim:\n        flag = one\n    return lock(flag, sim)\n"
+            "\n"
             "def fixed(flag):\n    return lock(True, flag)\n"
             "\n"
             "def spread(**kwargs):\n    return lock(False, **kwargs)\n"
         ),
         main=(
-            "from pkg.tb import fixed, maybe, rebound, renamed, spread\n"
+            "from pkg.tb import fixed, looped, maybe, opened, rebound, renamed, spread\n"
             "\n"
-            "def run():\n    renamed(False)\n    rebound(False, [1])\n    fixed(False)\n    spread(other=True)\n    maybe(False, None)\n"
+            "def run(n):\n    renamed(False)\n    rebound(False, [1])\n    fixed(False)\n    spread(other=True)\n"
+            "    maybe(False, None)\n    opened(False, n)\n    looped(False, (2,))\n"
         ),
     )
     calls = _calls(roots)
@@ -2715,9 +2797,15 @@ def test_a_route_constant_is_handed_through_a_forwarder_only_as_it_came(tmp_path
         return {name: value for name, value in found.items() if value is not calls_mod.UNSET}
 
     assert constants("renamed") == {"flag": False, "other": False, "more": None}
-    # ``sim`` is handed on as it came, so the route goes on out to ``run``; ``flag``
-    # is bound again first, and what ``run`` hands it is not what ``lock`` gets.
-    assert constants("rebound") == {"more": None}
+    # ``sim`` is handed on as it came, so the route goes on out to ``run``, which hands a display: the
+    # binding runs, and ``lock`` gets what it binds, not what ``run`` handed ``flag``.
+    rebound = constants("rebound")
+    assert rebound.pop("flag") is True and repr(rebound.pop("other")) == "[...]"
+    assert rebound == {"more": None}
+    # Bound again under a test the route leaves open, or in a loop: it is no one's.
+    assert constants("opened") == {"more": None}
+    looped = constants("looped")
+    assert repr(looped.pop("other")) == "[...]" and looped == {"more": None}
     # The same binding under a test the route's own constant rules out is not on the route.
     assert constants("maybe") == {"flag": False, "other": None, "more": None}
     # ``other`` is handed on as it came: the outer call's.
@@ -2780,6 +2868,29 @@ def test_a_receiver_built_as_a_builtin_lands_outside_the_corpus(tmp_path):
     given = _placed(calls, "m", "build", "given.append")
     assert (given.targets, given.unplaced) == ((), calls_mod.UNPLACED_RECEIVER)
 
+
+
+def test_a_receiver_a_builtin_function_makes_is_of_the_type_callfacts_says(tmp_path):
+    """``out = open(path)`` is a file and ``n = len(xs)`` an int: their methods are a builtin's, not ``Log.write``'s.
+    ``type(xs)`` is a class, whose type callfacts does not say."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m="class Log:\n    def write(self, x):\n        return x\n\n"
+            "def run(path, xs):\n"
+            "    out = open(path)\n"
+            "    out.write(xs)\n"
+            "    n = len(xs)\n"
+            "    n.write(xs)\n"
+            "    kind = type(xs)\n"
+            "    kind.write(xs)\n",
+        )
+    )
+
+    for text in ("out.write", "n.write"):
+        placed = _placed(calls, "m", "run", text)
+        assert (placed.targets, placed.unplaced) == ((), calls_mod.UNPLACED_OUTSIDE), text
+    assert _placed(calls, "m", "run", "kind.write").unplaced != calls_mod.UNPLACED_OUTSIDE
 
 def test_a_builtin_beside_a_corpus_class_leaves_the_call_open_as_before(tmp_path):
     """``held`` is a list on one branch and a ``ListWithLock`` on the other: either may run the call."""
@@ -3442,3 +3553,33 @@ def test_a_wrapper_or_an_object_whose_function_may_be_called_some_other_way_is_n
         placed = _placed(calls, "api", "update", "timed.run")
         assert placed.forwarded == (), name
         assert calls.forwarded_reads() == set(), name
+
+
+_CONTAINERS_DECLARED = '''
+from collections.abc import Collection
+from typing import Generator, Iterator
+
+class Spec:
+    def check(self):
+        pass
+
+def made() -> Generator[Spec, None, None]:
+    yield Spec()
+
+def run(specs: Collection[Spec], queue: Iterator[Spec], by_name: dict[str, Spec]):
+    for spec in specs:
+        spec.check()
+    for one in made():
+        one.check()
+    for other in queue:
+        other.check()
+    by_name["x"].check()
+'''
+
+
+def test_a_loop_takes_a_collections_element_and_a_generators_first_argument(tmp_path):
+    """``Collection[Spec]`` holds ``Spec``s as ``list[Spec]`` does, ``Generator[Spec, None, None]`` yields its first
+    argument, not the three, and ``dict[str, Spec]``'s subscript is its value (callfacts.CONTAINERS)."""
+    calls = _calls(_tree(tmp_path, m=_CONTAINERS_DECLARED))
+    for text in ("spec.check", "one.check", "other.check", "by_name['x'].check"):
+        assert _where(_placed(calls, "m", "run", text)) == [("Spec", "check")], text

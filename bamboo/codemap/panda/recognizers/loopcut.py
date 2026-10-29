@@ -53,6 +53,7 @@ import ast
 import re
 from typing import Iterator, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, LoopCutNode, SourceModule
 from bamboo.codemap.panda.pathcond import (
@@ -66,7 +67,6 @@ from bamboo.codemap.panda.recognizers.selection import _TAG, _identifiers, _rend
 
 _LOOPS = (ast.For, ast.AsyncFor, ast.While)
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
-_LEVELS = frozenset({"debug", "info", "warning", "error", "critical"})
 
 
 def _innermost_loop(node: ast.AST) -> Optional[ast.AST]:
@@ -126,7 +126,7 @@ def _logging_calls(statement: ast.stmt) -> Iterator[ast.Call]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _LEVELS
+            and node.func.attr in callfacts.LOG_LEVELS
         ):
             yield node
 
@@ -322,7 +322,7 @@ def extract(
                     continue
                 cut = found.get(message)
                 if cut is None:
-                    cut = _Cut(message, node.lineno, loop.lineno, call.func.attr)
+                    cut = _Cut(message, node.lineno, loop.lineno, callfacts.LOG_LEVELS[call.func.attr])
                     found[message] = cut
                 cut.add(path_condition(node), _scope_prefix(call, func))
 

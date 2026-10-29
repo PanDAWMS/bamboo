@@ -48,11 +48,20 @@ map holds rather than one it has no room for.
 from __future__ import annotations
 
 import ast
+import contextlib
 import dataclasses
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    NamedTuple,
+    Optional,
+)
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -488,8 +497,6 @@ _INSERT_INTO = re.compile(r"^\s*INSERT\s+(?:/\*.*?\*/\s*)?INTO\s+([\w.{}$]+)", r
 #: level FROM dual CONNECT BY level<=:nIDs)`` -- and the sequence.
 _SELECTS_SEQUENCE = re.compile(r"^\s*SELECT\s+(?:/\*.*?\*/\s*)?([\w.{}$]+)\.nextval\b", re.IGNORECASE | re.DOTALL)
 _RETURNING = re.compile(r"\bRETURNING\s+(.*?)\s+INTO\b", re.IGNORECASE | re.DOTALL)
-#: Calls making one value of another without making it new: ``int(row[0])`` is still the row's.
-_CONVERSIONS = frozenset({"int", "str", "float", "long"})
 
 
 @dataclasses.dataclass
@@ -570,9 +577,19 @@ def _returned(text: str) -> set[str]:
     return {column.strip().lower() for column in m.group(1).split(",")} if (m := _RETURNING.search(text)) else set()
 
 
+def _converting(value: ast.AST) -> bool:
+    """Whether *value* makes one value of another without making it new -- ``int(row[0])`` is still the row's
+    (:data:`callfacts.CONVERTING`)."""
+    return (
+        isinstance(value, ast.Call)
+        and (function := callfacts.builtin_function_at(value)) is not None
+        and function.gives in callfacts.CONVERTING
+    )
+
+
 def _plain(value: ast.AST) -> bool:
     """A copy of one value: a name, an attribute or a subscript of one, or a conversion of such."""
-    while isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in _CONVERSIONS:
+    while _converting(value):
         if len(value.args) != 1:
             return False
         value = value.args[0]
@@ -582,12 +599,7 @@ def _plain(value: ast.AST) -> bool:
 
 
 def _root(value: ast.AST) -> Optional[ast.Name]:
-    while (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Name)
-        and value.func.id in _CONVERSIONS
-        and value.args
-    ):
+    while _converting(value) and value.args:
         value = value.args[0]
     while isinstance(value, (ast.Attribute, ast.Subscript)):
         value = value.value
@@ -2470,10 +2482,6 @@ def _merged_tree(one: Optional[ConditionNode], other: Optional[ConditionNode]) -
 _SEEDED = re.compile(r"(:\w+)@[\d,]+")
 
 
-#: The logger methods a print of a statement is made with.
-_PRINTS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
-
-
 def _message_parts(node: ast.expr) -> list[tuple[str, object]]:
     """A message as it is assembled: ``("text", str)`` and ``("expr", node)`` in order.
 
@@ -2568,7 +2576,7 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _PRINTS
+            and node.func.attr in callfacts.LOG_LEVELS  # a print of a statement
             and len(node.args) == 1
             and enclosing_function(node) is func
         ):
@@ -3010,7 +3018,7 @@ def _rows_written(
     over the cursor that ran the statement (``for (pandaID,) in self.cur:``,
     the receiver of the call line's ``execute``), whose target takes each row.
     Reading only the call would leave most of the corpus with no rows to test
-    an exit against -- see :data:`sql.FETCHES`.
+    an exit against -- see :func:`sql.regions`.
 
     A fetch was read only as the whole value, and only where the call line
     bound nothing: ``has_merging`` and ``nRow`` held no rows, so ``if not
@@ -3023,7 +3031,7 @@ def _rows_written(
         if isinstance(node, ast.Call)
         and node.lineno == line
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr in ("execute", "executemany")
+        and node.func.attr in callfacts.CURSOR_RUNS
     }
     found: list[ast.Assign | ast.AnnAssign | ast.For | ast.AsyncFor] = []
     for node in walk(func):
@@ -3042,8 +3050,8 @@ def _rows_written(
 def _fetches(node: ast.AST) -> bool:
     """Whether *node* fetches a statement's rows or reads how many there were: ``x.fetchall()``, ``x.rowcount``."""
     if isinstance(node, ast.Call):
-        return isinstance(node.func, ast.Attribute) and node.func.attr in sql.FETCHES
-    return isinstance(node, ast.Attribute) and node.attr == "rowcount"
+        return isinstance(node.func, ast.Attribute) and node.func.attr in callfacts.FETCHES
+    return isinstance(node, ast.Attribute) and node.attr == callfacts.ROW_COUNT
 
 
 def _route_constants(calls: Calls, target: Target, sites: tuple[CallSite, ...], tested: set[str]) -> dict[str, object]:
@@ -4385,27 +4393,21 @@ _Paths = frozenset[tuple[str, ...]]
 _WHOLE: _Paths = frozenset({()})
 _NOTHING: _Paths = frozenset()
 
-#: Calls making a logger whose tag is the value: the tag is a log line's.  ``create_tagged_logger`` tests ``if tag is
-#: None`` and ``MsgWrapper.__init__`` its token, which read as using it.
-_LOG_MAKERS = frozenset({"create_tagged_logger", "MsgWrapper", "LogWrapper"})
 #: What a ``+`` is of, as its operand is written (U1): a list, a number, a text -- or not written (``None``).
 _SEQUENCE, _NUMBER, _TEXT = "sequence", "number", "text"
 #: Calls reading a value again out of a text -- a column's content parsed, decoded: a value of its own (U1).
-_READ_AGAIN = frozenset(
-    {"loads", "load", "literal_eval", "safe_load", "b64decode", "decode", "unquote", "fromisoformat", "strptime"}
-)
-#: Builtins and modules computing a number from what they are handed (U1).
-_COMPUTING = frozenset(
-    {"len", "sum", "round", "abs", "divmod", "pow", "min", "max", "any", "all", "ord", "chr", "hash", "bool", "range"}
-)
-_COMPUTING_MODULES = frozenset({"math", "statistics", "numpy", "np"})
+_READ_AGAIN = callfacts.READ_AGAIN
+#: Modules computing a number from what they are handed (U1), as a builtin does (:data:`callfacts.COMPUTING_MODULES`).
+_COMPUTING_MODULES = callfacts.COMPUTING_MODULES
 
 
-def _unread_call(call: ast.Call, name: str) -> bool:
+def _unread_call(call: ast.Call, name: str, function: Optional[callfacts.Function]) -> bool:
     """Whether *call*, which no reading places, makes a value the map cannot read (U1's 4): another system's answer, a
-    function of the corpus or a library -- not a builtin or a module computing a number, a value read again out of a
-    text, a text made by a str method."""
-    if name in _READ_AGAIN or name in _COMPUTING or name in ("join", "format"):
+    function of the corpus or a library -- not a builtin (*function*) or a module computing a number, a value read
+    again out of a text, a text made by a str method."""
+    if name in _READ_AGAIN or name in callfacts.text_methods(callfacts.JOINED):
+        return False
+    if function is not None and function.gives == callfacts.COMPUTED:
         return False
     if isinstance(call.func, ast.Attribute):
         receiver = call.func.value
@@ -4471,7 +4473,8 @@ def _annotation_kind(annotation: Optional[ast.AST]) -> Optional[str]:
     name = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", None)
     if name == "Optional" and isinstance(annotation, ast.Subscript):
         return _annotation_kind(annotation.slice)
-    if name in ("list", "List", "tuple", "Tuple", "Sequence"):
+    held = callfacts.CONTAINERS.get(name) if name is not None else None
+    if held is not None and held.ordered:  # its elements at positions, joined by ``+``
         return _SEQUENCE
     if name in ("int", "float"):
         return _NUMBER
@@ -4524,25 +4527,15 @@ def _name_kinds(func: ast.AST) -> dict[str, str]:
     return kinds
 
 
-#: Builtins whose value is what they are handed, elements and all.
-_KEEPING = frozenset({"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter", "dict"})
-#: Builtins handing on what they are handed, or its elements: read where their value goes.
-_PASSING_ON = _KEEPING | {"next", "enumerate", "zip", "filter", "map"}
-#: Builtins that tell nothing of the value: its type, whether it has a part.
-_TELLING_NOTHING = frozenset({"isinstance", "issubclass", "hasattr", "callable", "id", "type"})
 #: ``copy.copy`` / ``copy.deepcopy``: the value again, not a use of it.
-_COPIES = frozenset({"copy", "deepcopy"})
-#: Calls that write a value out whole -- every part of it read.
-_SERIALIZING = frozenset({"dumps", "str", "repr"})
-#: A builtin container's methods handing back the container, and one of its elements.
-_CONTAINER_KEEPING = frozenset({"copy"})
-_CONTAINER_ELEMENT = frozenset({"get", "pop", "popitem", "setdefault"})
+_COPIES = frozenset(name for _module, name in callfacts.COPIES)
+#: ``json.dumps``: writes a value out whole -- every part of it read -- as a builtin's text of it does
+#: (:data:`callfacts.TEXT`).
+_SERIALIZING = callfacts.SERIALIZING
 #: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
 #: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
 #: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
-_CHUNKING = frozenset({"batched"})
-_SLICING = frozenset({"islice"})
-_CHAINING = frozenset({"chain"})
+_CHUNKING, _SLICING, _CHAINING = callfacts.CHUNKING, callfacts.SLICING, callfacts.CHAINING
 
 
 def _cut(path: tuple[str, ...]) -> tuple[str, ...]:
@@ -4593,10 +4586,10 @@ def _keys(paths: _Paths) -> _Paths:
     return _under(_KEY, paths)
 
 
+#: Annotations naming a dict (:data:`callfacts.CONTAINERS`).
+_DICT_TYPES = callfacts.containers(callfacts.MAPPING)
 #: Calls making a dict.
-_DICT_MAKERS = frozenset({"dict", "defaultdict", "OrderedDict", "Counter"})
-#: Annotations naming a dict.
-_DICT_TYPES = _DICT_MAKERS | {"Dict", "DefaultDict", "Mapping", "MutableMapping"}
+_DICT_MAKERS = _DICT_TYPES & callfacts.CONTAINER_MAKERS
 
 
 def _dict_type(annotation: Optional[ast.AST]) -> bool:
@@ -4846,15 +4839,21 @@ class _Summary(NamedTuple):
     carry: Optional["_PathCarry"]
 
 
+def _item_steps(rows: callfacts.Rows) -> tuple[str, ...]:
+    """The steps to a select item, ``{}`` its position, in what a call giving *rows* hands back."""
+    steps = ("[{}]",) if rows.gives == callfacts.ROW else (_ALL, "[{}]")
+    return steps if rows.at is None else (f"[{rows.at}]", *steps)
+
+
 #: Where a select item sits, ``{}`` its position, in what a call giving a statement's rows gives: one row's of a
 #: ``fetchone``, each row's of a ``fetchall`` / ``fetchmany`` and of the task buffer's ``querySQL``, the rows' of
-#: ``querySQLS``'s ``(status, rows)``.
+#: ``querySQLS``'s ``(status, rows)`` (:data:`callfacts.FETCHES`, :data:`callfacts.TASK_BUFFER_RUNS`).
 _ITEM_AT: dict[str, tuple[str, ...]] = {
-    "fetchone": ("[{}]",),
-    "fetchall": (_ALL, "[{}]"),
-    "fetchmany": (_ALL, "[{}]"),
-    "querySQL": (_ALL, "[{}]"),
-    "querySQLS": ("[1]", _ALL, "[{}]"),
+    name: _item_steps(rows)
+    for name, rows in [
+        *callfacts.FETCHES.items(),
+        *((name, run.rows) for name, run in callfacts.TASK_BUFFER_RUNS.items() if run.rows is not None),
+    ]
 }
 
 
@@ -4905,9 +4904,10 @@ class _PathCarry:
 
     A call's value is read from where it lands (:class:`_Reading`): what the definition returns of what it is
     handed, what a constructor keeps in its object.  A call no reading places is a builtin's or a hole: a container
-    method takes the part it names, a builtin of :data:`_KEEPING` keeps its argument, an iterator helper outside the
-    corpus (``batched``, ``islice``, ``chain``) is made of its iterables' elements -- not of the count beside them --
-    and any other call's value holds the rows where something it is handed holds them whole -- a part of them
+    method takes the part it names, a builtin function the part of its arguments its value holds
+    (:class:`callfacts.Function`: ``list(xs)`` their elements, ``max(a, b)`` one of them), an iterator helper outside
+    the corpus (``batched``, ``islice``, ``chain``) is made of its iterables' elements -- not of the count beside them
+    -- and any other call's value holds the rows where something it is handed holds them whole -- a part of them
     handed to a hole makes nothing of them.  What the reach record reads as the database gives nothing back of this
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
@@ -5289,59 +5289,71 @@ class _PathCarry:
         if id(call) in self.call_values:
             return self.call_values[id(call)]
         name = _callee_name(call)
-        if name in _LOG_MAKERS:
+        if name in callfacts.LOGGER_MAKERS:  # its tag is a log line's: the makers' `if tag is None` is no use of it
             return _NOTHING
         held = self.held
         args = [one.value if isinstance(one, ast.Starred) else one for one in call.args]
-        if name in _SERIALIZING and args and (isinstance(call.func, ast.Name) or name == "dumps"):
+        function = callfacts.builtin_function(self.reading.calls.types, self.file, self.func, call)
+        gives = function.gives if function is not None else None
+        if args and (gives == callfacts.TEXT or name == _SERIALIZING):
             return _WHOLE if held(args[0], at) else _NOTHING
         if isinstance(call.func, ast.Name):
-            if name in _TELLING_NOTHING:
+            if gives == callfacts.TELLS:
                 return _NOTHING
             as_list = self._as_list
-            if name in _KEEPING:
-                return (held(args[0], at) if name == "dict" else as_list(args[0], at)) if args else _NOTHING
-            if name == "next":
-                return _elements(as_list(args[0], at)) if args else _NOTHING
-            if name in ("filter", "map") and len(args) >= 2:
+            if gives == callfacts.COPY:
+                return as_list(args[0], at) if args else _NOTHING
+            if gives == callfacts.DICT:
+                return held(args[0], at) if args else _NOTHING
+            if function is not None and gives == callfacts.ONE:
+                elements, whole = callfacts.picked(function, call)
+                return frozenset(
+                    path
+                    for part in [_elements(as_list(one, at)) for one in elements] + [held(one, at) for one in whole]
+                    for path in part
+                )
+            if gives in (callfacts.KEPT, callfacts.MADE) and len(args) >= 2:
                 return as_list(args[1], at)  # the elements kept, or what is made of each (read as the element)
-            if name in ("min", "max") and len(args) == 1:
-                return _under(_ALL, as_list(args[0], at))
-            if name == "enumerate" and args:
+            if gives == callfacts.NUMBERED and args:
                 return _below((_ALL, "[1]"), _under(_ALL, as_list(args[0], at)))
-            if name == "zip":
+            if gives == callfacts.ZIPPED:
                 return frozenset(
                     path
                     for index, one in enumerate(args)
                     for path in _below((_ALL, f"[{index}]"), _under(_ALL, as_list(one, at)))
                 )
-            if name == "getattr" and len(args) >= 2:
+            if function is not None and gives == callfacts.ATTRIBUTE and len(args) >= 2:
                 attr = args[1]
+                default = function.default
+                beside = held(args[default], at) if default is not None and len(args) > default else _NOTHING
                 if isinstance(attr, ast.Constant) and isinstance(attr.value, str):
-                    return _under("." + attr.value, held(args[0], at))
-                return _any_field(held(args[0], at))
+                    return _under("." + attr.value, held(args[0], at)) | beside
+                return _any_field(held(args[0], at)) | beside
         if isinstance(call.func, ast.Attribute):
             if name in _COPIES and isinstance(call.func.value, ast.Name) and call.func.value.id == "copy":
                 return held(args[0], at) if args else _NOTHING
             receiver = held(call.func.value, at)
             placed = self.reading.place(self, call) if receiver else None
-            if not receiver and name in _CONTAINER_ELEMENT and self.handed_any(call, at):
+            gives = callfacts.taken(name)
+            if not receiver and gives is not None and gives.key is not None and self.handed_any(call, at):
                 # ``d.get(k)``, ``k`` holding them: the key chooses the value; a default handed beside it may be it.
                 placed = self.reading.place(self, call)
                 if not (placed is not None and placed.targets):
-                    return frozenset(path for one in args[1:] for path in held(one, at))
-            if receiver and not (placed is not None and placed.targets):
-                # A method of a builtin container, which no reading places: dict.get, .values(), .items(), ...
-                if name == "values":
+                    beside = args[gives.default : gives.default + 1] if gives.default is not None else []
+                    return frozenset(path for one in beside for path in held(one, at))
+            if receiver and gives is not None and not (placed is not None and placed.targets):
+                # A builtin container's method no reading places, by what it hands back (callfacts.Give).
+                if gives.part == callfacts.VALUES:
                     return _below((_ALL,), _under(_ALL, receiver))
-                if name == "keys":
+                if gives.part == callfacts.KEYS:
                     return _below((_ALL,), _under(_KEY, receiver))
-                if name == "items":
+                if gives.part == callfacts.ITEMS:
                     return _below((_ALL, "[0]"), _under(_KEY, receiver)) | _below((_ALL, "[1]"), _under(_ALL, receiver))
-                if name in _CONTAINER_ELEMENT:
+                if gives.part == callfacts.ITEM:
+                    return _below(("[0]",), _under(_KEY, receiver)) | _below(("[1]",), _under(_ALL, receiver))
+                if gives.part == callfacts.AT:
                     return _under(_ALL, receiver)
-                if name in _CONTAINER_KEEPING:
-                    return receiver
+                return receiver  # a copy
         if not self.handed_any(call, at):
             return _NOTHING
         if self.reading.record.is_database(self.file, call) and self.reading.outermost(call):
@@ -5380,7 +5392,7 @@ class _PathCarry:
             if isinstance(call.func, ast.Attribute):
                 parts.append(held(call.func.value, at))
             return _WHOLE if any(holding(part) for part in parts) else _NOTHING
-        if isinstance(call.func, ast.Name) and name in _CONVERSIONS:
+        if function is not None and function.gives in callfacts.CONVERTING:
             return _WHOLE if args and holding(held(args[0], at)) else _NOTHING
         if isinstance(call.func, ast.Attribute) and name not in _READ_AGAIN:
             if holding(held(call.func.value, at)):
@@ -5391,14 +5403,18 @@ class _PathCarry:
                 handed = [held(one, at) for one in args]
                 if holding(handed[-1]) and not any(handed[:-1]):
                     return _WHOLE
-            if name in ("join", "format"):
+            if name in callfacts.text_methods(callfacts.JOINED):
                 # A text made by a separator or a template, written here or held in a name.
                 handed = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
                 holders = [part for part in handed if holding(part)]
                 if len(handed) == 1 or (name == "join" and len(holders) == 1):
                     return _WHOLE if holders else _NOTHING  # one value, or one column's values ("," .join(ids))
                 return _NOTHING  # a text of several values: os.path.join(a, b), "{} {}".format(a, b)
-        if self.unread_kept and _unread_call(call, name) and not self.reading.record.is_database(self.file, call):
+        if (
+            self.unread_kept
+            and _unread_call(call, name, function)
+            and not self.reading.record.is_database(self.file, call)
+        ):
             parts = [held(one, at) for one in args] + [held(keyword.value, at) for keyword in call.keywords]
             if isinstance(call.func, ast.Attribute):
                 parts.append(held(call.func.value, at))
@@ -5463,9 +5479,9 @@ class _Reading:
     A function **reads** what it is handed where its value decides something there: a test on it whole (``if
     rows:``), an index it chooses, a call that uses it -- the database's (a bind), a method of the value
     (``job.valuesMap()``), a function owning no junction that reads it in its body; else what a call makes of it is
-    read where that goes.  Not a read: a log line (:data:`callfacts.LOG_METHODS`, :data:`_LOG_MAKERS`), a builtin
-    telling nothing of it, a copy, a value put into a container or handed on -- to a name, a loop, a ``return``, the
-    caller.
+    read where that goes.  Not a read: a log line (:data:`callfacts.LOG_METHODS`, :data:`callfacts.LOGGER_MAKERS`), a
+    builtin telling nothing of it, a copy, a value put into a container or handed on -- to a name, a loop, a
+    ``return``, the caller.
     A definition is read while it is read: a call of itself gets nothing back and reads nothing.
     """
 
@@ -5620,7 +5636,7 @@ class _Reading:
         :func:`callfacts.meaning` reads it: what the definitions it lands at keep (their summaries), the object a
         protocol copies into, what a library object's or a builtin container's method puts into its object."""
         name = _callee_name(call)
-        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return {}
         # The pickle round trip copies what ``y`` holds, whatever ``y.__getstate__()`` is read as.
         copied = callfacts.round_trip(call)
@@ -5764,9 +5780,10 @@ class _Reading:
 
     def _argument_reads(self, carry: _PathCarry, call: ast.Call, child: ast.AST) -> bool:
         name = _callee_name(call)
-        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return False
-        if isinstance(call.func, ast.Name) and name in _TELLING_NOTHING:
+        function = callfacts.builtin_function(self.calls.types, carry.file, carry.func, call)
+        if function is not None and function.gives == callfacts.TELLS:
             return False
         if isinstance(call.func, ast.Attribute) and self._puts_or_copies(carry, call):
             return False  # put into a container, or copied: read where that is used
@@ -5777,20 +5794,20 @@ class _Reading:
             and call.func.value.id == "copy"
         ):
             return False
-        if isinstance(call.func, ast.Name) and name in _PASSING_ON:
-            return self._use_reads(carry, call)
+        if function is not None and function.gives in callfacts.HANDING_ON:
+            return self._use_reads(carry, call)  # a builtin handing on what it is handed, or a part of it
         return self._call_reads(carry, call)
 
     def _method_reads(self, carry: _PathCarry, call: ast.Call) -> bool:
         name = _callee_name(call)
-        if name in callfacts.LOG_METHODS or name in _LOG_MAKERS:
+        if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return False
         if callfacts.round_trip(call) is not None or _state_handed_across(call):
             return False  # pickle's round trip, either half: a copy, read where the copy is used
         placed = self.place(carry, call)
         if placed is not None and placed.targets:
             return self._call_reads(carry, call)
-        if name in {"values", "keys", "items"} | _CONTAINER_ELEMENT | _CONTAINER_KEEPING:
+        if name in callfacts.TAKING:
             return self._use_reads(carry, call)
         if self._puts_or_copies(carry, call):
             return False
@@ -5886,10 +5903,13 @@ class _Crossings:
     declared ``Any``.
     """
 
-    def __init__(self, reading: _Reading, landing: bool = False):
+    def __init__(self, reading: _Reading, landing: bool = False, routed: bool = False):
         self.reading = reading
         #: Whether to keep where the rows reach the database through calls (:attr:`landings`).
         self.landing = landing
+        #: Whether to keep each found owner's ways back up (:attr:`ways`): only :func:`attach_crossings`' walk reads
+        #: them, and the key sources' walks, many more, keep them for nothing.
+        self.routed = routed
         #: The junction owners the rows reach and read them; those found on the way back too.
         self.found: set[str] = set()
         self.found_back: set[str] = set()
@@ -5901,11 +5921,52 @@ class _Crossings:
         #: Where the rows reached the database through calls (:class:`_Landing`), and the way the walk is on now.
         self.landings: list[_Landing] = []
         self._way: list[tuple[str, str, ast.AST, ast.Call]] = []
+        #: Each found owner's ways back up: the ``file:line`` of each caller's call the rows went back through, in
+        #: order, as a route's chain spells it (``()`` for one reached from the statement's function).
+        self.ways: dict[str, set[tuple[str, ...]]] = {}
+        #: Each function gone through or back to (its ``_entered`` / ``_returned`` key): the owners found beneath it,
+        #: each with the way back up from it there -- what a way that reaches it again, and is not walked again,
+        #: reaches too.  And the ones being walked now, with how far back up the walk was when it went in.
+        self._beneath: dict[tuple, set[tuple[str, tuple[str, ...]]]] = {}
+        self._walking: list[tuple[tuple, int]] = []
 
     def _cross(self, owner: str) -> None:
         self.found.add(owner)
         if self._backing:
             self.found_back.add(owner)
+        if self.routed:
+            self._reached(owner, self._back_up())
+
+    def _back_up(self) -> tuple[str, ...]:
+        """The way back up the walk is on now (:attr:`ways`)."""
+        return tuple(f"{file}:{call.lineno}" for kind, file, _func, call in self._way if kind == "back")
+
+    def _reached(self, owner: str, way: tuple[str, ...]) -> None:
+        self.ways.setdefault(owner, set()).add(way)
+        for key, depth in self._walking:
+            self._beneath[key].add((owner, way[depth:]))
+
+    def _again(self, key: tuple) -> None:
+        """A function the walk does not go through again, reached by another way: what it reached is reached by this
+        one too.  Not where the walk is in it now: what it reaches is found under the way that went in, whose start
+        this one has."""
+        if not self.routed or any(walking == key for walking, _depth in self._walking):
+            return
+        way = self._back_up()
+        for owner, rest in self._beneath.get(key, ()):
+            self._reached(owner, way + rest)
+
+    @contextlib.contextmanager
+    def _going(self, key: tuple) -> Iterator[None]:
+        if not self.routed:
+            yield
+            return
+        self._beneath[key] = set()
+        self._walking.append((key, len(self._back_up())))
+        try:
+            yield
+        finally:
+            self._walking.pop()
 
     def into(self, carry: _PathCarry, call: ast.Call, everything: bool = False) -> None:
         """Follow *call*, made in *carry*'s function, handed what *carry* holds there -- all of it, *everything* --
@@ -5973,17 +6034,20 @@ class _Crossings:
     def _through(self, target: Target, given: dict[str, _Paths]) -> None:
         key = self.reading._key(target, given)
         if key in self._entered:
+            self._again(("through", key))
             return
         self._entered.add(key)
         carry = self.reading.summary(target, given).carry or self.reading.carry(target, given)
-        for call in _own_calls(target.func):
-            if carry.follows(call):
-                self.into(carry, call)
+        with self._going(("through", key)):
+            for call in _own_calls(target.func):
+                if carry.follows(call):
+                    self.into(carry, call)
 
     def back(self, file: str, func: ast.AST, paths: _Paths) -> None:
         """Follow the parts *paths* of the rows *func* returns into each of its callers."""
         key = (file, func.lineno, paths)  # type: ignore[attr-defined]
         if key in self._returned:
+            self._again(("back", key))
             return
         self._returned.add(key)
         reading = self.reading
@@ -5991,25 +6055,26 @@ class _Crossings:
             self.open[hole] = None
         held = reading.calls.types.method_class(file, func)
         self._backing += 1
-        for site in reading.calls.callers(Target(file, func, held[1] if held is not None else None)):
-            # A call in a module's own body has no caller to hand the rows on to, and a function calling itself is
-            # not where they go next.
-            if site.in_module or (site.file == file and site.func is func):
-                continue
-            self._way.append(("back", site.file, site.func, site.call))
-            try:
-                carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
-                owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
-                if owner in reading.owners and reading.reads_in(carry):
-                    self._cross(owner)
-                for call in _own_calls(site.func):
-                    if call is not site.call and carry.follows(call):
-                        self.into(carry, call)
-                returned = carry.returns()
-                if returned:
-                    self.back(site.file, site.func, returned)
-            finally:
-                self._way.pop()
+        with self._going(("back", key)):
+            for site in reading.calls.callers(Target(file, func, held[1] if held is not None else None)):
+                # A call in a module's own body has no caller to hand the rows on to, and a function calling itself
+                # is not where they go next.
+                if site.in_module or (site.file == file and site.func is func):
+                    continue
+                self._way.append(("back", site.file, site.func, site.call))
+                try:
+                    carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
+                    owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
+                    if owner in reading.owners and reading.reads_in(carry):
+                        self._cross(owner)
+                    for call in _own_calls(site.func):
+                        if call is not site.call and carry.follows(call):
+                            self.into(carry, call)
+                    returned = carry.returns()
+                    if returned:
+                        self.back(site.file, site.func, returned)
+                finally:
+                    self._way.pop()
         self._backing -= 1
 
 
@@ -6019,14 +6084,15 @@ def _walk(
     site: ReadSiteNode,
     item: Optional[int] = None,
     landing: bool = False,
+    routed: bool = False,
 ) -> tuple[_Crossings, _Paths]:
     """Carry *site*'s rows on from its statement in *func* (:func:`attach_crossings`) -- with *item*, that select item
-    of them alone (:class:`_PathCarry`), with *landing* keeping where they reach the database through calls: the walk,
-    and what *func* returns of them."""
+    of them alone (:class:`_PathCarry`), with *landing* keeping where they reach the database through calls, with
+    *routed* each found owner's ways back up (:attr:`_Crossings.ways`): the walk, and what *func* returns of them."""
     file, line = site.anchor.file, site.anchor.line_start
     rows = _rows_written(func, line, site.region[1])
     carry = _PathCarry(reading, file, func, (), start=rows, item=item)
-    crossings = _Crossings(reading, landing)
+    crossings = _Crossings(reading, landing, routed)
     for call in _own_calls(func):
         if call.lineno == line:
             # The call running the statement, followed with all it hands:
@@ -6241,7 +6307,7 @@ def attach_crossings(
         func = _site_function(trees, site)
         if func is None:
             continue
-        crossings, returned = _walk(reading, func, site, landing=landings is not None)
+        crossings, returned = _walk(reading, func, site, landing=landings is not None, routed=True)
         if landings is not None:
             found = [one for one in crossings.landings if not _own_run(one, func, site)]
             for landing in found:
@@ -6261,9 +6327,44 @@ def attach_crossings(
         site.crosses_open = [
             OpenCrossing(owner=owner, line=line, callee=callee) for owner, line, callee in sorted(crossings.open)
         ]
+        site.crossing_selects = _crossing_selects(site, crossings.ways)
         stored += len(site.crosses_to)
         opened += 1 if site.crosses_open else 0
     return CrossingCensus(stored, handing_back, resolved, opened)
+
+
+def _crossing_selects(site: ReadSiteNode, ways: dict[str, set[tuple[str, ...]]]) -> dict[str, list[str]]:
+    """:attr:`ReadSiteNode.crossing_selects`: each of *site*'s ``crosses_to`` owners whose *ways* back up all go by
+    routes selecting fewer values than the statement, with those values.
+
+    A way's routes are the :attr:`~ReadSiteNode.call_readings` whose chain it starts with, or which start it -- a
+    route is read four calls out (:attr:`Calls.ROUTE_HOPS`), a way may stop sooner.  A route read as the statement
+    selects what it does, one it never runs on nothing.  A way from the statement's own function, or one no route
+    matches, takes the statement's values, and so the owner does: a caller the routes did not place is not a reason
+    to select less."""
+    own = set(site.selects)
+    if not site.call_readings or not own:
+        return {}
+    found: dict[str, list[str]] = {}
+    for owner in site.crosses_to:
+        values: set[str] = set()
+        for way in ways.get(owner, {()}):
+            routes = [route for route in site.call_readings if route.chain and _starts_alike(route.chain, way)]
+            if not way or not routes:
+                values = own
+                break
+            for route in routes:
+                if not route.not_run:
+                    values |= own if route.as_statement else set(route.selects)
+        if values & own != own:
+            found[owner] = sorted(values & own)
+    return found
+
+
+def _starts_alike(chain: list[str], way: tuple[str, ...]) -> bool:
+    """Whether one of *chain* and *way* starts the other."""
+    length = min(len(chain), len(way))
+    return tuple(chain[:length]) == way[:length]
 
 
 class _Filled:

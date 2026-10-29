@@ -107,32 +107,10 @@ from bamboo.codemap.panda.recognizers import progress
 #: The classes whose columns an assignment is kept for (tmaeno, 10-18: D1).
 COLUMN_CLASSES = ("JobSpec", "JediTaskSpec", "FileSpec")
 
-#: Builtins that hand back the elements of what they are given, at positions not known.
-_ELEMENTS_OF = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
-#: Builtins that hand back one element of what they are given, or one of their arguments.
-_ONE_OF = {"next", "max", "min"}
 #: How :func:`callfacts.meaning` reads a call that puts into its object (:meth:`_Values._fill`).
 _FILLING = (callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED)
-#: A builtin container's own methods that hand back what is in it.
-_TAKERS = {"pop", "popleft", "get", "setdefault", "values", "copy", "items", "popitem"}
 #: A literal key a path keeps (8,937 of pin k's 8,950); another reads as ``[]``.
 _KEY = re.compile(r"[A-Za-z0-9_:\-]*")
-
-#: Calls that hand a value on unchanged as far as a key is concerned (keycolumns, and a row's key the record binds): ``str(pandaID)``.
-CONVERSIONS = frozenset({"str", "int", "repr"})
-
-
-def unconverted(node: ast.expr) -> ast.expr:
-    """*node* without the conversions that hand it on unchanged (:data:`CONVERSIONS`)."""
-    while (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in CONVERSIONS
-        and len(node.args) == 1
-        and not node.keywords
-    ):
-        node = node.args[0]
-    return node
 
 
 def is_parameter(func: ast.AST, name: str) -> bool:
@@ -687,22 +665,29 @@ class _Values:
             return [_Carry("", call=call)]
         called = call.func
         args = call.args
-        if isinstance(called, ast.Name) and called.id not in self.names:
-            if called.id in _ELEMENTS_OF and args:
+        function = callfacts.builtin_function(
+            self.reader.types, self.file, self.func, call
+        )
+        if function is not None:
+            # A builtin function, by what its value holds of what it is handed (callfacts.Function).
+            if function.gives == callfacts.COPY and args:
                 return _shift(_index(self.carried(args[0]), "[]"), "[]")
-            if called.id in _ONE_OF and args:
-                if len(args) == 1:
-                    return _index(self.carried(args[0]), "[]")
-                return [carry for one in args for carry in self.carried(one)]
-            if called.id == "enumerate" and args:
+            if function.gives == callfacts.ONE and args:
+                elements, whole = callfacts.picked(function, call)
+                return [
+                    carry
+                    for one in elements
+                    for carry in _index(self.carried(one), "[]")
+                ] + [carry for one in whole for carry in self.carried(one)]
+            if function.gives == callfacts.NUMBERED and args:
                 return _shift(_index(self.carried(args[0]), "[]"), "[][1]")
-            if called.id == "zip":
+            if function.gives == callfacts.ZIPPED:
                 return [
                     carry
                     for index, one in enumerate(args)
                     for carry in _shift(_index(self.carried(one), "[]"), f"[][{index}]")
                 ]
-            if called.id == "dict":
+            if function.gives == callfacts.DICT:
                 # a mapping's values, or the second of each pair; and the keywords under their names
                 found = [
                     carry
@@ -718,21 +703,31 @@ class _Values:
                         self.carried(keyword.value), _named(keyword.arg)
                     )
                 ]
-        elif isinstance(called, ast.Attribute) and called.attr in _TAKERS:
+        elif (
+            isinstance(called, ast.Attribute)
+            and (gives := callfacts.taken(called.attr)) is not None
+        ):
+            # A builtin container's method, by what it hands back of what is in it (callfacts.Give).
             receiver = self.carried(called.value)
-            method = called.attr
-            if method in ("pop", "popleft") and not args:
+            if (
+                gives.part == callfacts.AT
+                and gives.key is not None
+                and len(args) > gives.key
+            ):
+                found = _index(receiver, _subscript(args[gives.key]))
+                beside = (
+                    [args[gives.default]]
+                    if gives.default is not None and len(args) > gives.default
+                    else []
+                )
+                return found + [carry for one in beside for carry in self.carried(one)]
+            if gives.part == callfacts.AT and not args:
                 return _index(receiver, "[]")
-            if method in ("pop", "get", "setdefault") and args:
-                found = _index(receiver, _subscript(args[0]))
-                return found + [
-                    carry for one in args[1:2] for carry in self.carried(one)
-                ]
-            if method in ("values", "copy") and not args:
+            if gives.part in (callfacts.VALUES, callfacts.SELF) and not args:
                 return _shift(_index(receiver, "[]"), "[]")
-            if method == "items" and not args:
+            if gives.part == callfacts.ITEMS and not args:
                 return _shift(_index(receiver, "[]"), "[][1]")
-            if method == "popitem" and not args:
+            if gives.part == callfacts.ITEM and not args:
                 return _shift(_index(receiver, "[]"), "[1]")
         return [_Carry("", call=call)]
 
@@ -743,7 +738,7 @@ class _Values:
 
         A row a query returns holds, in each column its own ``WHERE`` sets
         equal to one bind (:func:`sqltext.row_tests`), what the bind was
-        filled with.  So where ``O.pack(r)`` (:data:`specwrites.ROW_READ`)
+        filled with.  So where ``O.pack(r)`` (:data:`callfacts.ROW_READ`)
         takes such a row, ``O.PandaID`` holds what ``varMap[":PandaID"]``
         does: ``peekJob``'s ``job.pack(res[0])`` after ``SELECT ... WHERE
         PandaID=:PandaID`` is the ``job.PandaID = pandaID`` its not-found
@@ -767,7 +762,7 @@ class _Values:
         packs: dict[tuple[int, str], dict[str, list[str]]] = {}
         for bound in self.handed.values():
             if (
-                bound.to.rpartition(".")[2] not in specwrites.ROW_READ
+                bound.to.rpartition(".")[2] not in callfacts.ROW_READ
                 or not bound.parameter
                 or bound.at
                 or not bound.path
@@ -798,7 +793,7 @@ class _Values:
             for node in C.own_nodes(self.func)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in sql.FETCHES
+            and node.func.attr in callfacts.FETCHES
         }
         ties: Optional[set[tuple[str, str]]] = None
         for path in rows:
@@ -912,7 +907,11 @@ class _Values:
             for bind in binds:
                 if pathcond.enclosing_function(bind.value) is not self.func:
                     continue
-                for path in self.versions.paths(unconverted(bind.value)):
+                for path in self.versions.paths(
+                    callfacts.unconverted(
+                        self.reader.types, self.file, self.func, bind.value
+                    )
+                ):
                     found.add((attribute, path))
         return found
 

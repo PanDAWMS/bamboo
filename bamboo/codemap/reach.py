@@ -115,72 +115,19 @@ HOLE_STATEMENT_NOT_READ = "the statement is not read"
 _NOT_BY_NAME = (HOLE_QUEUE, HOLE_OUTSIDE_START, HOLE_STATEMENT_NOT_READ)
 _HOLE_TEXT = re.compile(r"^(?P<owner>.*?):(?P<line>\d+) (?P<callee>.*?) -- (?P<why>.*)$")
 
-#: The library classes whose ``put()`` hands a value to whoever ``get()``s it
-#: -- another thread, another process, another task.
-_QUEUES = {
-    ("queue", "Queue"),
-    ("queue", "LifoQueue"),
-    ("queue", "PriorityQueue"),
-    ("queue", "SimpleQueue"),
-    ("multiprocessing", "Queue"),
-    ("multiprocessing", "JoinableQueue"),
-    ("multiprocessing", "SimpleQueue"),
-    ("asyncio", "Queue"),
-    ("asyncio", "LifoQueue"),
-    ("asyncio", "PriorityQueue"),
-}
-_PUTS = {"put", "put_nowait"}
-_GETS = {"get", "get_nowait"}
-#: Builtins that never call what they are handed: a class passed to them is no constructor run.
-_NOT_CALLING = {
-    "isinstance", "issubclass", "super", "getattr", "hasattr", "delattr", "type", "id",
-    "len", "repr", "str", "print", "callable", "vars", "dir",
-}  # fmt: skip
-
+#: The library classes whose ``put()`` hands a value to whoever ``get()``s it (:data:`callfacts.QUEUES`).
+_QUEUES, _PUTS, _GETS = callfacts.QUEUES, callfacts.QUEUE_PUTS, callfacts.QUEUE_GETS
 _BUILTINS = set(dir(builtins))
-#: The builtin types and the typing and collections names a builtin value is annotated with.
+#: The builtin types and the typing and collections names a builtin value is annotated with: the scalars, and the
+#: containers holding keys, elements or positions (:data:`callfacts.CONTAINERS`).
 _BUILTIN_ANNOTATIONS = {
-    "str", "int", "float", "bool", "bytes", "bytearray", "complex", "dict", "list", "set", "tuple",
-    "frozenset", "range", "None", "NoneType", "Dict", "List", "Set", "Tuple", "FrozenSet", "Iterable",
-    "Iterator", "Sequence", "Mapping", "MutableMapping", "Generator", "defaultdict", "OrderedDict",
-    "Counter", "deque", "DefaultDict",
-}  # fmt: skip
+    "str", "int", "float", "bool", "bytes", "bytearray", "complex", "range", "None", "NoneType",
+} | callfacts.containers(callfacts.MAPPING, callfacts.COLLECTION, callfacts.RECORD)  # fmt: skip
 _SCALARS = {"str", "int", "float", "bool", "bytes", "complex", "NoneType"}
-#: Builtin functions whose value is a builtin whatever they are handed, and of which type.
-_BUILTIN_RESULTS = {
-    "len": "int", "str": "str", "int": "int", "float": "float", "bool": "bool", "bytes": "bytes",
-    "repr": "str", "hash": "int", "id": "int", "abs": "", "round": "", "ord": "int", "chr": "str",
-    "hex": "str", "oct": "str", "bin": "str", "format": "str", "isinstance": "bool", "issubclass": "bool",
-    "hasattr": "bool", "callable": "bool", "any": "bool", "all": "bool", "divmod": "tuple", "range": "range",
-    "list": "list", "dict": "dict", "set": "set", "tuple": "tuple", "frozenset": "frozenset",
-    "sorted": "list", "enumerate": "iterator", "zip": "iterator", "map": "iterator", "filter": "iterator",
-    "reversed": "iterator", "iter": "iterator", "open": "file", "input": "str", "print": "NoneType",
-    "sum": "", "pow": "",
-}  # fmt: skip
-#: Methods of a builtin container whose value is one of what it holds.
-_ELEMENT_METHODS = {
-    "get",
-    "pop",
-    "popitem",
-    "setdefault",
-    "values",
-    "items",
-    "popleft",
-    "__getitem__",
-}
-#: Methods of a builtin whose value is another of the same type: ``d.copy()`` is a dict.
-_SAME_TYPE_METHODS = {"copy"}
-#: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
-_OPERATORS: dict[type, tuple[str, ...]] = {
-    op: (f"__{name}__", f"__r{name}__", f"__i{name}__")
-    for op, name in (
-        (ast.Add, "add"), (ast.Sub, "sub"), (ast.Mult, "mul"), (ast.MatMult, "matmul"), (ast.Div, "truediv"),
-        (ast.FloorDiv, "floordiv"), (ast.Mod, "mod"), (ast.Pow, "pow"), (ast.LShift, "lshift"),
-        (ast.RShift, "rshift"), (ast.BitAnd, "and"), (ast.BitXor, "xor"), (ast.BitOr, "or"),
-    )
-} | {ast.USub: ("__neg__",), ast.UAdd: ("__pos__",), ast.Invert: ("__invert__",)}  # fmt: skip
+#: The dunders each operator calls (:data:`callfacts.OPERATOR_DUNDERS`).
+_OPERATORS = callfacts.OPERATOR_DUNDERS
 
-#: The dunders Python runs with no call naming them -- ``with``, ``for``,
+#: The dunders Python runs with no call naming them (:data:`callfacts.IMPLICIT_DUNDERS`) -- ``with``, ``for``,
 #: ``in``, ``x[k]``, ``str(x)``, an operator, comparing, hashing, pickling
 #: and copying.  No edge says when they run, so the premise
 #: ``outside_calls_back_only_handed`` takes them to reach no write, and the
@@ -192,17 +139,7 @@ _OPERATORS: dict[type, tuple[str, ...]] = {
 #: ``__setattr__`` has no ``called_from`` -- and a store on an object no
 #: reading says anything of has none (167 stores on pin k, 9 of them of
 #: ``jobStatus``).
-IMPLICIT_DUNDERS = frozenset(
-    {
-        "__enter__", "__exit__", "__aenter__", "__aexit__", "__iter__", "__next__", "__aiter__", "__anext__",
-        "__getitem__", "__setitem__", "__delitem__", "__contains__", "__len__", "__bool__", "__eq__", "__ne__",
-        "__lt__", "__le__", "__gt__", "__ge__", "__hash__", "__str__", "__repr__", "__format__", "__del__",
-        "__call__", "__getattr__", "__getattribute__", "__setattr__", "__delattr__", "__reduce__",
-        "__reduce_ex__", "__getstate__", "__setstate__", "__copy__", "__deepcopy__", "__new__", "__post_init__",
-        "__await__", "__index__", "__int__", "__float__", "__init_subclass__",
-    }
-    | {name for names in _OPERATORS.values() for name in names}
-)  # fmt: skip
+IMPLICIT_DUNDERS = callfacts.IMPLICIT_DUNDERS
 
 #: How a reach edge says an attribute store runs its object's ``__setattr__`` (:meth:`calls.Calls.stored`).
 HOW_SETATTR = "setattr"
@@ -371,14 +308,10 @@ class _Receivers:
         if library in _QUEUES:
             return _QUEUE, ".".join(library)
         if named in _BUILTIN_ANNOTATIONS and (
-            library is None or library[0] in ("typing", "collections")
+            library is None or library[0].split(".")[0] in ("typing", "collections")
         ):
-            return _BUILTIN, {
-                "Dict": "dict",
-                "List": "list",
-                "Set": "set",
-                "Tuple": "tuple",
-            }.get(named, named)
+            held = callfacts.CONTAINERS.get(named)
+            return _BUILTIN, (held.builtin if held is not None and held.builtin else named)
         if self.types.annotated_all(file, head):
             return _UNKNOWN, f"declared {ast.unparse(head)}, a class of the corpus"
         if library is not None:
@@ -569,7 +502,8 @@ class _Receivers:
             and isinstance(called, ast.Name)
             and self._is_builtin(file, func, called.id)
         ):
-            result = _BUILTIN_RESULTS.get(called.id)
+            function = callfacts.BUILTIN_FUNCTIONS.get(called.id)
+            result = function.result if function is not None else None
             if result is None:
                 return _UNKNOWN, f"what {called.id}() returns"
             return _BUILTIN, result
@@ -597,9 +531,10 @@ class _Receivers:
             )
         if held in _SCALARS:
             return _BUILTIN, ""
-        if method in _SAME_TYPE_METHODS:
+        gives = callfacts.taken(method, held)
+        if gives is not None and gives.part == callfacts.SELF:
             return _BUILTIN, held
-        if method in _ELEMENT_METHODS:
+        if gives is not None and gives.part != callfacts.KEYS:
             return _UNKNOWN, f"what {_a(held or 'builtin container')} holds"
         return _BUILTIN, ""
 
@@ -690,13 +625,7 @@ class _Receivers:
         return func.name in self._as_values  # type: ignore[attr-defined]
 
     def _is_builtin(self, file: str, func: ast.AST, name: str) -> bool:
-        if name not in _BUILTINS:
-            return False
-        if not isinstance(func, ast.Module) and (
-            name in _parameters(func) or name in self.types.assigned(func)
-        ):
-            return False
-        return name not in self.types._module_bound(file)
+        return self.types.is_builtin(file, func, name)
 
     def _named(
         self, file: str, func: ast.AST, name: str, depth: int
@@ -868,24 +797,23 @@ _HOLDERS_CUT = 300
 #: The slot of an item's value -- ``for key, value in d.items()``, ``for index, one in enumerate(xs)``.
 _SECOND = ast.Constant(value=1)
 
-#: Builtins whose value holds nothing of what they are handed: a count, a text, a test.
-_KEEPING_BUILTINS = {
-    "len", "str", "repr", "int", "float", "bool", "bytes", "print", "isinstance", "issubclass", "hash", "id",
-    "type", "any", "all", "sum", "format", "abs", "round", "callable", "hasattr", "getattr", "ord", "chr",
-    "bin", "hex", "oct", "ascii", "divmod", "pow",
-}  # fmt: skip
-#: Builtins whose value holds the elements of the one value they are handed, each as an element of its own.
-_COPYING_BUILTINS = {"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"}
-#: Builtins whose value is one of the elements of what they are handed.
-_PICKING_BUILTINS = {"max", "min", "next"}
-#: A builtin container's methods that hand back a part of it (what they put into it is :mod:`callfacts`'s): (the
-#: part's place below the receiver, the value's place below the part).
-_PARTS: dict[str, tuple[_Path, _Path]] = {
-    "copy": ((), ()),
-    "values": ((None,), (None,)),
-    "items": ((None, _SECOND), (None,)),
-    "popitem": ((_SECOND,), (None,)),
-}
+
+def _part(gives: callfacts.Give, args: list[ast.expr]) -> Optional[tuple[_Path, _Path]]:
+    """Where a builtin container's method's value is a part of its receiver (:class:`callfacts.Give`): (the place in
+    the value, the receiver's place it holds) -- ``d.items()``: each element's second is one of ``d``'s values;
+    ``d.get(k)`` is ``d``'s value at ``k``, ``xs.pop()`` one of its elements.  ``None`` for a view of the keys, which
+    holds none of what it holds."""
+    if gives.part == callfacts.SELF:
+        return (), ()
+    if gives.part == callfacts.VALUES:
+        return (None,), (None,)
+    if gives.part == callfacts.ITEMS:
+        return (None, _SECOND), (None,)
+    if gives.part == callfacts.ITEM:
+        return (_SECOND,), (None,)
+    if gives.part == callfacts.AT:
+        return ((), (args[gives.key],)) if gives.key is not None and gives.key < len(args) else ((), (None,))
+    return None
 
 
 def _subscripted(expression: ast.expr) -> tuple[Optional[ast.Name], list[ast.expr]]:
@@ -1136,10 +1064,11 @@ class _Holders:
         if (
             isinstance(value, ast.Call)
             and isinstance(value.func, ast.Attribute)
-            and value.func.attr in ("get", "pop")
-            and len(value.args) == 2
+            and (gives := callfacts.taken(value.func.attr)) is not None
+            and gives.default is not None
+            and len(value.args) > gives.default
         ):
-            self._place(file, func, value.args[1], at, of)  # the default
+            self._place(file, func, value.args[gives.default], at, of)  # the default
         chain = _chain(value)
         if chain is not None:
             root, path = chain
@@ -1180,27 +1109,21 @@ class _Holders:
         if (
             isinstance(called, ast.Attribute)
             and not value.args
-            and called.attr in _PARTS
+            and (gives := callfacts.taken(called.attr)) is not None
         ):
-            ys, xs = _PARTS[called.attr]
-            return [(called.value, xs, ys)]
-        if (
-            isinstance(called, ast.Attribute)
-            and called.attr == "keys"
-            and not value.args
-        ):
-            return []
+            part = _part(gives, [])
+            return [] if part is None else [(called.value, part[1], part[0])]
         if (
             isinstance(called, ast.Name)
             and len(value.args) == 1
             and not isinstance(value.args[0], ast.Starred)
-            and self.receivers._is_builtin(file, func, called.id)
+            and (function := callfacts.builtin_function(self.calls.types, file, func, value)) is not None
         ):
-            if called.id in _COPYING_BUILTINS:
+            if function.gives == callfacts.COPY:
                 return [(value.args[0], (None,), (None,))]
-            if called.id == "enumerate":
+            if function.gives == callfacts.NUMBERED:
                 return [(value.args[0], (None,), (None, _SECOND))]
-            if called.id in _PICKING_BUILTINS:
+            if function.gives == callfacts.ONE:
                 return [(value.args[0], (None,), ())]
         return None
 
@@ -1623,10 +1546,8 @@ class _Holders:
                     moved = _composed((), (ast.Constant(value=keyword.arg),), at, of)
                     if moved is not None:
                         self._place(file, func, keyword.value, *moved)
-        elif method in ("get", "pop"):
-            return ((), (args[0],)) if args else ((), (None,))
-        elif method in _PARTS:
-            return _PARTS[method]
+        elif (gives := callfacts.taken(method)) is not None and gives.part != callfacts.KEYS:
+            return _part(gives, args)
         elif method.startswith("__"):
             self._unread(at, of)
         return None
@@ -1647,20 +1568,28 @@ class _Holders:
         if isinstance(called, ast.Name) and self.receivers._is_builtin(
             file, func, called.id
         ):
-            builtin = called.id
-            if builtin in _KEEPING_BUILTINS:
-                return None
+            function = callfacts.BUILTIN_FUNCTIONS.get(called.id)
+            gives = function.gives if function is not None else None
+            if gives in callfacts.HOLDING_NONE:
+                return None  # a text, a number, a count or a test of it
+            if function is not None and gives == callfacts.ATTRIBUTE:
+                # getattr's default may be the value; an attribute of a builtin container is a method of it.
+                default = function.default
+                kept = default is not None and len(call.args) > default and argument is call.args[default]
+                return ((), ()) if kept else None
             if isinstance(argument, (ast.keyword, ast.Starred)):
                 self._unread(at, of)
                 return None
-            if builtin in _PICKING_BUILTINS and len(call.args) > 1:
-                return (), ()  # max(a, b): one of them
-            if len(call.args) == 1 and builtin in _COPYING_BUILTINS:
+            if function is not None and gives == callfacts.ONE:
+                elements, whole = callfacts.picked(function, call)
+                if any(argument is one for one in whole):
+                    return (), ()  # max(a, b), next(it, default): one of them
+                if any(argument is one for one in elements):
+                    return (), (None,)
+            if len(call.args) == 1 and gives == callfacts.COPY:
                 return (None,), (None,)
-            if len(call.args) == 1 and builtin == "enumerate":
+            if len(call.args) == 1 and gives == callfacts.NUMBERED:
                 return (None, _SECOND), (None,)
-            if len(call.args) == 1 and builtin in _PICKING_BUILTINS:
-                return (), (None,)
             self._unread(at, of)
             return None
         try:
@@ -1680,6 +1609,8 @@ class _Holders:
                 self._unread(at, of)  # handed to whoever gets it: HOLE_QUEUE
                 return None
             meant = callfacts.meaning(self.calls, file, func, call, placed)
+            if meant.kind in (callfacts.LOGGER, callfacts.CLIENT):
+                return None  # a line written, another system handed it: it holds nothing of it here
             if (
                 receiver[0] == _BUILTIN
                 and not called.attr.startswith("__")
@@ -2444,13 +2375,10 @@ def graph(
                     list(bound) or objects,
                     for_classes,
                 )
-            if (
-                isinstance(call.func, ast.Name)
-                and call.func.id in _NOT_CALLING
-                and receivers._is_builtin(file, func, call.func.id)
-            ):
-                continue
+            function = callfacts.builtin_function(receivers.types, file, func, call)
             for value in _handed_values(call):
+                if function is not None and callfacts.builds_nothing(function, call, value):
+                    continue  # isinstance(x, C), hasattr(C, name): no constructor run
                 for for_classes, bound in _groups(objects, classes, _reads_self(value)):
                     for target in calls.named_callables(file, func, value, bound):
                         to = names.of(target.func)
@@ -2582,8 +2510,8 @@ def _close(
         asked = _asked(receivers.calls, file, func, call, selfs)
         types = receivers.types
         if (
-            called.attr == "start"
-            and any(types.method(*one, "run") is not None for one in asked)
+            called.attr == callfacts.START
+            and any(types.method(*one, callfacts.RUN) is not None for one in asked)
             and any(types.built_outside(*one) for one in asked)
         ):
             row.hole(call, HOLE_OUTSIDE_START, for_classes)

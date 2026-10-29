@@ -53,6 +53,7 @@ import ast
 from collections import defaultdict
 from typing import NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import Calls, CallSite, Target, bind
 from bamboo.codemap.models import (
@@ -68,12 +69,6 @@ from bamboo.codemap.panda.recognizers import trigger
 # PandaLogger.getLogger(name) opens "<logdir>/panda-<name>.log".
 _FILENAME = "panda-{}.log"
 
-#: The calls that open a ``PandaLogger`` file by name.
-_OPENERS = frozenset({"getLogger", "setup_logger"})
-#: The calls that wrap a logger and write through it, the logger first:
-#: ``LogWrapper(logger, prefix)``, JEDI's ``MsgWrapper(logger, ...)`` and
-#: pandacommon's ``make_logger(logger, ...)``, which builds a ``LogWrapper``.
-_WRAPPERS = frozenset({"LogWrapper", "MsgWrapper", "make_logger"})
 #: How many callers deep a logger handed in as a parameter is followed.  The
 #: proxy mixins take theirs two constructors up: ``BaseModule.__init__`` from
 #: each mixin's ``__init__``, and that from ``OraDBProxy.DBProxy``'s.
@@ -102,6 +97,12 @@ def _names_itself(node: ast.expr) -> bool:
     return isinstance(receiver, ast.Name) and receiver.id == "__name__"
 
 
+def _opens(name: str) -> bool:
+    """Whether a call of *name* opens a ``PandaLogger`` file by name (:data:`callfacts.LOGGER_MAKERS`)."""
+    maker = callfacts.LOGGER_MAKERS.get(name)
+    return maker is not None and maker.opens
+
+
 def _opened_name(call: ast.Call, rel_path: str) -> Optional[str]:
     """The ``PandaLogger`` name *call* opens in module *rel_path*, or None.
 
@@ -112,7 +113,7 @@ def _opened_name(call: ast.Call, rel_path: str) -> Optional[str]:
     """
     called = call.func
     name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
-    if name not in _OPENERS:
+    if not _opens(name):
         return None
     if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name) and called.value.id == "logging":
         return None
@@ -370,15 +371,17 @@ class LoggerFiles:
             return
         called = call.func
         name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
-        if name in _OPENERS and isinstance(called, ast.Attribute) and getattr(called.value, "id", "") == "logging":
+        if _opens(name) and isinstance(called, ast.Attribute) and getattr(called.value, "id", "") == "logging":
             # A logger, and none of PandaLogger's files.
             trail.reached = True
             trail.standard = True
             return
-        if name in _WRAPPERS and call.args:
-            self._value(trail, file, func, call.args[0], at, way)
+        # A call wrapping a logger writes through the one it is handed: LogWrapper(logger, prefix).
+        maker = callfacts.LOGGER_MAKERS.get(name)
+        if maker is not None and maker.logger is not None and len(call.args) > maker.logger:
+            self._value(trail, file, func, call.args[maker.logger], at, way)
             return
-        placed = self.calls.callees(file, func, call) if func is not None and name not in _OPENERS else None
+        placed = self.calls.callees(file, func, call) if func is not None and not _opens(name) else None
         # One definition, placed closed: a call placed open may return
         # another function's file.
         if placed is None or len(placed.targets) != 1 or placed.unplaced or placed.returns_none:

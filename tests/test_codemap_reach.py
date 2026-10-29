@@ -5,8 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reach
 from bamboo.codemap.models import Anchor, Branch, JunctionNode
 
 PACKAGE = "pkg"
@@ -548,6 +548,30 @@ def test_a_class_handed_to_a_builtin_that_never_calls_it_builds_nothing(tmp_path
     assert _to(record, "pkg/mod.py::Child.__init__", "handed") == []
 
 
+def test_a_class_a_builtin_may_hand_back_is_built_and_one_it_holds_none_of_is_not(tmp_path):
+    """``getattr(holder, "factory", Base)`` may be ``Base`` itself, which ``factory()`` builds; ``hash(Other)``,
+    ``bool(Other)`` and ``getattr(Other, name)`` read the class and hold none of it (callfacts.builds_nothing)."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "class Base:\n"
+            "    def __init__(self):\n"
+            "        pass\n\n"
+            "class Other:\n"
+            "    def __init__(self):\n"
+            "        pass\n\n"
+            "def run(holder, name):\n"
+            "    hash(Other)\n"
+            "    bool(Other)\n"
+            "    getattr(Other, name)\n"
+            "    factory = getattr(holder, 'factory', Base)\n"
+            "    return factory()\n"
+        ),
+    )
+
+    assert _to(record, "pkg/mod.py::run", "handed") == ["pkg/mod.py::Base.__init__"]
+
+
 def test_a_function_set_on_a_class_is_handed_and_taken_as_called(tmp_path):
     """``setattr(Workflow, "scatter", scatter)`` installs it as a method something calls later: an edge, not a builtin's read."""
     record = _record(
@@ -937,6 +961,30 @@ def _callees(record: reach.ReachGraph, owner: str) -> list[str]:
     return [hole.callee for hole in record.rows[owner].holes]
 
 
+def test_what_a_builtin_hands_back_of_a_container_is_read_by_what_callfacts_says(tmp_path):
+    """``e = getattr(o, "x", d)`` may be ``d`` itself (the default), so what ``e["a"].append`` puts may be in
+    ``d["a"]``: an unknown ``e`` leaves ``d["a"][-1].move()`` open.  ``range(d["a"][0])`` is a range, holding none
+    of ``d``: the walk of ``d`` goes on past it, and ``d["a"].append`` is a list's."""
+    record = _record(
+        tmp_path,
+        mod=(
+            _TAKER + "def defaults(o):\n"
+            "    d = {'a': [1]}\n"
+            "    e = getattr(o, 'x', d)\n"
+            "    e['a'].append(2)\n"
+            "    d['a'][-1].move()\n\n"
+            "def counts():\n"
+            "    d = {'a': [1]}\n"
+            "    for i in range(d['a'][0]):\n"
+            "        d['a'].append(i)\n"
+            "    d['a'][-1].move()\n"
+        ),
+    )
+
+    assert "d['a'][-1].move" in _callees(record, "pkg/mod.py::defaults")
+    assert _callees(record, "pkg/mod.py::counts") == []
+
+
 def test_a_container_s_copy_is_the_container_and_an_augmented_assignment_leaves_a_name_what_it_was(
     tmp_path,
 ):
@@ -1033,13 +1081,15 @@ def test_a_container_s_values_are_read_from_every_name_holding_it(tmp_path):
     ``kwargs.update(new_kwargs)`` -- the ``**`` holds the key on every way, so the ``*`` does not fill it -- and by
     ``store`` with the default: ``extracted['state']['vars']`` is the list ``setdefault`` puts there.  Where the
     update is on some ways only (``bulk2``), the ``*`` may fill it and the call stays a hole.  A value put through a
-    part (``setdefault(...).append``, ``get(...).append``), an alias (``e = d or more``), a loop over the values or
-    items or a builtin's copy of them, or by a callee handed the container, is one of what it holds there: the
-    undeclared one leaves ``d['a'][-1].move`` a hole.  A callee that only reads it leaves it closed.
+    part (``setdefault(...).append``, ``get(...).append``, ``__getitem__(...).append``), an alias (``e = d or
+    more``), a loop over the values or items or a builtin's copy of them, or by a callee handed the container, is one
+    of what it holds there: the undeclared one leaves ``d['a'][-1].move`` a hole.  A callee that only reads it leaves
+    it closed.
     """
     shapes = {
         "chain_setdefault": "    d.setdefault('a', []).append(undeclared())\n",
         "chain_get": "    d.get('a').append(undeclared())\n",
+        "chain_getitem": "    d.__getitem__('a').append(undeclared())\n",
         "loop_values": "    for v in d.values():\n        v.append(undeclared())\n",
         "loop_items": "    for k, v in d.items():\n        v.append(undeclared())\n",
         "alias": "    e = d or {}\n    e['a'].append(undeclared())\n",
@@ -1098,6 +1148,21 @@ def test_a_container_s_values_are_read_from_every_name_holding_it(tmp_path):
     assert "extracted['state']['vars'].append" in holes("record2")
     for name in shapes:
         assert ("d['a'][-1].move" in holes(name)) is (name != "callee_reads"), name
+
+
+def test_a_builtin_container_s_method_s_value_is_the_part_of_its_receiver_callfacts_says():
+    """(the place in the value, the receiver's place it holds), read from :class:`callfacts.Give`: a copy is the
+    receiver, a view's elements its values (each pair's second for ``items()``), a pair popped holds a value at its
+    second, ``get`` / ``pop`` the value at the key handed or any one where none is; a view of the keys holds none of
+    what it holds."""
+    key = ast.Name(id="k")
+    assert reach._part(callfacts.Give(callfacts.SELF), []) == ((), ())
+    assert reach._part(callfacts.Give(callfacts.VALUES), []) == ((None,), (None,))
+    assert reach._part(callfacts.Give(callfacts.ITEMS), []) == ((None, reach._SECOND), (None,))
+    assert reach._part(callfacts.Give(callfacts.ITEM), []) == ((reach._SECOND,), (None,))
+    assert reach._part(callfacts.taken("get"), [key]) == ((), (key,))
+    assert reach._part(callfacts.taken("popleft"), []) == ((), (None,))
+    assert reach._part(callfacts.taken("keys"), []) is None
 
 
 def test_a_container_the_function_makes_and_returns_holds_what_the_function_puts_there(
@@ -1279,3 +1344,25 @@ def test_the_keys_a_mapping_may_hold_are_read_from_every_put_into_every_name_hol
     assert keys("first") == keys("update")
     for owner in ("by_fstring", "by_parameter", "outside", "returned"):
         assert keys(owner) is None, owner
+
+
+def test_a_value_declared_a_collection_is_a_builtin_as_a_sequence_is(tmp_path):
+    """``Collection[str]`` from ``collections.abc`` names a builtin container, as ``Sequence[str]`` does, not a class
+    outside the corpus; ``DefaultDict`` and ``FrozenSet`` are a ``defaultdict`` and a ``frozenset``
+    (callfacts.CONTAINERS)."""
+    mod = (
+        "from collections.abc import Collection, Sequence\n"
+        "from typing import DefaultDict, FrozenSet\n\n"
+        "def f(a: Collection[str], b: Sequence[str], c: DefaultDict[str, int], d: FrozenSet[str]):\n"
+        "    pass\n"
+    )
+    calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, mod=mod), {}))
+    receivers = reach._Receivers(calls, None)
+    func = calls.types.tree("pkg/mod.py").body[2]
+    kinds = [receivers.annotation("pkg/mod.py", arg.annotation) for arg in func.args.args]
+    assert kinds == [
+        ("builtin", "Collection"),
+        ("builtin", "Sequence"),
+        ("builtin", "defaultdict"),
+        ("builtin", "frozenset"),
+    ]

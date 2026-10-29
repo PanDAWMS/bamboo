@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "asked", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
+    "asked", "attr_time", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
 ]
 
@@ -1267,6 +1267,65 @@ def test_a_call_with_no_print_after_it_on_every_path_is_placed_between_the_recor
     assert printed_between is None
 
 
+def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_their_prints_runs_it(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "r.py").write_text(
+        textwrap.dedent(
+            """
+            def run(self, task):
+                self.logger.info("extracting common")
+                try:
+                    self.impl.extract(task)
+                except Exception:
+                    self.logger.error("failed")
+                    return
+                if task.x:
+                    self.tb.update(task)
+                self.logger.info("checking length")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows as R
+            from bamboo.querier.which_ran import rows_around
+
+            node = R.functions("pandajedi/r.py", "run")[0]
+            at = lambda line: R.statement_at(node, line)
+            prints = {id(s) for s in R.own_nodes(node) if R.is_print(s)}
+            through = lambda a, b, s: R.passes_through(node, at(a), at(b), at(s), prints)
+            fn = N(node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            # record 1 is another function's (the callee's, say)
+            placed = {3: [0], 11: [2]}
+            hits = {k: [(x, 9, "") for x in v] for k, v in placed.items()}
+            print(json.dumps({
+                "the call": through(3, 11, 5),
+                "an arm": through(3, 11, 10),
+                "raised to the handler": through(3, 7, 5),
+                "around the call": rows_around(fn, N(unambiguous=placed, hits=hits), at(5)),
+                "around the arm": rows_around(fn, N(unambiguous=placed, hits=hits), at(10)),
+                "a row read between": rows_around(fn, N(unambiguous=placed, hits={**hits, 7: [(1, 9, "")]}), at(5)),
+                "only the first": rows_around(fn, N(unambiguous={3: [0]}, hits={3: [(0, 9, "")]}), at(5)),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # "extracting common" then "checking length" with nothing of it between: the call ran (and returned)
+    assert got["the call"] is True and got["around the call"] == [3, 11]
+    # the update is one arm's: a pass from 3 to 11 need not run it
+    assert got["an arm"] is False and got["around the arm"] is None
+    # the handler's print after 3 is reached only by the call raising
+    assert got["raised to the handler"] is True
+    # no two rows in a row: nothing shown; "failed" matched the record between, though not alone: not a pass's two
+    assert got["only the first"] is None
+    assert got["a row read between"] is None
+
+
 def test_every_call_that_goes_on_into_the_candidate_is_tried_at_each_of_its_lines(tmp_path):
     out = _ok(
         _run(
@@ -2021,18 +2080,146 @@ def test_rows_read_again_by_their_key_are_handed_on_to_writers_where_the_reread_
     before, (running, scouted), paths = json.loads(out.splitlines()[-1])
     again = "getTasks@1676 selects the value, and {} reads its rows again"
     assert before == {"p/already.py::already": "getTasks@1676 hands the rows it selects to it"}
-    # after every other way: to the writers 1731 calls (not record, which writes nothing; already keeps its first why),
-    # the owner whose write 1745's rows key, and the writer killJob's rows reach through a call (not events)
+    # the owner first: 1745 takes 1676's rows again, so the key of its write at 1746 is 1676's rows' (key_chain), as
+    # the statement is read; after every other way: to the writers 1731 calls (not record, which writes nothing;
+    # already keeps its first why), and the writer killJob's rows reach through a call (not events)
     assert list(running.items()) == [
+        ("p/fin.py::getTasks", "getTasks@1676 selects the value, and its rows fill the key of the write(s) at [1746]"),
         ("p/already.py::already", "getTasks@1676 hands the rows it selects to it"),
         ("p/post.py::post", again.format("getTasks@1731") + " and hands them to it"),
         ("p/consumers.py::consumers", again.format("killJob@991") + " and hands them to it"),
-        ("p/fin.py::getTasks", again.format("getTasks@1745") + ", and they fill the key of the write(s) at [1746]"),
     ]
     # 1731 never runs for a scouted row: post is not reached then
     assert "p/post.py::post" not in scouted and "p/consumers.py::consumers" in scouted
     # the statement whose rows were taken is 1676, for L2 to read
     assert paths["p/post.py::post"] == [1676] and paths["p/fin.py::getTasks"] == [1676]
+
+
+def test_a_key_filled_through_the_functions_reads_is_the_statements_and_an_arm_keyed_elsewhere_is_said(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import elsewhere_of, keyed_arms
+
+    S = "JediFileSpec.status"
+    reset, status, hop, bare = "p/te.py::reset", "p/jc.py::updateStatus", "p/te.py::hop", "p/jc.py::bare"
+    writers[:] = [writer(reset, branch(5035, "ready")), writer(status, branch(241, "failed")),
+                  writer(hop, branch(70, "ready")), writer(bare, branch(90, "ready"))]
+
+    def rows(owner, line):
+        return N(kind="rows", name=f"panda:{owner}@{line}", site_owner=owner, site_line=line)
+
+    def key(owner, term, *sources, writes=None, statement=0, reads=False):
+        return N(owner=owner, term=term, writes=writes or {}, reads=reads, statement=statement, unread="", sources=list(sources))
+
+    mapdump._FRAGMENT[:] = [N(key_froms=[
+        # reset: 5001 selects running files, 5009 takes PandaIDs by their datasetID (another table), 5026 the job's
+        # files by those PandaIDs, and 5038 sets them ready by 5026's keys
+        key(reset, "datasetID=:datasetID", rows(reset, 5001), reads=True, statement=5009),
+        key(reset, "PandaID=:PandaID", rows(reset, 5009), reads=True, statement=5026),
+        key(reset, "fileID=:fileID", rows(reset, 5026), writes={S: [5035]}, statement=5038),
+        # updateStatus: its one arm writes the row a parameter names
+        key(status, "PandaID=:PandaID", N(kind="parameter", name="pandaID"), writes={S: [241]}, statement=241),
+        # hop: 60's rows fill 70's key, and 60 takes its rows by a value the map did not follow
+        key(hop, "PandaID=:PandaID", N(kind="unknown", name="ids"), reads=True, statement=60),
+        key(hop, "fileID=:fileID", rows(hop, 60), writes={S: [70]}, statement=71),
+        # bare: no KeyFrom names 90's row
+    ])]
+    follow = N(guarded_by=[], reader_statements=[
+        stmt(reset, 5001, [f"{S}=running"], [4997, 5004]), stmt(status, 294, [f"{S}=running"], [288, 295]),
+        stmt(hop, 50, [f"{S}=running"], [49, 52]), stmt(bare, 80, [f"{S}=running"], [79, 82])])
+    arms = arms_of(writers, reset, S, "running")
+    print(json.dumps([keyed_arms(writers, follow.reader_statements[0], S, arms), movers_of(follow, writers, S, "running"),
+                      elsewhere_of(follow, writers, S, "running")]))
+    """,
+        )
+    )
+    keyed, movers, elsewhere = json.loads(out.splitlines()[-1])
+    # three statements on, 5035's key is still 5001's rows'
+    assert keyed == [[5035], {}, {}]
+    assert movers["p/te.py::reset"] == "reset@5001 selects the value, and its rows fill the key of the write(s) at [5035]"
+    # each stays a mover; only updateStatus's arm is known to name another row -- hop's key may come from 50's rows
+    # through the value not followed, and bare's row is named by nothing the map read
+    assert set(movers) == {"p/te.py::reset", "p/jc.py::updateStatus", "p/te.py::hop", "p/jc.py::bare"}
+    assert elsewhere == {"p/jc.py::updateStatus": [241]}
+
+
+def test_a_crossing_hands_on_only_the_values_its_routes_back_up_select(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    S = "JediTaskSpec.status"
+    writers[:] = [writer("p/tc.py::getTasks", branch(1900, "ready")), writer("p/tb.py::setCloud", branch(204, "assigning")),
+                  writer("p/jg.py::run", branch(90, "ready")), writer("p/kill.py::killJobs", branch(5, "aborted"))]
+    # 1898 has an arm of its owner's in its region; 95's owner has none
+    region = stmt("p/tc.py::getTasks", 1898, [f"{S}=running", f"{S}=scouting"], [1890, 1910], ["p/tb.py::setCloud", "p/jg.py::run"])
+    past = stmt("p/tc.py::other", 95, [f"{S}=running", f"{S}=failed"], [93, 96], ["p/kill.py::killJobs", "p/jg.py::run"])
+    follow = N(guarded_by=[], reader_statements=[region, past])
+    before = [movers_of(follow, writers, S, v) for v in ("running", "failed")]
+    # setCloud is reached only back up a route that selects no status; killJobs only back up one that selects running
+    region.crossing_selects = {"p/tb.py::setCloud": []}
+    past.crossing_selects = {"p/kill.py::killJobs": [f"{S}=running"]}
+    after = [movers_of(follow, writers, S, v) for v in ("running", "failed")]
+    print(json.dumps([[sorted(m) for m in before], [sorted(m) for m in after]]))
+    """,
+        )
+    )
+    before, after = json.loads(out.splitlines()[-1])
+    # a dump with no crossing_selects pairs every crossing with every value the statement selects
+    assert before == [["p/jg.py::run", "p/kill.py::killJobs", "p/tb.py::setCloud", "p/tc.py::getTasks"],
+                      ["p/jg.py::run", "p/kill.py::killJobs"]]
+    # in the region and past it, a crossing takes only what its routes select; one the map names none of takes all
+    assert after == [["p/jg.py::run", "p/kill.py::killJobs", "p/tc.py::getTasks"], ["p/jg.py::run"]]
+
+
+def test_a_mover_whose_rows_reach_none_of_its_arms_is_one_by_key_where_the_reach_without_them_writes_nothing(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap import reach as RE
+            from bamboo.codemap.models import Anchor, ReachHole, ReachNode
+            from bamboo.querier import mapdump, rerun
+
+            def node(owner, start, end, **k):
+                return ReachNode(name=owner, map_id="m", derived_from="d", owner=owner, function=owner.split("::")[-1],
+                                 anchor=Anchor(package="p", file=owner.split("::")[0], line_start=start, line_end=end), **k)
+
+            status, insert = "p/jc.py::updateStatus", "p/jc.py::insert"
+            rows = [node(status, 200, 300), node(insert, 1, 50, holes=[ReachHole(line=9, callee="f", why=RE.HOLE_LOCAL_CALLED)])]
+            RE.moving_off = lambda junctions, graph, subject, value: RE.Destination({status: ["failed@241"], insert: ["ready@30"]}, [])
+            rerun.elsewhere_of = lambda follow, writers, subject, observed: {status: [241], insert: [30]}
+            rerun.defs_holding = lambda rel, func, lines: [object()]
+            mapdump._FRAGMENT[:] = [N(reach_graph=rows, junctions=[])]
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.result, r._reach, r._graph_read = [], {}, None, None
+            q = rerun.Stuck("JobSpec.jobStatus", "waiting", "1")
+            follow = N(reader_statements=[N(owner=status, line=294, selects=["JobSpec.jobStatus=waiting"], result="rows"),
+                                          N(owner=insert, line=20, selects=["JobSpec.jobStatus=waiting"], result="rows")])
+            said = r._rows_elsewhere(q, follow, [], {status: "", insert: ""}, {})
+            print(json.dumps([{o: [to_key, text, reach["own_arms"], reach["writes"]] for o, (to_key, text, reach) in said.items()},
+                              r._reach_of(q, status, [294])["own_arms"]]))
+            """,
+        )
+    )
+    said, own = json.loads(out.splitlines()[-1])
+    # with its arm 241 left out, updateStatus reaches no write with nothing open: a writer by its key, said
+    to_key, text, own_arms, writes = said["p/jc.py::updateStatus"]
+    assert to_key is True and own_arms == [] and writes == []
+    assert text.startswith("the rows updateStatus@294 select(s) reach none of its arms [241]: the map names each one's row by a "
+                           "key they do not fill, and the reach from it, those arms left out, writes no other value")
+    assert text.endswith(": a writer that takes a row by its key (KNOWN_ISSUES.md K16)")
+    # a call left open may go on into a write: insert stays a mover, said why
+    to_key, text, own_arms, writes = said["p/jc.py::insert"]
+    assert to_key is False and writes is None
+    assert "; kept: reach: reaches no write of another value, but 1 call(s) on the way are left open" in text
+    # asked as before, the own arm keeps it
+    assert own == ["p/jc.py::updateStatus"]
 
 
 def test_an_arm_no_write_in_its_function_persists_keeps_the_owner_said_with_where_its_fields_go(tmp_path):
@@ -2453,6 +2640,89 @@ def test_l2_says_each_movers_verdict(tmp_path):
     assert last == "not ruled out: 4 mover(s)"
 
 
+def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_statements_join_to_the_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import mapdump
+    # the joins are the dump's read site's, by the map's name of it; the follow-up's statement carries none
+    sites = []
+    mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])], read_sites=sites)]
+    r.rows_asks, r.hop = {}, "M2"
+    r.data["rows"]["job"]["jediTaskID"] = {"value": 5}
+    r.data["classes"]["task"], r.data["rows"]["task"] = "JediTaskSpec", {"jediTaskID": {"value": 5}}
+    ftype = term("equal", "FileSpec.type", "IN", [val("input")])
+
+    def pair(a, b, a_source="f", b_source="j"):
+        return N(a_attr=a, b_attr=b, a_source=a_source, b_source=b_source)
+
+    def files(line, joins, routes=(), trees=(ftype,)):
+        if joins is not None:
+            sites.append(N(name=f"panda:d/a.py::main@{line}", joins=joins))
+        return N(owner="d/a.py::main", line=line, keys=[], selects=[], excludes=[], refuses=[], restricts=[],
+                 conditions=[], condition_trees=[N(entry="e", tree=t) for t in trees], call_readings=list(routes),
+                 callers_complete=True, callers_stop=[])
+
+    by_job = [pair("FileSpec.PandaID", "JobSpec.PandaID"), pair("FileSpec.jediTaskID", "JobSpec.jediTaskID")]
+    said = {}
+    for name, st in {
+        # one key of two columns, the row's values; a second alias of the table, a second key
+        "joined": files(10, by_job + [pair("JobSpec.PandaID", "FileSpec.PandaID", "j", "g")]),
+        # the same rows asked again: once
+        "again": files(11, by_job),
+        # every route refuses the row: nothing the rows could change (rows no other statement asks)
+        "refused": files(12, by_job[1:], routes=[N(**vars(route([share])), constants={}, chain=["d/b.py:3"])]),
+        # through another table only (the task's, whose row the file holds: not the row asked), a class-less table, a
+        # column the row does not hold
+        "through": files(13, [pair("JediFileSpec.jediTaskID", "JediTaskSpec.jediTaskID")], trees=[term("equal", "JediFileSpec.status", "=", [val("ready")])]),
+        "class-less": files(14, [pair("", "JobSpec.PandaID", "t", "j")], trees=[term("equal", "T_TASK.total_done_jobs", "=", [val("0")])]),
+        "unheld": files(15, [pair("FileSpec.dispatchDBlock", "JobSpec.dispatchDBlock")]),
+        # no read site of its name in the dump: said, not asked
+        "no site": files(18, None),
+    }.items():
+        before = len(r.rows_asks)
+        kind, lines = r._passed_over(st, q)
+        said[name] = [kind, len(r.rows_asks) - before, [x for x in lines if x.startswith(("not compared", "the dump has"))]]
+    asked = list(r.rows_asks.values())
+    # rows the file's linked holds by a pair the statement joins on, for the row's value: said, not asked; another
+    # pair, or another value, is asked
+    r.data["linked"] = [{"class": "FileSpec", "via": {"from": "JobSpec.PandaID", "to": "FileSpec.PandaID"}, "asked": [1], "rows": []},
+                        {"class": "FileSpec", "via": {"from": "JobSpec.jediTaskID", "to": "FileSpec.jediTaskID"}, "asked": [6], "rows": []}]
+    r.rows_asks = {}
+    held = [r._passed_over(files(19, by_job[:1]), q)[1][-1], len(r.rows_asks), r._passed_over(files(20, by_job[1:]), q)[1][-1], len(r.rows_asks)]
+    r.data.pop("linked")
+    # L2's movers: a statement it did not judge asks too, one it judged refused does not
+    r.rows_asks = {}
+    q.movers, q.by_key, q.refusing, q.mover, q.writers = {"d/a.py::open": "main@16 hands the rows it selects to it"}, [], [], "p/w.py::moved", []
+    q.paths = {"d/a.py::open": [files(16, by_job[:1]), files(17, [pair("FileSpec.fileID", "JobSpec.PandaID")])]}
+    r._movers_in_window(q, {("d/a.py::main", 17): "refused"})
+    print(json.dumps([said, asked, [a["rows"]["where"] for a in r.rows_asks.values()], held]))
+    """,
+        )
+    )
+    said, asked, by_l2, held = json.loads(out.splitlines()[-1])
+    assert by_l2 == [{"PandaID": 1}]
+    assert held == ["the rows file's linked holds FileSpec's rows by JobSpec.PandaID -> FileSpec.PandaID, which this step does not "
+                    "compare (KNOWN_ISSUES.md K36)", 0, "not compared: FileSpec.type (no row of FileSpec)", 1]
+    assert said["joined"] == ["not settled", 2, ["not compared: FileSpec.type (no row of FileSpec)"]]
+    assert said["again"][:2] == ["not settled", 0]
+    assert said["refused"][:2] == ["refused", 0] and said["refused"][2] == said["joined"][2]
+    assert [said[n][1] for n in ("through", "class-less", "unheld")] == [0, 0, 0]
+    assert said["through"][2] == ["not compared: JediFileSpec.status (no row of JediFileSpec)"]
+    assert said["no site"] == ["not settled", 0, [said["joined"][2][0], "the dump has no read site panda:d/a.py::main@18: its joins "
+                                                  "are not read, and the rows of FileSpec.type not asked"]]
+    why = "main@10 compares FileSpec's type with the row's, and neither the rows file's rows nor its linked hold FileSpec's"
+    row = {"entity": "JobSpec", "key": {"PandaID": 1}}
+    by_id = {"from": "JobSpec.PandaID", "to": "FileSpec.PandaID"}
+    assert asked == [
+        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1, "jediTaskID": 5},
+                  "via": [by_id, {"from": "JobSpec.jediTaskID", "to": "FileSpec.jediTaskID"}]}, "step": "M2", "why": why},
+        {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1}, "via": [by_id]},
+         "step": "M2", "why": why},
+    ]
+
+
 def test_the_window_end_reads_after_only_at_as_of(tmp_path):
     out = _ok(
         _run(
@@ -2604,6 +2874,37 @@ def f(self):
         z = x.size
     self.logger.debug("finished the update of the job")
 """
+
+
+def test_a_frame_of_another_version_is_read_at_the_one_line_of_its_function_holding_its_source(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "b.py").write_text(
+        "def f(x):\n    a = 1\n    y = h(x)\n    if x:\n        return None\n    return None\n\n\ndef g():\n    y = h(x)\n"
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.records import _chains
+
+            def frame(line, source):
+                tb = ["Traceback (most recent call last):",
+                      f'  File "/opt/panda/lib/python3.11/site-packages/pandaserver/b.py", line {line}, in f',
+                      f"    {source}", "ValueError: no"]
+                f, = _chains(tb)[0].frames
+                return [f.line, f.same_source, f.moved_from, f.printed_at]
+
+            print(json.dumps({"moved": frame(7, "y = h(x)"), "same": frame(3, "y = h(x)"),
+                              "twice": frame(9, "return None"), "absent": frame(2, "z = 3")}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the run's code had the line at 7: f holds it once, at 3 (g's own is another function's)
+    assert got["moved"] == [3, True, 7, []]
+    assert got["same"] == [3, True, None, []]
+    # printed twice in f, or nowhere: not placed, as before, with the lines of f that hold it
+    assert got["twice"] == [9, False, None, [5, 6]] and got["absent"] == [2, False, None, []]
 
 
 def test_a_candidates_must_rows_stop_where_a_traceback_of_its_run_shows_the_call_left(tmp_path):
@@ -2822,7 +3123,7 @@ class Stray:
             for name, line in (("declared", 8), ("undeclared", 15)):
                 classes, theirs = receiver_methods("updateTask_JEDI", call, "pandajedi/jedidog/Dog.py", line)
                 reading = proxy_reading("updateTask_JEDI", call, theirs if classes else None)
-                got[name] = [classes, sorted(theirs), reading[3]]
+                got[name] = [classes, sorted(theirs), reading[3], reading[5]]
             # a declared class with no method of the name: no facade's at that receiver
             got["not its method"] = proxy_reading("updateTask_JEDI", call, set())
             print(json.dumps(got))
@@ -2830,12 +3131,14 @@ class Stray:
         )
     )
     got = json.loads(out.splitlines()[-1])
-    # JediTaskBuffer's updateTask_JEDI hands updateDEFT=False on: the DEFT table is not read
+    # JediTaskBuffer's updateTask_JEDI hands updateDEFT=False on: the DEFT table is not read, nor its statement run
     assert got["declared"] == [
-        ["pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer"], [["pandajedi/jedicore/JediTaskBuffer.py", 4]], ["JEDI_Tasks"]
+        ["pandajedi/jedicore/JediTaskBuffer.py::JediTaskBuffer"], [["pandajedi/jedicore/JediTaskBuffer.py", 4]], ["JEDI_Tasks"],
+        ["pandajedi/jedicore/JediDBProxy.py:4"],
     ]
     # no declaration: every facade of the name, TaskBuffer's True among them
-    assert got["undeclared"] == [[], [], ["JEDI_Tasks", "T_TASK"]]
+    assert got["undeclared"] == [[], [], ["JEDI_Tasks", "T_TASK"],
+                                 ["pandaserver/taskbuffer/OraDBProxy.py:4", "pandaserver/taskbuffer/OraDBProxy.py:7", "pandajedi/jedicore/JediDBProxy.py:4"]]
     assert got["not its method"] is None
 
 
@@ -3157,6 +3460,357 @@ def test_a_container_is_read_by_the_form_of_each_write_and_not_rebuilt_where_a_p
     # the setdefault's statement goes on to append to what "a" holds: the key is known, its value is not
     assert list(got["g"][0]) == ["a"] and "what @10 makes of g['a'] for the call" in got["g"][0]["a"]
     assert got["g"][2] == ["a"]
+
+
+_LOOPED = """def f(job):
+    for f in job.Files:
+        x = "a"
+    x = "b"
+    d = {}
+    for f in job.Files:
+        d[f.lfn] = 1
+    e = {}
+    for s in job.Datasets:
+        e[s.name] = 2
+    return x, d, e
+"""
+
+
+def test_a_binding_in_a_loop_over_rows_not_had_is_unknown_and_a_loop_over_no_rows_wrote_nothing(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_LOOPED)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import asked as A
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import false_guard as G
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "walk"
+            owner = "pandaserver/a.py::f"
+            made = [("x", 3, "'a'", "=", "loop at 2: for f in job.Files"), ("x", 4, "'b'", "=", ""),
+                    ("d", 5, "{}", "=", ""), ("d", 7, "1", "=", "loop at 6: for f in job.Files"),
+                    ("e", 8, "{}", "=", ""), ("e", 10, "2", "=", "loop at 9: for s in job.Datasets")]
+            steps = [N(name=n, owner=owner, kind="binding", line=line, value=v, operator=op, guards=[], unseen=[u] if u else [],
+                       reads=[], terminal="", detail="", depth=1, cls="") for n, line, v, op, u in made]
+            # the rows file has the job's datasets, none of them, and not its files
+            told = []
+            walk = G.Walk(A.given(steps), E.Env(), {"job.Datasets": {"rows": "datasets", "entity": "JediDatasetSpec"}},
+                          {"datasets": []}, ask=lambda iterable, step, env: told.append([iterable, step.line]))
+            show = lambda v: "UNKNOWN" if v is E.UNKNOWN else v
+            got = {"x": [[o.step.line, show(o.value), show(o.reached), o.why] for o in walk.origins("x", owner)],
+                   "chosen": show(walk._choose("x", owner, None, {})[0])}
+            for name in ("d", "e"):
+                value, notes = walk.build(name, owner)
+                keys = walk.keys(name, owner)
+                got[name] = [value, notes[:1], [o.value for o in keys.origins], keys.opaque, keys.complete()]
+            got["told"] = sorted(map(list, {tuple(t) for t in told}))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the walk tells its asker of each loop over the files it does not have, not of the datasets it has
+    assert got["told"] == [["job.Files", 3], ["job.Files", 7]]
+    # x = "a" may have run, for files not known: kept, so "b" is not taken as all x held
+    assert got["x"] == [[3, "UNKNOWN", "UNKNOWN", "@3 runs in a loop over rows this investigation does not have"],
+                        [4, "b", True, ""]]
+    assert got["chosen"] == "UNKNOWN"
+    assert got["d"][0] is None and got["d"][1] == ["@7 runs over rows this investigation does not have"]
+    assert got["d"][3] == ["@7 runs in a loop over rows this investigation does not have"] and got["d"][4] is False
+    # a loop over no rows ran no write: e is built empty and its key set is whole
+    assert got["e"][0] == {} and got["e"][2:] == [[], [], True]
+
+
+def test_a_collection_the_rows_file_lacks_is_asked_by_its_rows_class_key_and_attribute(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import mapdump, parts as PT, rerun
+
+            # the dump's tables name a class's identity
+            mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="FileSpec", identity_attrs=["FileSpec.row_ID"]),
+                                              N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])])]
+            r = object.__new__(rerun.Rerun)
+            r.rows_asks, r.hop = {}, "R2"
+            # the walk spells the case's row by its name in the rows file, whose classes give its class
+            r.data = {"classes": {"job": "JobSpec"}}
+            env = E.Env()
+            env.table["job"] = {"PandaID": E.Value(7, "the rows file"), "jobStatus": E.Value("failed", "the rows file")}
+            step = N(line=7, owner="pandaserver/a.py::f")
+            for iterable in ("<job>.Files", "<job>.Files", "tmp_list"):
+                r.ask_collection(iterable, step, env)
+            # a GroupsNow carries its db_read form; a MovedOn, a window over the history, its SQL only
+            now = PT.GroupsNow("getJobs@2404", "ATLAS_PANDA.jobsActive4", "jobStatus='activated'", [("gshare", "asc")], "pandaid", [])
+            print(json.dumps([list(r.rows_asks.values()), PT.db_read(now)]))
+            """,
+        )
+    )
+    asked, form = json.loads(out.splitlines()[-1])
+    # once, by the job's key the dump names; a local name is no row to ask of
+    assert asked == [{"rows": {"kind": "collection", "row": {"entity": "JobSpec", "key": {"PandaID": 7}}, "attr": "Files", "entity": None},
+                      "step": "R2", "why": "@7 f loops over <job>.Files, which the rows file does not have"}]
+    assert form == {"table": "ATLAS_PANDA.jobsActive4", "where": "jobStatus='activated'", "group_by": ["gshare"], "least": "pandaid"}
+
+
+def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "walk"  # the reading's logs
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "", {}, []
+            r.data = {"statuslog": {"states": [{"status": "running", "time": "2026-01-01 00:00:00"},
+                                               {"status": "done", "time": "2026-01-02 00:00:00"}]}}
+            logged = N(file="pandaserver/t.py", owner="pandaserver/t.py::TaskModule.updateTask_JEDI", lines=[1], log_files=["panda-DBProxy.log"])
+            r._writers = lambda subject, value, key: [logged] if subject == "JediTaskSpec.status" else []
+
+            def past(readings, subject, state):
+                raise RuntimeError(f"past H2's time: {state['time']}")
+
+            r._unborn = past
+            got = {}
+            for subject in ("JediTaskSpec.status", "JediTaskSpec.superStatus"):
+                try:
+                    r._which_wrote(subject, "done", "1")
+                except rerun.Stop as e:
+                    got[subject] = e.args[0]
+                except RuntimeError as e:
+                    got[subject] = str(e)
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the task's status is the history's own: its row for 'done' gives the time
+    assert got["JediTaskSpec.status"] == "past H2's time: 2026-01-02 00:00:00"
+    # superStatus is spelled with the status's values, but no history records it: not the status's time -- its
+    # writers' arms are asked (K37), and with none in the map it stops there
+    assert got["JediTaskSpec.superStatus"] == "H2: a writer of JediTaskSpec.superStatus in the map, to say when it took 'done'"
+
+
+def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_rows_its_writers_passes_write(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rerun
+
+            def branch(line, outcome, *pairs, hole=""):
+                return N(line=line, outcome=outcome, history=list(pairs), history_hole=hole)
+
+            def pair(row, writes=(), why=""):
+                return N(row=row, row_why=why, writes=list(writes), caller="pandajedi/r.py::Refiner.runImpl", call=226,
+                         callee="self.taskBufferIF.updateTask_JEDI", order="after")
+
+            upd = "pandaserver/t.py::TaskModule.updateTask_JEDI:1570"
+            mapdump._FRAGMENT[:] = [N(
+                junctions=[
+                    N(subject="JediTaskSpec.rescueTime", owner="pandaserver/t.py::TaskModule.rescue", branches=[branch(737, "runtime(CURRENT_DATE)")]),
+                    N(subject="JediTaskSpec.transUses", owner="pandajedi/r.py::Refiner.extract", branches=[branch(140, "runtime(p)", pair("can", [upd]))]),
+                    N(subject="JediTaskSpec.walltime", owner="pandajedi/r.py::Refiner.extract", branches=[branch(150, "runtime(w)", pair("can", ["pandaserver/t.py::TaskModule.mark:9"]))]),
+                    N(subject="JediTaskSpec.splitRule", owner="pandajedi/r.py::Refiner.extract", branches=[branch(160, "runtime(s)", pair("can", [upd]))]),
+                    N(subject="JediTaskSpec.splitRule", owner="pandajedi/w.py::Dog.act", branches=[branch(20, "runtime(s)", pair("", why="not followed"))]),
+                ],
+                reach_graph=[N(owner="pandaserver/t.py::TaskModule.updateTask_JEDI", history=[N(line=1570, values=["runtime(taskSpec.status)"])]),
+                             N(owner="pandaserver/t.py::TaskModule.mark", history=[N(line=9, values=["defined"])])],
+            )]
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "H2", {}, []
+            states = [{"status": s, "time": t, "host": "h"} for s, t in
+                      (("defined", "2026-10-29 07:08:40"), ("ready", "2026-10-29 07:08:41"), ("done", "2026-10-29 08:36:33"))]
+            r.data = {"statuslog": {"states": states}}
+            reading = lambda owner, *lines: N(owner=owner, lines=list(lines))
+            asks = {
+                "now": ("JediTaskSpec.rescueTime", "2026-10-29 00:49:09", [reading("pandaserver/t.py::rescue", 737)]),
+                "not a time": ("JediTaskSpec.rescueTime", "soon", [reading("pandaserver/t.py::rescue", 737)]),
+                "any row": ("JediTaskSpec.transUses", "Atlas", [reading("pandajedi/r.py::extract", 140)]),
+                "its rows": ("JediTaskSpec.walltime", "3", [reading("pandajedi/r.py::extract", 150)]),
+                "one not placed": ("JediTaskSpec.splitRule", "x", [reading("pandajedi/r.py::extract", 160), reading("pandajedi/w.py::act", 20)]),
+                "no writer": ("JediTaskSpec.transUses", "Atlas", []),
+            }
+            got = {}
+            for name, (subject, value, readings) in asks.items():
+                try:
+                    tries = r._attribute_tries(subject, subject.split(".")[1], value, readings)
+                    got[name] = [[s["status"] if s else None, a.window, a.machine] for s, a in tries]
+                except rerun.Stop as e:
+                    got[name] = e.args[0]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # every writer writes the time it runs: the value is the time, asked on every machine
+    assert got["now"] == [[None, ["2026-10-29 00:49:09", "2026-10-29 00:49:09"], None]]
+    assert got["not a time"] == "H2: a time for soon: rescueTime='soon', which its writers set to the time they run, is not a time"
+    # a pass that records the task's status at run time can write any row: every row, newest first, at its host
+    assert [g[0] for g in got["any row"]] == ["done", "ready", "defined"] and got["any row"][0][1:] == [["2026-10-29 08:36:33"] * 2, "h"]
+    # one that records 'defined' only: that row
+    assert got["its rows"] == [["defined", ["2026-10-29 07:08:40"] * 2, "h"]]
+    # a writer on no row of the task leaves the time not known
+    assert got["one not placed"] == ("H2: every writer of JediTaskSpec.splitRule on a history row of the object, to say when it took 'x' "
+                                     "(1 of 2 not: KNOWN_ISSUES.md K37)")
+    assert got["no writer"] == "H2: a writer of JediTaskSpec.transUses in the map, to say when it took 'Atlas'"
+
+
+def test_h2_stops_on_no_log_for_its_writers_and_not_on_no_run_in_logs_it_never_asked(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "walk"  # the reading's logs, as for a function the map has no prints of its own for
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "H2", {"H2": "2026-10-29 00:48:00"}, []
+            reading = lambda owner, *logs: N(file=owner.partition("::")[0], owner=owner, lines=[939], log_files=list(logs))
+            silent = reading("pandaserver/b.py::setSuperStatus_JEDI")
+            got = {"one logged": r._writer_logs("JediTaskSpec.superStatus", [silent, reading("pandajedi/r.py::extract", "panda-TaskRefiner.log")])}
+            for name, readings in (("none", [silent]), ("no writer", [])):
+                try:
+                    r._writer_logs("JediTaskSpec.superStatus", readings)
+                except rerun.Stop as e:
+                    got[name] = e.args[0]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["one logged"] == ["panda-TaskRefiner.log"]
+    # no writer has a log: no log is asked, and a time handed for H2 gives none
+    assert got["none"] == ("H2: a log to look for a run of a writer of JediTaskSpec.superStatus in (setSuperStatus_JEDI: the map "
+                           "names none; KNOWN_ISSUES.md K25)")
+    assert got["no writer"] == "H2: a writer of JediTaskSpec.superStatus in the map"
+
+
+def test_a_writer_that_prints_nothing_is_read_at_its_history_pairs_call_and_its_own_condition_is_left_open(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "r.py").write_text(
+        textwrap.dedent(
+            """
+            class Refiner:
+                def extract(self, task, taskParamMap):
+                    if task.x:
+                        self.taskSpec.transPath = taskParamMap["transPath"]
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import mapdump, rerun
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "graph"
+            rerun.prints_nothing = lambda owner, lines: owner.endswith("::extract")
+            pair = N(row="can", row_why="", writes=[], caller="pandajedi/o.py::RefinerThread.runImpl", point=211, call=226,
+                     level=1, callee="self.taskBufferIF.updateTask_JEDI", order="after")
+            mapdump._FRAGMENT[:] = [N(junctions=[N(subject="JediTaskSpec.transPath", owner="pandajedi/r.py::Refiner.extract",
+                                                   branches=[N(line=5, outcome="runtime(taskParamMap['transPath'])", history=[pair], history_hole="")])],
+                                      reach_graph=[])]
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used, r._stand_ins = [], [], "H2", {}, [], {}
+            r.files_of = lambda owner, today, lines: list(today) or [owner.split("::")[-1] + ".log"]
+            silent = N(file="pandajedi/r.py", owner="pandajedi/r.py::extract", lines=[5], log_files=["panda-TaskRefiner.log"])
+            printing = N(file="pandaserver/t.py", owner="pandaserver/t.py::setPath", lines=[9], log_files=[])
+            cands = r._h2_candidates("JediTaskSpec.transPath", [silent, printing])
+            row = {"status": "ready", "time": "2026-10-29 10:06:19"}
+            v = lambda kind: N(candidate=cands[0], line=211, kind=kind, reasons=["rows 205 and 563 printed in a row"])
+            said = lambda ps: [[p.arm, p.wrote, p.premises] for p in ps]
+            print(json.dumps({
+                "candidates": [[c.owner, c.lines, c.log_files] for c in cands],
+                "shown, not read": said(r._possibles(v("positive"), row, E.Env())),
+                "shown, read false": said(r._possibles(v("positive"), row, E.Env({"task.x": E.Value(False, "row")}))),
+                "shown, read true": said(r._possibles(v("positive"), row, E.Env({"task.x": E.Value(True, "row")}))),
+                "kept": said(r._possibles(v("kept"), row, E.Env({"task.x": E.Value(True, "row")}))),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the writer stands in at its pair's caller, on the logs its reading names; the printing writer stays itself
+    assert got["candidates"] == [["pandajedi/o.py::runImpl", [211], ["panda-TaskRefiner.log"]],
+                                 ["pandaserver/t.py::setPath", [9], ["setPath.log"]]]
+    # the call shown run: the arm wrote only where its own condition is read true
+    assert got["shown, not read"] == [["r.py::extract:5", False, ["its condition 'task.x' not read"]]]
+    assert got["shown, read false"] == []
+    assert got["shown, read true"] == [["r.py::extract:5", True, []]]
+    assert got["kept"] == [["r.py::extract:5", False, ["its run does not show the line ran (rows 205 and 563 printed in a row)"]]]
+
+
+def test_h2_reads_the_rows_newest_first_keeping_those_that_may_have_and_names_the_arms_left(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+
+            P = rerun.Possible
+            rows = [{"status": s, "time": t} for s, t in (("running", "11:38"), ("scouting", "10:06"), ("ready", "10:05"), ("defined", "04:10"))]
+            tries = [(s, N(why=f"the statuslog's {s['status']!r}")) for s in rows]
+            answer = N(question="the run")
+
+            def scan(found):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result, r.question = [], [], "H2", {}, [], {}, None
+                r._row_at = lambda subject, attr, value, key, readings, state, asking: found(state)
+                try:
+                    got = r._scan("JediTaskSpec.cloud", "cloud", "WORLD", "1", [], tries)
+                    return ["answer", got is answer, r.question]
+                except rerun.Stop as e:
+                    return [e.code, e.args[0], r.result.get("possibilities")]
+
+            def table(by):
+                return lambda state: by.get(state["status"], [])
+
+            print(json.dumps({
+                "the newest shows a printing writer": scan(table({"running": [P("a.py::gen:44", rows[0], True, [], answer)]})),
+                "one that may have, then one shown": scan(table({
+                    "running": [P("a.py::gen:44", rows[0], False, ["its condition 'x' not read"])],
+                    "ready": [P("r.py::extract:226", rows[2], True, [])],
+                    "defined": [P("o.py::old:1", rows[3], True, [], answer)],
+                })),
+                "none": scan(table({})),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["the newest shows a printing writer"] == ["answer", True, "the run"]
+    # the newer that may have stays; the scan ends at the row shown; the older is not read
+    code, text, possibilities = got["one that may have, then one shown"]
+    assert code == "one-of"
+    assert text == ("H2: one arm that wrote JediTaskSpec.cloud='WORLD' last, of 2 left: a.py::gen:44 (may have at 'running' 11:38); "
+                    "r.py::extract:226 (wrote at 'ready' 10:05) (KNOWN_ISSUES.md K38)")
+    assert [p["arm"] for p in possibilities] == ["a.py::gen:44", "r.py::extract:226"]
+    assert possibilities[0]["rows"] == [{"status": "running", "time": "11:38", "wrote": False, "premises": ["its condition 'x' not read"]}]
+    assert got["none"][:2] == ["one-of", "H2: a pass that wrote JediTaskSpec.cloud='WORLD' at the 4 statuslog row(s) its writers' passes "
+                                         "can write (none shows a writer's pass: KNOWN_ISSUES.md K38)"]
 
 
 def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_name(tmp_path):

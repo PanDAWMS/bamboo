@@ -44,17 +44,20 @@ from typing import Any, Iterator, Optional
 
 import click
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.panda.pathcond import targets_of
+from bamboo.codemap.panda.plugin import PACKAGES
 
 # Packages that make up the PanDA map.  Both ship in one distribution
 # (``panda-server-source``), so a single version stamps the whole census.
-PACKAGES = ("pandaserver", "pandajedi")
+# The packages are the plugin's (:data:`bamboo.codemap.panda.plugin.PACKAGES`).
 
-# Attribute-declaration names seen in spec classes.  ``_attributes`` is the
-# common one; the leading-underscore variant was missed by a first pass that
-# only looked for ``attributes`` -- a naming drift no external tool would have
-# caught either, which is precisely why the census exists.
-ATTR_DECLS = ("attributes", "_attributes")
+# Attribute-declaration names seen in spec classes: :data:`callfacts.SPEC_DECLARATION_NAMES`.
+# ``_attributes`` is the common one; the leading-underscore variant was missed
+# by a first pass that only looked for ``attributes`` -- a naming drift no
+# external tool would have caught either, which is precisely why the census
+# exists.  ``attributes_with_types`` holds ``AttributeWithType`` calls, which
+# :func:`collect_spec_attributes` (string constants only) reads none of.
 
 _STATUS_RE = re.compile(r"status", re.I)
 
@@ -230,7 +233,7 @@ def collect_spec_attributes(modules: list[Module]) -> dict[str, set[str]]:
         for cls in (n for n in ast.walk(mod.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
                 names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
-                if not names & set(ATTR_DECLS):
+                if not names & callfacts.SPEC_DECLARATION_NAMES:
                     continue
                 if isinstance(stmt.value, (ast.Tuple, ast.List)):
                     out[cls.name].update(

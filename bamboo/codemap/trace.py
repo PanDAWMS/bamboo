@@ -564,13 +564,32 @@ def literal_length(message: ast.JoinedStr) -> int:
     return sum(len(_literal_text(part).strip()) for part in message.values)
 
 
-#: Calls whose result prints as a Python ``repr`` -- a dict, a list, an
-#: exception's text -- and so may hold spaces, commas and brackets.
-_PRINTS_TEXT = frozenset(
-    {"str", "repr", "sorted", "list", "dict", "set", "tuple", "format_exc", "join", "keys", "values", "items"}
+#: Calls whose result prints as a Python ``repr`` -- a dict, a list, an exception's text -- and so may hold spaces,
+#: commas and brackets, by what callfacts says their value is: a builtin's text of what it is handed or a container
+#: of it, a ``str`` method joining values or cutting the receiver, a dict's view, a library's text.  A text method
+#: changing its receiver prints as the receiver does, a token unless it is one of these.
+_PRINTS_TEXT = (
+    frozenset(
+        name
+        for name, one in callfacts.BUILTIN_FUNCTIONS.items()
+        if one.gives == callfacts.TEXT
+        or (one.result in callfacts.CONTAINER_MAKERS and one.gives in callfacts.HANDING_ON)
+    )
+    | callfacts.text_methods(callfacts.JOINED, callfacts.PARTS)
+    | frozenset(
+        name
+        for (_type, name), one in callfacts.BUILTIN_METHODS.items()
+        if one.gives is not None and one.gives.part in (callfacts.KEYS, callfacts.VALUES, callfacts.ITEMS)
+    )
+    | callfacts.LIBRARY_TEXTS
 )
-#: Calls whose result prints as a number.
-_PRINTS_NUMBER = frozenset({"len", "int", "round", "sum", "count"})
+#: Calls whose result prints as a number: a builtin whose value is an ``int`` or a ``float``, or a number it
+#: computes; a ``str`` method counting or finding.
+_PRINTS_NUMBER = frozenset(
+    name
+    for name, one in callfacts.BUILTIN_FUNCTIONS.items()
+    if one.result in ("int", "float") or (one.gives == callfacts.COMPUTED and not one.result)
+) | callfacts.text_methods(callfacts.NUMBER)
 #: The type letter a format spec ends with when it prints a number.
 _NUMBER_SPEC = frozenset("bcdeEfFgGnoxX%")
 
@@ -1033,8 +1052,11 @@ class _Unknown(NamedTuple):
     expression: str
 
 
-#: Methods of ``str`` a constant can be folded through.
-_FOLDABLE = frozenset({"strip", "lstrip", "rstrip", "lower", "upper"})
+#: Methods of ``str`` a constant can be folded through: the receiver changed, handed nothing
+#: (:data:`callfacts.TEXT_METHODS`).
+_FOLDABLE = frozenset(
+    name for name, one in callfacts.TEXT_METHODS.items() if one.gives == callfacts.TEXT and one.alone
+)
 
 # Why a print row's prefix is empty where its logger may write one
 # (:attr:`SkeletonLine.prefix_hole`).  ``{logger}`` is the receiver as spelled.
@@ -1049,6 +1071,9 @@ PREFIX_NOT_FOLLOWED = "the logger {logger} is built by {call}(...), which is not
 PREFIX_STAMP = "the logger {logger} is a LogWrapper with prefix None, which writes a time stamp"
 PREFIX_NOT_FOLDED = "the logger {logger}'s prefix {prefix} is not a string this reading folds"
 PREFIX_KEYWORD = "the logger {logger}'s prefix is given by keyword, which is not read"
+#: The logger maker whose prefix this reading spells: ``LogWrapper(logger, prefix)`` writes ``prefix + " " + message``,
+#: its mark where :data:`callfacts.LOGGER_MAKERS` says.
+_WRAPPER = "LogWrapper"
 
 
 def _fold(expression: Optional[ast.expr], env: dict[str, list], depth: int = 0) -> Optional[list]:
@@ -1142,14 +1167,15 @@ def _wrapper_prefix(built: ast.Call, env: dict[str, list]) -> tuple[Optional[lis
     ``LogWrapper(logger)`` writes the message alone; a prefix of ``None`` is a
     time stamp taken when the logger is made, which no pattern here spells.
     """
-    if len(built.args) >= 2:
-        given = built.args[1]
-    elif any(keyword.arg == "prefix" for keyword in built.keywords):
+    mark = callfacts.LOGGER_MAKERS[_WRAPPER].mark
+    if len(built.args) > mark.position:
+        given = built.args[mark.position]
+    elif any(keyword.arg == mark.keyword for keyword in built.keywords):
         return None, PREFIX_KEYWORD
     else:
-        return [], ""
+        return ([], "") if mark.absent == callfacts.NO_MARK else (None, PREFIX_STAMP)
     if isinstance(given, ast.Constant) and given.value is None:
-        return None, PREFIX_STAMP
+        return (None, PREFIX_STAMP) if mark.none == callfacts.STAMP else ([], "")
     pieces = _fold(given, env)
     if pieces is None:
         return None, PREFIX_NOT_FOLDED.replace("{prefix}", _text(given))
@@ -1402,6 +1428,14 @@ def _own_nodes(func: ast.AST):
         yield from _own_nodes(child)
 
 
+def _prints_whole(call: ast.Call) -> bool:
+    """Whether a message part that is *call* prints as the call's value -- a hole of the call, how it prints
+    read off its name (:data:`_PRINTS_TEXT`, :data:`_PRINTS_NUMBER`) -- rather than as a value it returned."""
+    called = call.func
+    name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+    return name in _PRINTS_TEXT or name in _PRINTS_NUMBER or (isinstance(called, ast.Name) and called.id in _BUILTINS)
+
+
 def _message_sites(
     func: ast.AST, spelled: str
 ) -> tuple[list[ast.expr], list[ast.expr], list[ast.AST]]:
@@ -1428,11 +1462,13 @@ def _message_sites(
             slot(target.value, None)
         elif isinstance(target, (ast.Tuple, ast.List)):
             # A slot of a literal tuple is that element; a slot of a call is
-            # what the call returns, which is the call's to say.
+            # what the call returns, which is the call's to say -- unless the
+            # call prints as its whole value (:func:`_prints_whole`): one
+            # element of ``src_dst.split(":")`` is no list, and prints as a token.
             if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
                 elements: list[Optional[ast.expr]] = list(value.elts)
             elif isinstance(value, ast.Call):
-                elements = [value] * len(target.elts)
+                elements = [None if _prints_whole(value) else value] * len(target.elts)
             else:
                 elements = [None] * len(target.elts)
             for inner, held in zip(target.elts, elements, strict=True):
@@ -1629,8 +1665,8 @@ def _put_values(call: ast.Call) -> list[ast.expr]:
     ]
 
 
-#: The constructors an empty container is spelled with.
-_EMPTY_CALLS = ("set", "dict", "list", "tuple", "defaultdict", "OrderedDict")
+#: The constructors an empty container is spelled with (:data:`callfacts.CONTAINER_MAKERS`).
+_EMPTY_CALLS = callfacts.CONTAINER_MAKERS
 
 
 def _is_empty_container(node: ast.expr) -> bool:
@@ -2607,12 +2643,7 @@ class _Walk:
                 if templates and len(ways) == len(templates) and all(w is not None for w in ways):
                     return ways, []  # type: ignore[return-value]
                 return [[_hole(expr)]], []
-            name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
-            if (
-                name in _PRINTS_TEXT
-                or name in _PRINTS_NUMBER
-                or (isinstance(called, ast.Name) and called.id in _BUILTINS)
-            ):
+            if _prints_whole(expr):
                 return [[_hole(expr)]], []
             return [], [REFUSED_RETURNED]
         if isinstance(expr, ast.IfExp):
@@ -2736,7 +2767,7 @@ class _Walk:
         The why is a ``PREFIX_*`` text with ``{logger}`` left for the caller.
         """
         env = self._constant_env(frame.func)
-        if _called_name(built) == "LogWrapper":
+        if _called_name(built) == _WRAPPER:
             return _wrapper_prefix(built, env)
         unfollowed = PREFIX_NOT_FOLLOWED.replace("{call}", _called_name(built) or _text(built.func))
         if depth > 1:
@@ -2763,7 +2794,7 @@ class _Walk:
                 and isinstance(targets[0], ast.Name)
             ):
                 value = statement.value
-                if isinstance(value, ast.Call) and _called_name(value) == "LogWrapper":
+                if isinstance(value, ast.Call) and _called_name(value) == _WRAPPER:
                     loggers[targets[0].id] = _wrapper_prefix(value, callee_env)
                     continue
                 folded = _fold(value, callee_env)
@@ -2782,7 +2813,7 @@ class _Walk:
                 returned = statement.value
                 if isinstance(returned, ast.Name):
                     return loggers.get(returned.id, (None, unfollowed))
-                if isinstance(returned, ast.Call) and _called_name(returned) == "LogWrapper":
+                if isinstance(returned, ast.Call) and _called_name(returned) == _WRAPPER:
                     return _wrapper_prefix(returned, callee_env)
                 return None, unfollowed
         return None, unfollowed

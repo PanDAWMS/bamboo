@@ -50,6 +50,7 @@ import re
 import string
 from typing import TYPE_CHECKING, Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import sqleval, sqltext
 from bamboo.codemap.panda.pathcond import (
@@ -1761,15 +1762,18 @@ class Runner(NamedTuple):
     own: bool
 
 
-#: The cursor's own forms: the driver, which runs the statement and nothing of the corpus.
-_CURSOR = {"execute": Runner(many=False, own=False), "executemany": Runner(many=True, own=False)}
+#: The cursor's own forms (:data:`callfacts.CURSOR_RUNS`): the driver, which runs the statement and nothing of the
+#: corpus.
+_CURSOR = {name: Runner(many=run.many, own=False) for name, run in callfacts.CURSOR_RUNS.items()}
 #: Their names: a call by one lands in the driver, never in a function of the corpus of that name.
 CURSOR_RUNNERS = frozenset(_CURSOR)
 
 #: The runners of a reading with no corpus: the cursor's and the task buffer's (``taskBuffer.querySQLS(sql,
-#: var_map)``, the daemon layer's form).  A corpus says its own (:func:`runners`).
-_NO_CORPUS = {**_CURSOR, "querySQL": Runner(many=False, own=False), "querySQLS": Runner(many=False, own=False)}
-RUNNERS = frozenset(_NO_CORPUS)
+#: var_map)``, the daemon layer's form; :data:`callfacts.TASK_BUFFER_RUNS`).  A corpus says its own (:func:`runners`).
+_NO_CORPUS = {
+    **_CURSOR,
+    **{name: Runner(many=run.many, own=False) for name, run in callfacts.TASK_BUFFER_RUNS.items()},
+}
 
 #: :func:`runners` of each corpus, by its roots.
 _RUNNERS_OF: dict[tuple, dict[str, Runner]] = {}
@@ -1994,7 +1998,7 @@ def written_back_at(path: Path, line: int) -> Optional[tuple[str, ...]]:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"execute", "executemany"}
+            and node.func.attr in callfacts.CURSOR_RUNS
             and node.lineno == line
         ):
             func = enclosing_function(node)
@@ -2084,21 +2088,16 @@ def binding_window(
     return start, line
 
 
-#: Where a statement's rows arrive.  The ``execute`` form binds nothing at the
-#: call -- ``self.cur.execute(sql, varMap)`` and then ``res =
-#: self.cur.fetchall()`` -- so reading the call line alone finds the rows for
-#: 48 of the corpus's 264 statements and misses every exit taken because none
-#: came back.  A fetch reads the rows of the run whose region holds it (:func:`regions`).
-FETCHES = ("fetchall", "fetchone", "fetchmany")
-
-
 def regions(
     func: ast.FunctionDef | ast.AsyncFunctionDef, executions: list[Execution]
 ) -> dict[int, tuple[int, int]]:
     """The stretch of *func* each run owns, by its call's line: ``(first, last)``.
 
     From where the run's binds start being filled to just before the next
-    run's do, so a ``fetch*`` in it reads this run's rows.  Every run of the
+    run's do, so a ``fetch*`` in it reads this run's rows (:data:`callfacts.FETCHES`):
+    the ``execute`` form binds nothing at the call, and reading the call line
+    alone finds the rows for 48 of the corpus's 264 statements and misses every
+    exit taken because none came back.  Every run of the
     function is laid out: the statement that ends a region may be one no
     reader keeps, and stopping at the next *kept* one would hand a reader the
     following query's rows as well.

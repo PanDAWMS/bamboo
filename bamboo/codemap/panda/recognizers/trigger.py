@@ -50,6 +50,7 @@ import ast
 from collections import Counter
 from typing import Collection, Iterator, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     ARRIVES_BY_CALL,
@@ -1051,7 +1052,7 @@ _WORKER_BASE = "WorkerThread"
 #: How a constructed worker is set going.  ``threading.Thread.start`` spawns it
 #: and ``run`` is the inline spelling two message processors use to avoid an
 #: extra thread; both reach the same method, so both count.
-_DISPATCH = frozenset({"start", "run"})
+_DISPATCH = frozenset({callfacts.START, callfacts.RUN})
 
 
 def subclass_edges(
@@ -1117,7 +1118,7 @@ def worker_door(modules: list[SourceModule]) -> Optional[str]:
     for module in modules:
         for node in walk(module.tree):
             if isinstance(node, ast.ClassDef) and node.name == _WORKER_BASE:
-                called = _self_calls(node).get("run", set())
+                called = _self_calls(node).get(callfacts.RUN, set())
                 if len(called) == 1:
                     return next(iter(called))
     return None

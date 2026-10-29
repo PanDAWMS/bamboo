@@ -55,7 +55,7 @@ DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 #: a row proves a path only when it says something -- a pattern of fewer
 #: literal characters than this can be present by accident
 MIN_PROOF = 8
-#: where a function's print rows come from: ``walk`` (``trace.walk``'s skeleton, per
+#: where a function's print rows come from: ``walk`` (the skeleton of the map's walk, ``trace.Asker.start``, per
 #: asking) or ``graph`` (the map's ``FunctionPrintsNode``), whose
 #: rows carry no arms -- those are computed here as the walk computes them.  ``graph``
 #: stops when the map read another
@@ -381,6 +381,16 @@ def runs_between(func: ast.AST, first: ast.stmt, last: ast.stmt, site: ast.stmt,
     if id(site) not in _reached(func, _next(first, func), prints):
         return False
     return id(last) in _reached(func, _next(site, func), prints)
+
+
+def passes_through(func: ast.AST, first: ast.stmt, last: ast.stmt, site: ast.stmt, prints: set[int]) -> bool:
+    """Whether every path from the print *first* on to the print *last* that passes no other print of *prints* runs
+    *site* (:func:`runs_between`, and *last* not reached from *first* with *site* a stop): two records in a row of a
+    function's prints then say its pass ran *site*.
+
+    ``TaskRefinerThread.runImpl`` prints "extracting common" at 205 and calls ``extractCommon``, which prints nothing,
+    at 211: a run printing 205 and then 563 with no row of it between passed 211."""
+    return runs_between(func, first, last, site, prints) and id(last) not in _reached(func, _next(first, func), prints | {id(site)})
 
 
 def implying_rows(func: ast.AST, site: ast.stmt) -> list[ast.stmt]:
@@ -1032,7 +1042,10 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
     if ROWS_FROM == "graph":
         by_line, arms_of, files_of = _graph_rows(rel, node, arms)
     else:
-        walked = trace.walk(ROOTS, file=rel, owner=f"{rel}::{name}", lines=list(arms) or [node.lineno], classify=classify, reaching=False)
+        from .asked import _types  # asked imports this module
+
+        walked = trace.Asker(ROOTS, file=rel, owner=f"{rel}::{name}", lines=list(arms) or [node.lineno], classify=classify,
+                             reaching=False, types=_types()).start()
         for sk in walked.skeleton:
             if sk.kind == "print":
                 by_line.setdefault(sk.line, []).append(sk)
@@ -1169,9 +1182,9 @@ def _seen(fn: Function, run: Run, mode: str, hits: dict[int, list[tuple[int, int
 
 
 def raised_in(fn: Function, run: Run) -> tuple[bool, set[int] | None]:
-    """``(a traceback in *run* names fn, the lines its frames of fn show)``; lines None when a frame of fn
-    is of another version of the code (its source line differs), outside the corpus or of another file of
-    the same name, and cannot be placed."""
+    """``(a traceback in *run* names fn, the lines its frames of fn show)``, at the pin's lines (a frame of another
+    version of the code is read at the one line of fn holding its source, ``records._place``); lines None when a
+    frame of fn cannot be placed so, or is outside the corpus or of another file of the same name."""
     named, lines = False, set()
     base = fn.rel.rsplit("/", 1)[-1]
     for record in run.records:

@@ -53,6 +53,10 @@ BOUNDED = {
         "errs = {}\nif p:\n    errs[p] = ''\nelse:\n    errs[p] = f'failed {p}'\njob.diag = errs[p]",
         ["", "failed {}"],
     ),
+    "a dict a value is popped from": (
+        "errs = {}\nerrs[p] = 'a'\nerrs.pop(g, None)\njob.diag = errs[p]",
+        ["a"],
+    ),
     "a dict, two hops": (
         "errs = {}\ntmp = f'could not {p}'\nerrs[p] = tmp\njob.diag = errs[p]",
         ["could not {}"],

@@ -1,6 +1,7 @@
 """Answer a run's asks of PanDA's logs from production, one record per ask.
 
     python -m bamboo.scripts.panda.fieldtest.record --asks <asks.jsonl> --records <dir>
+    python -m bamboo.scripts.panda.fieldtest.record --cases <file> --shared <dir>
 
 Run it where PanDA's credentials load: the ``.env`` holding the OIDC token is
 read only from /Users/tmaeno/bamboo or below.
@@ -15,6 +16,15 @@ answer is kept under ``answers-r<n>-<time>/`` before it is read.  The formats
 are bamboo-e1's and bamboo-8f's (analyzer-handover/stage2-record-format.md,
 live-harness/notes/to-querier-15.md and -16.md); the reader is
 ``bamboo.querier.recorded``.
+
+**Several cases.**  ``--cases`` names, a line each, a case's asks file and its
+directory, and one round answers them all: one list of the logs, and one grep
+per machine and file with the strings of every case's asks reading it (31
+cases asked panda-DBProxy.log on every server machine on 2026-10-29).  Each
+case gets its own next round, ``records-r<n>.jsonl`` as one case's round
+writes it; the API answers are kept once under ``--shared``, and each case's
+``answers-r<n>-<time>/shared.json`` says where.  A later round reads the
+rotated files those answers hold again, as it reads its own.
 
 **Machines.**  An ask names its log, and the machine when the run wanted is
 one machine's; its service is never its to say ("unsettled").  Both services
@@ -99,6 +109,8 @@ BEING_COMPRESSED = "Being compressed"
 ASK_KEYS = {"name", "service", "machine", "strings", "window", "whole_records"}
 FMT = "%Y-%m-%d %H:%M:%S"
 ROUND = re.compile(r"^records-r(\d+)\.jsonl$")
+#: in a case's round directory: where a round of several cases kept the API answers they shared
+SHARED = "shared.json"
 DATED = re.compile(r"^(?P<log>panda-.+)-(?P<date>\d{8})(?P<gz>\.gz)?$")
 
 
@@ -444,9 +456,19 @@ class Earlier:
     leaves: dict[tuple[str, str], list[dict]] = field(default_factory=dict)
 
     @classmethod
-    def read(cls, directory: Path) -> Earlier:
+    def read(cls, *directories: Path) -> Earlier:
+        """The leaves kept in each case directory's rounds, and in the shared answers a round of several cases kept."""
         out = cls()
-        for path in sorted(directory.glob("answers-r*/leaves.jsonl")):
+        kept: list[Path] = []
+        for directory in directories:
+            for round_dir in sorted(directory.glob("answers-r*")):
+                if (round_dir / "leaves.jsonl").exists():
+                    kept.append(round_dir)
+                if (pointer := round_dir / SHARED).exists():
+                    kept.append(Path(json.loads(pointer.read_text())["answers"]))
+        for path in dict.fromkeys(d / "leaves.jsonl" for d in kept):
+            if not path.exists():
+                continue
             for line in path.read_text().splitlines():
                 if line.strip():
                     leaf = json.loads(line)
@@ -768,15 +790,46 @@ async def record_round(
 ) -> tuple[Path | None, list[dict], list[dict]]:
     """Answer *asks* and write them as the next round in *directory*: the file written (None where every ask was
     deferred), its records, and the asks deferred with why."""
-    last, keys = recorded_keys(directory)
-    again = [a["ask"] for a in asks if key_of(a["ask"]) in keys]
-    if again:
+    (out,) = await record_rounds([(asks, directory)], parts, max_wait)
+    return out
+
+
+async def record_rounds(
+    cases: list[tuple[list[dict], Path]],
+    parts: Parts,
+    max_wait: datetime.timedelta,
+    shared: Path | None = None,
+) -> list[tuple[Path | None, list[dict], list[dict]]]:
+    """Answer the asks of several cases in one round, each written as the next round in its own directory.
+
+    One list of the logs and one grep per machine and file serve every case's
+    asks, and each record keeps its own ask's strings, as the asks of one case
+    share them.  The API answers are kept once, under *shared*, and each case's
+    round directory says where (:data:`SHARED`); with one case and no *shared*
+    they sit in its own round directory.  By case, as :func:`record_round`
+    returns them."""
+    if shared is None and len(cases) != 1:
         raise FieldTestError(
-            f"{len(again)} ask(s) already recorded in {directory}, e.g. {key_of(again[0])}"
+            "a round of several cases keeps its answers in a shared directory"
         )
-    n = last + 1
+    rounds = []
+    for case_asks, directory in cases:
+        last, keys = recorded_keys(directory)
+        again = [a["ask"] for a in case_asks if key_of(a["ask"]) in keys]
+        if again:
+            raise FieldTestError(
+                f"{len(again)} ask(s) already recorded in {directory}, e.g. {key_of(again[0])}"
+            )
+        rounds.append(last + 1)
     started = parts.now()
-    answers = Answers(directory, f"answers-r{n}-{started:%Y%m%dT%H%M%S}")
+    if shared is None:
+        answers = Answers(cases[0][1], f"answers-r{rounds[0]}-{started:%Y%m%dT%H%M%S}")
+    else:
+        answers = Answers(shared, f"answers-{started:%Y%m%dT%H%M%S}")
+    asks = [a for case_asks, _ in cases for a in case_asks]
+    round_of = [
+        n for (case_asks, _), n in zip(cases, rounds, strict=True) for _ in case_asks
+    ]
     names = sorted({a["ask"]["name"] for a in asks})
     machines, failed, kept, listed_at = await list_machines(parts, names, answers)
 
@@ -852,13 +905,12 @@ async def record_round(
                 job.since = min(job.since, lo)
         plans.append(plan)
 
-    grepper = Grepper(
-        parts, answers, Earlier.read(directory), started + max_wait, listed_at
-    )
+    earlier = Earlier.read(*(directory for _, directory in cases))
+    grepper = Grepper(parts, answers, earlier, started + max_wait, listed_at)
     await run_jobs(grepper, list(jobs.values()))
 
     records = []
-    for entry, plan in zip(asks, plans, strict=True):
+    for entry, plan, n in zip(asks, plans, round_of, strict=True):
         ask = entry["ask"]
         strings = set(ask["strings"])
         out_machines = {}
@@ -899,29 +951,46 @@ async def record_round(
                 "requests": requests,
             }
         )
-    # an ask a list or a grep failed for is asked again rather than recorded with a hole no round would fill
-    deferred = [
-        {"ask": r["ask"], "why": why}
-        for r in records
-        if (why := failures(r["machines"]))
-    ]
-    records = [r for r in records if not failures(r["machines"])]
-    kept_dir = directory / answers.name
+    kept_dir = answers.root / answers.name
     kept_dir.mkdir(parents=True, exist_ok=True)
     (kept_dir / "leaves.jsonl").write_text(
         "".join(json.dumps(leaf) + "\n" for leaf in grepper.leaves)
     )
-    if deferred:
-        (kept_dir / "deferred.jsonl").write_text(
-            "".join(json.dumps(d) + "\n" for d in deferred)
+    out = []
+    start = 0
+    for (case_asks, directory), n in zip(cases, rounds, strict=True):
+        mine = records[start : start + len(case_asks)]
+        start += len(case_asks)
+        # an ask a list or a grep failed for is asked again rather than recorded with a hole no round would fill
+        deferred = [
+            {"ask": r["ask"], "why": why}
+            for r in mine
+            if (why := failures(r["machines"]))
+        ]
+        mine = [r for r in mine if not failures(r["machines"])]
+        round_dir = (
+            kept_dir
+            if shared is None
+            else directory / f"answers-r{n}-{started:%Y%m%dT%H%M%S}"
         )
-    if not records:
-        return None, [], deferred
-    path = directory / f"records-r{n}.jsonl"
-    tmp = path.with_suffix(".jsonl.tmp")
-    tmp.write_text("".join(json.dumps(r) + "\n" for r in records))
-    tmp.rename(path)
-    return path, records, deferred
+        round_dir.mkdir(parents=True, exist_ok=True)
+        if shared is not None:
+            (round_dir / SHARED).write_text(
+                json.dumps({"answers": str(kept_dir)}) + "\n"
+            )
+        if deferred:
+            (round_dir / "deferred.jsonl").write_text(
+                "".join(json.dumps(d) + "\n" for d in deferred)
+            )
+        if not mine:
+            out.append((None, [], deferred))
+            continue
+        path = directory / f"records-r{n}.jsonl"
+        tmp = path.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in mine))
+        tmp.rename(path)
+        out.append((path, mine, deferred))
+    return out
 
 
 def failures(machines: dict) -> list[str]:
@@ -943,9 +1012,14 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m bamboo.scripts.panda.fieldtest.record",
         description=__doc__.split("\n\n")[0],
     )
-    ap.add_argument("--asks", required=True, help="the asks file the querier wrote")
+    ap.add_argument("--asks", help="the asks file the querier wrote")
+    ap.add_argument("--records", help="the case's directory of records-r<n>.jsonl")
     ap.add_argument(
-        "--records", required=True, help="the case's directory of records-r<n>.jsonl"
+        "--cases",
+        help="several cases in one round: a file of lines '<asks file> <records directory>'",
+    )
+    ap.add_argument(
+        "--shared", help="with --cases: where the round keeps the API answers once"
     )
     ap.add_argument(
         "--max-wait",
@@ -954,31 +1028,51 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds to wait for a day file being compressed",
     )
     a = ap.parse_args(argv)
-    directory = Path(a.records)
-    directory.mkdir(parents=True, exist_ok=True)
-    asks = read_asks(Path(a.asks))
-    if not asks:
-        print(f"{a.asks}: no asks")
+    if bool(a.cases) == bool(a.asks or a.records) or bool(a.cases) != bool(a.shared):
+        ap.error("give --asks and --records, or --cases and --shared")
+    if a.cases:
+        pairs = [
+            line.split()
+            for line in Path(a.cases).read_text().splitlines()
+            if line.strip()
+        ]
+        shared = Path(a.shared)
+        shared.mkdir(parents=True, exist_ok=True)
+    else:
+        pairs, shared = [[a.asks, a.records]], None
+    cases = []
+    for asks_file, records in pairs:
+        asks = read_asks(Path(asks_file))
+        if not asks:
+            print(f"{asks_file}: no asks")
+            continue
+        directory = Path(records)
+        directory.mkdir(parents=True, exist_ok=True)
+        cases.append((asks, directory))
+    if not cases:
         return 0
     try:
-        path, records, deferred = asyncio.run(
-            record_round(
-                asks, directory, Parts(), datetime.timedelta(seconds=a.max_wait)
+        out = asyncio.run(
+            record_rounds(
+                cases, Parts(), datetime.timedelta(seconds=a.max_wait), shared
             )
         )
     except NotSettled as e:
         print(f"not settled, nothing written: {e}", file=sys.stderr)
         return 3
-    for d in deferred:
-        print(f"deferred {key_of(d['ask'])}: {'; '.join(d['why'])}")
-    if path is None:
-        print(
-            f"nothing written: every one of {len(deferred)} ask(s) deferred",
-            file=sys.stderr,
-        )
-        return 4
-    print(f"{path}: {len(records)} record(s), {len(deferred)} ask(s) deferred")
-    return 0
+    written = 0
+    for (_, directory), (path, records, deferred) in zip(cases, out, strict=True):
+        for d in deferred:
+            print(f"deferred {key_of(d['ask'])}: {'; '.join(d['why'])}")
+        if path is None:
+            print(
+                f"{directory}: nothing written: every one of {len(deferred)} ask(s) deferred",
+                file=sys.stderr,
+            )
+            continue
+        written += 1
+        print(f"{path}: {len(records)} record(s), {len(deferred)} ask(s) deferred")
+    return 0 if written else 4
 
 
 if __name__ == "__main__":

@@ -839,6 +839,13 @@ def ruled_out_by(node: ast.AST, func: ast.AST, values: dict[str, object]) -> boo
     return False
 
 
+def runs_by(node: ast.AST, func: ast.AST, values: dict[str, object]) -> bool:
+    """Whether every test of *func* that decides whether *node* runs is decided for it when its parameters hold
+    *values* -- :func:`ruled_out_by`'s tests, each read the way *node* runs on.  Tests only: a loop or a ``try``
+    holding *node* is the caller's to rule out."""
+    return all(decided(test, values) is keeps for test, keeps in _tests_on(node, func))
+
+
 def ruled_out_at(node: ast.AST, func: ast.AST, name: str, value: object) -> bool:
     """Whether *func* never runs *node* with *name* holding *value* there.
 

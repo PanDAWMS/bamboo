@@ -157,6 +157,15 @@ def draw(q: GroupsNow | MovedOn) -> str:
     return _groups_now_sql(q) if isinstance(q, GroupsNow) else _moved_on_sql(q)
 
 
+def db_read(q: GroupsNow | MovedOn) -> dict | None:
+    """The question as a reader of one table by a WHERE, counting by columns, takes it: a GroupsNow's table, WHERE,
+    the columns it groups by and the key it takes the least of.  None for a MovedOn, a window over the history (LAG),
+    which only its SQL says."""
+    if not isinstance(q, GroupsNow):
+        return None
+    return {"table": q.table, "where": q.where, "group_by": [c for c, _ in q.cols], "least": q.key}
+
+
 def _sorted(c: str, d: str, alias: str = "") -> str:
     """An ORDER BY item: a ranked column (ranked at run time, not here) by itself."""
     return f"{alias}{c}" if d == "ranked" else f"{alias}{c} {d}"

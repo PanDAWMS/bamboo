@@ -38,6 +38,7 @@ import hashlib
 import re
 from typing import Iterator, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, CoverageStat, FilterStageNode, SourceModule
 from bamboo.codemap.panda import values
@@ -61,8 +62,6 @@ _TAG_LITERAL = re.compile(r"[-+][\w.]+\Z")
 # ``f"{len(scanSiteList)} candidates passed scratch disk check"`` -- the step.
 _FUNNEL = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
 _SUMMARY = "add_summary_message"
-
-_LOG_LEVELS = frozenset({"debug", "info", "warning", "error", "critical"})
 
 
 def _rendered(node: ast.AST) -> Optional[str]:
@@ -188,7 +187,7 @@ def log_level(node: ast.AST) -> Optional[str]:
     call = _emitting_call(node)
     if call is None or not isinstance(call.func, ast.Attribute):
         return None
-    return call.func.attr if call.func.attr in _LOG_LEVELS else None
+    return callfacts.LOG_LEVELS.get(call.func.attr)
 
 
 def helper_log_levels(modules: list[SourceModule]) -> dict[str, Optional[str]]:
@@ -212,9 +211,9 @@ def helper_log_levels(modules: list[SourceModule]) -> dict[str, Optional[str]]:
                 if (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in _LOG_LEVELS
+                    and node.func.attr in callfacts.LOG_LEVELS
                 ):
-                    found = node.func.attr
+                    found = callfacts.LOG_LEVELS[node.func.attr]
                     break
             levels[owner] = found
     return levels

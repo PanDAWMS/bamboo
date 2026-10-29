@@ -80,6 +80,7 @@ import re
 import string
 from typing import Callable, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 
 HOLE = "\x00"
@@ -109,10 +110,12 @@ WHOLE_WORK: Optional[int] = (
     500_000  # the run over every call of a function; past it, each call on its own (was 5 s)
 )
 CALLEE_WORK: Optional[int] = 200_000  # one callee run (was 0.5 s)
-#: The names a call runs a statement by where no corpus is read; a corpus says its own (``sql.runners``), installed
-#: for the reading by :func:`use_runners`.
-RUNNERS = frozenset({"execute", "executemany", "querySQL", "querySQLS"})
-_RUNNERS: frozenset[str] = RUNNERS
+#: The names a call runs a statement by where no corpus is read (:data:`callfacts.CURSOR_RUNS`,
+#: :data:`callfacts.TASK_BUFFER_RUNS`); a corpus says its own (``sql.runners``), installed for the reading by
+#: :func:`use_runners`.
+_RUNNERS: frozenset[str] = frozenset(
+    {**callfacts.CURSOR_RUNS, **callfacts.TASK_BUFFER_RUNS}
+)
 
 
 def use_runners(names: frozenset[str]) -> frozenset[str]:
@@ -120,11 +123,6 @@ def use_runners(names: frozenset[str]) -> frozenset[str]:
     global _RUNNERS
     previous, _RUNNERS = _RUNNERS, names
     return previous
-
-
-_DICT_READS = frozenset(
-    {"keys", "items", "values", "get", "copy"}
-)  # methods that read a dict's structure
 
 
 # ================================================================ values
@@ -893,20 +891,10 @@ _PERCENT = re.compile(
     r"%(?:\((?P<key>[^)]*)\))?(?P<flags>[#0\- +]*)(?P<width>\*|\d+)?(?:\.(?P<prec>\*|\d+))?[hlL]?(?P<conv>[diouxXeEfFgGcrsa%])"
 )
 _FORMATTER = string.Formatter()
-_MUTATORS = frozenset(
-    {
-        "append",
-        "extend",
-        "insert",
-        "pop",
-        "remove",
-        "clear",
-        "sort",
-        "reverse",
-        "update",
-        "setdefault",
-    }
-)
+#: The methods changing their receiver (:data:`callfacts.CHANGING`): a container's value is not known after one.
+_MUTATORS = callfacts.CHANGING
+#: The ``str`` methods this evaluator runs (:meth:`method` applies the text's own; of
+#: :data:`callfacts.TEXT_METHODS`).
 _STR_METHODS = frozenset(
     {
         "format",
@@ -924,7 +912,16 @@ _STR_METHODS = frozenset(
         "endswith",
     }
 )
-_CONTAINER_METHODS = frozenset({"get", "keys", "values", "items", "copy"})
+#: The container methods this evaluator runs (:meth:`method`): a dict's that hand back a part of it and change
+#: nothing (:data:`callfacts.BUILTIN_METHODS`), ``__getitem__`` aside -- a subscript is read as one.
+_CONTAINER_METHODS = frozenset(
+    name
+    for (type_name, name), fact in callfacts.BUILTIN_METHODS.items()
+    if type_name == "dict"
+    and fact.gives is not None
+    and not fact.changes
+    and not name.startswith("__")
+)
 _BUILTINS = frozenset(
     {
         "str",
@@ -1036,9 +1033,7 @@ def _statement_literal(value: ast.AST) -> bool:
 
 #: Methods of a text whose result is the text again, filled in or trimmed: what ``sql = sqlR.format(table)`` makes
 #: of a statement is a statement.
-_TEXT_RESULT = frozenset(
-    {"format", "replace", "join", "strip", "rstrip", "lstrip", "upper", "lower"}
-)
+_TEXT_RESULT = callfacts.text_methods(callfacts.TEXT, callfacts.JOINED)
 
 
 def _text_reads(value: ast.AST) -> set[str]:
@@ -1633,7 +1628,6 @@ def _aligned(base: "Env", env: "Env", names) -> "Env":
 
 _RETURNS: dict = {}  # (callee, arguments) -> (callee, values or None, dims made in it)
 _PLACED: dict = {}  # id(call) -> (call, the resolver's targets)
-_DATABASE_READS = frozenset({"fetchall", "fetchone", "fetchmany"})
 _NESTED: dict = {}  # id(func) -> (func, ids of the functions defined inside it)
 
 
@@ -4076,7 +4070,7 @@ class Ref:
                     # are.  Applied per branch, a dict joined by widening (its values
                     # choices) handed a loop a choice of lists, read as a loop of
                     # unknown length.
-                    inside = type(receiver) is Dct and method in _DICT_READS
+                    inside = type(receiver) is Dct and method in _CONTAINER_METHODS
                     for args in self.ev_args(node.args, env):
                         over = list(range(1, len(args) + 1)) if inside else None
                         out.append(
@@ -4563,7 +4557,7 @@ class Ref:
             if isinstance(node.func, ast.Attribute)
             else getattr(node.func, "id", "")
         )
-        if name in _RUNNERS or name in _DATABASE_READS:
+        if name in _RUNNERS or name in callfacts.FETCHES:
             return [UNK]  # what the database hands back
         held = _PLACED.get(id(node))
         if held is None or held[0] is not node:

@@ -52,6 +52,7 @@ import ast
 import re
 from typing import Collection, Iterator, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import changing, walk
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import sql, sqltext
@@ -82,7 +83,7 @@ UNRESOLVED_CLASS = "?"
 # the type of an element.  ``Callable`` describes a signature and ``Tuple``
 # describes positions, so in neither case is a spec named inside one the class
 # of the annotated object or of anything taken out of it.
-_RECORD_WRAPPERS = frozenset({"Callable", "Tuple", "tuple"})
+_RECORD_WRAPPERS = callfacts.containers(callfacts.RECORD, callfacts.SIGNATURE)
 
 #: Prefix marking a legibility-census entry where the reader understood the
 #: form and correctly answered no class, as opposed to one it could not read.
@@ -538,7 +539,7 @@ class SpecAttributor:
             return None
         base = annotation.value
         wrapper = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
-        if wrapper not in {"tuple", "Tuple"}:
+        if wrapper not in callfacts.containers(callfacts.RECORD):
             return None
         inner = annotation.slice
         parts = list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
@@ -1180,7 +1181,8 @@ class SpecAttributor:
             return None
         base = annotation.value
         wrapper = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
-        if wrapper not in {"Iterator", "Generator", "AsyncIterator", "AsyncGenerator"}:
+        held = callfacts.CONTAINERS.get(wrapper)
+        if held is None or not held.generator:
             return None
         inner = annotation.slice
         parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]

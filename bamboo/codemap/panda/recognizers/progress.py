@@ -39,6 +39,7 @@ from __future__ import annotations
 import ast
 from typing import Iterator, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
@@ -689,12 +690,6 @@ def _resolve(
     return [Resolved(_runtime(value), 2, frames=tuple(values.value_frames(value, func)))]
 
 
-#: Class-level names a spec uses to say which database columns it holds.
-#: Read together because PanDA uses all three, and which one a class picks is a
-#: matter of when it was written rather than of what it means.
-SPEC_DECLARATION_NAMES = frozenset({"attributes", "_attributes", "attributes_with_types"})
-
-
 def _declared_names(value: ast.expr) -> set[str]:
     """The column names one declaration states, whichever form it takes.
 
@@ -760,7 +755,7 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
         for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
                 names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
-                if not names & SPEC_DECLARATION_NAMES:
+                if not names & callfacts.SPEC_DECLARATION_NAMES:
                     continue
                 found.append((cls.name, module.rel_path, _declared_names(stmt.value)))
     return found

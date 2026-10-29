@@ -911,6 +911,12 @@ class Forms:
         for each in job.Files + extra:
             each.jobStatus = "file"
 
+    def picks(self, job: JobSpec, jobs: list[JobSpec], other):
+        first = next(iter(jobs), None)
+        first.jobStatus = "first"
+        larger = max(job, other)
+        larger.ddmErrorCode = 4
+
     def generated(self, jobs: list[JobSpec]):
         for one in self.each(jobs):
             one.jobMetrics = "each"
@@ -996,6 +1002,19 @@ def test_or_if_else_a_comprehension_pop_and_plus_carry_what_they_hold(tmp_path):
     assert "jobStatus" in _assigned(files)  # for each in job.Files + extra
 
 
+def test_a_builtin_function_s_value_is_the_part_of_what_it_is_handed_callfacts_says(
+    tmp_path,
+):
+    """``next(iter(jobs), None)`` is one of the jobs, not the iterator (``callfacts.picked``); ``max(job, other)``
+    is one of the two."""
+    _fragment, rows = _forms(tmp_path)
+    owner = f"{_FORMS}.picks"
+    element = objects.follow(rows, owner, "jobs[]")
+    assert "first" in element.held[owner]
+    assert "jobStatus" in _assigned(element)
+    assert "ddmErrorCode" in _assigned(objects.follow(rows, owner, "job"))
+
+
 def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):
     """``self.store.get(1)`` runs ``Store.get``: its result, not a value of ``self.store`` under a key."""
     _fragment, rows = _forms(tmp_path)
@@ -1008,13 +1027,15 @@ def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):
 _KEEPER = """\
 from pandacommon.pandalogger.LogWrapper import LogWrapper
 from pandacommon.pandautils.thread_utils import WeightedLists
+from rucio.client import Client as RucioClient
 
 
 class Keeper:
-    def keep(self, job, lists: WeightedLists, log: LogWrapper):
+    def keep(self, job, lists: WeightedLists, log: LogWrapper, rucio: RucioClient):
         lists.add(3, job)
         log.debug(job)
         log.keepMsg(job)
+        rucio.add_files_to_dataset(job)
 """
 
 
@@ -1022,7 +1043,8 @@ def test_a_library_object_keeps_what_its_method_is_handed_and_a_logger_keeps_not
     tmp_path,
 ):
     """``lists.add(3, job)`` on a library class's object keeps the job in it, as nothing says what ``add`` does
-    there; ``log.debug(job)`` writes a line -- a logger's method, by its name, keeps nothing."""
+    there; ``log.debug(job)`` writes a line -- a logger's method, by its name, keeps nothing; and
+    ``rucio.add_files_to_dataset(job)`` hands it to another system, which keeps nothing of it here."""
     fragment = _build(tmp_path, keeper=_KEEPER)
     (row,) = [one for one in fragment.reach_graph if one.owner.endswith("Keeper.keep")]
     assert {(b.name, b.path) for b in row.bindings if b.how == BIND_FILL} == {

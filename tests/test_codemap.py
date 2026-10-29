@@ -10010,6 +10010,91 @@ def test_a_call_crosses_where_the_rows_reach_it_not_where_it_stands(tmp_path):
     assert [n.crosses_to for n in nodes if n is not node] == [[]] * (len(nodes) - 1)
 
 
+_PICK = (
+    "class TaskModule:\n"
+    "    def pick(self, target_tasks=None):\n"
+    "        varMap = {}\n"
+    "        if not target_tasks:\n"
+    "            varMap[':status'] = 'ready'\n"
+    "            sql = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
+    "        else:\n"
+    "            varMap[':jediTaskID'] = target_tasks[0]\n"
+    "            sql = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE jediTaskID=:jediTaskID '\n"
+    "        self.cur.execute(sql + comment, varMap)\n"
+    "        res = self.cur.fetchall()\n"
+    "        return res\n"
+)
+
+
+def _picking(cls: str, handed: str, to: str) -> str:
+    """A class whose ``run`` calls ``TaskModule.pick`` handing *handed* and gives the rows to the call *to*."""
+    return (
+        "from pandaserver.x import TaskModule\n"
+        "from pandaserver.s import Setter\n"
+        "from pandaserver.y import relay\n\n\n"
+        f"class {cls}:\n"
+        "    def __init__(self, proxy: TaskModule, setter: Setter):\n"
+        "        self.proxy = proxy\n"
+        "        self.setter = setter\n\n"
+        "    def run(self):\n"
+        f"        rows = self.proxy.pick({handed})\n"
+        f"        {to}(rows)\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("broker", "generator", "selects"),
+    [
+        ("self.setter.setCloud", "len", {"pandaserver/s.py::setCloud": []}),
+        ("relay", "len", {"pandaserver/s.py::setCloud": []}),
+        ("relay", "relay", {}),
+        ("self.setter.setCloud", "self.setter.setCloud", {}),
+    ],
+    ids=["its-own-way-in", "through-a-function", "a-function-both-ways-go-through", "both-ways-in"],
+)
+def test_a_crossing_takes_the_values_its_own_routes_select(tmp_path, broker, generator, selects):
+    """1898's rows reach ``setCloudToTasks_JEDI`` only back up TaskBroker 259, which hands ``simTasks=[...]``: the
+    status values of the branch it does not take go nowhere there (XB).
+
+    Two callers of one statement: ``Broker`` hands a display, so the statement selects no status on its way, and
+    ``Gen`` hands nothing.  Where both ways reach ``Setter.setCloud`` it takes the statement's values -- through
+    ``relay`` too, which the walk goes through once: the second way in still counts.
+    """
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import plugin
+
+    files = {
+        "pandaserver/taskbuffer/Specs.py": _SPECS,
+        "pandaserver/x.py": _PICK,
+        "pandaserver/s.py": "class Setter:\n    def setCloud(self, t):\n        if t:\n            pass\n",
+        "pandaserver/y.py": "from pandaserver.s import Setter\n\n\ndef relay(t):\n    Setter().setCloud(t)\n",
+        "pandaserver/b.py": _picking("Broker", "target_tasks=[1]", broker),
+        "pandaserver/g.py": _picking("Gen", "", generator),
+    }
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    with sql.across_calls(calls):
+        nodes = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor, calls).statements, MAP_ID, VERSION)
+        record = reach.ReachGraph(reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves()))
+        sqlwrite.attach_crossings(nodes, modules, [_junction("pandaserver/s.py::setCloud")], calls, record)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 10]
+    assert node.selects == ["JEDI_Tasks.status=ready"]
+    assert sorted(route.chain[-1].split(":")[0] for route in node.call_readings) == [
+        "pandaserver/b.py",
+        "pandaserver/g.py",
+    ]
+    assert node.crosses_to == ["pandaserver/s.py::setCloud"]
+    assert node.crossing_selects == selects
+
+
 @pytest.mark.parametrize(
     ("fill", "crosses"),
     [
@@ -10471,11 +10556,16 @@ def test_an_owner_that_does_not_read_what_it_is_handed_is_gone_through(tmp_path)
     assert node.crosses_to == ["pandaserver/f.py::finish"]
 
 
-@pytest.mark.parametrize(("maker", "crosses"), [("MsgWrapper", False), ("Note", True)], ids=["a-logger", "a-class"])
+@pytest.mark.parametrize(
+    ("maker", "crosses"),
+    [("MsgWrapper", False), ("make_logger", False), ("Note", True)],
+    ids=["a-logger", "pandacommon-s-maker", "a-class"],
+)
 def test_a_logger_made_from_the_rows_does_not_read_them(tmp_path, maker, crosses):
     """``tmpLog = MsgWrapper(logger, token)``: the token is a log line's tag, though ``MsgWrapper.__init__`` tests it
     (as ``create_tagged_logger`` tests ``if tag is None``).  Read as a use, 7 crossings of pin k came by a tag alone.
-    The same ``__init__`` under another name reads it."""
+    ``make_logger(logger, token)`` makes one too (callfacts.LOGGER_MAKERS), whatever its body is read as here.  The
+    same ``__init__`` under another name reads it."""
     source = _typed(_sweep(_EACH_TASK_RETRIED) + _EXIT_TAIL, ("retrier", "Retry", "r"))
     retrier = (
         f"from pandaserver.m import {maker}\n\n\n"
@@ -10934,6 +11024,83 @@ def test_rows_handed_back_as_a_dicts_keys_cross_to_what_the_caller_does(tmp_path
     (node,) = [n for n in nodes if n.anchor.line_start == 7]
     assert node.crosses_to == ["pandaserver/c.py::retryTask"]
     assert (census.handing_back, census.resolved) == (1, 1)
+
+
+def test_a_popped_pair_s_first_is_the_key_the_rows_are_filed_under(tmp_path):
+    """``retMap[jediTaskID] = set()`` and the caller takes ``tasks.popitem()``: a (key, value) pair
+    (callfacts.ITEM), so the task the rows are filed under is the pair's first, not one of the values."""
+    source = (
+        "class TaskModule:\n"
+        "    def getTasks(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        retMap = {}\n"
+        "        for (taskID,) in res:\n"
+        "            retMap[taskID] = set()\n"
+        "        return retMap\n"
+    )
+    caller = _caller(
+        "Commando",
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        taskID, ids = tasks.popitem()\n"
+        "        self.retryTask(taskID)\n",
+        "retryTask",
+    )
+    nodes, census = _crossed(tmp_path, source, ["c.py::retryTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/c.py::retryTask"]
+
+
+def test_a_conversion_of_one_value_is_a_plain_copy_of_it_where_the_name_is_the_builtin():
+    """A bind's value ``repr(job.PandaID)`` or ``float(job.PandaID)`` is the field again, as another type
+    (callfacts.CONVERTING); ``str(...)`` with a ``str`` the function binds, and ``len(...)``, are computed."""
+    tree = ast.parse(
+        "def f(job, other):\n"
+        "    a = repr(job.PandaID)\n"
+        "    b = float(job.PandaID)\n"
+        "    c = len(job.PandaID)\n\n"
+        "def g(job, str):\n"
+        "    d = str(job.PandaID)\n"
+    )
+    pathcond.attach_parents(tree)
+    values = [node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)]
+    assert [sqlwrite._plain(value) for value in values] == [True, True, False, False]
+    assert [getattr(sqlwrite._root(value), "id", None) for value in values] == ["job", "job", None, None]
+
+
+def test_one_of_two_values_a_builtin_picks_holds_what_each_holds(tmp_path):
+    """``max(taskID, 0)`` is ``taskID`` or ``0`` (callfacts.ONE): the task the rows name reaches the call it is
+    handed to, as ``taskID`` itself would; ``next(iter(ids), None)`` is one of the ids or None."""
+    source = (
+        "class TaskModule:\n"
+        "    def getTasks(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        res = self.cur.fetchall()\n"
+        "        return res\n"
+    )
+    caller = _caller(
+        "Commando",
+        "        tasks = self.taskBufferIF.getTasks()\n"
+        "        (taskID,) = tasks[0]\n"
+        "        self.retryTask(max(taskID, 0))\n"
+        "        ids = [one for (one,) in tasks]\n"
+        "        self.killTask(next(iter(ids), None))\n",
+        "retryTask",
+        "killTask",
+    )
+    nodes, census = _crossed(tmp_path, source, ["c.py::retryTask", "c.py::killTask"], others=[(caller, "c.py")])
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.crosses_to == ["pandaserver/c.py::killTask", "pandaserver/c.py::retryTask"]
 
 
 def test_rows_used_only_to_choose_are_not_handed_back(tmp_path):

@@ -42,6 +42,7 @@ import ast
 import re
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.pathcond import single_definition
@@ -186,8 +187,8 @@ FRAME_HOPS = 2
 #: More renderings than this and the part is left a hole rather than listed.
 FRAME_LIMIT = 32
 _HOLE = "{}"
-#: The methods that read a dict without changing what its values can be.
-_READS_A_DICT = frozenset({"get", "keys", "values", "items", "copy", "setdefault"})
+#: The puts into a dict whose value this module reads where it is put (:func:`_frames`' ``d.setdefault(k, v)``).
+_PUTS_READ = frozenset({"setdefault"})
 
 
 def value_frames(
@@ -344,6 +345,13 @@ def _held_by_name(name: str, func, at: ast.AST, hops: int) -> list[str]:
     return _distinct(found)
 
 
+def _reads_a_dict(name: str) -> bool:
+    """Whether a builtin container's method *name* hands back a part of the dict (:class:`callfacts.Give`) and puts
+    nothing into it this module does not read: what its values can be stays what the stores say."""
+    method = callfacts.by_name(name)
+    return method is not None and method.gives is not None and (not method.puts or name in _PUTS_READ)
+
+
 def _dict_kept_local(name: str, func) -> bool:
     """Whether every use of *name* reads the dict or stores into it, here."""
     for node in walk(func):
@@ -358,7 +366,7 @@ def _dict_kept_local(name: str, func) -> bool:
             and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
         ):
             continue
-        if isinstance(parent, ast.Attribute) and parent.attr in _READS_A_DICT:
+        if isinstance(parent, ast.Attribute) and _reads_a_dict(parent.attr):
             continue
         if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id == "len":
             continue
