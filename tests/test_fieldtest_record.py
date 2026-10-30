@@ -408,6 +408,79 @@ async def test_a_cut_answer_is_asked_again_in_halves_and_a_string_cut_alone_mark
     assert b["machines"][SERVER[0]]["files"][0]["truncated"] is False
 
 
+async def test_a_half_whose_grep_fails_defers_the_asks_of_its_strings_alone(tmp_path):
+    day = "panda-adder.log-20261014.gz"
+
+    def reply(strings, _tail):
+        if len(strings) > 2:
+            return {**found(rec(1, "2026-10-14 06:00:00,1 a 111")), "truncated": True}
+        if strings == ["111", "222"]:
+            return {"status": "failed", "error": "timeout"}
+        return found(rec(3, "2026-10-14 06:00:00,3 c 333"), rec(4, "d 444"))
+
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {(SERVER[0], day): [reply]}
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:01")
+    asks = [ask(ADDER, [s], w, SERVER[0]) for s in ("111", "222", "333", "444")]
+    _, records, deferred = await run_round(tmp_path, panda, asks)
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [
+        ("111", "222", "333", "444"),
+        *[("111", "222")] * (1 + R.TIMEOUT_RETRIES),
+        ("333", "444"),
+    ]
+    assert [d["ask"]["strings"] for d in deferred] == [["111"], ["222"]]
+    assert {w for d in deferred for w in d["why"]} == {
+        f"{SERVER[0]} {day}: failed: timeout"
+    }
+    assert [r["ask"]["strings"] for r in records] == [["333"], ["444"]]
+    f333, f444 = (r["machines"][SERVER[0]]["files"][0] for r in records)
+    assert f333["status"] == "answered" and [x["offset"] for x in f333["records"]] == [
+        3
+    ]
+    assert f444["status"] == "answered" and [x["offset"] for x in f444["records"]] == [
+        4
+    ]
+
+
+async def test_a_grep_stopped_at_the_timeout_is_asked_again_and_its_answer_taken(
+    tmp_path,
+):
+    day = "panda-adder.log-20261014.gz"
+    replies = [
+        {"status": "failed", "error": "timeout"},
+        found(rec(1, "2026-10-14 06:00:00,1 a 7339")),
+    ]
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {(SERVER[0], day): replies}
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])])
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [("7339",), ("7339",)]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["status"] == "answered" and [x["offset"] for x in f["records"]] == [1]
+    assert [q["error"] for q in r["requests"]] == ["timeout", None]
+
+
+@pytest.mark.parametrize(
+    "error, greps", [("timeout", 1 + R.TIMEOUT_RETRIES), ("killed", 1)]
+)
+async def test_a_grep_is_asked_again_only_after_a_timeout_and_only_so_often(
+    tmp_path, error, greps
+):
+    day = "panda-adder.log-20261014.gz"
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], day): [{"status": "failed", "error": error}]},
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, records, (d,) = await run_round(
+        tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])]
+    )
+    assert len([c for c in panda.calls if c[0] == "grep"]) == greps
+    assert records == [] and d["why"] == [f"{SERVER[0]} {day}: failed: {error}"]
+
+
 async def test_a_day_being_compressed_is_waited_for_and_read_when_done(tmp_path):
     plain = [entry("panda-adder.log-20261014", "2026-10-14 07:00:03"), *ADDER_FILES[:2]]
     lists = lists_with({SERVER[0]: plain, SERVER[1]: []})
@@ -509,6 +582,58 @@ async def test_a_later_round_reads_a_rotated_files_earlier_answer_again(tmp_path
     assert [x["offset"] for x in f["records"]] == [1] and r["requests"][0][
         "reused"
     ].startswith("answers-r1-")
+
+
+def by_string(strings, _tail):
+    """A grep's answer: a record per string, at the offset of its first digit."""
+    return found(
+        *(rec(int(s[0]), f"2026-10-14 06:00:00,{s[0]} x {s}") for s in strings)
+    )
+
+
+async def test_a_later_round_asks_only_the_strings_no_earlier_answer_held(tmp_path):
+    day = "panda-adder.log-20261014.gz"
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], day): [by_string]},
+    )
+    w1 = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    await run(tmp_path, panda, [ask(ADDER, [s], w1, SERVER[0]) for s in ("111", "222")])
+    w2 = ("2026-10-14 05:00:00", "2026-10-14 06:00:00")
+    _, (a, b) = await run(
+        tmp_path, panda, [ask(ADDER, [s], w2, SERVER[0]) for s in ("111", "333")]
+    )
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [("111", "222"), ("333",)]
+    fa, fb = a["machines"][SERVER[0]]["files"][0], b["machines"][SERVER[0]]["files"][0]
+    assert [x["offset"] for x in fa["records"]] == [1]
+    assert [x["offset"] for x in fb["records"]] == [3]
+    assert a["requests"][0]["reused"].startswith("answers-r1-")
+
+
+async def test_a_held_strings_ask_is_answered_when_the_new_strings_grep_fails(
+    tmp_path,
+):
+    day = "panda-adder.log-20261014.gz"
+
+    def reply(strings, tail):
+        if "333" in strings:
+            return {"status": "failed", "error": "timeout"}
+        return by_string(strings, tail)
+
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {(SERVER[0], day): [reply]}
+    )
+    w1 = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    await run(tmp_path, panda, [ask(ADDER, ["111"], w1, SERVER[0])])
+    w2 = ("2026-10-14 05:00:00", "2026-10-14 06:00:00")
+    _, records, deferred = await run_round(
+        tmp_path, panda, [ask(ADDER, [s], w2, SERVER[0]) for s in ("111", "333")]
+    )
+    assert [d["ask"]["strings"] for d in deferred] == [["333"]]
+    (r,) = records
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert r["ask"]["strings"] == ["111"] and f["status"] == "answered"
+    assert [x["offset"] for x in f["records"]] == [1]
 
 
 async def test_an_ask_already_recorded_is_refused(tmp_path):

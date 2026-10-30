@@ -57,10 +57,19 @@ mtime: server machines list an empty ``panda-JediDBProxy.log`` (2026-10-14).
 **Greps.**  One request per machine and file, to that machine alone, with the
 strings of every ask reading it.  An answer cut at 1 MB is asked again in
 halves, down to a string alone, whose files are then said ``truncated``.  A
-rotated file still being compressed (its plain name listed, or a grep answered
+grep that fails fails its own strings alone: the other greps are still asked
+(a two-string half timed out after its file's 19 strings were cut,
+2026-10-30).  A grep stopped at the API's timeout is asked again at once, up
+to :data:`TIMEOUT_RETRIES` times: what keeps a whole read of a ``.gz`` past
+240 s is the disk, and the part the stopped matcher read stays in the page
+cache, so the next one goes further (aipanda093's DBProxy-20261029.gz, 1.4 GB
+with 521 MB cached, took 312 s, 91 s of it CPU, 2026-10-30).  A rotated file still being compressed (its plain name listed, or a grep answered
 :data:`BEING_COMPRESSED`) is waited for; past the day after its date it is
-``unreadable``.  A rotated ``.gz`` does not change, so an earlier round's
-answer for the same machine and file is read again when it held every string.
+``unreadable``.  A rotated ``.gz`` does not change, so a string an earlier
+round's answer for the same machine and file held uncut is read from it again,
+and only the other strings are asked (a round asked 16 rotated files again
+whole for their new strings, with the 2-17 strings each one's earlier answers
+held, 2026-10-30).
 
 **A record.**  Each ask's record copies the ask and lists, for every machine
 it asks, every file whose span meets the window, read or not, with the records
@@ -70,7 +79,8 @@ whose lines hold one of the ask's strings: not cut to the window.
 file a record says ``failed`` would stay unsearched though the failure passed
 (a grep cut by a server's timeout, 2026-10-14).  An ask any of whose greps or
 lists failed -- refused, failed on a machine, or got no response at all (a
-connection dropped, 2026-10-26) -- gets no record: it is written to the round's
+connection dropped, 2026-10-26); a grep is the ask's when it held one of the
+ask's strings -- gets no record: it is written to the round's
 ``answers-r<n>-<time>/deferred.jsonl`` with why, and the querier asks it again.
 The next round reads the rotated files this one answered from this round's
 answers.  ``unreadable``, ``truncated``, ``list cut``, ``not listed`` and ``no
@@ -105,6 +115,9 @@ TAIL_FACTOR = 1.5
 COMPRESS_POLL = datetime.timedelta(minutes=10)
 #: a grep of a rotated file still being compressed fails with this at the end of its error (panda-server bf5c9fe2)
 BEING_COMPRESSED = "Being compressed"
+#: the error of a grep the API stopped at its subprocess timeout (240 s), and how many times one is asked again
+TIMED_OUT = "timeout"
+TIMEOUT_RETRIES = 2
 #: the keys of an ask, as the querier writes them
 ASK_KEYS = {"name", "service", "machine", "strings", "window", "whole_records"}
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -208,6 +221,9 @@ class Job:
     records: dict[int, dict] = field(default_factory=dict)  # by offset: head records
     fragments: dict[int, dict] = field(default_factory=dict)  # by offset: head false
     truncated: set[str] = field(default_factory=set)  # strings cut even alone
+    failed: dict[str, str] = field(
+        default_factory=dict
+    )  # strings whose grep failed: why
     tails: list[tuple[str | None, int | None, datetime.datetime]] = field(
         default_factory=list
     )  # first_stamp, offset, asked
@@ -477,15 +493,17 @@ class Earlier:
                     )
         return out
 
-    def cover(self, machine: str, file: str, strings: set[str]) -> list[dict] | None:
-        """Leaves that together held every one of *strings* uncut, or None."""
+    def cover(
+        self, machine: str, file: str, strings: set[str]
+    ) -> tuple[list[dict], set[str]]:
+        """The leaves that held one of *strings* uncut, and the strings none of them held."""
         found = [
             leaf
             for leaf in self.leaves.get((machine, file), [])
-            if not leaf["truncated"]
+            if not leaf["truncated"] and strings & set(leaf["strings"])
         ]
         held = {s for leaf in found for s in leaf["strings"]}
-        return found if strings <= held else None
+        return found, strings - held
 
 
 class Grepper:
@@ -507,22 +525,31 @@ class Grepper:
         f = job.file
         if f.kind == "compressing" and not await self.compressed(job):
             return
+        reused, asking = [], job.strings
         if f.kind != "current":
-            reused = self.earlier.cover(f.machine, f.name, job.strings)
-            if reused is not None:
-                for leaf in reused:
-                    self.take(job, leaf["records"], leaf["fragments"])
-                    job.requests.append(
-                        {"machine": f.machine, "file": f.name, "reused": leaf["answer"]}
-                    )
+            reused, asking = self.earlier.cover(f.machine, f.name, job.strings)
+            for leaf in reused:
+                self.take(job, leaf["records"], leaf["fragments"])
+                job.requests.append(
+                    {"machine": f.machine, "file": f.name, "reused": leaf["answer"]}
+                )
+            if not asking:
                 job.status = "answered"
                 return
         while True:
-            outcome = await self.grep(job, sorted(job.strings))
+            job.status = ""
+            job.failed.clear()
+            outcome = await self.grep(job, sorted(asking))
             if outcome != "compressing":
                 break
             if not await self.compressed(job):
                 return
+        if reused:  # the earlier answers hold the other strings; a failed string fails its own asks alone
+            job.status = "answered"
+        elif (
+            job.failed and job.status != "answered"
+        ):  # every grep failed: the file is failed
+            job.status, job.error = "failed", next(iter(job.failed.values()))
         if f.kind == "current" and job.status == "answered":
             self.settle_tail(job)
 
@@ -578,20 +605,29 @@ class Grepper:
                 f.kind = "compressing"
 
     async def grep(self, job: Job, strings: list[str]) -> str:
-        """Grep *strings* in the job's file; halve them while the answer is cut.  'compressing' when refused for it."""
+        """Grep *strings* in the job's file; halve them while the answer is cut.  'compressing' when refused for it;
+        'failed' when a grep failed, once every other grep was asked (:attr:`Job.failed` holds its strings)."""
         f = job.file
         tail = None
         if f.kind == "current":
             tail = job.tail_bytes or tail_for(f, job.since, self.parts.now())
             job.tail_bytes = tail
+        outcomes = []
         for i in range(0, len(strings), PC.GREP_MAX_STRINGS):
             chunk = strings[i : i + PC.GREP_MAX_STRINGS]
             outcome = await self.leaf(job, chunk, tail)
-            if outcome != "answered":
+            if outcome == "compressing":
                 return outcome
-        return "answered"
+            outcomes.append(outcome)
+        return "failed" if "failed" in outcomes else "answered"
 
-    async def leaf(self, job: Job, strings: list[str], tail: int | None) -> str:
+    async def leaf(
+        self,
+        job: Job,
+        strings: list[str],
+        tail: int | None,
+        retries: int = TIMEOUT_RETRIES,
+    ) -> str:
         f = job.file
         asked = self.parts.now()
         response = await responded(
@@ -620,10 +656,8 @@ class Grepper:
         job.requests.append(request)
         if not response.get("success"):
             request["status"] = "refused"
-            job.status, job.error = (
-                "failed",
-                response.get("message") or "the grep was refused",
-            )
+            why = response.get("message") or "the grep was refused"
+            job.failed.update(dict.fromkeys(strings, why))
             return "failed"
         got = PC.per_machine(response, True).get(f.machine) or {"status": "no result"}
         request["status"], request["error"] = got.get("status"), got.get("error")
@@ -632,15 +666,23 @@ class Grepper:
         ):
             return "compressing"
         if got.get("status") != "done":
-            job.status, job.error = "failed", got.get("error") or got.get("status")
+            if got.get("error") == TIMED_OUT and retries:
+                # the matcher left what it read in the page cache: asked again, it reads that from memory and
+                # goes on from where the disk stopped it
+                return await self.leaf(job, strings, tail, retries - 1)
+            job.failed.update(
+                dict.fromkeys(strings, got.get("error") or got.get("status"))
+            )
             return "failed"
         if got.get("truncated") and len(strings) > 1:
             half = len(strings) // 2
+            outcomes = []
             for part in (strings[:half], strings[half:]):
                 outcome = await self.leaf(job, part, tail)
-                if outcome != "answered":
+                if outcome == "compressing":
                     return outcome
-            return "answered"
+                outcomes.append(outcome)
+            return "failed" if "failed" in outcomes else "answered"
         result = got.get("result") or {}
         records = result.get("records") or []
         heads = [r for r in records if r.get("head")]
@@ -759,13 +801,19 @@ def file_entry(
         covers, covers_from = tail_covers(job, listed_at)
     else:
         covers, covers_from = [text(f.start), text(listed_at)], "list"
+    # a grep that failed is the ask's when it held one of the ask's strings; the file's other greps answer the rest
+    failed = sorted({job.failed[s] for s in strings & job.failed.keys()}) if job else []
     entry = {
         "file": f.name,
         "covers": covers,
         "covers_from": covers_from,
         "tail_bytes": job.tail_bytes if job else None,
-        "status": job.status if job and job.status else "failed",
-        "error": job.error if job else "not read",
+        "status": "failed"
+        if failed
+        else job.status
+        if job and job.status
+        else "failed",
+        "error": "; ".join(failed) if failed else job.error if job else "not read",
         "truncated": bool(job and strings & job.truncated),
         "records": [r for _, r in sorted(job.records.items()) if holds_any(r, strings)]
         if job
