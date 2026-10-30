@@ -4395,11 +4395,14 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
             arm = Verdict(Candidate("pandajedi/r.py", "extract", [5]), 5, "positive")
             call = Verdict(Candidate("pandajedi/o.py", "runImpl", [211]), 211, "positive")
 
-            def asked(subject, guards, row=None, via=None, window=("2026-10-29 04:09:50", "2026-10-29 04:10:10"), kind="positive"):
+            def asked(subject, guards, row=None, via=None, window=("2026-10-29 04:09:50", "2026-10-29 04:10:10"), kind="positive",
+                      env=None, unsearched=None):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.ends, r.touched, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], "", {}, [], {}, "outside"
+                r.base_env = lambda at=None: E.Env({})
                 chosen = Verdict(arm.candidate, arm.line, kind)
-                r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}), chosen, via=via, row=row, window=window)
+                r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}) if env is None else env, chosen, via=via, row=row,
+                                                        window=window, unsearched=unsearched or {})
                 rerun.pathcond = N(path_condition=lambda site: guards)
                 try:
                     got = r.asked(rerun.Asked(subject, "A", "7"))
@@ -4409,12 +4412,21 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 return {"said": said, "ends": [line for _, line in r.ends], "wrote": r.result.get("wrote")}
 
             row = {"status": "defined", "time": "2026-10-29 04:10:00.123456"}
+            second = ("2026-10-29 00:49:09", "2026-10-29 00:49:09")
+            holes = {"panda-JediDBProxy.log": ["aipanda081.cern.ch: 2026-10-29 00:49:09 .. 2026-10-29 00:49:09",
+                                               "aipanda086.cern.ch: 2026-10-29 00:49:09 .. 2026-10-29 00:49:09"]}
+            held = E.Env({"task.x": E.Value(True, "hole")})
             print(json.dumps({
                 "no guard": asked("JediTaskSpec.transUses", [], row),
                 "guards read true, a stand-in": asked("JediTaskSpec.transUses", ["1 == 1"], None, call,
                                                       ("2026-10-29 04:10:00", "2026-10-29 04:10:00")),
-                "by elimination": asked("JediTaskSpec.rescueTime", [], None, window=("2026-10-29 00:49:09", "2026-10-29 00:49:09"),
-                                        kind="kept"),
+                "by elimination": asked("JediTaskSpec.rescueTime", [], None, window=second, kind="kept"),
+                "by elimination, not searched": asked("JediTaskSpec.rescueTime", [], None, window=second, kind="kept",
+                                                      unsearched=holes),
+                "by elimination, a guard the run's values hold": asked("JediTaskSpec.rescueTime", ["task.x"], None, window=second,
+                                                                       kind="kept", env=held),
+                "by elimination, guards read true": asked("JediTaskSpec.rescueTime", ["1 == 1"], None, window=second, kind="kept"),
+                "shown, a guard the run's values hold": asked("JediTaskSpec.rescueTime", ["task.x"], None, window=second, env=held),
                 "not read": asked("JediTaskSpec.transUses", ["1 == 1", "task.x", "1 == 2"], row),
                 "through a method": asked("JediTaskSpec.transUses", ["task.useScout()"], row),
                 "a status": asked("JediTaskSpec.status", [], row),
@@ -4438,11 +4450,26 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
     stood = got["guards read true, a stand-in"]
     assert stood["ends"] == ["END JediTaskSpec.transUses='A' written last by extract:5, called at runImpl:211 (shown in its run; "
                              "its guards hold in the run's values), at 2026-10-29 04:10:00: the run"]
-    # an arm its run does not show ran, left by elimination (the one writer of a value that is its time): said so
+    # an arm no run shows ran, left by elimination (the one writer of a value that is its time): said so, and no run
+    # named -- the run the judge read it on is any of the key's at the window -- but the writer's logs not searched there
     left = got["by elimination"]
-    assert left["ends"] == ["END JediTaskSpec.rescueTime='A' written last by extract:5 (by elimination: its run does not show the "
-                            "line ran; it has no guard), at 2026-10-29 00:49:09: the run"]
-    assert (left["said"], left["wrote"]["shown"]) == (None, False)
+    assert left["ends"] == ["END JediTaskSpec.rescueTime='A' written last by extract:5 (by elimination: no run shows the "
+                            "line ran; it has no guard), at 2026-10-29 00:49:09"]
+    assert (left["said"], left["wrote"]["shown"], left["wrote"]["run"]) == (None, False, None)
+    assert got["by elimination, not searched"]["ends"] == [
+        "END JediTaskSpec.rescueTime='A' written last by extract:5 (by elimination: no run shows the line ran; it has no "
+        "guard), at 2026-10-29 00:49:09; not searched there: panda-JediDBProxy.log on aipanda081.cern.ch, aipanda086.cern.ch"]
+    # its guards are read in no run's values, and H3 stops there; an arm shown reads them in its run's
+    assert got["by elimination, a guard the run's values hold"] == {
+        "said": ["STOP", "H3: a run that shows extract:5 ran, to read its guards in (by elimination; its conditions: "
+                         "'task.x' not read)"],
+        "ends": [], "wrote": left["wrote"]}
+    assert got["by elimination, guards read true"]["ends"] == [
+        "END JediTaskSpec.rescueTime='A' written last by extract:5 (by elimination: no run shows the line ran; its guards "
+        "hold in the rows' values), at 2026-10-29 00:49:09"]
+    assert got["shown, a guard the run's values hold"]["ends"] == [
+        "END JediTaskSpec.rescueTime='A' written last by extract:5 (shown in its run; its guards hold in the run's values), "
+        "at 2026-10-29 00:49:09: the run"]
     assert (stood["said"], stood["wrote"]["via"], stood["wrote"]["row"]) == (None, {"owner": "pandajedi/o.py::runImpl", "line": 211}, None)
     # a condition not read, or read false, is named where H3 stops
     assert got["not read"]["said"] == ["STOP", "H3: a method the guard reads through (its conditions: 'task.x' not read, "

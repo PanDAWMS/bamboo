@@ -1238,6 +1238,8 @@ class Wrote:
     row: dict | None = None
     #: the window H2 asked the logs over, ``(lo, hi)``
     window: tuple[str, str] | None = None
+    #: what of the window the chosen writer's logs were not searched for, ``{log: Log.holes}``
+    unsearched: dict = field(default_factory=dict)
 
     @property
     def reading(self):
@@ -1945,19 +1947,33 @@ class Rerun:
         self.say(f"guards of {site_fn.name}:{chosen.line}: {guards}")
         unread = []
         if attribute:
+            shown = chosen.kind == "positive"
+            if not shown:
+                # an arm left by elimination has no run that shows it ran: the run the judge read it on is any of the
+                # key's at the window, on any machine (a server's DBProxy log for a JEDI writer).  Its guards are read in
+                # the rows' values alone, and no run is named
+                env = self.base_env(at=w.row["time"] if w.row else None)
             read = {g: _guard_read(g, env) for g in guards}
             if all(got is True for got in read.values()):
                 lo, hi = w.window
                 at = (f"in the pass of the statuslog row {w.row['status']!r} at {w.row['time']}" if w.row else
                       f"at {hi}" if lo == hi else f"in {lo} .. {hi}")
                 via = f", called at {at_fn.name}:{w.via.line}" if w.via is not None else ""
-                # an arm the run does not show ran was left by elimination: the run named is the key's in its log then
-                shown = "shown in its run" if chosen.kind == "positive" else "by elimination: its run does not show the line ran"
-                how = "its guards hold in the run's values" if guards else "it has no guard"
-                self.end(f"{q.subject}={q.observed!r} written last by {site_fn.name}:{chosen.line}{via} ({shown}; {how}), {at}: "
-                         f"{question.describe()}")
+                how = (("its guards hold in the run's values" if shown else "its guards hold in the rows' values") if guards
+                       else "it has no guard")
+                said = f"{q.subject}={q.observed!r} written last by {site_fn.name}:{chosen.line}{via}"
+                if shown:
+                    self.end(f"{said} (shown in its run; {how}), {at}: {question.describe()}")
+                    return None
+                holes = "; ".join(f"{log} on {', '.join(dict.fromkeys(h.partition(': ')[0] for h in hs))}"
+                                  for log, hs in w.unsearched.items())
+                self.end(f"{said} (by elimination: no run shows the line ran; {how}), {at}"
+                         + (f"; not searched there: {holes}" if holes else ""))
                 return None
             unread = [f"{g!r} {'read false' if got is False else 'not read'}" for g, got in read.items() if got is not True]
+            # an arm left by elimination is read in no run: H4 would read its guard's method in a run not its own
+            self.need(f"a run that shows {site_fn.name}:{chosen.line} ran, to read its guards in (by elimination; its "
+                      f"conditions: {', '.join(unread)})", shown)
         methods = []
         for g in guards:
             for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
@@ -1976,14 +1992,16 @@ class Rerun:
     def _wrote_said(self, w: Wrote) -> dict:
         """result.json's ``wrote`` for an attribute: H2's answer -- the arm, whether its run shows the line ran (else it was
         left by elimination), the call a writer that prints nothing is read at, the statuslog row whose pass wrote it, the
-        window asked and the run (as ``moved_by``'s)."""
+        window asked and the run (as ``moved_by``'s; null for an arm left by elimination, which no run shows)."""
         run = w.question
+        shown = w.chosen.kind == "positive"
         return {
-            "owner": w.reading.owner, "line": w.chosen.line, "shown": w.chosen.kind == "positive",
+            "owner": w.reading.owner, "line": w.chosen.line, "shown": shown,
             "via": {"owner": w.via.candidate.owner, "line": w.via.line} if w.via is not None else None,
             "row": {"status": w.row["status"], "time": _iso(w.row.get("time_extended") or w.row["time"])} if w.row else None,
             "window": {"start": _iso(w.window[0]), "end": _iso(w.window[1])} if w.window else None,
-            "run": {"log": run.log.name, "machine": run.machine or None, "token": run.token, "first": run.first, "last": run.last},
+            "run": {"log": run.log.name, "machine": run.machine or None, "token": run.token, "first": run.first, "last": run.last}
+            if shown else None,
         }
 
     def _guard_at(self, w: Wrote, site_fn) -> tuple:
@@ -2217,7 +2235,8 @@ class Rerun:
             if v.kind == "excluded" or (v.kind == "unexamined" and not any(f in holes for f in v.candidate.log_files)):
                 continue
             run = question if question is not None and question.log.name in v.candidate.log_files else j.runs.get(v.candidate.owner)
-            answer = Wrote(readings, run, cands, env, v, row=state, window=(lo, hi)) if run is not None else None
+            answer = Wrote(readings, run, cands, env, v, row=state, window=(lo, hi),
+                           unsearched={f: holes[f] for f in v.candidate.log_files if f in holes}) if run is not None else None
             if v.kind == "unexamined":
                 v.reasons.append(f"not searched whole: {', '.join(f for f in v.candidate.log_files if f in holes)}")
             out += self._possibles(v, state, env, answer)
@@ -2307,7 +2326,8 @@ class Rerun:
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._h2_candidates(subject, readings)
-        runs = self.runs(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+        runs, unanswered, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+        self._stop_unanswered(unanswered)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
         if not at and not last:
             self.say(f"  no run of {key} at {when}")
@@ -2347,7 +2367,8 @@ class Rerun:
             question = self.need(f"the run of {chosen.candidate.func} at {when}", j.runs.get(chosen.candidate.owner))
             self.say(f"the run: {question.describe()}")
         self.question = question
-        return Wrote(readings, question, cands, env, chosen, row=state, window=(lo, hi))
+        return Wrote(readings, question, cands, env, chosen, row=state, window=(lo, hi),
+                     unsearched={f: holes[f] for f in chosen.candidate.log_files if f in holes})
 
     def _writers(self, subject: str, value: str, key: str) -> list:
         """H1's reading: the map's writers of ``subject=value`` (derive-strategy's readings), read once per value."""
