@@ -592,8 +592,19 @@ the time.  Counted on the harness's 57 (attr-time-shape.md): every arm placed 23
 the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's storeJobs leaves 12 of the 18
 (asked of the map, 10-29).
 
-*Shows:* "-- row n of m" in H2 and its judgement per row; a stop "every writer of <subject> on a history row of the
-object ... (k of n not: K37)" or "a writer of <subject> in the map".
+A row is asked, and read, of the logs of the writers whose passes can write it alone (`attr_time.row_writers`,
+`readings_of`; the harness's to-querier-61, step 1, tmaeno 「１で」 10-30): before, every row was asked of every
+writer's logs, so a writer that can write any row kept every log in every window.  No row is left out by it.  Which
+rows a writer's pass can write is still read from the history call's recorded statuses only: a pass that records the
+status at run time can write any row, though it moves the object on only from the statuses it picks it up at --
+TaskRefiner's pass from registered, rerefine and staged.  Telling those from a writer that takes its row by a key from
+outside (updateJobStatus, the pilot's PandaID) needs the key's source of the pass's status write (step 2, not built:
+S1's census lists TaskRefiner.runImpl as a writer by key at 31 task values, and updateJobStatus as a kept mover at
+activated and waiting, so neither its kept movers nor its writers by key tell them apart).
+
+*Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers; a
+stop "every writer of <subject> on a history row of the object ... (k of n not: K37)" or "a writer of <subject> in
+the map".
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
 arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 

@@ -3808,9 +3808,16 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                     N(subject="JediTaskSpec.walltime", owner="pandajedi/r.py::Refiner.extract", branches=[branch(150, "runtime(w)", pair("can", ["pandaserver/t.py::TaskModule.mark:9"]))]),
                     N(subject="JediTaskSpec.splitRule", owner="pandajedi/r.py::Refiner.extract", branches=[branch(160, "runtime(s)", pair("can", [upd]))]),
                     N(subject="JediTaskSpec.splitRule", owner="pandajedi/w.py::Dog.act", branches=[branch(20, "runtime(s)", pair("", why="not followed"))]),
+                    # two writers: one whose pass can write any row; one whose line 1187's pass records 'defined' only
+                    # and line 1188's 'ready' only
+                    N(subject="JediTaskSpec.workDiskUnit", owner="pandajedi/r.py::Refiner.extract", branches=[branch(182, "runtime(u)", pair("can", [upd]))]),
+                    N(subject="JediTaskSpec.workDiskUnit", owner="pandaserver/t.py::TaskModule.scout", branches=[
+                        branch(1187, "runtime(u)", pair("can", ["pandaserver/t.py::TaskModule.mark:9"])),
+                        branch(1188, "runtime(v)", pair("same", ["pandaserver/t.py::TaskModule.ready:5"]))]),
                 ],
                 reach_graph=[N(owner="pandaserver/t.py::TaskModule.updateTask_JEDI", history=[N(line=1570, values=["runtime(taskSpec.status)"])]),
-                             N(owner="pandaserver/t.py::TaskModule.mark", history=[N(line=9, values=["defined"])])],
+                             N(owner="pandaserver/t.py::TaskModule.mark", history=[N(line=9, values=["defined"])]),
+                             N(owner="pandaserver/t.py::TaskModule.ready", history=[N(line=5, values=["ready"])])],
             )]
             r = object.__new__(rerun.Rerun)
             r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "H2", {}, []
@@ -3830,9 +3837,19 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
             for name, (subject, value, readings) in asks.items():
                 try:
                     tries = r._attribute_tries(subject, subject.split(".")[1], value, readings)
-                    got[name] = [[s["status"] if s else None, a.window, a.machine] for s, a in tries]
+                    got[name] = [[s["status"] if s else None, a.window, a.machine] for s, a, _ in tries]
                 except rerun.Stop as e:
                     got[name] = e.args[0]
+            # each row with the writers that can write it, a reading cut to those lines where it has more
+            Reading = __import__("bamboo.codemap.models", fromlist=["Reading"]).Reading
+            two = [reading("pandajedi/r.py::extract", 182), Reading(owner="pandaserver/t.py::scout", lines=[1187, 1188])]
+            tries = r._attribute_tries("JediTaskSpec.workDiskUnit", "workDiskUnit", "MB", two)
+            got["two writers"] = [[s["status"], [[x.owner.split("::")[-1], x.lines] for x in own]] for s, _, own in tries]
+            got["said"] = [x for x in r.lines if "row(s)" in x][-3:]
+            # an arm whose pass writes history rows at two calls is one of a row's writers once
+            AT = rerun.AT
+            twice = AT.Arm("pandajedi/r.py::extract", 182, "runtime(u)", (N(writes=[upd]), N(writes=[upd])), "")
+            got["once"] = [len(arms) for _, arms in AT.row_writers([twice], states, {upd: ["runtime(taskSpec.status)"]})]
             print(json.dumps(got))
             """,
         )
@@ -3849,6 +3866,11 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
     assert got["one not placed"] == ("H2: every writer of JediTaskSpec.splitRule on a history row of the object, to say when it took 'x' "
                                      "(1 of 2 not: KNOWN_ISSUES.md K37)")
     assert got["no writer"] == "H2: a writer of JediTaskSpec.transUses in the map, to say when it took 'Atlas'"
+    # a row is asked of the writers that can write it alone (to-querier-61, step 1), a reading cut to its lines that can
+    assert got["two writers"] == [["done", [["extract", [182]]]], ["ready", [["extract", [182]], ["scout", [1188]]]],
+                                  ["defined", [["extract", [182]], ["scout", [1187]]]]]
+    assert got["said"] == ["  extract:182: 3 row(s)", "  scout:1187: 1 row(s)", "  scout:1188: 1 row(s)"]
+    assert got["once"] == [1, 1, 1]
 
 
 def test_h2_stops_on_no_log_for_its_writers_and_not_on_no_run_in_logs_it_never_asked(tmp_path):
@@ -3882,6 +3904,50 @@ def test_h2_stops_on_no_log_for_its_writers_and_not_on_no_run_in_logs_it_never_a
     assert got["none"] == ("H2: a log to look for a run of a writer of JediTaskSpec.superStatus in (setSuperStatus_JEDI: the map "
                            "names none; KNOWN_ISSUES.md K25)")
     assert got["no writer"] == "H2: a writer of JediTaskSpec.superStatus in the map"
+
+
+def test_h2_asks_and_reads_each_row_of_an_attribute_on_the_logs_of_the_writers_that_can_write_it(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+
+            reading = lambda owner, log: N(file=owner.partition("::")[0], owner=owner, lines=[1], log_files=[log])
+            a, b = reading("p/a.py::refine", "a.log"), reading("p/b.py::scout", "b.log")
+            row = lambda status: {"status": status, "time": "t"}
+
+            def h2(tries):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result, r.data = [], [], "", {}, [], {}, {}
+                r._writers = lambda subject, value, key: [a, b]
+                r._attribute_tries = lambda subject, attr, value, readings: tries
+                r._h2_candidates = lambda subject, readings: [N(log_files=x.log_files) for x in readings]
+                seen = {"asked": [], "read": None}
+                r._ask = lambda key, names, asking: (None, [f"{asking.why} {n}" for n in names], None)
+                r._stop_unanswered = lambda asks: seen["asked"].extend(asks)
+                r._scan = lambda *args: "scanned"
+                def wrote_at(subject, attr, value, key, readings, state, asking, last):
+                    seen["read"] = [x.owner for x in readings]
+                    return N(chosen=N(candidate=N(owner="x"), line=0))
+                r._wrote_at = wrote_at
+                r._which_wrote("JediTaskSpec.workDiskUnit", "MB", "1")
+                return seen
+
+            print(json.dumps({
+                "rows": h2([(row("running"), N(why="running"), [a]), (row("defined"), N(why="defined"), [a, b])]),
+                "one row": h2([(row("defined"), N(why="defined"), [b])]),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # every row's asks in one round, each of the logs of the writers that can write it
+    assert got["rows"]["asked"] == ["running a.log", "defined a.log", "defined b.log"]
+    # a single window is read on its own writers
+    assert got["one row"]["read"] == ["p/b.py::scout"]
 
 
 def test_a_writer_that_prints_nothing_is_read_at_its_history_pairs_call_and_its_own_condition_is_left_open(tmp_path):
@@ -3954,15 +4020,17 @@ def test_h2_reads_the_rows_newest_first_keeping_those_that_may_have_and_names_th
 
             P = rerun.Possible
             rows = [{"status": s, "time": t} for s, t in (("running", "11:38"), ("scouting", "10:06"), ("ready", "10:05"), ("defined", "04:10"))]
-            tries = [(s, N(why=f"the statuslog's {s['status']!r}")) for s in rows]
+            tries = [(s, N(why=f"the statuslog's {s['status']!r}"), None) for s in rows]
             answer = N(question="the run")
 
-            def scan(found):
+            seen = []
+
+            def scan(found, tries=tries):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result, r.question = [], [], "H2", {}, [], {}, None
-                r._row_at = lambda subject, attr, value, key, readings, state, asking: found(state)
+                r._row_at = lambda subject, attr, value, key, readings, state, asking: (seen.append([state["status"], readings]), found(state))[1]
                 try:
-                    got = r._scan("JediTaskSpec.cloud", "cloud", "WORLD", "1", [], tries)
+                    got = r._scan("JediTaskSpec.cloud", "cloud", "WORLD", "1", ["every writer"], tries)
                     return ["answer", got is answer, r.question]
                 except rerun.Stop as e:
                     return [e.code, e.args[0], r.result.get("possibilities")]
@@ -3978,11 +4046,14 @@ def test_h2_reads_the_rows_newest_first_keeping_those_that_may_have_and_names_th
                     "defined": [P("o.py::old:1", rows[3], True, [], answer)],
                 })),
                 "none": scan(table({})),
+                # a try naming the writers that can write its row is read on them alone
+                "own": (seen.clear(), scan(table({}), [(rows[0], N(why="r"), ["its writer"]), (rows[1], N(why="s"), None)]), seen)[2],
             }))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
+    assert got["own"] == [["running", ["its writer"]], ["scouting", ["every writer"]]]
     assert got["the newest shows a printing writer"] == ["answer", True, "the run"]
     # the newer that may have stays; the scan ends at the row shown; the older is not read
     code, text, possibilities = got["one that may have, then one shown"]

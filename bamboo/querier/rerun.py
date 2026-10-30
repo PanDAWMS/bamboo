@@ -1960,7 +1960,7 @@ class Rerun:
             found = self.need(f"a statuslog time for {value}: {asking.why}", asking.window)
             if isinstance(found, str):  # a time from --hand
                 asking = W.Asking((found, found), None, f"the time handed for {value}, on every machine")
-            tries = [(state, asking)]
+            tries = [(state, asking, None)]
         elif state is None and PT.history(subject) is None:
             # an attribute no history records or holds: its writers' arms say when it took the value (K37)
             tries = self._attribute_tries(subject, attr, value, readings)
@@ -1970,16 +1970,18 @@ class Rerun:
                 state = self.need(f"a statuslog time for {value}", next((s for s in states if s["status"] == value), None))
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
-            tries = [(state, W.at_transition(state))]
+            tries = [(state, W.at_transition(state), None)]
         self._stand_ins: dict[tuple[str, int], list[StandIn]] = {}
         names = self._writer_logs(subject, readings, self._h2_candidates(subject, readings) if readings else [])
         if len(tries) > 1:
-            # every row's asks in one round, for the recording step to answer together; the rows are then read
-            # newest first, and the first whose pass a writer is shown to write in ends the scan
-            self._stop_unanswered([u for _, asking in tries for u in self._ask(key, names, asking)[1]])
+            # every row's asks in one round, for the recording step to answer together, each of the logs of the
+            # writers that can write it; the rows are then read newest first, and the first whose pass a writer is
+            # shown to write in ends the scan
+            self._stop_unanswered([u for _, asking, own in tries for u in self._ask(
+                key, names if own is None else self._writer_logs(subject, own, self._h2_candidates(subject, own)), asking)[1]])
             return self._scan(subject, attr, value, key, readings, tries)
-        state, asking = tries[0]
-        wrote = self._wrote_at(subject, attr, value, key, readings, state, asking, True)
+        state, asking, own = tries[0]
+        wrote = self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking, True)
         if (wrote.chosen.candidate.owner, wrote.chosen.line) in self._stand_ins:
             self._one_of(subject, value, self._possibles(wrote.chosen, state, wrote.env), 1)
         return wrote
@@ -2038,11 +2040,11 @@ class Rerun:
         """H2 over the statuslog rows the writers' passes can write, newest first (attr-time-shape.md 5): a row whose pass
         a writer is shown to write in ends the scan; one shown to have no writer's pass goes; one that may have stays.
         The answer is a writer that prints shown to write, with nothing newer that may have; else the arms left are
-        named (:meth:`_one_of`)."""
+        named (:meth:`_one_of`).  A row is read on the writers that can write it, where the try names them."""
         left: list[Possible] = []
-        for n, (state, asking) in enumerate(tries, 1):
+        for n, (state, asking, own) in enumerate(tries, 1):
             self.say(f"-- row {n} of {len(tries)}: {asking.why}")
-            found = self._row_at(subject, attr, value, key, readings, state, asking)
+            found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking)
             left += found
             if any(p.wrote for p in found):
                 break
@@ -2133,9 +2135,10 @@ class Rerun:
                        f"KNOWN_ISSUES.md K25)")
         return names
 
-    def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking]]:
+    def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking, list | None]]:
         """H2's windows for an attribute no history records (``attr_time``, KNOWN_ISSUES.md K37): the value itself where
-        every writer writes the time it runs, else the statuslog rows the writers' passes can write, newest first."""
+        every writer writes the time it runs, else the statuslog rows the writers' passes can write, newest first, each
+        with the readings of the writers that can write it (``attr_time.row_writers``), whose logs alone it is asked of."""
         fragment = mapdump.fragment()
         found = AT.arms(fragment, subject, readings)
         self.need(f"a writer of {subject} in the map, to say when it took {value!r}", found)
@@ -2145,7 +2148,7 @@ class Rerun:
             if isinstance(got, str):  # a time from --hand
                 asking = W.Asking((got, got), None, f"the time handed for {value}, on every machine")
             self.say(f"{len(found)} writer line(s), each writing the time it runs: {asking.why}")
-            return [(None, asking)]
+            return [(None, asking, None)]
         for a in found:
             self.say(f"  {a.owner.split('::')[-1]}:{a.line} " + (f"is on no history row of the object: {a.unplaced}" if a.unplaced else
                      "writes in a pass that writes the object's history row (" + ", ".join(sorted({f"{p.caller.split('::')[-1]}:{p.call} "
@@ -2154,12 +2157,16 @@ class Rerun:
         self.need(f"every writer of {subject} on a history row of the object, to say when it took {value!r} "
                   f"({len(unplaced)} of {len(found)} not: KNOWN_ISSUES.md K37)", not unplaced)
         states = self.data["statuslog"]["states"]
-        rows = AT.candidate_rows(found, states, AT.recorded_values(fragment))
-        self.say(f"the writers' passes can write {len(rows)} of the {len(states)} statuslog row(s): asked newest first")
-        got = self.need(f"a statuslog row the writers of {subject} can write", rows)
+        rows = AT.row_writers(found, states, AT.recorded_values(fragment))
+        self.say(f"the writers' passes can write {len(rows)} of the {len(states)} statuslog row(s): asked newest first, "
+                 "each of the logs of the writers that can write it")
+        if len(found) > 1:
+            for a in found:
+                self.say(f"  {a.owner.split('::')[-1]}:{a.line}: {sum(a in arms for _, arms in rows)} row(s)")
+        got = self.need(f"a statuslog row the writers of {subject} can write", [s for s, _ in rows])
         if isinstance(got, str):  # a time from --hand
-            return [({"status": value, "time": got}, W.Asking((got, got), None, f"the time handed for {value}, on every machine"))]
-        return [(s, W.at_transition(s)) for s in rows]
+            return [({"status": value, "time": got}, W.Asking((got, got), None, f"the time handed for {value}, on every machine"), None)]
+        return [(s, W.at_transition(s), AT.readings_of(readings, arms)) for s, arms in rows]
 
     def _wrote_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict | None,
                   asking: W.Asking, last: bool) -> Wrote | None:
