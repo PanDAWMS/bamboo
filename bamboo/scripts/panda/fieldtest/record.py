@@ -2,6 +2,7 @@
 
     python -m bamboo.scripts.panda.fieldtest.record --asks <asks.jsonl> --records <dir>
     python -m bamboo.scripts.panda.fieldtest.record --cases <file> --shared <dir>
+    python -m bamboo.scripts.panda.fieldtest.record --again (--records <dir> | --cases <file> --shared <dir>)
 
 Run it where PanDA's credentials load: the ``.env`` holding the OIDC token is
 read only from /Users/tmaeno/bamboo or below.
@@ -71,9 +72,37 @@ and only the other strings are asked (a round asked 16 rotated files again
 whole for their new strings, with the 2-17 strings each one's earlier answers
 held, 2026-10-30).
 
+**A cut string.**  A string cut alone is read from the file's start to the
+second before its last record's: the cut can fall inside that second.  Where
+an ask's window, widened by :data:`CONTINUE_SLACK` on each side, reaches past
+that in a rotated file, the string is asked again in the API's pattern mode, a
+regular expression for a line that starts with a stamp inside the stretch
+still wanted and holds the string: one grep per machine and file for all such
+strings.  An answer cut again is asked again from its last record's second on,
+until a page reads no further (one second holding more than 1 MB).  Such a
+grep reads only the lines that start with a stamp: a string inside a record's
+later lines (a traceback's) is not found there.  A string an earlier round
+read in part is not asked again with the strings: its records and what it
+read are taken from that round, and only the rest of its stretch is asked.  A
+cut string of the current file is not asked again; a later round reads the
+file once it has rotated.  (rescueUnLockedTasksWithPicked_JEDI < vo=atlas
+label=user > was cut at 10-28 11:00 in aipanda081's JediDBProxy-20261029.gz,
+and its run at 10-29 00:49:09 named task 53348259: one pattern grep of
+00:44-00:54 took 33 s for 337 records, 2026-10-30.)
+
 **A record.**  Each ask's record copies the ask and lists, for every machine
 it asks, every file whose span meets the window, read or not, with the records
-whose lines hold one of the ask's strings: not cut to the window.
+whose lines hold one of the ask's strings: not cut to the window.  A file one
+of whose ask's strings was cut also has ``searched``: the closed stretches of
+its ``covers`` in which every one of the ask's strings was read (a start not
+known stays null), and ``truncated`` says one was cut.  Without it the
+querier read a cut file up to its last record, which another string's records
+could carry past the cut string's (157 of pin m's 315 cut files, 2026-10-30).
+
+**Again.**  ``--again`` records again, as a new round, the asks of a case
+whose latest record holds a cut file without ``searched``: each new record has
+``replaces``, the round whose record of the ask the querier reads it instead
+of.
 
 **A deferred ask.**  The querier never asks again what a record answers, so a
 file a record says ``failed`` would stay unsearched though the failure passed
@@ -118,6 +147,18 @@ BEING_COMPRESSED = "Being compressed"
 #: the error of a grep the API stopped at its subprocess timeout (240 s), and how many times one is asked again
 TIMED_OUT = "timeout"
 TIMEOUT_RETRIES = 2
+#: how far past each end of an ask's window a cut string is asked again: the querier's EDGE, within which a run near
+#: an end of what was searched may go on past it (its door asks again for that once)
+CONTINUE_SLACK = datetime.timedelta(minutes=10)
+#: most strings one pattern grep takes: its pattern grows with each (pin m's most in one file was 30, 2026-10-30)
+CONTINUE_MAX_STRINGS = 50
+SECOND = datetime.timedelta(seconds=1)
+#: the open ends of a stretch: a file's start not known, and no end
+LOW, HIGH = datetime.datetime.min, datetime.datetime.max
+#: the characters rg's regular expressions read as syntax ("<" is not one, and stays unescaped: a newer rg reads "\<"
+#: as a word's start; which rg the servers run is not known)
+RG_META = set("\\.+*?()|[]{}^$#&-~")
+STAMPED = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 #: the keys of an ask, as the querier writes them
 ASK_KEYS = {"name", "service", "machine", "strings", "window", "whole_records"}
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -140,6 +181,135 @@ def stamp(text: str) -> datetime.datetime:
 
 def text(t: datetime.datetime | None) -> str | None:
     return None if t is None else t.strftime(FMT)
+
+
+# ---------------------------------------------------------------------------
+# stretches of a file: closed, in seconds of its log clock
+# ---------------------------------------------------------------------------
+
+Stretches = list[tuple[datetime.datetime, datetime.datetime]]
+
+
+def after(t: datetime.datetime) -> datetime.datetime:
+    return t if t == HIGH else t + SECOND
+
+
+def before(t: datetime.datetime) -> datetime.datetime:
+    return t if t == LOW else t - SECOND
+
+
+def joined(stretches: Stretches) -> Stretches:
+    """*stretches* in order, those that overlap or touch made one."""
+    out: Stretches = []
+    for lo, hi in sorted(s for s in stretches if s[0] <= s[1]):
+        if out and lo <= after(out[-1][1]):
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def common(a: Stretches, b: Stretches) -> Stretches:
+    """The seconds in both."""
+    return joined(
+        [
+            (max(x0, y0), min(x1, y1))
+            for x0, x1 in a
+            for y0, y1 in b
+            if max(x0, y0) <= min(x1, y1)
+        ]
+    )
+
+
+def minus(a: Stretches, b: Stretches) -> Stretches:
+    """The seconds of *a* not in *b*."""
+    out = joined(a)
+    for y0, y1 in joined(b):
+        rest: Stretches = []
+        for x0, x1 in out:
+            if y1 < x0 or x1 < y0:
+                rest.append((x0, x1))
+                continue
+            if x0 < y0:
+                rest.append((x0, before(y0)))
+            if y1 < x1:
+                rest.append((after(y1), x1))
+        out = rest
+    return out
+
+
+def stretches_text(stretches: Stretches) -> list[list[str | None]]:
+    return [
+        [None if lo == LOW else text(lo), None if hi == HIGH else text(hi)]
+        for lo, hi in stretches
+    ]
+
+
+def stretches_of(rows: list[list[str | None]]) -> Stretches:
+    return [
+        (LOW if lo is None else stamp(lo), HIGH if hi is None else stamp(hi))
+        for lo, hi in rows
+    ]
+
+
+def last_stamp(records: list[dict]) -> datetime.datetime | None:
+    """The stamp of the last record in the file's order that starts with one."""
+    for r in sorted(records, key=lambda r: r["offset"], reverse=True):
+        m = STAMPED.match(r["lines"][0]) if r.get("lines") else None
+        if m:
+            return stamp(m.group())
+    return None
+
+
+def read_before(last: datetime.datetime | None) -> Stretches:
+    """What a grep cut after a record stamped *last* read: the file up to the second before, as the cut can fall
+    inside that second (none when the answer held no stamped record)."""
+    return [] if last is None else [(LOW, last - SECOND)]
+
+
+#: a stamp's beginnings that a block of time shares: its size, whether a second starts one, the beginning's length
+_BLOCKS = (
+    (datetime.timedelta(days=1), lambda t: t.hour == t.minute == t.second == 0, 11),
+    (datetime.timedelta(hours=1), lambda t: t.minute == t.second == 0, 14),
+    (
+        datetime.timedelta(minutes=10),
+        lambda t: t.minute % 10 == 0 and t.second == 0,
+        15,
+    ),
+    (datetime.timedelta(minutes=1), lambda t: t.second == 0, 17),
+    (datetime.timedelta(seconds=10), lambda t: t.second % 10 == 0, 18),
+    (SECOND, lambda t: True, 19),
+)
+
+
+def stamp_prefixes(lo: datetime.datetime, hi: datetime.datetime) -> list[str]:
+    """The beginnings of a ``YYYY-MM-DD HH:MM:SS`` stamp one of which a stamp starts with just when it lies in
+    *lo* .. *hi* (closed): the whole days, hours, ten minutes, minutes, ten seconds and seconds that fit, largest
+    first."""
+    out = []
+    t = lo
+    while t <= hi:
+        for size, starts, width in _BLOCKS:
+            if starts(t) and t + size - SECOND <= hi:
+                out.append(t.strftime(FMT)[:width])
+                t += size
+                break
+    return out
+
+
+def rg_escaped(s: str) -> str:
+    return "".join("\\" + c if c in RG_META else c for c in s)
+
+
+def continuation_pattern(wanted: dict[str, Stretches]) -> str:
+    """A line that starts with a stamp inside one of a string's stretches and holds that string, for each string."""
+    arms = []
+    for s, stretches in sorted(wanted.items()):
+        starts = "|".join(
+            rg_escaped(p) for lo, hi in stretches for p in stamp_prefixes(lo, hi)
+        )
+        arms.append(f"(?:{starts}).*{rg_escaped(s)}")
+    return "^(?:" + "|".join(arms) + ")"
 
 
 @dataclass
@@ -220,7 +390,15 @@ class Job:
     error: str | None = None
     records: dict[int, dict] = field(default_factory=dict)  # by offset: head records
     fragments: dict[int, dict] = field(default_factory=dict)  # by offset: head false
-    truncated: set[str] = field(default_factory=set)  # strings cut even alone
+    truncated: set[str] = field(
+        default_factory=set
+    )  # strings cut even alone, or read in part by an earlier round
+    read: dict[str, Stretches] = field(
+        default_factory=dict
+    )  # by string of truncated: what of the file was read for it
+    windows: dict[str, list[tuple[datetime.datetime, datetime.datetime]]] = field(
+        default_factory=dict
+    )  # by string: the windows of the asks reading the file with it
     failed: dict[str, str] = field(
         default_factory=dict
     )  # strings whose grep failed: why
@@ -300,6 +478,36 @@ def recorded_keys(directory: Path) -> tuple[int, set[str]]:
             if x.strip()
         }
     return last, keys
+
+
+def latest_records(directory: Path) -> dict[str, tuple[int, dict]]:
+    """By ask key, the round and the record the querier reads: the last, which replaces any before it."""
+    out: dict[str, tuple[int, dict]] = {}
+    for path in directory.glob("records-r*.jsonl"):
+        m = ROUND.match(path.name)
+        if not m:
+            continue
+        n = int(m[1])
+        for x in path.read_text().splitlines():
+            if x.strip():
+                record = json.loads(x)
+                key = key_of(record["ask"])
+                if key not in out or out[key][0] < n:
+                    out[key] = (n, record)
+    return out
+
+
+def cut_asks(directory: Path) -> list[dict]:
+    """The asks whose latest record holds a cut file written without ``searched``: what ``--again`` records."""
+    return [
+        {"ask": record["ask"]}
+        for _, (_, record) in sorted(latest_records(directory).items())
+        if any(
+            f.get("truncated") and "searched" not in f
+            for m in record["machines"].values()
+            for f in m.get("files", [])
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -495,15 +703,33 @@ class Earlier:
 
     def cover(
         self, machine: str, file: str, strings: set[str]
-    ) -> tuple[list[dict], set[str]]:
-        """The leaves that held one of *strings* uncut, and the strings none of them held."""
-        found = [
-            leaf
-            for leaf in self.leaves.get((machine, file), [])
-            if not leaf["truncated"] and strings & set(leaf["strings"])
-        ]
-        held = {s for leaf in found for s in leaf["strings"]}
-        return found, strings - held
+    ) -> tuple[list[dict], set[str], dict[str, Stretches]]:
+        """The leaves that held one of *strings*, the strings none of them held, and, by string some held only in
+        part, what of the file they read for it."""
+        found, whole, part = [], set(), {}
+        for leaf in self.leaves.get((machine, file), []):
+            mine = strings & set(leaf["strings"])
+            if not mine:
+                continue
+            found.append(leaf)
+            read = leaf_read(leaf)
+            if read is None:
+                whole |= mine
+            else:
+                for s in mine:
+                    part.setdefault(s, []).extend(read.get(s, []))
+        part = {s: joined(v) for s, v in part.items() if s not in whole}
+        return found, strings - whole - part.keys(), part
+
+
+def leaf_read(leaf: dict) -> dict[str, Stretches] | None:
+    """What of its file a kept leaf read for each of its strings, None where it read them whole.  A cut leaf kept
+    before leaves said so read from the file's start to the second before its last record's."""
+    if "read" in leaf:
+        return {s: stretches_of(rows) for s, rows in leaf["read"].items()}
+    if not leaf["truncated"]:
+        return None
+    return {s: read_before(last_stamp(leaf["records"])) for s in leaf["strings"]}
 
 
 class Grepper:
@@ -527,16 +753,16 @@ class Grepper:
             return
         reused, asking = [], job.strings
         if f.kind != "current":
-            reused, asking = self.earlier.cover(f.machine, f.name, job.strings)
+            reused, asking, part = self.earlier.cover(f.machine, f.name, job.strings)
             for leaf in reused:
                 self.take(job, leaf["records"], leaf["fragments"])
                 job.requests.append(
                     {"machine": f.machine, "file": f.name, "reused": leaf["answer"]}
                 )
-            if not asking:
-                job.status = "answered"
-                return
-        while True:
+            for s, read in part.items():
+                job.truncated.add(s)
+                job.read[s] = read
+        while asking:
             job.status = ""
             job.failed.clear()
             outcome = await self.grep(job, sorted(asking))
@@ -550,8 +776,107 @@ class Grepper:
             job.failed and job.status != "answered"
         ):  # every grep failed: the file is failed
             job.status, job.error = "failed", next(iter(job.failed.values()))
+        if f.kind == "rotated" and job.status == "answered":
+            await self.continue_cut(job)
         if f.kind == "current" and job.status == "answered":
             self.settle_tail(job)
+
+    async def continue_cut(self, job: Job) -> None:
+        """Ask again, by pattern, for what of their asks' windows the cut strings were not read for."""
+        f = job.file
+        span = [(f.start or LOW, f.end or HIGH)]
+        wanted = {}
+        for s in sorted(job.truncated - job.failed.keys()):
+            around = joined(
+                [
+                    (lo - CONTINUE_SLACK, hi + CONTINUE_SLACK)
+                    for lo, hi in job.windows.get(s, [])
+                ]
+            )
+            rest = minus(common(around, span), job.read.get(s, []))
+            if rest:
+                wanted[s] = rest
+        strings = sorted(wanted)
+        for i in range(0, len(strings), CONTINUE_MAX_STRINGS):
+            await self.page(
+                job, {s: wanted[s] for s in strings[i : i + CONTINUE_MAX_STRINGS]}
+            )
+
+    async def page(
+        self, job: Job, wanted: dict[str, Stretches], retries: int = TIMEOUT_RETRIES
+    ) -> None:
+        """One pattern grep for *wanted*; cut, the next from its last record's second on, while it gets further.
+        A grep that fails fails its strings, as a grep of the strings does."""
+        f = job.file
+        pattern = continuation_pattern(wanted)
+        asked = self.parts.now()
+        response = await responded(
+            self.parts.grep_log, f.name, pattern=pattern, machine=f.machine
+        )
+        answered = self.parts.now()
+        kept = self.answers.keep(
+            "continue",
+            f"{f.machine}-{f.name}",
+            {
+                "asked_at": text(asked),
+                "wanted": {s: stretches_text(v) for s, v in wanted.items()},
+                "pattern": pattern,
+                "response": response,
+            },
+        )
+        request = {
+            "machine": f.machine,
+            "file": f.name,
+            "strings": len(wanted),
+            "pattern": True,
+            "submitted_at": text(asked),
+            "answered_at": text(answered),
+            "answer": kept,
+        }
+        job.requests.append(request)
+        if not response.get("success"):
+            request["status"] = "refused"
+            why = response.get("message") or "the grep was refused"
+            job.failed.update(dict.fromkeys(wanted, why))
+            return
+        got = PC.per_machine(response, True).get(f.machine) or {"status": "no result"}
+        request["status"], request["error"] = got.get("status"), got.get("error")
+        if got.get("status") != "done":
+            if got.get("error") == TIMED_OUT and retries:
+                return await self.page(job, wanted, retries - 1)
+            job.failed.update(
+                dict.fromkeys(wanted, got.get("error") or got.get("status"))
+            )
+            return
+        records = (got.get("result") or {}).get("records") or []
+        heads = [r for r in records if r.get("head")]
+        fragments = [r for r in records if not r.get("head")]
+        self.take(job, heads, fragments)
+        cut = bool(got.get("truncated"))
+        read = (
+            {s: common(v, read_before(last_stamp(heads))) for s, v in wanted.items()}
+            if cut
+            else wanted
+        )
+        for s, v in read.items():
+            job.read[s] = joined(job.read.get(s, []) + v)
+        self.leaves.append(
+            {
+                "machine": f.machine,
+                "file": f.name,
+                "strings": sorted(wanted),
+                "pattern": pattern,
+                "truncated": cut,
+                "answer": kept,
+                "records": heads,
+                "fragments": fragments,
+                "read": {s: stretches_text(v) for s, v in read.items()},
+            }
+        )
+        if cut:
+            rest = {s: r for s, v in wanted.items() if (r := minus(v, job.read[s]))}
+            if rest != wanted:
+                await self.page(job, rest)
 
     async def compressed(self, job: Job) -> bool:
         """Wait for the file's day to be compressed; False when it is now unreadable (the job is settled)."""
@@ -688,8 +1013,13 @@ class Grepper:
         heads = [r for r in records if r.get("head")]
         fragments = [r for r in records if not r.get("head")]
         self.take(job, heads, fragments)
-        if got.get("truncated"):
+        cut = bool(got.get("truncated"))
+        if cut:
             job.truncated.update(strings)
+            for s in strings:
+                job.read[s] = joined(
+                    job.read.get(s, []) + read_before(last_stamp(heads))
+                )
         if f.kind == "current":
             window = result.get("window") or {}
             job.tails.append((window.get("first_stamp"), window.get("offset"), asked))
@@ -699,7 +1029,12 @@ class Grepper:
                     "machine": f.machine,
                     "file": f.name,
                     "strings": strings,
-                    "truncated": bool(got.get("truncated")),
+                    **(
+                        {"read": {s: stretches_text(job.read[s]) for s in strings}}
+                        if cut
+                        else {}
+                    ),
+                    "truncated": cut,
                     "answer": kept,
                     "records": heads,
                     "fragments": fragments,
@@ -772,6 +1107,7 @@ async def run_jobs(grepper: Grepper, jobs: list[Job]) -> None:
             job.records.clear()
             job.fragments.clear()
             job.truncated.clear()
+            job.read.clear()
             job.tails.clear()
             job.error = None
             await grepper.run(job)
@@ -824,6 +1160,18 @@ def file_entry(
     }
     if f.margin:
         entry["margin_s"] = int(MARGIN.total_seconds())
+    if job and (cut := strings & job.truncated):
+        searched: Stretches = []
+        if covers is not None:
+            searched = [
+                (
+                    stamp(covers[0]) if covers[0] else LOW,
+                    stamp(covers[1]) if covers[1] else HIGH,
+                )
+            ]
+            for s in sorted(cut):
+                searched = common(searched, job.read.get(s, []))
+        entry["searched"] = stretches_text(searched)
     if (
         entry["status"] == "answered"
         and f.kind == "current"
@@ -847,6 +1195,7 @@ async def record_rounds(
     parts: Parts,
     max_wait: datetime.timedelta,
     shared: Path | None = None,
+    again: bool = False,
 ) -> list[tuple[Path | None, list[dict], list[dict]]]:
     """Answer the asks of several cases in one round, each written as the next round in its own directory.
 
@@ -854,20 +1203,33 @@ async def record_rounds(
     asks, and each record keeps its own ask's strings, as the asks of one case
     share them.  The API answers are kept once, under *shared*, and each case's
     round directory says where (:data:`SHARED`); with one case and no *shared*
-    they sit in its own round directory.  By case, as :func:`record_round`
-    returns them."""
+    they sit in its own round directory.  With *again* every ask is one already
+    recorded, and its record says the round it ``replaces``.  By case, as
+    :func:`record_round` returns them."""
     if shared is None and len(cases) != 1:
         raise FieldTestError(
             "a round of several cases keeps its answers in a shared directory"
         )
-    rounds = []
+    rounds, replaced = [], []
     for case_asks, directory in cases:
         last, keys = recorded_keys(directory)
-        again = [a["ask"] for a in case_asks if key_of(a["ask"]) in keys]
         if again:
-            raise FieldTestError(
-                f"{len(again)} ask(s) already recorded in {directory}, e.g. {key_of(again[0])}"
+            latest = latest_records(directory)
+            missing = [a["ask"] for a in case_asks if key_of(a["ask"]) not in latest]
+            if missing:
+                raise FieldTestError(
+                    f"{len(missing)} ask(s) to record again not recorded in {directory}, e.g. {key_of(missing[0])}"
+                )
+            replaced.append(
+                {key_of(a["ask"]): latest[key_of(a["ask"])][0] for a in case_asks}
             )
+        else:
+            recorded = [a["ask"] for a in case_asks if key_of(a["ask"]) in keys]
+            if recorded:
+                raise FieldTestError(
+                    f"{len(recorded)} ask(s) already recorded in {directory}, e.g. {key_of(recorded[0])}"
+                )
+            replaced.append({})
         rounds.append(last + 1)
     started = parts.now()
     if shared is None:
@@ -877,6 +1239,11 @@ async def record_rounds(
     asks = [a for case_asks, _ in cases for a in case_asks]
     round_of = [
         n for (case_asks, _), n in zip(cases, rounds, strict=True) for _ in case_asks
+    ]
+    replaces_of = [
+        rep.get(key_of(a["ask"]))
+        for (case_asks, _), rep in zip(cases, replaced, strict=True)
+        for a in case_asks
     ]
     names = sorted({a["ask"]["name"] for a in asks})
     machines, failed, kept, listed_at = await list_machines(parts, names, answers)
@@ -951,6 +1318,8 @@ async def record_rounds(
                 job = jobs.setdefault((name, f.name), Job(f, set(), lo))
                 job.strings.update(ask["strings"])
                 job.since = min(job.since, lo)
+                for s in ask["strings"]:
+                    job.windows.setdefault(s, []).append((lo, hi))
         plans.append(plan)
 
     earlier = Earlier.read(*(directory for _, directory in cases))
@@ -958,7 +1327,9 @@ async def record_rounds(
     await run_jobs(grepper, list(jobs.values()))
 
     records = []
-    for entry, plan, n in zip(asks, plans, round_of, strict=True):
+    for entry, plan, n, replaces in zip(
+        asks, plans, round_of, replaces_of, strict=True
+    ):
         ask = entry["ask"]
         strings = set(ask["strings"])
         out_machines = {}
@@ -979,6 +1350,7 @@ async def record_rounds(
             {
                 "ask": ask,
                 "round": n,
+                **({"replaces": replaces} if replaces is not None else {}),
                 "machines": out_machines,
                 "list_logs": {
                     "asked_at": text(listed_at),
@@ -1075,8 +1447,21 @@ def main(argv: list[str] | None = None) -> int:
         default=7200.0,
         help="seconds to wait for a day file being compressed",
     )
+    ap.add_argument(
+        "--again",
+        action="store_true",
+        help="record again the asks whose latest record holds a cut file without 'searched'; "
+        "with --cases, a line names a records directory alone",
+    )
     a = ap.parse_args(argv)
-    if bool(a.cases) == bool(a.asks or a.records) or bool(a.cases) != bool(a.shared):
+    if a.again:
+        if (
+            bool(a.cases) == bool(a.records)
+            or a.asks
+            or bool(a.cases) != bool(a.shared)
+        ):
+            ap.error("with --again give --records, or --cases and --shared")
+    elif bool(a.cases) == bool(a.asks or a.records) or bool(a.cases) != bool(a.shared):
         ap.error("give --asks and --records, or --cases and --shared")
     if a.cases:
         pairs = [
@@ -1087,13 +1472,21 @@ def main(argv: list[str] | None = None) -> int:
         shared = Path(a.shared)
         shared.mkdir(parents=True, exist_ok=True)
     else:
-        pairs, shared = [[a.asks, a.records]], None
+        pairs, shared = [[a.records] if a.again else [a.asks, a.records]], None
     cases = []
-    for asks_file, records in pairs:
-        asks = read_asks(Path(asks_file))
-        if not asks:
-            print(f"{asks_file}: no asks")
-            continue
+    for pair in pairs:
+        if a.again:
+            (records,) = pair
+            asks = cut_asks(Path(records))
+            if not asks:
+                print(f"{records}: no cut file without 'searched'")
+                continue
+        else:
+            asks_file, records = pair
+            asks = read_asks(Path(asks_file))
+            if not asks:
+                print(f"{asks_file}: no asks")
+                continue
         directory = Path(records)
         directory.mkdir(parents=True, exist_ok=True)
         cases.append((asks, directory))
@@ -1102,7 +1495,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         out = asyncio.run(
             record_rounds(
-                cases, Parts(), datetime.timedelta(seconds=a.max_wait), shared
+                cases, Parts(), datetime.timedelta(seconds=a.max_wait), shared, a.again
             )
         )
     except NotSettled as e:
