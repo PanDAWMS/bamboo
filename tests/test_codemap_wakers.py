@@ -250,3 +250,38 @@ def test_unsettled_unequal_and_null_terms_ask_no_write() -> None:
     assert [s.wakers for s in fragment.read_sites if s.anchor.line_start == 1830] == [
         []
     ]
+
+
+def test_a_plain_conjunct_on_another_column_is_asked_though_no_tree_holds_it() -> None:
+    """restartTasksForContentsUpdate_JEDI's 1830 asks ``tabD.state=:dsState`` of every row: a plain conjunct, which
+    ``conditions`` leaves to ``selects`` -- so it is in no tree, and ``restricts`` holds it."""
+    owner = f"{MODULE}::f1830"
+    plain = ReadSiteNode(
+        name=ReadSiteNode.make_name("m", owner, 1830),
+        map_id="m",
+        derived_from="v",
+        owner=owner,
+        selects=["JediDatasetSpec.state=mutable", "JediTaskSpec.status=defined"],
+        restricts=["JediDatasetSpec.state=mutable", "JediTaskSpec.status=defined"],
+        anchor=Anchor(package="pkg", file=MODULE, line_start=1830),
+    )
+    fragment = MapFragment(
+        map_id="m",
+        derived_from="v",
+        read_sites=[plain],
+        junctions=[
+            _writer(
+                "set_state", "JediDatasetSpec.state", Branch(outcome="mutable", line=70)
+            ),
+            _writer(
+                "define", "JediTaskSpec.status", Branch(outcome="defined", line=80)
+            ),
+        ],
+    )
+    assert wakers.attach(fragment) == 1
+    assert sorted(
+        (w.pairs, w.term, w.owner.split("::")[1]) for w in fragment.read_sites[0].wakers
+    ) == [
+        (["JediDatasetSpec.state=mutable"], "JediTaskSpec.status=defined", "define"),
+        (["JediTaskSpec.status=defined"], "JediDatasetSpec.state=mutable", "set_state"),
+    ]

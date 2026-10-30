@@ -11,9 +11,14 @@ item 6 b of 10-25; tmaeno 「buildにいれる」 of 10-30).
 
 For each pair ``S=V`` the statement selects, a term of a conjunction admitting ``V`` -- one every term on ``S`` of
 which can hold ``V``, the condition read as an ``any`` of ``all``s -- that tests another subject ``T`` for equality
-with settled values is asked of a row at ``V``.  Each branch that can write one of those values to ``T`` is a
-:class:`~bamboo.codemap.models.Waker`: one whose outcome states it, or a run-time one whose own frames do not rule it
-out (:func:`~bamboo.codemap.models.branch_excludes`, the rule ``strategy._reaching`` reads an observed value by), and
+with settled values is asked of a row at ``V``; so is a plain conjunct on ``T``, which no tree holds --
+:attr:`~bamboo.codemap.models.ReadSiteNode.conditions` are the terms ``selects`` does not say -- but
+:attr:`~bamboo.codemap.models.ReadSiteNode.restricts` does: restartTasksForContentsUpdate_JEDI's 1830 asks
+``tabD.state=:dsState`` of every row, spelled as its pair ``JediDatasetSpec.state=mutable`` (the first build read
+the trees alone, and missed 88 such terms on 56 statements).  Each branch that can write one of those values to
+``T`` is a :class:`~bamboo.codemap.models.Waker`: one whose outcome states it, or a run-time one whose own frames
+do not rule it out (:func:`~bamboo.codemap.models.branch_excludes`, the rule ``strategy._reaching`` reads an
+observed value by), and
 none whose object no row is written from (:attr:`~bamboo.codemap.models.Branch.off_row`).  Its ``keyed_by`` are the
 statements whose rows fill a key of the write holding the branch -- the KeyFroms with a ``rows`` source, and the
 branches at their ``writes`` lines, as the KeyFrom's docstring reads them -- and ``keyed_at`` the pairs one of those
@@ -135,6 +140,20 @@ def _wakers(
                     ):
                         for one in {v.constant for v in term.values if v.constant}:
                             asked[(term.text, term.subject, one)].add(pair)
+    # A plain conjunct is in no tree -- conditions are what selects does not say -- but restricts holds it: every row
+    # the statement returns holds one of its values, whatever pair it is asked about.
+    tested = {term.subject for tree in trees for term in _terms(tree)}
+    restricted: dict[str, set[str]] = defaultdict(set)
+    for pair in site.restricts:
+        subject, _, value = pair.partition("=")
+        restricted[subject].add(value)
+    for other, held in restricted.items():
+        if other in tested:
+            continue
+        for pair in site.selects:
+            if pair.partition("=")[0] != other:
+                for one in held:
+                    asked[(f"{other}={one}", other, one)].add(pair)
 
     def at(pairs: set[str], by: list[str], owner: str) -> list[str]:
         """The pairs a statement other than this one keying the write selects, on the way its rows go to *owner*."""

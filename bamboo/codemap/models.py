@@ -1904,7 +1904,12 @@ class Waker(BaseModel):
             "Sorted."
         )
     )
-    term: str = Field(description="The term as the statement writes it: ``tabD.status IN (:dsStatus___in)``.")
+    term: str = Field(
+        description=(
+            "The term as the statement writes it: ``tabD.status IN (:dsStatus___in)``; a plain conjunct, which only "
+            ":attr:`ReadSiteNode.restricts` holds, as its pair: ``JediDatasetSpec.state=mutable``."
+        )
+    )
     subject: str = Field(description="The subject the term tests, and the branch writes.")
     value: str = Field(description="The value the term asks and the branch can write.")
     owner: str = Field(description="The junction's owner, ``module::function``; an insert's function, spelled so.")
