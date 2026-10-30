@@ -7,7 +7,7 @@ restartTasksForContentsUpdate_JEDI is what does, at 1844, for the tasks its 1830
 facts was in the map -- the term in :attr:`~bamboo.codemap.models.ReadSiteNode.condition_trees`, the write in a
 junction's branch, where the write's key comes from in a :class:`~bamboo.codemap.models.KeyFrom` -- but nothing joined
 them, so a reader asking why a row was not moved could name the mover and not what wakes it (the querier's ask, MV
-item 6 b of 10-25; tmaeno 「buildにいれる」 of 10-30).
+item 6 b of 10-25; tmaeno: "put it in the build", 10-30).
 
 For each pair ``S=V`` the statement selects, a term of a conjunction admitting ``V`` -- one every term on ``S`` of
 which can hold ``V``, the condition read as an ``any`` of ``all``s -- that tests another subject ``T`` for equality
