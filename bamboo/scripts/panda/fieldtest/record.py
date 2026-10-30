@@ -78,8 +78,13 @@ an ask's window, widened by :data:`CONTINUE_SLACK` on each side, reaches past
 that in a rotated file, the string is asked again in the API's pattern mode, a
 regular expression for a line that starts with a stamp inside the stretch
 still wanted and holds the string: one grep per machine and file for all such
-strings.  An answer cut again is asked again from its last record's second on,
-until a page reads no further (one second holding more than 1 MB).  Such a
+strings.  An answer cut again is asked again from its last record's second on.
+A page that reads no further (one second holding more than 1 MB of its
+strings) leaves the string most of its records hold there, the rest of its
+stretch not read, and the others are asked on without it: the asks of one file
+share its grep, and one ask's busy second would end the others' (16 pages of
+pin m's round 5 stopped so, and 69 asks of 20 cases kept holes that another
+ask's string made, 2026-10-30).  Such a
 grep reads only the lines that start with a stamp: a string inside a record's
 later lines (a traceback's) is not found there.  A string an earlier round
 read in part is not asked again with the strings: its records and what it
@@ -100,9 +105,12 @@ querier read a cut file up to its last record, which another string's records
 could carry past the cut string's (157 of pin m's 315 cut files, 2026-10-30).
 
 **Again.**  ``--again`` records again, as a new round, the asks of a case
-whose latest record holds a cut file without ``searched``: each new record has
+whose latest record holds a cut file not searched over the ask's window
+widened by :data:`CONTINUE_SLACK`: one written without ``searched``, or whose
+``searched`` leaves a second of its ``covers`` there out.  Each new record has
 ``replaces``, the round whose record of the ask the querier reads it instead
-of.
+of.  A record of an earlier round reads the strings it read in part from that
+round's answers, so only what it left is asked.
 
 **A deferred ask.**  The querier never asks again what a record answers, so a
 file a record says ``failed`` would stay unsearched though the failure passed
@@ -498,16 +506,31 @@ def latest_records(directory: Path) -> dict[str, tuple[int, dict]]:
 
 
 def cut_asks(directory: Path) -> list[dict]:
-    """The asks whose latest record holds a cut file written without ``searched``: what ``--again`` records."""
+    """The asks whose latest record holds a cut file not searched over their window: what ``--again`` records."""
     return [
         {"ask": record["ask"]}
         for _, (_, record) in sorted(latest_records(directory).items())
         if any(
-            f.get("truncated") and "searched" not in f
+            f.get("truncated") and not searched_over(f, record["ask"]["window"])
             for m in record["machines"].values()
             for f in m.get("files", [])
         )
     ]
+
+
+def searched_over(f: dict, window: list[str]) -> bool:
+    """Whether a cut file's ``searched`` holds every second of its ``covers`` in *window* widened by
+    :data:`CONTINUE_SLACK`.  A file whose covers are not known (a tail holding no stamp) is not read better by asking
+    again."""
+    if "searched" not in f:
+        return False
+    if not f.get("covers"):
+        return True
+    lo, hi = (stamp(w) for w in window)
+    wanted = common(
+        [(lo - CONTINUE_SLACK, hi + CONTINUE_SLACK)], stretches_of([f["covers"]])
+    )
+    return not minus(wanted, stretches_of(f["searched"]))
 
 
 # ---------------------------------------------------------------------------
@@ -805,8 +828,9 @@ class Grepper:
     async def page(
         self, job: Job, wanted: dict[str, Stretches], retries: int = TIMEOUT_RETRIES
     ) -> None:
-        """One pattern grep for *wanted*; cut, the next from its last record's second on, while it gets further.
-        A grep that fails fails its strings, as a grep of the strings does."""
+        """One pattern grep for *wanted*; cut, the next from its last record's second on, while it gets further,
+        and one that gets no further goes on without the string most of its records hold.  A grep that fails fails
+        its strings, as a grep of the strings does."""
         f = job.file
         pattern = continuation_pattern(wanted)
         asked = self.parts.now()
@@ -875,7 +899,16 @@ class Grepper:
         )
         if cut:
             rest = {s: r for s, v in wanted.items() if (r := minus(v, job.read[s]))}
-            if rest != wanted:
+            if rest == wanted:
+                # one second holds more than a page: the string filling it stays there, and the others go on
+                held = {
+                    s: n
+                    for s in wanted
+                    if (n := sum(1 for r in heads if holds_any(r, {s})))
+                }
+                if held:
+                    del rest[min(held, key=lambda s: (-held[s], s))]
+            if rest and rest != wanted:
                 await self.page(job, rest)
 
     async def compressed(self, job: Job) -> bool:
@@ -1450,7 +1483,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--again",
         action="store_true",
-        help="record again the asks whose latest record holds a cut file without 'searched'; "
+        help="record again the asks whose latest record holds a cut file not searched over their window; "
         "with --cases, a line names a records directory alone",
     )
     a = ap.parse_args(argv)
@@ -1479,7 +1512,7 @@ def main(argv: list[str] | None = None) -> int:
             (records,) = pair
             asks = cut_asks(Path(records))
             if not asks:
-                print(f"{records}: no cut file without 'searched'")
+                print(f"{records}: no cut file not searched over its window")
                 continue
         else:
             asks_file, records = pair
