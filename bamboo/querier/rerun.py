@@ -903,6 +903,79 @@ def paths_of(follow, writers: list, subject: str, observed: str) -> dict[str, li
     return found
 
 
+@dataclass(frozen=True)
+class Wake:
+    """A write a mover's rows wait on besides the mover (``wakers_of``): the statement giving the mover rows, its term on
+    another column, the value written there, the writing branch, and the functions keying that write that move the
+    row on from the value themselves (none: not a candidate)."""
+
+    mover: str
+    reader: str
+    term: str
+    writes: str
+    owner: str
+    line: int
+    candidate: tuple = ()
+
+
+def wakers_of(follow, writers: list, subject: str, observed: str) -> dict[str, list[Wake]]:
+    """Each mover's wakers at *observed*: of the map's ``wakers`` of each statement giving it rows (``paths_of``; ix's
+    6 b), those the map states (the branch's outcome is the value) and whose write is handed rows selected at the value
+    (``keyed_at``) -- restartTasksForContentsUpdate_JEDI's 1844 sets toupdate the datasets of the tasks its 1830 selects
+    at defined, which ContentsFeeder's 130 asks of a task at defined.  A write any pass may make, or one keyed by rows
+    of other values, is not said.  Where a function whose statement keys the write moves the subject on from the value
+    itself (an arm of its own, ``arms_of``), the waker is a candidate: that pass may take the row on before the mover
+    sees it (prepareTasksToBeFinished_JEDI's 4001 for JobGenerator's 1871 at task running, keyed by its own 3694).
+    None said is not "nothing wakes it": the map reads no command row and no Python test (KNOWN_ISSUES.md K39)."""
+    asked = f"{subject}={observed}"
+    sites = {(r.owner, r.anchor.line_start): r for r in getattr(mapdump.fragment(), "read_sites", None) or []}
+    by_name = {r.name: r for r in sites.values()}
+    found: dict[str, list[Wake]] = {}
+    for mover, statements in paths_of(follow, writers, subject, observed).items():
+        for rs in statements:
+            for w in getattr(sites.get((rs.owner, rs.line)), "wakers", None) or []:
+                if asked not in w.pairs or not w.stated or asked not in w.keyed_at:
+                    continue
+                keying = {by_name[n].owner for n in w.keyed_by if n in by_name and asked in by_name[n].selects}
+                moving = tuple(sorted(o for o in keying if arms_of(writers, o, subject, observed)))
+                wake = Wake(mover, f"{rs.owner.split('::')[-1]}@{rs.line}", w.term, f"{w.subject}={w.value}", w.owner,
+                            w.line, moving)
+                if wake not in found.setdefault(mover, []):
+                    found[mover].append(wake)
+    return found
+
+
+def wake_said(w: Wake) -> str:
+    """One waker as S1 says it under its mover."""
+    said = (f"its rows wait also on {w.owner.split('::')[-1]}@{w.line} writing {w.writes}, which {w.reader} asks "
+            f"({w.term!r}), for rows selected at the value")
+    if w.candidate:
+        said += (f" -- a candidate: {', '.join(o.split('::')[-1] for o in w.candidate)}, whose rows key it, moves the "
+                 "row on itself")
+    return said
+
+
+def woken_of(entries: list[dict], wakes: dict[str, list[Wake]]) -> dict[str, list[Wake]]:
+    """The movers S1 drops as reaching no write that the movers it keeps wait on (``wakers_of``), each with those
+    wakers: restartTasksForContentsUpdate_JEDI at task defined, for ContentsFeeder's 130.  What a dropped mover's own
+    rows wait on is not asked."""
+    staying = [e["owner"] for e in entries if e["verdict"] != "reaches-no-write"]
+    found: dict[str, list[Wake]] = {}
+    for e in entries:
+        woken = [w for m in staying for w in wakes.get(m, []) if w.owner == e["owner"]]
+        if e["verdict"] == "reaches-no-write" and woken:
+            found[e["owner"]] = woken
+    return found
+
+
+def woken_said(woken: list[Wake]) -> str:
+    """A mover dropped as one that reaches no write, said as the waker it is of the movers kept."""
+    writes = "; ".join(f"{w.writes} at {w.line}" for w in woken)
+    movers = sorted({f"{w.mover.split('::')[-1]} ({w.reader})" for w in woken})
+    return (f"not a mover, but it writes {writes} for rows selected at the value, which {', '.join(movers)} asks: "
+            "its waker (the map's wakers; KNOWN_ISSUES.md K39)")
+
+
 def refused_arms(writers: list, owner: str, subject: str, observed: str) -> list[str]:
     """*owner*'s writes of another value that ``arms_of`` drops because each requires the row to hold other values of
     the subject's column: ``line writes outcome only on a row holding column in [values]``."""
@@ -1887,7 +1960,7 @@ class Rerun:
             found = self.need(f"a statuslog time for {value}: {asking.why}", asking.window)
             if isinstance(found, str):  # a time from --hand
                 asking = W.Asking((found, found), None, f"the time handed for {value}, on every machine")
-            tries = [(state, asking)]
+            tries = [(state, asking, None)]
         elif state is None and PT.history(subject) is None:
             # an attribute no history records or holds: its writers' arms say when it took the value (K37)
             tries = self._attribute_tries(subject, attr, value, readings)
@@ -1897,16 +1970,18 @@ class Rerun:
                 state = self.need(f"a statuslog time for {value}", next((s for s in states if s["status"] == value), None))
                 if isinstance(state, str):  # a time from --hand
                     state = {"status": value, "time": state}
-            tries = [(state, W.at_transition(state))]
+            tries = [(state, W.at_transition(state), None)]
         self._stand_ins: dict[tuple[str, int], list[StandIn]] = {}
         names = self._writer_logs(subject, readings, self._h2_candidates(subject, readings) if readings else [])
         if len(tries) > 1:
-            # every row's asks in one round, for the recording step to answer together; the rows are then read
-            # newest first, and the first whose pass a writer is shown to write in ends the scan
-            self._stop_unanswered([u for _, asking in tries for u in self._ask(key, names, asking)[1]])
+            # every row's asks in one round, for the recording step to answer together, each of the logs of the
+            # writers that can write it; the rows are then read newest first, and the first whose pass a writer is
+            # shown to write in ends the scan
+            self._stop_unanswered([u for _, asking, own in tries for u in self._ask(
+                key, names if own is None else self._writer_logs(subject, own, self._h2_candidates(subject, own)), asking)[1]])
             return self._scan(subject, attr, value, key, readings, tries)
-        state, asking = tries[0]
-        wrote = self._wrote_at(subject, attr, value, key, readings, state, asking, True)
+        state, asking, own = tries[0]
+        wrote = self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking, True)
         if (wrote.chosen.candidate.owner, wrote.chosen.line) in self._stand_ins:
             self._one_of(subject, value, self._possibles(wrote.chosen, state, wrote.env), 1)
         return wrote
@@ -1965,11 +2040,11 @@ class Rerun:
         """H2 over the statuslog rows the writers' passes can write, newest first (attr-time-shape.md 5): a row whose pass
         a writer is shown to write in ends the scan; one shown to have no writer's pass goes; one that may have stays.
         The answer is a writer that prints shown to write, with nothing newer that may have; else the arms left are
-        named (:meth:`_one_of`)."""
+        named (:meth:`_one_of`).  A row is read on the writers that can write it, where the try names them."""
         left: list[Possible] = []
-        for n, (state, asking) in enumerate(tries, 1):
+        for n, (state, asking, own) in enumerate(tries, 1):
             self.say(f"-- row {n} of {len(tries)}: {asking.why}")
-            found = self._row_at(subject, attr, value, key, readings, state, asking)
+            found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking)
             left += found
             if any(p.wrote for p in found):
                 break
@@ -2060,9 +2135,10 @@ class Rerun:
                        f"KNOWN_ISSUES.md K25)")
         return names
 
-    def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking]]:
+    def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking, list | None]]:
         """H2's windows for an attribute no history records (``attr_time``, KNOWN_ISSUES.md K37): the value itself where
-        every writer writes the time it runs, else the statuslog rows the writers' passes can write, newest first."""
+        every writer writes the time it runs, else the statuslog rows the writers' passes can write, newest first, each
+        with the readings of the writers that can write it (``attr_time.row_writers``), whose logs alone it is asked of."""
         fragment = mapdump.fragment()
         found = AT.arms(fragment, subject, readings)
         self.need(f"a writer of {subject} in the map, to say when it took {value!r}", found)
@@ -2072,7 +2148,7 @@ class Rerun:
             if isinstance(got, str):  # a time from --hand
                 asking = W.Asking((got, got), None, f"the time handed for {value}, on every machine")
             self.say(f"{len(found)} writer line(s), each writing the time it runs: {asking.why}")
-            return [(None, asking)]
+            return [(None, asking, None)]
         for a in found:
             self.say(f"  {a.owner.split('::')[-1]}:{a.line} " + (f"is on no history row of the object: {a.unplaced}" if a.unplaced else
                      "writes in a pass that writes the object's history row (" + ", ".join(sorted({f"{p.caller.split('::')[-1]}:{p.call} "
@@ -2081,12 +2157,16 @@ class Rerun:
         self.need(f"every writer of {subject} on a history row of the object, to say when it took {value!r} "
                   f"({len(unplaced)} of {len(found)} not: KNOWN_ISSUES.md K37)", not unplaced)
         states = self.data["statuslog"]["states"]
-        rows = AT.candidate_rows(found, states, AT.recorded_values(fragment))
-        self.say(f"the writers' passes can write {len(rows)} of the {len(states)} statuslog row(s): asked newest first")
-        got = self.need(f"a statuslog row the writers of {subject} can write", rows)
+        rows = AT.row_writers(found, states, AT.recorded_values(fragment))
+        self.say(f"the writers' passes can write {len(rows)} of the {len(states)} statuslog row(s): asked newest first, "
+                 "each of the logs of the writers that can write it")
+        if len(found) > 1:
+            for a in found:
+                self.say(f"  {a.owner.split('::')[-1]}:{a.line}: {sum(a in arms for _, arms in rows)} row(s)")
+        got = self.need(f"a statuslog row the writers of {subject} can write", [s for s, _ in rows])
         if isinstance(got, str):  # a time from --hand
-            return [({"status": value, "time": got}, W.Asking((got, got), None, f"the time handed for {value}, on every machine"))]
-        return [(s, W.at_transition(s)) for s in rows]
+            return [({"status": value, "time": got}, W.Asking((got, got), None, f"the time handed for {value}, on every machine"), None)]
+        return [(s, W.at_transition(s), AT.readings_of(readings, arms)) for s, arms in rows]
 
     def _wrote_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict | None,
                   asking: W.Asking, last: bool) -> Wrote | None:
@@ -2714,6 +2794,7 @@ class Rerun:
         keyed = by_key_of(writers, movers, q.subject, q.observed)
         # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark
         owners = frozenset(o.split("::")[-1] for o in [*movers, *keyed])
+        wakes = wakers_of(follow, writers, q.subject, q.observed)
         self.say(f"selected by {follow.selected_by}; guarded by {[g.owner for g in follow.guarded_by]}")
         for owner, why in movers.items():
             self.say(f"  mover {owner}: {why}")
@@ -2776,6 +2857,10 @@ class Rerun:
                 entry["reasons"].append({"code": "K14", "text": f"no arm of its own, kept: {'; '.join(kept)}"})
                 if said:
                     self.say(f"  {func}: {said}")
+            for w in wakes.get(owner, []):
+                self.say(f"  {owner.split('::')[-1]}: {wake_said(w)}")
+                entry.setdefault("wakers", []).append({"waker": w.owner, "line": w.line, "writes": w.writes,
+                                                       "reader": w.reader, "term": w.term, "candidate": list(w.candidate)})
             if gaps.get(owner):
                 entry["reasons"].append({"code": "map-gap", "text": f"the map could not read all of it ({gap_said(gaps[owner])})"})
             if prints_nothing(owner, list(arms)):
@@ -2825,6 +2910,13 @@ class Rerun:
                     entry["verdict"] = "no-run-found"
                     entry["reasons"].append({"code": "K19", "text": said})
                 self.say(f"  {owner.split('::')[-1]}: {said}")
+        # a mover dropped as reaching no write may be what the movers kept wait on (the map's wakers, ix's 6 b)
+        woken = woken_of(entries, wakes)
+        for entry in entries:
+            if entry["owner"] in woken:
+                said = woken_said(woken[entry["owner"]])
+                self.say(f"  {entry['owner'].split('::')[-1]}: {said}")
+                entry["reasons"].append({"code": "K39", "text": said})
         self.result["movers"] = entries
         self._stop_unanswered(unanswered)
         # every mover that ran and left the value is part of the answer: each goes on alone (tmaeno, 2026-10-13)
