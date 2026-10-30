@@ -426,7 +426,7 @@ async def test_a_half_whose_grep_fails_defers_the_asks_of_its_strings_alone(tmp_
     _, records, deferred = await run_round(tmp_path, panda, asks)
     assert [c[3] for c in panda.calls if c[0] == "grep"] == [
         ("111", "222", "333", "444"),
-        ("111", "222"),
+        *[("111", "222")] * (1 + R.TIMEOUT_RETRIES),
         ("333", "444"),
     ]
     assert [d["ask"]["strings"] for d in deferred] == [["111"], ["222"]]
@@ -441,6 +441,44 @@ async def test_a_half_whose_grep_fails_defers_the_asks_of_its_strings_alone(tmp_
     assert f444["status"] == "answered" and [x["offset"] for x in f444["records"]] == [
         4
     ]
+
+
+async def test_a_grep_stopped_at_the_timeout_is_asked_again_and_its_answer_taken(
+    tmp_path,
+):
+    day = "panda-adder.log-20261014.gz"
+    replies = [
+        {"status": "failed", "error": "timeout"},
+        found(rec(1, "2026-10-14 06:00:00,1 a 7339")),
+    ]
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {(SERVER[0], day): replies}
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])])
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [("7339",), ("7339",)]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["status"] == "answered" and [x["offset"] for x in f["records"]] == [1]
+    assert [q["error"] for q in r["requests"]] == ["timeout", None]
+
+
+@pytest.mark.parametrize(
+    "error, greps", [("timeout", 1 + R.TIMEOUT_RETRIES), ("killed", 1)]
+)
+async def test_a_grep_is_asked_again_only_after_a_timeout_and_only_so_often(
+    tmp_path, error, greps
+):
+    day = "panda-adder.log-20261014.gz"
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], day): [{"status": "failed", "error": error}]},
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, records, (d,) = await run_round(
+        tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])]
+    )
+    assert len([c for c in panda.calls if c[0] == "grep"]) == greps
+    assert records == [] and d["why"] == [f"{SERVER[0]} {day}: failed: {error}"]
 
 
 async def test_a_day_being_compressed_is_waited_for_and_read_when_done(tmp_path):

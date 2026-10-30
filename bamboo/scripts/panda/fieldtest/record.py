@@ -59,7 +59,11 @@ strings of every ask reading it.  An answer cut at 1 MB is asked again in
 halves, down to a string alone, whose files are then said ``truncated``.  A
 grep that fails fails its own strings alone: the other greps are still asked
 (a two-string half timed out after its file's 19 strings were cut,
-2026-10-30).  A rotated file still being compressed (its plain name listed, or a grep answered
+2026-10-30).  A grep stopped at the API's timeout is asked again at once, up
+to :data:`TIMEOUT_RETRIES` times: what keeps a whole read of a ``.gz`` past
+240 s is the disk, and the part the stopped matcher read stays in the page
+cache, so the next one goes further (aipanda093's DBProxy-20261029.gz, 1.4 GB
+with 521 MB cached, took 312 s, 91 s of it CPU, 2026-10-30).  A rotated file still being compressed (its plain name listed, or a grep answered
 :data:`BEING_COMPRESSED`) is waited for; past the day after its date it is
 ``unreadable``.  A rotated ``.gz`` does not change, so a string an earlier
 round's answer for the same machine and file held uncut is read from it again,
@@ -111,6 +115,9 @@ TAIL_FACTOR = 1.5
 COMPRESS_POLL = datetime.timedelta(minutes=10)
 #: a grep of a rotated file still being compressed fails with this at the end of its error (panda-server bf5c9fe2)
 BEING_COMPRESSED = "Being compressed"
+#: the error of a grep the API stopped at its subprocess timeout (240 s), and how many times one is asked again
+TIMED_OUT = "timeout"
+TIMEOUT_RETRIES = 2
 #: the keys of an ask, as the querier writes them
 ASK_KEYS = {"name", "service", "machine", "strings", "window", "whole_records"}
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -614,7 +621,13 @@ class Grepper:
             outcomes.append(outcome)
         return "failed" if "failed" in outcomes else "answered"
 
-    async def leaf(self, job: Job, strings: list[str], tail: int | None) -> str:
+    async def leaf(
+        self,
+        job: Job,
+        strings: list[str],
+        tail: int | None,
+        retries: int = TIMEOUT_RETRIES,
+    ) -> str:
         f = job.file
         asked = self.parts.now()
         response = await responded(
@@ -653,6 +666,10 @@ class Grepper:
         ):
             return "compressing"
         if got.get("status") != "done":
+            if got.get("error") == TIMED_OUT and retries:
+                # the matcher left what it read in the page cache: asked again, it reads that from memory and
+                # goes on from where the disk stopped it
+                return await self.leaf(job, strings, tail, retries - 1)
             job.failed.update(
                 dict.fromkeys(strings, got.get("error") or got.get("status"))
             )
