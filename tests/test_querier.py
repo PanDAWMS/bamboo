@@ -4233,3 +4233,36 @@ def test_a_reader_asks_the_questions_it_reads_and_refuses_steps_that_cannot_ask(
     assert got["steps"] == [["a", 1], ["x", 2], ["m()", 6]]
     assert got["summary"] == ["walk from f:1: asked 3 question(s), 3 step(s); cut: x in f: the depth budget ran out"]
     assert got["refused"] == ["the steps were not asked"] * 2
+
+
+def test_a_rows_prefix_is_read_without_its_leading_blanks_which_the_records_cut_takes_with_the_level(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rows
+
+            def by(prefixes, token, text):
+                row = object.__new__(rows.Row)
+                row.map_prefixes = prefixes
+                return row.written_by(N(token=token, text=text))
+
+            # MsgWrapper(self.logger, f" < jediTaskID={jediTaskID} >"): "INFO      < jediTaskID=53099750 > start for retry"
+            mark = ["\\\\ <\\\\ jediTaskID=.*?\\\\ >\\\\ "]
+            print(json.dumps({
+                "the mark's line": by(mark, "< jediTaskID=53099750 >", "start for retry"),
+                "another mark": by(mark, "<run>", "start"),
+                "inside an outer mark": by(mark, "<run>", " < jediTaskID=5 > start"),
+                "a proxy's tag": by(["archiveJob\\\\ <\\\\ .*?\\\\ >\\\\ "], "archiveJob < PandaID=1 >", "start"),
+                "another method's tag": by(["archiveJob\\\\ <\\\\ .*?\\\\ >\\\\ "], "getJobs < x >", "start"),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the record's token holds no leading blank (records.PREFIX reads it with the level's padding): the mark's line is
+    # the row's, whose prefix keeps the blank as the logger writes it
+    assert got == {"the mark's line": True, "another mark": False, "inside an outer mark": True, "a proxy's tag": True,
+                   "another method's tag": False}

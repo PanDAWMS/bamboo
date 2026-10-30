@@ -774,7 +774,10 @@ class Row:
         none; else the prefix stands where the line starts (``archiveJob < ... >`` is the token and the head of
         the message) or right after the token (``LogWrapper(self.logger, "<run>")``: the outer wrapper's mark
         comes first).  Checked apart from the patterns: a map pattern need not start where the message does
-        (``sqlDelE + comment`` is drawn from `` /* DBProxy...``)."""
+        (``sqlDelE + comment`` is drawn from `` /* DBProxy...``).  A prefix's leading blanks are not asked for: the
+        record's cut (``records.PREFIX``) reads the level with the blanks after it, a mark's own among them
+        (``MsgWrapper(self.logger, f" < jediTaskID={jediTaskID} >")``), while the map's prefix is what the logger
+        writes (tmaeno, 10-30 15:4x)."""
         if not (PREFIX and self.map_prefixes):
             return True
         regex = _prefix_regex(tuple(self.map_prefixes))
@@ -997,7 +1000,9 @@ def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[in
 
 @functools.cache
 def _prefix_regex(prefixes: tuple[str, ...]) -> re.Pattern[str]:
-    return re.compile(prefixes[0] if len(prefixes) == 1 else "(?:" + "|".join(prefixes) + ")", re.S)
+    # the leading blanks optional, not dropped: right after an outer mark's token a mark's own blank stays in the text
+    bare = [re.sub(r"^(?:\\?\s)+", "", p) for p in prefixes]
+    return re.compile(r"\s*" + (bare[0] if len(bare) == 1 else "(?:" + "|".join(bare) + ")"), re.S)
 
 
 def _prefixes(mapped: list) -> list[str]:
