@@ -3359,15 +3359,22 @@ def run(self, jediTaskID, log):
 
 def test_a_logger_built_by_a_helper_says_its_prefix_through_the_helper(tmp_path):
     """``start`` is printed by hundreds of proxy methods; the prefix
-    ``create_tagged_logger`` builds from ``comment`` is what names this one."""
+    ``create_tagged_logger`` builds from ``comment`` is what names this one.
+    The logger it wraps is the one ``__init__`` is handed, declared a plain
+    ``logging.Logger``: it marks nothing, however the proxy is made."""
     roots = _tree(
         tmp_path,
         **{
             "base.py": '''\
+import logging
+
 from pandacommon.pandalogger.LogWrapper import LogWrapper
 
 
 class Base:
+    def __init__(self, log_stream: logging.Logger):
+        self._log_stream = log_stream
+
     def create_tagged_logger(self, comment, tag=None):
         """Create logger from function comment and tag."""
         method_name = comment.split(" ")[-2].split(".")[-1]
@@ -3401,6 +3408,8 @@ class Proxy(Base):
 
 
 def test_a_logger_built_here_says_its_prefix(tmp_path):
+    """The wrapper's own mark, after what the logger it wraps writes: here ``self.logger``, which nothing here
+    makes, so that part is one hole spelled as the wrapped logger."""
     roots = _tree(
         tmp_path,
         m='''\
@@ -3413,7 +3422,55 @@ def f(self, job):
 
     (row,) = _printed(roots, file="m", owner="f", lines=[4])
 
-    assert row.prefix == r"<setup_destination>\ "
+    assert row.prefix == r".*?<setup_destination>\ "
+    assert [(hole.expression, hole.prints) for hole in row.prefix_holes] == [("self.logger", "token")]
+
+
+def test_a_wrapper_over_a_wrapper_carries_both_marks_the_inner_first(tmp_path):
+    """``LogWrapper(log, prefix)`` hands ``log`` the line ``prefix + " " + message``: over another wrapper, the
+    inner mark comes first.  A logger declared a plain ``logging.Logger`` marks nothing, whoever hands it; one the
+    walk does not close is one hole; one made with a time stamp is a hole too."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def nested(job):
+    outer = LogWrapper(_logger, "<task=1>")
+    tmp_log = LogWrapper(outer, "<sub>")
+    tmp_log.debug("nested")
+    job.status = "done"
+
+
+def declared(log: logging.Logger, job):
+    tmp_log = LogWrapper(log, "<declared>")
+    tmp_log.debug("declared")
+    job.status = "done"
+
+
+def stamped(job):
+    stamp = LogWrapper(_logger, None)
+    tmp_log = LogWrapper(stamp, "<run>")
+    tmp_log.debug("stamped")
+    job.status = "done"
+''',
+    )
+
+    said = {
+        owner: [
+            (row.prefix, [hole.expression for hole in row.prefix_holes])
+            for row in _printed(roots, file="m", owner=owner, lines=lines)
+        ]
+        for owner, lines in (("nested", [10]), ("declared", [16]), ("stamped", [22]))
+    }
+    assert said == {
+        "nested": [(r"<task=1>\ <sub>\ ", [])],
+        "declared": [(r"<declared>\ ", [])],
+        "stamped": [(r".*?<run>\ ", ["stamp"])],
+    }
 
 
 def test_an_empty_prefix_says_why_where_the_logger_may_write_one(tmp_path):

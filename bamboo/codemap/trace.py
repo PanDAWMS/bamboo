@@ -1075,6 +1075,8 @@ PREFIX_KEYWORD = "the logger {logger}'s prefix is given by keyword, which is not
 PREFIX_MARKS = "the logger {logger} is made with different marks on its paths"
 #: How many calls deep a maker's parameters are folded through the callers that came into it (:meth:`Trace._env_at`).
 _RETURN_DEPTH = 3
+#: How many wrappers deep a wrapper's own logger is followed for its mark (:meth:`Trace._wrapped_mark`).
+_WRAP_DEPTH = 3
 #: The logger maker whose prefix this reading spells: ``LogWrapper(logger, prefix)`` writes ``prefix + " " + message``,
 #: its mark where :data:`callfacts.LOGGER_MAKERS` says.
 _WRAPPER = "LogWrapper"
@@ -2932,20 +2934,52 @@ class _Walk:
             self._loggers = logfile.LoggerFiles(self.calls, {}, {})
         return self._loggers
 
-    def _mark_of(self, maker) -> tuple[Optional[list], str]:
+    def _mark_of(self, maker, depth: int = 0) -> tuple[Optional[list], str]:
         """The folded mark *maker* (:class:`logfile.Maker`) writes before each line, ``[]`` for none; or ``None`` and
         why, a ``PREFIX_*`` text with ``{logger}`` left for the caller.
 
         Folded where the maker is: the function's locals bound once to a string, and, where the walk came into it by
-        a call, its parameters as that call hands them, folded in the caller (:meth:`_env_at`).
+        a call, its parameters as that call hands them, folded in the caller (:meth:`_env_at`).  A parameter declared
+        a plain ``logging.Logger`` (a maker with no call) marks nothing.  A wrapper's lines carry the mark of the
+        logger it wraps first (:meth:`_wrapped_mark`).
         """
+        if maker.call is None:
+            return [], ""
         fact = callfacts.LOGGER_MAKERS.get(_called_name(maker.call))
         if fact is None or fact.mark is None:
             return [], ""
         env, nones = self._env_at(maker.func, maker.call, maker.returning)
         if _called_name(maker.call) == "make_logger":
-            return _made_logger_prefix(maker.call, env, nones, getattr(maker.func, "name", None))
-        return _wrapper_prefix(maker.call, env, nones)
+            own, why = _made_logger_prefix(maker.call, env, nones, getattr(maker.func, "name", None))
+        else:
+            own, why = _wrapper_prefix(maker.call, env, nones)
+        if own is None:
+            return own, why
+        return self._wrapped_mark(maker, fact, depth) + own, why
+
+    def _wrapped_mark(self, maker, fact, depth: int) -> list:
+        """What the logger *maker* wraps writes before the wrapper's own mark, its separating blank included:
+        ``LogWrapper(log, prefix)`` hands ``log`` the line ``prefix + " " + message``, so where ``log`` is itself a
+        wrapper its mark comes first -- the setupper's ``LogWrapper(self.logger, "<run>")`` over ``LogWrapper(_logger,
+        None)``.  ``[]`` where the wrapped logger marks nothing; one hole, spelled as the wrapped logger, where its mark
+        is not read: a path the walk does not close, marks that differ by path, or one no pattern spells (a time
+        stamp)."""
+        if fact.logger is None:
+            return []
+        if len(maker.call.args) <= fact.logger or depth >= _WRAP_DEPTH:
+            return [_Unknown(_text(maker.call), "token")]
+        value = maker.call.args[fact.logger]
+        hole = [_Unknown(_text(value), "token")]
+        makers, stopped = self._makers().makers_of_value(
+            maker.file, maker.func, value, pathcond.site_of(maker.call), maker.returning
+        )
+        if stopped:
+            return hole
+        marks = [self._mark_of(one, depth + 1) for one in makers]
+        if any(pieces is None for pieces, _why in marks) or len({_spelled(pieces) for pieces, _why in marks}) > 1:
+            return hole
+        inner = marks[0][0] if marks else []
+        return [*inner, " "] if inner else []
 
     def _env_at(self, func: Optional[ast.AST], at: ast.AST, returning, depth: int = 0) -> tuple[dict[str, list], frozenset[str]]:
         """What the names of *func* fold to at *at*, and which hold ``None``: its locals bound once to a string, and,
