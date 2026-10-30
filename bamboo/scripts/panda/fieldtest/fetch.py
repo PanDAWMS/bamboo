@@ -1,6 +1,6 @@
 """Ask PanDA for the rows a case's key leads to, and keep every answer as it came.
 
-    python -m bamboo.scripts.panda.fieldtest.fetch <case.json> --out <answers.json>
+    python -m bamboo.scripts.panda.fieldtest.fetch <case.json> --dump <map dump> --out <answers.json>
 
 Run it where PanDA's credentials load: the ``.env`` holding the OIDC token is
 read only from /Users/tmaeno/bamboo or below.
@@ -11,9 +11,10 @@ key's, and those of the rows the links found.  For a job that is its file rows
 (in its own answer) and its history; for a task, its jobs and their number by
 table and status, its history, and the jobs' histories.  These are the rows the querier's rows file holds.  Nothing
 here knows a case: the key's class (the question's subject) picks the calls.
-Which column of a row names which rows of another class is PanDA's schema,
-written here (:data:`LINKS`, with :data:`KEY`, :data:`LIVE`, :data:`ARCHIVE`
-and :data:`CREATED`) until the map exports it.
+A class's key, its tables, the column saying when its rows were made and how
+its archive is partitioned are read from the map's dump (:class:`Tables`, the
+case's pair's ``MAP_DUMP``); which column of a row names which rows of another
+class is written here (:data:`LINKS`) until the map exports it.
 
 **Two ways in.**  A row read by its key -- a job with its files, a task --
 comes from a plain endpoint, answered at once.  The task's jobs and
@@ -22,13 +23,14 @@ cycle and may wait behind its greps; one batch holds all four of its queries.
 
 **The archive.**  ``job/get_description_incl_archive`` looks in the archive
 for the last 90 days only.  The task's jobs are asked of ATLAS_PANDAARCH with
-a lower bound, since its tables are partitioned by ``modificationTime``: the
+a lower bound, since its tables are partitioned by time (``modificationTime``): the
 task's creation less :data:`CLOCK_SLACK` (the creating server's clock and the
 database's differ), else :data:`NO_CREATION` before the task was asked, which
 covers the 93 days the status history keeps.
 
 **The record.**  Every step's request and response, in order, with the role
-each query plays (:mod:`rows` lays a record out as a rows file).  A refused or
+each query plays (:mod:`rows` lays a record out as a rows file), and the dump
+the tables were read from (``tables_from``, its path and sha256).  A refused or
 failed answer is kept as it came; nothing is merged or dropped here.
 """
 
@@ -44,19 +46,79 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from bamboo.scripts.panda.fieldtest.run import FieldTestError, load_case
+from bamboo.scripts.panda.fieldtest.run import FieldTestError, load_case, sha256
 from bamboo.utils import panda_client as PC
 
-#: the key column of a class's rows, as the R queries spell it
-KEY = {"JobSpec": "PandaID", "JediTaskSpec": "jediTaskID"}
-#: the live tables a job's row is in
-LIVE = {"JobSpec": ("jobsDefined4", "jobsActive4", "jobsArchived4")}
-#: the archive table of a job's row, partitioned by modificationTime
-ARCHIVE = {"JobSpec": "jobsArchived"}
-#: the column saying when a row of the class was made, as the class spells it
-CREATED = {"JobSpec": "creationTime", "JediTaskSpec": "creationDate"}
 #: where a job's answer holds its file rows
 FILES = "Files"
+
+
+@dataclass(frozen=True)
+class Tables:
+    """What the map's dump says of each class's tables (its ``tables``), as the fetch asks by them.
+
+    By class: *key*, the attribute naming a row, where the class's tables name
+    each row by one; *created*, the attribute saying when a row was made;
+    *live*, the tables of the class's family that rows are inserted into;
+    *archive*, the family's tables none is inserted into; *since*, the
+    attribute the archive is partitioned by; *identity*, every attribute the
+    class's tables name a row by (a dataset of a task: ``datasetID`` and
+    ``jediTaskID``).  A table is spelled as PanDA's
+    code spells it, as ``db_read`` takes it, in the order of its name.  A class
+    the dump gives none of these, or no one family spelled one way, has no
+    entry.  The rules are the harness's reading of the dump, which the map
+    confirmed (to-map-28).
+    """
+
+    key: dict[str, str]
+    created: dict[str, str]
+    live: dict[str, tuple[str, ...]]
+    archive: dict[str, tuple[str, ...]]
+    since: dict[str, str]
+    identity: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    @classmethod
+    def read(cls, dump: Path) -> Tables:
+        return cls.of(json.loads(dump.read_text()))
+
+    @classmethod
+    def of(cls, dump: dict) -> Tables:
+        by_class: dict[str, list[dict]] = {}
+        for t in dump.get("tables") or []:
+            if t["rows_of"]:
+                by_class.setdefault(t["rows_of"], []).append(t)
+        out = cls({}, {}, {}, {}, {})
+        for c, tables in by_class.items():
+            if attr := _one(a for t in tables for a in t["identity_attrs"]):
+                out.key[c] = attr
+            if named := sorted({a for t in tables for a in t["identity_attrs"]}):
+                out.identity[c] = tuple(a.partition(".")[2] for a in named)
+            if attr := _one(a for t in tables for a in t["creation"]):
+                out.created[c] = attr
+            spelled = [
+                (t, _spelled(t)) for t in sorted(tables, key=lambda t: t["name"])
+            ]
+            families = {frozenset([t["name"], *t["family"]]) for t in tables}
+            if len(families) != 1 or any(s is None for _, s in spelled):
+                continue
+            out.live[c] = tuple(s for t, s in spelled if t["inserted"])
+            out.archive[c] = tuple(s for t, s in spelled if not t["inserted"])
+            archived = [t for t in tables if not t["inserted"]]
+            if attr := _one(a for t in archived for a in t["partitioned_by_attrs"]):
+                out.since[c] = attr
+        return out
+
+
+def _one(values) -> str | None:
+    """The attribute (``Class.attr``'s *attr*) of the one value *values* hold; None for none or several."""
+    found = set(values)
+    return found.pop().partition(".")[2] if len(found) == 1 else None
+
+
+def _spelled(table: dict) -> str | None:
+    """The table as PanDA's code spells it besides the dump's name; None where the code spells it several ways."""
+    code = sorted(set(table["spellings"]) - {table["name"]})
+    return table["name"] if not code else code[0] if len(code) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -207,14 +269,12 @@ def asked_at(response: dict) -> datetime.datetime:
     return datetime.datetime.strptime(response["asked_at"], "%Y-%m-%d %H:%M:%S")
 
 
-def query(
-    cls: str, where: list, *, tables: tuple[str, ...] | None = None, **rest: Any
-) -> dict:
-    return {"tables": list(tables or LIVE[cls]), "where": where, **rest}
+def query(tables: tuple[str, ...], where: list, **rest: Any) -> dict:
+    return {"tables": list(tables), "where": where, **rest}
 
 
-def since(t: datetime.datetime) -> list:
-    return ["modificationTime", ">=", t.isoformat()]
+def since(attr: str, t: datetime.datetime) -> list:
+    return [attr, ">=", t.isoformat()]
 
 
 def lower_bound(
@@ -233,36 +293,43 @@ class Asked:
     response: dict
 
 
+#: the part reading a key's row, and its request, by the row's class
+KEY_REQUEST: dict[str, tuple[str, Callable[[Any], dict]]] = {
+    "JobSpec": ("jobs", lambda key: {"job_ids": [key]}),
+    "JediTaskSpec": ("task", lambda key: {"task_id": key}),
+}
+
+
 async def _job_row(key: int, rec: Record, parts: Parts) -> tuple[dict | None, dict]:
-    response = await rec.call("jobs", parts.jobs([key]), {"job_ids": [key]})
+    part, request = KEY_REQUEST["JobSpec"]
+    response = await rec.call(part, parts.jobs([key]), request(key))
     return job_of(response, key)[0], response
 
 
 async def _task_row(key: int, rec: Record, parts: Parts) -> tuple[dict | None, dict]:
-    response = await rec.call("task", parts.task(key), {"task_id": key})
+    part, request = KEY_REQUEST["JediTaskSpec"]
+    response = await rec.call(part, parts.task(key), request(key))
     return task_of(response)[0], response
 
 
 async def _task_jobs(
-    values: list, asked: Asked, rec: Record, parts: Parts
+    values: list, asked: Asked, rec: Record, parts: Parts, tables: Tables
 ) -> list[dict]:
     """A task's jobs in every table and their number by table and status, in one batch."""
     (key,) = values
-    created = when(asked.row.get(CREATED[asked.cls])) if asked.row else None
+    created = when(asked.row.get(tables.created[asked.cls])) if asked.row else None
     by_key = [["jediTaskID", "=", key]]
-    bounded = by_key + [since(lower_bound(created, asked_at(asked.response)))]
-    arch = (ARCHIVE["JobSpec"],)
+    bound = lower_bound(created, asked_at(asked.response))
+    bounded = by_key + [since(tables.since["JobSpec"], bound)]
+    live, arch = tables.live["JobSpec"], tables.archive["JobSpec"]
     counted = {"group_by": ["jobStatus"], "aggregates": [["count", "*"]]}
     live_rows, _, arch_rows, _ = await rec.read(
         parts,
         [
-            ("job_rows", query("JobSpec", by_key, columns=JOB_ROW_COLUMNS)),
-            ("job_counts", query("JobSpec", by_key, **counted)),
-            (
-                "job_rows",
-                query("JobSpec", bounded, tables=arch, columns=JOB_ROW_COLUMNS),
-            ),
-            ("job_counts", query("JobSpec", bounded, tables=arch, **counted)),
+            ("job_rows", query(live, by_key, columns=JOB_ROW_COLUMNS)),
+            ("job_counts", query(live, by_key, **counted)),
+            ("job_rows", query(arch, bounded, columns=JOB_ROW_COLUMNS)),
+            ("job_counts", query(arch, bounded, **counted)),
         ],
     )
     return [r for _, r in (rows_of(live_rows) or []) + (rows_of(arch_rows) or [])]
@@ -293,11 +360,9 @@ LINK_ROWS = {"JobSpec.jediTaskID": _task_jobs}
 HISTORY = {"JobSpec": _job_history, "JediTaskSpec": _task_history}
 
 
-def made(cls: str, rows: list[dict]) -> datetime.datetime | None:
-    """When the first of *rows* was made."""
-    return min(
-        (t for r in rows if (t := when(value_of(r, CREATED[cls])))), default=None
-    )
+def made(attr: str, rows: list[dict]) -> datetime.datetime | None:
+    """When the first of *rows* was made, by their *attr*."""
+    return min((t for r in rows if (t := when(value_of(r, attr)))), default=None)
 
 
 def held_rows(cls: str, row: dict | None) -> dict[str, list[dict]]:
@@ -311,27 +376,33 @@ def held_rows(cls: str, row: dict | None) -> dict[str, list[dict]]:
     return rows
 
 
-def values_by(link: Link, got: list[dict], key_class: str, key: int) -> set:
+def values_by(
+    link: Link, got: list[dict], key_class: str, key: int, tables: Tables
+) -> set:
     """The values *link* holds in *got*, rows of its source class.
 
     A link from the key's own column holds the key, answered row or not.
     """
-    if link.src_class == key_class and link.src_attr == KEY[key_class]:
+    if link.src_class == key_class and link.src_attr == tables.key[key_class]:
         return {key}
     return {v for r in got if (v := value_of(r, link.src_attr))}
 
 
-def link_values(rows: dict[str, list[dict]], dst: str, asked: Asked) -> list:
+def link_values(
+    rows: dict[str, list[dict]], dst: str, asked: Asked, tables: Tables
+) -> list:
     """Every value the links leading to *dst* hold in *rows*, once each."""
     held = set()
     for cls, got in rows.items():
         for link in links_from(cls):
             if link.dst == dst and not link.held:
-                held |= values_by(link, got, asked.cls, asked.key)
+                held |= values_by(link, got, asked.cls, asked.key, tables)
     return sorted(held)
 
 
-async def fetch_key(cls: str, key: int, rec: Record, parts: Parts) -> None:
+async def fetch_key(
+    cls: str, key: int, rec: Record, parts: Parts, tables: Tables
+) -> None:
     """The key's row, the rows its links name one step on, then the histories of the key and of the rows found.
 
     The rows one step on are named by the key's row and the rows its answer
@@ -345,28 +416,30 @@ async def fetch_key(cls: str, key: int, rec: Record, parts: Parts) -> None:
     for dst in dict.fromkeys(
         link.dst for c in rows for link in links_from(c) if not link.held
     ):
-        if values := link_values(rows, dst, asked):
-            got = await LINK_ROWS[dst](values, asked, rec, parts)
+        if values := link_values(rows, dst, asked, tables):
+            got = await LINK_ROWS[dst](values, asked, rec, parts, tables)
             found.setdefault(dst.partition(".")[0], []).extend(got)
-    await HISTORY[cls]([key], made(cls, rows[cls]), rec, parts)
+    await HISTORY[cls]([key], made(tables.created[cls], rows[cls]), rec, parts)
     for c, got in found.items():
-        if c in HISTORY and (ids := sorted({int(value_of(r, KEY[c])) for r in got})):
-            await HISTORY[c](ids, made(c, got), rec, parts)
+        if c in HISTORY and (
+            ids := sorted({int(value_of(r, tables.key[c])) for r in got})
+        ):
+            await HISTORY[c](ids, made(tables.created[c], got), rec, parts)
 
 
 def key_class(question: dict) -> str:
     return question["subject"].partition(".")[0]
 
 
-async def fetch(question: dict, parts: Parts | None = None) -> dict:
-    """The record of everything asked for *question*'s key."""
+async def fetch(question: dict, tables: Tables, parts: Parts | None = None) -> dict:
+    """The record of everything asked for *question*'s key, by the dump's *tables*."""
     parts = parts or Parts()
     cls = key_class(question)
     rec = Record(question)
     started = datetime.datetime.now(datetime.timezone.utc)
     if cls not in KEY_ROW:
         raise FieldTestError(f"no plan yet for a key of {cls}")
-    await fetch_key(cls, int(question["key"]), rec, parts)
+    await fetch_key(cls, int(question["key"]), rec, parts, tables)
     return {
         "about": "Every request this fetch made and every response as it came, in order (bamboo.scripts.panda.fieldtest.fetch).",
         "question": question,
@@ -384,10 +457,17 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__.split("\n\n")[0],
     )
     ap.add_argument("case")
+    ap.add_argument(
+        "--dump",
+        required=True,
+        type=Path,
+        help="the map's dump whose tables name each class's key and tables (the case's pair's MAP_DUMP)",
+    )
     ap.add_argument("--out", required=True, help="where to write the record")
     a = ap.parse_args(argv)
     case = load_case(Path(a.case))
-    record = asyncio.run(fetch(case["question"]))
+    record = asyncio.run(fetch(case["question"], Tables.read(a.dump)))
+    record["tables_from"] = {"dump": str(a.dump), "sha256": sha256(a.dump)}
     Path(a.out).write_text(json.dumps(record, indent=1) + "\n")
     print(
         f"{a.out}: {len(record['steps'])} step(s) for {record['key_class']} {case['question']['key']}"

@@ -94,6 +94,18 @@ def value_held(states: list[dict], column: str, value: str, created: str | None)
                                              f"{first['time']}, on every machine (no row says which run wrote it)")
 
 
+def value_now(column: str, value: str) -> Asking:
+    """H2 for a value every writer of *column* sets to the time it runs (``attr_time.NOW``): the value is the write's
+    time, on the database's clock or the writer's, so the run is asked at it on every machine.  No window where the
+    value is not a time."""
+    try:
+        t = _down(when(value))
+    except ValueError:
+        return Asking(None, None, f"{column}={value!r}, which its writers set to the time they run, is not a time")
+    return Asking((t, t), None, f"{column}={value!r}, the time its writer ran: every writer of it writes the time it "
+                                f"runs (the last write), on every machine")
+
+
 def rows_until(states: list[dict], until: str) -> list[tuple[dict, Asking]]:
     """H6: the statuslog rows written by *until* (the last record of the run the object was missing in), in order, each
     with its own time on the machine that wrote it (:func:`at_transition`)."""

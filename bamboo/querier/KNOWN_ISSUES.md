@@ -119,6 +119,57 @@ whose run is every call in the window: G's round asked 492 marks, 9 of them a wr
 8 reads no row missing from it), so a mover whose run it is is followed on positive evidence only.  A shared mark
 seen in one piece is still asked, and comes back cut.
 
+## The rows ask (`Rerun.ask_rows`)
+
+### K36. Rows the rows file does not have are asked, and nothing of the querier's answers them
+
+Where a step stops for rows the rows file does not have, it says them as an ask a fetch can answer, written to
+`--rows-asks` (none unless given), each once, `{"rows": {...}, "step", "why"}` (the harness's rows ask, stage 1,
+10-29).  Four places ask: a walk's loop over a row's collection the file lacks (`Walk.elements`: `collection`, the
+row by its class and the key the dump's tables name its identity by, and the attribute; the element's class is
+`null`, not known here), S5's call whose rows, history or counts the file lacks (`statement`: the proxy's statements
+the call runs as `<file>:<line>`, the tables it reads, each argument's value in each pass -- `"unknown"` where the
+run's is not known -- and the passes' times), L3's answers the file lacks (`sql`: the question's name and SQL, a
+GroupsNow's `db_read` form -- table, WHERE, the columns grouped by, the key it takes the least of -- and none for the
+window over the history), and a statement S1 or L2 compares with a class the file has no row of (`Rerun.ask_linked`,
+the 4th place, the harness's to-querier-57: `collection` with the attribute `null` and the class named, `where`,
+the class's columns the statement's joins compare with the row's, with the row's values -- the task's datasets by
+jediTaskID -- and `via`, each pair by name as the rows file's `linked` names one (`from` the row's class, `to` the
+class asked); one per pair of sources the joins meet by).  The 4th place does not stop: the statement stays `not
+settled`, as before.  It asks only where the rows could change the verdict (not for a statement `refused`), and
+not for a class joined to the row only through another table, a class-less table (`T_TASK`: its join side names
+no attribute) or a join column the row does not hold.  Nor does it ask rows the file's `linked` holds by one of
+those pairs for the row's value (a job's files, `JobSpec.PandaID -> FileSpec.PandaID`): S1 reads one row per class
+(`rows`), not `linked` or `files`, so its "no row of FileSpec" means none in `rows`; it says the file holds them,
+which no step compares yet.  On the harness's stuck cases of 10-29 (runs/20261029-150512-m-r1)
+its 51 not-settled judgements lacking rows (JediDatasetSpec 50, FileSpec 1) all join the row directly
+(`out/nrow/nr0-summary.txt`); JediFileSpec and T_TASK appear there only in refused ones; the FileSpec one's rows
+are in its file's `linked` (the harness's reading of f99a537's ask, 10-29).  The fetch that answers
+them is the harness's (stage 2); until it reads them the file keeps its sections as now.  A stop no other rule
+names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
+walk does not read as a row's attribute asks nothing.
+
+L3's `db_read` form gives the WHERE as db_read's conditions, `[column, op]` or `[column, op, value]`, all of which
+hold (the harness's ask 4, 10-29: a WHERE in text is not passed to db_read), where every term is one column tested
+against a value: each term read as the map reads a WHERE (`sqltext.row_tests`), a bind's value the run's as its
+print holds it, a quoted constant a text and another a number (`parts.condition`).  db_read takes `=`, `!=`, `<`,
+`<=`, `>`, `>=`, `in`, `is null`, `is not null`.  A term that is none -- an OR, `NOT IN`, an expression of columns,
+the database's clock, another column, a value that is no number or text -- keeps the form's WHERE text, and L3 says
+each such term under the SQL ("db_read takes no ..."): a term is said whole or not at all, since dropping one
+counts rows the call did not pass.  db_read refuses a value whose type is not its column's (`bad_value`); the
+querier gives the run's, not knowing the column's type.  On pin m one statement reaches L3, getJobs@2404, and only
+D and D-rec of the querier's and the harness's cases reach it, with three terms, all said.  The harness's records
+hold 293 of getJobs' prints: 291 of that shape; 2 (the unified pilot's, in N-rec and A-rec) with
+`(minRamCount<=:minRamCount OR minRamCount=0)` and `(maxDiskCount<=:maxDiskCount OR maxDiskCount=0)`, which keep
+the text (out/dw/dw-predictions.txt).
+
+*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`; "-- db_read takes no ..." under L3's SQL.
+*Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
+place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
+a comparison that takes the row where some joined row holds the terms, which is not built.  When a case reaches L3
+with an OR: db_read could still answer it, the OR's columns grouped by and the groups that fail the OR dropped by the
+querier, or the OR's branches asked apart where no row can pass two; neither is built.
+
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 
 ### K14. A mover that writes through what it calls is not followed
@@ -138,6 +189,8 @@ S1 counts a mover's arms in its own function only; `TaskBuffer.killJobs` writes 
   mover says why as before (`kept_without_arms`) and what the reach found: the writers reached, or the calls left open.
   A dump with no `reach_graph` keeps them all, and says so once.
 - Kept for a call left open is not "can move it": the answer is `None`, not a write.
+- A mover whose statements' rows reach none of its arms is asked so too, those arms left out of where the reach ends
+  (K28); where it writes nothing so, it is a writer that takes a row by its key (K16).
 
 *Shows:* a stop at S2 for a mover that writes through its calls; each kept mover's reasons and reach in S1's output; a
 dropped one's line, and its `reach` in result.json.
@@ -186,10 +239,29 @@ are not read as keying its arms: on x13v4k, 16 such records, each of a function 
 already.  Not seen: an arm no KeyFrom names (`datasetManager.run`'s 858, `tmpFile.status = "ready"`; `getCommands`'
 1824, an `IN` list of binds made by a join) -- such an arm is the statement's only inside its region, as before.
 
+A statement of the owner's that takes its rows by a key the statement's rows fill hands them on to a write keyed by
+its own rows (`key_chain`, through the map's read KeyFroms): `resetInputToReGenCoJumbo_JEDI` sets ready at 5038 the
+files of 5026's rows, 5026 takes the job's files by the PandaIDs of 5009's rows, and 5009 takes those by 5001's
+`datasetID` and `fileID` -- another table at each step, so neither the one hop nor `read_again`'s same rows saw that
+5035 is 5001's (the movers re-scan's O6, 2026-10-29).  Whatever column fills a key counts at every step.  The other
+way, an arm whose row the map names by a key it read whole, at every step, that the rows do not fill is not the
+statement's.  Where every way S1 has of a mover is a statement of its own whose rows reach none of its arms so
+(`elsewhere_arms`, `elsewhere_of`), S1 asks the map's reach of it as of a mover with no arm of its own (K14), those
+arms left out of where the reach ends (`Rerun._rows_elsewhere`); where the reach writes no other value with nothing
+left open, the mover is a writer that takes a row by its key (K16), said: `updateJobStatus`'s 294 selects the
+co-jumbo jobs `waiting` and sets their modificationTime alone, 262 the jobset's `activated` ES jobs alike, and its one
+arm, 241, writes the pilot's own job by the `PandaID` it is handed.  On M d62d62d's census (lm10) the class holds 5
+(value, mover) rows: those two and `updateJob` at `JediFileSpec.status=running` (596 checks input files in one branch,
+618 writes output files in its `elif`) move to by key; `insertFilesForDataset_JEDI` at `finished` stays (its reach
+leaves 2 calls open), said; `resetInputToReGenCoJumbo_JEDI` at `running` is keyed through its chain.  An arm whose
+key, or a key on the way, the map did not read keeps the mover as before.
+
 *Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]", or "...
 the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept", or "... no write in the
 function persists the value(s) set at [...] (<object> (<where its fields go>)): kept" (the two joined by ", and "
-where a statement has both).
+where a statement has both); for rows that reach none of the arms, "the rows <statements> select(s) reach none of its
+arms [...]: ..." -- "a writer that takes a row by its key" or "; kept: <the reach>" --, the entry's reason `K16` or
+`K14` with the reach.
 *Revisit:* when a census on a new map finds an arm keyed by another column or at a value in `never_at` (v's fields
 make both readable); with objects followed across a call (a field set on an element of a container handed on, a key of
 an object a call returns).
@@ -225,6 +297,15 @@ no verdict moved by it: `updateJobStatus` is kept now because its reach leaves 2
 (`push_job_status_message`'s `mb_proxy.send`, ...), and 27 reach texts lose writers of births alone
 (`ppEventServiceJob`, `makeFakeCoJumbo`, `increaseSeqNumber_JEDI`, ...).
 
+An arm on an object no row holds is no arm either.  The map's OS (ix) says on a branch that the records prove its
+object is held by no write of its class's tables, or by none that takes it whole or by the attribute (`off_row`,
+`no_write` or `not_taken`: a spec the function makes and drops, `getTaskWithJumbo_JEDI`'s useJumbo, `checkAllEventsDone`'s
+FileSpec), and its readers -- derive-strategy's readings (H1), `reach.moving_off` -- leave it out.  The querier's
+door to the writers (`Rerun._writers_of`, which S1, L2 and the mover census read) leaves those branches out too
+(`on_rows`), and a junction left with none, its owner no writer.  On ix's map (x13ixO1m, 20 such arms, none on a
+status) one census row moves: `checkAllEventsDone` at `FileSpec.type=input`, kept by its arm 1275, has no arm of its
+own and reaches no write, so it is dropped (out/ix/or-predictions.txt).  A dump built before OS has no `off_row`.
+
 *Shows:* "<owner>: its writes at [...] make the row (births: sequence at 623): not arms"; result.json's `births`; a
 writer with births alone is absent from the movers; H2 / F1: "the key's row was there before 'activated' at ..., so
 its writes that make a row are no candidates: ppEventServiceJob [5556, 5560] (births: sequence at 5706)".
@@ -249,10 +330,15 @@ there until the reach places those calls.  H2 / F1: 4016 is no candidate for an 
 (A-rec, N-rec: 7 -> 6 readings).  A statement with no route placed (the map leaves it open: reached from outside,
 called from outside the corpus), one some route runs, and a dump without the fields are read as before.  A caller
 outside the map's view (a test handing `simul=True`, a REST call) may still run such a statement: S1 errs on
-dropping there, by the map's word that no placed caller does.
+dropping there, by the map's word that no placed caller does.  The other way, a route the map places counts
+whatever calls the function it comes from: `makeTaskPending_JEDI`'s one route is JEDI's facade
+(`JediTaskBuffer.makeTaskPending_JEDI`, routes 1, none open, no `out_on`), and the facade's one call is in a comment
+(`AtlasTaskWithholderWatchDog` 118), so S1 keeps it a mover of `JediTaskSpec.status` `ready`, `running` and `scouting`
+by its guard (the movers oracle's O2, 2026-10-25; read again 2026-10-29).  Telling a chain no entry runs from one an
+entry outside the corpus does needs the callers above it to an entry point (the map's upward union, K15).
 
 *Shows:* the writer is absent from the movers, as one with births alone (K29); H2 / F1: its line among the births a
-later status leaves out.
+later status leaves out; a writer with no caller above its route stays a mover, said nowhere.
 *Revisit:* a statement some routes run, read per way: none of S1's rows rests on one on pin k (the map's iv,
 2026-10-28), and the way would need the hand-off call's line (`lockJobsForReassign`@846's rows reach `retryJob` at
 copyArchive 814, not from `lockJobsForReassign`).
@@ -283,6 +369,17 @@ K14 to drop or keep by its reach, and D's L2 no longer ruled out `updateRelatedE
 `activated`) nor `recordStatusChange`: hence writers only.  A miss costs more than an overclaim here: a mover kept
 is asked, one left out is not looked at again.
 
+A selecting statement's own crossings no longer overclaim so where the map reads the routes back up: a crossing takes
+only the values those routes select (`crossing_values`, the map's `crossing_selects`, XB, 2026-10-29).  1898 in
+`_get_tasks_datasets_with_unprocessed_inputs` adds `tabT.status IN (statusForJobGenerator())` only where no
+`target_tasks` is given, and its rows reach `setCloudToTasks_JEDI` only back up TaskBroker 259, which hands
+`simTasks`: S1 kept it a mover of `JediTaskSpec.status` `preprocessing`, `running`, `scouting` and `topreprocess`, and
+no more; `getPandaIDsWithTaskID`@95 filters failed / cancelled / closed only under `unsuccessful_only`, which task_api
+432 hands `killJobs` False.  An owner the map gives no values (reached from the statement's function, by a way no
+route matches, or from a statement with no route read) takes all the statement selects, as before.  A re-read's
+crossings are not narrowed so: the map gives the field on a selecting statement, and a statement reading rows again
+by their key selects no value of its own.
+
 *Shows:* the mover's line "<statement> selects the value, and <statement> reads its rows again and hands them to it",
 or "..., and they fill the key of the write(s) at [...]".
 *Revisit:* with a reading of the test a call runs under on the rows' values, through what a set the function fills
@@ -300,7 +397,8 @@ alone, not the rest a mover's is asked over: they are mostly the DB proxy's, and
 So a writer that ran and stopped before the last part is not named, and none of them is ruled out (K19's window).
 `by_key_of` is every writer no statement gives rows, not only the per-key ones: on pin k (dce1e07's dump) 32 for
 `jobStatus=running` and 28 for `status=finishing`, bulk methods whose selection the map does not link and the
-setupper's helpers among them, against 3 and 1 movers.
+setupper's helpers among them, against 3 and 1 movers.  A mover whose rows reach none of its arms, and whose reach
+writes nothing else, is taken as one of these (K28): `updateJobStatus` at `waiting`, its 241 the pilot's own job.
 
 *Shows:* said ("... from <the last part's start>, the window's last part, which alone is asked of a writer that takes
 a row by its key"); result.json's `reached` `key`.
@@ -346,7 +444,7 @@ says, for each mover with no run found, which of the three hold (`premises`: `wi
 it did not run (judgement 3)"); result.json's verdict `no-run-found` or `did-not-run`, with its `premises`.
 *Revisit:* when the map pairs a run's mark and an SQL statement's key bind with the written row.
 
-### K25. S1 does not follow a function that prints nothing of its own
+### K25. S1 does not follow a function that prints nothing of its own, and H2 stops where no writer has a log
 
 A function the map has no prints of its own for (`prints_nothing`) has no run of its own in a log, so S1 does not
 follow it.  Before, a run found in its logs was read as its own wherever the run's mark named no method (`_of_mover`),
@@ -359,9 +457,26 @@ read at all.  On pin k (dce1e07's dump): 2 of the 60 writers that take a row by 
 (setOnHold, adder_gen's finalize_job_status) and 1 of the movers S1 keeps over the census (TaskBuffer.updateJobs, one
 value of `JobSpec.jobStatus`).
 
+H2 reads such a writer, where the map's history pair places its arm (`attr_time.arms`), at the pair's caller: the
+call on the way to it (`HistoryPair.point`) is the candidate, judged on the caller's run (`Rerun._h2_candidates`,
+`StandIn`; attr-time-shape.md 5).  The call is shown run by a row on every path through it, or by two of the caller's
+rows printed in a row that only a path through it prints (`which_ran.rows_around`, `rows.passes_through`:
+TaskRefinerThread.runImpl's 205 and 563 around 211, extractCommon).  That says the writer was called, not that its arm
+wrote: the arm's own path condition is read in the row's values, and what is not read -- or, above level 1, the
+functions between the call and the writer -- is left open, a premise of "may have written" (K38).  Counted on the
+harness's attribute cases (pin m, x13M110m, 2026-10-29, out/attr/attr-pass-summary.txt): 41 of the 46 arms that print
+nothing are placed, at 24 calls; at 10 of them two rows can show the call ran, at all 24 two rows can stand around it.
+A writer no pair places is asked in the logs its reading names (`rows.own_log_files`).  Where no writer of the subject
+has a log -- each prints nothing, no pair places it and its reading names none -- H2 stops on that before it asks
+(`_writer_logs`); before, it asked no log and stopped on "a run of <key> at <t>", as if the logs had held none.  Only
+where the map places the prints (`ROWS_FROM=graph`, `ROWS_OWN_FILES`): else the readings' logs stand.
+
 *Shows:* said ("the map has no prints of its own for it, so no run in a log is its own: not followed"); result.json's
-verdict `prints-nothing`.
-*Revisit:* where a caller's junction does not place the function's write.
+verdict `prints-nothing`.  H2: the caller's line among the candidates, "rows a and b printed in a row, which only a
+path through it prints"; "a log to look for a run of a writer of <subject> in (<functions>: the map names none;
+KNOWN_ISSUES.md K25)".
+*Revisit:* where a caller's junction does not place the function's write; for H2, when the functions between a
+level-2 pair's call and the writer are read.
 
 ### K26. S3 reads what an arm that ran wrote only from a row after it in its own block
 
@@ -452,10 +567,56 @@ stretch's first row (`windows.value_held`).  A row holding the value says it was
 which run wrote it, so no machine is named; the pairs of a writer and the history row its run writes,
 which would name the row's time and host, are the map's to say (build2-design.md 7, the second stage).
 A value written after the last row has no row to close the window, and a task's creation time is not
-checked (`parts.History.created`): both stop.  A subject no history holds stops as before.
+checked (`parts.History.created`): both stop.  A subject no history records or holds takes no time from
+the status's rows, though its values may be spelled as the status's: until 10-29 H2 took the status's row
+holding the value as the subject's time (`JediTaskSpec.superStatus` 'done', three of the harness's cases;
+`oldStatus` too).  Its writers' arms are asked instead (K37).
 
 *Shows:* a stop at H2 naming the column, the last row or the creation time; asks of every machine.
 *Revisit:* when the map says which history row a writer's run writes.
+
+### K37. An attribute no history records is timed by its writers' arms, and only where every arm says the time
+
+`attr_time` (the harness's ask b, tmaeno 「おねがいします」 10-29): where every arm H1 names writes the time it runs
+(`runtime(CURRENT_DATE)`, `runtime(naive_utcnow())`), the value is the write's time and H2 asks the run at it, on
+every machine (`windows.value_now`); else each arm is placed on the object's history by the map's HistoryPair (row
+same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
+history call records where they are literals, any row otherwise), and read newest first (K38): the first whose pass a
+writer is shown to write in is the write that left the value, and H2 goes on from it as for a status.  Only the last write is
+asked; one of the same value before it is not.  It stops where an arm is on no row of the object -- its pairs are
+another object's, the map does not follow the object to its pass's history call, or it has none: its run may have
+written the value after any row, and asking its logs over the rest of the window (F3) is not built -- and where H1
+names no writer (a value the pilot reports through updateJob's SET, which the map does not read).  A name bound to
+the time earlier in the pass (`timeNow`, `now_time`) or the time less a span (`CURRENT_DATE-1`) is not read as
+the time.  Counted on the harness's 57 (attr-time-shape.md): every arm placed 23, some 13, none 18, no writer 3;
+the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's storeJobs leaves 12 of the 18
+(asked of the map, 10-29).
+
+*Shows:* "-- row n of m" in H2 and its judgement per row; a stop "every writer of <subject> on a history row of the
+object ... (k of n not: K37)" or "a writer of <subject> in the map".
+*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
+arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
+
+### K38. H2's scan of the rows names the arms that wrote last or may have, and goes on from none of them but one
+
+Over the statuslog rows a writer's pass can write (K37), newest first, each row's pass is read three ways
+(`Rerun._scan`, `_row_at`, attr-time-shape.md 5; tmaeno 「可能性としての Fork でしょうね」, 10-29): an arm shown to
+write ends the scan; a row whose logs, searched whole, hold no run of the key, or whose arms are excluded, has no
+write and goes; an arm the run does not show ran (kept), whose own condition is not read (K25's stand-ins), or whose
+logs were not searched whole may have written and stays, with what is open named.  Before (querier-at), a row where
+the judge chose no writer was passed over as "no writer ran" -- for a judgement that could not decide too -- and an
+older row's write was taken as the last.  Where one printing writer is shown to write and nothing newer may have,
+H2 goes on from it; else it stops naming each arm left with its rows, code `one-of`, and result.json's
+`possibilities` lists them (arm, rows, premises).  Arms, not rows, are the possibilities: the steps after H2 explain
+an arm, and an arm's passes differ only in the run read.  An arm whose passes are all older than the newest shown
+write is not among them.  None read on any row: "a pass that wrote ... (none shows a writer's pass)".  A single
+window (a status's row, a value held, a value that is its time) is judged as before; a stand-in chosen there is named
+the same way.  The steps after H2 run for no arm of several, and for a stand-in for none: the second stage, a fork
+whose branches are the arms and whose undecided branches end open rather than stopping the run, is not built.
+
+*Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row; a stop "one arm that
+wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)".
+*Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it).
 
 ### K11. After H4 the next question is always H5, the traceback
 
@@ -464,6 +625,65 @@ way on.
 
 *Shows:* a stop at H5 ("a traceback through <function> in the run").
 *Revisit:* when a case reaches H4 with a value set without an exception.
+
+### K33. A traceback of another version of the code is placed by its frames' source text, where it is unique
+
+A run's traceback prints the lines of the code it ran, and the pin is the code the case is read against: since the
+pin moved to panda-server 32907fe6 (tag 1.1.0 and #841, 2026-10-29), the replay cases' logs (written by 1.0.x on
+09-28 .. 10-14) are read against other code, and a log of 1.1.0 itself is too: #841 moves lines in 8 files
+(`adder_gen.py`, `job_complex_module.py`, `base_module.py`, ...).  `records._place` reads a frame whose line holds
+other text at the one line of its function -- every def of its name in the file -- holding the source the traceback
+printed, keeps the traceback's line (`Frame.moved_from`), and H5 says it ("frame <file>:<the traceback's line>
+<function> is line <n> of the pin by its source text").  `rows.raised_in` places such a frame the same way.  A
+source line printed twice in the function, or not found there, leaves the frame unplaced, as before -- the version's
+own lines are not known -- and H5 says, on the line before its stop ("the frame's source line matches the corpus"),
+the lines of the function holding it ("at no line" or "at lines <a>, <b>").  The text matching says the same
+statement, not the same code around it: a guard that changed between the versions is read as the pin has it.
+
+No case's frame has moved so far.  K's stop on the new pin is not a moved line: its statement is gone.  8ec5f109
+("Fix KeyError in decompose_id_map for alternatively staged-out outputs", 2026-09-30) is K's own failure fixed, and
+pin m's `decompose_id_map` holds the printed `sub_to_dataset_map[tmp_dataset]` at no line.  So K and K-rec, the only
+cases that reach R1-R5, stop at H5 on the pin.  The other position the cases are keyed by is a rows file's answer
+to L3 ("getJobs@<line> ..."): `data/D-rows.build.py` (the analyzer handover's, not this repo's) writes D's answers
+under the statement's line on both pins.
+
+*Shows:* H5's line for each frame placed so; H5's "holds the printed source at no line" before a stop where the run's
+statement is not the pin's.
+*Revisit:* when a case's logs come from a version whose function no longer holds the printed line, or holds it twice
+(a pin of the case's own version); when another step keys a reading by a line of the code; when a current case
+reaches R1-R5.
+
+### K34. An exception relayed from another process is read as raised inside the corpus
+
+`pandajedi/jedicore/Interaction.py`'s `__call__` hands a method call to a child process over a pipe and raises the
+class the child returned with the child's string (`raise retException(strException)`, line 272 on pin m).  The
+traceback the parent prints ends at that line, in the corpus, while the exception came from what the child called:
+in an example of 10-29, `AtlasTaskSetupper.doSetup`'s `registerNewDataset` failed by Rucio's ORA-20101.  H5 takes an
+innermost frame in the corpus as the line that raised and goes on to R1-R5, which would read the relay's `raise` as
+panda's own failure; the boundary is the pipe, as WrappedCursor -> oracledb is one H5 sees.  No case has reached it,
+and that example likely would not (not run): doSetup's except returns a code and sets no status, so H5 would find
+no traceback through the function H4 chose.  A traceback raised by panda's own line comes from a bug and is rare
+(tmaeno, 10-29); R1-R5's cases are K and K-rec, read on the pin of their version (8e24aa1a-f2), since K's bug is
+fixed on the current pin (K33).
+
+*Shows:* R1 reading `Interaction.py`'s `raise retException(strException)` as what raised.
+*Revisit:* when a case's traceback ends in a relay of another process's exception.
+
+### K35. A binding in a loop over rows the investigation does not have is unknown
+
+`false_guard.Walk.elements` gives the rows a loop around a step ran for, from the rows file's collections.
+A collection the file does not have (None) is kept apart from one of no rows (`[]`): a binding of a name
+in a loop over the first is an origin of unknown value and reach, so the name's other bindings are not
+taken as all it held (`Walk._choose` takes none of them alone); a keyed write there leaves the key set
+opaque and the container not rebuilt, as before.  A loop over no rows ran no write: the container gains
+nothing from it, and its key set can be whole.  The file's rows are taken as the run's, as for any
+collection.  Until 10-29 `origins` left such a binding out and a loop over no rows read as one over rows
+not had.  `G.part` still matches the printed key by value, and a binding of unknown value beside it does not
+make the match two.  H7's implicit else read without the job's file row says the row is missing before its
+stop.
+
+*Shows:* "@<line> runs in a loop over rows this investigation does not have" among a name's origins in R2.
+*Revisit:* when the harness's fetch answers the walk's ask for the collection (K36, stage 2).
 
 ## `which_ran`
 
@@ -535,3 +755,27 @@ JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), no
 *Revisit:* when S3 must go on from such a guard: the map would record each entry's place (its `if`'s line, or the
 replacing write's, and for a callee's test the method and how its names map to the caller's); for an `[at N]`
 entry, when a reader holds a name's value at a line rather than for the whole pass.
+
+## The walks (`asked.py`)
+
+### K32. The walks read the code alone, not the instance record the map was built with
+
+The querier's walks (`asked.walk`: the map's `trace.Asker` over `asked._types()`; under `ROWS_FROM=walk` the rows'
+skeleton too) read the corpus with `Types(ROOTS, {})`: a module name holds what the code says.  The map built the
+dump with an instance's record (`MapFragment.instance_record`, `calls.read_recorded`), which the dump names by its
+path and digest only.  On x13vi1k the record is ATLAS production's `g_pluginMap`, empty, so `panda_config.getPlugin`
+returns None at its three callers (adder_gen 174, setupper 109, closer 126) and the ATLAS plugin class is taken; the
+walks read getPlugin's `type[Any] | None`, so the plugin constructor's binding names every plugin class of the name
+and says the call may land somewhere the reading cannot name, where the dump's reach has the ATLAS one.  The walks
+name more, never less: the steps and the questions are the same.  By the mover tables no S4 walk starts in those
+files -- the census's movers there have no arm (AdderAtlasPlugin's process_subscriptions, register_files and
+update_outputs, Closer.run, of FileSpec.type) -- and the 307 guards S4 walks from in 75 movers' functions read the
+same with the record and without, as do two rounds of every question from their arms (out/ir/ir-predictions.txt,
+ir1 and ir2, 2026-10-29).  The steps that read the plugins otherwise -- H1 to H6, F1, S1's reach -- read the dump.
+Not measured: R2's and value_diff's walks, which start where a case's traceback or diff is, past two rounds.
+
+*Shows:* silent that the record is not read; where a stop line prints the binding (S4, R2, value_diff), its "returns
+from ..." names every plugin class and "the call may also land somewhere this reading cannot name".
+*Revisit:* when the census gives a mover in a plugin's file an arm, the record holds more than `g_pluginMap`, or a
+case's answer rests on such a binding: the map would put the record's values in the dump, and `asked._types()` would
+hand them to `Types`.

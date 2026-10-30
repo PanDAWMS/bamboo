@@ -11,7 +11,10 @@ rows, one entry per link and table: its ``class``, ``via`` (``{"from":
 "JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"}``), the values
 ``asked`` by it, how the rows were read, and the ``rows`` -- those whose
 ``to`` column holds an asked value, or every row of the answer where the rows
-do not carry that column (a task's jobs, read by the task's key).
+do not carry that column (a task's jobs, read by the task's key).  The rows
+step's answer to an ask naming its join (``via``, :func:`answered`) is laid
+there too, an entry per table asked, those with no row as well: the querier
+asks no rows ``linked`` holds by the ask's pair for the row's value.
 ``statuslogs`` holds each class's status histories by the key of the row each
 belongs to.  Both say again what the sections above say, so a reader can move
 to them; the sections above stay as they were until it has.
@@ -66,7 +69,7 @@ from typing import Any
 
 from bamboo.scripts.panda.fieldtest.fetch import (
     FILES,
-    KEY,
+    Tables,
     held_rows,
     job_of,
     links_from,
@@ -102,7 +105,8 @@ def column_spellings(
 ) -> dict[str, dict[str, str]]:
     """class -> {lower-case column: the class's spelling}, from the column list in each class's source.
 
-    The dump's ``declaration_yields`` says which file declares a class.
+    The dump's ``declaration_yields`` says which file declares a class.  A class it names no file for, or whose
+    source lists no columns as string constants (``attributes_with_types``' calls), is not in it.
     """
     declared = {}
     for name in json.loads(dump.read_text())["declaration_yields"]:
@@ -110,19 +114,31 @@ def column_spellings(
             declared[m["cls"]] = m["path"]
     out = {}
     for cls in classes:
+        if cls not in declared:
+            continue
         tree = ast.parse((pin / declared[cls]).read_text())
-        body = next(
-            n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == cls
-        ).body
-        names = next(
-            ast.literal_eval(n.value)
-            for n in body
-            if isinstance(n, ast.Assign)
-            and any(
-                getattr(t, "id", "") in ("_attributes", "attributes") for t in n.targets
-            )
+        found = next(
+            (
+                n
+                for n in ast.walk(tree)
+                if isinstance(n, ast.ClassDef) and n.name == cls
+            ),
+            None,
         )
-        out[cls] = {c.lower(): c for c in names}
+        names = next(
+            (
+                ast.literal_eval(n.value)
+                for n in (found.body if found else [])
+                if isinstance(n, ast.Assign)
+                and any(
+                    getattr(t, "id", "") in ("_attributes", "attributes")
+                    for t in n.targets
+                )
+            ),
+            None,
+        )
+        if names is not None:
+            out[cls] = {c.lower(): c for c in names}
     return out
 
 
@@ -294,7 +310,7 @@ def bounds_of(response: dict) -> dict[str, str | None]:
     }
 
 
-def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
+def build(record: dict, spellings: dict[str, dict[str, str]], tables: Tables) -> dict:
     q = record["question"]
     cls = record["key_class"]
     entity = ENTITY[cls]
@@ -333,7 +349,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
     raw, read, why = key_row(laid, cls, q["key"])
     if raw is None:
         left_out.append(
-            f"rows.{entity}{', files' if cls == 'JobSpec' else ''}: {KEY[cls]}={q['key']}: {why}"
+            f"rows.{entity}{', files' if cls == 'JobSpec' else ''}: {tables.key[cls]}={q['key']}: {why}"
         )
     else:
         row = columns(
@@ -343,21 +359,11 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
 
     if cls == "JobSpec":
         if raw is not None:
-            out["files"] = [
-                {
-                    c: {"value": v, **read}
-                    for c, v in columns(f, spellings["FileSpec"], other).items()
-                }
-                for f in raw.get(FILES) or []
-            ]
-            out["collections"] = {
-                "about": "JobSpec.Files holds the job's FileSpec rows (PanDA's schema).",
-                "job.Files": {"rows": "files", "entity": "file"},
-            }
+            _job_files(out, raw, read, spellings, other)
     else:
         _task_sections(out, laid, left_out)
-    out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings)
-    out["statuslogs"] = statuslogs(laid, int(q["key"]))
+    out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings, tables)
+    out["statuslogs"] = statuslogs(laid, int(q["key"]), tables)
 
     if other:
         out["about"] += (
@@ -366,6 +372,179 @@ def build(record: dict, spellings: dict[str, dict[str, str]]) -> dict:
     if left_out:
         out["about"] += "  Left out: " + "; ".join(left_out) + "."
     return out
+
+
+def _job_files(
+    out: dict,
+    raw: dict,
+    read: dict,
+    spellings: dict[str, dict[str, str]],
+    other: set[str],
+) -> None:
+    out["files"] = [
+        {
+            c: {"value": v, **read}
+            for c, v in columns(f, spellings["FileSpec"], other).items()
+        }
+        for f in raw.get(FILES) or []
+    ]
+    out["collections"] = {
+        "about": "JobSpec.Files holds the job's FileSpec rows (PanDA's schema).",
+        "job.Files": {"rows": "files", "entity": "file"},
+    }
+
+
+#: how an aggregate's column comes back from R, and what L3 reads it as (its SQL's ``COUNT(*) AS n``,
+#: ``MIN(pandaid) AS min_pandaid``)
+AGGREGATE = re.compile(r"^(?P<function>count|min|max)\((?P<column>[^)]*)\)$")
+
+
+def _aggregate_name(column: str) -> str:
+    m = AGGREGATE.match(column)
+    if m is None:
+        return column
+    return "n" if m["function"] == "count" else f"{m['function']}_{m['column']}"
+
+
+def answered(
+    docs: list[dict], key_class: str, key: str, spellings: dict[str, dict[str, str]]
+) -> tuple[dict, list[str]]:
+    """The sections the answers to the querier's rows asks give, round by round (a later round's over an
+    earlier's), and what is left out and why.
+
+    A statement's rows, their histories and counts are the sections a task's fetch gives (``job_rows``,
+    ``job_statuslog``, ``counts``); the key's job's ``Files``, its ``files`` and ``collections``; the rows of
+    a class joined to a row by the ask's one pair (``via``), ``linked`` entries (:func:`joined`); an sql
+    ask's groups, ``answers[<name>]``, with R's aggregate columns named as L3's SQL names them.  The rows of
+    another row's attribute have no section yet, and are left out.  *spellings* holds the classes the
+    answers' rows are of, those it can.
+    """
+    out: dict[str, Any] = {}
+    left_out: list[str] = []
+    linked_by: dict[tuple, dict] = {}
+    for doc in docs:
+        for a in doc["answers"]:
+            ask = a["ask"]["rows"]
+            name = f"{ask['kind']} {ask.get('name') or ask.get('method') or ask.get('attr') or ask.get('entity')}"
+            if a["why"]:
+                left_out.append(f"{name}: {a['why']}")
+                continue
+            laid = Laid({"steps": a["steps"]})
+            if ask["kind"] == "statement":
+                _task_sections(out, laid, left_out)
+            elif ask["kind"] == "collection":
+                row = ask["row"]
+                mine = row["entity"] == key_class == "JobSpec" and [
+                    str(v) for v in row["key"].values()
+                ] == [str(key)]
+                raw, read, why = (
+                    key_row(laid, key_class, key) if mine else (None, {}, "")
+                )
+                if raw is not None:
+                    _job_files(out, raw, read, spellings, set())
+                elif ask.get("via"):
+                    entries, why = joined(ask, a["steps"], spellings)
+                    if why:
+                        left_out.append(f"{name}: {why}")
+                    for e in entries:
+                        linked_by[_linked_key(e)] = e
+                else:
+                    held = f"{row['entity']}.{ask['attr']}"
+                    left_out.append(
+                        f"{name}: {why or 'no section of the rows file holds the rows of ' + held + ' yet'}"
+                    )
+            elif ask["kind"] == "sql":
+                if not laid.complete("sql"):
+                    left_out.append(
+                        f"{name}: {laid.incomplete.get('sql', 'not asked')}"
+                    )
+                    continue
+                out.setdefault("answers", {})[ask["name"]] = {
+                    "source": f"R as of {laid.as_of.get('sql')}, by db_read's form of the ask",
+                    "as_of": down_to_second(laid.as_of.get("sql")),
+                    "clock": DATABASE,
+                    "rows": [
+                        {_aggregate_name(c): text(v) for c, v in r.items()}
+                        for _, r in laid.rows["sql"]
+                    ],
+                }
+    if linked_by:
+        out["linked"] = list(linked_by.values())
+    return out, left_out
+
+
+def joined(
+    ask: dict, steps: list[dict], spellings: dict[str, dict[str, str]]
+) -> tuple[list[dict], str]:
+    """A joined class's rows the rows step read for *ask*, as ``linked`` entries -- one per table asked, with no row
+    too, so the querier sees each was read -- or why none."""
+    via, element = ask["via"], ask["entity"]
+    if len(via) != 1:
+        return [], f"a linked entry names one pair, and the ask {len(via)}: {via}"
+    laid = Laid({"steps": steps})
+    if not laid.complete("collection"):
+        return [], "; ".join(laid.incomplete.get("collection", ["not asked"]))
+    if element not in spellings:
+        return [], f"no column list of {element} was read from the pin"
+    (pair,) = via
+    read = {
+        "source": f"R as of {laid.as_of.get('collection')}, where {ask['where']}",
+        "as_of": down_to_second(laid.as_of.get("collection")),
+        "clock": DATABASE,
+    }
+    by_table: dict[str, list[dict]] = {
+        t: [] for t in tables_answered(steps, "collection")
+    }
+    for table, r in laid.rows["collection"]:
+        by_table.setdefault(table, []).append(columns(r, spellings[element], set()))
+    asked = [ask["where"][pair["to"].partition(".")[2]]]
+    return [
+        {
+            "class": element,
+            "via": pair,
+            "asked": asked,
+            "table": t,
+            **read,
+            "rows": rows,
+        }
+        for t, rows in by_table.items()
+    ], ""
+
+
+def tables_answered(steps: list[dict], role: str) -> list[str]:
+    """The tables a done db_read answer of *role* holds, those with no row too."""
+    out = []
+    for step in steps:
+        response = step["response"]
+        data = response.get("data") if response.get("success") else None
+        if (
+            step["part"] != "db_read"
+            or not isinstance(data, dict)
+            or "answers" not in data
+        ):
+            continue
+        for r, answer in zip(step["roles"], data["answers"], strict=True):
+            if r == role and answer and answer.get("status") == "done":
+                out += [t["table"] for t in answer["tables"]]
+    return out
+
+
+def _linked_key(entry: dict) -> tuple:
+    return (
+        entry["class"],
+        entry["via"]["from"],
+        entry["via"]["to"],
+        tuple(map(str, entry["asked"])),
+        entry.get("table"),
+    )
+
+
+def lay_linked(built: list[dict], entries: list[dict]) -> list[dict]:
+    """The fetch's ``linked`` with the rows step's *entries* laid over it: an entry of the same class, pair, asked
+    values and table is replaced by the later."""
+    by = {_linked_key(e): e for e in built}
+    by.update((_linked_key(e), e) for e in entries)
+    return list(by.values())
 
 
 def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
@@ -458,6 +637,7 @@ def linked(
     raw: dict | None,
     read: dict,
     spellings: dict[str, dict[str, str]],
+    tables: Tables,
 ) -> list[dict]:
     """The rows each link from the key's rows named: one entry per link and table, with the values it asked.
 
@@ -469,7 +649,7 @@ def linked(
     out = []
     for cls, got in held.items():
         for link in links_from(cls):
-            values = sorted(values_by(link, got, key_class, key))
+            values = sorted(values_by(link, got, key_class, key, tables))
             if not values or (link.held and not got):
                 continue
             if link.held:
@@ -508,7 +688,7 @@ def linked(
     return out
 
 
-def statuslogs(laid: Laid, key: int) -> dict:
+def statuslogs(laid: Laid, key: int, tables: Tables) -> dict:
     """Each class's status histories that were answered, by the key of the row each belongs to; every key asked is there."""
     out = {}
     for cls, (part, kind) in HISTORIES.items():
@@ -524,7 +704,7 @@ def statuslogs(laid: Laid, key: int) -> dict:
                 {k: v for k, v in s.items() if k != "pandaid"}
             )
         out[cls] = {
-            "key": f"{cls}.{KEY[cls]}",
+            "key": f"{cls}.{tables.key[cls]}",
             "source": source,
             **bounds_of(laid.responses[part]),
             "by_key": by_key,

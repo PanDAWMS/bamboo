@@ -55,6 +55,9 @@ ROW_EXIT = os.environ.get("WHICH_RUN_ROW_EXIT", "1") != "0"
 #: ``WHICH_RUN_JOIN_CALLS=0``: runs of the key in several logs stay several runs, and none is the question's
 #: (2026-10-14), even where one ran inside a call the other made (the adder's updateJobs and DBProxy's archiveJob)
 JOIN_CALLS = os.environ.get("WHICH_RUN_JOIN_CALLS", "1") != "0"
+#: ``WHICH_RUN_ROWS_AROUND=0``: a line is proven only by a row on a path through it (implying rows, P), not by two
+#: rows printed in a row that only a path through it prints (:func:`rows_around`)
+ROWS_AROUND = os.environ.get("WHICH_RUN_ROWS_AROUND", "1") != "0"
 
 
 def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
@@ -251,6 +254,27 @@ def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, i
     if first is None or last is None or id(first) not in prints or id(last) not in prints:
         return None
     return (i, j) if R.runs_between(node, first, last, stmt, prints) else None
+
+
+def rows_around(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> tuple[int, int] | None:
+    """``(first, last)``: two of *fn*'s rows the run printed in a row -- no row of it read between them -- that only a
+    path through *stmt* prints so (``rows.passes_through``), or None.  A line no row is on every path through (a call
+    of a function that prints nothing) is shown run by the rows around it: ``TaskRefinerThread.runImpl``'s 205 and 563
+    around 211, ``extractCommon``.  A row read but not placed (``Seen.hits`` beyond ``unambiguous``) between the two
+    breaks the pair, as in :func:`_between_records`."""
+    node = fn.node
+    placed = sorted((x, line) for line, xs in sn.unambiguous.items() for x in xs)
+    read = sorted(x for found in getattr(sn, "hits", {}).values() for x, *_ in found)
+    prints = {id(s) for s in R.own_nodes(node) if isinstance(s, ast.stmt) and R.is_print(s) and fn.row_at(s) is not None}
+    for (i, a), (j, b) in zip(placed, placed[1:], strict=False):
+        if any(i < x < j for x in read):
+            continue
+        first, last = R.statement_at(node, a), R.statement_at(node, b)
+        if first is None or last is None or id(first) not in prints or id(last) not in prints:
+            continue
+        if R.passes_through(node, first, last, stmt, prints):
+            return a, b
+    return None
 
 
 def held_in_calls(
@@ -633,6 +657,9 @@ def judge(
                 elif proof.kind == "positive":
                     v.kind = "positive"
                     v.reasons.append(proof.reason)
+                elif ROWS_AROUND and (around := rows_around(fn, sn, stmt)) is not None:
+                    v.kind = "positive"
+                    v.reasons.append(f"rows {around[0]} and {around[1]} printed in a row, which only a path through it prints")
                 else:
                     v.reasons.append(
                         f"must rows: printed {shown}, unreadable {neutral}; none prints only through it"

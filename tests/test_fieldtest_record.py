@@ -644,3 +644,118 @@ async def test_an_ask_whose_list_got_no_response_is_deferred(tmp_path):
         "every jedi machine",
         "every server machine",
     }
+
+
+# ------------------------------------------------------------------ several cases in one round
+
+
+async def run_cases(tmp_path, panda: FakePanda, cases: list, max_wait=3600):
+    return await R.record_rounds(
+        cases, panda.parts(), datetime.timedelta(seconds=max_wait), tmp_path / "shared"
+    )
+
+
+async def test_the_asks_of_several_cases_share_one_list_and_one_grep_and_each_case_keeps_its_own_round(
+    tmp_path,
+):
+    reply = found(
+        rec(1, "2026-10-14 06:00:00,1 a 111"),
+        rec(2, "2026-10-14 06:00:01,1 b 222"),
+    )
+    greps = {
+        (SERVER[0], "panda-adder.log-20261014.gz"): [reply],
+        (SERVER[0], "panda-adder.log-20261013.gz"): [found()],
+    }
+    panda = FakePanda(lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), greps)
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:01")
+    a, b = tmp_path / "a", tmp_path / "b"
+    # b has a round of its own already: its next is its second
+    await run(b, panda, [ask(ADDER, ["333"], ("2026-10-13 06:00:00",) * 2, SERVER[0])])
+    calls_before = len(panda.calls)
+
+    (pa, (ra,), _), (pb, (rb,), _) = await run_cases(
+        tmp_path,
+        panda,
+        [
+            ([ask(ADDER, ["111"], w, SERVER[0])], a),
+            ([ask(ADDER, ["222"], w, SERVER[0])], b),
+        ],
+    )
+    calls = panda.calls[calls_before:]
+    assert [c for c in calls if c[0] == "grep"] == [
+        ("grep", SERVER[0], "panda-adder.log-20261014.gz", ("111", "222"), None)
+    ]
+    assert (
+        len([c for c in calls if c[0] == "list"]) == 2
+    )  # once per service, for both cases
+    assert (pa, pb) == (a / "records-r1.jsonl", b / "records-r2.jsonl")
+    assert (ra["round"], rb["round"]) == (1, 2)
+    fa, fb = (
+        ra["machines"][SERVER[0]]["files"][0],
+        rb["machines"][SERVER[0]]["files"][0],
+    )
+    assert [x["offset"] for x in fa["records"]] == [1]
+    assert [x["offset"] for x in fb["records"]] == [2]
+    # the answers are kept once, and each case's round says where
+    (kept,) = (tmp_path / "shared").glob("answers-*/leaves.jsonl")
+    for d, n in ((a, 1), (b, 2)):
+        (pointer,) = d.glob(f"answers-r{n}-*/shared.json")
+        assert json.loads(pointer.read_text()) == {"answers": str(kept.parent)}
+        assert not list(d.glob(f"answers-r{n}-*/leaves.jsonl"))
+
+
+async def test_a_later_round_of_one_case_reads_the_rotated_file_the_shared_round_answered(
+    tmp_path,
+):
+    greps = {
+        (SERVER[0], "panda-adder.log-20261014.gz"): [
+            found(rec(1, "2026-10-14 06:00:00,1 a 7339"))
+        ]
+    }
+    panda = FakePanda(lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), greps)
+    a, b = tmp_path / "a", tmp_path / "b"
+    first = _adder_on(SERVER[0])
+    other = ask(ADDER, ["8000"], ("2026-10-14 06:00:00",) * 2, SERVER[0])
+    await run_cases(tmp_path, panda, [([first], a), ([other], b)])
+    wider = ask(
+        ADDER, ["7339"], ("2026-10-14 05:00:00", "2026-10-14 06:00:00"), SERVER[0]
+    )
+    p2, (r,) = await run(a, panda, [wider])
+    assert p2.name == "records-r2.jsonl"
+    assert len([c for c in panda.calls if c[0] == "grep"]) == 1
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert [x["offset"] for x in f["records"]] == [1]
+    assert r["requests"][0]["reused"].startswith("answers-")
+
+
+async def test_a_deferred_ask_stays_in_its_own_cases_round(tmp_path):
+    day = "panda-adder.log-20261014.gz"
+    greps = {
+        (SERVER[0], day): [found(rec(1, "2026-10-14 06:00:00,1 a 7339"))],
+        (SERVER[1], day): [{"status": "failed", "error": "timeout"}],
+    }
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: ADDER_FILES}), greps
+    )
+    a, b = tmp_path / "a", tmp_path / "b"
+    (pa, ra, da), (pb, rb, (d,)) = await run_cases(
+        tmp_path, panda, [([_adder_on(SERVER[0])], a), ([_adder_on(SERVER[1])], b)]
+    )
+    assert pa == a / "records-r1.jsonl" and len(ra) == 1 and da == []
+    assert (
+        pb is None and rb == [] and d["why"] == [f"{SERVER[1]} {day}: failed: timeout"]
+    )
+    assert not list(b.glob("records-r*.jsonl"))
+    (kept,) = b.glob("answers-r1-*/deferred.jsonl")
+    assert [json.loads(x)["ask"] for x in kept.read_text().splitlines()] == [d["ask"]]
+    assert not list(a.glob("answers-r1-*/deferred.jsonl"))
+
+
+async def test_several_cases_need_a_shared_directory(tmp_path):
+    panda = FakePanda(lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {})
+    with pytest.raises(FieldTestError, match="shared directory"):
+        await R.record_rounds(
+            [([_adder_on(SERVER[0])], tmp_path / "a"), ([], tmp_path / "b")],
+            panda.parts(),
+            datetime.timedelta(seconds=60),
+        )
