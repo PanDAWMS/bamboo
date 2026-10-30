@@ -83,13 +83,32 @@ def recorded_values(fragment) -> dict[str, list[str]]:
     return {f"{n.owner}:{h.line}": list(h.values) for n in (fragment.reach_graph if fragment else []) for h in (n.history or [])}
 
 
-def candidate_rows(found: list[Arm], states: list[dict], values: dict[str, list[str]]) -> list[dict]:
-    """The statuslog rows the placed arms' passes can write, newest first: a pair whose history call records literal
-    statuses can write the rows holding one of them; any other, any row."""
-    keep: set[int] = set()
+def row_writers(found: list[Arm], states: list[dict], values: dict[str, list[str]]) -> list[tuple[dict, list[Arm]]]:
+    """The statuslog rows the placed arms' passes can write, newest first, each with those arms: a pair whose history
+    call records literal statuses can write the rows holding one of them; any other, any row.  H2 asks a row of its own
+    arms' logs only (the harness's to-querier-61, step 1): a row only one writer's passes can write is not asked of the
+    others' logs."""
+    by_row: dict[int, list[Arm]] = {}
     for a in found:
         for p in a.placed:
             recorded = [v for w in p.writes for v in values.get(w, ["runtime(?)"])]
             literal = bool(recorded) and not any(v.startswith("runtime(") for v in recorded)
-            keep |= {i for i, s in enumerate(states) if not literal or s["status"] in recorded}
-    return [states[i] for i in sorted(keep, reverse=True)]
+            for i, s in enumerate(states):
+                if (not literal or s["status"] in recorded) and a not in by_row.get(i, []):
+                    by_row.setdefault(i, []).append(a)
+    return [(states[i], by_row[i]) for i in sorted(by_row, reverse=True)]
+
+
+def readings_of(readings: list, arms: list[Arm]) -> list:
+    """*readings* cut to the lines of *arms*: the writers H2 asks one row of (``row_writers``)."""
+    lines: dict[str, set[int]] = {}
+    for a in arms:
+        lines.setdefault(a.owner, set()).add(a.line)
+    out = []
+    for r in readings:
+        keep = [line for line in r.lines if line in lines.get(r.owner, ())]
+        if len(keep) == len(r.lines):
+            out.append(r)
+        elif keep:
+            out.append(r.model_copy(update={"lines": keep}))
+    return out

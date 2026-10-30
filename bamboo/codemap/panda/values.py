@@ -941,7 +941,10 @@ def handed(resolve, calls: Optional["Calls"]):
       it -- and only where every one of them settles (see ``bindings``);
     * a parameter, through what each call :meth:`Calls.callers` places at the
       function hands it (``calls.bind``), read in the caller the same way --
-      every call, however many.
+      every call, however many;
+    * ``d.keys()`` of a dict display -- written there, held by a local or
+      returned by the call -- key by key, where every key settles:
+      ``JediTaskSpec.commandStatusMap().keys()``, TaskCommando's commands.
 
     Returns ``(expression, func, file) -> [Handed, ...]``.  Without *calls*
     only the function's own writes are read.
@@ -1064,6 +1067,18 @@ def handed(resolve, calls: Optional["Calls"]):
             left = settle(expression.left, func, file, depth, seen)
             right = settle(expression.right, func, file, depth, seen)
             return left + right if _any_value(left) and _any_value(right) else []
+        if (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Attribute)
+            and expression.func.attr == "keys"
+            and not expression.args
+            and not expression.keywords
+        ):
+            # ``commandStatusMap.keys()``, the name bound to what
+            # ``JediTaskSpec.commandStatusMap()`` returns: the display's keys.
+            keyed = keys_of(expression.func.value, func, file, depth, seen)
+            if keyed:
+                return keyed
         if isinstance(expression, ast.Call):
             return returned(expression, func, file, depth, seen)
         if not isinstance(expression, ast.Name):
@@ -1129,6 +1144,48 @@ def handed(resolve, calls: Optional["Calls"]):
             for via, constants in calls.handed_constants(target, {expression.id})
             if pathcond.ruled_out_by(expression, func, constants)
         ]
+
+    def keys_of(expression: ast.expr, func: ast.AST, file: str, depth: int, seen: frozenset) -> list[Handed]:
+        """The keys of the dict *expression* is: a display, a local every write of which is one, or a call every
+        return of which is one -- and only where every key settles and nothing is spread in with ``**``."""
+        if isinstance(expression, ast.Dict):
+            if any(key is None for key in expression.keys):
+                return []
+            found: list[Handed] = []
+            for key in expression.keys:
+                settled = settle(key, func, file, depth, seen)  # type: ignore[arg-type]
+                if not _any_value(settled):
+                    return []
+                found.extend(settled)
+            return found
+        if isinstance(expression, ast.Name) and expression.id not in parameters(func):
+            key = (file, getattr(func, "lineno", 0), expression.id, "<keys>")
+            written = bindings(func, expression.id) if key not in seen else None
+            if not written:
+                return []
+            found = []
+            for value in written:
+                settled = keys_of(value, func, file, depth, seen | {key})
+                if not _any_value(settled):
+                    return []
+                found.extend(settled)
+            return found
+        if isinstance(expression, ast.Call) and calls is not None and depth < HANDED_DEPTH:
+            placed = calls.callees(file, func, expression)
+            if not placed.targets or placed.unplaced or placed.returns_none:
+                return []
+            found = []
+            for target in placed.targets:
+                key = (target.file, target.func.lineno, "<return keys>")  # type: ignore[attr-defined]
+                if key in seen:
+                    return []
+                for value in calls_returns(target.func):
+                    settled = keys_of(value, target.func, target.file, depth + 1, seen | {key})
+                    if not _any_value(settled):
+                        return []
+                    found.extend(settled)
+            return found
+        return []
 
     def returned(call: ast.Call, func: ast.AST, file: str, depth: int, seen: frozenset) -> list[Handed]:
         """What the functions *call* lands in return, where each of their returns settles."""

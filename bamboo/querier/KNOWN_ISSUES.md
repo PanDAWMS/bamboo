@@ -592,8 +592,19 @@ the time.  Counted on the harness's 57 (attr-time-shape.md): every arm placed 23
 the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's storeJobs leaves 12 of the 18
 (asked of the map, 10-29).
 
-*Shows:* "-- row n of m" in H2 and its judgement per row; a stop "every writer of <subject> on a history row of the
-object ... (k of n not: K37)" or "a writer of <subject> in the map".
+A row is asked, and read, of the logs of the writers whose passes can write it alone (`attr_time.row_writers`,
+`readings_of`; the harness's to-querier-61, step 1, tmaeno 「１で」 10-30): before, every row was asked of every
+writer's logs, so a writer that can write any row kept every log in every window.  No row is left out by it.  Which
+rows a writer's pass can write is still read from the history call's recorded statuses only: a pass that records the
+status at run time can write any row, though it moves the object on only from the statuses it picks it up at --
+TaskRefiner's pass from registered, rerefine and staged.  Telling those from a writer that takes its row by a key from
+outside (updateJobStatus, the pilot's PandaID) needs the key's source of the pass's status write (step 2, not built:
+S1's census lists TaskRefiner.runImpl as a writer by key at 31 task values, and updateJobStatus as a kept mover at
+activated and waiting, so neither its kept movers nor its writers by key tell them apart).
+
+*Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers; a
+stop "every writer of <subject> on a history row of the object ... (k of n not: K37)" or "a writer of <subject> in
+the map".
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
 arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 
@@ -617,6 +628,31 @@ whose branches are the arms and whose undecided branches end open rather than st
 *Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row; a stop "one arm that
 wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)".
 *Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it).
+
+### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
+
+A mover's statement can select its rows by another column too, one other functions write: ContentsFeeder's 130
+takes a task at defined only while its dataset is toupdate or defined, and restartTasksForContentsUpdate_JEDI's 1844
+sets the dataset toupdate for the tasks its 1830 selects at defined.  The map records these on the read site
+(`ReadSiteNode.wakers`, ix's 6 b, A only), and `wakers_of` takes, for each statement giving a mover rows, those the
+map states (the branch's outcome is the value) and whose write is handed rows selected at the value (`keyed_at`).
+S1 says each under its mover where the mover is not dropped, and says a mover it drops as reaching no write that is
+one of them as their waker -- restart at task defined and at dataset toupdate, which S1 dropped with nothing more
+before.  A waker keyed by a statement whose function moves the subject on from the value itself is said a candidate:
+that pass may take the row on before the mover sees it (prepareTasksToBeFinished_JEDI's 4001 / 4006 for JobGenerator's
+1871 at task running, keyed by its own 3694; the map's own doubt).  Not said: a write the map does not state (tier
+2), one keyed by rows of other values, and what the map does not read -- a command row (getAchievedTasks_JEDI's finish
+into PRODSYS_COMM, read by TaskCommando's 4339: the map's B) and a Python test on a row read by key
+(AtlasAnalWatchDog's `tmpFileSpec.status == "finished"`: C).  So no waker said is not "nothing wakes it".  S1 does not
+ask whether a waker ran for the row, nor read the row's other column against the term.  On pin m (x13ixA1m) the
+census has 17 kept movers naming 41 wakers, 13 of them with a candidate, and 4 dropped movers said as wakers, all at
+the task's and the dataset's statuses.
+
+*Shows:* "<mover>: its rows wait also on <waker>@<line> writing <subject>=<value>, which <reader> asks ('<term>'),
+for rows selected at the value" (" -- a candidate: ..."); "<waker>: not a mover, but it writes ...: its waker";
+result.json's mover entries' `wakers`, and a `K39` reason on the dropped one.
+*Revisit:* with step 2 -- asking a waker's runs for the row, and the row's other column against the term (on tmaeno's
+word); and with the map's B and C (map_todo MV).
 
 ### K11. After H4 the next question is always H5, the traceback
 

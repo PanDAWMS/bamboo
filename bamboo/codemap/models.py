@@ -1904,20 +1904,44 @@ class Waker(BaseModel):
             "Sorted."
         )
     )
-    term: str = Field(description="The term as the statement writes it: ``tabD.status IN (:dsStatus___in)``.")
+    term: str = Field(
+        description=(
+            "The term as the statement writes it: ``tabD.status IN (:dsStatus___in)``; a plain conjunct, which only "
+            ":attr:`ReadSiteNode.restricts` holds, as its pair: ``JediDatasetSpec.state=mutable``."
+        )
+    )
     subject: str = Field(description="The subject the term tests, and the branch writes.")
     value: str = Field(description="The value the term asks and the branch can write.")
-    owner: str = Field(description="The junction's owner, ``module::function``.")
-    line: int = Field(description="The branch's line.")
+    owner: str = Field(description="The junction's owner, ``module::function``; an insert's function, spelled so.")
+    line: int = Field(description="The branch's line; an insert's, each line it runs from.")
     stated: bool = Field(
-        description="The branch's outcome is the value; else a run-time value its own frames do not rule out."
+        description=(
+            "The branch's outcome is the value, else a run-time value its own frames do not rule out; an insert "
+            "writes the value, as a literal or on ``routes``, else on routes whose constant is not known."
+        )
+    )
+    kind: str = Field(
+        default="branch",
+        description=(
+            "``branch`` -- a junction's branch writes the value; ``insert`` -- a reach record's ``INSERT`` gives a new "
+            "row the value (:attr:`ReachNode.writes`): sendCommandTaskPanda's 4038, the commands 4339 selects."
+        ),
+    )
+    routes: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "An insert whose column takes a parameter: the routes into its function (``file:line`` of each call, the "
+            "call into it first) handing the value -- or, not stated, handing a constant not known; empty for a "
+            "literal and a branch."
+        ),
     )
     keyed_by: list[str] = Field(
         default_factory=list,
         description=(
             "The :class:`ReadSiteNode` names whose rows fill a key of the write holding the branch "
             "(:attr:`KeyFrom.sources` of kind ``rows``), sorted: restartTasksForContentsUpdate_JEDI's 1844 is "
-            "keyed by its 1830's rows."
+            "keyed by its 1830's rows.  For an insert, those its other parameter columns are carried from on its "
+            "routes: 4038's ``COMM_TASK`` from getAchievedTasks_JEDI's 3297 on the route through TypicalWatchDogBase."
         ),
     )
     keyed_at: list[str] = Field(
