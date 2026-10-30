@@ -297,6 +297,15 @@ no verdict moved by it: `updateJobStatus` is kept now because its reach leaves 2
 (`push_job_status_message`'s `mb_proxy.send`, ...), and 27 reach texts lose writers of births alone
 (`ppEventServiceJob`, `makeFakeCoJumbo`, `increaseSeqNumber_JEDI`, ...).
 
+An arm on an object no row holds is no arm either.  The map's OS (ix) says on a branch that the records prove its
+object is held by no write of its class's tables, or by none that takes it whole or by the attribute (`off_row`,
+`no_write` or `not_taken`: a spec the function makes and drops, `getTaskWithJumbo_JEDI`'s useJumbo, `checkAllEventsDone`'s
+FileSpec), and its readers -- derive-strategy's readings (H1), `reach.moving_off` -- leave it out.  The querier's
+door to the writers (`Rerun._writers_of`, which S1, L2 and the mover census read) leaves those branches out too
+(`on_rows`), and a junction left with none, its owner no writer.  On ix's map (x13ixO1m, 20 such arms, none on a
+status) one census row moves: `checkAllEventsDone` at `FileSpec.type=input`, kept by its arm 1275, has no arm of its
+own and reaches no write, so it is dropped (out/ix/or-predictions.txt).  A dump built before OS has no `off_row`.
+
 *Shows:* "<owner>: its writes at [...] make the row (births: sequence at 623): not arms"; result.json's `births`; a
 writer with births alone is absent from the movers; H2 / F1: "the key's row was there before 'activated' at ..., so
 its writes that make a row are no candidates: ppEventServiceJob [5556, 5560] (births: sequence at 5706)".

@@ -571,16 +571,34 @@ def unborn_junctions(junctions: list, subject: str) -> list:
     S1 leaves out as a birth is no arm of a mover's own def for K14's keep (``reach_said``), nor of a writer its calls
     reach -- ``updateJobStatus``'s new FileSpec of type zipinput (434) kept it a mover of ``FileSpec.type=input``
     (KNOWN_ISSUES.md K29)."""
+    return [
+        _with_branches(j, [b for b in j.branches if not born(b, birth_marks(j.owner, subject))] if j.subject == subject else j.branches)
+        for j in junctions
+    ]
+
+
+def on_rows(junctions: list) -> list:
+    """*junctions* without the branches the map says write no row (``Branch.off_row``, ix's OS): the arm assigns on an
+    object the records prove no write of its class's tables holds, or none takes whole or by the attribute -- a spec
+    the function makes and drops, as ``getTaskWithJumbo_JEDI``'s useJumbo.  No writer of the row's value, as H1's
+    readings and ``reach.moving_off`` already read it; a junction left with no branch goes, its owner no writer.  A
+    dump built before OS says none."""
     out = []
     for j in junctions:
-        kept = [b for b in j.branches if not born(b, birth_marks(j.owner, subject))] if j.subject == subject else j.branches
-        if len(kept) == len(j.branches):
-            out.append(j)
-        elif hasattr(j, "model_copy"):
-            out.append(j.model_copy(update={"branches": kept}))
-        else:
-            out.append(copy.copy(j))
-            out[-1].branches = kept
+        kept = [b for b in j.branches if not getattr(b, "off_row", None)]
+        if kept or not j.branches:
+            out.append(_with_branches(j, kept))
+    return out
+
+
+def _with_branches(j, kept: list):
+    """*j* with *kept* for its branches: itself where none is left out, else a copy (a dump's model or a stand-in)."""
+    if len(kept) == len(j.branches):
+        return j
+    if hasattr(j, "model_copy"):
+        return j.model_copy(update={"branches": kept})
+    out = copy.copy(j)
+    out.branches = kept
     return out
 
 
@@ -3005,7 +3023,7 @@ class Rerun:
     async def _writers_of(self, subject: str) -> list:
         writers = await mapdump.code_map("rerun").writers_of(subject)
         R.check_blobs(writers, f"the map's writers of {subject}")
-        return writers
+        return on_rows(writers)
 
     # ------------------------------------------------------------ Passes: which way each pass went
     def passes(self, q: Passes):

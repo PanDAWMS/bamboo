@@ -3614,6 +3614,53 @@ def test_l3s_db_read_form_takes_the_where_as_conditions_where_each_term_is_one_c
     ]
 
 
+def test_the_writers_the_map_hands_lose_the_arms_it_says_write_no_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import asyncio, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rerun
+
+            off = N(why="no_write", functions=["pandaserver/a.py::C.g"], writes=[])
+            junctions = [
+                N(owner="a.py::C.g", subject="JediTaskSpec.splitRule",
+                  branches=[N(line=10, outcome="x", off_row=None), N(line=11, outcome="y", off_row=off)]),
+                # every arm off its row: the owner is no writer
+                N(owner="a.py::C.h", subject="JediTaskSpec.splitRule", branches=[N(line=20, outcome="z", off_row=off)]),
+                # a dump built before OS: no off_row
+                N(owner="a.py::C.k", subject="JediTaskSpec.splitRule", branches=[N(line=30, outcome="w")]),
+                N(owner="a.py::C.e", subject="JediTaskSpec.splitRule", branches=[]),
+            ]
+
+            async def writers_of(subject):
+                return junctions
+
+            mapdump.code_map = lambda who: N(writers_of=writers_of)
+            r = object.__new__(rerun.Rerun)
+            got = asyncio.run(r._writers_of("JediTaskSpec.splitRule"))
+            # a dump's junction is a model: copied with the branches kept
+            from bamboo.codemap.models import Anchor, Branch, JunctionNode
+
+            subject, owner = "JediTaskSpec.splitRule", "pandajedi/a.py::C.g"
+            model = JunctionNode(name=JunctionNode.make_name("panda", subject, owner), map_id="panda", derived_from="x",
+                                 subject=subject, owner=owner, branches=[Branch(outcome="x", line=10), Branch(outcome="y", line=11)],
+                                 anchor=Anchor(package="pandajedi", file="pandajedi/a.py", line_start=1))
+            copied = rerun._with_branches(model, model.branches[:1])
+            print(json.dumps([[[j.owner, [b.line for b in j.branches]] for j in got], [b.line for b in junctions[0].branches],
+                              got[1] is junctions[2], [type(copied).__name__, [b.line for b in copied.branches],
+                                                       [b.line for b in model.branches]]]))
+            """,
+        )
+    )
+    got, map_own, same, model = json.loads(out.splitlines()[-1])
+    assert got == [["a.py::C.g", [10]], ["a.py::C.k", [30]], ["a.py::C.e", []]]
+    # the map's junction is not changed, and one with nothing left out is handed on as it is
+    assert map_own == [10, 11] and same is True
+    assert model == ["JunctionNode", [10], [10, 11]]
+
+
 def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_path):
     out = _ok(
         _run(
