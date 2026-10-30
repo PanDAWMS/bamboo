@@ -39,9 +39,19 @@ from bamboo.codemap.models import (
     MapFragment,
     SourceModule,
     SubjectNode,
+    pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import mustprints, objects, promotion, runs, sql, sqltext
+from bamboo.codemap.panda import (
+    mustprints,
+    objects,
+    offrow,
+    promotion,
+    runs,
+    sql,
+    sqltext,
+    wakers,
+)
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
@@ -151,6 +161,7 @@ def _merge_junctions(junctions: list[JunctionNode]) -> list[JunctionNode]:
             held = known.get((branch.outcome, tuple(branch.path_condition)))
             if held is not None:
                 held.value_frames = pooled_frames(held.value_frames, branch.value_frames)
+                held.value_cuts = pooled_cuts(held.value_cuts, branch.value_cuts)
                 held.other_lines = sorted(
                     {*held.other_lines, *[line for line in (branch.line, *branch.other_lines) if line is not None]}
                     - {held.line}
@@ -797,7 +808,15 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 recorded,
                 paired,
             )
+            # The arms whose object no row is written from, read on the same records: what a reader of a row's
+            # value skips.
+            off = offrow.attach(fragment, self._modules, self._calls)
+            logger.info("PandaCodeMapPlugin: %d branch(es) write their object to no row", off)
 
+        # What a row a statement selects waits on besides the mover: the writes its terms on other columns ask for,
+        # joined from the junctions and the key sources once the arms off their row are marked.
+        woken = wakers.attach(fragment)
+        logger.info("PandaCodeMapPlugin: %d read site(s) with a waker", woken)
         lap("objects and runs")
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "

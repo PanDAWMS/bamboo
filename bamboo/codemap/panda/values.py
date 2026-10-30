@@ -180,10 +180,12 @@ def diagnostic_template(node: ast.expr) -> Optional[str]:
     return text if text and has_literal_text(text) else None
 
 
-#: How far :func:`value_frames` follows a local back.  Two, because the second
-#: hop is the shape ``setup_destination`` has: ``dest_error[dest] = tmp_msg``,
-#: with ``tmp_msg`` built two lines above.
-FRAME_HOPS = 2
+#: How far :func:`value_frames` follows a local back.  Three: the second hop is
+#: the shape ``setup_destination`` has, ``dest_error[dest] = tmp_msg`` with
+#: ``tmp_msg`` built two lines above, and the third ``updateJobMetrics_JEDI``'s,
+#: ``newSH = newSH[:500]`` after ``newSH = " ".join(items)``, whose last item is
+#: ``tagStr``, built before.  On the pin the third hop alone gives no frame.
+FRAME_HOPS = 3
 #: More renderings than this and the part is left a hole rather than listed.
 FRAME_LIMIT = 32
 _HOLE = "{}"
@@ -213,22 +215,49 @@ def value_frames(
     a parameter, a ``global``, an unpacking, a loop or ``with`` target, a dict
     handed to another function or changed by a method -- each is a hole.
 
+    A join holds what its own block put into the list before it
+    (:func:`_put_before`): ``items.append(tagStr)`` then ``" ".join(items)``
+    is ``{}`` around ``tagStr``'s texts.  And a value the code cuts to a length
+    (``newSH[:500]``) is read as what it cuts, the length said apart
+    (:func:`value_reading`): a value of that length may be a frame's head.
+
     Not :func:`progress._reaching`, which a later write in another arm shadows
     on purpose: it answers which text *belongs* to a write, to attach a tag,
     and dropping a possible text there costs a tag, here an arm.  And an
     earlier pass of a loop holds what this one did not assign, so inside a
     loop around both the two arms of one ``if`` are not kept apart.
     """
+    return value_reading(node, func).frames
+
+
+class ValueReading(NamedTuple):
+    """What :func:`value_reading` answers: :func:`value_frames`' frames, and the lengths the code cuts the whole value
+    to on its way -- see ``Branch.value_cuts``."""
+
+    frames: list[str]
+    cuts: list[int]
+
+
+def value_reading(node: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef]) -> ValueReading:
+    """:func:`value_frames`' frames of *node*, with every length a slice ``x[:n]`` cuts the whole value to.
+
+    Only the whole value's cut: a slice inside a text, a ``+`` or a join cuts
+    a part, and the text is then not a head of its frame, so there it is a
+    hole.  A negative bound drops a tail, which no frame says: a hole too.
+    """
+    cuts: list[int] = []
     try:
-        found = _frames(node, func, pathcond.site_of(node), FRAME_HOPS)
+        found = _frames(node, func, pathcond.site_of(node), FRAME_HOPS, cuts)
     except RecursionError:
-        return []
-    if any(_HOLE in frame and not has_literal_text(frame) for frame in found):
-        return []
-    return found
+        return ValueReading([], [])
+    if not found or any(_HOLE in frame and not has_literal_text(frame) for frame in found):
+        return ValueReading([], [])
+    return ValueReading(found, sorted(set(cuts)))
 
 
-def _frames(node: ast.expr, func, at: ast.AST, hops: int) -> list[str]:
+def _frames(node: ast.expr, func, at: ast.AST, hops: int, cuts: Optional[list[int]] = None) -> list[str]:
+    """*node*'s frames; *cuts*, where *node* is the whole value, collects the lengths it is cut to (``None``: a
+    part, where a cut is a hole)."""
     if isinstance(node, ast.Constant):
         return [_literal(node.value)] if isinstance(node.value, str) else [_HOLE]
     if isinstance(node, ast.JoinedStr):
@@ -259,10 +288,42 @@ def _frames(node: ast.expr, func, at: ast.AST, hops: int) -> list[str]:
         if "{{" in text or "}}" in text:
             return [_HOLE]
         return [_squeezed(blank_fields(text))]
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Slice)
+        and node.slice.lower is None
+        and node.slice.step is None
+        and isinstance(node.slice.upper, ast.Constant)
+        and type(node.slice.upper.value) is int
+        and node.slice.upper.value >= 0
+    ):
+        # ``newSH[:500]``: what it cuts, cut to a length.
+        if cuts is None:
+            return [_HOLE]
+        cuts.append(node.slice.upper.value)
+        return _frames(node.value, func, at, hops, cuts)
+    if (
+        func is not None
+        and isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and isinstance(node.func.value, ast.Constant)
+        and isinstance(node.func.value.value, str)
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+    ):
+        put = _put_before(node.args[0].id, node)
+        if put:
+            # One of the joined texts, wherever it sits among the others: read within the join's own hop, as the
+            # parts of a text are.
+            return _distinct(
+                [_HOLE + frame + _HOLE for one in put for frame in _frames(one, func, pathcond.site_of(one), hops)]
+            )
     if func is None or hops == 0:
         return [_HOLE]
     if isinstance(node, ast.Name):
-        return _held_by_name(node.id, func, at, hops)
+        return _held_by_name(node.id, func, at, hops, cuts)
     if (
         isinstance(node, ast.Subscript)
         and isinstance(node.value, ast.Name)
@@ -319,7 +380,68 @@ def _local(func, name: str) -> bool:
     )
 
 
-def _held_by_name(name: str, func, at: ast.AST, hops: int) -> list[str]:
+def _put_before(name: str, join: ast.Call) -> list[ast.expr]:
+    """What the statements of *join*'s own block before it put into the list *name*, read back to the first that
+    takes from it, binds it again or hands it on: what the joined text holds on every path to the join.
+
+    ``updateJobMetrics_JEDI``'s ``items.append(tagStr)`` right before
+    ``newSH = " ".join(items)``.  An earlier statement of the block runs before
+    the join on every path that reaches it, so its put is among the joined
+    texts; a put under an ``if`` there is not read, nor one in another block.
+    A use of the list that is neither a put nor a read (``callfacts``: a
+    builtin method that changes it and puts nothing, ``len``, ``in``) ends the
+    reading -- what was put before it may be gone.
+    """
+    at = pathcond.site_of(join)
+    parent = getattr(at, "parent", None)
+    block = next(
+        (body for field in ("body", "orelse", "finalbody") if at in (body := getattr(parent, field, None) or [])),
+        None,
+    )
+    if block is None:
+        return []
+    put: list[ast.expr] = []
+    for statement in reversed(block[: block.index(at)]):
+        call = statement.value if isinstance(statement, ast.Expr) else None
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == name
+        ):
+            method = callfacts.by_name(call.func.attr)
+            elements = [
+                one.argument
+                for one in (method.puts if method is not None else ())
+                if one.into == callfacts.ELEMENT and isinstance(one.argument, int)
+            ]
+            if elements and all(position < len(call.args) for position in elements) and not call.keywords:
+                put += [call.args[position] for position in elements]
+                continue
+        if not _only_read(statement, name):
+            break
+    return put
+
+
+def _only_read(statement: ast.stmt, name: str) -> bool:
+    """Whether *statement* uses the list *name* only to put into it or to read it."""
+    for node in walk(statement):
+        if not (isinstance(node, ast.Name) and node.id == name):
+            continue
+        parent = getattr(node, "parent", None)
+        if isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Attribute):
+            method = callfacts.by_name(parent.attr)
+            if method is not None and (method.puts or not method.changes):
+                continue
+        if isinstance(parent, ast.Compare) and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops):
+            continue
+        if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id == "len":
+            continue
+        return False
+    return True
+
+
+def _held_by_name(name: str, func, at: ast.AST, hops: int, cuts: Optional[list[int]] = None) -> list[str]:
     if not _local(func, name):
         return [_HOLE]
     every = pathcond.bindings(func, name)
@@ -335,7 +457,7 @@ def _held_by_name(name: str, func, at: ast.AST, hops: int) -> list[str]:
         if binding.unpacked or binding.slot is not None or binding.value is None:
             return [_HOLE]
         if binding.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED, pathcond.BIND_WALRUS):
-            found += _frames(binding.value, func, binding.site, hops - 1)
+            found += _frames(binding.value, func, binding.site, hops - 1, cuts)
         elif binding.kind == pathcond.BIND_AUGMENTED and isinstance(binding.site.op, ast.Add):
             # What was there, then this.  The head is a hole rather than the
             # earlier texts: which of them it was is a second question.

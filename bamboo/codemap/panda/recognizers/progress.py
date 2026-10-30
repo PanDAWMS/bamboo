@@ -575,6 +575,8 @@ class Resolved(NamedTuple):
     conditions: tuple[str, ...] = ()
     #: Every text a run-time value can be -- see ``Branch.value_frames``.
     frames: tuple[str, ...] = ()
+    #: The lengths the code cuts the value to -- see ``Branch.value_cuts``.
+    cuts: tuple[int, ...] = ()
 
 
 def _runtime(value: ast.expr) -> str:
@@ -687,7 +689,8 @@ def _resolve(
     # ``errorDialog`` and ``datasetName`` in opposite directions).  What it can
     # be is kept beside it, read back through the locals that build it: that
     # is a bound on the text, not a claim about what kind of text it is.
-    return [Resolved(_runtime(value), 2, frames=tuple(values.value_frames(value, func)))]
+    reading = values.value_reading(value, func)
+    return [Resolved(_runtime(value), 2, frames=tuple(reading.frames), cuts=tuple(reading.cuts))]
 
 
 def _declared_names(value: ast.expr) -> set[str]:
@@ -1050,6 +1053,7 @@ def extract(
                             messages=messages,
                             line=node.lineno,
                             value_frames=list(resolved.frames),
+                            value_cuts=list(resolved.cuts),
                         )
                     )
             for one in adding:

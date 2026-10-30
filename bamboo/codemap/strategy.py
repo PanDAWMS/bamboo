@@ -350,18 +350,21 @@ def _reaching(junction: JunctionNode, observed: str, cut: Optional[int] = None) 
     says so itself.  The junction-level half of the same rule is
     :meth:`~bamboo.codemap.lookup.CodeMap.producers_of`; this one has to agree
     with it, or a surviving junction would be offered with no arm to read.
-    *cut* is where the subject's spec cuts the field (``truncated_to``).
+    *cut* is where the subject's spec cuts the field (``truncated_to``).  An
+    arm whose object the records prove is written to no row (``off_row``) is
+    none of them.
     """
-    stated = [b for b in junction.branches if b.outcome == observed]
+    written = [b for b in junction.branches if b.off_row is None]
+    stated = [b for b in written if b.outcome == observed]
     return stated or [
         b
-        for b in junction.branches
+        for b in written
         if b.tier == 2 and not branch_excludes(b, observed, cut)
     ]
 
 
 def _candidate(junction: JunctionNode, observed: str, cut: Optional[int] = None) -> Candidate:
-    stated = any(b.outcome == observed for b in junction.branches)
+    stated = any(b.outcome == observed and b.off_row is None for b in junction.branches)
     return Candidate(
         owner=junction.owner,
         file=junction.anchor.file if junction.anchor else "",

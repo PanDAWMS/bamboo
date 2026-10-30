@@ -123,6 +123,8 @@ class GroupsNow:
     #: a blank order term the map says ranks by a column (its ``order_holes``): (term, column, where the ranking is
     #: computed at run time) -- grouped by, its ranking not known here
     ranked: list[tuple[str, str, str]] = field(default_factory=list)
+    #: the WHERE as db_read's conditions (:func:`condition`), all of which hold; None where a term is none
+    conditions: list[list] | None = None
 
 
 @dataclass
@@ -159,11 +161,49 @@ def draw(q: GroupsNow | MovedOn) -> str:
 
 def db_read(q: GroupsNow | MovedOn) -> dict | None:
     """The question as a reader of one table by a WHERE, counting by columns, takes it: a GroupsNow's table, WHERE,
-    the columns it groups by and the key it takes the least of.  None for a MovedOn, a window over the history (LAG),
-    which only its SQL says."""
+    the columns it groups by and the key it takes the least of.  The WHERE is its conditions where every term is one,
+    else its text.  None for a MovedOn, a window over the history (LAG), which only its SQL says."""
     if not isinstance(q, GroupsNow):
         return None
-    return {"table": q.table, "where": q.where, "group_by": [c for c, _ in q.cols], "least": q.key}
+    where = q.where if q.conditions is None else q.conditions
+    return {"table": q.table, "where": where, "group_by": [c for c, _ in q.cols], "least": q.key}
+
+
+#: a test's operator as db_read takes it (panda-server's async_process/submit_db_read_request); it takes no NOT IN
+_DB_READ_OPS = {"=": "=", "<>": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">=", "IN": "in"}
+
+
+def condition(test, binds: dict) -> list | str:
+    """*test*, one test the map reads off a term of a WHERE (``sqltext.Test``), as a db_read condition --
+    ``[column, op]`` or ``[column, op, value]`` -- or why it is none.  A bind's value is the run's, as its print
+    holds it (*binds*, keyed ``:name`` or ``name``); a quoted constant is a text, another a number."""
+    if test.kind in ("null", "not_null"):
+        return [test.column, "is null" if test.kind == "null" else "is not null"]
+    op = _DB_READ_OPS.get(test.op)
+    if op is None:
+        return f"{test.op}, which db_read does not take" if test.op else "not a column tested against a value"
+    values = []
+    for side in test.sides:
+        if side.kind == "bind" and len(side.binds) == 1:
+            key = side.binds[0]
+            value = binds[key] if key in binds else binds.get(key[1:])
+        elif side.kind == "constant":
+            value = side.constant if side.text.startswith("'") else _number(side.text)
+        else:
+            return f"compared with {side.text}, a {side.kind}"
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return f"{side.text} is {value!r}, not a number or a text"
+        values.append(value)
+    return [test.column, op, values if op == "in" else values[0]]
+
+
+def _number(text: str) -> int | float | None:
+    for kind in (int, float):
+        try:
+            return kind(text)
+        except ValueError:
+            pass
+    return None
 
 
 def _sorted(c: str, d: str, alias: str = "") -> str:

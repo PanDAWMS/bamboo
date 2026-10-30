@@ -3560,6 +3560,107 @@ def test_a_collection_the_rows_file_lacks_is_asked_by_its_rows_class_key_and_att
     assert form == {"table": "ATLAS_PANDA.jobsActive4", "where": "jobStatus='activated'", "group_by": ["gshare"], "least": "pandaid"}
 
 
+def test_l3s_db_read_form_takes_the_where_as_conditions_where_each_term_is_one_column_tested_against_the_runs_values(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.codemap.panda import sqltext
+            from bamboo.querier import parts as PT, rerun
+
+            def where(terms, binds):
+                sql = f"SELECT * FROM (SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab WHERE {terms} ORDER BY PandaID) WHERE ROWNUM<=:njobs"
+                query = sqltext.printed(sql).queries[-1]
+                said, unsaid = rerun._db_read_where(query, binds)
+                now = PT.GroupsNow("getJobs@2404", query.spelled[0], "<the text>", [("gshare", "asc")], "pandaid", [], [],
+                                   None if unsaid else said)
+                return [said, unsaid, PT.db_read(now)["where"]]
+
+            got = {
+                # D's call, its binds as the print holds them
+                "D": where("jobStatus=:oldJobStatus AND computingSite=:computingSite AND prodSourceLabel IN (:p1,:p2)",
+                           {":oldJobStatus": "activated", ":computingSite": "BOINC_MCORE", ":p1": "managed", ":p2": "test"}),
+                # each op db_read takes; a constant a number or a text; a bind keyed without its colon; BETWEEN as two
+                "ops": where("jobExecutionID=1 AND x<>'a' AND lockedby IS NULL AND lockedtime IS NOT NULL"
+                             " AND currentPriority BETWEEN :lo AND 5.5 AND 3<attemptNr AND maxCpuCount>=:c",
+                             {"lo": 10, ":c": 2}),
+                # a term db_read takes none of keeps the WHERE text
+                "unsaid": where("jobStatus=:s AND (minRamCount<=:m OR minRamCount=0) AND jediTaskID NOT IN (:e1)"
+                                " AND minramcount / NVL(corecount, 1)<=:a AND modificationTime<CURRENT_DATE-1"
+                                " AND maxDiskCount<=minRamCount AND cloud=:none AND gshare=:flag",
+                                {":s": "activated", ":m": 2000, ":e1": 5, ":a": 2.5, ":none": None, ":flag": True}),
+            }
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    d = [["jobStatus", "=", "activated"], ["computingSite", "=", "BOINC_MCORE"], ["prodSourceLabel", "in", ["managed", "test"]]]
+    assert got["D"] == [d, [], d]
+    ops = [["jobExecutionID", "=", 1], ["x", "!=", "a"], ["lockedby", "is null"], ["lockedtime", "is not null"],
+           ["currentPriority", ">=", 10], ["currentPriority", "<=", 5.5], ["attemptNr", ">", 3], ["maxCpuCount", ">=", 2]]
+    assert got["ops"] == [ops, [], ops]
+    assert got["unsaid"] == [
+        [["jobStatus", "=", "activated"]],
+        [["(minRamCount<=:m OR minRamCount=0)", "an OR, or no one column's test"],
+         ["jediTaskID NOT IN (:e1)", "NOT IN, which db_read does not take"],
+         ["minramcount / NVL(corecount, 1)<=:a", "not a column tested against a value"],
+         ["modificationTime<CURRENT_DATE-1", "compared with CURRENT_DATE - 1, a clock"],
+         ["maxDiskCount<=minRamCount", "compared with minRamCount, a column"],
+         ["cloud=:none", ":none is None, not a number or a text"],
+         ["gshare=:flag", ":flag is True, not a number or a text"]],
+        "<the text>",
+    ]
+
+
+def test_the_writers_the_map_hands_lose_the_arms_it_says_write_no_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import asyncio, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rerun
+
+            off = N(why="no_write", functions=["pandaserver/a.py::C.g"], writes=[])
+            junctions = [
+                N(owner="a.py::C.g", subject="JediTaskSpec.splitRule",
+                  branches=[N(line=10, outcome="x", off_row=None), N(line=11, outcome="y", off_row=off)]),
+                # every arm off its row: the owner is no writer
+                N(owner="a.py::C.h", subject="JediTaskSpec.splitRule", branches=[N(line=20, outcome="z", off_row=off)]),
+                # a dump built before OS: no off_row
+                N(owner="a.py::C.k", subject="JediTaskSpec.splitRule", branches=[N(line=30, outcome="w")]),
+                N(owner="a.py::C.e", subject="JediTaskSpec.splitRule", branches=[]),
+            ]
+
+            async def writers_of(subject):
+                return junctions
+
+            mapdump.code_map = lambda who: N(writers_of=writers_of)
+            r = object.__new__(rerun.Rerun)
+            got = asyncio.run(r._writers_of("JediTaskSpec.splitRule"))
+            # a dump's junction is a model: copied with the branches kept
+            from bamboo.codemap.models import Anchor, Branch, JunctionNode
+
+            subject, owner = "JediTaskSpec.splitRule", "pandajedi/a.py::C.g"
+            model = JunctionNode(name=JunctionNode.make_name("panda", subject, owner), map_id="panda", derived_from="x",
+                                 subject=subject, owner=owner, branches=[Branch(outcome="x", line=10), Branch(outcome="y", line=11)],
+                                 anchor=Anchor(package="pandajedi", file="pandajedi/a.py", line_start=1))
+            copied = rerun._with_branches(model, model.branches[:1])
+            print(json.dumps([[[j.owner, [b.line for b in j.branches]] for j in got], [b.line for b in junctions[0].branches],
+                              got[1] is junctions[2], [type(copied).__name__, [b.line for b in copied.branches],
+                                                       [b.line for b in model.branches]]]))
+            """,
+        )
+    )
+    got, map_own, same, model = json.loads(out.splitlines()[-1])
+    assert got == [["a.py::C.g", [10]], ["a.py::C.k", [30]], ["a.py::C.e", []]]
+    # the map's junction is not changed, and one with nothing left out is handed on as it is
+    assert map_own == [10, 11] and same is True
+    assert model == ["JunctionNode", [10], [10, 11]]
+
+
 def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_path):
     out = _ok(
         _run(

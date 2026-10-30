@@ -258,6 +258,12 @@ class CodeMap:
         :func:`~bamboo.codemap.models.branch_excludes`, which also needs to
         know where the subject's spec cuts the field.
 
+        Nor an arm whose object the records prove is written to no row
+        (:attr:`~bamboo.codemap.models.Branch.off_row`): a spec its function
+        makes to ask something of.  That proof does rest on other nodes -- the
+        records of the functions the object goes to --, and
+        :mod:`bamboo.codemap.panda.offrow` says what it rests on.
+
         The same rule lives in :func:`~bamboo.codemap.strategy._reaching`, one
         level down, because this answers *which junctions* and that answers
         *which arms of one*.  Both are read by the same report and a reader
@@ -269,8 +275,8 @@ class CodeMap:
             junction
             for junction in await self.writers_of(subject)
             if any(
-                b.outcome == outcome
-                or (b.tier == 2 and not branch_excludes(b, outcome, cut))
+                b.off_row is None
+                and (b.outcome == outcome or (b.tier == 2 and not branch_excludes(b, outcome, cut)))
                 for b in junction.branches
             )
         ]

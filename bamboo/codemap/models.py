@@ -603,6 +603,30 @@ class HistoryPair(BaseModel):
     run_hole: str = Field(default="", description="Why ``runs`` is empty.")
 
 
+#: Why no row is written from an arm's object (:attr:`OffRow.why`): no function it is held in writes a table of its
+#: class; or each write of one there takes neither the object whole nor the attribute.
+OFF_ROW_NO_WRITE = "no_write"
+OFF_ROW_NOT_TAKEN = "not_taken"
+
+
+class OffRow(BaseModel):
+    """What proves no row is written from the object an arm assigns on -- see :mod:`bamboo.codemap.panda.offrow`."""
+
+    why: str = Field(description=":data:`OFF_ROW_NO_WRITE` or :data:`OFF_ROW_NOT_TAKEN`.")
+    functions: list[str] = Field(
+        description=(
+            "The :attr:`ReachNode.owner` of each function the object is held in, the arm's own among them, sorted."
+        )
+    )
+    writes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "With :data:`OFF_ROW_NOT_TAKEN`, each write of a table of the class there, as ``owner:line kind table``, "
+            "sorted: each names its columns, and none takes the object or the attribute."
+        ),
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -754,6 +778,16 @@ class Branch(BaseModel):
             "the block records about the decision rather than what it writes."
         ),
     )
+    value_cuts: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lengths the code itself cuts the whole value to on its way "
+            "to the write (``newSH = newSH[:500]``), beside the cut a spec "
+            "makes (``SubjectNode.truncated_to``): a value of one of them may "
+            "be the head of a frame, not all of it.  Read with "
+            "``value_frames``; ``[]`` where nothing cuts it."
+        ),
+    )
     must_prints: Optional[list[int]] = Field(
         default=None,
         description=(
@@ -799,6 +833,18 @@ class Branch(BaseModel):
             "the calls on it hand rule it out."
         ),
     )
+    off_row: Optional[OffRow] = Field(
+        default=None,
+        description=(
+            "Where the records prove no row is written from the object the arm "
+            "assigns on: a spec its function makes to ask or to carry values, "
+            "that leaves it by no way and is written by no statement there -- "
+            ":mod:`bamboo.codemap.panda.offrow`, which says what that rests on.  "
+            "A reader of a value the row holds skips the arm "
+            "(:meth:`~bamboo.codemap.lookup.CodeMap.producers_of`).  ``None`` "
+            "where not proven: the arm may write its row, as every arm is read."
+        ),
+    )
 
 
 #: A hole in a frame -- see :attr:`Branch.value_frames`.
@@ -815,6 +861,11 @@ def pooled_frames(one: list[str], other: list[str]) -> list[str]:
     """
     if not one or not other:
         return []
+    return sorted(set(one) | set(other))
+
+
+def pooled_cuts(one: list[int], other: list[int]) -> list[int]:
+    """The cuts of two branches kept as one: a value either write cuts may be a head (:attr:`Branch.value_cuts`)."""
     return sorted(set(one) | set(other))
 
 
@@ -848,7 +899,9 @@ def branch_excludes(branch: Branch, value: str, truncated_to: Optional[int] = No
     that wrote a long ``ddmErrorDiag`` -- ``JobSpec`` keeps 500 characters and
     the frame's tail is in what it dropped.  Reading every value as a head
     gives up 26 eliminations the map makes, ``es_merge`` against
-    ``es_merge_{}`` among them.
+    ``es_merge_{}`` among them.  The code can cut a value itself, where the
+    spec does not (``updateJobMetrics_JEDI``'s ``newSH[:500]``): a value of
+    one of :attr:`Branch.value_cuts`' lengths is read as a head too.
     """
     if branch.tier != 2 or not branch.value_frames:
         return False
@@ -859,7 +912,7 @@ def fitting_frames(branch: Branch, value: str, truncated_to: Optional[int] = Non
     """The frames of a tier-2 *branch* that *value* fits, read as :func:`branch_excludes` reads them."""
     if branch.tier != 2:
         return []
-    cut = truncated_to is not None and len(value) == truncated_to
+    cut = (truncated_to is not None and len(value) == truncated_to) or len(value) in branch.value_cuts
     return [frame for frame in branch.value_frames if _fits(frame.split(_HOLE), value, cut)]
 
 
@@ -1837,6 +1890,47 @@ RESULT_AGGREGATE = "aggregate"
 RESULT_VARIES = "varies"
 
 
+class Waker(BaseModel):
+    """A branch whose write can make a row a statement selects meet one of its terms on another column.
+
+    :attr:`ReadSiteNode.wakers`; :mod:`bamboo.codemap.panda.wakers` says how they are found and what is not read.
+    """
+
+    pairs: list[str] = Field(
+        description=(
+            "The statement's ``selects`` pairs a row at which is asked the term: those whose subject every term of "
+            "some conjunction holding it can hold the value in -- ``JediTaskSpec.status=defined`` for "
+            "``tabD.status IN (...)`` in ``tabT.status=:ts_defined AND tabD.status IN (...)``, not ``=ready``.  "
+            "Sorted."
+        )
+    )
+    term: str = Field(description="The term as the statement writes it: ``tabD.status IN (:dsStatus___in)``.")
+    subject: str = Field(description="The subject the term tests, and the branch writes.")
+    value: str = Field(description="The value the term asks and the branch can write.")
+    owner: str = Field(description="The junction's owner, ``module::function``.")
+    line: int = Field(description="The branch's line.")
+    stated: bool = Field(
+        description="The branch's outcome is the value; else a run-time value its own frames do not rule out."
+    )
+    keyed_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The :class:`ReadSiteNode` names whose rows fill a key of the write holding the branch "
+            "(:attr:`KeyFrom.sources` of kind ``rows``), sorted: restartTasksForContentsUpdate_JEDI's 1844 is "
+            "keyed by its 1830's rows."
+        ),
+    )
+    keyed_at: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The ``pairs`` one of ``keyed_by`` other than this statement selects as well, sorted: the write is "
+            "handed rows at the value a reader asks about -- 1830 selects ``JediTaskSpec.status=defined``, so 1844 "
+            "wakes the tasks 130 would take at ``defined``.  Not this statement: a write its own rows key is its "
+            "mover's, on rows it took."
+        ),
+    )
+
+
 class ReadSiteNode(BaseNode):
     """One statement that asks the database for rows by a value.
 
@@ -2294,6 +2388,16 @@ class ReadSiteNode(BaseNode):
             "sources, in a ``WHERE`` or an ``ON``, a subquery's among them -- "
             "read off the statement's tree, so a statement not read as one "
             "gives none; sorted.  Not ``x IN (SELECT y ...)``."
+        ),
+    )
+    wakers: list[Waker] = Field(
+        default_factory=list,
+        description=(
+            "The branches whose write can make a row this statement selects meet one of its terms on another "
+            "column (:class:`Waker`), sorted: what a row waits on besides the mover.  ContentsFeeder's 130 takes "
+            "a task at ``defined`` only with a dataset ``defined`` or ``toupdate``; restartTasksForContentsUpdate_"
+            "JEDI's 1844 writes ``toupdate``.  Empty where no such term is read -- see "
+            ":mod:`bamboo.codemap.panda.wakers` for what is not."
         ),
     )
     anchor: Anchor = Field(

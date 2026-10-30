@@ -149,10 +149,26 @@ them is the harness's (stage 2); until it reads them the file keeps its sections
 names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
 walk does not read as a row's attribute asks nothing.
 
-*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
+L3's `db_read` form gives the WHERE as db_read's conditions, `[column, op]` or `[column, op, value]`, all of which
+hold (the harness's ask 4, 10-29: a WHERE in text is not passed to db_read), where every term is one column tested
+against a value: each term read as the map reads a WHERE (`sqltext.row_tests`), a bind's value the run's as its
+print holds it, a quoted constant a text and another a number (`parts.condition`).  db_read takes `=`, `!=`, `<`,
+`<=`, `>`, `>=`, `in`, `is null`, `is not null`.  A term that is none -- an OR, `NOT IN`, an expression of columns,
+the database's clock, another column, a value that is no number or text -- keeps the form's WHERE text, and L3 says
+each such term under the SQL ("db_read takes no ..."): a term is said whole or not at all, since dropping one
+counts rows the call did not pass.  db_read refuses a value whose type is not its column's (`bad_value`); the
+querier gives the run's, not knowing the column's type.  On pin m one statement reaches L3, getJobs@2404, and only
+D and D-rec of the querier's and the harness's cases reach it, with three terms, all said.  The harness's records
+hold 293 of getJobs' prints: 291 of that shape; 2 (the unified pilot's, in N-rec and A-rec) with
+`(minRamCount<=:minRamCount OR minRamCount=0)` and `(maxDiskCount<=:maxDiskCount OR maxDiskCount=0)`, which keep
+the text (out/dw/dw-predictions.txt).
+
+*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`; "-- db_read takes no ..." under L3's SQL.
 *Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
 place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
-a comparison that takes the row where some joined row holds the terms, which is not built.
+a comparison that takes the row where some joined row holds the terms, which is not built.  When a case reaches L3
+with an OR: db_read could still answer it, the OR's columns grouped by and the groups that fail the OR dropped by the
+querier, or the OR's branches asked apart where no row can pass two; neither is built.
 
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 
@@ -280,6 +296,15 @@ their births (`unborn_junctions`), for a mover's own def and for the writers its
 no verdict moved by it: `updateJobStatus` is kept now because its reach leaves 2 calls open
 (`push_job_status_message`'s `mb_proxy.send`, ...), and 27 reach texts lose writers of births alone
 (`ppEventServiceJob`, `makeFakeCoJumbo`, `increaseSeqNumber_JEDI`, ...).
+
+An arm on an object no row holds is no arm either.  The map's OS (ix) says on a branch that the records prove its
+object is held by no write of its class's tables, or by none that takes it whole or by the attribute (`off_row`,
+`no_write` or `not_taken`: a spec the function makes and drops, `getTaskWithJumbo_JEDI`'s useJumbo, `checkAllEventsDone`'s
+FileSpec), and its readers -- derive-strategy's readings (H1), `reach.moving_off` -- leave it out.  The querier's
+door to the writers (`Rerun._writers_of`, which S1, L2 and the mover census read) leaves those branches out too
+(`on_rows`), and a junction left with none, its owner no writer.  On ix's map (x13ixO1m, 20 such arms, none on a
+status) one census row moves: `checkAllEventsDone` at `FileSpec.type=input`, kept by its arm 1275, has no arm of its
+own and reaches no write, so it is dropped (out/ix/or-predictions.txt).  A dump built before OS has no `off_row`.
 
 *Shows:* "<owner>: its writes at [...] make the row (births: sequence at 623): not arms"; result.json's `births`; a
 writer with births alone is absent from the movers; H2 / F1: "the key's row was there before 'activated' at ..., so

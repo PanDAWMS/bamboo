@@ -139,6 +139,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     TermGuard,
     TermPlace,
+    pooled_cuts,
     pooled_frames,
 )
 from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext, values
@@ -1331,6 +1332,8 @@ class _Outcome(NamedTuple):
     decided_at: ast.stmt
     #: Every text a run-time value can be -- see ``Branch.value_frames``.
     frames: tuple[str, ...] = ()
+    #: The lengths the code cuts the value to -- see ``Branch.value_cuts``.
+    cuts: tuple[int, ...] = ()
 
 
 def _outcomes(
@@ -1416,6 +1419,7 @@ def _outcomes(
             # The writer is known, the value is not until run time.
             # Recorded rather than dropped: localize and prune read
             # observed values, so they work from the writer alone.
+            reading = values.value_reading(value, func)
             found.append(
                 _Outcome(
                     f"runtime({ast.unparse(value)})",
@@ -1423,7 +1427,8 @@ def _outcomes(
                     site,
                     list(later),
                     site,
-                    tuple(values.value_frames(value, func)),
+                    tuple(reading.frames),
+                    tuple(reading.cuts),
                 )
             )
         if not found:
@@ -1574,7 +1579,7 @@ def _record(
         )
 
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
-    for outcome, tier, node, extra, decided_at, frames in outcomes:
+    for outcome, tier, node, extra, decided_at, frames, cuts in outcomes:
         condition = path_condition(node) + extra
         guards = beside(node) if beside is not None else row_precondition
         # The tests the branch's own condition already makes are not what tells
@@ -1589,6 +1594,7 @@ def _record(
         held = known.get((outcome, tuple(condition)))
         if held is not None:
             held.value_frames = pooled_frames(held.value_frames, list(frames))
+            held.value_cuts = pooled_cuts(held.value_cuts, list(cuts))
             held.row_precondition = [term for term in held.row_precondition if term in guards]
             if decided_at.lineno != held.line and decided_at.lineno not in held.other_lines:
                 held.other_lines = sorted([*held.other_lines, decided_at.lineno])
@@ -1611,6 +1617,7 @@ def _record(
             messages=messages,
             line=decided_at.lineno,
             value_frames=list(frames),
+            value_cuts=list(cuts),
         )
         known[(outcome, tuple(condition))] = branch
         junction.branches.append(branch)
