@@ -903,6 +903,79 @@ def paths_of(follow, writers: list, subject: str, observed: str) -> dict[str, li
     return found
 
 
+@dataclass(frozen=True)
+class Wake:
+    """A write a mover's rows wait on besides the mover (``wakers_of``): the statement giving the mover rows, its term on
+    another column, the value written there, the writing branch, and the functions keying that write that move the
+    row on from the value themselves (none: not a candidate)."""
+
+    mover: str
+    reader: str
+    term: str
+    writes: str
+    owner: str
+    line: int
+    candidate: tuple = ()
+
+
+def wakers_of(follow, writers: list, subject: str, observed: str) -> dict[str, list[Wake]]:
+    """Each mover's wakers at *observed*: of the map's ``wakers`` of each statement giving it rows (``paths_of``; ix's
+    6 b), those the map states (the branch's outcome is the value) and whose write is handed rows selected at the value
+    (``keyed_at``) -- restartTasksForContentsUpdate_JEDI's 1844 sets toupdate the datasets of the tasks its 1830 selects
+    at defined, which ContentsFeeder's 130 asks of a task at defined.  A write any pass may make, or one keyed by rows
+    of other values, is not said.  Where a function whose statement keys the write moves the subject on from the value
+    itself (an arm of its own, ``arms_of``), the waker is a candidate: that pass may take the row on before the mover
+    sees it (prepareTasksToBeFinished_JEDI's 4001 for JobGenerator's 1871 at task running, keyed by its own 3694).
+    None said is not "nothing wakes it": the map reads no command row and no Python test (KNOWN_ISSUES.md K39)."""
+    asked = f"{subject}={observed}"
+    sites = {(r.owner, r.anchor.line_start): r for r in getattr(mapdump.fragment(), "read_sites", None) or []}
+    by_name = {r.name: r for r in sites.values()}
+    found: dict[str, list[Wake]] = {}
+    for mover, statements in paths_of(follow, writers, subject, observed).items():
+        for rs in statements:
+            for w in getattr(sites.get((rs.owner, rs.line)), "wakers", None) or []:
+                if asked not in w.pairs or not w.stated or asked not in w.keyed_at:
+                    continue
+                keying = {by_name[n].owner for n in w.keyed_by if n in by_name and asked in by_name[n].selects}
+                moving = tuple(sorted(o for o in keying if arms_of(writers, o, subject, observed)))
+                wake = Wake(mover, f"{rs.owner.split('::')[-1]}@{rs.line}", w.term, f"{w.subject}={w.value}", w.owner,
+                            w.line, moving)
+                if wake not in found.setdefault(mover, []):
+                    found[mover].append(wake)
+    return found
+
+
+def wake_said(w: Wake) -> str:
+    """One waker as S1 says it under its mover."""
+    said = (f"its rows wait also on {w.owner.split('::')[-1]}@{w.line} writing {w.writes}, which {w.reader} asks "
+            f"({w.term!r}), for rows selected at the value")
+    if w.candidate:
+        said += (f" -- a candidate: {', '.join(o.split('::')[-1] for o in w.candidate)}, whose rows key it, moves the "
+                 "row on itself")
+    return said
+
+
+def woken_of(entries: list[dict], wakes: dict[str, list[Wake]]) -> dict[str, list[Wake]]:
+    """The movers S1 drops as reaching no write that the movers it keeps wait on (``wakers_of``), each with those
+    wakers: restartTasksForContentsUpdate_JEDI at task defined, for ContentsFeeder's 130.  What a dropped mover's own
+    rows wait on is not asked."""
+    staying = [e["owner"] for e in entries if e["verdict"] != "reaches-no-write"]
+    found: dict[str, list[Wake]] = {}
+    for e in entries:
+        woken = [w for m in staying for w in wakes.get(m, []) if w.owner == e["owner"]]
+        if e["verdict"] == "reaches-no-write" and woken:
+            found[e["owner"]] = woken
+    return found
+
+
+def woken_said(woken: list[Wake]) -> str:
+    """A mover dropped as one that reaches no write, said as the waker it is of the movers kept."""
+    writes = "; ".join(f"{w.writes} at {w.line}" for w in woken)
+    movers = sorted({f"{w.mover.split('::')[-1]} ({w.reader})" for w in woken})
+    return (f"not a mover, but it writes {writes} for rows selected at the value, which {', '.join(movers)} asks: "
+            "its waker (the map's wakers; KNOWN_ISSUES.md K39)")
+
+
 def refused_arms(writers: list, owner: str, subject: str, observed: str) -> list[str]:
     """*owner*'s writes of another value that ``arms_of`` drops because each requires the row to hold other values of
     the subject's column: ``line writes outcome only on a row holding column in [values]``."""
@@ -2714,6 +2787,7 @@ class Rerun:
         keyed = by_key_of(writers, movers, q.subject, q.observed)
         # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark
         owners = frozenset(o.split("::")[-1] for o in [*movers, *keyed])
+        wakes = wakers_of(follow, writers, q.subject, q.observed)
         self.say(f"selected by {follow.selected_by}; guarded by {[g.owner for g in follow.guarded_by]}")
         for owner, why in movers.items():
             self.say(f"  mover {owner}: {why}")
@@ -2776,6 +2850,10 @@ class Rerun:
                 entry["reasons"].append({"code": "K14", "text": f"no arm of its own, kept: {'; '.join(kept)}"})
                 if said:
                     self.say(f"  {func}: {said}")
+            for w in wakes.get(owner, []):
+                self.say(f"  {owner.split('::')[-1]}: {wake_said(w)}")
+                entry.setdefault("wakers", []).append({"waker": w.owner, "line": w.line, "writes": w.writes,
+                                                       "reader": w.reader, "term": w.term, "candidate": list(w.candidate)})
             if gaps.get(owner):
                 entry["reasons"].append({"code": "map-gap", "text": f"the map could not read all of it ({gap_said(gaps[owner])})"})
             if prints_nothing(owner, list(arms)):
@@ -2825,6 +2903,13 @@ class Rerun:
                     entry["verdict"] = "no-run-found"
                     entry["reasons"].append({"code": "K19", "text": said})
                 self.say(f"  {owner.split('::')[-1]}: {said}")
+        # a mover dropped as reaching no write may be what the movers kept wait on (the map's wakers, ix's 6 b)
+        woken = woken_of(entries, wakes)
+        for entry in entries:
+            if entry["owner"] in woken:
+                said = woken_said(woken[entry["owner"]])
+                self.say(f"  {entry['owner'].split('::')[-1]}: {said}")
+                entry["reasons"].append({"code": "K39", "text": said})
         self.result["movers"] = entries
         self._stop_unanswered(unanswered)
         # every mover that ran and left the value is part of the answer: each goes on alone (tmaeno, 2026-10-13)

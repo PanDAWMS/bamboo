@@ -3661,6 +3661,87 @@ def test_the_writers_the_map_hands_lose_the_arms_it_says_write_no_row(tmp_path):
     assert model == ["JunctionNode", [10], [10, 11]]
 
 
+def test_s1_names_the_writes_a_movers_rows_wait_on_that_the_map_states_and_keys_by_rows_at_the_value(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rerun
+
+            asked = "JediTaskSpec.status=defined"
+            restart, prepare = "s.py::restartTasksForContentsUpdate_JEDI", "c.py::prepareTasksToBeFinished_JEDI"
+            site = lambda owner, line, selects, wakers=(): N(owner=owner, anchor=N(line_start=line), name=f"panda:{owner}@{line}",
+                                                             selects=selects, wakers=list(wakers))
+            wake = lambda owner, line, value, **kw: N(**{"pairs": [asked], "term": "tabD.status IN (:s)", "subject": "JediDatasetSpec.status",
+                                                         "value": value, "owner": owner, "line": line, "stated": True,
+                                                         "keyed_by": [], "keyed_at": [asked], **kw})
+            keyed_by_restart = [f"panda:{restart}@1830"]
+            keyed_by_prepare = [f"panda:{prepare}@3694", f"panda:{prepare}@3980"]
+            sites = [
+                site("c.py::getDatasetsToFeedContents_JEDI", 130, [asked], [
+                    wake(restart, 1844, "toupdate", keyed_by=keyed_by_restart),
+                    wake(restart, 1844, "toupdate", keyed_by=keyed_by_restart[::-1]),  # the same write twice: said once
+                    wake(restart, 1889, "defined", keyed_by=keyed_by_restart, stated=False),  # tier 2: not said
+                    wake(restart, 1900, "toupdate", keyed_by=keyed_by_restart, keyed_at=[]),  # keyed by rows of other values
+                    wake(restart, 1910, "toupdate", keyed_by=keyed_by_restart, pairs=["JediTaskSpec.status=ready"]),
+                ]),
+                site("c.py::_get_tasks_datasets_with_unprocessed_inputs", 1871, [asked], [
+                    wake(prepare, 4001, "done", keyed_by=keyed_by_prepare),
+                    # keyed only by a statement selecting other values: its function's arms do not make it a candidate
+                    wake(prepare, 4006, "done", keyed_by=[f"panda:{prepare}@3980"]),
+                ]),
+                site(restart, 1830, [asked]),
+                site(prepare, 3694, [asked]),
+                site(prepare, 3980, ["JediDatasetSpec.status=ready"]),
+                site("x.py::other", 50, [asked], [wake(restart, 1844, "toupdate", keyed_by=keyed_by_restart)]),  # no mover's
+            ]
+            mapdump.fragment = lambda: N(read_sites=sites)
+            statement = lambda owner, line: N(owner=owner, line=line)
+            rerun.paths_of = lambda follow, writers, subject, observed: {
+                "f.py::feed_contents_to_tasks": [statement("c.py::getDatasetsToFeedContents_JEDI", 130)],
+                "g.py::runImpl": [statement("c.py::_get_tasks_datasets_with_unprocessed_inputs", 1871)],
+                "k.py::byKey": [],
+            }
+            # prepareTasksToBeFinished_JEDI moves the task on from the value itself; restart does not
+            rerun.arms_of = lambda writers, owner, subject, observed: {3720: "arm"} if owner == prepare else {}
+            got = rerun.wakers_of(None, [], "JediTaskSpec.status", "defined")
+            # a dropped mover is said as a waker of the movers kept only: not one kept, nor one only a dropped one waits on
+            other = rerun.Wake("s.py::restartTasksForContentsUpdate_JEDI", "s.py::r@1830", "t", "x=y", "z.py::other", 5)
+            kept_waker = rerun.Wake("f.py::feed_contents_to_tasks", "c.py::g@130", "t", "x=y", prepare, 6)
+            entries = [{"owner": "f.py::feed_contents_to_tasks", "verdict": "ran"}, {"owner": restart, "verdict": "reaches-no-write"},
+                       {"owner": prepare, "verdict": "no-log"}, {"owner": "z.py::other", "verdict": "reaches-no-write"}]
+            wakes = {"f.py::feed_contents_to_tasks": [*got["f.py::feed_contents_to_tasks"], kept_waker], restart: [other]}
+            print(json.dumps([{m: [[w.owner.split("::")[-1], w.line, w.writes, w.reader, list(w.candidate)] for w in ws]
+                               for m, ws in got.items()},
+                              [rerun.wake_said(w) for ws in got.values() for w in ws],
+                              rerun.woken_said(got["f.py::feed_contents_to_tasks"]),
+                              {o: [w.line for w in ws] for o, ws in rerun.woken_of(entries, wakes).items()}]))
+            """,
+        )
+    )
+    got, said, woken, dropped = json.loads(out.splitlines()[-1])
+    assert dropped == {"s.py::restartTasksForContentsUpdate_JEDI": [1844]}
+    assert got == {
+        "f.py::feed_contents_to_tasks": [
+            ["restartTasksForContentsUpdate_JEDI", 1844, "JediDatasetSpec.status=toupdate", "getDatasetsToFeedContents_JEDI@130", []]
+        ],
+        "g.py::runImpl": [
+            ["prepareTasksToBeFinished_JEDI", 4001, "JediDatasetSpec.status=done", "_get_tasks_datasets_with_unprocessed_inputs@1871",
+             ["c.py::prepareTasksToBeFinished_JEDI"]],
+            ["prepareTasksToBeFinished_JEDI", 4006, "JediDatasetSpec.status=done", "_get_tasks_datasets_with_unprocessed_inputs@1871", []],
+        ],
+    }
+    assert said[0] == ("its rows wait also on restartTasksForContentsUpdate_JEDI@1844 writing JediDatasetSpec.status=toupdate, "
+                       "which getDatasetsToFeedContents_JEDI@130 asks ('tabD.status IN (:s)'), for rows selected at the value")
+    assert said[1].endswith("-- a candidate: prepareTasksToBeFinished_JEDI, whose rows key it, moves the row on itself")
+    assert "candidate" not in said[2]
+    assert woken == ("not a mover, but it writes JediDatasetSpec.status=toupdate at 1844 for rows selected at the value, which "
+                     "feed_contents_to_tasks (getDatasetsToFeedContents_JEDI@130) asks: its waker (the map's wakers; "
+                     "KNOWN_ISSUES.md K39)")
+
+
 def test_an_attribute_no_history_records_takes_no_time_from_the_status_rows(tmp_path):
     out = _ok(
         _run(
