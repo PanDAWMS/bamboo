@@ -625,9 +625,21 @@ window (a status's row, a value held, a value that is its time) is judged as bef
 the same way.  The steps after H2 run for no arm of several, and for a stand-in for none: the second stage, a fork
 whose branches are the arms and whose undecided branches end open rather than stopping the run, is not built.
 
-*Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row; a stop "one arm that
+No run of the key at a row is no write only for a writer whose log some row's records show naming the key -- a run of
+it there, on any machine (`Rerun._named`).  JobGenerator's pass marks its lines `<jediTaskID=... datasetID=...>` and
+prints no PandaID, so its log holds no run of a job it made: the 12 job attributes it writes were read as no writer's
+pass at every row (the harness's to-querier-62; tmaeno: "please do (b)", 10-30 13:0x).  A writer not shown so
+may have written at each row with no run (`_unshown`), its premise "no line of <log> in the records holds <key>".
+Asking its log by the key its mark holds (the job's jediTaskID, which rows.json has) needs the map to say what fills a
+print's prefix; asked of the map 10-30.  Which of a pass's arms wrote last where several did is not read either: the
+order of their points in the caller (TaskRefiner.runImpl calls extractCommon at 211 and doRefine at 284, in its
+loop over tasks) says it only where no loop inside the pass holds both, so it waits for the run's records to say it.
+
+*Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row, "no run of <key> at
+<time>: no writer's pass of a log that names it" where a writer's log is not shown naming it; a stop "one arm that
 wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)".
-*Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it).
+*Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it); when the
+map says what fills a print's prefix (then ask a writer's log by its mark's key).
 
 ### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
 

@@ -2042,9 +2042,10 @@ class Rerun:
         The answer is a writer that prints shown to write, with nothing newer that may have; else the arms left are
         named (:meth:`_one_of`).  A row is read on the writers that can write it, where the try names them."""
         left: list[Possible] = []
+        named = self._named(subject, key, readings, tries)
         for n, (state, asking, own) in enumerate(tries, 1):
             self.say(f"-- row {n} of {len(tries)}: {asking.why}")
-            found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking)
+            found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking, named)
             left += found
             if any(p.wrote for p in found):
                 break
@@ -2054,9 +2055,44 @@ class Rerun:
         self._one_of(subject, value, left, len(tries))
         raise AssertionError("_one_of stops")
 
-    def _row_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict, asking: W.Asking) -> list[Possible]:
+    def _named(self, subject: str, key: str, readings: list, tries: list) -> set[str]:
+        """The writers' logs some run of *key* is in, in the records of any row of *tries*: a log shown to name its runs
+        by the key, where no run at a row is no pass of its writers (:meth:`_row_at`).  JobGenerator's pass marks its
+        lines <jediTaskID=... datasetID=...> and prints no PandaID: its log holds no run of a job it made (the harness's
+        to-querier-62)."""
+        out: set[str] = set()
+        for _, asking, own in tries:
+            cands = self._h2_candidates(subject, readings if own is None else own)
+            for name in self.logs.names(list(dict.fromkeys(f for c in cands for f in c.log_files))):
+                try:
+                    log = self.logs.log(name, key, self.window(asking), machine=asking.machine)
+                except Unrecorded:
+                    continue
+                if runs_for(log, key):
+                    out.add(name)
+        return out
+
+    def _unshown(self, cands: list[Candidate], key: str, state: dict, env: E.Env) -> list[Possible]:
+        """The arms of *cands*, writers none of whose logs is shown to name its runs by *key* (:meth:`_named`): no run
+        of the key at the row is not their absence, so each may have written -- a stand-in's arm less one its condition
+        read false rules out."""
+        out = []
+        for c in cands:
+            why = f"no line of {', '.join(c.log_files)} in the records holds {key}: its runs are not shown to name it"
+            for line in c.lines:
+                stands = self._stand_ins.get((c.owner, line))
+                if not stands:
+                    out.append(Possible(f"{Path(c.rel).name}::{c.func}:{line}", state, False, [why]))
+                for s in stands or []:
+                    if (left := s.left(env)) is not None:
+                        out.append(Possible(f"{Path(s.arm.split('::')[0]).name}::{s.arm.split('::')[-1]}", state, False, [why, *left]))
+        return out
+
+    def _row_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict, asking: W.Asking,
+                named: set[str]) -> list[Possible]:
         """One row of :meth:`_scan`: the arms whose pass at the row wrote, or may have.  No run of the key there, in logs
-        searched whole, is no writer's pass; a log not searched whole leaves its writers open."""
+        searched whole and shown to name runs by it (*named*), is no writer's pass; a log not searched whole leaves its
+        writers open, and so does one no record shows naming the key (:meth:`_unshown`)."""
         readings, said = self._unborn(readings, subject, state)
         if said:
             self.say(said)
@@ -2065,9 +2101,13 @@ class Rerun:
         cands = self._h2_candidates(subject, readings)
         runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+        env = self.base_env(at=state["time"])
+        maybe = self._unshown([c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env)
         if not at and not holes:
-            self.say(f"  no run of {key} at {when}: no writer's pass")
-            return []
+            self.say(f"  no run of {key} at {when}: no writer's pass" + (" of a log that names it" if maybe else ""))
+            for p in maybe:
+                self.say(f"  may have written: {p.arm} ({'; '.join(p.premises)})")
+            return maybe
         # as _wrote_at: runs in several logs, or several in a window, are each judged on their own; else the one
         question = None if len(at) != 1 or (lo != hi and len(next(iter(at.values()))) > 1) else next(iter(at.values()))[0]
         if question is not None:
@@ -2076,7 +2116,6 @@ class Rerun:
         for c in cands:
             if any(name in c.log_files for name in at):
                 self.warn_split(c.owner, c.lines)
-        env = self.base_env(at=state["time"])
         stable_holes([R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
                       for c in cands for run in at_hand if run.log.name in c.log_files], env)
         j = judge(
@@ -2093,6 +2132,7 @@ class Rerun:
             if v.kind == "unexamined":
                 v.reasons.append(f"not searched whole: {', '.join(f for f in v.candidate.log_files if f in holes)}")
             out += self._possibles(v, state, env, answer)
+        out += maybe
         for p in out:
             self.say(f"  {'wrote' if p.wrote else 'may have written'}: {p.arm}" + (f" ({'; '.join(p.premises)})" if p.premises else ""))
         return out
