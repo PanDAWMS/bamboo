@@ -4389,6 +4389,9 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
 
             rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
+            # a guard's call is read through the pure functions, which E fills from pandaserver at the first call; the
+            # dev install (CI) has no pandaserver, and useScout is no pure function either way
+            E.PURE.setdefault("<no pure function is read here>", None)
             run = N(log=N(name="panda-TaskRefiner.log"), machine="aipanda084.cern.ch", token="< jediTaskID=7 >", records=[0, 1],
                     first="2026-10-29 04:10:00,100", last="2026-10-29 04:10:01,200", describe=lambda: "the run")
             readings = [N(file="pandajedi/r.py", owner="pandajedi/r.py::extract")]
