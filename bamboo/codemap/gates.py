@@ -1483,8 +1483,9 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     A pair's ``writes`` are looked up on the writing function's
     :class:`ReachNode` (:attr:`ReachNode.history`, where the values are), its
     ``runs`` in the :class:`FunctionPrintsNode` of the caller or of
-    ``runs_in``, and a print statement's ``runs`` in its own node: a line
-    found in none of them is a pair or a print no reader can place in a run.
+    ``runs_in``, a print statement's ``runs`` in its own node and its
+    ``handed_runs`` in the node each names: a line found in none of them is a
+    pair or a print no reader can place in a run.
     A branch left unread with no reason reads as one no history row is
     written beside.  A ``can`` row names the caller's path holding the arm's
     object and a way to one of the pair's writes through calls of reach rows:
@@ -1514,6 +1515,10 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
             for line in statement.runs:
                 if line not in lines:
                     failures.append(f"{node.owner}:{statement.line}: run {line} is not one of the function's runs")
+            for ref in statement.handed_runs:
+                holder = prints.get(ref.owner)
+                if holder is None or not any(run.line == ref.line for run in holder.runs):
+                    failures.append(f"{node.owner}:{statement.line}: handed run {ref.owner}@{ref.line} is in no node")
     read = 0
     for junction in fragment.junctions:
         for branch in junction.branches:

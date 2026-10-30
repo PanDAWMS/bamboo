@@ -633,6 +633,32 @@ def test_a_repeated_name_in_a_file_is_told_apart(tmp_path):
     ]
 
 
+def test_an_overloaded_name_is_its_body_and_its_stubs_are_told_apart(tmp_path):
+    """``CoreUtils.clean_user_id``'s ``@overload`` stubs come before the body: the body, which the calls resolve the
+    name to, is spelled without ``#n`` and holds its calls, as the readers spelling an owner by its name mean it."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "from typing import overload\n\n"
+            "def tidy(x):\n"
+            "    return x\n\n"
+            "@overload\n"
+            "def clean(x: str) -> str: ...\n\n"
+            "@overload\n"
+            "def clean(x: None) -> None: ...\n\n"
+            "def clean(x):\n"
+            "    return tidy(x)\n\n"
+            "def caller():\n"
+            "    return clean('a')\n"
+        ),
+    )
+
+    assert [call.to for call in record.rows["pkg/mod.py::clean"].calls] == ["pkg/mod.py::tidy"]
+    assert record.rows["pkg/mod.py::clean#2"].calls == []
+    assert record.rows["pkg/mod.py::clean#3"].calls == []
+    assert [call.to for call in record.rows["pkg/mod.py::caller"].calls] == ["pkg/mod.py::clean"]
+
+
 def _junction(owner: str, line: int, arms: list[tuple[str, list[str]]]) -> JunctionNode:
     return JunctionNode(
         name=f"m:{owner}",

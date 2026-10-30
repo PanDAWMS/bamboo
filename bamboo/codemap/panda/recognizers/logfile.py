@@ -276,10 +276,12 @@ class Maker(NamedTuple):
 
     *returning* is the call that path followed into *func*, its parameters bound to that call's arguments
     (``create_tagged_logger``'s ``LogWrapper(self._log_stream, method_name)``, its ``tag`` the caller's); ``None``
-    where *func* was reached otherwise, or the maker is in a module's own body (*func* ``None``).
+    where *func* was reached otherwise, or the maker is in a module's own body (*func* ``None``).  *call* is ``None``
+    where the path ends at a parameter declared a plain ``logging.Logger`` (:func:`_declared_plain`): whatever made
+    it, such a logger writes a message as it is handed.
     """
 
-    call: ast.Call
+    call: Optional[ast.Call]
     file: str
     func: Optional[ast.AST]
     returning: Optional[_Return]
@@ -342,9 +344,21 @@ class LoggerFiles:
     def makers_of(self, file: str, func: ast.AST, call: ast.Call) -> tuple[list[Maker], bool]:
         """The first logger maker on each path back from logging *call*, as :meth:`of_call` follows them, and whether
         any path stopped short of one: the makers whose marks its lines can carry."""
-        trail = _Trail([])
         receiver = call.func.value if isinstance(call.func, ast.Attribute) else call.func
-        self._value(trail, file, func, receiver, pathcond.site_of(call), _Way(frozenset()))
+        return self.makers_of_value(file, func, receiver, pathcond.site_of(call))
+
+    def makers_of_value(
+        self,
+        file: str,
+        func: Optional[ast.AST],
+        value: ast.expr,
+        at: Optional[ast.AST],
+        returning: Optional[_Return] = None,
+    ) -> tuple[list[Maker], bool]:
+        """:meth:`makers_of` for the logger *value* holds at *at* -- a wrapper's own logger, its first argument, read
+        where the wrapper is made, *returning* the call the walk came into *func* by."""
+        trail = _Trail([])
+        self._value(trail, file, func, value, at, _Way(frozenset(), returning=returning))
         return trail.makers or [], trail.open
 
     def of_call(self, file: str, func: ast.AST, call: ast.Call) -> Landing:
@@ -503,6 +517,15 @@ class LoggerFiles:
                 returning.way._replace(seen=way.seen),
             )
             return
+        if trail.makers is not None and self._declared_plain(file, func, name):
+            # Where the lines' mark is asked, a parameter declared a plain
+            # ``logging.Logger`` ends the path whatever its callers hand it:
+            # ``BaseModule.__init__(self, log_stream: logging.Logger)`` -- such a
+            # logger marks nothing, and the walk need not close every
+            # construction of the proxy to know it.
+            trail.makers.append(Maker(None, file, func, way.returning))
+            trail.reached = True
+            return
         if way.hops >= _HOPS:
             trail.open = True
             return
@@ -523,6 +546,38 @@ class LoggerFiles:
                 trail, site.file, None if site.in_module else site.func, argument, None if site.in_module else site.call,
                 _Way(way.seen, way.hops + 1, way.instance if same_object else None),
             )
+
+    def _declared_plain(self, file: str, func: ast.AST, name: str) -> bool:
+        """Whether parameter *name* of *func* is declared a ``logging.Logger`` -- or one or ``None``, which prints
+        nothing (:meth:`_value`)."""
+        arguments = func.args  # type: ignore[attr-defined]
+        for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+            if one.arg == name:
+                return one.annotation is not None and self._plain_logger(file, one.annotation)
+        return False
+
+    def _plain_logger(self, file: str, node: ast.expr) -> bool:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            try:
+                node = ast.parse(node.value, mode="eval").body
+            except SyntaxError:
+                return False
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            sides = [
+                side for side in (node.left, node.right) if not (isinstance(side, ast.Constant) and side.value is None)
+            ]
+            return len(sides) == 1 and self._plain_logger(file, sides[0])
+        if isinstance(node, ast.Subscript) and isinstance(node.value, (ast.Name, ast.Attribute)):
+            if (node.value.id if isinstance(node.value, ast.Name) else node.value.attr) == "Optional":
+                return self._plain_logger(file, node.slice)
+            return False
+        imports = self.types.imports(file)
+        if isinstance(node, ast.Attribute) and node.attr == "Logger" and isinstance(node.value, ast.Name):
+            held = imports.get(node.value.id)
+            return (held[0] if held else node.value.id) == "logging"
+        if isinstance(node, ast.Name):
+            return imports.get(node.id) == ("logging", "Logger")
+        return False
 
     def _field(self, trail: _Trail, file: str, func: ast.AST, field: str, way: _Way) -> None:
         held = self.types.method_class(file, func)
