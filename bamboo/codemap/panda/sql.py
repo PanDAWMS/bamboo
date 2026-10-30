@@ -684,9 +684,12 @@ class Execution(NamedTuple):
     calls: tuple[ast.Call, ...] = ()
     """Every call of the function that runs this statement with this map.
 
-    The readers keep one run per statement and map -- one read site, one set
-    of columns counted -- and read the binds for all of these at once: a
-    statement run from two places binds what either place fills.  Before the
+    The readers keep one run per statement and map -- one set of columns
+    counted -- and read the binds for all of these at once: a statement run
+    from two places binds what either place fills.  The key records and the
+    read sites do not: each place is a statement of its own, read with
+    ``calls`` set to its call alone (``sqlwrite._each_call``, ``read_side``),
+    since a map built anew between the calls binds each place apart.  Before the
     binds were paired with the run this was free, because every run read every
     bind of the key; ``resetStatus`` running one ``UPDATE`` inside an ``if``
     and again below it would otherwise lose the first run's value to the

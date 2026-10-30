@@ -19052,6 +19052,63 @@ def test_a_text_run_from_two_places_with_its_map_built_anew_is_a_key_record_for_
     ]
 
 
+_READ_TWICE = '''
+class TaskModule:
+    def countTasks(self, vo):
+        sqlC = "SELECT COUNT(*) FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status=:status "
+        varMap = {}
+        varMap[":vo"] = vo
+        varMap[":status"] = "defined"
+        self.cur.execute(sqlC + comment, varMap)  # RUN D
+        (nDefined,) = self.cur.fetchone()
+        varMap = {}
+        varMap[":vo"] = vo
+        varMap[":status"] = "ready"
+        self.cur.execute(sqlC + comment, varMap)  # RUN R
+        (nReady,) = self.cur.fetchone()
+        return nDefined, nReady
+'''
+
+
+def test_a_select_run_from_two_places_with_its_map_built_anew_is_a_read_site_for_each(tmp_path):
+    """insertnRunningInSiteData's ``sqlCh`` at 1713 and 1751: one text and one map name, so one run
+    (:attr:`sql.Execution.calls`), read once at every call -- one site asking both values.  Each place is a
+    statement of its own, asking what the binds reaching it hold, and so is its key record."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _READ_TWICE})
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources([], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules)
+    lines = _READ_TWICE.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    asked = {s.anchor.line_start: s.selects for s in sites if s.owner.endswith("::countTasks")}
+    assert asked == {at("# RUN D"): ["JEDI_Tasks.status=defined"], at("# RUN R"): ["JEDI_Tasks.status=ready"]}
+    keyed = sorted(
+        (one.statement, [(s.kind, s.name) for s in one.sources])
+        for one in froms
+        if one.owner.endswith("::countTasks") and one.term == "status=:status"
+    )
+    assert keyed == [(at("# RUN D"), [("constant", "'defined'")]), (at("# RUN R"), [("constant", "'ready'")])]
+
+
+def test_a_run_read_at_its_own_call_is_one_object_at_every_ask():
+    """The readers keep what they read by the run (``_text_run``, ``bound_sites``), so ``_read_runs`` hands the
+    same runs each time it is asked; a new run at every ask read them all again."""
+    func = ast.parse(_READ_TWICE).body[0].body[0]
+    first, again = sqlwrite._read_runs(func), sqlwrite._read_runs(func)
+    assert [run.calls for run in first] == [(run.call,) for run in first] and len(first) == 2
+    assert all(one is other for one, other in zip(first, again, strict=True))
+
+
 _BATCHED = '''
 from pandacommon.pandautils.PandaUtils import batched
 
@@ -19436,16 +19493,17 @@ def test_a_read_statements_terms_say_which_rows_fill_them_and_whether_they_are_t
     ]
 
 
-def test_a_read_run_from_two_places_is_one_keyfrom_at_its_read_sites_line(tmp_path):
-    """One text with one map run from two calls is one run, its read site at the first: the KeyFrom is that line's,
-    so a reader joining a source's statement to the read site cannot miss it on the second."""
+def test_a_read_run_from_two_places_is_a_read_site_and_a_keyfrom_at_each(tmp_path):
+    """One text with one map run from two calls is one run, and each call is a statement of its own: a read site at
+    each, and its KeyFrom at that site's line, so a reader joining a source's statement to the read site finds
+    each."""
     froms, sites, at = _reread(tmp_path)
     twice = [one for one in froms if one.owner.endswith("::twice")]
-    (site,) = [one for one in sites if one.owner.endswith("::twice")]
+    lines = sorted(one.anchor.line_start for one in sites if one.owner.endswith("::twice"))
     assert [(one.statement, one.term, [(s.kind, s.name) for s in one.sources]) for one in twice] == [
-        (site.anchor.line_start, "jediTaskID=:jediTaskID", [("parameter", "jediTaskID")])
+        (line, "jediTaskID=:jediTaskID", [("parameter", "jediTaskID")]) for line in lines
     ]
-    assert site.anchor.line_start == at("self.cur.execute(sqlW")
+    assert lines[0] == at("self.cur.execute(sqlW") and len(lines) == 2
 
 
 def test_a_rows_source_says_why_it_names_no_column(tmp_path):

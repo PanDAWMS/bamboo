@@ -494,6 +494,28 @@ def _ran_by(record: KeyFrom, func: ast.FunctionDef | ast.AsyncFunctionDef, run: 
         record._executions.append(run)
 
 
+def _read_runs(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[sql.Execution]:
+    """Each run of *func* at its own call: what the read statement at that call is read with.
+
+    :func:`sql.executions` gives a text run from several calls with one map those calls together
+    (:attr:`sql.Execution.calls`), its binds read at every one.  A read site is the statement at one call --
+    ``insertnRunningInSiteData`` asks ``FLAG=snapshot`` at 1713 and ``FLAG=max`` at 1751, its map built anew between
+    them -- so the read side, a route's reading of it and its key records read each call apart, as the write side's
+    key records do (:func:`_each_call`).
+
+    Kept on *func* per reading context, as :func:`sql.executions` keeps its runs: the readers hold what they read by
+    the run (:func:`_text_run`, ``bound_sites``), and a new run at every ask read it all again -- the read side took
+    twice its time on pin m.
+    """
+    key = sql.reading_context()
+    held = getattr(func, "_sqlwrite_read_runs", None)
+    if held is None:
+        held = func._sqlwrite_read_runs = {}  # type: ignore[union-attr]
+    if key not in held:
+        held[key] = [run._replace(calls=(run.call,)) for run in sql.executions(func)]
+    return list(held[key])
+
+
 def _each_call(
     attributor: SpecAttributor,
     func: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -3606,7 +3628,7 @@ def read_side(
         variants: dict[int, list] = {}
         refuses_at: dict[int, set[tuple[str, str]]] = {}
         restricts_at: dict[int, dict[str, set[str]]] = {}
-        for run in sql.executions(func):
+        for run in _read_runs(func):
             line = run.call.lineno
             per_line.setdefault(line, _CallReading(set())).add(reading_of(func, run, file))
             if all(run.sql != other.sql for other in variants.setdefault(line, [])):
@@ -4177,20 +4199,22 @@ def read_side(
             # pairing the forwarded form exists to make.  ``copyArchive.main``
             # runs one ``jobsActive4`` query from three places with
             # ``:jobStatus`` bound to ``holding`` at each, and the text-only
-            # key reported none of them.
-            seen: set[tuple[str, Optional[tuple[int, int]]]] = set()
+            # key reported none of them.  And by the call: a cursor's run has
+            # no window, and a text run from two places is two statements,
+            # each read at its own call (:func:`_read_runs`).
+            seen: set[tuple[str, Optional[tuple[int, int]], int]] = set()
             # Read once and handed on.  ``executions`` is the most expensive
             # call in this walk, and the two passes below want the same list:
             # calling it again for each of them tripled the build.
-            executions = sql.executions(func)
+            executions = _read_runs(func)
             # Runs that came before their line had a record, filed once every
             # run is read: whether a run's tables count must not hang on the
             # order the runs come in.
             unfiled: list[tuple[sql.Execution, ReadStatement, set[str]]] = []
             for run in executions:
-                if (run.sql, run.window) in seen:
+                if (run.sql, run.window, run.call.lineno) in seen:
                     continue
-                seen.add((run.sql, run.window))
+                seen.add((run.sql, run.window, run.call.lineno))
                 together: set[str] = set()
                 for verb, table in _rows_touched(run.reading):
                     if _UNREAD_TABLE.fullmatch(table):
@@ -6717,8 +6741,8 @@ def _site_function(
 def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) -> list[KeyFrom]:
     """A KeyFrom (:attr:`KeyFrom.reads`) for each row-naming term of each read site's run: a term on the statement's
     own rows (:data:`sqltext.ROW`) comparing a column with binds, not excluding, every row meeting it -- as
-    :func:`_key_froms` makes a write's, its binds read the same way.  Its statement is the read site's line, the run's
-    first; an ``IN`` list of several binds is one term.
+    :func:`_key_froms` makes a write's, its binds read the same way.  Its statement is the read site's line, its binds
+    those reaching that call (:func:`_read_runs`); an ``IN`` list of several binds is one term.
     """
     found: dict[tuple[str, int, str, str], KeyFrom] = {}
     for site in sorted(sites, key=lambda one: (one.owner, one.anchor.line_start)):
@@ -6726,7 +6750,7 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
         if func is None:
             continue
         line, file = site.anchor.line_start, site.anchor.file
-        for run in sql.executions(func):
+        for run in _read_runs(func):
             if run.call.lineno != line:
                 continue
             for term in sqltext.terms(run.reading).terms:
