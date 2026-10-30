@@ -103,6 +103,15 @@ def _opens(name: str) -> bool:
     return maker is not None and maker.opens
 
 
+def _makes_a_logger(call: ast.Call) -> bool:
+    """Whether *call* makes the logger a line is written through (:data:`callfacts.LOGGER_MAKERS`): one opening a
+    file, ``logging``'s too, or a wrapper of a logger it is handed.  ``create_tagged_logger`` makes one in its body,
+    which is followed."""
+    called = call.func
+    maker = callfacts.LOGGER_MAKERS.get(called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", ""))
+    return maker is not None and (maker.opens or maker.logger is not None)
+
+
 def _opened_name(call: ast.Call, rel_path: str) -> Optional[str]:
     """The ``PandaLogger`` name *call* opens in module *rel_path*, or None.
 
@@ -253,11 +262,27 @@ class _Trail:
     prints wherever its handlers say and into none of PandaLogger's files.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, makers: Optional[list["Maker"]] = None) -> None:
         self.files: set[str] = set()
         self.reached = False
         self.standard = False
         self.open = False
+        #: Where it is a list, each path stops at the first maker it reaches and adds it (:meth:`LoggerFiles.makers_of`).
+        self.makers = makers
+
+
+class Maker(NamedTuple):
+    """The first call making a logger on one path back from a logging call: the logger whose mark its lines carry.
+
+    *returning* is the call that path followed into *func*, its parameters bound to that call's arguments
+    (``create_tagged_logger``'s ``LogWrapper(self._log_stream, method_name)``, its ``tag`` the caller's); ``None``
+    where *func* was reached otherwise, or the maker is in a module's own body (*func* ``None``).
+    """
+
+    call: ast.Call
+    file: str
+    func: Optional[ast.AST]
+    returning: Optional[_Return]
 
 
 class LoggerFiles:
@@ -314,6 +339,14 @@ class LoggerFiles:
         self._rebound = self._rebindings()
         self._callers: dict[tuple, list[tuple[CallSite, bool]]] = {}
 
+    def makers_of(self, file: str, func: ast.AST, call: ast.Call) -> tuple[list[Maker], bool]:
+        """The first logger maker on each path back from logging *call*, as :meth:`of_call` follows them, and whether
+        any path stopped short of one: the makers whose marks its lines can carry."""
+        trail = _Trail([])
+        receiver = call.func.value if isinstance(call.func, ast.Attribute) else call.func
+        self._value(trail, file, func, receiver, pathcond.site_of(call), _Way(frozenset()))
+        return trail.makers or [], trail.open
+
     def of_call(self, file: str, func: ast.AST, call: ast.Call) -> Landing:
         """Where the lines of logging *call*, made in *func* of *file*, land."""
         trail = _Trail()
@@ -364,6 +397,10 @@ class LoggerFiles:
             trail.open = True
 
     def _call(self, trail: _Trail, file: str, func: Optional[ast.AST], call: ast.Call, at: Optional[ast.AST], way: _Way) -> None:
+        if trail.makers is not None and _makes_a_logger(call):
+            trail.makers.append(Maker(call, file, func, way.returning))
+            trail.reached = True
+            return
         opened = _opened_name(call, file)
         if opened:
             trail.files.add(_FILENAME.format(opened))
