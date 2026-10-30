@@ -4028,7 +4028,8 @@ def test_h2_reads_the_rows_newest_first_keeping_those_that_may_have_and_names_th
             def scan(found, tries=tries):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result, r.question = [], [], "H2", {}, [], {}, None
-                r._row_at = lambda subject, attr, value, key, readings, state, asking: (seen.append([state["status"], readings]), found(state))[1]
+                r._named = lambda subject, key, readings, tries: {"a.log"}
+                r._row_at = lambda subject, attr, value, key, readings, state, asking, named: (seen.append([state["status"], readings, sorted(named)]), found(state))[1]
                 try:
                     got = r._scan("JediTaskSpec.cloud", "cloud", "WORLD", "1", ["every writer"], tries)
                     return ["answer", got is answer, r.question]
@@ -4053,7 +4054,8 @@ def test_h2_reads_the_rows_newest_first_keeping_those_that_may_have_and_names_th
         )
     )
     got = json.loads(out.splitlines()[-1])
-    assert got["own"] == [["running", ["its writer"]], ["scouting", ["every writer"]]]
+    # and every row is read with the logs any row's records show naming the key
+    assert got["own"] == [["running", ["its writer"], ["a.log"]], ["scouting", ["every writer"], ["a.log"]]]
     assert got["the newest shows a printing writer"] == ["answer", True, "the run"]
     # the newer that may have stays; the scan ends at the row shown; the older is not read
     code, text, possibilities = got["one that may have, then one shown"]
@@ -4064,6 +4066,93 @@ def test_h2_reads_the_rows_newest_first_keeping_those_that_may_have_and_names_th
     assert possibilities[0]["rows"] == [{"status": "running", "time": "11:38", "wrote": False, "premises": ["its condition 'x' not read"]}]
     assert got["none"][:2] == ["one-of", "H2: a pass that wrote JediTaskSpec.cloud='WORLD' at the 4 statuslog row(s) its writers' passes "
                                          "can write (none shows a writer's pass: KNOWN_ISSUES.md K38)"]
+
+
+def test_h2_reads_no_run_of_the_key_at_a_row_as_no_pass_only_of_a_log_some_record_shows_naming_the_key(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun
+            from bamboo.querier.which_ran import Candidate
+
+            refine = Candidate("pandajedi/o.py", "runImpl", [211], ["panda-TaskRefiner.log"])
+            gen = Candidate("pandajedi/g.py", "doGenerate", [1251], ["panda-JobGenerator.log"])
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "H2", {}, []
+            r._stand_ins = {("pandajedi/o.py::runImpl", 211): [rerun.StandIn("pandajedi/r.py::extract:5", 1, ("task.x",)),
+                                                               rerun.StandIn("pandajedi/r.py::extract:7", 1, ("task.y",))]}
+            own = Candidate("pandaserver/s.py", "storeJobs", [410], ["panda-TaskBuffer.log"])
+            r._h2_candidates = lambda subject, readings: [own] if readings == ["its writer"] else [refine, gen]
+            r.window = lambda asking: asking.window
+            # the refiner's log holds a run of the key on the older row's machine only; the generator's on none; a
+            # try naming its own writers is read on theirs
+            held = {("panda-TaskRefiner.log", "m91"): ["a run"], ("panda-TaskBuffer.log", "m86"): ["a run"]}
+
+            def log(name, key, window, machine=None):
+                if name == "panda-DataService.log":
+                    raise rerun.Unrecorded([])
+                return N(runs=held.get((name, machine), []))
+
+            r.logs = N(names=lambda wanted: wanted + ["panda-DataService.log"], log=log)
+            rerun.runs_for = lambda log, key: log.runs
+            tries = [({"status": "pending"}, N(window=("10:05", "10:05"), machine="m86"), None),
+                     ({"status": "defined"}, N(window=("04:10", "04:10"), machine="m91"), None)]
+            named = r._named("JobSpec.nucleus", "7", ["every writer"], tries)
+            named_own = r._named("JobSpec.nucleus", "7", ["every writer"], [(tries[0][0], tries[0][1], ["its writer"])])
+
+            env = E.Env({"task.y": E.Value(False, "row")})
+            row = {"status": "pending", "time": "10:05"}
+            said = lambda ps: [[p.arm, p.wrote, p.premises] for p in ps]
+            unshown = said(r._unshown([refine, gen], "7", row, env))
+
+            def row_at(named, holes={}):
+                r.lines = []
+                r._unborn = lambda readings, subject, state: (readings, "")
+                r._ask = lambda key, names, asking: ({}, [], holes)
+                r.base_env = lambda at: env
+                got = r._row_at("JobSpec.nucleus", "nucleus", "MPPMU", "7", ["every writer"], row, N(window=("10:05", "10:05")), named)
+                return [said(got), r.lines]
+
+            # a log not searched whole goes to the judge, which here reads no verdict
+            r.mode, r.decide, r._called_at, r.warn_split = "outside", "positive", None, lambda owner, lines: None
+            rerun.stable_holes = lambda seens, env: None
+            rerun.judge = lambda cands, runs, **kw: N(verdicts=[], runs={}, report=lambda question: "judged")
+            print(json.dumps({"named": sorted(named), "named own": sorted(named_own), "unshown": unshown,
+                              "generator unshown": row_at(named), "both shown": row_at({"panda-TaskRefiner.log", "panda-JobGenerator.log"}),
+                              "generator not searched whole": row_at(named, {"panda-JobGenerator.log": ["10:00..10:05"]}),
+                              "refiner not searched whole": row_at(set(), {"panda-TaskRefiner.log": ["10:00..10:05"]})}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # a log is shown to name its runs by the key by a run in any row's records, on any machine; one unanswered is not
+    assert got["named"] == ["panda-TaskRefiner.log"]
+    assert got["named own"] == ["panda-TaskBuffer.log"]
+    # a writer not shown so may have written at a row with no run of the key: a printing one at its line, a stand-in at
+    # its arms less one whose condition is read false
+    def why(log: str) -> str:
+        return f"no line of {log} in the records holds 7: its runs are not shown to name it"
+
+    assert got["unshown"] == [
+        ["r.py::extract:5", False, [why("panda-TaskRefiner.log"), "its condition 'task.x' not read"]],
+        ["g.py::doGenerate:1251", False, [why("panda-JobGenerator.log")]],
+    ]
+    # no run at the row: no pass of the refiner, whose log names the key; the generator's may have
+    assert got["generator unshown"] == [
+        [["g.py::doGenerate:1251", False, [why("panda-JobGenerator.log")]]],
+        ["  no run of 7 at 10:05: no writer's pass of a log that names it",
+         f"  may have written: g.py::doGenerate:1251 ({why('panda-JobGenerator.log')})"],
+    ]
+    # with every log shown naming the key, no run at the row is no writer's pass, said as before
+    assert got["both shown"] == [[], ["  no run of 7 at 10:05: no writer's pass"]]
+    # a writer whose log was not searched whole is the judge's (K38), not one more that may have; past the judge the
+    # writers not shown naming the key are added
+    assert got["generator not searched whole"][0] == []
+    assert got["refiner not searched whole"][0] == [["g.py::doGenerate:1251", False, [why("panda-JobGenerator.log")]]]
 
 
 def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_name(tmp_path):
