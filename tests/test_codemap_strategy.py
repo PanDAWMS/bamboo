@@ -219,6 +219,38 @@ async def test_a_framed_arm_is_not_offered_as_a_way_the_value_was_reached():
     assert [b.outcome for b in strategy.candidates[0].branches] == ["runtime(newStatus)"]
 
 
+async def test_an_arm_settled_at_run_time_is_offered_beside_the_arm_that_states_the_value():
+    """Another arm stating the value does not rule out the one that may have.
+
+    ``extractCommon``'s shape: ``coreCount = taskParamMap["coreCount"]`` in one
+    arm and ``coreCount = 1`` in the other.  A task holding ``1`` may have come
+    either way, so both are offered, each with its own tier for a reader that
+    ranks them -- and a framed arm the value does not fit is still left out.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction(
+                "refiner.py::extractCommon",
+                Branch(outcome="runtime(taskParamMap['coreCount'])", tier=2, line=161),
+                Branch(outcome="1", line=163),
+                Branch(outcome="runtime(f'merge_{s}')", tier=2, value_frames=["merge_{}"], line=170),
+                log_files=[KNIGHT_LOG],
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="1", task_id="1")
+    )
+
+    (candidate,) = strategy.candidates
+    assert candidate.tier == 1
+    assert [(b.line, b.tier) for b in candidate.branches] == [(161, 2), (163, 1)]
+    assert strategy.readings[0].lines == [161, 163]
+
+
 async def test_a_proxy_is_probed_at_its_callers_log_and_not_its_own():
     """The guard that stops eleven candidates being ruled out at once.
 

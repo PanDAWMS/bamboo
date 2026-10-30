@@ -343,23 +343,26 @@ def rows_shape(producers: list[JunctionNode]) -> tuple[Optional[str], list[str]]
 def _reaching(junction: JunctionNode, observed: str, cut: Optional[int] = None) -> list:
     """The branches that can have produced *observed*.
 
-    The ones that state it, or -- when none does -- the ones whose value is
-    only settled at run time.  A tier-2 branch is not ruled out by the value,
-    because "this one could have" is the honest answer for it -- unless its own
-    frames are ones the value does not fit, which is the one case where the arm
-    says so itself.  The junction-level half of the same rule is
-    :meth:`~bamboo.codemap.lookup.CodeMap.producers_of`; this one has to agree
-    with it, or a surviving junction would be offered with no arm to read.
-    *cut* is where the subject's spec cuts the field (``truncated_to``).  An
-    arm whose object the records prove is written to no row (``off_row``) is
-    none of them.
+    The ones that state it, and the ones whose value is only settled at run
+    time.  A tier-2 branch is not ruled out by the value, because "this one
+    could have" is the honest answer for it -- unless its own frames are ones
+    the value does not fit, which is the one case where the arm says so itself.
+    Nor by another arm stating the value: ``extractCommon`` writes
+    ``coreCount = 1`` in one arm and the task's own parameter in the other, and
+    a task holding ``1`` may have come either way, so offering only the stated
+    arm turns two ways into a confident one.  Each arm keeps its own tier for a
+    reader that ranks them.  The junction-level half of the same rule is
+    :meth:`~bamboo.codemap.lookup.CodeMap.producers_of`, and this is the same
+    test arm by arm, or a surviving junction would be offered with no arm to
+    read.  *cut* is where the subject's spec cuts the field (``truncated_to``).
+    An arm whose object the records prove is written to no row (``off_row``)
+    is none of them.
     """
-    written = [b for b in junction.branches if b.off_row is None]
-    stated = [b for b in written if b.outcome == observed]
-    return stated or [
+    return [
         b
-        for b in written
-        if b.tier == 2 and not branch_excludes(b, observed, cut)
+        for b in junction.branches
+        if b.off_row is None
+        and (b.outcome == observed or (b.tier == 2 and not branch_excludes(b, observed, cut)))
     ]
 
 
