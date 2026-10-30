@@ -577,7 +577,7 @@ holding the value as the subject's time (`JediTaskSpec.superStatus` 'done', thre
 
 ### K37. An attribute no history records is timed by its writers' arms, and only where every arm says the time
 
-`attr_time` (the harness's ask b, tmaeno 「おねがいします」 10-29): where every arm H1 names writes the time it runs
+`attr_time` (the harness's ask b, tmaeno: "please do", 10-29): where every arm H1 names writes the time it runs
 (`runtime(CURRENT_DATE)`, `runtime(naive_utcnow())`), the value is the write's time and H2 asks the run at it, on
 every machine (`windows.value_now`); else each arm is placed on the object's history by the map's HistoryPair (row
 same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
@@ -593,7 +593,7 @@ the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's 
 (asked of the map, 10-29).
 
 A row is asked, and read, of the logs of the writers whose passes can write it alone (`attr_time.row_writers`,
-`readings_of`; the harness's to-querier-61, step 1, tmaeno 「１で」 10-30): before, every row was asked of every
+`readings_of`; the harness's to-querier-61, step 1, tmaeno: "go with 1", 10-30): before, every row was asked of every
 writer's logs, so a writer that can write any row kept every log in every window.  No row is left out by it.  Which
 rows a writer's pass can write is still read from the history call's recorded statuses only: a pass that records the
 status at run time can write any row, though it moves the object on only from the statuses it picks it up at --
@@ -624,7 +624,7 @@ arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JED
 ### K38. H2's scan of the rows names the arms that wrote last or may have, and goes on from none of them but one
 
 Over the statuslog rows a writer's pass can write (K37), newest first, each row's pass is read three ways
-(`Rerun._scan`, `_row_at`, attr-time-shape.md 5; tmaeno 「可能性としての Fork でしょうね」, 10-29): an arm shown to
+(`Rerun._scan`, `_row_at`, attr-time-shape.md 5; tmaeno: "a Fork over the possibilities, I'd say", 10-29): an arm shown to
 write ends the scan; a row whose logs, searched whole, hold no run of the key, or whose arms are excluded, has no
 write and goes; an arm the run does not show ran (kept), whose own condition is not read (K25's stand-ins), or whose
 logs were not searched whole may have written and stays, with what is open named.  Before (querier-at), a row where
