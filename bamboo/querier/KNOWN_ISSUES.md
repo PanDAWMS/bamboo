@@ -847,6 +847,35 @@ JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), no
 replacing write's, and for a callee's test the method and how its names map to the caller's); for an `[at N]`
 entry, when a reader holds a name's value at a line rather than for the whole pass.
 
+### K41. P reads the arm's own function's rows, by what a call is handed, and a positive says the arm ran
+
+P (`printed.py`) reads a run against the arm's own function only.  Of the 103 pairs of possibilities the
+investigator read in the possibilities task (round 1, 2026-10-30), the print that tells them apart sits in the arm's
+function for 96 and in a function it calls for 7 (doBasicPostProcess's getTaskStatus_JEDI 2596 and
+get_event_statistics 4633 in task_standalone_module; archiveJob's check_fine_grained_processing 1945): those are not
+read.  What a call changes is read from what it is handed -- by name, and below ``self`` by
+chain (`printed.self_effects`, the core's (c)) -- so an object stored elsewhere earlier and changed through that alias
+is not seen, nor is a local bound to the target's object in the walked function (``job = self.job`` then
+``job.jobStatus = ...`` binds ``job.jobStatus``, not the target).  (c) resolves ``self.m()`` with the map's
+``calls.Types`` (the class, its corpus subclasses, each along its order): a base outside the corpus listed before the
+class in a subclass's bases, defining the same name, is not seen.  The second P (the core's (d), `printed.Reaching`)
+rests on the candidates being every writer of the observed value: on a map without the writers of a value known at
+run time only (RD, codemap-rd), a call that writes the target from such a value is not seen.
+
+A positive says the arm ran in the run.  Where the row is written by a later call of the pass (the map's
+`HistoryPair`, reachable and not taken), a test in the callee can refuse the write and the caller go on unaware:
+ContentsFeeder's updateTaskStatusByContFeeder_JEDI writes nothing where the task is locked by another process or its
+status is not one for contents update (task_complex_module 1324-1331), and the caller's print after the call reads
+the same.  On x13xiiC2m (the 65 texts, the attribute 60, MT; 2026-10-31) 7 of the 14 arms judged positive have their
+history row written by a later call; 5 of them, DB proxy methods, write the value with their own statement; the
+adder's 441 (32 texts) is proven by rows printed only after updateJobs returned success; and doBasicPostProcess's
+endTime (114) by a row after updateTask_JEDI, whose result it does not read: one arm in one text.
+
+*Shows:* H2's verdicts: P's reason, and "read with the other verdicts: a call reaching no writer of '<value>' left
+standing does not write it" for a positive of the second P.
+*Revisit:* when a pass's runs of a called function's log are read as the caller's (K21's join, inside the call); when
+the map holds a call's write conditions; when RD lands.
+
 ## The walks (`asked.py`)
 
 ### K32. The walks read the code alone, not the instance record the map was built with

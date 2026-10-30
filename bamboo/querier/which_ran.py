@@ -16,7 +16,9 @@ Every candidate comes out as one of four, with the rule that put it there:
 * **positive** -- every row that must print does, one of them says enough to
   prove it, and a hole of the subject in them holds the observed value; or,
   that failing, the rows printed around the ``if`` chain it sits under leave no
-  other way through (P, :mod:`bamboo.querier.printed`);
+  other way through (P, :mod:`bamboo.querier.printed`) -- read once more after
+  every other verdict, where a call changes the subject to the observed value
+  only through a writer of it not excluded (``printed.Reaching``);
 * **unexamined** -- no run to read it against: no log to hand, or the log does
   not cover the time the question is about;
 * **kept** -- read, and nothing above decided it.
@@ -677,6 +679,24 @@ def judge(
             elif proof.kind == "inconsistent":
                 p_notes.append(f"P inconsistent: {where}: {proof.reason}")
             verdicts.append(v)
+
+    # P again on each kept candidate, with the other verdicts: a call changes the subject to the observed value only
+    # where the map reaches, from it, a writer of that value not excluded (printed.Reaching)
+    if subject and observed and called_at is not None:
+        standing = [c for c in candidates if any(v.candidate is c and v.kind != "excluded" for v in verdicts)]
+        for v in verdicts:
+            c = v.candidate
+            if v.kind != "kept" or c.owner not in seens or (stmt := R.statement_at(seens[c.owner].fn.node, v.line)) is None:
+                continue
+            sn = seens[c.owner]
+            lines = {
+                int(line) for other in standing if other.owner != c.owner
+                for site in called_at(sn.fn, other) for file, _, line in [site.rpartition(":")] if file == c.rel
+            }
+            proof = PR.prove(sn.fn, sn, stmt, PR.Reaching(observed, frozenset(lines)))
+            if proof.kind == "positive":
+                v.kind = "positive"
+                v.reasons.append(f"{proof.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
 
     positives = [v for v in verdicts if v.kind == "positive"]
     left = [v for v in verdicts if v.kind in ("positive", "kept", "unexamined")]

@@ -49,6 +49,42 @@ Beyond ``WIDEN_AT`` paths, paths that agree on the arm, the rows passed and
 the target are joined into one that knows only what all of them knew
 (:func:`widen`): that can turn a positive into nothing, never the reverse.
 
+A call leaves the path knowing nothing of what it can change: an attribute
+or an item below what it is handed, or a container it is handed (the value
+the path bound there is dropped, not only the holes printed before).
+
+Against a run (:func:`prove`) four readings go further (attr-time-shape.md
+7.3):
+
+* **(a)** an ``if`` before the arm's chain, in the same block, that binds the
+  target is an S* too: the adder's ``if self.job.jobStatus not in
+  ["transferring"]: self.job.jobStatus = self.job_status`` above ``if ... :
+  self.job.jobStatus = "failed"``;
+* **(b)** a target bound to an expression the path cannot read holds that
+  expression (:class:`Deferred`): at a later row printing both, the row's
+  value of it is the target's, where nothing on the path bound it or was
+  handed it since (**E4 deferred**);
+* **(c)** a call of the function's own class, ``self.m()``, changes only what
+  m binds of ``self`` and what the calls in it are handed of it -- m as every
+  class ``self`` can be resolves it (the map's ``calls.Types``: the class and
+  its corpus subclasses, each along its order); any other call, only what it
+  is handed below ``self`` (``self.taskBuffer.updateJobs([self.job])``:
+  ``self.taskBuffer`` and ``self.job``, not ``self.job_status``).  ``self``
+  itself handed on, a name resolved to more than one method or none, or an
+  object of ``self`` bound to another name in m, and the call changes all of
+  ``self``, as before;
+* **(d)** with the judge's other verdicts (:class:`Reaching`), at a row that
+  prints the observed value, a call changes the target only where the map
+  reaches, from it, a writer of that value the judge has not excluded: the
+  writers of the observed value are the candidates, so the value cannot
+  have come from elsewhere.  At a row printing another value any call it is
+  handed to may have written it, as before.
+
+What (c) does not see: a base outside the corpus listed before the class in
+a subclass's bases that defines the same name (the map's order stands it for
+itself), and an object of ``self`` handed out earlier and changed through
+that alias later.
+
 :func:`census` asks the same of the code alone: if the arm ran, which rows
 would print, and would they rule out everything else.
 """
@@ -242,6 +278,16 @@ def mutating_roots(node: ast.AST) -> set[str]:
     return out
 
 
+def _below(t: str, v: Any, handed: str) -> bool:
+    """Whether a call handed *handed* can change what *t* holds (*v*, None where not known): a chain below it, or
+    *handed* itself holding a container -- an attribute chain whose value is not known counts as one."""
+    if t.startswith((handed + ".", handed + "[")):
+        return True
+    if t != handed:
+        return False
+    return isinstance(v, (list, dict, set)) if v is not None else not handed.isidentifier()
+
+
 _WRITTEN_BACK: dict[tuple[str, int], tuple[str, ...] | None] = {}
 _written_back_at: Callable[..., Any] | None = None
 
@@ -281,6 +327,191 @@ def _read_only_map(call: ast.Call) -> set[int]:
     # a name the call also reads elsewhere (the statement, the receiver) is still handed there
     elsewhere = {m.id for m in ast.walk(call) if isinstance(m, ast.Name) and all(m is not i for i in inside)}
     return {id(m) for m in inside if m.id not in elsewhere}
+
+
+# ---------------------------------------------------------------- (c) calls in a method, of self
+
+FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
+#: a dunder of self (``self.__dict__.update(...)``) changes any attribute
+_DUNDER = re.compile(r"self\.__\w+__")
+_RUNTIME: dict[tuple[str, int], list[list[tuple[str, ast.ClassDef]]] | None] = {}
+
+
+@functools.cache
+def _calls_index(types: Any) -> Any:
+    from bamboo.codemap.calls import Calls
+
+    return Calls(types)
+
+
+def _runtime(where: tuple[str, int]) -> list[list[tuple[str, ast.ClassDef]]] | None:
+    """The orders (the map's ``calls.Types.mro``) of the classes ``self`` can be in a method of the class at *where*
+    (its file and line): the class and its corpus subclasses.  None where the class is not found."""
+    if where not in _RUNTIME:
+        from . import asked
+
+        types = asked._types()
+        file, line = where
+        tree = types.tree(file)
+        cls = next((n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.lineno == line), None) if tree is not None else None
+        _RUNTIME[where] = (
+            None if cls is None else [types.mro(f, k) for f, k in [(file, cls), *_calls_index(types).subclasses(file, cls)]]
+        )
+    return _RUNTIME[where]
+
+
+@functools.cache
+def _methods(where: tuple[str, int]) -> frozenset[str]:
+    return frozenset(m.name for order in _runtime(where) or () for _, k in order for m in k.body if isinstance(m, FUNCS))
+
+
+@functools.cache
+def _attributes(where: tuple[str, int]) -> frozenset[str]:
+    """The names a method of a class ``self`` can be binds as ``self.<name>``."""
+    return frozenset(
+        t.split(".")[1]
+        for order in _runtime(where) or () for _, k in order for m in k.body if isinstance(m, FUNCS)
+        for st in ast.walk(m) for t, _ in binds(st) if root(t) == "self" and re.fullmatch(r"self\.\w+", t)
+    )
+
+
+@functools.cache
+def _self_method(where: tuple[str, int], name: str) -> tuple[str, ast.AST] | None:
+    """The one method ``self.<name>`` is on every class ``self`` can be; None where they differ or one has none."""
+    found: dict[tuple[str, int], tuple[str, ast.AST]] = {}
+    for order in _runtime(where) or ():
+        hit = next(((f, m) for f, k in order for m in k.body if isinstance(m, FUNCS) and m.name == name), None)
+        if hit is None:
+            return None
+        found[(hit[0], hit[1].lineno)] = hit
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
+def _as_value(e: ast.AST, s: str, methods: frozenset[str]) -> bool:
+    """Whether *e* holds *s* (self) itself, or a method bound to it, as a value -- a call's own arguments are read
+    where the call is."""
+    if isinstance(e, ast.Name):
+        return e.id == s
+    if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name) and e.value.id == s:
+        return e.attr in methods
+    if isinstance(e, ast.Call):
+        return False
+    return any(_as_value(c, s, methods) for c in ast.iter_child_nodes(e))
+
+
+def _lets_self_out(m: ast.AST, methods: frozenset[str]) -> bool:
+    """Whether method *m* hands ``self`` (or a method bound to it) to a call, binds or returns it, or closes over it."""
+    if not m.args.args or any(isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") for d in m.decorator_list):  # type: ignore[attr-defined]
+        return False
+    s = m.args.args[0].arg  # type: ignore[attr-defined]
+    for n in ast.walk(m):
+        if isinstance(n, (ast.Lambda, *FUNCS)) and n is not m:
+            if any(isinstance(x, ast.Name) and x.id == s for x in ast.walk(n)):
+                return True
+        elif isinstance(n, ast.Call):
+            if R.is_log_call(n) or (isinstance(n.func, ast.Name) and (n.func.id in READERS or n.func.id == "super")):
+                continue
+            if any(_as_value(a, s, methods) for a in [*n.args, *(k.value for k in n.keywords)]):
+                return True
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.Return, ast.Yield, ast.YieldFrom)):
+            if n.value is not None and _as_value(n.value, s, methods):
+                return True
+    return False
+
+
+@functools.cache
+def _self_stays(where: tuple[str, int]) -> bool:
+    """Whether no method of a class ``self`` can be lets it out: then only a method of self rebinds an attribute of
+    it, and another call changes only the objects below self it is handed."""
+    orders = _runtime(where)
+    if orders is None:
+        return False
+    methods = _methods(where)
+    held = {(f, k.lineno): k for order in orders for f, k in order}
+    return not any(_lets_self_out(m, methods) for k in held.values() for m in k.body if isinstance(m, FUNCS))
+
+
+def _self_call(x: ast.AST, where: tuple[str, int]) -> bool:
+    return (
+        isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and isinstance(x.func.value, ast.Name)
+        and x.func.value.id == "self" and x.func.attr in _methods(where)
+    )
+
+
+def _effects(where: tuple[str, int], node: ast.AST, seen: frozenset) -> tuple[frozenset[str], frozenset[str]] | None:
+    """``(chains of self bound, chains below self handed)`` by the calls in *node*; None where they can change any of
+    self."""
+    bound: set[str] = set()
+    handed: set[str] = set()
+    for n in R.own_nodes(node):
+        if not isinstance(n, ast.Call) or R.is_log_call(n) or (isinstance(n.func, ast.Name) and n.func.id in READERS):
+            continue
+        f = n.func
+        if any(isinstance(x, ast.Name) and x.id == "super" for x in ast.walk(f)):
+            return None  # a base's method, run on self
+        given: list[ast.AST] = [*n.args, *(k.value for k in n.keywords)]
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "self":
+            if f.attr in _methods(where):
+                method = _self_method(where, f.attr)
+                if method is None:
+                    return None
+                if (key := (method[0], method[1].lineno)) not in seen:
+                    inner = _method_effects(where, method[1], seen | {key})
+                    if inner is None:
+                        return None
+                    bound |= inner[0]
+                    handed |= inner[1]
+            elif f.attr in _attributes(where):
+                given.append(f)  # an attribute of self holding a callable: the object called
+            else:
+                return None  # neither: a method of a base outside the corpus, say
+        else:
+            given.append(f.value if isinstance(f, ast.Attribute) else f)
+        # what a method of self returns may be any object of self, handed on here (another call's result is reached
+        # from its receiver or arguments, handed already)
+        if any(_self_call(x, where) for a in given for x in ast.walk(a)):
+            return None
+        handed |= {c for a in given for c in _chains(a) if root(c) == "self"}
+    if any(_DUNDER.match(c) for c in bound | handed):
+        return None
+    return frozenset(bound), frozenset(handed)
+
+
+def _method_effects(where: tuple[str, int], m: ast.AST, seen: frozenset) -> tuple[frozenset[str], frozenset[str]] | None:
+    """What calling method *m* of self does to self: what it binds of self, the objects below self it binds another
+    name to (an alias it may change them through, counted as handed), and its own calls' effects."""
+    bound: set[str] = set()
+    handed: set[str] = set()
+    for st in ast.walk(m):
+        for t, _ in binds(st):
+            if root(t) == "self":
+                bound.add(t)
+        value = st.iter if isinstance(st, (ast.For, ast.AsyncFor)) else getattr(st, "value", None)
+        if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.For, ast.AsyncFor)) and value is not None:
+            handed |= {c for c in _chains(value) if root(c) == "self"}
+        if isinstance(st, (ast.With, ast.AsyncWith)):
+            handed |= {c for i in st.items if i.optional_vars is not None for c in _chains(i.context_expr) if root(c) == "self"}
+    inner = _effects(where, m, seen)
+    if inner is None:
+        return None
+    return frozenset(bound | inner[0]), frozenset(handed | inner[1])
+
+
+@functools.lru_cache(maxsize=None)
+def self_effects(func: ast.AST, node: ast.AST) -> tuple[frozenset[str], frozenset[str]] | None:
+    """(c): what the calls in *node*, in method *func*, can change of ``self`` -- ``(chains of self bound, chains below
+    self handed)`` -- or None where they can change any of it (``self`` let out by a method of a class it can be, a
+    name resolved to more than one method or none)."""
+    cls = next((a for a in pathcond.ancestors(func) if isinstance(a, ast.ClassDef)), None)
+    module = next((a for a in pathcond.ancestors(func) if isinstance(a, ast.Module)), None)
+    rel = R.TREE_REL.get(id(module)) if module is not None else None
+    args = getattr(func, "args", None)
+    if cls is None or rel is None or args is None or not args.args or args.args[0].arg != "self":
+        return None
+    where = (rel, cls.lineno)
+    if not _self_stays(where):
+        return None
+    return _effects(where, node, frozenset())
 
 
 def chain_of_arm(func: ast.AST, stmt: ast.stmt) -> list[ast.If]:
@@ -574,7 +805,12 @@ class Hole:
     def valid_after(self, marks: frozenset[str] | set[str]) -> bool:
         for m in marks:
             if m.endswith("()"):
-                if self.sensitive and m[:-2] in self.roots:
+                handed = m[:-2]
+                # a name handed to a call; or (c) a chain below self, whose object the call can change
+                if handed.isidentifier():
+                    if self.sensitive and handed in self.roots:
+                        return False
+                elif affects(handed, self.chains):
                     return False
             elif affects(m, self.chains):
                 return False
@@ -624,6 +860,24 @@ def valid_before(func: ast.AST, row_stmt: ast.stmt, s_star: ast.stmt, hole: Hole
 # ---------------------------------------------------------------- paths through a region
 
 
+@dataclass(frozen=True)
+class Deferred:
+    """(b): the target bound to *expr*, which the path cannot read, at line ``-key`` -- ``key`` is the binding's
+    entry in :attr:`Path.since`, beside the rows' lines."""
+
+    expr: str
+    key: int
+
+
+@dataclass(frozen=True)
+class Reaching:
+    """(d): the judge's other verdicts -- the lines of the function's calls from which the map reaches a writer of
+    *value* (the observed one) the judge has not excluded."""
+
+    value: str
+    lines: frozenset[int]
+
+
 @dataclass
 class Path:
     #: texts bound on the path -> value (E.UNKNOWN when not known)
@@ -631,7 +885,7 @@ class Path:
     arm: bool = False
     left: str = ""
     seen: tuple[int, ...] = ()
-    #: printed row line -> what was bound / handed to a call after it
+    #: printed row line -> what was bound / handed to a call after it; a :class:`Deferred`'s key -> the same since it
     since: dict[int, frozenset[str]] = field(default_factory=dict)
     marks: frozenset[str] = frozenset()
     #: (test, outcome, state then) for tests that read the target while the path has not bound it
@@ -643,11 +897,13 @@ class Path:
     facts: dict[str, bool] = field(default_factory=dict)
     #: (row line, its message as this path renders it) -- E5, census only
     rendered: tuple = ()
+    #: (d) a call the target was handed to since it was bound reaches a writer of the observed value still standing
+    target_reached: bool = False
 
     def copy(self) -> "Path":
         return Path(
             dict(self.state), self.arm, self.left, self.seen, dict(self.since), self.marks, self.prior,
-            self.target_called, self.tests, self.at_row, dict(self.facts), self.rendered,
+            self.target_called, self.tests, self.at_row, dict(self.facts), self.rendered, self.target_reached,
         )
 
     def key(self) -> str:
@@ -658,6 +914,7 @@ class Path:
             self.arm, bool(self.left), self.left.split(" ")[0] if self.left else "", self.seen,
             sorted((k, _value_key(v)) for k, v in self.state.items()), sorted((line, sorted(m)) for line, m in self.since.items()),
             sorted(self.marks), self.prior, self.target_called, self.at_row, sorted(self.facts.items()), self.rendered,
+            self.target_reached,
         ))
 
 
@@ -716,6 +973,7 @@ def widen(paths: list[Path], target: str) -> list[Path]:
             base.since = {line: base.since.get(line, frozenset()) | q.since.get(line, frozenset()) for line in set(base.since) | set(q.since)}
             base.marks |= q.marks
             base.target_called = base.target_called or q.target_called
+            base.target_reached = base.target_reached or q.target_reached
             base.facts = {k: v for k, v in base.facts.items() if q.facts.get(k) == v}
             base.prior = tuple(x for x in base.prior if x in q.prior)
             base.rendered = tuple(x for x in base.rendered if x in q.rendered)
@@ -740,9 +998,14 @@ class Walker:
         check_row: Callable[["Walker", int, Path], str],
         track: bool = False,
         require_all: bool = True,
+        against_run: bool = False,
+        reaching: Reaching | None = None,
     ) -> None:
         self.func = func
         self.arm = arm
+        #: (b) and (c): read against a run only; the census reads the code as before
+        self.against_run = against_run
+        self.reaching = reaching
         self.target = target
         self.target_attr = bool(target) and not target.isidentifier()
         self.target_root = root(target) if target else ""
@@ -779,7 +1042,7 @@ class Walker:
                     if h.value is not None and h.valid_after(p.since[line]):
                         env.put_printed(h.expr, h.value, h.source)
         for t, v in p.state.items():
-            if v is E.UNKNOWN or isinstance(v, Shape):
+            if v is E.UNKNOWN or isinstance(v, (Shape, Deferred)):
                 env.stale[t] = "bound on the path"
             else:
                 env.put(t, v, "bound on the path")
@@ -839,7 +1102,8 @@ class Walker:
             if any(can_raise(i.context_expr) for i in s.items):
                 out.append(self.leave(p, f"call at {s.lineno}"))
             q = p.copy()
-            self.call(q, set().union(*[mutating_roots(i.context_expr) for i in s.items]))
+            for i in s.items:
+                self.calls(q, i.context_expr)
             self.bind(q, binds(s))
             return out + self.block(s.body, [q])
         if isinstance(s, R.JUMPS):
@@ -853,7 +1117,7 @@ class Walker:
         if can_raise(s.test):
             out.append(self.leave(p, f"call at {s.lineno}"))
         q0 = p.copy()
-        self.call(q0, mutating_roots(s.test))
+        self.calls(q0, s.test)
         for outcome in self.decide(self, s, q0):
             q = q0.copy()
             if self.track:
@@ -897,7 +1161,7 @@ class Walker:
             and isinstance(q.state.get(s.target.id), (str, Shape))
         ):
             appended = shape_value(s.value, q.state, before=q.state[s.target.id])
-        self.call(q, mutating_roots(s))
+        self.calls(q, s)
         self.bind(q, _own_binds(s))
         if appended is not None and s.target.id in q.state:  # type: ignore[union-attr]
             q.state[s.target.id] = appended  # type: ignore[union-attr]
@@ -913,7 +1177,7 @@ class Walker:
             jumps = R.contains(s, (ast.Return, ast.Raise))
             out.append(self.leave(p, f"{'jump' if jumps else 'call'} in {type(s).__name__.lower()} at {s.lineno}"))
         q = p.copy()
-        self.call(q, mutating_roots(s))
+        self.calls(q, s)
         self.bind(q, [(t, None) for t in deep_binds(s)])
         inside = sorted(
             (line for line, (stmt, _) in self.order.items() if s in pathcond.ancestors(stmt)),
@@ -925,18 +1189,47 @@ class Walker:
         out.append(q)
         return out
 
-    def call(self, q: Path, roots: set[str]) -> None:
+    def calls(self, q: Path, node: ast.AST) -> None:
+        """What the calls in *node* -- a statement, a test, a context expression -- can change."""
+        roots = mutating_roots(node)
+        reaches = self.reaching is None or any(
+            n.lineno in self.reaching.lines for n in R.own_nodes(node) if isinstance(n, ast.Call)
+        )
+        if self.against_run and "self" in roots and (effects := self_effects(self.func, node)) is not None:
+            # (c): what m binds of self, and the objects below self a call is handed -- not all of self
+            bound, handed = effects
+            roots = roots - {"self"}
+            marks = frozenset({b for b in bound if affects(b, self.relevant)} | {f"{h}()" for h in handed if affects(h, self.relevant)})
+            if marks:
+                q.marks |= marks
+                q.since = {line: m | marks for line, m in q.since.items()}
+            self.forget(q, lambda t, v: any(affects(b, {t}) for b in bound) or any(_below(t, v, h) for h in handed))
+            if self.target_attr and any(affects(c, {self.target}) for c in bound | handed):
+                q.target_called = True
+                q.target_reached = q.target_reached or reaches
+        self.call(q, roots, reaches)
+
+    def call(self, q: Path, roots: set[str], reaches: bool = True) -> None:
         roots = roots & self.rel_roots
         if not roots:
             return
         marks = frozenset(f"{r}()" for r in roots)
         q.marks |= marks
         q.since = {line: m | marks for line, m in q.since.items()}
-        for atom in list(q.facts):
-            if any(root(c) in roots and not c.isidentifier() for c in chains(atom)):
-                del q.facts[atom]
+        self.forget(q, lambda t, v: root(t) in roots and _below(t, v, root(t)))
         if self.target_attr and self.target_root in roots:
             q.target_called = True
+            q.target_reached = q.target_reached or reaches
+
+    def forget(self, q: Path, changed: Callable[[str, Any], bool]) -> None:
+        """Drop what the path knew of what a call changed: the values it bound there (the target's stays, read
+        through ``target_called``) and the facts reading them."""
+        for t, v in list(q.state.items()):
+            if t != self.target and v is not E.UNKNOWN and changed(t, v):
+                q.state[t] = E.UNKNOWN
+        for atom in list(q.facts):
+            if any(changed(c, None) for c in chains(atom)):
+                del q.facts[atom]
 
     def bind(self, q: Path, pairs: list[tuple[str, ast.expr | None]]) -> None:
         for t, vnode in pairs:
@@ -953,6 +1246,13 @@ class Walker:
                     value = E.UNKNOWN
                 if ROW_RENDER and value is E.UNKNOWN and t.isidentifier():
                     value = shape_value(vnode, q.state)
+            deferred = None
+            if (
+                self.against_run and value is E.UNKNOWN and t == self.target and isinstance(vnode, (ast.Name, ast.Attribute))
+                and ast.unparse(vnode) in self.relevant
+            ):
+                # (b): a later row may print what it holds
+                deferred = value = Deferred(ast.unparse(vnode), -vnode.lineno)
             for c in hit:
                 if c != t:
                     q.state[c] = E.UNKNOWN
@@ -962,8 +1262,10 @@ class Walker:
                     del q.facts[atom]
             q.marks |= {t}
             q.since = {line: m | {t} for line, m in q.since.items()}
+            if deferred is not None:
+                q.since[deferred.key] = frozenset()
             if t == self.target:
-                q.target_called = False
+                q.target_called = q.target_reached = False
 
     def pass_row(self, q: Path, line: int) -> bool:
         rank = self.order[line][1]
@@ -1003,13 +1305,16 @@ class Walker:
 
     # -- E4
 
-    def value_check(self, q: Path, same: Callable[[Any], bool], put: Callable[[E.Env], None]) -> str:
-        """Why the path cannot have the printed target value at this row, or ''."""
-        if self.target_attr and q.target_called:
+    def value_check(
+        self, q: Path, same: Callable[[Any], bool], put: Callable[[E.Env], None], called: bool | None = None
+    ) -> str:
+        """Why the path cannot have the printed target value at this row, or ''.  *called*: whether a call since the
+        target was bound may have changed it (``target_called`` unless the caller says)."""
+        if self.target_attr and (q.target_called if called is None else called):
             return ""
         if self.target in q.state:
             v = q.state[self.target]
-            if v is E.UNKNOWN or isinstance(v, Shape):
+            if v is E.UNKNOWN or isinstance(v, (Shape, Deferred)):
                 return ""
             return "" if same(v) else "E4 value"
         if getattr(self, "target_unbound", False):
@@ -1127,12 +1432,24 @@ def _proven_hits(sn: R.Seen, row: R.Row) -> int:
     return sum(1 for _, lit, _ in sn.hits.get(row.line, ()) if lit >= R.MIN_PROOF)
 
 
-def prove(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> Proof:
-    """P for the arm *stmt* of *fn* against one run (the records *sn* read)."""
+def binding_ifs(top: ast.If, target: str) -> list[ast.If]:
+    """(a): the ``if``s before *top* in its block that bind *target*, nearest first."""
+    placed = R.block_of(top.parent, top)  # type: ignore[attr-defined]
+    if placed is None or not target:
+        return []
+    _, block = placed
+    return [s for s in reversed(block[: block.index(top)]) if isinstance(s, ast.If) and any(affects(t, {target}) for t in deep_binds(s))]
+
+
+def prove(fn: R.Function, sn: R.Seen, stmt: ast.stmt, reaching: Reaching | None = None) -> Proof:
+    """P for the arm *stmt* of *fn* against one run (the records *sn* read); *reaching*, the judge's other verdicts
+    (d), where it has them."""
     func = fn.node
     levels = chain_of_arm(func, stmt)
     if not levels:
         return Proof("none", reason="P: the arm is not under an if")
+    above = binding_ifs(levels[-1], target_of(stmt))
+    levels += above
     for row in fn.rows:
         if innermost_loop(row.stmt, func) is None and _proven_hits(sn, row) > 1:
             return Proof("skipped", reason=f"P: row {row.line} printed {_proven_hits(sn, row)} times: more than one call")
@@ -1143,7 +1460,7 @@ def prove(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> Proof:
             printed[row.line] = (row, hs[0][0])
     best: Proof | None = None
     for s_star in levels:
-        found = _prove_at(fn, sn, stmt, s_star, printed)
+        found = _prove_at(fn, sn, stmt, s_star, printed, reaching, binding=s_star in above)
         if found.kind == "positive":
             return found
         # among equals, the level a printed row reached says more than one nothing reached
@@ -1154,7 +1471,10 @@ def prove(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> Proof:
     return best or Proof("none", reason="P: nothing printed reaches it")
 
 
-def _prove_at(fn: R.Function, sn: R.Seen, stmt: ast.stmt, s_star: ast.If, printed: dict[int, tuple[R.Row, int]]) -> Proof:
+def _prove_at(
+    fn: R.Function, sn: R.Seen, stmt: ast.stmt, s_star: ast.If, printed: dict[int, tuple[R.Row, int]], reaching: Reaching | None,
+    binding: bool = False,
+) -> Proof:
     func = fn.node
     region = region_of(s_star)
     loops = loops_around(s_star, func)
@@ -1185,21 +1505,38 @@ def _prove_at(fn: R.Function, sn: R.Seen, stmt: ast.stmt, s_star: ast.If, printe
         holes_of[line] = [Hole.make(e, v, f"row {line}") for e, v in row.capture(sn.run.records[idx]).items()]
     target = target_of(stmt)
     printed_target = {line: h.value for line, hs in holes_of.items() for h in hs if h.expr == target and target}
+    if binding and not printed_target:
+        # (a): the level is there for E4 to read the target at a printed row; with no such row it is not walked (a long
+        # function's region costs minutes: archiveJob's 1301 for its 1813)
+        return Proof("none", s_star.lineno, f"P: no printed row in {s_star.lineno}'s region shows {target}")
 
     def check_row(w: Walker, line: int, q: Path) -> str:
         if line not in printed_target:
             return ""
         text = printed_target[line].strip()
+        # (d): only a writer of the observed value can have made the target print it
+        called = q.target_reached if reaching is not None and text == reaching.value.strip() else q.target_called
+        held = q.state.get(target)
+        if isinstance(held, Deferred) and not (w.target_attr and called):
+            got = next(
+                (h.value.strip() for h in holes_of.get(line, ())
+                 if h.expr == held.expr and h.value is not None and h.valid_after(q.since.get(held.key, frozenset()))),
+                None,
+            )
+            if got is not None:
+                return "" if got == text else "E4 deferred"
         return w.value_check(
             q,
             lambda v: str(v) == text,
             lambda env: env.put_printed(target, text, f"row {line}"),
+            called,
         )
 
     w = Walker(
         func, stmt, target=target,
         relevant=_relevant(region, before + [h for hs in holes_of.values() for h in hs]),
         order=order, before=before, holes_of=holes_of, decide=decide_run, check_row=check_row,
+        against_run=True, reaching=reaching,
     )
     w.target_unbound = bool(target) and unbound_before(func, s_star, target)  # type: ignore[attr-defined]
     # with the token: a log with no instance mark reads the message's first word as one

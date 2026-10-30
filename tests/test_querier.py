@@ -2996,6 +2996,159 @@ def test_a_candidates_must_rows_stop_where_a_traceback_of_its_run_shows_the_call
     assert got["caught"][:2] == [[6], "excluded"] and "rule 4: must row(s) [5] not in the run" in got["caught"][2]
 
 
+# the adder's process_job_report, cut down: 416 binds the job's status from self.job_status, 441 sets it failed
+_ADDER = """
+class Adder:
+    def __init__(self, job, job_status, report):
+        self.logger = logger
+        self.job = job
+        self.job_status = job_status
+        self.report = report
+        self.plugin_class = Plugin
+        self.add_result = None
+
+    def process(self):
+        self.logger.debug("start the report of the job")
+        if self.job.jobStatus not in ["transferring"]:
+            self.job.jobStatus = self.job_status
+        self.add_result = None
+        parsed = self.parse()
+        if parsed < 2:
+            self.run_plugin()
+            if self.add_result is None:
+                self.job.jobStatus = "failed"
+        self.logger.debug(f"status after plugin call :job.jobStatus={self.job.jobStatus} jobStatus={self.job_status}")
+        self.logger.debug("updating the job in the DB")
+        return True
+
+    def parse(self):
+        if self.report is None:
+            self.logger.debug("no report of the job to parse")
+            self.job.jobStatus = "failed"
+            return 2
+        return 0
+
+    def run_plugin(self):
+        self.add_result = self.plugin_class(self.job).execute()
+"""
+
+
+def test_p_reads_the_status_a_target_was_bound_from_at_a_later_row_with_the_judges_other_verdicts(tmp_path):
+    files = {
+        "c.py": _ADDER,
+        # a subclass runs another parse, which binds self.job_status
+        "d.py": _ADDER + "\n\nclass Adder2(Adder):\n    def parse(self):\n        self.job_status = 'failed'\n        return 0\n",
+        # a method lets self out: any call may reach it
+        "e.py": _ADDER + "\n    def register(self):\n        REGISTRY.append(self)\n",
+    }
+    # the status bound from an object below self: handed to the plugin, the object may hold another status after
+    info = _ADDER.replace("self.job_status", "self.info.status").replace("self.report = report", "self.report, self.info = report, info")
+    files["h.py"] = info.replace("self.plugin_class(self.job)", "self.plugin_class(self.job, self.info)")
+    files["i.py"] = info
+    for name, text in files.items():
+        (_corpus(tmp_path) / "pandaserver" / name).write_text(text)
+    lines = _ADDER.splitlines()
+    arm, parse_arm, call = (lines.index(f"{' ' * n}{s}") + 1 for n, s in
+                            [(16, 'self.job.jobStatus = "failed"'), (12, 'self.job.jobStatus = "failed"'), (8, "parsed = self.parse()")])
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    after = "status after plugin call :job.jobStatus={} jobStatus={}"
+    logs = {
+        "core": [stamp.format(0, "start the report of the job"), stamp.format(1, after.format("failed", "finished")),
+                 stamp.format(2, "updating the job in the DB")],
+        # parse's arm printed its row: a writer of 'failed' still standing, reached from the call at 'parsed = ...'
+        "live": [stamp.format(0, "start the report of the job"), stamp.format(1, "no report of the job to parse"),
+                 stamp.format(2, after.format("failed", "finished")), stamp.format(3, "updating the job in the DB")],
+        "other": [stamp.format(0, "start the report of the job"), stamp.format(1, after.format("finished", "closed")),
+                  stamp.format(2, "updating the job in the DB")],
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(text))
+    code = """
+        import json
+        from bamboo.querier import printed as P
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, judge
+
+        R.ROWS_FROM = "walk"
+        got = {}
+        for file, log in [("c.py", "core"), ("c.py", "live"), ("d.py", "core"), ("e.py", "core"), ("h.py", "core"), ("i.py", "core")]:
+            run, = runs_for(read_log(f"{log}.log"), "1")
+            rel = f"pandaserver/{file}"
+            cs = [Candidate(rel, "process", [ARM], [run.log.name], run=run), Candidate(rel, "parse", [PARSE_ARM], [run.log.name], run=run)]
+            at = lambda fn, c, rel=rel: [f"{rel}:CALL"] if c.func == "parse" else []
+            j = judge(cs, {run.log.name: [run]}, question_run=run, subject="jobStatus", observed="failed", called_at=at)
+            got[f"{file} {log}"] = [[v.kind, v.reasons] for v in j.verdicts] + [j.how]
+        run, = runs_for(read_log("other.log"), "1")
+        fn = R.function("pandaserver/c.py", "process", (ARM,))
+        sn = R.seen(fn, run, "outside")
+        for value in ("failed", "finished"):
+            proof = P.prove(fn, sn, R.statement_at(fn.node, ARM), P.Reaching(value, frozenset()))
+            got[f"other {value}"] = [proof.kind, proof.dropped]
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("PARSE_ARM", str(parse_arm)).replace("ARM", str(arm)).replace("CALL", str(call))))
+    got = json.loads(out.splitlines()[-1])
+    (kind, why), (parse_kind, _), how = got["c.py core"]
+    # the call that could have written 'failed' reaches only parse's arm, which the run excludes: the path that skips the
+    # arm holds self.job_status, printed 'finished' at the row that printed the job 'failed' -- and the one through
+    # 'transferring' cannot print 'failed' either (the if's level above the arm's chain)
+    assert parse_kind == "excluded" and kind == "positive" and how == "positive evidence"
+    assert "every path through 13 that fits" in why[-1] and "E4 deferred" in why[-1] and "E4 prior" in why[-1]
+    assert why[-1].endswith("read with the other verdicts: a call reaching no writer of 'failed' left standing does not write it")
+    # a writer of 'failed' standing behind the call: the job's status may be its
+    assert got["c.py live"][0][0] == "kept"
+    # parse resolved to two methods, or self let out: a call may change any of self, self.job_status too
+    assert got["d.py core"][0][0] == "kept" and got["e.py core"][0][0] == "kept"
+    # bound from self.info.status: read at the row where no call is handed self.info, not where the plugin is
+    assert got["i.py core"][0][0] == "positive" and got["h.py core"][0][0] == "kept"
+    # a row printing another value than the observed one: any call handed the job may have written it
+    assert got["other failed"][0] == "none" and "E4 deferred" not in got["other failed"][1]
+    assert got["other finished"][0] == "inconsistent" and got["other finished"][1]["E4 deferred"] > 0
+
+
+def test_a_call_leaves_the_path_knowing_nothing_of_what_it_changes(tmp_path):
+    checker = (
+        "\nclass Checker:\n    def __init__(self):\n        self.logger = logger\n        self.flag = None\n        self.result = None\n\n"
+        "    def check(self, cond):\n        self.logger.debug('checking the input of the job')\n        if cond:\n"
+        "            self.flag = None\n            self.probe()\n            self.logger.debug('probed the input of the job once')\n"
+        "            if self.flag is None:\n                self.result = 'none found'\n"
+        "        self.logger.debug('done with the input of the job')\n\n    def probe(self):\n        self.flag = compute()\n"
+    )
+    (_corpus(tmp_path) / "pandaserver" / "f.py").write_text(checker)
+    # self let out: the call is read as before, as one that may change any of self
+    (_corpus(tmp_path) / "pandaserver" / "g.py").write_text(checker + "\n    def register(self):\n        REGISTRY.append(self)\n")
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "x.log").write_text(
+        "".join(stamp.format(i, t) for i, t in enumerate(["checking the input of the job", "probed the input of the job once",
+                                                            "done with the input of the job"]))
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import printed as P
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+
+            R.ROWS_FROM = "walk"
+            run, = runs_for(read_log("x.log"), "1")
+            got = []
+            for file in ("f.py", "g.py"):
+                fn = R.function(f"pandaserver/{file}", "check", (15,))
+                proof = P.prove(fn, R.seen(fn, run, "outside"), R.statement_at(fn.node, 15))
+                got.append([proof.kind, proof.reason])
+            print(json.dumps(got))
+            """,
+        )
+    )
+    # probe binds self.flag: the None bound before it says nothing of the test after, and a path skips the arm --
+    # read from what probe binds, or, self let out, from the call handed self
+    for kind, reason in json.loads(out.splitlines()[-1]):
+        assert kind == "none" and "miss it" in reason
+
+
 def test_a_row_is_missing_only_from_a_run_of_a_file_the_map_places_it_in(tmp_path):
     (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_LEFT)
     for name in ("panda-a.log", "panda-b.log"):
