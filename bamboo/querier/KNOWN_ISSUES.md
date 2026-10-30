@@ -119,6 +119,21 @@ whose run is every call in the window: G's round asked 492 marks, 9 of them a wr
 8 reads no row missing from it), so a mover whose run it is is followed on positive evidence only.  A shared mark
 seen in one piece is still asked, and comes back cut.
 
+### K40. A truncated file with no `searched` is read up to its last record, whichever string's
+
+A file is `truncated` where any string of its ask was cut at 1 MB, while the ask's other strings ran on to the file's
+end; read up to its last record returned, it counts as searched the stretch past a cut string's last record, where
+that string's records were never fetched (and the cut record's second).  On pin m's records (the harness, 10-30 20:4x):
+157 of 315 truncated entries end on a record after a cut string's last, 99 of those over the ask's window --
+MR-T-53354737-queuedTime reads aipanda081's panda-JediDBProxy.log-20261029.gz as searched at 10-29 07:43:04, though
+`getTasksToRefine_JEDI < vo=None label=managed >` was cut at 10-28 07:52:08.  A record saying where every string was
+read (`searched`) is read only there, and a later round writes such records again with `replaces` (tmaeno: "OK", 10-30
+20:5x).
+*Shows:* silent: the "not searched" lines of H2 and S2 leave the machine out, and a log read as searched whole with no
+run of the key there reads as no writer's pass.
+*Revisit:* when the harness's round rewrites every truncated entry with `searched`; the records snapshots taken
+before it keep the overread.
+
 ## The rows ask (`Rerun.ask_rows`)
 
 ### K36. Rows the rows file does not have are asked, and nothing of the querier's answers them

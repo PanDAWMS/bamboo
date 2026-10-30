@@ -725,12 +725,25 @@ def test_the_record_door_asks_the_marks_that_do_not_hold_the_key_a_round_later(t
                 twice = ""
             except SystemExit as e:
                 twice = str(e)
+            # a later round writes the key's ask again, saying it replaces round 1: read instead of it, in either order
+            again = {**key_rec, "round": 2, "replaces": 1,
+                     "machines": {M1: answered({**TODAY, "records": [hit]}), M2: answered({**TODAY, "records": []})}}
+            Path("old.jsonl").write_text(json.dumps(key_rec) + "\\n" + json.dumps(tok_rec) + "\\n")
+            Path("new.jsonl").write_text(json.dumps(again) + "\\n")
+            Path("two.jsonl").write_text(json.dumps(again) + "\\n" + json.dumps({**again, "round": 3}) + "\\n")
+            replaced = [RecordedLogs(paths).log("panda-x.log", "ds_sub1", W).holes for paths in (["old.jsonl", "new.jsonl"],
+                                                                                              ["new.jsonl", "old.jsonl"])]
+            try:
+                RecordedLogs(["old.jsonl", "two.jsonl"])
+                two = ""
+            except SystemExit as e:
+                two = str(e)
             print(json.dumps([round0, round1, round2, [r.span for r in run.records], run.describe(), log.holes, log.notes,
-                              run.would_print("ERROR"), twice]))
+                              run.would_print("ERROR"), twice, replaced, two]))
             """),
         )
     )
-    round0, round1, round2, spans, described, holes, notes, would_print, twice = json.loads(out)
+    round0, round1, round2, spans, described, holes, notes, would_print, twice, replaced, two = json.loads(out)
     # the key first, on every machine (no machine named)
     assert round0 == [[{"machine": None, "name": "panda-x.log", "service": "unsettled", "strings": ["ds_sub1"],
                         "whole_records": True, "window": ["2026-09-28 08:21:12", "2026-09-28 08:41:13"]}, ""]]
@@ -747,6 +760,10 @@ def test_the_record_door_asks_the_marks_that_do_not_hold_the_key_a_round_later(t
     assert notes == ["1 fragment(s) of records whose head was not returned"]
     assert would_print is True
     assert "a second record for the ask" in twice
+    # round 2's record of the key's ask, which replaces round 1's: aipanda094 answered there
+    assert replaced == [[], []]
+    # two records replacing the same round: which to read is not the door's choice
+    assert "two.jsonl:2: a second record for the ask" in two
 
 
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
@@ -900,6 +917,7 @@ def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_n
                             "panda-x.log", "12345", AT, M1)
             print(json.dumps([
                 described(LATE, {**TODAY, "truncated": True, "records": run}),
+                described(LATE, {**TODAY, "truncated": True, "searched": [["2026-09-28 06:40:00", "2026-09-28 08:31:20"]], "records": run}),
                 described(LATE, {**TODAY, "margin_s": 0, "covers": ["2026-09-28 06:40:00", "2026-09-28 08:35:00"], "records": run}),
                 described(EARLY, oldest, {**TODAY, "records": early}),
                 runs_for(log, "12345")[0].describe(),
@@ -908,9 +926,12 @@ def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_n
             """),
         )
     )
-    cut, asked_then, oldest_first, nothing_before, whole = json.loads(out)
+    cut, cut_searched, asked_then, oldest_first, nothing_before, whole = json.loads(out)
     assert cut.endswith("(key on 2; read as cut: what was searched on aipanda093 ends at 2026-09-28 08:31:14: the answer of "
                         "panda-x.log-20260929.gz was cut at 1 MB after its last record)")
+    assert cut_searched.endswith("(key on 2; read as cut: what was searched on aipanda093 ends at 2026-09-28 08:31:20: the "
+                                 "answer of panda-x.log-20260929.gz was cut at 1 MB, and its record says every string was read "
+                                 "only so far)")
     assert asked_then.endswith("ends at 2026-09-28 08:34:59: panda-x.log-20260929.gz was read to the time it was asked)")
     assert oldest_first.endswith("begins at 2026-09-28 06:40:00: panda-x.log-20260928.gz is the oldest kept, its start not "
                                  "known)")
@@ -941,6 +962,10 @@ def test_the_record_door_says_what_of_the_window_it_did_not_search(tmp_path):
                 # truncated: read up to its last record
                 holes(("2026-09-28 07:00:00", "2026-09-28 07:30:00"), {M1: answered({**TODAY, "truncated": True, "records": [
                     {**line("07:10:00", "12345", "PandaID=12345"), "offset": 1}]})}),
+                # truncated, its record saying where every string was read: only there, whatever its last record
+                holes(("2026-09-28 07:00:00", "2026-09-28 07:30:00"), {M1: answered({**TODAY, "truncated": True, "searched": [
+                    ["2026-09-28 06:40:00", "2026-09-28 07:09:59"], ["2026-09-28 07:15:00", "2026-09-28 07:20:00"]], "records": [
+                    {**line("07:25:00", "12345", "PandaID=12345"), "offset": 1}]})}),
                 # today's file, asked at 12:00: no margin, so read to a second before
                 holes(("2026-09-28 11:00:00", "2026-09-28 12:00:00"), {M1: answered({**TODAY, "covers": ["2026-09-28 06:40:00", "2026-09-28 12:00:00"],
                                                                                     "margin_s": 0, "records": []})}),
@@ -954,7 +979,7 @@ def test_the_record_door_says_what_of_the_window_it_did_not_search(tmp_path):
             """),
         )
     )
-    failed, both, rotation, truncated, today, oldest, machines, nowhere = json.loads(out)
+    failed, both, rotation, truncated, searched, today, oldest, machines, nowhere = json.loads(out)
     assert failed == [["aipanda093.cern.ch: 2026-09-28 06:45:00 .. 2026-09-28 06:45:00"], []]
     assert both == [[], []]
     # 06:40:00 is in the older file's covers and margin, read through: searched (the newer may hold it too, and was
@@ -962,6 +987,9 @@ def test_the_record_door_says_what_of_the_window_it_did_not_search(tmp_path):
     assert rotation == [[], []]
     # (and the run at its last record is not asked for again: the same window would read no further)
     assert truncated[0] == ["aipanda093.cern.ch: 2026-09-28 07:10:01 .. 2026-09-28 07:30:00"]
+    # the last record (07:25) is another string's, read past the cut: the stretches the record names are what was read
+    assert searched[0] == ["aipanda093.cern.ch: 2026-09-28 07:10:00 .. 2026-09-28 07:14:59",
+                           "aipanda093.cern.ch: 2026-09-28 07:20:01 .. 2026-09-28 07:30:00"]
     assert today[0] == ["aipanda093.cern.ch: 2026-09-28 12:00:00 .. 2026-09-28 12:00:00"]
     assert oldest[0] == ["aipanda093.cern.ch: 2026-09-28 06:45:00 .. 2026-09-28 06:45:00"]
     assert machines[0] == ["aipanda094.cern.ch: list failed (timeout)", "aipanda093.cern.ch: 2026-09-28 06:45:00 .. 2026-09-28 06:45:00"]

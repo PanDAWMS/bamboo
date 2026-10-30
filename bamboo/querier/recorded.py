@@ -9,6 +9,8 @@ later: the key first, then the marks that do not hold the key, then the ends of 
 Formats: analyzer-handover/stage2-record-format.md, as bamboo-e1 answered it (live-harness/notes/to-querier-15.md).  A
 record is keyed by its ask, compared as JSON with sorted keys (:func:`key_of`); the recording step copies the ask
 unchanged.  It writes one file per round (``records-r<n>.jsonl``); ``--records`` takes the files or their directory.
+A later round may write an ask's record again with ``replaces``: n -- round n's records and what a continuation read
+-- which is read instead of round n's; any other second record of an ask stops the run.
 
 What is read from a record:
 
@@ -22,7 +24,10 @@ What is read from a record:
   overlap; and its ``status``: ``answered``, or ``failed`` / ``unreadable`` (not read).  A second *t* is searched on a
   machine only when a file whose start is known covers it and every file covering it was read through it -- in an
   overlap, one file read and its neighbour failed is not searched.  ``truncated`` (1 MB, after the recording step halved
-  the strings) reads a file only up to its last record returned.  A file with no margin (today's, read to the time it
+  the strings) reads a file only up to its last record returned -- whichever string's it is, so a string cut earlier
+  is read past its cut -- unless the record says where every string of the ask was read: ``searched``, closed
+  stretches in the covers' form (one a cut ends stops the second before the cut string's last record's), a second of
+  the covers counted read only inside one.  A file with no margin (today's, read to the time it
   was asked) is read up to a second before its end: a record stamped just before can be written after.  A file whose
   start is not known (the oldest kept) covers every second before its end but makes none searched.  ``covers`` null
   (a tail holding no stamp) counts for nothing.  What of the window is not searched is :attr:`Log.holes`;
@@ -121,9 +126,18 @@ class _File:
     name: str = ""
     #: why it was read only to ``read_to``, for a run's line (``_edges_in``); empty for a rotated file read whole
     stop: str = ""
+    #: the stretches of its covers the record says every string of the ask was read in (``searched``), closed; None:
+    #: all of it up to ``read_to``
+    searched: tuple[tuple[datetime.datetime, datetime.datetime], ...] | None = None
 
     def covers(self, t: datetime.datetime) -> bool:
         return (self.start is None or self.start <= t) and t <= self.end
+
+    def read(self, t: datetime.datetime) -> bool:
+        """Whether second *t* of it was read: up to ``read_to``, and inside a searched stretch where the record names
+        them."""
+        return (self.read_to is not None and t <= self.read_to
+                and (self.searched is None or any(a <= t <= b for a, b in self.searched)))
 
 
 class _Gathered:
@@ -171,16 +185,20 @@ class _Gathered:
                 end = _t(end)
                 self.rank[(machine, f["file"])] = end
                 name = Path(f["file"]).name
+                searched = tuple((_t(a), _t(b)) for a, b in f["searched"]) if f.get("searched") is not None else None
                 if f.get("status") != "answered":
                     read_to, stop = None, f"{name} was {f.get('status') or 'not read'}"
-                elif f.get("truncated"):
+                elif f.get("truncated") and searched is None:
                     read_to, stop = _t(last) if last else None, f"the answer of {name} was cut at 1 MB after its last record"
                 else:
                     read_to = end if f.get("margin_s") else end - _SECOND
                     stop = "" if f.get("margin_s") else f"{name} was read to the time it was asked"
+                    if f.get("truncated"):
+                        # a string of the ask was cut: the record says where every one of them was read
+                        stop = f"the answer of {name} was cut at 1 MB, and its record says every string was read only so far"
                     if f.get("margin_s"):
                         self.rotated_ends.add((machine, end))
-                self.files.append(_File(machine, _t(start) if start else None, end, read_to, name, stop))
+                self.files.append(_File(machine, _t(start) if start else None, end, read_to, name, stop, searched))
 
     def log(self, name: str) -> Log:
         order = sorted(self.records.values(), key=lambda r: (r.machine, self.rank.get((r.machine, r.file), datetime.datetime.max), r.offset))
@@ -188,7 +206,7 @@ class _Gathered:
 
     def searched(self, machine: str, t: datetime.datetime) -> bool:
         covering = [f for f in self.files if f.machine == machine and f.covers(t)]
-        return any(f.start is not None for f in covering) and all(f.read_to is not None and t <= f.read_to for f in covering)
+        return any(f.start is not None for f in covering) and all(f.read(t) for f in covering)
 
     def stretches(self, machine: str, lo: datetime.datetime | None = None, hi: datetime.datetime | None = None) -> list[tuple]:
         """The machine's searched seconds from *lo* to *hi* (all its files' span when not given), as closed stretches."""
@@ -199,7 +217,8 @@ class _Gathered:
         hi = hi or max(f.end for f in files)
         cuts = {lo, hi + _SECOND}
         for f in files:
-            for t in (f.start, f.end + _SECOND, f.read_to + _SECOND if f.read_to else None):
+            for t in (f.start, f.end + _SECOND, f.read_to + _SECOND if f.read_to else None,
+                      *(x for a, b in f.searched or () for x in (a, b + _SECOND))):
                 if t is not None and lo < t <= hi:
                     cuts.add(t)
         points = sorted(cuts)
@@ -248,15 +267,22 @@ class RecordedLogs:
         files = [f for p in paths for f in (sorted(Path(p).glob("records-r*.jsonl")) if Path(p).is_dir() else [Path(p)])]
         #: the files read, a directory's records-r*.jsonl in order (result.json's inputs)
         self.files: list[Path] = files
+        by_ask: dict[str, list[tuple[Path, int, dict]]] = {}
         for path in files:
             for n, line in enumerate(path.read_text().splitlines(), 1):
                 if not line.strip():
                     continue
                 record = json.loads(line)
-                key = key_of(record["ask"])
-                if key in self._records:
-                    raise SystemExit(f"{path}:{n}: a second record for the ask {key}: which to read is not this door's choice")
-                self._records[key] = record
+                by_ask.setdefault(key_of(record["ask"]), []).append((path, n, record))
+        for key, got in by_ask.items():
+            # a record saying it replaces round n is read instead of the ask's record of that round, in either file
+            # order (a later round writes an ask's record again: the earlier records and what a continuation read)
+            left = [(p, n, r) for p, n, r in got
+                    if not any(o is not r and "replaces" in o and o["replaces"] == r.get("round") for _, _, o in got)]
+            if len(left) != 1:
+                path, n, _ = (left or got)[-1]
+                raise SystemExit(f"{path}:{n}: a second record for the ask {key}: which to read is not this door's choice")
+            self._records[key] = left[0][2]
         self._alike: dict[tuple, list[dict]] = {}
         for record in self._records.values():
             self._alike.setdefault(_alike(record["ask"]), []).append(record)
@@ -444,7 +470,7 @@ def _edges_in(got: _Gathered):
         covering = [f for f in got.files if f.machine == machine and f.covers(t)]
         if not covering:
             return f"no file read covers what comes {side}"
-        said = [f.stop or f"{f.name} was not read through it" for f in covering if f.read_to is None or t > f.read_to]
+        said = [f.stop or f"{f.name} was not read through it" for f in covering if not f.read(t)]
         said += [f"{f.name} is the oldest kept, its start not known" for f in covering if f.start is None]
         return "; ".join(dict.fromkeys(said)) or "it was not searched"
 
