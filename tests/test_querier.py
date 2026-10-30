@@ -4374,3 +4374,81 @@ def test_a_rows_prefix_is_read_without_its_leading_blanks_which_the_records_cut_
     # the row's, whose prefix keeps the blank as the logger writes it
     assert got == {"the mark's line": True, "another mark": False, "inside an outer mark": True, "a proxy's tag": True,
                    "another method's tag": False}
+
+
+def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_those_not_read(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun
+            from bamboo.querier.which_ran import Candidate, Verdict
+
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+                        entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
+            run = N(log=N(name="panda-TaskRefiner.log"), machine="aipanda084.cern.ch", token="< jediTaskID=7 >", records=[0, 1],
+                    first="2026-10-29 04:10:00,100", last="2026-10-29 04:10:01,200", describe=lambda: "the run")
+            readings = [N(file="pandajedi/r.py", owner="pandajedi/r.py::extract")]
+            arm = Verdict(Candidate("pandajedi/r.py", "extract", [5]), 5, "positive")
+            call = Verdict(Candidate("pandajedi/o.py", "runImpl", [211]), 211, "positive")
+
+            def asked(subject, guards, row=None, via=None, window=("2026-10-29 04:09:50", "2026-10-29 04:10:10"), kind="positive"):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.ends, r.touched, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], "", {}, [], {}, "outside"
+                chosen = Verdict(arm.candidate, arm.line, kind)
+                r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}), chosen, via=via, row=row, window=window)
+                rerun.pathcond = N(path_condition=lambda site: guards)
+                try:
+                    got = r.asked(rerun.Asked(subject, "A", "7"))
+                    said = None if got is None else ["SetBy", got.method]
+                except rerun.Stop as e:
+                    said = ["STOP", str(e)]
+                return {"said": said, "ends": [line for _, line in r.ends], "wrote": r.result.get("wrote")}
+
+            row = {"status": "defined", "time": "2026-10-29 04:10:00.123456"}
+            print(json.dumps({
+                "no guard": asked("JediTaskSpec.transUses", [], row),
+                "guards read true, a stand-in": asked("JediTaskSpec.transUses", ["1 == 1"], None, call,
+                                                      ("2026-10-29 04:10:00", "2026-10-29 04:10:00")),
+                "by elimination": asked("JediTaskSpec.rescueTime", [], None, window=("2026-10-29 00:49:09", "2026-10-29 00:49:09"),
+                                        kind="kept"),
+                "not read": asked("JediTaskSpec.transUses", ["1 == 1", "task.x", "1 == 2"], row),
+                "through a method": asked("JediTaskSpec.transUses", ["task.useScout()"], row),
+                "a status": asked("JediTaskSpec.status", [], row),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # an attribute: H2's pass is the answer, written to result.json; an arm with no guard ends at H3
+    assert got["no guard"] == {
+        "said": None,
+        "ends": ["END JediTaskSpec.transUses='A' written last by extract:5 (shown in its run; it has no guard), in the pass of "
+                 "the statuslog row 'defined' at 2026-10-29 04:10:00.123456: the run"],
+        "wrote": {"owner": "pandajedi/r.py::extract", "line": 5, "shown": True, "via": None,
+                  "row": {"status": "defined", "time": "2026-10-29T04:10:00.123456Z"},
+                  "window": {"start": "2026-10-29T04:09:50Z", "end": "2026-10-29T04:10:10Z"},
+                  "run": {"log": "panda-TaskRefiner.log", "machine": "aipanda084.cern.ch", "token": "< jediTaskID=7 >",
+                          "first": "2026-10-29 04:10:00,100", "last": "2026-10-29 04:10:01,200"}},
+    }
+    # ... and one whose guards hold in the run's values; a writer that prints nothing says the call it is read at
+    stood = got["guards read true, a stand-in"]
+    assert stood["ends"] == ["END JediTaskSpec.transUses='A' written last by extract:5, called at runImpl:211 (shown in its run; "
+                             "its guards hold in the run's values), at 2026-10-29 04:10:00: the run"]
+    # an arm its run does not show ran, left by elimination (the one writer of a value that is its time): said so
+    left = got["by elimination"]
+    assert left["ends"] == ["END JediTaskSpec.rescueTime='A' written last by extract:5 (by elimination: its run does not show the "
+                            "line ran; it has no guard), at 2026-10-29 00:49:09: the run"]
+    assert (left["said"], left["wrote"]["shown"]) == (None, False)
+    assert (stood["said"], stood["wrote"]["via"], stood["wrote"]["row"]) == (None, {"owner": "pandajedi/o.py::runImpl", "line": 211}, None)
+    # a condition not read, or read false, is named where H3 stops
+    assert got["not read"]["said"] == ["STOP", "H3: a method the guard reads through (its conditions: 'task.x' not read, "
+                                               "'1 == 2' read false)"]
+    assert (got["not read"]["ends"], got["not read"]["wrote"]["line"]) == ([], 5)
+    # a guard read through a method goes on to H4 as for a status
+    assert got["through a method"]["said"] == ["SetBy", "useScout"]
+    # a status: H3 as before, and no wrote
+    assert got["a status"] == {"said": ["STOP", "H3: a method the guard reads through"], "ends": [], "wrote": None}

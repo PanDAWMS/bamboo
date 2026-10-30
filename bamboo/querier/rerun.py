@@ -1234,11 +1234,23 @@ class Wrote:
     #: the caller's verdict where *chosen* is the arm of a writer that prints nothing, read on that caller's run at its
     #: call (:class:`StandIn`): the run's marks and the guard's record are the call's, the guards the arm's
     via: object = None
+    #: the statuslog row whose pass wrote it, where H2 asked at a row (None for a value held or a value that is its time)
+    row: dict | None = None
+    #: the window H2 asked the logs over, ``(lo, hi)``
+    window: tuple[str, str] | None = None
 
     @property
     def reading(self):
         c = self.chosen.candidate
         return next(r for r in self.readings if r.file == c.rel and r.owner.endswith("::" + c.func))
+
+
+def _guard_read(text: str, env: E.Env) -> object:
+    """A path condition read in *env*: True or False where the values read decide it; anything else is not read."""
+    try:
+        return E.evaluate(text, env)
+    except SyntaxError:
+        return E.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -1256,10 +1268,7 @@ class StandIn:
         """What stays open of the arm once its call ran, or None where a guard is false in *env* (it did not write)."""
         out = []
         for g in self.guards:
-            try:
-                got = E.evaluate(g, env)
-            except SyntaxError:
-                got = E.UNKNOWN
+            got = _guard_read(g, env)
             if got is False:
                 return None
             if got is not True:
@@ -1800,9 +1809,10 @@ class Rerun:
 
     def result_of(self, outcome: dict, asks: dict) -> dict:
         """result.json, version 1 (agreed with the live-case harness, 2026-10-15): the outcome, the question, the steps
-        opened in order, every input with its sha256, the asks file, and what the steps found -- the window, the mover
-        that moved the value (late), every mover with its verdict and, in S1, judgement 3's premises (``_premises``, added
-        in build order 2a) -- with times in UTC, ISO 8601 with ``Z``."""
+        opened in order, every input with its sha256, the asks file, and what the steps found -- the window, the arm
+        that wrote an attribute's value last (``wrote``), the mover that moved the value (late), every mover with its
+        verdict and, in S1, judgement 3's premises (``_premises``, added in build order 2a) -- with times in UTC, ISO 8601
+        with ``Z``."""
         a = self.args
         dump = mapdump.installed()
         return {
@@ -1832,6 +1842,7 @@ class Rerun:
             "values_read_at": _read_at(self.data),
             "readings_at": self.result.get("readings_at"),
             "possibilities": self.result.get("possibilities"),
+            "wrote": self.result.get("wrote"),
             "moved_by": self.result.get("moved_by"),
             "movers": self.result.get("movers"),
         }
@@ -1922,11 +1933,31 @@ class Rerun:
             self.say(f"WARNING: the run holds {len(starts)} passes of {at_fn.name} (rule 20); the steps below read them as one")
         site = R.statement_at(site_fn.node, chosen.line)
         reading = w.reading
+        # an attribute's question is when it took the value, and H2 answered it: the pass of the arm that wrote it last
+        # (KNOWN_ISSUES.md K37).  A status's goes on to why its writer's arm ran
+        attribute = PT.history(q.subject) is None
+        if attribute:
+            self.result["wrote"] = self._wrote_said(w)
 
         # H3
         self.start("H3", "what its guard reads")
         guards = pathcond.path_condition(site)
         self.say(f"guards of {site_fn.name}:{chosen.line}: {guards}")
+        unread = []
+        if attribute:
+            read = {g: _guard_read(g, env) for g in guards}
+            if all(got is True for got in read.values()):
+                lo, hi = w.window
+                at = (f"in the pass of the statuslog row {w.row['status']!r} at {w.row['time']}" if w.row else
+                      f"at {hi}" if lo == hi else f"in {lo} .. {hi}")
+                via = f", called at {at_fn.name}:{w.via.line}" if w.via is not None else ""
+                # an arm the run does not show ran was left by elimination: the run named is the key's in its log then
+                shown = "shown in its run" if chosen.kind == "positive" else "by elimination: its run does not show the line ran"
+                how = "its guards hold in the run's values" if guards else "it has no guard"
+                self.end(f"{q.subject}={q.observed!r} written last by {site_fn.name}:{chosen.line}{via} ({shown}; {how}), {at}: "
+                         f"{question.describe()}")
+                return None
+            unread = [f"{g!r} {'read false' if got is False else 'not read'}" for g, got in read.items() if got is not True]
         methods = []
         for g in guards:
             for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
@@ -1938,8 +1969,22 @@ class Rerun:
                     ):
                         methods.append((n.func.attr, ast.unparse(n)))
         self.say(f"read through a method: {methods}")
-        method = self.need("a method the guard reads through", methods[0][0] if methods else None)
+        method = self.need("a method the guard reads through" + (f" (its conditions: {', '.join(unread)})" if unread else ""),
+                           methods[0][0] if methods else None)
         return SetBy(method, reading, question, guard_record, env)
+
+    def _wrote_said(self, w: Wrote) -> dict:
+        """result.json's ``wrote`` for an attribute: H2's answer -- the arm, whether its run shows the line ran (else it was
+        left by elimination), the call a writer that prints nothing is read at, the statuslog row whose pass wrote it, the
+        window asked and the run (as ``moved_by``'s)."""
+        run = w.question
+        return {
+            "owner": w.reading.owner, "line": w.chosen.line, "shown": w.chosen.kind == "positive",
+            "via": {"owner": w.via.candidate.owner, "line": w.via.line} if w.via is not None else None,
+            "row": {"status": w.row["status"], "time": _iso(w.row.get("time_extended") or w.row["time"])} if w.row else None,
+            "window": {"start": _iso(w.window[0]), "end": _iso(w.window[1])} if w.window else None,
+            "run": {"log": run.log.name, "machine": run.machine or None, "token": run.token, "first": run.first, "last": run.last},
+        }
 
     def _guard_at(self, w: Wrote, site_fn) -> tuple:
         """``(function, record)``: whose passes the run holds and the first record past the rows that must print after
@@ -2172,7 +2217,7 @@ class Rerun:
             if v.kind == "excluded" or (v.kind == "unexamined" and not any(f in holes for f in v.candidate.log_files)):
                 continue
             run = question if question is not None and question.log.name in v.candidate.log_files else j.runs.get(v.candidate.owner)
-            answer = Wrote(readings, run, cands, env, v) if run is not None else None
+            answer = Wrote(readings, run, cands, env, v, row=state, window=(lo, hi)) if run is not None else None
             if v.kind == "unexamined":
                 v.reasons.append(f"not searched whole: {', '.join(f for f in v.candidate.log_files if f in holes)}")
             out += self._possibles(v, state, env, answer)
@@ -2302,7 +2347,7 @@ class Rerun:
             question = self.need(f"the run of {chosen.candidate.func} at {when}", j.runs.get(chosen.candidate.owner))
             self.say(f"the run: {question.describe()}")
         self.question = question
-        return Wrote(readings, question, cands, env, chosen)
+        return Wrote(readings, question, cands, env, chosen, row=state, window=(lo, hi))
 
     def _writers(self, subject: str, value: str, key: str) -> list:
         """H1's reading: the map's writers of ``subject=value`` (derive-strategy's readings), read once per value."""

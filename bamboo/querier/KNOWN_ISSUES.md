@@ -582,7 +582,7 @@ holding the value as the subject's time (`JediTaskSpec.superStatus` 'done', thre
 every machine (`windows.value_now`); else each arm is placed on the object's history by the map's HistoryPair (row
 same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
 history call records where they are literals, any row otherwise), and read newest first (K38): the first whose pass a
-writer is shown to write in is the write that left the value, and H2 goes on from it as for a status.  Only the last write is
+writer is shown to write in is the write that left the value, the answer (below).  Only the last write is
 asked; one of the same value before it is not.  It stops where an arm is on no row of the object -- its pairs are
 another object's, the map does not follow the object to its pass's history call, or it has none: its run may have
 written the value after any row, and asking its logs over the rest of the window (F3) is not built -- and where H1
@@ -602,9 +602,22 @@ outside (updateJobStatus, the pilot's PandaID) needs the key's source of the pas
 S1's census lists TaskRefiner.runImpl as a writer by key at 31 task values, and updateJobStatus as a kept mover at
 activated and waiting, so neither its kept movers nor its writers by key tell them apart).
 
-*Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers; a
-stop "every writer of <subject> on a history row of the object ... (k of n not: K37)" or "a writer of <subject> in
-the map".
+The pass H2 answers with is when the attribute took the value (attr-time-shape.md 6, P5; tmaeno: "OK", 10-30 15:03):
+result.json's `wrote` names the arm, whether its run shows the line ran (`shown`; else H2 left it by elimination, and
+the run named is only the key's in its log then: the one writer of a value that is its time), the call it is read at
+for a writer that prints nothing (K25), the statuslog row whose pass wrote it (none for a value held or a value that
+is its time), the window asked and the run, and H3 ends there (END) where the arm has no guard or every guard holds in
+the run's values.  A condition not read, or read false,
+is named in H3's stop; a guard read through a method goes on to H4 as for a status, whose steps say why the arm ran,
+not when.  Before, an attribute went on as a status does and stopped at H3 "a method the guard reads through" for an
+arm with no guard: 12 of the 14 attribute cases H2 answered on the harness's round-2 snapshot.
+
+*Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers;
+"END <subject>=<value> written last by <arm>[, called at <call>] (shown in its run | by elimination: its run does not
+show the line ran; it has no guard | its guards hold in the run's values), in the pass of the statuslog row <status>
+at <time>: <run>"; a stop "every writer of <subject> on a history
+row of the object ... (k of n not: K37)", "a writer of <subject> in the map", or at H3 "a method the guard reads
+through (its conditions: '<condition>' not read)".
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
 arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 
