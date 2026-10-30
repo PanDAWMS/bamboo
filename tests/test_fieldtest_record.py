@@ -546,6 +546,58 @@ async def test_a_later_round_reads_a_rotated_files_earlier_answer_again(tmp_path
     ].startswith("answers-r1-")
 
 
+def by_string(strings, _tail):
+    """A grep's answer: a record per string, at the offset of its first digit."""
+    return found(
+        *(rec(int(s[0]), f"2026-10-14 06:00:00,{s[0]} x {s}") for s in strings)
+    )
+
+
+async def test_a_later_round_asks_only_the_strings_no_earlier_answer_held(tmp_path):
+    day = "panda-adder.log-20261014.gz"
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], day): [by_string]},
+    )
+    w1 = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    await run(tmp_path, panda, [ask(ADDER, [s], w1, SERVER[0]) for s in ("111", "222")])
+    w2 = ("2026-10-14 05:00:00", "2026-10-14 06:00:00")
+    _, (a, b) = await run(
+        tmp_path, panda, [ask(ADDER, [s], w2, SERVER[0]) for s in ("111", "333")]
+    )
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [("111", "222"), ("333",)]
+    fa, fb = a["machines"][SERVER[0]]["files"][0], b["machines"][SERVER[0]]["files"][0]
+    assert [x["offset"] for x in fa["records"]] == [1]
+    assert [x["offset"] for x in fb["records"]] == [3]
+    assert a["requests"][0]["reused"].startswith("answers-r1-")
+
+
+async def test_a_held_strings_ask_is_answered_when_the_new_strings_grep_fails(
+    tmp_path,
+):
+    day = "panda-adder.log-20261014.gz"
+
+    def reply(strings, tail):
+        if "333" in strings:
+            return {"status": "failed", "error": "timeout"}
+        return by_string(strings, tail)
+
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {(SERVER[0], day): [reply]}
+    )
+    w1 = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    await run(tmp_path, panda, [ask(ADDER, ["111"], w1, SERVER[0])])
+    w2 = ("2026-10-14 05:00:00", "2026-10-14 06:00:00")
+    _, records, deferred = await run_round(
+        tmp_path, panda, [ask(ADDER, [s], w2, SERVER[0]) for s in ("111", "333")]
+    )
+    assert [d["ask"]["strings"] for d in deferred] == [["333"]]
+    (r,) = records
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert r["ask"]["strings"] == ["111"] and f["status"] == "answered"
+    assert [x["offset"] for x in f["records"]] == [1]
+
+
 async def test_an_ask_already_recorded_is_refused(tmp_path):
     greps = {(SERVER[0], "panda-adder.log-20261014.gz"): [found()]}
     panda = FakePanda(lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), greps)

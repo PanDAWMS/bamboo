@@ -61,8 +61,11 @@ grep that fails fails its own strings alone: the other greps are still asked
 (a two-string half timed out after its file's 19 strings were cut,
 2026-10-30).  A rotated file still being compressed (its plain name listed, or a grep answered
 :data:`BEING_COMPRESSED`) is waited for; past the day after its date it is
-``unreadable``.  A rotated ``.gz`` does not change, so an earlier round's
-answer for the same machine and file is read again when it held every string.
+``unreadable``.  A rotated ``.gz`` does not change, so a string an earlier
+round's answer for the same machine and file held uncut is read from it again,
+and only the other strings are asked (a round asked 16 rotated files again
+whole for their new strings, with the 2-17 strings each one's earlier answers
+held, 2026-10-30).
 
 **A record.**  Each ask's record copies the ask and lists, for every machine
 it asks, every file whose span meets the window, read or not, with the records
@@ -483,15 +486,17 @@ class Earlier:
                     )
         return out
 
-    def cover(self, machine: str, file: str, strings: set[str]) -> list[dict] | None:
-        """Leaves that together held every one of *strings* uncut, or None."""
+    def cover(
+        self, machine: str, file: str, strings: set[str]
+    ) -> tuple[list[dict], set[str]]:
+        """The leaves that held one of *strings* uncut, and the strings none of them held."""
         found = [
             leaf
             for leaf in self.leaves.get((machine, file), [])
-            if not leaf["truncated"]
+            if not leaf["truncated"] and strings & set(leaf["strings"])
         ]
         held = {s for leaf in found for s in leaf["strings"]}
-        return found if strings <= held else None
+        return found, strings - held
 
 
 class Grepper:
@@ -513,25 +518,28 @@ class Grepper:
         f = job.file
         if f.kind == "compressing" and not await self.compressed(job):
             return
+        reused, asking = [], job.strings
         if f.kind != "current":
-            reused = self.earlier.cover(f.machine, f.name, job.strings)
-            if reused is not None:
-                for leaf in reused:
-                    self.take(job, leaf["records"], leaf["fragments"])
-                    job.requests.append(
-                        {"machine": f.machine, "file": f.name, "reused": leaf["answer"]}
-                    )
+            reused, asking = self.earlier.cover(f.machine, f.name, job.strings)
+            for leaf in reused:
+                self.take(job, leaf["records"], leaf["fragments"])
+                job.requests.append(
+                    {"machine": f.machine, "file": f.name, "reused": leaf["answer"]}
+                )
+            if not asking:
                 job.status = "answered"
                 return
         while True:
             job.status = ""
             job.failed.clear()
-            outcome = await self.grep(job, sorted(job.strings))
+            outcome = await self.grep(job, sorted(asking))
             if outcome != "compressing":
                 break
             if not await self.compressed(job):
                 return
-        if (
+        if reused:  # the earlier answers hold the other strings; a failed string fails its own asks alone
+            job.status = "answered"
+        elif (
             job.failed and job.status != "answered"
         ):  # every grep failed: the file is failed
             job.status, job.error = "failed", next(iter(job.failed.values()))
