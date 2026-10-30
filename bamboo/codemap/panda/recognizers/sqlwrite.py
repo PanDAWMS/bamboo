@@ -452,8 +452,9 @@ def _key_froms(
 ) -> None:
     """Add *run*'s row-naming terms of *statement* to their :class:`KeyFrom` s, one per term however many texts run it.
 
-    The binds only -- where their values came from is read after the reach record (:func:`attach_key_sources`).
-    A term none of whose runs has a bind map is :data:`KEY_NO_MAP`; one whose runs fill none, :data:`KEY_NO_BIND`.
+    *run* is one call's (:func:`_each_call`).  The binds only -- where their values came from is read after the
+    reach record (:func:`attach_key_sources`).  A term none of whose runs has a bind map is :data:`KEY_NO_MAP`; one
+    whose runs fill none, :data:`KEY_NO_BIND`.
     """
     owner = f"{rel_path}::{func.name}"
     terms = [(f"{column}={bind}", bind) for column, bind in sorted(statement.keys.items())]
@@ -491,6 +492,43 @@ def _ran_by(record: KeyFrom, func: ast.FunctionDef | ast.AsyncFunctionDef, run: 
     places.extend(call for call in (run.calls or (run.call,)) if not any(call is one for one in places))
     if not any(run is one for one in record._executions):
         record._executions.append(run)
+
+
+def _each_call(
+    attributor: SpecAttributor,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: sql.Execution,
+    statement: sqltext.SqlWrite,
+    spec_class: Optional[str],
+    settle,
+    written: dict[str, set[int]],
+) -> list[tuple[sql.Execution, dict[str, set[int]]]]:
+    """*run* as each of its calls runs it, with the lines that call's binds write each subject's values on.
+
+    The readers keep one run per text and map (:attr:`sql.Execution.calls`), which is what the statement does; but a
+    key is one execution's.  restartTasksForContentsUpdate_JEDI runs its ``sqlTD`` at 1855 and 1862 for the rows its
+    1830 selects and at 1914 for 1906's, its map built anew each time, and one record read at all three said each of
+    its writes keyed by both statements' rows.  So a run of several calls is read again at each, its outcomes too
+    (:func:`_outcomes` at that call alone); a run of one call is *written* as it is.
+    """
+    if len(run.run_at) < 2:
+        return [(run, written)]
+    found = []
+    for call in run.run_at:
+        one = run._replace(call=call, calls=(call,))
+        lines: dict[str, set[int]] = {}
+        for column, supplied in statement.columns.items():
+            qualifier, attribute, _kind = _subject_of(attributor, spec_class, statement.table, column)
+            outcomes = _outcomes(
+                attributor, func=func, run=one, statement=statement, column=column, supplied=supplied,
+                spec_class=spec_class, settle=settle, templates=[], why=[],
+            )
+            if outcomes:
+                lines.setdefault(SubjectNode.make_name(qualifier, attribute), set()).update(
+                    outcome.decided_at.lineno for outcome in outcomes
+                )
+        found.append((one, lines))
+    return found
 
 
 _INSERT_INTO = re.compile(r"^\s*INSERT\s+(?:/\*.*?\*/\s*)?INTO\s+([\w.{}$]+)", re.IGNORECASE | re.DOTALL)
@@ -1212,14 +1250,17 @@ def extract(
                             found.decided_at.lineno for found in outcomes
                         )
                     if key_froms is not None:
-                        _key_froms(keyed, key_froms, func, run, statement, module.rel_path, written)
-                        if statement.kind == "insert" and writing is not None:
-                            _insert_froms(
-                                keyed, key_froms, func, _owner, run, statement, module.rel_path, written,
-                                attributor, writing,
-                                upsert=writing.upserts(run, statement.table),
-                            )
-                        elif made_of:
+                        inserts = statement.kind == "insert" and writing is not None
+                        # A record per call: each place runs the text with the binds that reach it.
+                        for one, lines in _each_call(attributor, func, run, statement, spec_class, settle, written):
+                            _key_froms(keyed, key_froms, func, one, statement, module.rel_path, lines)
+                            if inserts:
+                                _insert_froms(
+                                    keyed, key_froms, func, _owner, one, statement, module.rel_path, lines,
+                                    attributor, writing,
+                                    upsert=writing.upserts(one, statement.table),
+                                )
+                        if not inserts and made_of:
                             _mark_object(keyed, func, _owner, run, statement, module.rel_path, made_of, attributor)
             # The executions nothing was read out of, last: they have no run
             # to hang on, and saying them is what tells "read in full" from

@@ -18986,6 +18986,72 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
     assert (lost.sources, lost.unread) == ([], "no bind found")
 
 
+_TWO_PLACES = '''
+class TaskModule:
+    def restartTasks(self, vo):
+        sqlD = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status=:status "
+        sqlR = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND status=:status AND splitRule IS NULL "
+        sqlT = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        self.cur.execute(sqlD + comment, {":vo": vo, ":status": "defined"})
+        resD = self.cur.fetchall()
+        for (jediTaskID,) in resD:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID  # KEY D
+            varMap[":newStatus"] = "ready"  # NEW D
+            varMap[":oldStatus"] = "defined"
+            self.cur.execute(sqlT + comment, varMap)  # RUN D
+        self.cur.execute(sqlR + comment, {":vo": vo, ":status": "ready"})
+        resR = self.cur.fetchall()
+        for (jediTaskID,) in resR:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID  # KEY R
+            varMap[":newStatus"] = "defined"  # NEW R
+            varMap[":oldStatus"] = "ready"
+            self.cur.execute(sqlT + comment, varMap)  # RUN R
+'''
+
+
+def test_a_text_run_from_two_places_with_its_map_built_anew_is_a_key_record_for_each(tmp_path):
+    """restartTasksForContentsUpdate_JEDI's ``sqlTD`` at 1855 and 1914: one text and one map name, so one run
+    (:attr:`sql.Execution.calls`), but each place keys its write by another statement's rows -- a record each, its
+    source and its write the binds reaching that place."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _TWO_PLACES})
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources([], junctions, calls, record, key_froms=froms, read_sites=sites)
+    lines = _TWO_PLACES.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (written,) = [j for j in junctions if j.owner.endswith("::restartTasks")]
+    site = {s.anchor.line_start: s.name for s in sites if s.owner.endswith("::restartTasks")}
+    found = sorted(
+        (one.statement, one.writes, [(s.kind, s.name, s.line) for s in one.sources])
+        for one in froms
+        if one.term == "jediTaskID=:jediTaskID"
+    )
+    assert found == [
+        (
+            at("# RUN D"),
+            {written.subject: [at("# NEW D")]},
+            [("rows", site[at("execute(sqlD")], at("# KEY D"))],
+        ),
+        (
+            at("# RUN R"),
+            {written.subject: [at("# NEW R")]},
+            [("rows", site[at("execute(sqlR")], at("# KEY R"))],
+        ),
+    ]
+
+
 _BATCHED = '''
 from pandacommon.pandautils.PandaUtils import batched
 
@@ -19102,12 +19168,16 @@ def test_a_write_says_the_routes_on_which_it_never_runs(tmp_path):
     assert (partly.routes, partly.routes_open, partly.out_on) == (2, True, [[at("self.partly(1, True)")]])
 
 
-def test_a_write_run_from_two_places_is_out_only_where_both_are(tmp_path):
-    """One text and one map run from two places is one record at the first: on each route one of them runs."""
-    by, _at = _routed(tmp_path)
+def test_a_write_run_from_two_places_is_a_record_for_each_out_where_it_is(tmp_path):
+    """One text and one map run from two places is a record per place: ``if getNew`` runs on both routes, every
+    placed caller handing ``True``, and its ``else`` on neither -- the write is held by both, so a reader dropping
+    the place that never runs keeps it."""
+    by, at = _routed(tmp_path)
 
-    (both,) = by["sqlB"]
-    assert (both.routes, both.out_on) == (2, [])
+    runs, never = sorted(by["sqlB"], key=lambda one: one.statement)
+    assert (runs.routes, runs.out_on) == (2, [])
+    assert (never.routes, never.out_on) == (2, [[at("self.retry(1, True)")], [at("self.retry(2, True)")]])
+    assert runs.writes == never.writes
 
 
 def test_a_flag_the_function_binds_again_rules_out_no_route(tmp_path):

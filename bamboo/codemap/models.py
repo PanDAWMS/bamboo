@@ -2937,7 +2937,9 @@ class KeyFrom(BaseModel):
     own way on (its ``crosses_to``, its KeyFroms' sources): joined by the reader, which can test the value there.
 
     Read in the same step as :attr:`RowKeySource.handed_by`, after the reach record and by the same carries, so the
-    two never disagree.  A statement run with several texts is one KeyFrom per term, its sources every text's.
+    two never disagree: a RowKeySource is one per text and map, and holds what its calls' KeyFroms hold together.  A
+    statement run with several texts is one KeyFrom per term, its sources every text's; a text run from several
+    places is one per place, its sources the binds that reach that place.
     Not followed here: rows reaching the bind through a call (a parameter is where this function was handed them),
     and the values of the columns the statement writes.
 
@@ -2960,10 +2962,10 @@ class KeyFrom(BaseModel):
     statement: int = Field(
         default=0,
         description=(
-            "The line the write runs on -- the first, where the function runs one text with one bind map from "
-            "several places (``setNoRetry`` at 2604 and 2608): one run, its binds every place's "
-            "(``sql.Execution.calls``); a flush's, the call.  For an object no write persists, the first line its "
-            "fields reach the use on (the call, the statement, the return), else the first assignment's."
+            "The line the write runs on -- one record per place where the function runs one text from several "
+            "(``sql.Execution.calls``; ``restartTasksForContentsUpdate_JEDI``'s ``sqlTD`` at 1855, 1862 and 1914), "
+            "its binds what reaches that place; a flush's, the call.  For an object no write persists, the first "
+            "line its fields reach the use on (the call, the statement, the return), else the first assignment's."
         ),
     )
     table: str = Field(
