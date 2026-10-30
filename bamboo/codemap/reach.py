@@ -159,7 +159,13 @@ def _cut(node: ast.AST) -> str:
 
 
 class _Names:
-    """The id of every function and class of the corpus: ``file::Outer.inner``, ``#n`` after a repeated one."""
+    """The id of every function and class of the corpus: ``file::Outer.inner``, ``#n`` after a repeated one.
+
+    Of the definitions one scope repeats a name with, the one the name is bound to -- the one the calls resolve it to
+    (:func:`calls.binding`) -- is spelled without ``#n``, as every reader spelling an owner by its qualified name
+    means it, and the others ``#2``, ``#3`` in source order: ``CoreUtils.clean_user_id``'s ``@overload`` stubs come
+    before the body that runs, and a property's setter after its getter.
+    """
 
     def __init__(self, types: C.Types):
         self.functions: list[tuple[str, ast.AST, str]] = []
@@ -173,22 +179,34 @@ class _Names:
             self._walk(file, tree, [], seen)
 
     def _walk(self, file: str, scope: ast.AST, names: list[str], seen: Counter) -> None:
-        for node in ast.iter_child_nodes(scope):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                spelled = f"{file}::{'.'.join([*names, node.name])}"
-                seen[spelled] += 1
-                if seen[spelled] > 1:
-                    spelled = f"{spelled}#{seen[spelled]}"
-                self._of[id(node)] = spelled
-                self._keep.append(node)
-                if not isinstance(node, ast.ClassDef):
-                    self.functions.append((file, node, spelled))
-                self._walk(file, node, [*names, node.name], seen)
-            else:
-                self._walk(file, node, names, seen)
+        defs = list(_scope_definitions(scope))
+        bound = {name: C.binding(defs, name) for name in {node.name for node in defs}}
+        spelled_as: dict[int, str] = {}
+        for node in sorted(defs, key=lambda one: one is not bound[one.name]):
+            spelled = f"{file}::{'.'.join([*names, node.name])}"
+            seen[spelled] += 1
+            if seen[spelled] > 1:
+                spelled = f"{spelled}#{seen[spelled]}"
+            spelled_as[id(node)] = spelled
+        for node in defs:
+            self._of[id(node)] = spelled_as[id(node)]
+            self._keep.append(node)
+            if not isinstance(node, ast.ClassDef):
+                self.functions.append((file, node, spelled_as[id(node)]))
+            self._walk(file, node, [*names, node.name], seen)
 
     def of(self, node: ast.AST) -> Optional[str]:
         return self._of.get(id(node))
+
+
+def _scope_definitions(scope: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
+    """The ``def`` and ``class`` statements of *scope* itself, in source order: inside its ``if`` and ``try`` blocks
+    too, not inside another definition."""
+    for node in ast.iter_child_nodes(scope):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield node
+        else:
+            yield from _scope_definitions(node)
 
 
 def _annotation_parts(annotation: ast.expr) -> Iterator[ast.expr]:
