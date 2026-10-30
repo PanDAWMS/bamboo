@@ -4820,6 +4820,20 @@ LOG_FILES_PARTLY = "partly"
 LOG_FILES_OF_MODULE = "module"
 
 
+class RunRef(BaseModel):
+    """A run another function starts, by where a reader finds it: the :class:`RunStart` at ``line`` among the runs of
+    ``owner``'s :class:`FunctionPrintsNode` (:attr:`PrintStatement.handed_runs`)."""
+
+    owner: str = Field(
+        description=(
+            "The node holding the run: the function binding its logger, or, for "
+            "an object's run whose ``__init__`` prints nothing, the first by "
+            "name of the nodes holding it (the class's methods that print)."
+        )
+    )
+    line: int = Field(description="The run's :attr:`RunStart.line`.")
+
+
 class PrintStatement(BaseModel):
     """One logging call and every way it can print, in the order the skeleton gives them."""
 
@@ -4854,6 +4868,23 @@ class PrintStatement(BaseModel):
             "whose logger this call can print through.  Empty where its "
             "logger is none of them -- a parameter, the module's logger -- "
             "and then the rows' ``prefix_hole`` says how it is bound."
+        ),
+    )
+    handed_runs: list[RunRef] = Field(
+        default_factory=list,
+        description=(
+            "The runs of a logger this call prints through that the owner and "
+            "its object do not start, found as ``log_files`` and the prefix "
+            "are, back on every path to the calls making the logger "
+            "(:meth:`~bamboo.codemap.panda.recognizers.logfile.LoggerFiles."
+            "makers_of`): ``doGenerate`` prints through the ``tmpLog`` "
+            "``JobGeneratorThread.runImpl`` binds and hands it, that run.  Every run the "
+            "paths reach -- ``BaseModule.dump_error_message`` is handed every "
+            "DB proxy method's logger, 418 runs -- and a run made by a call "
+            "the binding's function returns from (``create_tagged_logger``) "
+            "at the caller's binding.  A run a function starts without "
+            "printing has no node and is not said; a path the walk does not "
+            "close, the rows' ``prefix_hole`` says."
         ),
     )
 

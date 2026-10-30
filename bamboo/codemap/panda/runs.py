@@ -11,7 +11,9 @@ pass's.  Three records answer it, each read once, at build time:
   of PanDA's factories (:data:`BUILDERS`), its mark, and the columns each hole
   of the mark holds, as a declaration or the value's uses say
   (:class:`RunStart`, :mod:`bamboo.codemap.panda.keycolumns`).  Each print
-  statement says which of them its logger can be (:attr:`PrintStatement.runs`).
+  statement says which of them its logger can be (:attr:`PrintStatement.runs`),
+  and which runs of other functions a logger it is handed can be
+  (:attr:`PrintStatement.handed_runs`).
 - :attr:`ReachNode.history`: each call of a history writer, and the values
   the row it writes can record (:class:`HistoryCall`).  A history writer is a
   function whose SQL inserts into a history table (:data:`HISTORY_TABLES`),
@@ -153,18 +155,22 @@ from bamboo.codemap.models import (
     HISTORY_ROW_SAME,
     RUN_KEY_TIME,
     Branch,
+    FunctionPrintsNode,
     HistoryCall,
     HistoryPair,
     HistoryRekey,
     JunctionNode,
     MapFragment,
+    PrintStatement,
     ReachCall,
     RunKey,
+    RunRef,
     RunStart,
     SourceModule,
 )
 from bamboo.codemap.panda import keycolumns, mustprints, pathcond, sql, sqltext
 from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.panda.recognizers import logfile
 
 #: The tables PanDA keeps a subject's past values in, lower-cased, each with
 #: the subject it records: one row per change, stamped when it is written.
@@ -357,6 +363,7 @@ class _Reader:
             tuple[dict[ast.AST, HistoryRekey], dict[ast.AST, tuple[str, str]]],
         ] = {}
         self._statements: dict[tuple[int, int], Optional[ast.stmt]] = {}
+        self._loggers: Optional[logfile.LoggerFiles] = None
         self._executions: dict[int, list[sql.Execution]] = {}
         self._targets: dict[str, C.Target] = {}
         self._callers: dict[str, list[C.CallSite]] = {}
@@ -375,12 +382,17 @@ class _Reader:
     # -- runs ----------------------------------------------------------------- #
 
     def attach_runs(self) -> int:
-        """Every printing function's runs, and each print statement's."""
+        """Every printing function's runs, and each print statement's: the owner's its logger can be, and those of a
+        logger it is handed (:meth:`_handed_through`), read once every node's runs are."""
         found = 0
+        sites: list[
+            tuple[FunctionPrintsNode, str, ast.AST, PrintStatement, ast.stmt]
+        ] = []
         for node in self.fragment.function_prints:
             node.runs = []
             for statement in node.statements:
                 statement.runs = []
+                statement.handed_runs = []
             held = self.funcs.get(node.owner)
             if held is None:
                 continue
@@ -393,6 +405,22 @@ class _Reader:
                     statement.runs = self._printed_through(
                         file, func, site, statement.level, node.runs
                     )
+                    sites.append((node, file, func, statement, site))
+        holders: dict[tuple[str, int], list[str]] = defaultdict(list)
+        for node in self.fragment.function_prints:
+            for run in node.runs:
+                holders[(run.at, run.line)].append(node.owner)
+        # A run is named by the node of the function binding it, else -- an
+        # object's run whose __init__ prints nothing -- by the first node by
+        # name holding it: one that exists, as a reader looks it up.
+        named = {
+            key: key[0] if key[0] in owners else min(owners)
+            for key, owners in holders.items()
+        }
+        for node, file, func, statement, site in sites:
+            statement.handed_runs = self._handed_through(
+                file, func, site, statement.level, node.runs, named
+            )
         return found
 
     def runs_of(self, owner: str) -> list[RunStart]:
@@ -520,16 +548,7 @@ class _Reader:
         self, file: str, func: ast.AST, site: ast.stmt, level: str, runs: list[RunStart]
     ) -> list[int]:
         """The lines of *runs* whose logger the logging call at *site* can be made on."""
-        call = next(
-            (
-                node
-                for node in walk(site)
-                if isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == level
-            ),
-            None,
-        )
+        call = _logging_call(site, level)
         if call is None:
             return []
         receiver = call.func.value  # type: ignore[attr-defined]
@@ -539,6 +558,43 @@ class _Reader:
         if not isinstance(receiver, ast.Name):
             return []
         return self._holding(func, site, receiver.id)
+
+    def _handed_through(
+        self,
+        file: str,
+        func: ast.AST,
+        site: ast.stmt,
+        level: str,
+        runs: list[RunStart],
+        named: dict[tuple[str, int], str],
+    ) -> list[RunRef]:
+        """The runs of a logger the logging call at *site* is handed: those the paths back to the calls making it
+        reach, *runs* -- the owner's and its object's -- left out (:attr:`PrintStatement.handed_runs`).
+
+        The walk is the log files' and the prefix's (:meth:`logfile.LoggerFiles.makers_of`).  A maker is a run
+        where it binds a logger a node holds (*named*): in the function it is in, or, reached through a call it
+        returns from (``create_tagged_logger``'s ``LogWrapper``), where the caller binds what the call returns.
+        """
+        call = _logging_call(site, level)
+        if call is None:
+            return []
+        if self._loggers is None:
+            self._loggers = logfile.LoggerFiles(self.calls, {}, {})
+        makers, _stopped = self._loggers.makers_of(file, func, call)
+        own = {(run.at, run.line) for run in runs}
+        found: set[tuple[str, int]] = set()
+        for maker in makers:
+            if maker.call is None or maker.func is None:
+                continue
+            key = (self.names.of(maker.func) or "", _binding_line(maker.call))
+            if key not in named and maker.returning is not None:
+                key = (
+                    self.names.of(maker.returning.caller) or "",
+                    _binding_line(maker.returning.at),
+                )
+            if key in named and key not in own:
+                found.add((named[key], key[1]))
+        return [RunRef(owner=owner, line=line) for owner, line in sorted(found)]
 
     def _holding(
         self, func: ast.AST, site: ast.AST, name: Optional[str] = None
@@ -1903,6 +1959,26 @@ def _called(call: ast.Call) -> str:
     if isinstance(call.func, ast.Attribute):
         return call.func.attr
     return ""
+
+
+def _logging_call(site: ast.stmt, level: str) -> Optional[ast.Call]:
+    """The call at *site* made on a logger's *level* method."""
+    return next(
+        (
+            node
+            for node in walk(site)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == level
+        ),
+        None,
+    )
+
+
+def _binding_line(node: ast.AST) -> int:
+    """The line of the statement holding *node*: a run's line is its binding statement's (:attr:`RunStart.line`)."""
+    statement = mustprints._statement_of(node)
+    return statement.lineno if statement is not None else node.lineno  # type: ignore[attr-defined]
 
 
 def _on_self(node: ast.expr) -> bool:

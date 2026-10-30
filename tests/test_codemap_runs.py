@@ -25,6 +25,7 @@ from bamboo.codemap.models import (
     KeyStop,
     MapFragment,
     RunKey,
+    RunRef,
     SourceModule,
 )
 from bamboo.codemap.panda import objects as panda_objects
@@ -1746,3 +1747,98 @@ def test_a_pair_printing_through_a_handed_logger_is_in_the_run_of_who_builds_it(
         "is not one of the caller's runs" in one
         for one in history_pairs_resolve(fragment).failures
     )
+
+
+def test_a_statement_printing_through_a_handed_logger_names_the_run_that_builds_it(
+    tmp_path: Path,
+) -> None:
+    """``doGenerate`` prints through the ``tmpLog`` its caller binds: the statement names that run where a reader
+    finds it, the caller's node and line.  A statement on the owner's own logger, or the module's, names none."""
+    fragment = _build(tmp_path, [], spec=SPEC, proxy=PROXY, handed=HANDED)
+    prints = {node.owner: node for node in fragment.function_prints}
+    built = RunRef(owner="pkg/handed.py::Post.process", line=_line(HANDED, "L0"))
+    (post,) = prints["pkg/handed.py::Post.post"].statements
+    assert (post.runs, post.handed_runs) == ([], [built])
+    (start,) = prints["pkg/handed.py::Post.process"].statements
+    assert (start.runs, start.handed_runs) == ([_line(HANDED, "L0")], [])
+    (quiet,) = prints["pkg/handed.py::Post.quiet"].statements
+    assert (quiet.runs, quiet.handed_runs) == ([], [])
+    assert history_pairs_resolve(fragment).passed
+    post.handed_runs = [RunRef(owner="pkg/handed.py::Post.quiet", line=built.line)]
+    assert any(
+        "is in no node" in one for one in history_pairs_resolve(fragment).failures
+    )
+
+
+HANDED_MANY = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.spec import JobSpec
+
+_logger = None
+
+
+class Gen:
+    def __init__(self, job: JobSpec):
+        self.logger = LogWrapper(_logger, f"<PandaID={job.PandaID}>")  # G0
+
+    def run(self):
+        self.logger.debug("run")
+        Plugin(self.logger).execute()
+
+
+class Plugin:
+    def __init__(self, log):
+        self.log = log
+
+    def execute(self):
+        self.log.debug("execute")
+
+
+def first(job: JobSpec):
+    tmp_log = LogWrapper(_logger, f"<PandaID={job.PandaID}>")  # F0
+    tmp_log.debug("first")
+    helper(tmp_log)
+
+
+def second(job: JobSpec):
+    tmp_log = LogWrapper(_logger, f"<jediTaskID={job.jediTaskID}>")  # S0
+    tmp_log.debug("second")
+    helper(tmp_log)
+
+
+class Proxy:
+    def create_tagged_logger(self, comment, tag=None):
+        return LogWrapper(_logger, f"{comment} < {tag} >")
+
+    def archive(self, job: JobSpec):
+        tmp_log = self.create_tagged_logger("archive", f"PandaID={job.PandaID}")  # C0
+        tmp_log.debug("archive")
+        helper(tmp_log)
+
+
+def helper(log):
+    log.debug("help")
+"""
+
+
+def test_a_handed_logger_names_every_run_it_can_be_and_an_objects_run_by_a_node_holding_it(
+    tmp_path: Path,
+) -> None:
+    """``dump_error_message`` is handed every DB proxy method's logger, and names a run for each -- one made by
+    ``create_tagged_logger`` where the caller binds it.  An object's run whose ``__init__`` prints nothing is named
+    by the class's method that prints and so holds it."""
+    fragment = _build(tmp_path, [], spec=SPEC, many=HANDED_MANY)
+    prints = {node.owner: node for node in fragment.function_prints}
+    (helped,) = prints["pkg/many.py::helper"].statements
+    assert helped.handed_runs == [
+        RunRef(owner="pkg/many.py::Proxy.archive", line=_line(HANDED_MANY, "C0")),
+        RunRef(owner="pkg/many.py::first", line=_line(HANDED_MANY, "F0")),
+        RunRef(owner="pkg/many.py::second", line=_line(HANDED_MANY, "S0")),
+    ]
+    assert "pkg/many.py::Gen.__init__" not in prints
+    (executed,) = prints["pkg/many.py::Plugin.execute"].statements
+    assert executed.handed_runs == [
+        RunRef(owner="pkg/many.py::Gen.run", line=_line(HANDED_MANY, "G0"))
+    ]
+    assert history_pairs_resolve(fragment).passed
