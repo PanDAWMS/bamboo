@@ -2365,7 +2365,9 @@ class Rerun:
         chosen = self.pick("which candidate ran", j)
         if question is None:
             question = self.need(f"the run of {chosen.candidate.func} at {when}", j.runs.get(chosen.candidate.owner))
-            self.say(f"the run: {question.describe()}")
+            # a candidate left by elimination is shown by no run: this is only the run the judge read it on
+            self.say(f"the run: {question.describe()}" if chosen.kind == "positive" else
+                     f"the run it was read on (no run shows {chosen.candidate.func}:{chosen.line} ran): {question.describe()}")
         self.question = question
         return Wrote(readings, question, cands, env, chosen, row=state, window=(lo, hi),
                      unsearched={f: holes[f] for f in chosen.candidate.log_files if f in holes})
