@@ -815,7 +815,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
         # What a row a statement selects waits on besides the mover: the writes its terms on other columns ask for,
         # joined from the junctions and the key sources once the arms off their row are marked.
-        woken = wakers.attach(fragment)
+        woken = wakers.attach(fragment, self._calls)
         logger.info("PandaCodeMapPlugin: %d read site(s) with a waker", woken)
         lap("objects and runs")
         logger.info(

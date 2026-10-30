@@ -2585,12 +2585,20 @@ def scan_binds(
                 # The dict literal form.  Only constant keys: a computed one
                 # (``var_map[f":{column}"] = val``, which the worker modules
                 # also use) names a placeholder the statement itself does not
-                # spell either, so there is nothing to pair it with.
+                # spell either, so there is nothing to pair it with.  An ``IN``
+                # list's map unpacked into it -- ``{":comm_owner": "DEFT",
+                # **comm_var_map}`` -- is that list, as ``varMap.update`` of it is.
                 if not isinstance(node.value, ast.Dict):
                     continue
                 for spelled, value in zip(
                     node.value.keys, node.value.values, strict=True
                 ):
+                    if spelled is None and isinstance(value, ast.Name) and value.id in lists:
+                        held = lists[value.id]
+                        spelled_keys.add(held.bind)
+                        if held.bind == key:
+                            keep(Bind(held.values, node), node)
+                        continue
                     if not isinstance(spelled, ast.Constant):
                         computed += 1
                         continue
