@@ -116,6 +116,10 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "crosses_open",
         "crossing_selects",
         "joins",
+        # The writes a row waits on besides the mover: composed from the
+        # junctions and the key sources, so a branch or a KeyFrom moving shows
+        # here too.
+        "wakers",
         "result",
     ),
     # ``calls``, ``joined_entities`` and ``dispatch`` are what the owner

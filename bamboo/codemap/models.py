@@ -1890,6 +1890,47 @@ RESULT_AGGREGATE = "aggregate"
 RESULT_VARIES = "varies"
 
 
+class Waker(BaseModel):
+    """A branch whose write can make a row a statement selects meet one of its terms on another column.
+
+    :attr:`ReadSiteNode.wakers`; :mod:`bamboo.codemap.panda.wakers` says how they are found and what is not read.
+    """
+
+    pairs: list[str] = Field(
+        description=(
+            "The statement's ``selects`` pairs a row at which is asked the term: those whose subject every term of "
+            "some conjunction holding it can hold the value in -- ``JediTaskSpec.status=defined`` for "
+            "``tabD.status IN (...)`` in ``tabT.status=:ts_defined AND tabD.status IN (...)``, not ``=ready``.  "
+            "Sorted."
+        )
+    )
+    term: str = Field(description="The term as the statement writes it: ``tabD.status IN (:dsStatus___in)``.")
+    subject: str = Field(description="The subject the term tests, and the branch writes.")
+    value: str = Field(description="The value the term asks and the branch can write.")
+    owner: str = Field(description="The junction's owner, ``module::function``.")
+    line: int = Field(description="The branch's line.")
+    stated: bool = Field(
+        description="The branch's outcome is the value; else a run-time value its own frames do not rule out."
+    )
+    keyed_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The :class:`ReadSiteNode` names whose rows fill a key of the write holding the branch "
+            "(:attr:`KeyFrom.sources` of kind ``rows``), sorted: restartTasksForContentsUpdate_JEDI's 1844 is "
+            "keyed by its 1830's rows."
+        ),
+    )
+    keyed_at: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The ``pairs`` one of ``keyed_by`` other than this statement selects as well, sorted: the write is "
+            "handed rows at the value a reader asks about -- 1830 selects ``JediTaskSpec.status=defined``, so 1844 "
+            "wakes the tasks 130 would take at ``defined``.  Not this statement: a write its own rows key is its "
+            "mover's, on rows it took."
+        ),
+    )
+
+
 class ReadSiteNode(BaseNode):
     """One statement that asks the database for rows by a value.
 
@@ -2347,6 +2388,16 @@ class ReadSiteNode(BaseNode):
             "sources, in a ``WHERE`` or an ``ON``, a subquery's among them -- "
             "read off the statement's tree, so a statement not read as one "
             "gives none; sorted.  Not ``x IN (SELECT y ...)``."
+        ),
+    )
+    wakers: list[Waker] = Field(
+        default_factory=list,
+        description=(
+            "The branches whose write can make a row this statement selects meet one of its terms on another "
+            "column (:class:`Waker`), sorted: what a row waits on besides the mover.  ContentsFeeder's 130 takes "
+            "a task at ``defined`` only with a dataset ``defined`` or ``toupdate``; restartTasksForContentsUpdate_"
+            "JEDI's 1844 writes ``toupdate``.  Empty where no such term is read -- see "
+            ":mod:`bamboo.codemap.panda.wakers` for what is not."
         ),
     )
     anchor: Anchor = Field(

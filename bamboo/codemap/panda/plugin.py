@@ -50,6 +50,7 @@ from bamboo.codemap.panda import (
     runs,
     sql,
     sqltext,
+    wakers,
 )
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
@@ -812,6 +813,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             off = offrow.attach(fragment, self._modules, self._calls)
             logger.info("PandaCodeMapPlugin: %d branch(es) write their object to no row", off)
 
+        # What a row a statement selects waits on besides the mover: the writes its terms on other columns ask for,
+        # joined from the junctions and the key sources once the arms off their row are marked.
+        woken = wakers.attach(fragment)
+        logger.info("PandaCodeMapPlugin: %d read site(s) with a waker", woken)
         lap("objects and runs")
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
