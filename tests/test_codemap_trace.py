@@ -3395,7 +3395,9 @@ class Proxy(Base):
     (row,) = [r for r in walked.skeleton if r.kind == models.SKELETON_PRINT]
 
     assert row.pattern == "start"
-    assert row.prefix == r"getPandaIDs\ <\ .*?\ >\ "
+    # The tag the caller hands is a string, so ``if tag is None`` does not run: its f-string is the mark.
+    assert row.prefix == r"getPandaIDs\ <\ jediTaskID=.*?\ >\ "
+    assert [(hole.expression, hole.prints) for hole in row.prefix_holes] == [("jediTaskID", "token")]
 
 
 def test_a_logger_built_here_says_its_prefix(tmp_path):
@@ -3417,8 +3419,12 @@ def f(self, job):
 def test_an_empty_prefix_says_why_where_the_logger_may_write_one(tmp_path):
     """``self.logger = LogWrapper(_logger, str(pandaID))`` in ``__init__``
     writes the PandaID before every message ``run`` prints; a row saying no
-    prefix there read as a run with no mark (Watcher.run, the adder).  The
-    prefix itself is read no further: only why it is not."""
+    prefix there read as a run with no mark (Watcher.run, the adder).  Each
+    logger is followed back to where it is made: the field to ``__init__``,
+    whose mark is one hole, ``str(pandaID)``; the module's ``getLogger``,
+    which marks nothing; a ``MsgWrapper``'s token; a name bound twice, both
+    reaching the call, with two marks.  Where the walk stops -- a parameter
+    no call hands -- the row says why."""
     roots = _tree(
         tmp_path,
         m='''\
@@ -3457,16 +3463,82 @@ class Watcher:
     rows = {row.text: (row.prefix, row.prefix_hole) for statement in found.statements for row in statement.rows}
 
     assert rows == {
-        "'start'": ("", trace_mod.PREFIX_NOT_A_NAME.format(logger="self.logger")),
+        "'start'": (r".*?\ ", ""),
         "'handed in'": ("", trace_mod.PREFIX_PARAMETER.format(logger="handed")),
-        '"the module\'s"': ("", trace_mod.PREFIX_NOT_BOUND.format(logger="_logger")),
+        '"the module\'s"': ("", ""),
         "'stamped'": ("", trace_mod.PREFIX_STAMP.format(logger="stamped")),
         "'plain'": ("", ""),
-        "'wrapped'": ("", trace_mod.PREFIX_NOT_FOLLOWED.format(logger="wrapped", call="MsgWrapper")),
-        "'twice'": ("", trace_mod.PREFIX_REBOUND.format(logger="twice")),
+        "'wrapped'": (r"token\ ", ""),
+        "'twice'": ("", trace_mod.PREFIX_MARKS.format(logger="twice")),
         "'keyed'": ("", trace_mod.PREFIX_KEYWORD.format(logger="keyed")),
         "'said'": (r"<run\ .*?>\ ", ""),
         "f'{job.name}'": ("", trace_mod.PREFIX_REFUSED),
+    }
+    holes = {
+        row.text: [hole.expression for hole in row.prefix_holes]
+        for statement in found.statements
+        for row in statement.rows
+        if row.prefix_holes
+    }
+    assert holes == {"'start'": ["str(pandaID)"], "'said'": ["job.PandaID"]}
+
+
+def test_a_logger_is_followed_to_the_mark_it_was_made_with_on_every_path(tmp_path):
+    """JobGenerator's ``runImpl`` makes ``tmpLog`` twice, once in a branch that returns and once per task, and
+    hands it to ``doGenerate``: each print carries the binding that reaches it, the callee its caller's (a
+    module of the corpus, so its callers are found) -- and
+    ``make_logger`` marks a line with its method and token, or ``method :``."""
+    roots = _tree(
+        tmp_path,
+        **{
+            "m.py": '''\
+_logger = PandaLogger().getLogger("m")
+
+
+class Gen:
+    def __init__(self, logger):
+        self.logger = logger
+
+    def run(self, tasks):
+        if not tasks:
+            tmpLog = MsgWrapper(self.logger, monToken="<none>")
+            tmpLog.info("nothing")
+            return
+        for task in tasks:
+            tmpLog = MsgWrapper(self.logger, f"<jediTaskID={task.jediTaskID}>")
+            tmpLog.info("start")
+            self.generate(task, tmpLog)
+
+    def generate(self, task, tmpLog):
+        tmpLog.debug("generating")
+
+
+def process():
+    tmp_log = logger_utils.make_logger(_logger, token=get_pid(), method_name="process")
+    tmp_log.debug("got")
+    plain = logger_utils.make_logger(_logger)
+    plain.debug("plain")
+
+
+def start():
+    Gen(_logger).run([])
+''',
+        },
+    )
+
+    rows = {
+        row.text: (row.prefix, row.prefix_hole, [hole.expression for hole in row.prefix_holes])
+        for found in trace_mod.function_prints(roots, [f"{PACKAGE}/m.py"])
+        for statement in found.statements
+        for row in statement.rows
+    }
+
+    assert rows == {
+        "'nothing'": ("", trace_mod.PREFIX_STAMP.format(logger="tmpLog"), []),
+        "'start'": (r"<jediTaskID=.*?>\ ", "", ["task.jediTaskID"]),
+        "'generating'": (r"<jediTaskID=.*?>\ ", "", ["task.jediTaskID"]),
+        "'got'": (r"process\ <.*?>\ ", "", ["get_pid()"]),
+        "'plain'": (r"process\ :\ ", "", []),
     }
 
 

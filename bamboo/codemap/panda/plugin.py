@@ -844,7 +844,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._modules, logfile.LoggerFiles(calls, declared, inherited) if calls is not None else None
         )
         nodes: list[FunctionPrintsNode] = []
-        for found in trace.function_prints(self._roots, list(shas)):
+        for found in trace.function_prints(self._roots, list(shas), calls):
             if found.blob_sha != shas[found.file]:
                 raise RuntimeError(
                     f"{found.file} changed while the map was being built; "

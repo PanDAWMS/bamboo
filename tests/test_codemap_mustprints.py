@@ -335,13 +335,12 @@ def test_a_reader_joins_the_lines_from_the_dump(tmp_path: Path) -> None:
     )
     assert answer.prints is not None
     (printed,) = answer.prints
-    # ``log`` is the module's: whether its lines carry a mark is not read here.
-    unread = f"prefix not read: {trace.PREFIX_NOT_BOUND.format(logger='log')}"
+    # ``log`` is the module's ``logging.getLogger``: its lines carry no mark, so none is unread.
     assert (printed.line, printed.level, printed.log_files, printed.holes) == (
         _line(HOLES, "P2"),
         "debug",
         ["a.log"],
-        [unread],
+        [],
     )
     assert [name.expression for name in printed.names] == ["job.PandaID"]
     # Files read off the module are a hole of the line, and so are names not read.
@@ -355,7 +354,7 @@ def test_a_reader_joins_the_lines_from_the_dump(tmp_path: Path) -> None:
         ).prints
         or []
     )
-    assert held.holes[1:] == [unread, mustprints.NAMES_NOT_ATTRIBUTE]
+    assert held.holes[1:] == [mustprints.NAMES_NOT_ATTRIBUTE]
     assert held.holes[0].startswith("files read off the module")
     before = Branch(outcome="x", line=1)
     assert mustprints.must_prints(

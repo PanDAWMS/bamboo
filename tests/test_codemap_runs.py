@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from bamboo.codemap import calls as calls_mod
 from bamboo.codemap import reach, trace
 from bamboo.codemap.gates import history_pairs_resolve
 from bamboo.codemap.gitsource import blob_sha
@@ -291,8 +292,8 @@ def _build(
     modules = []
     for name, text in files.items():
         (root / f"{name}.py").write_text(text)
-        tree = ast.parse(text)
-        pathcond.attach_parents(tree)
+        # The process's one tree for the file, as the build reads it (``calls.parsed``).
+        _source, tree = calls_mod.parsed(root / f"{name}.py")
         modules.append(
             SourceModule(
                 package=PACKAGE,
@@ -323,7 +324,7 @@ def _build(
                 ),
             )
             for found in trace.function_prints(
-                roots, [module.rel_path for module in modules]
+                roots, [module.rel_path for module in modules], calls
             )
         ]
         junctions = []

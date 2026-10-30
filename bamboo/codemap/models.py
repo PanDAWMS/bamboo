@@ -4724,28 +4724,40 @@ class SkeletonLine(BaseModel):
         default="",
         description=(
             "What the logger writes before the message, as a pattern: the "
-            "prefix a ``LogWrapper`` was built with here, or by the function "
-            "that built it -- ``getPandaIDsWithTask_JEDI\\ <\\ .*?\\ >\\ `` "
-            "for a proxy method's ``create_tagged_logger``.  Apart from "
-            "``pattern`` because the line holds it before the message, and it "
-            "names the writer where the message alone -- ``start``, ``done`` "
-            "-- is shared by many.  Empty where none is read, and then "
-            "``prefix_hole`` says why when the logger may write one."
+            "mark of the call that made it, followed back on every path -- a "
+            "``LogWrapper``'s prefix, a ``MsgWrapper``'s token, "
+            "``make_logger``'s ``method <token>`` -- ``archiveJob\\ <\\ "
+            "PandaID=.*?\\ jediTaskID=.*?\\ >\\ `` for a proxy method's "
+            "``create_tagged_logger(comment, f\"PandaID={job.PandaID} "
+            "jediTaskID={job.jediTaskID}\")``.  Apart from ``pattern`` because "
+            "the line holds it before the message, and it names the writer "
+            "where the message alone -- ``start``, ``done`` -- is shared by "
+            "many.  Empty where none is read, and then ``prefix_hole`` says "
+            "why when the logger may write one."
         ),
     )
     prefix_hole: str = Field(
         default="",
         description=(
             "Why ``prefix`` is empty where the logger may write one: the "
-            "row has no pattern, or the logger is not a local this function "
-            "builds by a ``LogWrapper`` whose prefix folds -- ``self.logger`` "
-            "built in ``__init__``, a parameter, the module's logger, a "
-            "``MsgWrapper``, a prefix of ``None`` (a time stamp).  Empty "
-            "where ``prefix`` is the whole reading: said, or a "
-            "``LogWrapper`` built here with none.  Apart from ``prefix``, "
-            "which a reader narrows records by and reads empty as not "
-            "narrowing: an empty ``prefix`` alone does not say the line "
-            "starts with the message."
+            "row has no pattern, a path back from the call stops short of "
+            "where its logger is made, its paths make it with different "
+            "marks, or the mark does not fold -- a prefix of ``None`` (a time "
+            "stamp).  Empty where ``prefix`` is the whole reading: said, or a "
+            "logger that marks nothing (``getLogger``, ``setup_logger``, a "
+            "``LogWrapper`` built with none), whose lines start with the "
+            "message.  Apart from ``prefix``, which a reader narrows records "
+            "by and reads empty as not narrowing: an empty ``prefix`` alone "
+            "does not say the line starts with the message."
+        ),
+    )
+    prefix_holes: list[SkeletonHole] = Field(
+        default_factory=list,
+        description=(
+            "Every hole of ``prefix``, in order, with what fills it, as "
+            "``holes`` has the message's: ``job.PandaID`` and "
+            "``job.jediTaskID`` for ``archiveJob``'s mark, as the function "
+            "filling it spells them."
         ),
     )
     arms: list[int] = Field(
@@ -4784,6 +4796,9 @@ class PrintRow(BaseModel):
     )
     prefix: str = Field(default="", description="As :attr:`SkeletonLine.prefix`.")
     prefix_hole: str = Field(default="", description="As :attr:`SkeletonLine.prefix_hole`.")
+    prefix_holes: list[SkeletonHole] = Field(
+        default_factory=list, description="As :attr:`SkeletonLine.prefix_holes`."
+    )
 
 
 #: How a print statement's ``log_files`` was found -- see
