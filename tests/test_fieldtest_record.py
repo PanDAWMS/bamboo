@@ -408,6 +408,41 @@ async def test_a_cut_answer_is_asked_again_in_halves_and_a_string_cut_alone_mark
     assert b["machines"][SERVER[0]]["files"][0]["truncated"] is False
 
 
+async def test_a_half_whose_grep_fails_defers_the_asks_of_its_strings_alone(tmp_path):
+    day = "panda-adder.log-20261014.gz"
+
+    def reply(strings, _tail):
+        if len(strings) > 2:
+            return {**found(rec(1, "2026-10-14 06:00:00,1 a 111")), "truncated": True}
+        if strings == ["111", "222"]:
+            return {"status": "failed", "error": "timeout"}
+        return found(rec(3, "2026-10-14 06:00:00,3 c 333"), rec(4, "d 444"))
+
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {(SERVER[0], day): [reply]}
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:01")
+    asks = [ask(ADDER, [s], w, SERVER[0]) for s in ("111", "222", "333", "444")]
+    _, records, deferred = await run_round(tmp_path, panda, asks)
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [
+        ("111", "222", "333", "444"),
+        ("111", "222"),
+        ("333", "444"),
+    ]
+    assert [d["ask"]["strings"] for d in deferred] == [["111"], ["222"]]
+    assert {w for d in deferred for w in d["why"]} == {
+        f"{SERVER[0]} {day}: failed: timeout"
+    }
+    assert [r["ask"]["strings"] for r in records] == [["333"], ["444"]]
+    f333, f444 = (r["machines"][SERVER[0]]["files"][0] for r in records)
+    assert f333["status"] == "answered" and [x["offset"] for x in f333["records"]] == [
+        3
+    ]
+    assert f444["status"] == "answered" and [x["offset"] for x in f444["records"]] == [
+        4
+    ]
+
+
 async def test_a_day_being_compressed_is_waited_for_and_read_when_done(tmp_path):
     plain = [entry("panda-adder.log-20261014", "2026-10-14 07:00:03"), *ADDER_FILES[:2]]
     lists = lists_with({SERVER[0]: plain, SERVER[1]: []})
