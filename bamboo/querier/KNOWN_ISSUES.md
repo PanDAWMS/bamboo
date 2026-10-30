@@ -577,12 +577,12 @@ holding the value as the subject's time (`JediTaskSpec.superStatus` 'done', thre
 
 ### K37. An attribute no history records is timed by its writers' arms, and only where every arm says the time
 
-`attr_time` (the harness's ask b, tmaeno 「おねがいします」 10-29): where every arm H1 names writes the time it runs
+`attr_time` (the harness's ask b, tmaeno: "please do", 10-29): where every arm H1 names writes the time it runs
 (`runtime(CURRENT_DATE)`, `runtime(naive_utcnow())`), the value is the write's time and H2 asks the run at it, on
 every machine (`windows.value_now`); else each arm is placed on the object's history by the map's HistoryPair (row
 same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
 history call records where they are literals, any row otherwise), and read newest first (K38): the first whose pass a
-writer is shown to write in is the write that left the value, and H2 goes on from it as for a status.  Only the last write is
+writer is shown to write in is the write that left the value, the answer (below).  Only the last write is
 asked; one of the same value before it is not.  It stops where an arm is on no row of the object -- its pairs are
 another object's, the map does not follow the object to its pass's history call, or it has none: its run may have
 written the value after any row, and asking its logs over the rest of the window (F3) is not built -- and where H1
@@ -593,7 +593,7 @@ the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's 
 (asked of the map, 10-29).
 
 A row is asked, and read, of the logs of the writers whose passes can write it alone (`attr_time.row_writers`,
-`readings_of`; the harness's to-querier-61, step 1, tmaeno 「１で」 10-30): before, every row was asked of every
+`readings_of`; the harness's to-querier-61, step 1, tmaeno: "go with 1", 10-30): before, every row was asked of every
 writer's logs, so a writer that can write any row kept every log in every window.  No row is left out by it.  Which
 rows a writer's pass can write is still read from the history call's recorded statuses only: a pass that records the
 status at run time can write any row, though it moves the object on only from the statuses it picks it up at --
@@ -602,32 +602,72 @@ outside (updateJobStatus, the pilot's PandaID) needs the key's source of the pas
 S1's census lists TaskRefiner.runImpl as a writer by key at 31 task values, and updateJobStatus as a kept mover at
 activated and waiting, so neither its kept movers nor its writers by key tell them apart).
 
-*Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers; a
-stop "every writer of <subject> on a history row of the object ... (k of n not: K37)" or "a writer of <subject> in
-the map".
+The pass H2 answers with is when the attribute took the value (attr-time-shape.md 6, P5; tmaeno: "OK", 10-30 15:03):
+result.json's `wrote` names the arm, whether its run shows the line ran (`shown`; else H2 left it by elimination: the
+one writer of a value that is its time), the call it is read at for a writer that prints nothing (K25), the statuslog
+row whose pass wrote it (none for a value held or a value that is its time), the window asked and the run, and H3 ends
+there (END) where the arm has no guard or every guard holds in the run's values.  A condition not read, or read false,
+is named in H3's stop; a guard read through a method goes on to H4 as for a status, whose steps say why the arm ran,
+not when.  Before, an attribute went on as a status does and stopped at H3 "a method the guard reads through" for an
+arm with no guard: 12 of the 14 attribute cases H2 answered on the harness's round-2 snapshot.
+
+An arm left by elimination names no run (`wrote.run` null), and its guards are read in the rows' values alone, its
+H3 stopping at "a run that shows <arm> ran" where they do not all hold: no run shows it, and the run the judge read it
+on is any of the key's at the window, on any machine -- a server's panda-DBProxy.log run (insertTaskParamsPanda, a
+day long, the key on one line) for rescueUnLockedTasksWithPicked_JEDI and get_tasks_for_periodic_action, JEDI's
+(the harness on xii's T, 10-30 20:2x; tmaeno: "fix it in xii").  Its END names the writer's logs not searched at the
+window instead.
+
+*Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers;
+"END <subject>=<value> written last by <arm>[, called at <call>] (shown in its run; it has no guard | its guards hold
+in the run's values), in the pass of the statuslog row <status> at <time>: <run>", or "(by elimination: no run shows
+the line ran; it has no guard | its guards hold in the rows' values), at <time>[; not searched there: <log> on
+<machines>]"; a stop "every writer of <subject> on a history
+row of the object ... (k of n not: K37)", "a writer of <subject> in the map", or at H3 "a method the guard reads
+through (its conditions: '<condition>' not read)" or "a run that shows <arm> ran, to read its guards in (by
+elimination; its conditions: ...)".
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
 arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 
 ### K38. H2's scan of the rows names the arms that wrote last or may have, and goes on from none of them but one
 
 Over the statuslog rows a writer's pass can write (K37), newest first, each row's pass is read three ways
-(`Rerun._scan`, `_row_at`, attr-time-shape.md 5; tmaeno 「可能性としての Fork でしょうね」, 10-29): an arm shown to
+(`Rerun._scan`, `_row_at`, attr-time-shape.md 5; tmaeno: "a Fork over the possibilities, I'd say", 10-29): an arm shown to
 write ends the scan; a row whose logs, searched whole, hold no run of the key, or whose arms are excluded, has no
 write and goes; an arm the run does not show ran (kept), whose own condition is not read (K25's stand-ins), or whose
 logs were not searched whole may have written and stays, with what is open named.  Before (querier-at), a row where
 the judge chose no writer was passed over as "no writer ran" -- for a judgement that could not decide too -- and an
-older row's write was taken as the last.  Where one printing writer is shown to write and nothing newer may have,
-H2 goes on from it; else it stops naming each arm left with its rows, code `one-of`, and result.json's
+older row's write was taken as the last.  Where one arm is shown to write and nothing newer may have, H2 goes on
+from it; else it stops naming each arm left with its rows, code `one-of`, and result.json's
 `possibilities` lists them (arm, rows, premises).  Arms, not rows, are the possibilities: the steps after H2 explain
 an arm, and an arm's passes differ only in the run read.  An arm whose passes are all older than the newest shown
 write is not among them.  None read on any row: "a pass that wrote ... (none shows a writer's pass)".  A single
-window (a status's row, a value held, a value that is its time) is judged as before; a stand-in chosen there is named
-the same way.  The steps after H2 run for no arm of several, and for a stand-in for none: the second stage, a fork
-whose branches are the arms and whose undecided branches end open rather than stopping the run, is not built.
+window (a status's row, a value held, a value that is its time) is judged as before, and a stand-in chosen there
+is read the same way.  A stand-in's arm shown to write goes on as an arm that prints does (attr-time-shape.md 6,
+P2; tmaeno: "the order does not matter much, so let's keep clearing the second stage", 10-30 14:47): H3 reads its
+own guards, on the caller's run, whose passes and record after the call stand for it (`Wrote.via`).  One writer
+that prints nothing can be called twice in one pass, once shown and once not (setSuperStatus_JEDI from
+updateTask_JEDI and from getTasksToBeFinished_JEDI): the arm and the row are one, so the answer stands and the
+other calls are said; which of them was last is not read.  The steps after H2 run for no arm of several: the
+second stage's fork, whose branches are the arms and whose undecided branches end open rather than stopping the
+run, is not built.
 
-*Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row; a stop "one arm that
+No run of the key at a row is no write only for a writer whose log some row's records show naming the key -- a run of
+it there, on any machine (`Rerun._named`).  JobGenerator's pass marks its lines `<jediTaskID=... datasetID=...>` and
+prints no PandaID, so its log holds no run of a job it made: the 12 job attributes it writes were read as no writer's
+pass at every row (the harness's to-querier-62; tmaeno: "please do (b)", 10-30 13:0x).  A writer not shown so
+may have written at each row with no run (`_unshown`), its premise "no line of <log> in the records holds <key>".
+Asking its log by the key its mark holds (the job's jediTaskID, which rows.json has) needs the map to say what fills a
+print's prefix; asked of the map 10-30.  Which of a pass's arms wrote last where several did is not read either: the
+order of their points in the caller (TaskRefiner.runImpl calls extractCommon at 211 and doRefine at 284, in its
+loop over tasks) says it only where no loop inside the pass holds both, so it waits for the run's records to say it.
+
+*Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row, "no run of <key> at
+<time>: no writer's pass of a log that names it" where a writer's log is not shown naming it; "<arm> wrote, read at
+<call>; in the same pass also <calls>, the same arm: which call was last is not read"; a stop "one arm that
 wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)".
-*Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it).
+*Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it); when the
+map says what fills a print's prefix (then ask a writer's log by its mark's key).
 
 ### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
 
