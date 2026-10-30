@@ -80,7 +80,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from bamboo.codemap import strategy as strategy_mod
@@ -127,7 +127,7 @@ from bamboo.querier.records import (
     keyed,
     runs_for,
 )
-from bamboo.querier.which_ran import Candidate, class_of, judge, stable_holes
+from bamboo.querier.which_ran import Candidate, Verdict, class_of, judge, stable_holes
 from bamboo.scripts.derive_strategy import _investigate
 
 BAMBOO = Path(R.BAMBOO_TREE)
@@ -1231,6 +1231,9 @@ class Wrote:
     cands: list
     env: object
     chosen: object
+    #: the caller's verdict where *chosen* is the arm of a writer that prints nothing, read on that caller's run at its
+    #: call (:class:`StandIn`): the run's marks and the guard's record are the call's, the guards the arm's
+    via: object = None
 
     @property
     def reading(self):
@@ -1275,8 +1278,10 @@ class Possible:
     wrote: bool
     #: what is open where it may have: a condition not read, a log not searched whole, the run not showing the line
     premises: list[str]
-    #: the answer for a writer that prints and was shown to write, for the steps after H2
+    #: the answer for a writer shown to write, for the steps after H2 -- one that prints nothing on its caller's run
     answer: Wrote | None = None
+    #: the call a writer that prints nothing is read at (``file::function:line``), where it stands in for one
+    by: str = ""
 
 
 @dataclass
@@ -1908,15 +1913,15 @@ class Rerun:
             if question.log.name in c.log_files:
                 self.touched.append((R.function(c.rel, c.func, c.lines), question))
         site_fn = R.function(chosen.candidate.rel, chosen.candidate.func, chosen.candidate.lines)
+        at_fn, guard_record = self._guard_at(w, site_fn)
+        if w.via is not None:
+            self.say(f"{site_fn.name}:{chosen.line} prints nothing: read on its caller's run, at {at_fn.name}:{w.via.line} (KNOWN_ISSUES.md K25)")
         # the run was chosen by its mark before the function was known; a mark that is
         # the key can hold several passes of it (rule 20), and then this run is not one
-        if len(starts := R.entries(site_fn, question, self.mode)) > 1:
-            self.say(f"WARNING: the run holds {len(starts)} passes of {site_fn.name} (rule 20); the steps below read them as one")
+        if len(starts := R.entries(at_fn, question, self.mode)) > 1:
+            self.say(f"WARNING: the run holds {len(starts)} passes of {at_fn.name} (rule 20); the steps below read them as one")
         site = R.statement_at(site_fn.node, chosen.line)
         reading = w.reading
-        _, after = R.must_rows(site_fn.node, site)
-        sn = R.seen(site_fn, question, self.mode)
-        guard_record = min((i for s in after for i, _, _ in sn.hits.get(s.lineno, ())), default=len(question.records))
 
         # H3
         self.start("H3", "what its guard reads")
@@ -1935,6 +1940,16 @@ class Rerun:
         self.say(f"read through a method: {methods}")
         method = self.need("a method the guard reads through", methods[0][0] if methods else None)
         return SetBy(method, reading, question, guard_record, env)
+
+    def _guard_at(self, w: Wrote, site_fn) -> tuple:
+        """``(function, record)``: whose passes the run holds and the first record past the rows that must print after
+        the chosen line -- what the steps after H3 read the run up to.  The chosen arm's function; for a writer that
+        prints nothing, read on its caller's run (``Wrote.via``), the caller at its call."""
+        at = w.via or w.chosen
+        at_fn = site_fn if w.via is None else R.function(at.candidate.rel, at.candidate.func, at.candidate.lines)
+        _, after = R.must_rows(at_fn.node, R.statement_at(at_fn.node, at.line))
+        sn = R.seen(at_fn, w.question, self.mode)
+        return at_fn, min((i for s in after for i, _, _ in sn.hits.get(s.lineno, ())), default=len(w.question.records))
 
     def _which_wrote(self, subject: str, value: str, key: str, state: dict | None = None) -> Wrote:
         """H1 and H2: the map's writers of ``subject=value``, and which of them the run of the key at the statuslog
@@ -1981,10 +1996,18 @@ class Rerun:
                 key, names if own is None else self._writer_logs(subject, own, self._h2_candidates(subject, own)), asking)[1]])
             return self._scan(subject, attr, value, key, readings, tries)
         state, asking, own = tries[0]
-        wrote = self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking, True)
-        if (wrote.chosen.candidate.owner, wrote.chosen.line) in self._stand_ins:
-            self._one_of(subject, value, self._possibles(wrote.chosen, state, wrote.env), 1)
-        return wrote
+        return self._stood(subject, value, self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking, True), state)
+
+    def _stood(self, subject: str, value: str, wrote: Wrote, state: dict | None) -> Wrote:
+        """A single window's pick, where it stands in for writers that print nothing (:class:`StandIn`): the arm shown
+        to write, read on the pick's run (:meth:`_answer`), or a stop naming the arms left (K38)."""
+        if (wrote.chosen.candidate.owner, wrote.chosen.line) not in self._stand_ins:
+            return wrote
+        left = self._possibles(wrote.chosen, state, wrote.env, wrote)
+        if (answer := self._answer(left)) is not None:
+            return answer
+        self._one_of(subject, value, left, 1)
+        raise AssertionError("_one_of stops")
 
     def _h2_candidates(self, subject: str, readings: list) -> list[Candidate]:
         """H2's candidates, one per function: each reading's, where its runs are; and for a writer that prints nothing,
@@ -2022,7 +2045,8 @@ class Rerun:
 
     def _possibles(self, v, state: dict | None, env: E.Env, answer: Wrote | None = None) -> list[Possible]:
         """The arms verdict *v* says wrote, or may have, in the pass of the row *state*: its own line, or the arms of the
-        writers that print nothing it stands in for, less those a guard read false shows did not."""
+        writers that print nothing it stands in for, less those a guard read false shows did not.  One shown to write
+        carries *answer*; a stand-in's with the writer's arm chosen, read on the caller's run (``Wrote.via``)."""
         kept = [] if v.kind == "positive" else [f"its run does not show the line ran ({v.reasons[-1] if v.reasons else v.kind})"]
         stands = self._stand_ins.get((v.candidate.owner, v.line))
         if not stands:
@@ -2033,8 +2057,28 @@ class Rerun:
             if left is None:
                 continue
             premises = kept + left
-            out.append(Possible(f"{Path(s.arm.split('::')[0]).name}::{s.arm.split('::')[-1]}", state, not premises, premises))
+            owner, _, line = s.arm.rpartition(":")
+            rel, _, func = owner.partition("::")
+            arm = Verdict(Candidate(rel, func, [int(line)]), int(line), v.kind, list(v.reasons))
+            stood = replace(answer, chosen=arm, via=v) if answer is not None and not premises else None
+            out.append(Possible(f"{Path(rel).name}::{func}:{line}", state, not premises, premises, stood,
+                                f"{Path(v.candidate.rel).name}::{v.candidate.func}:{v.line}"))
         return out
+
+    def _answer(self, left: list[Possible]) -> Wrote | None:
+        """H2's answer from the arms a scan left: one arm, shown to write at a row no possibility is newer than.  A writer
+        that prints nothing can be called twice in one pass, once shown and once not (setSuperStatus_JEDI from
+        updateTask_JEDI and from getTasksToBeFinished_JEDI): the arm and the row are one, so the answer stands, and the
+        other calls are said -- which of them was last is not read."""
+        if len({p.arm for p in left}) != 1:
+            return None
+        wrote = next((p for p in left if p.wrote and p.answer is not None), None)
+        if wrote is None or any(p.row is not wrote.row for p in left):
+            return None
+        if others := [p.by or p.arm for p in left if p is not wrote]:
+            self.say(f"  {wrote.arm} wrote" + (f", read at {wrote.by}" if wrote.by else "") +
+                     f"; in the same pass also {', '.join(others)}, the same arm: which call was last is not read")
+        return wrote.answer
 
     def _scan(self, subject: str, attr: str, value: str, key: str, readings: list, tries: list) -> Wrote:
         """H2 over the statuslog rows the writers' passes can write, newest first (attr-time-shape.md 5): a row whose pass
@@ -2049,9 +2093,9 @@ class Rerun:
             left += found
             if any(p.wrote for p in found):
                 break
-        if len(left) == 1 and left[0].answer is not None:
-            self.question = left[0].answer.question
-            return left[0].answer
+        if (answer := self._answer(left)) is not None:
+            self.question = answer.question
+            return answer
         self._one_of(subject, value, left, len(tries))
         raise AssertionError("_one_of stops")
 

@@ -616,14 +616,20 @@ write ends the scan; a row whose logs, searched whole, hold no run of the key, o
 write and goes; an arm the run does not show ran (kept), whose own condition is not read (K25's stand-ins), or whose
 logs were not searched whole may have written and stays, with what is open named.  Before (querier-at), a row where
 the judge chose no writer was passed over as "no writer ran" -- for a judgement that could not decide too -- and an
-older row's write was taken as the last.  Where one printing writer is shown to write and nothing newer may have,
-H2 goes on from it; else it stops naming each arm left with its rows, code `one-of`, and result.json's
+older row's write was taken as the last.  Where one arm is shown to write and nothing newer may have, H2 goes on
+from it; else it stops naming each arm left with its rows, code `one-of`, and result.json's
 `possibilities` lists them (arm, rows, premises).  Arms, not rows, are the possibilities: the steps after H2 explain
 an arm, and an arm's passes differ only in the run read.  An arm whose passes are all older than the newest shown
 write is not among them.  None read on any row: "a pass that wrote ... (none shows a writer's pass)".  A single
-window (a status's row, a value held, a value that is its time) is judged as before; a stand-in chosen there is named
-the same way.  The steps after H2 run for no arm of several, and for a stand-in for none: the second stage, a fork
-whose branches are the arms and whose undecided branches end open rather than stopping the run, is not built.
+window (a status's row, a value held, a value that is its time) is judged as before, and a stand-in chosen there
+is read the same way.  A stand-in's arm shown to write goes on as an arm that prints does (attr-time-shape.md 6,
+P2; tmaeno: "the order does not matter much, so let's keep clearing the second stage", 10-30 14:47): H3 reads its
+own guards, on the caller's run, whose passes and record after the call stand for it (`Wrote.via`).  One writer
+that prints nothing can be called twice in one pass, once shown and once not (setSuperStatus_JEDI from
+updateTask_JEDI and from getTasksToBeFinished_JEDI): the arm and the row are one, so the answer stands and the
+other calls are said; which of them was last is not read.  The steps after H2 run for no arm of several: the
+second stage's fork, whose branches are the arms and whose undecided branches end open rather than stopping the
+run, is not built.
 
 No run of the key at a row is no write only for a writer whose log some row's records show naming the key -- a run of
 it there, on any machine (`Rerun._named`).  JobGenerator's pass marks its lines `<jediTaskID=... datasetID=...>` and
@@ -636,7 +642,8 @@ order of their points in the caller (TaskRefiner.runImpl calls extractCommon at 
 loop over tasks) says it only where no loop inside the pass holds both, so it waits for the run's records to say it.
 
 *Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row, "no run of <key> at
-<time>: no writer's pass of a log that names it" where a writer's log is not shown naming it; a stop "one arm that
+<time>: no writer's pass of a log that names it" where a writer's log is not shown naming it; "<arm> wrote, read at
+<call>; in the same pass also <calls>, the same arm: which call was last is not read"; a stop "one arm that
 wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)".
 *Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it); when the
 map says what fills a print's prefix (then ask a writer's log by its mark's key).
