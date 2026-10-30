@@ -603,6 +603,30 @@ class HistoryPair(BaseModel):
     run_hole: str = Field(default="", description="Why ``runs`` is empty.")
 
 
+#: Why no row is written from an arm's object (:attr:`OffRow.why`): no function it is held in writes a table of its
+#: class; or each write of one there takes neither the object whole nor the attribute.
+OFF_ROW_NO_WRITE = "no_write"
+OFF_ROW_NOT_TAKEN = "not_taken"
+
+
+class OffRow(BaseModel):
+    """What proves no row is written from the object an arm assigns on -- see :mod:`bamboo.codemap.panda.offrow`."""
+
+    why: str = Field(description=":data:`OFF_ROW_NO_WRITE` or :data:`OFF_ROW_NOT_TAKEN`.")
+    functions: list[str] = Field(
+        description=(
+            "The :attr:`ReachNode.owner` of each function the object is held in, the arm's own among them, sorted."
+        )
+    )
+    writes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "With :data:`OFF_ROW_NOT_TAKEN`, each write of a table of the class there, as ``owner:line kind table``, "
+            "sorted: each names its columns, and none takes the object or the attribute."
+        ),
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -807,6 +831,18 @@ class Branch(BaseModel):
             "stopped short of an end, so the list may hold less than every pair; "
             "beside an empty list, also a way up it did not take because what "
             "the calls on it hand rule it out."
+        ),
+    )
+    off_row: Optional[OffRow] = Field(
+        default=None,
+        description=(
+            "Where the records prove no row is written from the object the arm "
+            "assigns on: a spec its function makes to ask or to carry values, "
+            "that leaves it by no way and is written by no statement there -- "
+            ":mod:`bamboo.codemap.panda.offrow`, which says what that rests on.  "
+            "A reader of a value the row holds skips the arm "
+            "(:meth:`~bamboo.codemap.lookup.CodeMap.producers_of`).  ``None`` "
+            "where not proven: the arm may write its row, as every arm is read."
         ),
     )
 

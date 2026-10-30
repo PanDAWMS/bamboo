@@ -42,7 +42,15 @@ from bamboo.codemap.models import (
     pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import mustprints, objects, promotion, runs, sql, sqltext
+from bamboo.codemap.panda import (
+    mustprints,
+    objects,
+    offrow,
+    promotion,
+    runs,
+    sql,
+    sqltext,
+)
 from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
@@ -799,6 +807,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 recorded,
                 paired,
             )
+            # The arms whose object no row is written from, read on the same records: what a reader of a row's
+            # value skips.
+            off = offrow.attach(fragment, self._modules, self._calls)
+            logger.info("PandaCodeMapPlugin: %d branch(es) write their object to no row", off)
 
         lap("objects and runs")
         logger.info(

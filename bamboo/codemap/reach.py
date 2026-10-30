@@ -2780,7 +2780,9 @@ def moving_off(
     An arm writing another value whose row precondition does not require
     the row to hold something else (:func:`models.required_values`).  An arm
     whose outcome is decided at run time, or passed through, writes another
-    value as far as this can say, and is kept.
+    value as far as this can say, and is kept.  An arm whose object the
+    records prove is written to no row (:attr:`models.Branch.off_row`) moves
+    nothing.
     """
     column = subject.rsplit(".", 1)[-1].lower()
     arms: dict[str, list[str]] = {}
@@ -2790,7 +2792,7 @@ def moving_off(
             continue
         kept = []
         for branch in junction.branches:
-            if branch.outcome == value:
+            if branch.outcome == value or branch.off_row is not None:
                 continue
             if any(
                 (required := required_values(term)) is not None
