@@ -764,6 +764,9 @@ class Row:
     #: the files the map places this statement's lines in (``PrintStatement.log_files``, its logger followed); None
     #: where it does not place them (another ``log_files_basis``, no statement, ``ROWS_OWN_FILES=0``)
     log_files: list[str] | None = None
+    #: :meth:`patterns` per mode, made on the first ask: a row is built once per function (``_function``) and its
+    #: patterns and shapes are not changed after, while ``matches`` asks for them once per record
+    compiled: dict[str, list[tuple[re.Pattern[str], int, str]]] = field(default_factory=dict, repr=False, compare=False)
 
     def lands_in(self, name: str) -> bool:
         """Whether a line of this row can be in the log file *name*: yes where the map does not place it."""
@@ -809,10 +812,12 @@ class Row:
         function; the map now draws the ones that can still reach the print
         (of 358 such rows, none draws one that cannot).
         """
-        found =[(re.compile(p, re.S), _map_literal(p), "map") for p in self.map_patterns]
-        if mode == "outside":
-            found += [(re.compile(_regex(s, False)[0], re.S), literal_of(s), "outside:3-4") for s in self._outside_shapes()]
-        return found
+        if mode not in self.compiled:
+            found =[(re.compile(p, re.S), _map_literal(p), "map") for p in self.map_patterns]
+            if mode == "outside":
+                found += [(re.compile(_regex(s, False)[0], re.S), literal_of(s), "outside:3-4") for s in self._outside_shapes()]
+            self.compiled[mode] = found
+        return self.compiled[mode]
 
     def absence_counts(self, mode: str) -> bool:
         """Whether this row being missing from a run says it did not print."""
