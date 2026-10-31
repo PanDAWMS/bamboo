@@ -19070,6 +19070,12 @@ class TaskModule:
         sql = f"UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status WHERE jediTaskID=:taskID AND fileID IN ({file_var_names_str}) "
         self.cur.execute(sql + comment, varMap)
 
+    def unlockFiles(self, fileIDs):
+        file_var_names_str, file_var_map = get_sql_IN_bind_variables(fileIDs, prefix=":file")
+        file_var_map[":status"] = "ready"
+        sql = f"UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status WHERE fileID IN ({file_var_names_str}) "
+        self.cur.execute(sql + comment, file_var_map)
+
     def resetTask(self, status):
         varMap = {}
         varMap[":status"] = status
@@ -19087,7 +19093,8 @@ class TaskModule:
 
 def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_path):
     """A term each: its run's line, the subjects it writes with their lines, and its sources -- the rows of the
-    function's own statement, a parameter, an IN list's parameter, a literal -- or why none was read."""
+    function's own statement, a parameter, an IN list's parameter (the list's map added to the run's, or run itself),
+    a literal -- or why none was read."""
     rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
     modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _KEY_FROM})
     attributor = attribution.SpecAttributor(
@@ -19112,6 +19119,7 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
         ("setMaxAttempt", "fileID IN (:file__in)"),
         ("setMaxAttempt", "jediTaskID=:taskID"),
         ("throttleTasks", "jediTaskID=:jediTaskID"),
+        ("unlockFiles", "fileID IN (:file__in)"),
     ]
     lines = _KEY_FROM.split("\n")
 
@@ -19145,6 +19153,10 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
     assert throttle.unread == ""
     assert [(s.kind, s.name) for s in by[("setMaxAttempt", "jediTaskID=:taskID")].sources] == [("parameter", "taskID")]
     assert [(s.kind, s.name) for s in by[("setMaxAttempt", "fileID IN (:file__in)")].sources] == [
+        ("parameter", "fileIDs")
+    ]
+    # Run with the list's own map: the same list.
+    assert [(s.kind, s.name) for s in by[("unlockFiles", "fileID IN (:file__in)")].sources] == [
         ("parameter", "fileIDs")
     ]
     assert [(s.kind, s.name) for s in by[("resetTask", "jediTaskID=:jediTaskID")].sources] == [("constant", "123")]

@@ -3148,6 +3148,146 @@ class TableRecord(BaseModel):
             "and puts the time now (``JobSpec.creationTime``, ``JediTaskSpec.creationDate``)."
         ),
     )
+    history_of: str = Field(
+        default="",
+        description=(
+            "The subject whose past values its rows are, one row per change (``jobs_StatusLog``: "
+            "``JobSpec.jobStatus``), as :data:`bamboo.codemap.panda.runs.HISTORY_TABLES` names them; empty for "
+            "another table."
+        ),
+    )
+
+
+#: Why a value filling an endpoint's term is no parameter of the endpoint (:attr:`EndpointFill.why`): a literal; a
+#: field of ``self``; what a call of the corpus returns; a value that is no path -- an expression, or a builtin's
+#: value that holds none of what it is handed as it is (``len(x)``); a call that does not say what it hands the
+#: parameter (``*args``, a function handed to be called); a name no record or statement says the value of; the
+#: term's own values not read (:attr:`KeyFrom.unread`); a source of another kind (a module's or an object's
+#: attribute, a value not known); past :data:`bamboo.codemap.panda.endpoints.MAX_STEPS` steps.
+FILL_CONSTANT = "constant"
+FILL_SELF = "self"
+FILL_RESULT = "result"
+FILL_VALUE = "value"
+FILL_NOT_SAID = "not_said"
+FILL_UNREAD = "unread"
+FILL_TERM = "term"
+FILL_OTHER = "other"
+FILL_CUT = "cut"
+
+
+class EndpointFill(BaseModel):
+    """What fills one term of a statement an endpoint runs, followed up the calls from the endpoint: one of its own
+    parameters, the rows of another statement it runs, or why neither.
+
+    Each way from the endpoint to the statement's function (every call between functions of the closure, not only
+    :attr:`EndpointRead.way`), each call read where it is made -- the argument it hands the parameter, as the
+    arguments bind (:func:`bamboo.codemap.calls.bind`) -- and each name through the bindings that reach it
+    (:class:`PathBinding`), or the statement binding it where none is recorded.  A builtin conversion is the value
+    it converts (``task_id = int(task_id)``), a builtin keeping the elements of what it is handed is those elements
+    (``list(...)``, the keys of ``dict.fromkeys(...)``), an element of ``a + b`` is one of either's, and an empty
+    literal holds nothing to fill a term with.  A term's source of rows (:attr:`KeySource.via`) is the endpoint's
+    where the endpoint reads that statement and every call the rows come by is one of its closure's: not rows
+    another caller hands down (``peekJob``'s own, re-read by the watcher's retry).
+    """
+
+    parameter: str = Field(
+        default="",
+        description=(
+            "The endpoint's parameter, and the steps into it to the value: ``job_ids[*]``, an element of "
+            "``job_ids``; ``task_id``."
+        ),
+    )
+    rows: str = Field(
+        default="",
+        description="The :class:`ReadSiteNode` of another statement of :attr:`Endpoint.reads` whose rows fill it.",
+    )
+    attr: str = Field(
+        default="",
+        description="The field of what is there the value is, where the term's source says (:attr:`KeySource.attr`).",
+    )
+    why: str = Field(default="", description="Where neither *parameter* nor *rows*: one of the ``FILL_*`` codes.")
+    at: str = Field(default="", description="``file:line`` where *why* was met; empty for the term's own.")
+
+
+class EndpointTerm(BaseModel):
+    """One row-naming term of a statement an endpoint runs: a read :class:`KeyFrom` of the statement."""
+
+    term: str = Field(description="As the KeyFrom reads it: ``PandaID=:PandaID``.")
+    table: str = Field(description="The KeyFrom's table, as the source spells it.")
+    attr: str = Field(default="", description="The term's column as a subject, where the table's spec class has it.")
+    fills: list[EndpointFill] = Field(
+        default_factory=list, description="What fills it from the endpoint, one per value read, sorted."
+    )
+
+
+class EndpointRead(BaseModel):
+    """A statement reading rows that an endpoint's calls reach: one per statement of :attr:`Endpoint.reads`."""
+
+    site: str = Field(description="The :class:`ReadSiteNode`'s name: ``panda:<owner>@<line>``.")
+    function: str = Field(
+        description="The :attr:`ReachNode.owner` of the function holding the statement, ``file::Class.method``."
+    )
+    tables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The tables the statement reads, as :attr:`TableRecord.name` (lowered): what kind of rows each holds, "
+            "live, archive (:class:`TableRecord`'s rule) or a subject's history (:attr:`TableRecord.history_of`), "
+            "is the table's record."
+        ),
+    )
+    terms: list[EndpointTerm] = Field(default_factory=list, description="The statement's row-naming terms.")
+    way: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file:line`` of each call from the endpoint to the statement's function, the first call first, as "
+            ":attr:`ReachWrite.chain`: one way, the fewest calls; empty in the endpoint itself."
+        ),
+    )
+
+
+class EndpointWrite(BaseModel):
+    """A statement writing rows that an endpoint's calls reach: one per statement and kind of :attr:`Endpoint.writes`."""
+
+    function: str = Field(description="The :attr:`ReachNode.owner` of the function running it.")
+    line: int = Field(description="The line of the call that runs it.")
+    kind: str = Field(description="``insert``, ``update`` or ``delete``, as the statement's text reads.")
+    tables: list[str] = Field(default_factory=list, description="The tables it writes, lowered.")
+
+
+class Endpoint(BaseModel):
+    """A function the server runs for a request, and the statements reading rows its calls reach.
+
+    Read off the server's routing (:mod:`bamboo.codemap.panda.endpoints`): ``/api/v1/job/get_status_history``
+    runs ``job_api.py``'s ``get_status_history``.  *reads* is what the reach record's closure from it holds, walked as
+    :meth:`~bamboo.codemap.reach.ReachGraph.reach` walks; a statement past one of *holes* is not in it.
+    """
+
+    route: str = Field(description="``<module>/<method>`` as the URL names it: ``job/get_description_incl_archive``.")
+    version: str = Field(description="The API version the URL names: ``v1``.")
+    function: str = Field(description="The :attr:`ReachNode.owner` the server calls.")
+    closure: int = Field(default=0, description="How many functions its calls reach, itself included.")
+    holes: list[str] = Field(
+        default_factory=list,
+        description="``owner:line`` of each :class:`ReachHole` in the closure: a call that may go where no edge says.",
+    )
+    shut: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file:line`` of each call left out of the closure because a constant every way hands a parameter "
+            "rules it out (:func:`bamboo.codemap.panda.endpoints._shut`): ``get_task_details_json``'s "
+            "``_resolve_parent_task_id`` under ``if resolve_parent:``, for ``task/get_detailed_info``."
+        ),
+    )
+    reads: list[EndpointRead] = Field(default_factory=list)
+    writes: list[EndpointWrite] = Field(
+        default_factory=list,
+        description=(
+            "Every statement writing rows a function of the closure runs -- an ``INSERT``, ``UPDATE`` or ``DELETE`` "
+            "(:func:`bamboo.codemap.panda.sqltext.creates` / ``updates`` / ``deletes``) -- however it is guarded: "
+            "the closure is where the calls can go, not where a request makes them go.  A write past one of "
+            "*holes* is not here; ``job/kill`` writes, ``job/get_description_incl_archive`` does not."
+        ),
+    )
 
 
 class CoverageStat(BaseModel):
@@ -3227,6 +3367,7 @@ class MapFragment(BaseModel):
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
     key_froms: list[KeyFrom] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
+    endpoints: list[Endpoint] = Field(default_factory=list)
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
         description=(
