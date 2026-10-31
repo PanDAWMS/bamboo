@@ -285,6 +285,42 @@ def test_the_command_carries_the_question(tmp_path):
     assert "--stuck" not in F.command(home, case, Path("/out.txt"))
 
 
+LATE = {
+    "kind": "late",
+    "subject": "JediTaskSpec.status",
+    "observed": "exhausted",
+    "key": "5",
+    "since": "2026-10-29 09:33:01.716796",
+}
+
+
+def test_a_late_questions_stay_is_handed_where_the_querier_takes_it(tmp_path):
+    # querier-late (2026-10-31): --late stops where the value has more than one stay and --since names none
+    home = _home(tmp_path)
+    case = F.load_case(_case(tmp_path, question=dict(LATE)))
+    args = F.command(home, case, Path("/out.txt"), since=True)
+    assert args[args.index(F.SINCE_FLAG) + 1] == LATE["since"]
+    assert F.SINCE_FLAG not in F.command(home, case, Path("/out.txt"))
+    del case["question"]["since"]
+    assert F.SINCE_FLAG not in F.command(home, case, Path("/out.txt"), since=True)
+
+
+def test_a_querier_takes_the_flags_its_rerun_names(tmp_path):
+    tree = tmp_path / "tree"
+    pair = {"BAMBOO_TREE": str(tree)}
+    assert not F.takes(pair, F.SINCE_FLAG)
+    (tree / "bamboo" / "querier").mkdir(parents=True)
+    (tree / "bamboo" / "querier" / "rerun.py").write_text(
+        'ap.add_argument("--rows-asks")\n'
+    )
+    assert F.takes(pair, F.ROWS_ASKS_FLAG) and not F.takes(pair, F.SINCE_FLAG)
+
+
+def test_a_stay_is_named_by_a_late_question_alone(tmp_path):
+    with pytest.raises(F.FieldTestError, match="names a stay of a late question"):
+        F.load_case(_case(tmp_path, question=dict(LATE, kind="stuck")))
+
+
 def test_a_run_says_whether_it_read_what_it_was_handed():
     pair = {
         "MAP_DUMP": "/d/map.json",

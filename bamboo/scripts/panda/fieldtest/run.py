@@ -30,6 +30,12 @@ from production into the records directory (``rows-r<n>.json``), and a case
 whose rows file is built from its answers is built again with every round of
 them (``r<n+1>/rows.json``; :func:`rows.answered`).
 
+**A stay.**  A ``late`` question may name the stay it asks about: ``since``,
+the time_extended of the statuslog row that begins it (the case set's SQL
+answer, 2026-10-31).  A querier whose run tree takes ``--since``
+(querier-late) is handed it; one that does not runs as before, and the run's
+``argv`` says which.  A question of another kind names no stay.
+
 **Which code runs.**  A case names its pin, not a map: the map moves on that
 pin as the map session lands, and a case should not be edited for it.
 ``pairs/current.json`` names the pair each pin runs on now; ``--pair`` names
@@ -104,6 +110,8 @@ RESULT_VERSION = 1
 RESULT, ASKS, ROWS_ASKS = "result.json", "asks.jsonl", "rows-asks.jsonl"
 #: what a run tree's querier says where it takes the rows asks' file
 ROWS_ASKS_FLAG = "--rows-asks"
+#: what a run tree's querier says where it takes the stay a late question names
+SINCE_FLAG = "--since"
 
 #: where a run's Neo4j is: a closed port (bamboo's settings take the environment over .env)
 NO_GRAPH = {"NEO4J_URI": "bolt://127.0.0.1:1"}
@@ -151,6 +159,8 @@ def load_case(path: Path) -> dict:
         raise FieldTestError(f"{path} lacks {lacking}")
     if case["question"].get("kind") not in KINDS:
         raise FieldTestError(f"{path}: question.kind must be one of {KINDS}")
+    if "since" in case["question"] and case["question"]["kind"] != "late":
+        raise FieldTestError(f"{path}: question.since names a stay of a late question")
     if not ({"rows", "answers"} & set(case["inputs"])):
         raise FieldTestError(f"{path}: inputs need rows, or answers to build them from")
     if case["inputs"].get("records") and case["inputs"]["logs"]:
@@ -298,16 +308,19 @@ def build_rows(
     return out
 
 
-def takes_rows_asks(pair: dict) -> bool:
-    """Whether the pair's querier takes the rows asks' file (``--rows-asks``, querier-ra)."""
+def takes(pair: dict, flag: str) -> bool:
+    """Whether the pair's querier takes *flag*: its rerun.py names it (``--rows-asks``, querier-ra; ``--since``,
+    querier-late)."""
     rerun = Path(pair["BAMBOO_TREE"]) / "bamboo/querier/rerun.py"
     # a tree with no querier runs none: the run itself says so
-    return rerun.is_file() and f'"{ROWS_ASKS_FLAG}"' in rerun.read_text()
+    return rerun.is_file() and f'"{flag}"' in rerun.read_text()
 
 
-def command(home: Home, case: dict, out: Path, rows_asks: bool = False) -> list[str]:
+def command(
+    home: Home, case: dict, out: Path, rows_asks: bool = False, since: bool = False
+) -> list[str]:
     """The querier's command for *case*: the output *out*, and the result and the asks beside it, named here rather
-    than left to the querier's defaults."""
+    than left to the querier's defaults; the stay a late question names where the querier takes it (*since*)."""
     q, i, m = case["question"], case["inputs"], case["modes"]
     args = [home.python, "-m", QUERIER_MODULE]
     if q["kind"] != "default":
@@ -320,6 +333,8 @@ def command(home: Home, case: dict, out: Path, rows_asks: bool = False) -> list[
         "--key",
         str(q["key"]),
     ]
+    if since and q.get("since"):
+        args += [SINCE_FLAG, q["since"]]
     if i.get("records"):
         args += ["--records", i["records"]]
     for log in i["logs"]:
@@ -466,7 +481,9 @@ def run_round(home: Home, case: dict, pair: dict, env: dict, where: Path) -> dic
         out.with_name(ROWS_ASKS),
     ):
         f.unlink(missing_ok=True)
-    args = command(home, case, out, takes_rows_asks(pair))
+    args = command(
+        home, case, out, takes(pair, ROWS_ASKS_FLAG), takes(pair, SINCE_FLAG)
+    )
     handed = handed_of(case)
     t0 = time.time()
     with (where / "stdout.log").open("w") as log:
