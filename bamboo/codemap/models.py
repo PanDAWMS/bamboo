@@ -4983,8 +4983,12 @@ class SkeletonLine(BaseModel):
             "does not see it.  Apart from ``pattern`` because "
             "the line holds it before the message, and it names the writer "
             "where the message alone -- ``start``, ``done`` -- is shared by "
-            "many.  Empty where none is read, and then ``prefix_hole`` says "
-            "why when the logger may write one."
+            "many.  Where the paths make the logger with different marks, a "
+            "row per mark, alike but for this and ``prefix_holes``: the line "
+            "carries one of them -- ``activateJob``'s ``PandaID=None`` where it "
+            "is handed no job and ``PandaID=.*?`` where it is.  Empty where none "
+            "is read, and then ``prefix_hole`` says why when the logger may "
+            "write one."
         ),
     )
     prefix_hole: str = Field(
@@ -4992,8 +4996,7 @@ class SkeletonLine(BaseModel):
         description=(
             "Why ``prefix`` is empty where the logger may write one: the "
             "row has no pattern, a path back from the call stops short of "
-            "where its logger is made, its paths make it with different "
-            "marks, or the mark does not fold -- a prefix of ``None`` (a time "
+            "where its logger is made, or a mark does not fold -- a prefix of ``None`` (a time "
             "stamp).  Empty where ``prefix`` is the whole reading: said, or a "
             "logger that marks nothing (``getLogger``, ``setup_logger``, a "
             "``LogWrapper`` built with none), whose lines start with the "

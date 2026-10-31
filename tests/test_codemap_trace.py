@@ -3480,8 +3480,8 @@ def test_an_empty_prefix_says_why_where_the_logger_may_write_one(tmp_path):
     logger is followed back to where it is made: the field to ``__init__``,
     whose mark is one hole, ``str(pandaID)``; the module's ``getLogger``,
     which marks nothing; a ``MsgWrapper``'s token; a name bound twice, both
-    reaching the call, with two marks.  Where the walk stops -- a parameter
-    no call hands -- the row says why."""
+    reaching the call, with two marks: a row for each.  Where the walk stops
+    -- a parameter no call hands -- the row says why."""
     roots = _tree(
         tmp_path,
         m='''\
@@ -3520,8 +3520,15 @@ class Watcher:
     (found,) = [
         one for one in trace_mod.function_prints(roots, [f"{PACKAGE}/m"]) if one.owner.endswith("Watcher.run")
     ]
-    rows = {row.text: (row.prefix, row.prefix_hole) for statement in found.statements for row in statement.rows}
+    rows = {
+        row.text: (row.prefix, row.prefix_hole)
+        for statement in found.statements
+        for row in statement.rows
+        if row.text != "'twice'"
+    }
+    twice = [(row.prefix, row.prefix_hole) for statement in found.statements for row in statement.rows if row.text == "'twice'"]
 
+    assert twice == [(r"<a>\ ", ""), (r"<b>\ ", "")]
     assert rows == {
         "'start'": (r".*?\ ", ""),
         "'handed in'": ("", trace_mod.PREFIX_PARAMETER.format(logger="handed")),
@@ -3529,7 +3536,6 @@ class Watcher:
         "'stamped'": ("", trace_mod.PREFIX_STAMP.format(logger="stamped")),
         "'plain'": ("", ""),
         "'wrapped'": (r"token\ ", ""),
-        "'twice'": ("", trace_mod.PREFIX_MARKS.format(logger="twice")),
         # Made again on the only way to the line: the binding that reaches it is the one it prints through.
         "'again'": (r"<c>\ ", ""),
         "'keyed'": ("", trace_mod.PREFIX_KEYWORD.format(logger="keyed")),
