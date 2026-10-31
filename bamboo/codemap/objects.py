@@ -123,6 +123,8 @@ HELD_SPENT = f"the object is held by more than {MAX_HELD} paths in one function;
 PARTS_SPENT = f"a path longer than {MAX_PARTS} parts is not followed: {{path}}"
 
 RETURN = "<return>"
+#: How :attr:`ObjectReach.escapes` says the start's object is returned.
+RETURNED = "returned"
 
 #: The bindings a held path is stepped along (:func:`_held_steps`); a result's is read by :func:`follow`.
 STEPPED = (BIND_ALIAS, BIND_ELEMENT, BIND_FILL, BIND_RETURN)
@@ -297,7 +299,7 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
     escapes: dict[Site, None] = {}
     for end in sorted(outputs[root]):
         if end.startswith(RETURN):
-            escapes[Site(owner, 0, "returned")] = None
+            escapes[Site(owner, 0, RETURNED)] = None
         elif _under("self", path) is None:
             escapes[Site(owner, 0, f"kept on self as {end}")] = None
     return ObjectReach(
