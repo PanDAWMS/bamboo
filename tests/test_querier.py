@@ -3421,6 +3421,66 @@ def test_the_run_holding_most_rows_reads_each_run_once_and_each_rows_patterns_on
     assert json.loads(out.splitlines()[-1]) == ["b.log", {"seen": 2, "regex": 3}, 3, True, [1, 2]]
 
 
+def test_runs_of_a_key_try_its_pattern_only_on_a_message_or_mark_holding_the_keys_text(tmp_path):
+    log = tmp_path / "panda-x.log"
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID={}> {}\n"
+    log.write_text(
+        stamp.format(0, 7, "starting") + stamp.format(1, 8, "other") + stamp.format(2, 8, "about 7 too")
+        + stamp.format(3, 8, "no 17 here")
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            f"""
+            import json
+            from bamboo.querier import records as Rec
+            from bamboo.querier.records import read_log, runs_for
+
+            searched, keyed = [], Rec.keyed
+            class Counted:
+                def __init__(self, pattern):
+                    self.pattern = pattern
+                def search(self, text):
+                    searched.append(text)
+                    return self.pattern.search(text)
+            Rec.keyed = lambda key: Counted(keyed(key))
+            runs = runs_for(read_log({str(log)!r}), "7")
+            print(json.dumps([[(r.token, [x.lineno for x in r.records], [x.lineno for x in r.found_by]) for r in runs], searched]))
+            """,
+        )
+    )
+    runs, searched = json.loads(out.splitlines()[-1])
+    # the same runs as the pattern alone finds (17 is not the key 7), the pattern tried only where "7" is written
+    assert runs == [["<PandaID=7>", [1], [1]], ["<PandaID=8>", [2, 3, 4], [3]]]
+    assert searched == ["<PandaID=7>", "about 7 too", "no 17 here"]
+
+
+def test_the_statement_at_a_line_is_the_innermost_the_first_of_equal_depth_and_the_function_is_walked_once(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from bamboo.codemap.panda import pathcond
+            from bamboo.querier import rows as R
+
+            fn = ast.parse("def f(x):\\n    a = 1; b = 2\\n    if x: y = 3\\n    return a\\n").body[0]
+            pathcond.attach_parents(fn)
+            walks, own_nodes = [0], R.own_nodes
+            def counted(root):
+                walks[0] += 1
+                return own_nodes(root)
+            R.own_nodes = counted
+            got = [R.statement_at(fn, line) for line in (1, 2, 3, 4, 5, 3, 2)]
+            print(json.dumps([[None if s is None else ast.unparse(s) for s in got], walks[0]]))
+            """,
+        )
+    )
+    # not the def itself; of two on a line, the one own_nodes meets first (its stack takes the later); the if's body,
+    # not the if; nothing where none starts -- and one walk of the function for every line asked
+    assert json.loads(out.splitlines()[-1]) == [[None, "b = 2", "y = 3", "return a", None, "y = 3", "b = 2"], 1]
+
+
 # activateJob, cut down: f prints its files' UPDATE alike in both arms (92 and 124); g's other arm prints another text
 _ALIKE = """
 def f(self, job, ok):
@@ -5383,6 +5443,142 @@ def test_a_rows_prefix_is_read_without_its_leading_blanks_which_the_records_cut_
     # the row's, whose prefix keeps the blank as the logger writes it
     assert got == {"the mark's line": True, "another mark": False, "inside an outer mark": True, "a proxy's tag": True,
                    "another method's tag": False}
+
+
+def test_a_row_shorter_than_min_proof_proves_only_as_its_whole_message_no_other_function_can_print_there(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(
+        textwrap.dedent(
+            """
+            class M:
+                def activateJob(self):
+                    tmp_log.debug("start")
+
+                def configurator_read_panda_sites(self):
+                    tmp_log.debug("done")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, printed, rows
+
+            own = "activateJob\\\\ <\\\\ PandaID=.*?\\\\ >\\\\ "
+            # configurator_read_panda_sites's comment names configurator_read_sites: both write its mark
+            shared = "configurator_read_sites\\\\ <\\\\ .*?\\\\ >\\\\ "
+            prints = lambda owner, prefix, pattern, logs=("j.log",), basis="logger": N(
+                owner=owner, statements=[N(rows=[N(prefix=prefix, pattern=pattern)], log_files=list(logs), log_files_basis=basis)])
+            base = [prints("pandaserver/m.py::M.activateJob", own, "start"),
+                    prints("pandaserver/m.py::M.configurator_read_panda_sites", shared, "done"),
+                    prints("pandaserver/n.py::N.configurator_read_sites", shared, "done"),
+                    # a logger whose mark the map cannot spell (the adder's), in another log
+                    prints("pandaserver/a.py::A.run", ".*?\\\\ ", "start", logs=("other.log",))]
+
+            def proves(name, prefix, text, token, message, cut=False, also=()):
+                fragment = N(function_prints=base + list(also))
+                mapdump.fragment = lambda: fragment
+                row = object.__new__(rows.Row)
+                row.map_prefixes, row.map_patterns, row.compiled = [prefix] if prefix else [], [text], {}
+                row.stmt = N(lineno=3)
+                fn = N(rel="pandaserver/m.py", node=rows.functions("pandaserver/m.py", name)[0])
+                run = N(records=[N(token=token, text=message, cut=cut)], log=N(name="j.log"))
+                sn = rows.Seen(fn, run, "map", {3: [(0, len(text), "map")]}, {3: [0]})
+                return [sn.proves(row, 0, len(text)), sn.proven(row), printed._proven_hits(sn, row)]
+
+            mark = "activateJob < PandaID=1 >"
+            start = lambda **k: proves("activateJob", own, "start", mark, "start", **k)
+            # calculateRWwithPrio_JEDI makes its logger with two tags: the map gives its rows no prefix
+            marks_on_paths = lambda **k: prints("pandaserver/c.py::C.calculateRWwithPrio_JEDI", "", "start", **k)
+            got = {
+                "its whole message, no other function's line there": start(),
+                "inside another word": proves("activateJob", own, "start", mark, "restart"),
+                "a record the search cut": start(cut=True),
+                "another function's mark": proves("activateJob", own, "start", "getJobs < PandaID=1 >", "start"),
+                "a mark two functions write": proves("configurator_read_panda_sites", shared, "done",
+                                                     "configurator_read_sites < 2026-10-31/09:00:00 >", "done"),
+                "a logger with marks on its paths, in the log": start(also=[marks_on_paths()]),
+                "a logger with marks on its paths, in another log": start(also=[marks_on_paths(logs=("other.log",))]),
+                "lines the map does not place": start(also=[marks_on_paths(logs=(), basis="module")]),
+                "a row of holes alone": start(also=[prints("pandaserver/c.py::C.dump", "", "")]),
+                "another text with no prefix, in the log": start(also=[prints("pandaserver/c.py::C.dump", "", "done")]),
+                "a row with no prefix": proves("activateJob", "", "start", mark, "start"),
+                "a row of MIN_PROOF": proves("activateJob", "", "a long row", mark, "in a long row too"),
+            }
+            rows.PREFIX = False
+            got["prefixes not read"] = start()
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    yes, no = [True, True, 1], [False, False, 0]
+    assert got == {"its whole message, no other function's line there": yes, "inside another word": no,
+                   "a record the search cut": no, "another function's mark": no, "a mark two functions write": no,
+                   "a logger with marks on its paths, in the log": no, "a logger with marks on its paths, in another log": yes,
+                   "lines the map does not place": no, "a row of holes alone": yes,
+                   "another text with no prefix, in the log": yes, "a row with no prefix": no,
+                   "a row of MIN_PROOF": yes, "prefixes not read": no}
+
+
+def test_s2_takes_the_one_positive_arm_as_a_passs_way_and_the_positive_exits_as_where_it_left_after(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun, which_ran
+
+            # arms at 3 and 7, exits at 4 and 5 (updateJobStatus: the write at 242, then the return at 496)
+            node = ast.parse("def f():\\n    if a:\\n        x = 1\\n        return 1\\n    return 2\\n    if b:\\n        x = 2\\n").body[0]
+            fn = N(node=node, owner="p/j.py::f", name="f")
+            run = N(describe=lambda: "the run", token="f < PandaID=1 >")
+            one = N(first="2026-10-29 08:23:18,275", last="2026-10-29 08:23:18,288", records=[0, 1], log=N(name="j.log"))
+            rerun.R.function = lambda rel, func, lines: fn
+            rerun.R.passes = lambda fn, run, mode: ([one], "1 pass")
+            rerun.R.seen = lambda fn, run, mode: None
+            rerun.stable_holes = lambda *a, **k: None
+            rerun.class_of = lambda fn: None
+            verdict = lambda line, kind: which_ran.Verdict(which_ran.Candidate("p/j.py", "f", [line]), line, kind)
+
+            def way(kinds):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
+                r.opened, r.ends, r.branches = [], [], []
+                r.mode, r.decide, r.data, r.args = "map", "positive", {"statuslog": {"states": []}}, N(observed="running")
+                r.logs = N(needs_window=False, log=lambda name, key: N(covers=("t0", "t1")))
+                r.runs = lambda key, logs, asking, owners: {"j.log": [run]}
+                r.base_env = lambda at=None: N(values={})
+                rerun.judge = lambda *a, **k: which_ran.Judgement([verdict(l, k) for l, k in kinds.items()], None, "undecided", None)
+                arms = [rerun.Arm(3, ["x"], []), rerun.Arm(7, ["y"], [])]
+                try:
+                    got = r.passes(rerun.Passes("p/j.py::f", ["j.log"], arms, "1", None)).exit_line
+                except rerun.Stop as e:
+                    got = str(e)
+                return [got, [l.strip() for l in r.lines if "the way pass" in l]]
+
+            print(json.dumps({
+                "an arm and an exit": way({3: "positive", 4: "positive", 5: "kept", 7: "excluded"}),
+                "an arm and two exits": way({3: "positive", 4: "positive", 5: "positive", 7: "kept"}),
+                "two arms": way({3: "positive", 4: "positive", 7: "positive"}),
+                "exits alone": way({3: "kept", 4: "positive", 5: "positive"}),
+                "the arm alone, not chosen": way({3: "positive", 4: "kept"}),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    stop = ["S2: which way pass 1 went", []]
+    assert got == {
+        "an arm and an exit": [3, ["the way pass 1 went is arm 3: the positive exit(s) [4] are where it left after"]],
+        "an arm and two exits": [3, ["the way pass 1 went is arm 3: the positive exit(s) [4, 5] are where it left after"]],
+        "two arms": stop,
+        "exits alone": stop,
+        "the arm alone, not chosen": stop,
+    }
 
 
 def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_those_not_read(tmp_path):

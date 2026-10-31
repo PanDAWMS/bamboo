@@ -37,8 +37,9 @@ The arm is **positive** when some path is left and every one left passes it;
 -- proven if no call raised, and not counted.  **inconsistent**: no path fits
 the printed rows, which says a row was read from another pass or another line.
 
-Only rows with one record in the run, read by that row alone at
-``rows.MIN_PROOF``, count; a row outside every loop printed twice means two
+Only rows with one record in the run, read by that row alone and proving it
+(``rows.Seen.proves``: at ``rows.MIN_PROOF``, or a short row's whole message
+under a mark only its function writes), count; a row outside every loop printed twice means two
 calls, a row of the loop around S* printed twice means two iterations, and
 either stops the reading.  What this cannot see: two iterations that each
 printed different rows once read as one pass (E2 then usually finds no path,
@@ -1429,7 +1430,7 @@ def _straight_before(s_star: ast.stmt) -> list[ast.stmt]:
 
 
 def _proven_hits(sn: R.Seen, row: R.Row) -> int:
-    return sum(1 for _, lit, _ in sn.hits.get(row.line, ()) if lit >= R.MIN_PROOF)
+    return sum(1 for i, lit, _ in sn.hits.get(row.line, ()) if sn.proves(row, i, lit))
 
 
 def binding_ifs(top: ast.If, target: str) -> list[ast.If]:
