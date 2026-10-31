@@ -636,6 +636,54 @@ def test_a_function_handed_on_is_not_the_same_pass(tmp_path: Path) -> None:
     assert (branch.history, branch.history_hole) == ([], "")
 
 
+THREADS = """\
+from pkg.spec import JobSpec
+
+
+class Recorder:
+    def note_change(self, panda_id, status):
+        sql = "INSERT INTO ATLAS_PANDA.jobs_StatusLog (PandaID,jobStatus) VALUES (:PandaID,:jobStatus)"
+        self.cur.execute(sql, {":PandaID": panda_id, ":jobStatus": status})
+
+
+class Worker:
+    def run(self):
+        self.runImpl()
+
+
+class Generator(Worker):
+    def runImpl(self):
+        Recorder().note_change(1, "generated")  # T1
+
+
+class Closer(Worker):
+    def runImpl(self):
+        Recorder().note_change(2, "closed")  # T2
+
+
+def process(job: JobSpec):
+    job.jobStatus = "queued"  # A20
+    thread = Generator()
+    thread.run()  # T0
+"""
+
+
+def test_a_call_writes_the_history_its_callee_writes_as_the_class_it_runs_as(
+    tmp_path: Path,
+) -> None:
+    # Worker.run's self.runImpl() is Generator's for a Generator: the pair
+    # names Generator.runImpl's write, not Closer's (map_todo W11).
+    fragment = _build(
+        tmp_path,
+        [("threads", "process", "A20", "JobSpec.jobStatus")],
+        spec=SPEC,
+        threads=THREADS,
+    )
+    (pair,) = _branch(fragment, "A20").history or []
+    assert (pair.call, pair.history) == (_line(THREADS, "T0"), ["JobSpec.jobStatus"])
+    assert pair.writes == [f"pkg/threads.py::Generator.runImpl:{_line(THREADS, 'T1')}"]
+
+
 WAYS = """\
 from pkg.proxy import DBProxy
 from pkg.spec import JobSpec
