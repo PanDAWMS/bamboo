@@ -800,8 +800,9 @@ def _target(service: str | None, machine: str | None) -> dict[str, str]:
 
 async def grep_log(
     log_filename: str,
-    fixed_strings: list[str],
+    fixed_strings: list[str] | None = None,
     *,
+    pattern: str | None = None,
     service: str | None = None,
     machine: str | None = None,
     whole_records: bool = True,
@@ -810,9 +811,11 @@ async def grep_log(
     poll_seconds: float = 15.0,
     timeout_seconds: float = 3600.0,
 ) -> dict[str, Any]:
-    """Grep one log file for lines holding any of *fixed_strings*, and wait for the machines' answers.
+    """Grep one log file for lines holding any of *fixed_strings*, or matching *pattern*, and wait for the
+    machines' answers.
 
-    The strings are matched as they are (no escaping).  With *whole_records*
+    The strings are matched as they are (no escaping); *pattern* is a regular
+    expression in rg's syntax, whether the file is compressed or not.  With *whole_records*
     each machine's result is ``{"records": [{"offset", "head", "lines",
     "cut"}], "window"}``: a matching line with the rest of its record, where
     ``head`` is false for a match inside a record whose first line did not
@@ -823,6 +826,7 @@ async def grep_log(
         log_filename: a file under the server's logdir, ``panda-*.log`` or a
             rotated ``panda-*.log-YYYYMMDD.gz``.
         fixed_strings: 1 to :data:`GREP_MAX_STRINGS`; one named twice is sent once.
+        pattern: instead of *fixed_strings*: exactly one of the two.
         service, machine: exactly one; a service means every machine alive in it.
         tail_bytes: search only the end of a plain file; the answer's
             ``window`` says where the search started.
@@ -830,17 +834,21 @@ async def grep_log(
     Returns:
         As :func:`wait_per_machine`; a refused submit as it came.
     """
-    strings = list(dict.fromkeys(fixed_strings))
-    if not 1 <= len(strings) <= GREP_MAX_STRINGS:
-        raise ValueError(
-            f"a grep takes 1 to {GREP_MAX_STRINGS} strings, not {len(strings)}"
-        )
-    params: dict[str, Any] = {
-        "log_filename": log_filename,
-        "fixed_strings": strings,
-        "whole_records": whole_records,
-        **_target(service, machine),
-    }
+    if (fixed_strings is None) == (pattern is None):
+        raise ValueError("give exactly one of fixed_strings and pattern")
+    params: dict[str, Any] = {"log_filename": log_filename}
+    if pattern is not None:
+        if not pattern:
+            raise ValueError("an empty pattern matches every line")
+        params["pattern"] = pattern
+    else:
+        strings = list(dict.fromkeys(fixed_strings or []))
+        if not 1 <= len(strings) <= GREP_MAX_STRINGS:
+            raise ValueError(
+                f"a grep takes 1 to {GREP_MAX_STRINGS} strings, not {len(strings)}"
+            )
+        params["fixed_strings"] = strings
+    params.update({"whole_records": whole_records, **_target(service, machine)})
     if tail_bytes is not None:
         params["tail_bytes"] = int(tail_bytes)
     if max_matches is not None:

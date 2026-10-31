@@ -339,7 +339,39 @@ async def test_grep_refuses_what_the_server_would_before_sending():
         ):
             with pytest.raises(ValueError):
                 await PC.grep_log("panda-adder.log", strings, **target)
+        for strings, pattern in ((None, None), (["k"], "^k"), (None, "")):
+            with pytest.raises(ValueError):
+                await PC.grep_log(
+                    "panda-adder.log", strings, pattern=pattern, machine="m1"
+                )
     assert calls == []
+
+
+async def test_a_grep_by_pattern_sends_the_pattern_in_place_of_strings():
+    def route(endpoint, data):
+        if endpoint == "async_process/submit_grep_request":
+            return {"success": True, "message": "", "data": {"async_id": "g-2"}}
+        return _per_machine_poll(
+            ["m1"], [_row("m1", result=json.dumps({"records": [], "window": None}))]
+        )
+
+    ctx, calls = _patched(route)
+    with ctx:
+        await PC.grep_log(
+            "panda-adder.log-20261008.gz",
+            pattern="^2026-10-08 06:.*7339",
+            machine="m1",
+            poll_seconds=0,
+        )
+    assert calls[0] == (
+        "async_process/submit_grep_request",
+        {
+            "log_filename": "panda-adder.log-20261008.gz",
+            "pattern": "^2026-10-08 06:.*7339",
+            "whole_records": True,
+            "machine_name": "m1",
+        },
+    )
 
 
 def test_per_machine_tells_a_silent_machine_from_a_missing_file():
