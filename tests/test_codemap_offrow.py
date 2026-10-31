@@ -39,6 +39,8 @@ class JobSpec:
 """
 
 PROXY = """\
+from typing import Any
+
 from pkg.spec import JobSpec
 
 
@@ -99,6 +101,42 @@ class DBProxy:
         job = JobSpec()
         job.specialHandling = "stashed"  # W7
         setattr(holder, "job", job)
+
+    def listed(self):
+        job = JobSpec()
+        job.specialHandling = "in a list"  # R1
+        return [job]
+
+    def wrapped(self):
+        return self.listed()
+
+    def stored_list(self):
+        job = JobSpec()
+        job.specialHandling = "to store"  # R2
+        return [job]
+
+    def store(self):
+        jobs = self.stored_list()
+        for job in jobs:
+            self.archive(job)
+
+    def valued(self):
+        job = JobSpec()
+        job.specialHandling = "to hand on"  # R3
+        return [job]
+
+    def hand_on(self, runner):
+        jobs = self.valued()
+        runner(self.valued)
+
+
+class Viewer:
+    def show(self, buffer: Any):
+        jobs = buffer.wrapped()
+        for job in jobs:
+            if job.specialHandling:
+                return True
+        return False
 """
 
 ENTITIES = [
@@ -226,12 +264,37 @@ def test_an_object_written_returned_handed_in_or_lost_in_a_hole_may_be_on_its_ro
             ("DBProxy.stashed", "W7", "JobSpec.specialHandling"),
         ],
     )
-    # Its attribute a column of a write here, or of one in the function it is handed to; returned; a parameter;
-    # handed to a call of no known class, which the records do not follow; put into what the caller handed; set
-    # on another object by a computed name.
+    # Its attribute a column of a write here, or of one in the function it is handed to; returned, to no call the
+    # records hold; a parameter; handed to a call of no known class, which the records do not follow; put into what
+    # the caller handed; set on another object by a computed name.
     assert [
         _off(fragment, marker) for marker in ("W1", "W2", "W3", "W4", "W5", "W6", "W7")
     ] == [None] * 7
+
+
+def test_a_returned_object_is_read_on_in_every_call_of_its_function(
+    tmp_path: Path,
+) -> None:
+    """get_data_carousel_queued_requests_JEDI's task specs: returned in a list to the task buffer's wrapper, which
+    returns them to a caller whose receiver is declared Any -- a hole of the wrapper's name --, read there only."""
+    fragment = _build(
+        tmp_path,
+        [
+            ("DBProxy.listed", "R1", "JobSpec.specialHandling"),
+            ("DBProxy.stored_list", "R2", "JobSpec.specialHandling"),
+            ("DBProxy.valued", "R3", "JobSpec.specialHandling"),
+        ],
+    )
+    listed = _off(fragment, "R1")
+    assert listed is not None and listed.why == OFF_ROW_NO_WRITE
+    assert listed.functions == [
+        "pkg/proxy.py::DBProxy.listed",
+        "pkg/proxy.py::DBProxy.wrapped",
+        "pkg/proxy.py::Viewer.show",
+        "pkg/spec.py::JobSpec.__init__",
+    ]
+    # The caller hands it to a write of its attribute; the method is handed on as a value, to be called anywhere.
+    assert _off(fragment, "R2") is None and _off(fragment, "R3") is None
 
 
 def test_a_reader_of_the_rows_value_skips_an_arm_off_its_row() -> None:

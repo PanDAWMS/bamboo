@@ -9,6 +9,8 @@ later: the key first, then the marks that do not hold the key, then the ends of 
 Formats: analyzer-handover/stage2-record-format.md, as bamboo-e1 answered it (live-harness/notes/to-querier-15.md).  A
 record is keyed by its ask, compared as JSON with sorted keys (:func:`key_of`); the recording step copies the ask
 unchanged.  It writes one file per round (``records-r<n>.jsonl``); ``--records`` takes the files or their directory.
+A later round may write an ask's record again with ``replaces``: n -- round n's records and what a continuation read
+-- which is read instead of round n's; any other second record of an ask stops the run.
 
 What is read from a record:
 
@@ -22,7 +24,10 @@ What is read from a record:
   overlap; and its ``status``: ``answered``, or ``failed`` / ``unreadable`` (not read).  A second *t* is searched on a
   machine only when a file whose start is known covers it and every file covering it was read through it -- in an
   overlap, one file read and its neighbour failed is not searched.  ``truncated`` (1 MB, after the recording step halved
-  the strings) reads a file only up to its last record returned.  A file with no margin (today's, read to the time it
+  the strings) reads a file only up to its last record returned -- whichever string's it is, so a string cut earlier
+  is read past its cut -- unless the record says where every string of the ask was read: ``searched``, closed
+  stretches in the covers' form (one a cut ends stops the second before the cut string's last record's), a second of
+  the covers counted read only inside one.  A file with no margin (today's, read to the time it
   was asked) is read up to a second before its end: a record stamped just before can be written after.  A file whose
   start is not known (the oldest kept) covers every second before its end but makes none searched.  ``covers`` null
   (a tail holding no stamp) counts for nothing.  What of the window is not searched is :attr:`Log.holes`;
@@ -42,11 +47,17 @@ every end would end only at the oldest file kept.  EDGE is the windows' slack, n
 than it across a rotation is read as whole while it is not (KNOWN_ISSUES.md K7).
 
 An ask with no record of its own is answered from the record of a wider one (``RecordedLogs._within``): of the same
-log and strings, its window holding the ask's, on the ask's machine or on every machine.  The recording step reads
-every file whose covers meet the window, and every machine holding a file of the log when no machine is named, so the
-wider record holds every file the ask reaches, each searched whole for the strings; the files past the ask's window
-only add seconds that were searched.  It is read for the ask's machine alone, and a machine an every-machine record
-does not name holds no file of the log there.  The log's notes say which record answered.
+log, its window holding the ask's, on the ask's machine or on every machine, and each of the ask's strings holding one
+of the record's.  The recording step reads every file whose covers meet the window, and every machine holding a file
+of the log when no machine is named, so the wider record holds every file the ask reaches, each searched whole for
+the strings; the files past the ask's window only add seconds that were searched.  A line holding one of the ask's
+strings holds one of the record's, so the record returned it: the record is read for the records whose lines hold the
+ask's strings, and a file it cut is read as far as the record read it (an ask that now names a mark with its tag, or
+drops a mark, needs no new round) -- unless the cut leaves part of the ask's window unread: an ask of fewer lines
+may come back whole there, so it is asked anew (``_cut_over``).  Where a cut file's record says what was read for
+each cut string (``read``), the file is read for the strings of the record the ask's hold: cut only where one of them
+is (``_read_for``).  It is read for the ask's machine alone, and a machine
+an every-machine record does not name holds no file of the log there.  The log's notes say which record answered.
 """
 from __future__ import annotations
 
@@ -56,7 +67,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from bamboo.querier.records import PREFIX, STAMP, Log, Record, Unrecorded, Window, keyed
+from bamboo.querier.records import (
+    PREFIX,
+    STAMP,
+    Log,
+    Owners,
+    Record,
+    Unrecorded,
+    Window,
+    keyed,
+)
 
 EDGE = datetime.timedelta(minutes=10)
 #: the windows are on the database's clock (statuslog, as_of); a log's stamps are its machine's.  The server's statuslog rows fell inside their runs' log times to the second (bamboo-e1,
@@ -70,8 +90,8 @@ def key_of(ask: dict) -> str:
 
 
 def _alike(ask: dict) -> tuple:
-    """What an ask and a wider one share: all but the window and the machine."""
-    return ask["name"], ask["service"], tuple(sorted(set(ask["strings"]))), ask.get("whole_records")
+    """What an ask and a wider one share: all but the window, the machine and the strings."""
+    return ask["name"], ask["service"], ask.get("whole_records")
 
 
 def _t(text: str) -> datetime.datetime:
@@ -121,9 +141,18 @@ class _File:
     name: str = ""
     #: why it was read only to ``read_to``, for a run's line (``_edges_in``); empty for a rotated file read whole
     stop: str = ""
+    #: the stretches of its covers the record says every string of the ask was read in (``searched``), closed; None:
+    #: all of it up to ``read_to``
+    searched: tuple[tuple[datetime.datetime, datetime.datetime], ...] | None = None
 
     def covers(self, t: datetime.datetime) -> bool:
         return (self.start is None or self.start <= t) and t <= self.end
+
+    def read(self, t: datetime.datetime) -> bool:
+        """Whether second *t* of it was read: up to ``read_to``, and inside a searched stretch where the record names
+        them."""
+        return (self.read_to is not None and t <= self.read_to
+                and (self.searched is None or any(a <= t <= b for a, b in self.searched)))
 
 
 class _Gathered:
@@ -144,6 +173,9 @@ class _Gathered:
         self.rotated_ends: set[tuple[str, datetime.datetime]] = set()
 
     def add(self, record: dict) -> None:
+        # a wider record read for a narrower ask (RecordedLogs._within): its records holding the ask's strings; a cut
+        # file is still read as far as the whole record read it -- for the strings the ask needs, where it says so
+        only, needed = record.get("only"), record.get("needed")
         for machine, got in record.get("machines", {}).items():
             self.asked = True
             status = got.get("status")
@@ -159,11 +191,13 @@ class _Gathered:
             for f in got.get("files", []):
                 last = None
                 for r in f.get("records", []):
+                    kept = only is None or any(s in x for x in r["lines"] for s in only)
                     if not r.get("head"):
-                        self.fragments += 1
+                        self.fragments += kept
                         continue
                     rec = _record(machine, f["file"], r)
-                    self.records.setdefault((machine, f["file"], r["offset"]), rec)
+                    if kept:
+                        self.records.setdefault((machine, f["file"], r["offset"]), rec)
                     last = rec.stamp
                 if not f.get("covers"):
                     continue
@@ -171,16 +205,20 @@ class _Gathered:
                 end = _t(end)
                 self.rank[(machine, f["file"])] = end
                 name = Path(f["file"]).name
+                cut, searched = _read_for(f, needed)
                 if f.get("status") != "answered":
                     read_to, stop = None, f"{name} was {f.get('status') or 'not read'}"
-                elif f.get("truncated"):
+                elif cut and searched is None:
                     read_to, stop = _t(last) if last else None, f"the answer of {name} was cut at 1 MB after its last record"
                 else:
                     read_to = end if f.get("margin_s") else end - _SECOND
                     stop = "" if f.get("margin_s") else f"{name} was read to the time it was asked"
+                    if cut:
+                        # a string of the ask was cut: the record says where every one of them was read
+                        stop = f"the answer of {name} was cut at 1 MB, and its record says every string was read only so far"
                     if f.get("margin_s"):
                         self.rotated_ends.add((machine, end))
-                self.files.append(_File(machine, _t(start) if start else None, end, read_to, name, stop))
+                self.files.append(_File(machine, _t(start) if start else None, end, read_to, name, stop, searched))
 
     def log(self, name: str) -> Log:
         order = sorted(self.records.values(), key=lambda r: (r.machine, self.rank.get((r.machine, r.file), datetime.datetime.max), r.offset))
@@ -188,7 +226,7 @@ class _Gathered:
 
     def searched(self, machine: str, t: datetime.datetime) -> bool:
         covering = [f for f in self.files if f.machine == machine and f.covers(t)]
-        return any(f.start is not None for f in covering) and all(f.read_to is not None and t <= f.read_to for f in covering)
+        return any(f.start is not None for f in covering) and all(f.read(t) for f in covering)
 
     def stretches(self, machine: str, lo: datetime.datetime | None = None, hi: datetime.datetime | None = None) -> list[tuple]:
         """The machine's searched seconds from *lo* to *hi* (all its files' span when not given), as closed stretches."""
@@ -199,7 +237,8 @@ class _Gathered:
         hi = hi or max(f.end for f in files)
         cuts = {lo, hi + _SECOND}
         for f in files:
-            for t in (f.start, f.end + _SECOND, f.read_to + _SECOND if f.read_to else None):
+            for t in (f.start, f.end + _SECOND, f.read_to + _SECOND if f.read_to else None,
+                      *(x for a, b in f.searched or () for x in (a, b + _SECOND))):
                 if t is not None and lo < t <= hi:
                     cuts.add(t)
         points = sorted(cuts)
@@ -227,6 +266,67 @@ class _Gathered:
         return out
 
 
+def _cut_over(record: dict, want: dict) -> bool:
+    """Whether *record* has a file cut at 1 MB (``truncated``) that leaves part of *want*'s window unread on its
+    machine: read up to its last record returned, or inside its ``searched`` stretches where it names them.  An ask of
+    fewer lines a second may come back whole there, so it is asked anew rather than read from the cut one: round 5's
+    getTasksToBeProcessed_JEDI marks, cut where one call wrote thousands of its callee's lines in a second, left
+    MT-ready-stuck 188 lines not searched; asked for the method's own rows (``_narrowed``), they are asked again.  A file
+    that says what was read for each cut string (``read``) is cut for the ask only where a string it needs is
+    (:func:`_read_for`): an ask that drops the string that filled the stopped second is read from it whole."""
+    lo, hi = _t(want["window"][0]), _t(want["window"][1])
+    needed = _needed(record["ask"]["strings"], want["strings"])
+    for machine, got in record.get("machines", {}).items():
+        if want["machine"] not in (None, machine):
+            continue
+        for f in got.get("files", []):
+            cut, searched = _read_for(f, needed)
+            if not (cut and f.get("covers")):
+                continue
+            start, end = f["covers"]
+            a, b = max(lo, _t(start) if start else lo), min(hi, _t(end))
+            if a > b:
+                continue  # the file holds none of the window
+            if searched is None:
+                stamps = [_t(r["lines"][0]) for r in f.get("records", []) if r.get("head") and STAMP.match(r["lines"][0])]
+                searched = ((datetime.datetime.min, max(stamps)),) if stamps else ()
+            if not any(s <= a and b <= e for s, e in searched):
+                return True
+    return False
+
+
+def _needed(strings: list[str], asked: list[str]) -> list[str]:
+    """The strings of a record that the strings *asked* of a narrower ask hold: the ones whose lines it reads."""
+    return [s for s in strings if any(s in w for w in asked)]
+
+
+def _stretches(rows: list, top: datetime.datetime = datetime.datetime.max) -> tuple[tuple[datetime.datetime, datetime.datetime], ...]:
+    """Closed stretches in a record's text form, a start not known (null) open, an end not known *top* (its file's
+    end: the door adds a second to an end)."""
+    return tuple((datetime.datetime.min if a is None else _t(a), top if b is None else _t(b)) for a, b in rows)
+
+
+def _read_for(f: dict, needed: list[str] | None) -> tuple[bool, tuple | None]:
+    """``(cut, searched)`` of a file entry for an ask that reads the lines of *needed* of its record's strings (None:
+    every one).  Where the entry says what of its covers was read for each cut string (``read``, fieldtest ca43fb9), a
+    string not among them was read over the covers: the file is cut for the ask only where a string it needs is, and
+    searched where those strings' stretches meet.  An entry without ``read`` is cut for every ask of it, searched as its
+    ``searched`` says (None: up to its last record)."""
+    if not f.get("truncated"):
+        return False, None
+    top = _t(f["covers"][1]) if f.get("covers") and f["covers"][1] else datetime.datetime.max
+    read = f.get("read")
+    if read is None or needed is None:
+        return True, _stretches(f["searched"], top) if f.get("searched") is not None else None
+    keys = [s for s in needed if s in read]
+    if not keys:
+        return False, None
+    meet = _stretches(read[keys[0]], top)
+    for s in keys[1:]:
+        meet = tuple(sorted((max(a, c), min(b, d)) for a, b in meet for c, d in _stretches(read[s], top) if max(a, c) <= min(b, d)))
+    return True, meet
+
+
 def _record(machine: str, file: str, r: dict) -> Record:
     head, *rest = r["lines"]
     m = PREFIX.match(head) if STAMP.match(head) else None
@@ -248,15 +348,22 @@ class RecordedLogs:
         files = [f for p in paths for f in (sorted(Path(p).glob("records-r*.jsonl")) if Path(p).is_dir() else [Path(p)])]
         #: the files read, a directory's records-r*.jsonl in order (result.json's inputs)
         self.files: list[Path] = files
+        by_ask: dict[str, list[tuple[Path, int, dict]]] = {}
         for path in files:
             for n, line in enumerate(path.read_text().splitlines(), 1):
                 if not line.strip():
                     continue
                 record = json.loads(line)
-                key = key_of(record["ask"])
-                if key in self._records:
-                    raise SystemExit(f"{path}:{n}: a second record for the ask {key}: which to read is not this door's choice")
-                self._records[key] = record
+                by_ask.setdefault(key_of(record["ask"]), []).append((path, n, record))
+        for key, got in by_ask.items():
+            # a record saying it replaces round n is read instead of the ask's record of that round, in either file
+            # order (a later round writes an ask's record again: the earlier records and what a continuation read)
+            left = [(p, n, r) for p, n, r in got
+                    if not any(o is not r and "replaces" in o and o["replaces"] == r.get("round") for _, _, o in got)]
+            if len(left) != 1:
+                path, n, _ = (left or got)[-1]
+                raise SystemExit(f"{path}:{n}: a second record for the ask {key}: which to read is not this door's choice")
+            self._records[key] = left[0][2]
         self._alike: dict[tuple, list[dict]] = {}
         for record in self._records.values():
             self._alike.setdefault(_alike(record["ask"]), []).append(record)
@@ -266,11 +373,11 @@ class RecordedLogs:
         return list(dict.fromkeys(wanted))
 
     def log(
-        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None
     ) -> Log:
         if window is None:
             raise ValueError(f"{name}: the recorded logs are asked over a window")
-        at = (name, key, window, machine, owners)
+        at = (name, key, window, machine, None if owners is None else tuple(sorted(owners.items())))
         if at not in self._logs:
             self._logs[at] = self._read(name, key, window, machine, owners)
         return self._logs[at]
@@ -286,26 +393,32 @@ class RecordedLogs:
         return [record for _, _, record in got]
 
     def _within(self, ask: Ask) -> dict | None:
-        """*ask*'s answer from the record of a wider ask (the module's doc), or None where none holds it: its own
-        machine's record before every machine's, then the narrowest window."""
+        """*ask*'s answer from the record of a wider ask (the module's doc), or None where none holds it: a record of
+        the ask's own strings first, then its own machine's record before every machine's, the fewest strings, the
+        narrowest window.  A record of other strings cut at 1 MB over the ask's window answers none (:func:`_cut_over`)."""
         want = ask.canonical()
         lo, hi = want["window"]
         found = [
             r for r in self._alike.get(_alike(want), [])
             if r["ask"]["machine"] in (None, want["machine"]) and r["ask"]["window"][0] <= lo and hi <= r["ask"]["window"][1]
+            and all(any(s in w for s in r["ask"]["strings"]) for w in want["strings"])
+            and (r["ask"]["strings"] == want["strings"] or not _cut_over(r, want))
         ]
         if not found:
             return None
-        record = min(found, key=lambda r: (r["ask"]["machine"] is None, _t(r["ask"]["window"][1]) - _t(r["ask"]["window"][0]), key_of(r["ask"])))
+        record = min(found, key=lambda r: (r["ask"]["strings"] != want["strings"], r["ask"]["machine"] is None, len(r["ask"]["strings"]),
+                                           _t(r["ask"]["window"][1]) - _t(r["ask"]["window"][0]), key_of(r["ask"])))
         wider = record["ask"]
         machines = record.get("machines", {})
         if want["machine"] is not None and wider["machine"] is None:
             machines = {want["machine"]: machines.get(want["machine"], {"status": "no such log"})}
         where = wider["machine"] or "every machine"
-        return {**record, "ask": want, "machines": machines,
-                "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')})"}
+        only = {} if wider["strings"] == want["strings"] else {"only": want["strings"], "needed": _needed(wider["strings"], want["strings"])}
+        strings = "" if not only else f", {len(wider['strings'])} string(s), the lines holding the ask's"
+        return {**record, **only, "ask": want, "machines": machines,
+                "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')}{strings})"}
 
-    def _read(self, name: str, key: str, window: Window, machine: str | None, owners: frozenset[str] | None = None) -> Log:
+    def _read(self, name: str, key: str, window: Window, machine: str | None, owners: Owners | None = None) -> Log:
         notes: list[str] = []
         (first,) = self._get([(Ask(name, (key,), window, machine), "")], notes)
         if machine is not None and first.get("machines", {}).get(machine, {}).get("status") == "not listed":
@@ -316,7 +429,8 @@ class RecordedLogs:
 
         # the marks that do not hold the key: their records need not -- every such mark, near the window or not
         # (KNOWN_ISSUES.md K13); for an asker that reads some functions' runs alone, a DB proxy method's mark is asked
-        # only where it is one of theirs and its run can be made whole by it (_partial)
+        # only where it is one of theirs and its run can be made whole by it (_partial), and for the method's own rows
+        # and every line at WARNING and above where its rows below WARNING all start with fixed text (_narrowed)
         pattern = keyed(key)
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
@@ -324,8 +438,10 @@ class RecordedLogs:
                 marks.setdefault(r.machine, set()).add(r.token)
         partial = _partial(got, marks, owners)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
+        narrowed = _narrowed(marks, owners)
         why = "the records of the key's runs whose mark does not hold the key"
-        for record in self._get([(Ask(name, tuple(sorted(t)), window, m), why) for m, t in sorted(marks.items())], notes):
+        asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners))), window, m), why) for m, t in sorted(marks.items())]
+        for record in self._get(asks, notes):
             got.add(record)
 
         # the ends of what was searched: widened past once, where a part of a run that reaches the window lies near one
@@ -333,7 +449,7 @@ class RecordedLogs:
         for (m, token), lo, hi in _runs(got, pattern, window):
             if (m, token) in partial:
                 continue
-            strings = {key} if pattern.search(token) else {token}
+            strings = {key} if pattern.search(token) else _strings(m, {token}, narrowed, owners)
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
             # again), nor past today's file's end: the run is read as cut there
             if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0]:
@@ -348,9 +464,13 @@ class RecordedLogs:
         log.whole = _whole_in(got)
         log.edges = _edges_in(got)
         log.partial = partial
+        log.narrowed = narrowed
         if partial:
             kinds = sorted(set(partial.values()))
             notes.append(f"{len(partial)} mark(s) read from the key's records alone, as cut: {'; '.join(kinds)}")
+        if narrowed:
+            methods = sorted(set(narrowed.values()))
+            notes.append(f"{len(narrowed)} mark(s) asked for their method's own rows and every line at WARNING and above: {methods}")
         if not got.asked:
             notes.append("no machine lists it: the log is on none")
         if got.without:
@@ -365,7 +485,7 @@ class RecordedLogs:
 _METHOD_MARK = re.compile(r"([A-Za-z_]\w*) <")
 
 
-def _partial(got: _Gathered, marks: dict[str, set[str]], owners: frozenset[str] | None) -> dict[tuple[str, str], str]:
+def _partial(got: _Gathered, marks: dict[str, set[str]], owners: Owners | None) -> dict[tuple[str, str], str]:
     """The marks among *marks* (``machine -> the marks not holding the key``) not asked for whole, each with why, for
     an asker that reads the runs of *owners* alone (None: every mark is asked).  A mark naming no method is a worker's,
     any function's of it, and is asked.  A DB proxy method's mark of no owner is not: no run of it is read.  Nor is an
@@ -389,6 +509,40 @@ def _partial(got: _Gathered, marks: dict[str, set[str]], owners: frozenset[str] 
     return out
 
 
+def _narrowed(marks: dict[str, set[str]], owners: Owners | None) -> dict[tuple[str, str], str]:
+    """``(machine, mark) -> method`` for the marks among *marks* asked for the method's own rows: an owner's whose rows
+    below WARNING all start with fixed text (``rows.mark_heads``).  The readers of its run read its own rows and the
+    tracebacks its handlers print (``dump_error_message`` writes at ERROR), and a row of another function below
+    WARNING in it as not searched (``records.Run.holds``).  A call of getTasksToBeProcessed_JEDI is thousands of lines
+    its callee ``_make_dicts_tasks_datasets_with_unprocessed_inputs`` writes with its logger, one per task listed
+    (381,600 of 382,661 in MT-ready-stuck, the harness's round 5): no reader of the method reads them, and a second of
+    them is more than a page, which stops the recorder (to-querier-63)."""
+    if owners is None:
+        return {}
+    out = {}
+    for machine, tokens in marks.items():
+        for token in tokens:
+            method = _METHOD_MARK.match(token)
+            if method is not None and owners.get(method[1]):
+                out[(machine, token)] = method[1]
+    return out
+
+
+def _strings(machine: str, tokens: set[str], narrowed: dict[tuple[str, str], str], owners: Owners | None) -> set[str]:
+    """What the records of *tokens* on *machine* are asked by: a mark, or -- one asked for its method's rows -- the mark
+    and a blank before each head, and the level padded to 8 and a blank before the mark at each level from WARNING up
+    (PanDA's ``%(levelname)-8s %(message)s``; LogWrapper and MsgWrapper write the mark, a blank, the message)."""
+    out = set()
+    for token in tokens:
+        method = narrowed.get((machine, token))
+        if method is None or owners is None:
+            out.add(token)
+            continue
+        out |= {f"{token} {head}" for head in owners[method]}
+        out |= {f"{level:<8} {token}" for level in ("WARNING", "ERROR", "CRITICAL")}
+    return out
+
+
 def _runs(got: _Gathered, pattern, window: Window) -> list[tuple[tuple[str, str], tuple | None, tuple | None]]:
     """``((machine, mark), lo, hi)`` of every run the key is in that reaches *window*: *lo* the searched stretch the
     first record of its part near the window is in, as ``(start, end, first)``, and *hi* the one its last is in, as
@@ -399,9 +553,13 @@ def _runs(got: _Gathered, pattern, window: Window) -> list[tuple[tuple[str, str]
     """
     lo_w, hi_w = _t(window[0]) - EDGE, _t(window[1]) + EDGE
     hits = {(r.machine, r.token) for r in got.records.values() if r.token and (pattern.search(r.message) or pattern.search(r.token))}
+    stamps_of: dict[tuple[str, str], list[datetime.datetime]] = {}
+    for r in got.records.values():
+        if (r.machine, r.token) in hits:
+            stamps_of.setdefault((r.machine, r.token), []).append(_t(r.stamp))
     out = []
     for mark in sorted(hits):
-        stamps = sorted(_t(r.stamp) for r in got.records.values() if (r.machine, r.token) == mark)
+        stamps = sorted(stamps_of[mark])
         pieces = [[stamps[0]]]
         for t in stamps[1:]:
             if t - pieces[-1][-1] >= EDGE:
@@ -444,7 +602,7 @@ def _edges_in(got: _Gathered):
         covering = [f for f in got.files if f.machine == machine and f.covers(t)]
         if not covering:
             return f"no file read covers what comes {side}"
-        said = [f.stop or f"{f.name} was not read through it" for f in covering if f.read_to is None or t > f.read_to]
+        said = [f.stop or f"{f.name} was not read through it" for f in covering if not f.read(t)]
         said += [f"{f.name} is the oldest kept, its start not known" for f in covering if f.start is None]
         return "; ".join(dict.fromkeys(said)) or "it was not searched"
 

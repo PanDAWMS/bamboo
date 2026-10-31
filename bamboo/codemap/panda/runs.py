@@ -2084,7 +2084,10 @@ def _column_binds(
 ) -> list[sql.Bind]:
     """The binds of *attr*'s column that *call* runs *run*'s statement with."""
     try:
-        read = sqltext.writes(run.reading)
+        read = [
+            sql.with_keyed_columns(func, run, one)  # type: ignore[arg-type]
+            for one in sqltext.writes(run.reading)
+        ]
     except Exception:  # noqa: BLE001 -- the record keeps no write of it
         return []
     found: list[sql.Bind] = []

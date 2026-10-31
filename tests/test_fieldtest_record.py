@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 
 import pytest
 
@@ -46,15 +47,18 @@ def rec(offset: int, *lines: str, head: bool = True) -> dict:
 
 
 class FakePanda:
-    """list_logs and grep_log over a dict of files per machine; each grep answers from *greps* by (machine, file)."""
+    """list_logs and grep_log over a dict of files per machine; each grep answers from *greps* by (machine, file),
+    and each pattern grep from *patterns*, by default with no record."""
 
     def __init__(
         self,
         lists: dict[str, dict[str, dict]],
         greps: dict[tuple[str, str], list],
         now=NOW,
+        patterns: dict[tuple[str, str], list] | None = None,
     ) -> None:
         self.lists, self.greps = lists, greps
+        self.patterns = patterns or {}
         self.clock = now
         self.calls: list[tuple] = []
 
@@ -92,8 +96,22 @@ class FakePanda:
         return answer(out)
 
     async def grep_log(
-        self, log_filename, fixed_strings, *, machine=None, tail_bytes=None, **_
+        self,
+        log_filename,
+        fixed_strings=None,
+        *,
+        pattern=None,
+        machine=None,
+        tail_bytes=None,
+        **_,
     ):
+        if pattern is not None:
+            self.calls.append(("pattern", machine, log_filename, pattern, tail_bytes))
+            replies = self.patterns.get((machine, log_filename)) or [
+                {"result": {"records": [], "window": None}}
+            ]
+            reply = replies.pop(0) if len(replies) > 1 else replies[0]
+            return answer({machine: reply})
         self.calls.append(
             ("grep", machine, log_filename, tuple(fixed_strings), tail_bytes)
         )
@@ -634,6 +652,380 @@ async def test_a_held_strings_ask_is_answered_when_the_new_strings_grep_fails(
     (f,) = r["machines"][SERVER[0]]["files"]
     assert r["ask"]["strings"] == ["111"] and f["status"] == "answered"
     assert [x["offset"] for x in f["records"]] == [1]
+
+
+DAY = "panda-adder.log-20261014.gz"
+
+
+def t(s: str) -> datetime.datetime:
+    return datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+
+
+def cut_alone(cut_at: str, uncut: tuple[str, str] = ("222", "2026-10-14 06:30:00")):
+    """A grep's answer where "111" alone is cut after its record at *cut_at*, and the *uncut* string is not."""
+
+    def reply(strings, _tail):
+        if len(strings) > 1:
+            return {**found(rec(1, f"{cut_at},1 a 111")), "truncated": True}
+        if strings == ["111"]:
+            return {**found(rec(1, f"{cut_at},1 a 111")), "truncated": True}
+        return found(rec(2, f"{uncut[1]},1 b {uncut[0]}"))
+
+    return reply
+
+
+async def test_a_cut_string_is_read_to_the_second_before_its_last_record_and_asked_again_by_pattern(
+    tmp_path,
+):
+    # MR-T-53354737-queuedTime (2026-10-30): the file's other string ran past the cut one's last record, and the
+    # querier read the window as searched; and the cut one's window lay past its cut
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+        patterns={(SERVER[0], DAY): [found(rec(3, "2026-10-14 06:00:00,7 a 111"))]},
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:01")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["111", "222"], w, SERVER[0])])
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [
+        ("111", "222"),
+        ("111",),
+        ("222",),
+    ]
+    wanted = {"111": [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:01"))]}
+    assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
+        R.continuation_pattern(wanted)
+    ]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["truncated"] is True and [x["offset"] for x in f["records"]] == [1, 2, 3]
+    assert f["searched"] == [
+        [f["covers"][0], "2026-10-14 00:59:59"],
+        ["2026-10-14 05:50:00", "2026-10-14 06:10:01"],
+    ]
+
+
+async def test_an_uncut_file_says_nothing_of_what_was_searched(tmp_path):
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:01")
+    _, (a, b) = await run(
+        tmp_path,
+        panda,
+        [ask(ADDER, ["111"], w, SERVER[0]), ask(ADDER, ["222"], w, SERVER[0])],
+    )
+    fa, fb = a["machines"][SERVER[0]]["files"][0], b["machines"][SERVER[0]]["files"][0]
+    assert "searched" in fa and "searched" not in fb and fb["truncated"] is False
+    assert fa["read"] == {"111": fa["searched"]} and "read" not in fb
+
+
+async def test_a_continuation_cut_again_goes_on_from_its_last_records_second_while_it_gets_further(
+    tmp_path,
+):
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+        patterns={
+            (SERVER[0], DAY): [
+                {**found(rec(10, "2026-10-14 05:55:00,1 a 111")), "truncated": True},
+                {**found(rec(11, "2026-10-14 05:55:00,9 a 111")), "truncated": True},
+            ]
+        },
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["111"], w, SERVER[0])])
+    assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
+        R.continuation_pattern(
+            {"111": [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:00"))]}
+        ),
+        R.continuation_pattern(
+            {"111": [(t("2026-10-14 05:55:00"), t("2026-10-14 06:10:00"))]}
+        ),
+    ]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert [x["offset"] for x in f["records"]] == [1, 10, 11]
+    assert f["status"] == "answered" and f["searched"] == [
+        [f["covers"][0], "2026-10-14 00:59:59"],
+        ["2026-10-14 05:50:00", "2026-10-14 05:54:59"],
+    ]
+
+
+def stalled_second() -> FakePanda:
+    """A file where "111" and "333" are each cut alone, and their continuation stops at 05:50:00, a second holding two
+    records of "111" and one of "333", before "333" goes on to its record at 06:00:00."""
+
+    def reply(strings, _tail):
+        last = {"111": (1, "2026-10-14 01:00:00"), "333": (2, "2026-10-14 02:00:00")}
+        return {
+            **found(*(rec(last[s][0], f"{last[s][1]},1 {s}") for s in strings)),
+            "truncated": True,
+        }
+
+    busy = "2026-10-14 05:50:00"
+    return FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [reply]},
+        patterns={
+            (SERVER[0], DAY): [
+                {
+                    **found(
+                        rec(10, f"{busy},1 111"),
+                        rec(11, f"{busy},2 111"),
+                        rec(12, f"{busy},3 333"),
+                    ),
+                    "truncated": True,
+                },
+                found(rec(13, "2026-10-14 06:00:00,5 333")),
+            ]
+        },
+    )
+
+
+async def test_a_page_that_reads_no_further_goes_on_without_the_string_most_of_its_records_hold(
+    tmp_path,
+):
+    # pin m's round 5 (2026-10-30): a call printing a row per task filled 1 MB in one second of aipanda088's
+    # JediDBProxy.log, and the rarer strings of other asks sharing the grep were not read past it
+    panda = stalled_second()
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    a, b = ask(ADDER, ["111"], w, SERVER[0]), ask(ADDER, ["333"], w, SERVER[0])
+    _, (ra, rb) = await run(tmp_path, panda, [a, b])
+    around = [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:00"))]
+    assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
+        R.continuation_pattern({"111": around, "333": around}),
+        R.continuation_pattern({"333": around}),
+    ]
+    (fa,), (fb,) = (
+        ra["machines"][SERVER[0]]["files"],
+        rb["machines"][SERVER[0]]["files"],
+    )
+    assert fa["searched"] == [[fa["covers"][0], "2026-10-14 00:59:59"]]
+    assert fb["searched"] == [
+        [fb["covers"][0], "2026-10-14 01:59:59"],
+        ["2026-10-14 05:50:00", "2026-10-14 06:10:00"],
+    ]
+    assert [x["offset"] for x in fb["records"]] == [2, 12, 13]
+    assert R.cut_asks(tmp_path) == [{"ask": a["ask"]}]
+
+
+async def test_a_cut_file_gives_each_cut_string_what_was_read_for_it_and_searched_is_where_they_meet(
+    tmp_path,
+):
+    # the querier's door (2026-10-31): an ask narrower than the record that holds only "333" is read over "333"'s
+    # stretches, which went on past the second "111" stopped at; "searched" holes it there
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, (r,) = await run(
+        tmp_path, stalled_second(), [ask(ADDER, ["111", "333"], w, SERVER[0])]
+    )
+    (f,) = r["machines"][SERVER[0]]["files"]
+    start = f["covers"][0]
+    assert f["read"] == {
+        "111": [[start, "2026-10-14 00:59:59"]],
+        "333": [
+            [start, "2026-10-14 01:59:59"],
+            ["2026-10-14 05:50:00", "2026-10-14 06:10:00"],
+        ],
+    }
+    assert f["searched"] == [[start, "2026-10-14 00:59:59"]]
+
+
+@pytest.mark.parametrize(
+    "entry, over",
+    [
+        (
+            {
+                "truncated": True,
+                "covers": ["2026-10-14 00:00:00", "2026-10-14 07:00:00"],
+            },
+            False,
+        ),
+        ({"truncated": True, "covers": None, "searched": []}, True),
+        (
+            {
+                "truncated": True,
+                "covers": [None, "2026-10-14 07:00:00"],
+                "searched": [
+                    [None, "2026-10-14 01:00:00"],
+                    ["2026-10-14 05:50:00", "2026-10-14 06:10:00"],
+                ],
+            },
+            True,
+        ),
+        (
+            {
+                "truncated": True,
+                "covers": ["2026-10-14 00:00:00", "2026-10-14 06:05:00"],
+                "searched": [["2026-10-14 05:50:00", "2026-10-14 06:04:59"]],
+            },
+            False,
+        ),
+        (
+            {
+                "truncated": True,
+                "covers": ["2026-10-14 06:05:00", "2026-10-14 07:00:00"],
+                "searched": [["2026-10-14 06:05:00", "2026-10-14 06:10:00"]],
+            },
+            True,
+        ),
+    ],
+)
+def test_a_cut_file_is_searched_over_its_window_when_its_covers_there_are_all_searched(
+    entry, over
+):
+    assert (
+        R.searched_over(entry, ["2026-10-14 06:00:00", "2026-10-14 06:00:00"]) is over
+    )
+
+
+async def test_a_continuation_that_fails_defers_its_asks_after_its_timeouts(tmp_path):
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+        patterns={(SERVER[0], DAY): [{"status": "failed", "error": "timeout"}]},
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, records, deferred = await run_round(
+        tmp_path,
+        panda,
+        [ask(ADDER, ["111"], w, SERVER[0]), ask(ADDER, ["222"], w, SERVER[0])],
+    )
+    assert len([c for c in panda.calls if c[0] == "pattern"]) == 1 + R.TIMEOUT_RETRIES
+    assert [d["ask"]["strings"] for d in deferred] == [["111"]]
+    assert deferred[0]["why"] == [f"{SERVER[0]} {DAY}: failed: timeout"]
+    assert [r["ask"]["strings"] for r in records] == [["222"]]
+
+
+async def test_a_cut_string_of_the_current_file_is_not_asked_again(tmp_path):
+    current = "panda-adder.log"
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {
+            (SERVER[0], current): [
+                cut_alone("2026-10-14 10:00:00", ("222", "2026-10-14 11:30:00"))
+            ]
+        },
+    )
+    w = ("2026-10-14 11:00:00", "2026-10-14 11:00:01")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["111", "222"], w, SERVER[0])])
+    assert [c for c in panda.calls if c[0] == "pattern"] == []
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["file"] == current and f["searched"] == [
+        [f["covers"][0], "2026-10-14 09:59:59"]
+    ]
+
+
+async def test_a_later_round_reads_a_cut_string_from_the_earlier_answer_and_asks_only_the_rest(
+    tmp_path,
+):
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+        patterns={(SERVER[0], DAY): [found(rec(3, "2026-10-14 06:00:00,7 a 111"))]},
+    )
+    w1 = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    await run(tmp_path, panda, [ask(ADDER, ["111"], w1, SERVER[0])])
+    before = len(panda.calls)
+    w2 = ("2026-10-14 06:05:00", "2026-10-14 06:20:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["111"], w2, SERVER[0])])
+    later = panda.calls[before:]
+    assert [c for c in later if c[0] == "grep"] == []
+    assert [c[3] for c in later if c[0] == "pattern"] == [
+        R.continuation_pattern(
+            {"111": [(t("2026-10-14 06:10:01"), t("2026-10-14 06:30:00"))]}
+        )
+    ]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert [x["offset"] for x in f["records"]] == [1, 3]
+    assert f["searched"] == [
+        [f["covers"][0], "2026-10-14 00:59:59"],
+        ["2026-10-14 05:50:00", "2026-10-14 06:30:00"],
+    ]
+
+
+async def test_again_records_a_cut_files_ask_once_more_saying_the_round_it_replaces(
+    tmp_path,
+):
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    a = ask(ADDER, ["111"], w, SERVER[0])
+    old = {  # a record written before cut files said what was searched
+        "ask": a["ask"],
+        "round": 1,
+        "machines": {SERVER[0]: {"files": [{"file": DAY, "truncated": True}]}},
+    }
+    (tmp_path / "records-r1.jsonl").write_text(json.dumps(old) + "\n")
+    assert R.cut_asks(tmp_path) == [{"ask": a["ask"]}]
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+    )
+    with pytest.raises(FieldTestError, match="already recorded"):
+        await run_round(tmp_path, panda, R.cut_asks(tmp_path))
+    ((path, (r,), deferred),) = await R.record_rounds(
+        [(R.cut_asks(tmp_path), tmp_path)],
+        panda.parts(),
+        datetime.timedelta(seconds=3600),
+        None,
+        True,
+    )
+    assert path.name == "records-r2.jsonl" and deferred == []
+    assert r["round"] == 2 and r["replaces"] == 1
+    assert "searched" in r["machines"][SERVER[0]]["files"][0]
+    assert R.cut_asks(tmp_path) == []
+    with pytest.raises(FieldTestError, match="not recorded"):
+        await R.record_rounds(
+            [([ask(ADDER, ["999"], w, SERVER[0])], tmp_path)],
+            panda.parts(),
+            datetime.timedelta(seconds=3600),
+            None,
+            True,
+        )
+
+
+@pytest.mark.parametrize(
+    "lo, hi",
+    [
+        ("2026-10-14 05:50:00", "2026-10-14 06:10:01"),
+        ("2026-10-13 23:59:58", "2026-10-14 00:00:02"),
+        ("2026-10-14 05:55:07", "2026-10-14 05:55:07"),
+        ("2026-10-14 05:59:59", "2026-10-14 07:00:00"),
+        ("2026-10-14 05:53:00", "2026-10-14 06:21:30"),
+        ("2026-10-14 05:53:07", "2026-10-14 05:55:31"),
+    ],
+)
+def test_the_stamp_prefixes_of_a_stretch_hold_just_its_seconds(lo, hi):
+    prefixes = R.stamp_prefixes(t(lo), t(hi))
+    second = t(lo) - datetime.timedelta(hours=1)
+    while second <= t(hi) + datetime.timedelta(hours=1):
+        s = second.strftime("%Y-%m-%d %H:%M:%S")
+        assert any(s.startswith(p) for p in prefixes) == (lo <= s <= hi), s
+        second += datetime.timedelta(seconds=1)
+    assert len(prefixes) <= 20
+
+
+def test_the_stamp_prefixes_of_days_are_the_days():
+    assert R.stamp_prefixes(t("2026-10-12 00:00:00"), t("2026-10-13 23:59:59")) == [
+        "2026-10-12 ",
+        "2026-10-13 ",
+    ]
+
+
+def test_a_continuation_pattern_matches_a_stamped_line_in_its_strings_stretch_holding_it():
+    s = "getTasks_JEDI < vo=a.b label=c+d > (x)|$"
+    pattern = R.continuation_pattern(
+        {
+            s: [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:00"))],
+            "7339": [(t("2026-10-14 08:00:00"), t("2026-10-14 08:00:00"))],
+        }
+    )
+    m = re.compile(pattern)
+    assert m.search(f"2026-10-14 06:00:00,123 panda.log.X: DEBUG    {s} done")
+    assert m.search("2026-10-14 08:00:00,9 x 7339")
+    assert not m.search(f"2026-10-14 06:10:01,0 x {s}")
+    assert not m.search("2026-10-14 06:00:00,0 x 7339")
+    assert not m.search(f"  File x, line 3, in {s}")
+    assert not m.search(
+        "2026-10-14 06:00:00,0 x getTasks_JEDI < vo=aXb label=c+d > (x)|$"
+    )
 
 
 async def test_an_ask_already_recorded_is_refused(tmp_path):

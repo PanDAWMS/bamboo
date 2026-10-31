@@ -42,7 +42,7 @@ from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.selection import log_level
 
 from . import TREE, mapdump
-from .records import CORPUS, LEVEL_OF_METHOD, Record, Run
+from .records import CORPUS, LEVEL_OF_METHOD, LEVEL_RANK, Record, Run
 
 #: the bamboo tree the map's code is imported from (the package's own; see :mod:`bamboo.querier`)
 BAMBOO_TREE = str(TREE)
@@ -1095,6 +1095,23 @@ def function(rel: str, name: str, arms: Iterable[int] = (), within: Iterable[int
     return _function(rel, name, tuple(sorted(set(arms))), tuple(sorted(set(within))) if picks else ())
 
 
+def mark_heads(rel: str, name: str) -> tuple[str, ...]:
+    """The fixed text each of *name*'s own rows below WARNING starts with, up to its first line's end: the door asks
+    the method's mark for these rows (``recorded._narrowed``).  Empty where one may start otherwise -- a shape whose
+    first part is a hole (an f-string's leading expression, a message handed in), a row with no shape -- or where
+    *rel* defines *name* more than once: the mark is asked whole."""
+    if len(functions(rel, name)) != 1:
+        return ()
+    heads = set()
+    for row in function(rel, name).rows:
+        if LEVEL_RANK[row.level] >= LEVEL_RANK["WARNING"]:
+            continue
+        if not row.shapes or any(not shape or shape[0][0] != "lit" for shape in row.shapes):
+            return ()
+        heads |= {shape[0][1].split("\n", 1)[0] for shape in row.shapes}
+    return tuple(sorted(heads))
+
+
 # ---------------------------------------------------------------- whether the map's pattern can be trusted to be absent
 
 _LOG_COUNTS: dict[tuple[int, str, int], tuple[int, int]] = {}
@@ -1158,7 +1175,11 @@ class Seen:
         return bool(self.hits.get(row.line))
 
     def proven(self, row: Row) -> bool:
-        return any(lit >= MIN_PROOF for _, lit, _ in self.hits.get(row.line, ()))
+        """Whether a record of the run is this row's, read at MIN_PROOF and by no other row of the function: a text
+        two rows print alike is either one's (activateJob's filesTable4 UPDATE, 92 in the arm that activates and
+        124 in the one that does not)."""
+        mine = set(self.unambiguous.get(row.line, ()))
+        return any(lit >= MIN_PROOF and i in mine for i, lit, _ in self.hits.get(row.line, ()))
 
     def single_call(self) -> bool:
         return all(len(v) <= 1 for v in self.unambiguous.values())

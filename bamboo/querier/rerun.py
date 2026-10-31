@@ -122,6 +122,7 @@ from bamboo.querier.records import (
     CORPUS,
     FileLogs,
     Logs,
+    Owners,
     Unrecorded,
     Window,
     keyed,
@@ -1154,7 +1155,7 @@ class Passes:
     arms: list[Arm]
     key: str
     asking: W.Asking
-    owners: frozenset[str] | None = None
+    owners: Owners | None = None
 
 
 @dataclass
@@ -1479,6 +1480,20 @@ def _overlaps(run, window: Window) -> bool:
     return run.first[:19] <= window[1] and run.last[:19] >= window[0]
 
 
+def _question_run(at: dict[str, list]):
+    """The run H2's question is read in, of *at* (log -> the key's runs at the window): the one run of one log, or
+    None, and each candidate is judged on its own run.  Runs in more than one log: the machines' clocks are not known
+    finer than a second against the database's, so no run is the question's until the judge picks the candidate that
+    ran (Fr1, 2026-10-14) -- taking the first would take the asker's order of the logs, not the case's.  Several runs
+    of one log: a window can hold several passes of the key, and so can the row's second -- a mark that spans days
+    covers it as well as the pass that wrote (the 'done' second of MR-T-53354352: a two-day
+    prepareTasksToBeFinished_JEDI run and updateTask_JEDI's own)."""
+    if len(at) != 1:
+        return None
+    (runs,) = at.values()
+    return runs[0] if len(runs) == 1 else None
+
+
 def _of_mover(run, owner: str) -> bool:
     """Whether *run* can be a run of the mover *owner*: a mark that names a method (a DB proxy's tagged logger,
     ``getJobs < SITE 2026-01-01T00:00:00 >``) is one call of that method, so it is the mover's only when the method is
@@ -1681,7 +1696,7 @@ class Rerun:
             if key not in before and "<" in key:
                 self.row_facts[expr] = (printed, env.values[key].source)
 
-    def runs(self, key: str, names: list[str], asking: W.Asking, owners: frozenset[str] | None = None) -> dict[str, list]:
+    def runs(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None) -> dict[str, list]:
         """The key's runs in each of the logs *names* the door can be asked for, over *asking*'s window and machine.
 
         Every log is asked before a stop, so that a door short of answers names all the step's asks at once.
@@ -1690,7 +1705,7 @@ class Rerun:
         self._stop_unanswered(unanswered)
         return out
 
-    def _ask(self, key: str, names: list[str], asking: W.Asking, owners: frozenset[str] | None = None) -> tuple[dict[str, list], list, dict[str, list[str]]]:
+    def _ask(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None) -> tuple[dict[str, list], list, dict[str, list[str]]]:
         """``runs()`` without the stop: the runs found, the asks the door had no answer for, and what of the window each
         log was not searched for (``Log.holes``)."""
         window = self.window(asking)
@@ -2215,8 +2230,7 @@ class Rerun:
             for p in maybe:
                 self.say(f"  may have written: {p.arm} ({'; '.join(p.premises)})")
             return maybe
-        # as _wrote_at: runs in several logs, or several in a window, are each judged on their own; else the one
-        question = None if len(at) != 1 or (lo != hi and len(next(iter(at.values()))) > 1) else next(iter(at.values()))[0]
+        question = _question_run(at)
         if question is not None:
             self.say(f"the run: {question.describe()}")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
@@ -2333,19 +2347,13 @@ class Rerun:
             self.say(f"  no run of {key} at {when}")
             return None
         self.need(f"a run of {key} at {when}", at)
-        if len(at) > 1:
-            # the row's second holds runs in more than one log, and the machines' clocks are not known finer than a
-            # second against the database's: no run is the question's until the judge picks the candidate that ran
-            # (Fr1, 2026-10-14).  Taking the first would take the asker's order of the logs, not the case's
-            question = None
-            self.say(f"runs of {key} at {when} in {len(at)} logs ({', '.join(at)}): each candidate is judged on its own run")
-        elif lo != hi and len(only := next(iter(at.values()))) > 1:
-            # a window, not the row's second, can hold several passes of the key in one log: the same holds
-            question = None
-            self.say(f"{len(only)} runs of {key} at {when} in {next(iter(at))}: each candidate is judged on its own run")
-        else:
-            (question, *_), = at.values()
+        question = _question_run(at)
+        if question is not None:
             self.say(f"the run: {question.describe()}")
+        elif len(at) > 1:
+            self.say(f"runs of {key} at {when} in {len(at)} logs ({', '.join(at)}): each candidate is judged on its own run")
+        else:
+            self.say(f"{len(next(iter(at.values())))} runs of {key} at {when} in {next(iter(at))}: each candidate is judged on its own run")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
         for c in cands:
             if any(name in c.log_files for name in at):
@@ -2365,7 +2373,9 @@ class Rerun:
         chosen = self.pick("which candidate ran", j)
         if question is None:
             question = self.need(f"the run of {chosen.candidate.func} at {when}", j.runs.get(chosen.candidate.owner))
-            self.say(f"the run: {question.describe()}")
+            # a candidate left by elimination is shown by no run: this is only the run the judge read it on
+            self.say(f"the run: {question.describe()}" if chosen.kind == "positive" else
+                     f"the run it was read on (no run shows {chosen.candidate.func}:{chosen.line} ran): {question.describe()}")
         self.question = question
         return Wrote(readings, question, cands, env, chosen, row=state, window=(lo, hi),
                      unsearched={f: holes[f] for f in chosen.candidate.log_files if f in holes})
@@ -2942,8 +2952,11 @@ class Rerun:
                 del movers[owner]
         # a writer that takes a row by its key: asked over the window's last part alone (KNOWN_ISSUES.md K16)
         keyed = by_key_of(writers, movers, q.subject, q.observed)
-        # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark
-        owners = frozenset(o.split("::")[-1] for o in [*movers, *keyed])
+        # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark,
+        # and theirs for their own rows (a name two of them share: whole)
+        ids = list(dict.fromkeys([*movers, *keyed]))
+        names = [o.split("::")[-1] for o in ids]
+        owners = {n: R.mark_heads(*o.split("::", 1)) if names.count(n) == 1 else () for n, o in zip(names, ids, strict=True)}
         wakes = wakers_of(follow, writers, q.subject, q.observed)
         self.say(f"selected by {follow.selected_by}; guarded by {[g.owner for g in follow.guarded_by]}")
         for owner, why in movers.items():
@@ -3201,7 +3214,7 @@ class Rerun:
                 "closure": answer.closure, "own_arms": [s for s in starts if s in destination.arms]}
 
     def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking, rest: bool = True,
-                   owners: frozenset[str] | None = None):
+                   owners: Owners | None = None):
         """S1's asks for one mover: the window's last part first (*asking*, ``STUCK_SPAN``), and the rest of the window
         (``W.rest``) only where every ask of the last part was answered whole and held no run of its own -- no pass in
         six hours is not no pass in the window, and a mover that ran and stopped is the one a stuck value most needs
