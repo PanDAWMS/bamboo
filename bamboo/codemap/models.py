@@ -3158,12 +3158,66 @@ class TableRecord(BaseModel):
     )
 
 
+#: Why a value filling an endpoint's term is no parameter of the endpoint (:attr:`EndpointFill.why`): a literal; a
+#: field of ``self``; what a call of the corpus returns; a value that is no path -- an expression, or a builtin's
+#: value that holds none of what it is handed as it is (``len(x)``); a call that does not say what it hands the
+#: parameter (``*args``, a function handed to be called); a name no record or statement says the value of; the
+#: term's own values not read (:attr:`KeyFrom.unread`); a source of another kind (a module's or an object's
+#: attribute, a value not known); past :data:`bamboo.codemap.panda.endpoints.MAX_STEPS` steps.
+FILL_CONSTANT = "constant"
+FILL_SELF = "self"
+FILL_RESULT = "result"
+FILL_VALUE = "value"
+FILL_NOT_SAID = "not_said"
+FILL_UNREAD = "unread"
+FILL_TERM = "term"
+FILL_OTHER = "other"
+FILL_CUT = "cut"
+
+
+class EndpointFill(BaseModel):
+    """What fills one term of a statement an endpoint runs, followed up the calls from the endpoint: one of its own
+    parameters, the rows of another statement it runs, or why neither.
+
+    Each way from the endpoint to the statement's function (every call between functions of the closure, not only
+    :attr:`EndpointRead.way`), each call read where it is made -- the argument it hands the parameter, as the
+    arguments bind (:func:`bamboo.codemap.calls.bind`) -- and each name through the bindings that reach it
+    (:class:`PathBinding`), or the statement binding it where none is recorded.  A builtin conversion is the value
+    it converts (``task_id = int(task_id)``), a builtin keeping the elements of what it is handed is those elements
+    (``list(...)``, the keys of ``dict.fromkeys(...)``), an element of ``a + b`` is one of either's, and an empty
+    literal holds nothing to fill a term with.  A term's source of rows (:attr:`KeySource.via`) is the endpoint's
+    where the endpoint reads that statement and every call the rows come by is one of its closure's: not rows
+    another caller hands down (``peekJob``'s own, re-read by the watcher's retry).
+    """
+
+    parameter: str = Field(
+        default="",
+        description=(
+            "The endpoint's parameter, and the steps into it to the value: ``job_ids[*]``, an element of "
+            "``job_ids``; ``task_id``."
+        ),
+    )
+    rows: str = Field(
+        default="",
+        description="The :class:`ReadSiteNode` of another statement of :attr:`Endpoint.reads` whose rows fill it.",
+    )
+    attr: str = Field(
+        default="",
+        description="The field of what is there the value is, where the term's source says (:attr:`KeySource.attr`).",
+    )
+    why: str = Field(default="", description="Where neither *parameter* nor *rows*: one of the ``FILL_*`` codes.")
+    at: str = Field(default="", description="``file:line`` where *why* was met; empty for the term's own.")
+
+
 class EndpointTerm(BaseModel):
     """One row-naming term of a statement an endpoint runs: a read :class:`KeyFrom` of the statement."""
 
     term: str = Field(description="As the KeyFrom reads it: ``PandaID=:PandaID``.")
     table: str = Field(description="The KeyFrom's table, as the source spells it.")
     attr: str = Field(default="", description="The term's column as a subject, where the table's spec class has it.")
+    fills: list[EndpointFill] = Field(
+        default_factory=list, description="What fills it from the endpoint, one per value read, sorted."
+    )
 
 
 class EndpointRead(BaseModel):

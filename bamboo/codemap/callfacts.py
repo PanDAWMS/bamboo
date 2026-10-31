@@ -802,6 +802,10 @@ BUILTIN_FUNCTIONS: dict[str, Function] = {
     "input": Function(None, result="str"),
 }
 
+#: The builtin classes' methods called on the class whose value is keyed by the first argument's elements:
+#: ``dict.fromkeys(xs)``, what iterating it -- or ``list()`` of it -- gives one by one.  Its values are not them.
+KEYED_BY_ELEMENTS = frozenset({("dict", "fromkeys")})
+
 
 def builtin_function(
     types: "Types", file: str, func: ast.AST, call: ast.Call

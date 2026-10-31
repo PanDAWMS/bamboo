@@ -814,7 +814,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             off = offrow.attach(fragment, self._modules, self._calls)
             logger.info("PandaCodeMapPlugin: %d branch(es) write their object to no row", off)
             # The statements each API endpoint's calls reach, on the reach record and the read terms.
-            read = endpoints.attach(fragment, self._modules)
+            read = endpoints.attach(fragment, self._modules, self._calls)
             logger.info(
                 "PandaCodeMapPlugin: %d endpoint(s), %d statement(s) they read", len(fragment.endpoints), read
             )
