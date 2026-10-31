@@ -14,9 +14,14 @@ says two things that give the time of the write that left the value:
 An arm on no row of the object -- its pairs are another object's (``another: ...``), or the record does not follow
 the object to the call (``row`` empty), or it has none -- leaves the time not known: its run may have written the
 value after any row (KNOWN_ISSUES.md K37).  Only the last write is asked: a write of the same value before it is not.
+Two such arms are read all the same (KNOWN_ISSUES.md K37, tmaeno: "build it", 10-31): a birth (``Arm.born``, the
+INSERT that makes the object's row, K29) wrote as the row was made, at its creation (``creation_of``), before any
+write that came after; and an arm whose runs are marked by the object's key is asked over the object's life (F3), each
+run it shows read as a row is.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 #: an arm's outcome that is the time the write runs
@@ -36,32 +41,42 @@ class Arm:
     placed: tuple
     #: why it is on no row of the object; "" when placed
     unplaced: str
+    #: its branch makes the object's row (*born* of :func:`arms`): it wrote as the row was made
+    born: bool = False
 
 
-def arms(fragment, subject: str, readings: list) -> list[Arm]:
+def arms(fragment, subject: str, readings: list, born: Callable[[str, object], bool] | None = None) -> list[Arm]:
     """Each line of *readings* (H1's writers of *subject*) with the junction branch the map has for it.  A reading's
     owner is ``file::function``, a junction's ``file::Class.function``: they are matched by the file, the function's
-    name and the line."""
-    branches: dict[tuple[str, str, int], object] = {}
+    name and the line.  *born* says whether a junction's branch (its owner, the branch) makes the row."""
+    branches: dict[tuple[str, str, int], tuple[str, object]] = {}
     for j in (fragment.junctions if fragment else []):
         if j.subject != subject:
             continue
         file, _, qual = j.owner.partition("::")
         for b in j.branches:
-            branches.setdefault((file, qual.rpartition(".")[2], b.line), b)
+            branches.setdefault((file, qual.rpartition(".")[2], b.line), (j.owner, b))
     out = []
     for r in readings:
         file, _, func = r.owner.partition("::")
         for line in r.lines:
-            b = branches.get((file, func.rpartition(".")[2], line))
+            owner, b = branches.get((file, func.rpartition(".")[2], line), (None, None))
             if b is None:
                 out.append(Arm(r.owner, line, None, (), "the map has no branch of it"))
                 continue
             pairs = b.history or []
             placed = tuple(p for p in pairs if p.row in ON_THE_ROW)
             why = "" if placed else _unplaced(pairs, b.history_hole)
-            out.append(Arm(r.owner, line, b.outcome, placed, why))
+            out.append(Arm(r.owner, line, b.outcome, placed, why, bool(born and born(owner, b))))
     return out
+
+
+def creation_of(fragment, cls: str) -> str:
+    """*cls*'s attribute set as its row is made and never after, by the map's tables (``TableRecord.creation``:
+    ``JediTaskSpec.creationDate``, ``JobSpec.creationTime``), bare; "" where no table of the class names one, or its
+    tables name two."""
+    found = {c for t in (fragment.tables if fragment else []) if cls in (t.rows_of, t.spec_class) for c in t.creation}
+    return found.pop().partition(".")[2] if len(found) == 1 else ""
 
 
 def _unplaced(pairs: list, hole: str) -> str:

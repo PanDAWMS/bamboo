@@ -360,9 +360,11 @@ class Logs(Protocol):
         ...
 
     def log(
-        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
+        strings: tuple[str, ...] = (),
     ) -> Log:
-        """*owners*: the functions the asker reads runs of, as ``rerun._of_mover`` names them, or None for any."""
+        """*owners*: the functions the asker reads runs of, as ``rerun._of_mover`` names them, or None for any.
+        *strings*: what to ask for, where not the key alone (F3's marks holding the key)."""
         ...
 
 
@@ -388,7 +390,8 @@ class FileLogs:
         return [name for name in self._logs if name in wanted]
 
     def log(
-        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
+        strings: tuple[str, ...] = (),
     ) -> Log:
         return self._logs[name]
 
