@@ -862,14 +862,19 @@ class in a subclass's bases, defining the same name, is not seen.  The second P 
 rests on the candidates being every writer of the observed value: on a map without the writers of a value known at
 run time only (RD, codemap-rd), a call that writes the target from such a value is not seen.
 
-A positive says the arm ran in the run.  Where the row is written by a later call of the pass (the map's
-`HistoryPair`, reachable and not taken), a test in the callee can refuse the write and the caller go on unaware:
-ContentsFeeder's updateTaskStatusByContFeeder_JEDI writes nothing where the task is locked by another process or its
-status is not one for contents update (task_complex_module 1324-1331), and the caller's print after the call reads
-the same.  On x13xiiC2m (the 65 texts, the attribute 60, MT; 2026-10-31) 7 of the 14 arms judged positive have their
-history row written by a later call; 5 of them, DB proxy methods, write the value with their own statement; the
-adder's 441 (32 texts) is proven by rows printed only after updateJobs returned success; and doBasicPostProcess's
-endTime (114) by a row after updateTask_JEDI, whose result it does not read: one arm in one text.
+A positive says the arm ran in the run.  Where the value or its row is written by a later call of the pass (for a
+status the map's `HistoryPair`, reachable and not taken; for an attribute set in memory, the call that stores the
+object), a test in the callee can refuse the write and the caller go on unaware: ContentsFeeder's
+updateTaskStatusByContFeeder_JEDI writes nothing where the task is locked by another process or its status is not one
+for contents update (task_complex_module 1324-1331), and the caller's print after the call reads the same.  On
+x13xiiC2m (the 65 texts, the attribute 60, MT; 2026-10-31), of the 14 arms judged positive, 9 are DB proxy methods that
+write the value with their own statement (5 of them leave the history row to a later recordStatusChange or
+record_task_status_change); 2 are stored by the adder's updateJobs -- process_job_report 441 (32 texts) and
+adder_atlas_plugin execute 170 (6), whose runs print rows only after updateJobs returned success; 2 by TaskRefiner's
+registerTaskInOneShot_JEDI -- runImpl 211 (14 texts) and AtlasAnalTaskRefiner doRefine 260 (1), where a refusal prints
+"failed to register the task to JEDI in a single shot", in none of the 14 runs, an absence P does not read; and
+doBasicPostProcess 114 (endTime, 1 text) by updateTask_JEDI, whose result it does not read: one arm in one text that
+no row can tell.
 
 *Shows:* H2's verdicts: P's reason, and "read with the other verdicts: a call reaching no writer of '<value>' left
 standing does not write it" for a positive of the second P.

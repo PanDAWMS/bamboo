@@ -324,6 +324,38 @@ def test_runs_are_cut_by_the_instance_token_and_the_key_is_a_whole_token(tmp_pat
     assert would_print is True
 
 
+def test_a_tag_that_opens_a_bracket_it_does_not_close_is_one_mark_up_to_the_loggers_close(tmp_path):
+    # create_tagged_logger writes f"{method} < {tag} >", and insertNewJob's tag is f"<JediTaskID={...} idPool={...}"
+    log = tmp_path / "panda-DBProxy.log"
+    log.write_text(
+        "2026-01-01 00:00:00,000 panda.log.DBProxy: DEBUG    insertNewJob < <JediTaskID=111 idPool=3 > start\n"
+        "2026-01-01 00:00:01,000 panda.log.DBProxy: DEBUG    insertNewJob < <JediTaskID=222 idPool=1 > start\n"
+        "2026-01-01 00:00:02,000 panda.log.DBProxy: DEBUG    insertNewJob < <JediTaskID=111 idPool=3 > 12345 -> defined\n"
+        "2026-01-01 00:00:03,000 panda.log.DBProxy: DEBUG    checkTaskStatusJEDI <  < jediTaskID=111 > > done\n"
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            f"""
+            import json
+            from bamboo.querier.records import read_log, runs_for
+
+            log = read_log({str(log)!r})
+            runs = runs_for(log, "111")
+            print(json.dumps([[(r.token, [x.lineno for x in r.records]) for r in runs], log.records[2].message]))
+            """,
+        )
+    )
+    runs, message = json.loads(out)
+    # each call is its own mark, holding the task's id: the other task's call is no line of the run
+    assert runs == [
+        ["insertNewJob < <JediTaskID=111 idPool=3 >", [1, 3]],
+        ["checkTaskStatusJEDI <  < jediTaskID=111 > >", [4]],
+    ]
+    # the message's own '>' is not read into the mark
+    assert message == "12345 -> defined"
+
+
 def test_rule_8_wants_the_level_in_the_file_where_a_filter_may_send_it_elsewhere_or_panda_common_is_not_found(tmp_path):
     quiet, loud = tmp_path / "panda-x.log", tmp_path / "panda-y.log"
     quiet.write_text(
@@ -811,6 +843,44 @@ def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path)
     assert other[0][0]["strings"] == ["ds_sub2"]
     # an ask's own record comes first
     assert mine == [] and mine_notes == []
+
+
+def test_the_record_door_answers_a_narrower_ask_from_a_wider_record_by_the_lines_holding_its_strings(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            W, AT = ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), ("2026-09-28 08:31:10", "2026-09-28 08:31:15")
+            A, B = "insertNewJob < <JediTaskID=111 idPool=3 >", "insertNewJob < <JediTaskID=222 idPool=1 >"
+            TOK = "getJobs < SITE 2026-09-28T08:31:00.000000 >"
+            hit = {**line("08:31:12", "12345 -> defined", A), "offset": 150}
+            # an earlier round asked the bare method (its mark read so): every insertNewJob line, cut at 1 MB at 08:31:20
+            wide = record(Ask("panda-x.log", ("insertNewJob", TOK), W, M1), {M1: answered({**TODAY, "truncated": True, "records": [
+                {**line("08:31:11", "start", A), "offset": 100}, hit, {**line("08:31:13", "start", B), "offset": 200},
+                {**line("08:31:14", "got 3", TOK), "offset": 300}, {**line("08:31:20", "end", B), "offset": 400},
+                {"offset": 500, "head": False, "cut": False, "lines": [f"  {A} in a traceback"]}]})})
+            key_rec = record(Ask("panda-x.log", ("12345",), W), {M1: answered({**TODAY, "records": [hit]})})
+            log, asks = ask_of([key_rec, wide], "panda-x.log", "12345", AT, M1)
+            run, = runs_for(log, "12345")
+            print(json.dumps([asks, [r.span for r in log.records], run.token, log.holes, log.notes]))
+            """),
+        )
+    )
+    asks, spans, token, holes, notes = json.loads(out)
+    # the mark with its tag is asked of no new round: the bare method's record holds every line holding it
+    assert asks == []
+    assert token == "insertNewJob < <JediTaskID=111 idPool=3 >"
+    # only the lines holding the ask's strings: not the other task's call, nor the other mark asked with it
+    assert spans == ["aipanda093:panda-x.log-20260929.gz@100", "aipanda093:panda-x.log-20260929.gz@150"]
+    # the cut file is read as far as the whole record read it (08:31:20), not to the last line kept
+    assert holes == []
+    assert notes == [
+        "answered from the record of a wider ask (2026-09-28 08:21:12 .. 2026-09-28 08:41:13, every machine, round 1)",
+        "answered from the record of a wider ask (2026-09-28 08:21:12 .. 2026-09-28 08:41:13, aipanda093.cern.ch, round 1, "
+        "2 string(s), the lines holding the ask's)",
+        "1 fragment(s) of records whose head was not returned",
+    ]
 
 
 def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared_one_as_cut(tmp_path):

@@ -47,11 +47,14 @@ every end would end only at the oldest file kept.  EDGE is the windows' slack, n
 than it across a rotation is read as whole while it is not (KNOWN_ISSUES.md K7).
 
 An ask with no record of its own is answered from the record of a wider one (``RecordedLogs._within``): of the same
-log and strings, its window holding the ask's, on the ask's machine or on every machine.  The recording step reads
-every file whose covers meet the window, and every machine holding a file of the log when no machine is named, so the
-wider record holds every file the ask reaches, each searched whole for the strings; the files past the ask's window
-only add seconds that were searched.  It is read for the ask's machine alone, and a machine an every-machine record
-does not name holds no file of the log there.  The log's notes say which record answered.
+log, its window holding the ask's, on the ask's machine or on every machine, and each of the ask's strings holding one
+of the record's.  The recording step reads every file whose covers meet the window, and every machine holding a file
+of the log when no machine is named, so the wider record holds every file the ask reaches, each searched whole for
+the strings; the files past the ask's window only add seconds that were searched.  A line holding one of the ask's
+strings holds one of the record's, so the record returned it: the record is read for the records whose lines hold the
+ask's strings, and a file it cut is read as far as the record read it (an ask that now names a mark with its tag, or
+drops a mark, needs no new round).  It is read for the ask's machine alone, and a machine an every-machine
+record does not name holds no file of the log there.  The log's notes say which record answered.
 """
 from __future__ import annotations
 
@@ -75,8 +78,8 @@ def key_of(ask: dict) -> str:
 
 
 def _alike(ask: dict) -> tuple:
-    """What an ask and a wider one share: all but the window and the machine."""
-    return ask["name"], ask["service"], tuple(sorted(set(ask["strings"]))), ask.get("whole_records")
+    """What an ask and a wider one share: all but the window, the machine and the strings."""
+    return ask["name"], ask["service"], ask.get("whole_records")
 
 
 def _t(text: str) -> datetime.datetime:
@@ -158,6 +161,9 @@ class _Gathered:
         self.rotated_ends: set[tuple[str, datetime.datetime]] = set()
 
     def add(self, record: dict) -> None:
+        # a wider record read for a narrower ask (RecordedLogs._within): its records holding the ask's strings; a cut
+        # file is still read as far as the whole record read it
+        only = record.get("only")
         for machine, got in record.get("machines", {}).items():
             self.asked = True
             status = got.get("status")
@@ -173,11 +179,13 @@ class _Gathered:
             for f in got.get("files", []):
                 last = None
                 for r in f.get("records", []):
+                    kept = only is None or any(s in x for x in r["lines"] for s in only)
                     if not r.get("head"):
-                        self.fragments += 1
+                        self.fragments += kept
                         continue
                     rec = _record(machine, f["file"], r)
-                    self.records.setdefault((machine, f["file"], r["offset"]), rec)
+                    if kept:
+                        self.records.setdefault((machine, f["file"], r["offset"]), rec)
                     last = rec.stamp
                 if not f.get("covers"):
                     continue
@@ -312,24 +320,29 @@ class RecordedLogs:
         return [record for _, _, record in got]
 
     def _within(self, ask: Ask) -> dict | None:
-        """*ask*'s answer from the record of a wider ask (the module's doc), or None where none holds it: its own
-        machine's record before every machine's, then the narrowest window."""
+        """*ask*'s answer from the record of a wider ask (the module's doc), or None where none holds it: a record of
+        the ask's own strings first, then its own machine's record before every machine's, the fewest strings, the
+        narrowest window."""
         want = ask.canonical()
         lo, hi = want["window"]
         found = [
             r for r in self._alike.get(_alike(want), [])
             if r["ask"]["machine"] in (None, want["machine"]) and r["ask"]["window"][0] <= lo and hi <= r["ask"]["window"][1]
+            and all(any(s in w for s in r["ask"]["strings"]) for w in want["strings"])
         ]
         if not found:
             return None
-        record = min(found, key=lambda r: (r["ask"]["machine"] is None, _t(r["ask"]["window"][1]) - _t(r["ask"]["window"][0]), key_of(r["ask"])))
+        record = min(found, key=lambda r: (r["ask"]["strings"] != want["strings"], r["ask"]["machine"] is None, len(r["ask"]["strings"]),
+                                           _t(r["ask"]["window"][1]) - _t(r["ask"]["window"][0]), key_of(r["ask"])))
         wider = record["ask"]
         machines = record.get("machines", {})
         if want["machine"] is not None and wider["machine"] is None:
             machines = {want["machine"]: machines.get(want["machine"], {"status": "no such log"})}
         where = wider["machine"] or "every machine"
-        return {**record, "ask": want, "machines": machines,
-                "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')})"}
+        only = {} if wider["strings"] == want["strings"] else {"only": want["strings"]}
+        strings = "" if not only else f", {len(wider['strings'])} string(s), the lines holding the ask's"
+        return {**record, **only, "ask": want, "machines": machines,
+                "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')}{strings})"}
 
     def _read(self, name: str, key: str, window: Window, machine: str | None, owners: frozenset[str] | None = None) -> Log:
         notes: list[str] = []

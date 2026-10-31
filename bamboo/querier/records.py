@@ -47,11 +47,17 @@ STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 #: (``getJobs < SITE_NAME 2026-01-01T00:00:00.000000 >``, ``updateJobStatus <
 #: PandaID=12345678 >``): the name alone would make one run of every call of the
 #: method, for every job.  A tag may hold brackets of its own, one level
-#: (``checkTaskStatusJEDI <  < jediTaskID=12345 > >``: seven tags in the corpus)
+#: (``checkTaskStatusJEDI <  < jediTaskID=12345 > >``: seven tags in the corpus), or
+#: open one it does not close: ``create_tagged_logger`` writes ``f"{method} < {tag} >"``
+#: and three tags begin with ``<`` alone (``insertNewJob < <JediTaskID=12345 idPool=2 >``),
+#: so its `` >`` ends the mark -- not the method alone, nor a later ``>`` of the message.
+#: A prefix that never closes (LogWrapper's ``put_file_recovery_request <
+#: jediTaskID=12345``, one in the corpus) has nothing to end it and reads as the name
 PREFIX = re.compile(
     r"^(?P<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) (?P<logger>\S+): "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+"
-    r"(?P<token>[A-Za-z_]\w* <(?:[^<>\n]|<[^<>\n]*>)*>|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
+    r"(?P<token>[A-Za-z_]\w* < <[^<>\n]* >|[A-Za-z_]\w* <(?:[^<>\n]|<[^<>\n]*>)*>"
+    r"|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
 )
 TRACEBACK = "Traceback (most recent call last):"
 FRAME = re.compile(r'^\s*File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<func>\S+)')
