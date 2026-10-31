@@ -11,12 +11,20 @@ is the general rule the map exploits -- how fragile a recognizer is tracks how
 little the code declares about itself, and an explicit enumeration declares
 everything.
 
-Two things this deliberately does *not* do:
+Three things this deliberately does *not* do:
 
 * It does not treat every module constant as an enumeration entry.  A declared
   *value set* (``FINAL_TASK_STATUSES = [...]``) is a vocabulary oracle for
   checking extraction, not an index entry, and counting the two together makes
   an error-code module indistinguishable from a config module.
+* It does not take a constant the code never reads as a code.  An entry is one
+  a value is compared with for identity (``==``, ``in``), stored in a field or
+  a subscript, listed in a value set or made a dict's key somewhere in the
+  corpus (:func:`_coded`).  ``MAX_ROWS = 1000`` is compared by order, a
+  timeout is added to, a message is handed to a response: quantities and text,
+  which no record holds as a code -- and two limits of one size made one value
+  two names (``MAX_ROWS`` and ``MAX_KEYS``).  A constant nothing reads at all
+  (``EC_RSE``) is not one either.
 * It does not key on the number alone.  ``taskbuffer.EC_Kill`` and
   ``jobdispatcher.EC_Watcher`` are both ``100``; which one a field holds is
   decided by the namespace it was read from.
@@ -124,6 +132,49 @@ def _iter_module_constants(tree: ast.Module) -> Iterable[tuple[str, ast.stmt]]:
                 break
 
 
+_IDENTITY = (ast.Eq, ast.NotEq, ast.In, ast.NotIn, ast.Is, ast.IsNot)
+
+
+def _read_name(node: ast.AST) -> Optional[str]:
+    """The constant name *node* reads -- ``EC_Kill`` or ``ErrorCode.EC_Kill`` -- or ``None``."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and _is_enum_name(node.id):
+        return node.id
+    if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) and _is_enum_name(node.attr):
+        return node.attr
+    return None
+
+
+def _coded(tree: ast.AST) -> set[str]:
+    """The constant names *tree* reads as a code: a side of an identity compare
+    (``code == EC_Kill``, ``status in (ST_ready, ST_sent)``), the value stored in
+    a field or a subscript (``job.taskBufferErrorCode = EC_Kill``), an element of
+    a list, tuple or set, or a dict's key.
+
+    An order compare, arithmetic, a slice bound, an argument, a formatted string
+    or a name bound to it says nothing of a code: ``len(rows) > MAX_ROWS``,
+    ``now + MARGIN_SECONDS``, ``respond(MESSAGE_TASK_ID)``.  Names are read as
+    the references are, by name over the corpus.
+    """
+    found: set[str] = set()
+    for node in walk(tree):
+        if isinstance(node, ast.Compare):
+            sides = [node.left, *node.comparators]
+            for at, op in enumerate(node.ops):
+                if isinstance(op, _IDENTITY):
+                    places = [sides[at], sides[at + 1]]
+                    found |= {name for one in places if (name := _read_name(one))}
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if node.value is not None and any(isinstance(t, (ast.Attribute, ast.Subscript)) for t in targets):
+                if name := _read_name(node.value):
+                    found.add(name)
+        elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            found |= {name for one in node.elts if (name := _read_name(one))}
+        elif isinstance(node, ast.Dict):
+            found |= {name for one in node.keys if one is not None and (name := _read_name(one))}
+    return found
+
+
 def extract(
     modules: list[SourceModule],
     map_id: str,
@@ -139,15 +190,18 @@ def extract(
     Returns:
         ``(value_enums, coverage)``.  Coverage counts module-level constants as
         candidates and enumeration entries as explained, so a module of
-        computed or collection-valued constants shows a low ratio -- the signal
-        that it is a different kind of file, not a failed extraction.
+        computed or collection-valued constants, or of quantities, shows a low
+        ratio -- the signal that it is a different kind of file, not a failed
+        extraction.
     """
     enums: list[ValueEnumNode] = []
     coverage: list[CoverageStat] = []
     references: Counter = Counter()
+    coded: set[str] = set()
 
     # Reference counting runs over every module, not just the defining one:
-    # a constant is only meaningfully part of the index if something reads it.
+    # a constant is only meaningfully part of the index if something reads it,
+    # and reads it as a code.
     for module in modules:
         for node in walk(module.tree):
             if isinstance(node, ast.Attribute) and _is_enum_name(node.attr):
@@ -155,18 +209,14 @@ def extract(
             elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                 if _is_enum_name(node.id):
                     references[node.id] += 1
+        coded |= _coded(module.tree)
 
     for module in modules:
         pkg, rel, tree = module.package, module.rel_path, module.tree
         lines = module.source.splitlines()
         candidates = 0
         explained = 0
-        # A prefix only counts as an enumeration group when several constants
-        # share it, so singletons stay in the module namespace.
-        prefix_counts = Counter(
-            p for name, _ in _iter_module_constants(tree) if (p := _name_prefix(name))
-        )
-        grouped_prefixes = {p for p, n in prefix_counts.items() if n >= 2}
+        entries: list[tuple[str, ast.stmt]] = []
         for name, node in _iter_module_constants(tree):
             value_node = node.value
             is_scalar = (
@@ -188,6 +238,17 @@ def extract(
                 # a file full of them reads as "different kind of declaration",
                 # not as full coverage.
                 continue
+            if name not in coded:
+                # Read only as a quantity or as text, or not read at all: a
+                # candidate the index does not explain.
+                continue
+            entries.append((name, node))
+        # A prefix only counts as an enumeration group when several entries
+        # share it, so singletons stay in the module namespace.
+        prefix_counts = Counter(p for name, _ in entries if (p := _name_prefix(name)))
+        grouped_prefixes = {p for p, n in prefix_counts.items() if n >= 2}
+        for name, node in entries:
+            value_node = node.value
             explained += 1
             # The namespace is the index key and may end with the enumeration's
             # prefix; the display name stays module-scoped so it does not read

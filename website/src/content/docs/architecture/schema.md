@@ -114,7 +114,7 @@ Code Map types (machine-derived from source, separate namespace):
 - FilterStage: One reason a candidate was dropped on the way to a selection
 - LoopCut: A guard inside a loop that drops the candidate and says why in prose
 - Boundary: Where causation crosses into a system this map does not cover
-- ValueEnum: One `NAME = value` constant, so a code seen in a record can be decoded
+- ValueEnum: One `NAME = value` constant the code reads as a code (compared with, stored in a field, listed), so a code seen in a record can be decoded
 - Gloss: A reading of one function, with the exact text that reading was given
 - LogSite: Where one function's diagnostics land, for a function that decides nothing
 - ReadSite: One statement that asks the database for rows by a value

@@ -101,7 +101,9 @@ def test_extracts_name_value_and_comment():
     ``ast`` throws comments away, so they are recovered from the source text;
     without them an index entry is a bare number with no explanation.
     """
-    enums, _ = _extract("# error code\n\n# killed\nEC_Kill = 100\n")
+    enums, _ = _extract(
+        "# error code\n\n# killed\nEC_Kill = 100\n\n\ndef kill(job):\n    job.taskBufferErrorCode = EC_Kill\n"
+    )
 
     assert len(enums) == 1
     entry = enums[0]
@@ -115,7 +117,9 @@ def test_extracts_name_value_and_comment():
 
 def test_comment_does_not_leak_across_a_blank_line():
     """A blank line ends one entry's comment; otherwise it absorbs its neighbour's."""
-    enums, _ = _extract("# killed\nEC_Kill = 100\n\nEC_Transfer = 101\n")
+    enums, _ = _extract(
+        "# killed\nEC_Kill = 100\n\nEC_Transfer = 101\n\n\ndef failed(code):\n    return code in (EC_Kill, EC_Transfer)\n"
+    )
 
     by_name = {e.constant: e for e in enums}
     assert by_name["EC_Kill"].comment == "killed"
@@ -133,6 +137,8 @@ def test_prefix_separates_two_enumerations_in_one_module():
     source = (
         "ST_ready = 0\nST_sent = 1\n"
         "TASK_NORMAL = 0\nTASK_EVENT_SERVICE = 1\n"
+        "\n\ndef pick(state, task):\n"
+        "    return state in (ST_ready, ST_sent) and task in (TASK_NORMAL, TASK_EVENT_SERVICE)\n"
     )
     enums, _ = _extract(source, "pandaserver/taskbuffer/EventServiceUtils.py")
 
@@ -151,7 +157,8 @@ def test_prefix_separates_two_enumerations_in_one_module():
 
 def test_lone_prefixed_constant_is_not_given_its_own_namespace():
     """A prefix only groups when several constants share it."""
-    enums, _ = _extract("MESSAGE_JSON = 'bad json'\nLATENCY = 'latency'\n",
+    enums, _ = _extract("MESSAGE_JSON = 'bad json'\nLATENCY = 'latency'\n"
+                        "\n\ndef known(text, kind):\n    return text == MESSAGE_JSON or kind == LATENCY\n",
                         "pandaserver/api/v1/common.py")
 
     assert {e.namespace for e in enums} == {"api.common"}
@@ -164,7 +171,7 @@ def test_declared_value_set_is_not_an_index_entry():
     look like the same kind of file, which is what hid the distinction in the
     first place.
     """
-    source = "EC_Kill = 100\nFINAL_TASK_STATUSES = ['done', 'failed']\n"
+    source = "EC_Kill = 100\nFINAL_TASK_STATUSES = ['done', 'failed']\n\n\ndef killed(code):\n    return code == EC_Kill\n"
     enums, coverage = _extract(source)
 
     assert [e.constant for e in enums] == ["EC_Kill"]
@@ -176,7 +183,7 @@ def test_declared_value_set_is_not_an_index_entry():
 
 def test_computed_constants_stay_out_of_the_denominator():
     """A computed value is not a failed extraction, it is a different statement."""
-    source = "EC_Kill = 100\nTIMEOUT = compute_timeout()\nLIMIT = 3 * 60\n"
+    source = "EC_Kill = 100\nTIMEOUT = compute_timeout()\nLIMIT = 3 * 60\n\n\ndef killed(code):\n    return code == EC_Kill\n"
     enums, coverage = _extract(source)
 
     assert [e.constant for e in enums] == ["EC_Kill"]
@@ -185,17 +192,33 @@ def test_computed_constants_stay_out_of_the_denominator():
 
 
 def test_references_are_counted_across_the_whole_corpus():
-    """A constant belongs in a decoding index only if something reads it."""
-    definition = _module("EC_Kill = 100\nEC_Unused = 999\n")
+    """A constant belongs in a decoding index only if something reads it as a code.
+
+    Compared with for identity, stored in a field, listed in a value set or
+    made a dict's key -- anywhere in the corpus.  ``MAX_ROWS`` is compared by
+    order, ``MARGIN`` added to, ``MESSAGE_TASK_ID`` handed to a response:
+    quantities and text no record holds as a code.  ``EC_Unused`` nothing reads.
+    """
+    definition = _module(
+        "EC_Kill = 100\nEC_Stored = 101\nEC_Listed = 102\nEC_Keyed = 103\nEC_Unused = 999\n"
+        "MAX_ROWS = 1000\nMARGIN = 30\nMESSAGE_TASK_ID = 'jediTaskID must be an integer'\n"
+    )
     user = _module(
-        "from x import ErrorCode\nif code == ErrorCode.EC_Kill:\n    pass\n",
+        "from x import ErrorCode\n"
+        "if code == ErrorCode.EC_Kill:\n    pass\n"
+        "job.taskBufferErrorCode = ErrorCode.EC_Stored\n"
+        "retried = [ErrorCode.EC_Listed]\n"
+        "diag = {ErrorCode.EC_Keyed: 'keyed'}\n"
+        "if len(rows) > ErrorCode.MAX_ROWS:\n    deadline = now + ErrorCode.MARGIN\n"
+        "respond(ErrorCode.MESSAGE_TASK_ID)\n",
         "pandaserver/dataservice/user.py",
     )
-    enums, _ = errorcode.extract([definition, user], MAP_ID, VERSION)
+    enums, coverage = errorcode.extract([definition, user], MAP_ID, VERSION)
 
     by_name = {e.constant: e for e in enums}
+    assert sorted(by_name) == ["EC_Keyed", "EC_Kill", "EC_Listed", "EC_Stored"]
     assert by_name["EC_Kill"].references >= 1
-    assert by_name["EC_Unused"].references == 0
+    assert (coverage[0].candidates, coverage[0].explained) == (8, 4)
 
 
 # --------------------------------------------------------------------------- #
@@ -320,10 +343,11 @@ def test_blob_sha_tracks_content_not_position():
 
 def test_anchors_carry_the_content_hash():
     """Without it a rebuild cannot tell whether the enclosing file moved on."""
-    enums, _ = _extract("# killed\nEC_Kill = 100\n")
+    source = "# killed\nEC_Kill = 100\n\n\ndef killed(code):\n    return code == EC_Kill\n"
+    enums, _ = _extract(source)
 
     assert enums[0].anchor is not None
-    assert enums[0].anchor.blob_sha == blob_sha("# killed\nEC_Kill = 100\n")
+    assert enums[0].anchor.blob_sha == blob_sha(source)
 
 
 def test_describe_returns_none_outside_a_git_checkout(tmp_path):
