@@ -2643,6 +2643,15 @@ def scan_binds(
     for node in walk(func):
         if _AT_CALL and ruled_out(node):
             continue
+        if varmap in lists and node is lists[varmap].site:
+            # ``var_names_str, var_map = get_sql_IN_bind_variables(panda_ids, prefix=":PandaID")``, the
+            # statement run with ``var_map`` itself: the list's values, under its one placeholder.
+            held = lists[varmap]
+            assigned = True
+            spelled_keys.add(held.bind)
+            if held.bind == key:
+                keep(Bind(held.values, node), node)
+            continue
         if (
             lists
             and isinstance(node, ast.Expr)
