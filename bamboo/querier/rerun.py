@@ -632,14 +632,8 @@ UNPERSISTED = (KEY_HANDED, KEY_BOUND, KEY_RETURNED, KEY_KEPT, KEY_NO_USE)
 _READS: list = [None, {}]
 
 
-def key_chain(kf, rs) -> tuple[bool, list[str]]:
-    """Whether *kf*'s key comes from *rs*'s rows -- a ``rows`` source at *rs*, or at a statement of *rs*'s owner whose
-    rows are taken by a key that comes from them, read through that statement's own KeyFroms (``reads``) --, and the
-    terms the map did not read on the way there (an ``unread``, or a source not followed).  resetInputToReGenCoJumbo_JEDI
-    sets ready at 5038 the files of 5026's rows; 5026 takes the job's files by the PandaIDs of 5009's rows, and 5009
-    takes those by 5001's datasetID and fileID: 5038's key is 5001's rows' (the movers' O6, 2026-10-29).  Whatever
-    column fills a key on the way counts (KNOWN_ISSUES.md K28).  Another function's rows are not followed: *rs*'s rows
-    are its owner's, and come to no statement before it."""
+def _reads_of(owner: str, line) -> list:
+    """The read KeyFroms (``reads``) of *owner*'s statement at *line*."""
     kfs = key_froms()
     if _READS[0] is not kfs:
         reads: dict[tuple, list] = {}
@@ -647,23 +641,63 @@ def key_chain(kf, rs) -> tuple[bool, list[str]]:
             if getattr(one, "reads", False):
                 reads.setdefault((one.owner, getattr(one, "statement", None)), []).append(one)
         _READS[:] = [kfs, reads]
-    unread, seen, todo = [], set(), [kf]
+    return _READS[1].get((owner, line), [])
+
+
+def same_rows(owner: str, a, b) -> bool:
+    """Whether the rows *owner*'s statement at *a* takes can be those its statement at *b* takes, as the map's read
+    KeyFroms say: both take one table, by a term on a column both compare, and every such term of the two is filled
+    from the same sources, none a value the map did not follow -- insertFilesForDataset_JEDI's 757 takes the dataset's
+    files by datasetSpec's jediTaskID and datasetID, and 923 the dataset's ready and pending ones by the same two.  A
+    term only one of them compares narrows its rows, not where they are taken from."""
+    ra, rb = _reads_of(owner, a), _reads_of(owner, b)
+    tables = {getattr(k, "table", "") for k in ra} & {getattr(k, "table", "") for k in rb}
+
+    def terms(reads: list) -> dict[str, set]:
+        out: dict[str, set] = {}
+        for k in reads:
+            if getattr(k, "table", "") in tables:
+                column = re.split(r"\s*(?:!=|<>|>=|<=|=|<|>|\bIN\b)", k.term, maxsplit=1, flags=re.I)[0].strip().lower()
+                out.setdefault(column, set()).update((s.kind, s.name, getattr(s, "attr", ""), getattr(s, "column", ""),
+                                                      s.site_owner, s.site_line, tuple(getattr(s, "paths", None) or ()))
+                                                     for s in k.sources)
+        return out
+
+    ta, tb = terms(ra), terms(rb)
+    shared = set(ta) & set(tb)
+    return bool(shared) and all(ta[c] and ta[c] == tb[c] and all(s[0] != KEY_UNKNOWN for s in ta[c]) for c in shared)
+
+
+def key_chain(kf, rs) -> tuple[bool, list[str], int | None]:
+    """Whether *kf*'s key comes from *rs*'s rows -- a ``rows`` source at *rs*, or at a statement of *rs*'s owner whose
+    rows are taken by a key that comes from them, read through that statement's own KeyFroms (``reads``), or whose
+    rows can be *rs*'s (``same_rows``) --, the terms the map did not read on the way there (an ``unread``, or a source
+    not followed), and the statement whose rows can be *rs*'s it came through (None for none: *rs*'s own rows, or no
+    way) -- asked only where no way is *rs*'s own.  resetInputToReGenCoJumbo_JEDI sets ready at 5038 the files of
+    5026's rows; 5026 takes the job's files by the PandaIDs of 5009's rows, and 5009 takes those by 5001's datasetID
+    and fileID: 5038's key is 5001's rows' (the movers' O6, 2026-10-29).  insertFilesForDataset_JEDI sets lost at
+    1113 files of 757's rows, the dataset's, and 923 selects the dataset's ready files by the same values: a file 923
+    selects can be the one 1113 writes (the map, 2026-10-31).  Whatever column fills a key on the way counts
+    (KNOWN_ISSUES.md K28).  Another function's rows are not followed: *rs*'s rows are its owner's, and come to no
+    statement before it."""
+    unread, seen, todo = [], {}, [kf]
     while todo:
         one = todo.pop()
         for s in one.sources:
             if s.kind != KEY_ROWS or s.site_owner != rs.owner:
                 continue
             if s.site_line == rs.line:
-                return True, unread
+                return True, unread, None
             if s.site_line in seen:
                 continue
-            seen.add(s.site_line)
-            for back in _READS[1].get((rs.owner, s.site_line), []):
+            seen[s.site_line] = None
+            for back in _reads_of(rs.owner, s.site_line):
                 if back.unread:
                     unread.append(f"{back.term} at {s.site_line} ({back.unread})")
                 unread += [f"{back.term} at {s.site_line} (not followed: {x.name})" for x in back.sources if x.kind == KEY_UNKNOWN]
                 todo.append(back)
-    return False, unread
+    via = next((line for line in seen if same_rows(rs.owner, line, rs.line)), None)
+    return via is not None, unread, via
 
 
 def elsewhere_arms(writers: list, rs, subject: str, arms) -> tuple[int, ...]:
@@ -691,26 +725,30 @@ def elsewhere_arms(writers: list, rs, subject: str, arms) -> tuple[int, ...]:
         for kf in named[line]:
             if not kf.term or kf.unread or any(s.kind == KEY_UNKNOWN for s in kf.sources):
                 return ()
-            mine, unread = key_chain(kf, rs)
+            mine, unread, _ = key_chain(kf, rs)
             if mine or unread:
                 return ()
     return tuple(sorted(arms))
 
 
-def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]], dict[int, list[str]]]:
-    """``(keyed, unread, unpersisted)`` over *arms*, the arms of *rs*'s owner by line.  *keyed*: those whose write the
-    map says names its row by a key filled from *rs*'s rows -- a ``KeyFrom`` of the owner's writing *subject* on a
-    line of the arm's branch (its ``line`` or ``other_lines``), with a ``rows`` source of *rs*'s owner and line, or of
-    a statement of the owner's that takes its rows by a key they fill (``key_chain``)
-    (prepareTasksToBeFinished_JEDI keys the writes of its later loop by the jediTaskID its statements at 3723 and 3768
-    select, past their region).  Whatever column of the rows fills the key counts: the map does not say which
-    (KNOWN_ISSUES.md K28).  *unread*: the others with a row-naming term the map did not read -- its ``unread``, or a
-    value it did not follow -- each with the terms and why: their rows may be *rs*'s too.  *unpersisted*: the others
-    set on an object no write in the function persists -- a KeyFrom of no term, its ``unread`` what the object's
-    fields reach (``UNPERSISTED``) -- each with the object and where its fields go: there is no key here to read,
-    and the write that persists the value, if any, is the caller's or a callee's (datasetManager.run's ``file.status
-    = "failed"`` at 713, a file of the job it hands on)."""
+def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[int, list[str]], dict[int, list[str]], dict[int, list[str]]]:
+    """``(keyed, unread, unpersisted, through)`` over *arms*, the arms of *rs*'s owner by line.  *keyed*: those whose
+    write the map says names its row by a key filled from *rs*'s rows -- a ``KeyFrom`` of the owner's writing *subject*
+    on a line of the arm's branch (its ``line`` or ``other_lines``), with a ``rows`` source of *rs*'s owner and line,
+    or of a statement of the owner's that takes its rows by a key they fill, or whose rows can be *rs*'s
+    (``key_chain``) (prepareTasksToBeFinished_JEDI keys the writes of its later loop by the jediTaskID its statements
+    at 3723 and 3768 select, past their region).  Whatever column of the rows fills the key counts: the map does not
+    say which (KNOWN_ISSUES.md K28).  *unread*: the others with a row-naming term the map did not read -- its
+    ``unread``, or a value it did not follow -- each with the terms and why: their rows may be *rs*'s too.
+    *unpersisted*: the others set on an object no write in the function persists -- a KeyFrom of no term, its
+    ``unread`` what the object's fields reach (``UNPERSISTED``) -- each with the object and where its fields go: there
+    is no key here to read, and the write that persists the value, if any, is the caller's or a callee's
+    (datasetManager.run's ``file.status = "failed"`` at 713, a file of the job it hands on).  *through*: those of
+    *keyed* keyed only by rows that can be *rs*'s, each with the terms and the statement: "fileID=:fileID by
+    insertFilesForDataset_JEDI@757's rows"."""
     keyed: set[int] = set()
+    own: set[int] = set()
+    through: dict[int, list[str]] = {}
     unread: dict[int, list[str]] = {}
     unpersisted: dict[int, list[str]] = {}
     for kf in key_froms():
@@ -719,8 +757,13 @@ def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[i
         lines = set(kf.writes[subject])
         at = {b.line for j in writers if j.owner == rs.owner for b in j.branches
               if b.line in arms and lines & {b.line, *(getattr(b, "other_lines", None) or [])}}
-        if key_chain(kf, rs)[0]:
+        mine, _, via = key_chain(kf, rs)
+        if mine:
             keyed |= at
+            if via is None:
+                own |= at
+            for line in at if via is not None else ():
+                through.setdefault(line, []).append(f"{kf.term} by {rs.owner.split('::')[-1]}@{via}'s rows")
             continue
         if not kf.term and kf.unread in UNPERSISTED:
             to = ", ".join(h.split("::")[-1] for h in getattr(kf, "handed_to", None) or [])
@@ -731,11 +774,13 @@ def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[i
         for line in at if why else ():
             unread.setdefault(line, []).append(f"{kf.term} ({'; '.join(why)})")
     return (sorted(keyed), {line: said for line, said in sorted(unread.items()) if line not in keyed},
-            {line: said for line, said in sorted(unpersisted.items()) if line not in keyed})
+            {line: said for line, said in sorted(unpersisted.items()) if line not in keyed},
+            {line: said for line, said in sorted(through.items()) if line not in own})
 
 
 def _by_line(said: dict[int, list[str]]) -> str:
-    """``keyed_arms``' *unread* or *unpersisted* as a mover's line says it: "4300: PandaID=:PandaID (no bind found)"."""
+    """``keyed_arms``' *unread*, *unpersisted* or *through* as a mover's line says it: "4300: PandaID=:PandaID (no bind
+    found)"."""
     return "; ".join(f"{line}: {', '.join(what)}" for line, what in said.items())
 
 
@@ -793,9 +838,10 @@ def _reached(follow, writers: list, subject: str, observed: str):
                 if callee in writing and asked in crossing_values(rs, callee):
                     yield Way(callee, f"{reader} hands the rows it selects to it", rs)
             continue
-        keyed, unread, unpersisted = keyed_arms(writers, rs, subject, arms)
+        keyed, unread, unpersisted, through = keyed_arms(writers, rs, subject, arms)
         if keyed:
-            yield Way(rs.owner, f"{reader} selects the value, and its rows fill the key of the write(s) at {keyed}", rs)
+            alike = f" ({_by_line(through)}, which take the same table by the same values)" if through else ""
+            yield Way(rs.owner, f"{reader} selects the value, and its rows fill the key of the write(s) at {keyed}{alike}", rs)
         elif unread or unpersisted:
             why = []
             if unread:
@@ -877,7 +923,7 @@ def read_again(writers: list, writing: set[str], subject: str, observed: str, rs
         if any(lo <= line <= hi for line in arms):
             yield Way(r.owner, said, rs)
         else:
-            keyed, _, _ = keyed_arms(writers, r, subject, arms)
+            keyed = keyed_arms(writers, r, subject, arms)[0]
             if keyed:
                 yield Way(r.owner, f"{said}, and they fill the key of the write(s) at {keyed}", rs)
         for owner in r.crosses_to:

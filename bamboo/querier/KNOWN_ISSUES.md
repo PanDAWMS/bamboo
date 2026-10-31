@@ -284,7 +284,25 @@ arm, 241, writes the pilot's own job by the `PandaID` it is handed.  On M d62d62
 leaves 2 calls open), said; `resetInputToReGenCoJumbo_JEDI` at `running` is keyed through its chain.  An arm whose
 key, or a key on the way, the map did not read keeps the mover as before.
 
-*Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]", or "...
+Rows that can be the statement's count as its own (`same_rows`; the map, 2026-10-31): a statement on the way that
+takes one table by a term on a column the selecting statement compares too, every such term of the two filled from
+the same sources and none a value the map did not follow.  `insertFilesForDataset_JEDI` sets lost at 1113 files of
+757's rows, the dataset's, and 923 selects the dataset's ready and pending files by the same `jediTaskID` and
+`datasetID` (datasetSpec's): a file 923 selects can be the one 1113 writes, and read as another row S1 moved the writer
+to by key at `ready`.  A term only one of them compares narrows its rows, not where they come from.  On C4b
+(x13xiiiC4bm), over the nine subjects the movers census asks, 18 (value, statement, write term) rows are keyed so and
+not by the statement's own rows; that one moved S1's verdict.  The others' owners are movers by another way --
+`throttleUserJobs` at `activated`, `unThrottleUserJobs` at `throttled`, `resetFileStatusInJEDI` at `finished`,
+`insertFilesForDataset_JEDI` at `pending`, `_read_unprocessed_inputs` at `ready` -- and only the mover's line can
+move.  A write whose terms are filled from the values the selecting statement compares, with no statement's rows, is
+not read so: `updateJob`'s 619 names its file by the `job` file's fields 597 compares, but 597 and 619 are an `if` and
+its `elif`, which S1 is not given; read alike, 619 would be kept wrongly.  A term the two fill otherwise is not
+read either (`insertFilesForDataset_JEDI`'s 283 takes the parent task's files by `parent_tid`), nor rows of another
+table naming the same object (`getTasksToExecCommand_JEDI`'s 4339, a command naming its task: K16's writer by key).
+
+*Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]" -- with
+"(<arm>: <term> by <function>@<statement>'s rows, which take the same table by the same values)" where only rows
+that can be the statement's fill it --, or "...
 the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept", or "... no write in the
 function persists the value(s) set at [...] (<object> (<where its fields go>)): kept" (the two joined by ", and "
 where a statement has both); for rows that reach none of the arms, "the rows <statements> select(s) reach none of its
@@ -292,7 +310,8 @@ arms [...]: ..." -- "a writer that takes a row by its key" or "; kept: <the reac
 `K14` with the reach.
 *Revisit:* when a census on a new map finds an arm keyed by another column or at a value in `never_at` (v's fields
 make both readable); with objects followed across a call (a field set on an element of a container handed on, a key of
-an object a call returns).
+an object a call returns); with the branches of one turn read as exclusive, when terms filled by the same values can
+be read alike too.
 
 ### K29. A birth is no arm only where the map says every write on its lines makes the row
 

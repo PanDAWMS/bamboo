@@ -2322,7 +2322,7 @@ def test_an_arm_past_the_region_is_the_statements_where_its_rows_fill_the_key_an
     )
     unread = ["PandaID=:PandaID (no bind found)", "jobsetID=:jobsetID (not followed: jsid)"]
     # 3800's rows fill no key: only the unread one may be its
-    assert json.loads(out.splitlines()[-2]) == [[[3913, 4059], {"4300": unread}, {}], [[], {"4300": unread}, {}]]
+    assert json.loads(out.splitlines()[-2]) == [[[3913, 4059], {"4300": unread}, {}, {}], [[], {"4300": unread}, {}, {}]]
     before, keyed, kept = json.loads(out.splitlines()[-1])
     # no arm in the region: before KeyFrom only the helper took the rows; now the owner is a mover by its keyed arms
     # too, and one whose key was not read is kept, said; the helper takes them as before
@@ -2446,12 +2446,84 @@ def test_a_key_filled_through_the_functions_reads_is_the_statements_and_an_arm_k
     )
     keyed, movers, elsewhere = json.loads(out.splitlines()[-1])
     # three statements on, 5035's key is still 5001's rows'
-    assert keyed == [[5035], {}, {}]
+    assert keyed == [[5035], {}, {}, {}]
     assert movers["p/te.py::reset"] == "reset@5001 selects the value, and its rows fill the key of the write(s) at [5035]"
     # each stays a mover; only updateStatus's arm is known to name another row -- hop's key may come from 50's rows
     # through the value not followed, and bare's row is named by nothing the map read
     assert set(movers) == {"p/te.py::reset", "p/jc.py::updateStatus", "p/te.py::hop", "p/jc.py::bare"}
     assert elsewhere == {"p/jc.py::updateStatus": [241]}
+
+
+def test_an_arm_keyed_by_rows_taken_from_the_same_table_by_the_same_values_is_the_selecting_statements(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _MOVERS_MAP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier.rerun import elsewhere_of, keyed_arms
+
+    S, T = "JediFileSpec.status", "JEDI_Dataset_Contents"
+    owners = {n: f"p/tc.py::{n}" for n in ("ins", "both", "par", "unk", "tab", "dis", "val")}
+    writers[:] = [writer(o, branch(1113, "lost")) for o in owners.values()]
+
+    def src(kind, name, attr="", site_owner="", site_line=None):
+        return N(kind=kind, name=name, attr=attr, column="", site_owner=site_owner, site_line=site_line, paths=[])
+
+    def rows(o, line):
+        return src("rows", f"panda:{o}@{line}", site_owner=o, site_line=line)
+
+    def param(name, attr=""):
+        return src("parameter", name, attr)
+
+    tid, did = param("datasetSpec", "JediDatasetSpec.jediTaskID"), param("datasetSpec", "JediDatasetSpec.datasetID")
+    status = [src("constant", "'pending'"), src("constant", "'ready'")]
+
+    def read(o, line, term, *sources, table=T):
+        return N(owner=o, term=term, writes={}, reads=True, statement=line, unread="", table=table, sources=list(sources))
+
+    def write(o, term, *sources):
+        return N(owner=o, term=term, writes={S: [1113]}, reads=False, statement=1130, unread="", table=T, sources=list(sources))
+
+    kfs = []
+    for n, o in owners.items():
+        # 923 selects the dataset's ready and pending files; 757 (none for val) the dataset's files, as each says
+        kfs += [read(o, 923, "jediTaskID=:jediTaskID", param("parent_tid") if n == "par" else src("unknown", "ids") if n == "unk" else tid),
+                read(o, 923, "datasetID=:datasetID", did), read(o, 923, "status=:status", *status)]
+        wide = {"ins": [("jediTaskID=:jediTaskID", tid), ("datasetID=:datasetID", did)],
+                "both": [("jediTaskID=:jediTaskID", tid), ("datasetID=:datasetID", did)],
+                "par": [("jediTaskID=:jediTaskID", tid)], "unk": [("jediTaskID=:jediTaskID", src("unknown", "ids"))],
+                "tab": [("jediTaskID=:jediTaskID", tid), ("datasetID=:datasetID", did)],
+                "dis": [("datasetName=:datasetName", param("datasetSpec", "JediDatasetSpec.datasetName"))], "val": []}[n]
+        kfs += [read(o, 757, term, s, table="JEDI_Datasets" if n == "tab" else T) for term, s in wide]
+        if n == "val":
+            # the write's terms filled from the parameters 923 compares: values alike, no statement's rows
+            kfs += [write(o, "jediTaskID=:jediTaskID", tid), write(o, "datasetID=:datasetID", did),
+                    write(o, "fileID=:fileID", param("fileSpec", "JediFileSpec.fileID"))]
+        elif n == "both":
+            # 923's own rows fill fileID beside 757's; datasetID by 757's alone
+            kfs += [write(o, "fileID=:fileID", rows(o, 757), rows(o, 923)), write(o, "datasetID=:datasetID", rows(o, 757))]
+        else:
+            kfs += [write(o, "fileID=:fileID", rows(o, 757)), write(o, "jediTaskID=:jediTaskID", tid)]
+    mapdump._FRAGMENT[:] = [N(key_froms=kfs)]
+    follow = N(guarded_by=[], reader_statements=[stmt(o, 923, [f"{S}=ready"], [916, 1084]) for o in owners.values()])
+    print(json.dumps([[keyed_arms(writers, rs, S, arms_of(writers, rs.owner, S, "ready")) for rs in follow.reader_statements[:2]],
+                      movers_of(follow, writers, S, "ready"), elsewhere_of(follow, writers, S, "ready")]))
+    """,
+        )
+    )
+    (ins, both), movers, elsewhere = json.loads(out.splitlines()[-1])
+    # 757 takes the dataset's files by the values 923 takes its ready ones by: a file 923 selects can be the one 1113
+    # writes by 757's rows, and the line says through which
+    assert ins == [[1113], {}, {}, {"1113": ["fileID=:fileID by ins@757's rows"]}]
+    assert movers["p/tc.py::ins"] == ("ins@923 selects the value, and its rows fill the key of the write(s) at [1113] (1113: "
+                                      "fileID=:fileID by ins@757's rows, which take the same table by the same values)")
+    # 923's own rows fill one key of the arm: it is 923's, said so, whatever the other key's rows
+    assert both == [[1113], {}, {}, {}]
+    assert movers["p/tc.py::both"] == "both@923 selects the value, and its rows fill the key of the write(s) at [1113]"
+    # a term filled otherwise (the parent task's), another table, no term in common, and terms filled by the same
+    # values but no rows (updateJob's if and elif): the rows are not 923's; a value not followed keeps the mover
+    assert elsewhere == {f"p/tc.py::{n}": [1113] for n in ("par", "tab", "dis", "val")}
+    assert movers["p/tc.py::unk"] == "unk@923 selects the value"
 
 
 def test_a_crossing_hands_on_only_the_values_its_routes_back_up_select(tmp_path):
@@ -2576,7 +2648,7 @@ def test_an_arm_no_write_in_its_function_persists_keeps_the_owner_said_with_wher
     unpersisted = {"713": ["file (no use found)"], "745": ["file (no use found)"], "958": ["tmpFile (no use found)"],
                    "2786": to}
     # 5000 is keyed by 359's rows, whatever else its object reaches; the others are no key the map could not read
-    assert json.loads(out.splitlines()[-3]) == [[5000], {"4300": ["PandaID=:PandaID (no bind found)"]}, unpersisted]
+    assert json.loads(out.splitlines()[-3]) == [[5000], {"4300": ["PandaID=:PandaID (no bind found)"]}, unpersisted, {}]
     said = "713: file (no use found); 745: file (no use found); 958: tmpFile (no use found); 2786: " + ", ".join(to)
     # with no keyed arm both are said, joined; 5000's object is kept by the function, so it is one of them
     both, alone = (json.loads(line)["d/dm.py::run"] for line in out.splitlines()[-2:])
