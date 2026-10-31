@@ -118,6 +118,17 @@ whose run is every call in the window: G's round asked 492 marks, 9 of them a wr
 1 MB in all 18 files (bamboo-e1).  Such a mark's key records are read as a run cut at both ends (`Log.partial`: rule
 8 reads no row missing from it), so a mover whose run it is is followed on positive evidence only.  A shared mark
 seen in one piece is still asked, and comes back cut.
+A mark of theirs whose rows below WARNING all start with fixed text (`rows.mark_heads`) is asked for those rows and
+every line at WARNING and above (`recorded._narrowed`, 2026-10-31; the harness's to-querier-63): a call of
+getTasksToBeProcessed_JEDI was 382,661 lines in MT-ready-stuck's round 5, 381,600 of them its callee's, one per task
+listed, and a second of them stopped the recorder's paging.  A run of such a mark holds no other function's line below
+WARNING, and rule 8 and E6 read such a row as not searched (`Run.holds`; said on the run's line).  A message the
+shapes read as a leading hole (an f-string's expression, a conditional) leaves the mark asked whole: insertNewJob's
+rows start with `job.PandaID`.  A narrowed ask is not read from a record of the whole mark cut at 1 MB over its window
+(`recorded._cut_over`): it is asked anew, so the next round reads what the cut left unread.  H2 still asks every mark
+whole (it reads a candidate's rows in any run of the key, and a writer handed its caller's logger prints under the
+caller's mark); by the harness's count over rounds 1-5 (to-querier-64), only getTasksToBeProcessed_JEDI's marks come
+near a page's stop, and a round that stops on one is left to the recorder's split of the stopped second.
 
 ### K40. A truncated file with no `searched` is read up to its last record, whichever string's
 

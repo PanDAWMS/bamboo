@@ -122,6 +122,7 @@ from bamboo.querier.records import (
     CORPUS,
     FileLogs,
     Logs,
+    Owners,
     Unrecorded,
     Window,
     keyed,
@@ -1154,7 +1155,7 @@ class Passes:
     arms: list[Arm]
     key: str
     asking: W.Asking
-    owners: frozenset[str] | None = None
+    owners: Owners | None = None
 
 
 @dataclass
@@ -1695,7 +1696,7 @@ class Rerun:
             if key not in before and "<" in key:
                 self.row_facts[expr] = (printed, env.values[key].source)
 
-    def runs(self, key: str, names: list[str], asking: W.Asking, owners: frozenset[str] | None = None) -> dict[str, list]:
+    def runs(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None) -> dict[str, list]:
         """The key's runs in each of the logs *names* the door can be asked for, over *asking*'s window and machine.
 
         Every log is asked before a stop, so that a door short of answers names all the step's asks at once.
@@ -1704,7 +1705,7 @@ class Rerun:
         self._stop_unanswered(unanswered)
         return out
 
-    def _ask(self, key: str, names: list[str], asking: W.Asking, owners: frozenset[str] | None = None) -> tuple[dict[str, list], list, dict[str, list[str]]]:
+    def _ask(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None) -> tuple[dict[str, list], list, dict[str, list[str]]]:
         """``runs()`` without the stop: the runs found, the asks the door had no answer for, and what of the window each
         log was not searched for (``Log.holes``)."""
         window = self.window(asking)
@@ -2951,8 +2952,11 @@ class Rerun:
                 del movers[owner]
         # a writer that takes a row by its key: asked over the window's last part alone (KNOWN_ISSUES.md K16)
         keyed = by_key_of(writers, movers, q.subject, q.observed)
-        # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark
-        owners = frozenset(o.split("::")[-1] for o in [*movers, *keyed])
+        # the functions whose runs S1 reads, as _of_mover names them: the door asks no other DB proxy method's mark,
+        # and theirs for their own rows (a name two of them share: whole)
+        ids = list(dict.fromkeys([*movers, *keyed]))
+        names = [o.split("::")[-1] for o in ids]
+        owners = {n: R.mark_heads(*o.split("::", 1)) if names.count(n) == 1 else () for n, o in zip(names, ids, strict=True)}
         wakes = wakers_of(follow, writers, q.subject, q.observed)
         self.say(f"selected by {follow.selected_by}; guarded by {[g.owner for g in follow.guarded_by]}")
         for owner, why in movers.items():
@@ -3210,7 +3214,7 @@ class Rerun:
                 "closure": answer.closure, "own_arms": [s for s in starts if s in destination.arms]}
 
     def _ask_mover(self, q: Stuck, owner: str, to_hand: list[str], asking: W.Asking, rest: bool = True,
-                   owners: frozenset[str] | None = None):
+                   owners: Owners | None = None):
         """S1's asks for one mover: the window's last part first (*asking*, ``STUCK_SPAN``), and the rest of the window
         (``W.rest``) only where every ask of the last part was answered whole and held no run of its own -- no pass in
         six hours is not no pass in the window, and a mover that ran and stopped is the one a stuck value most needs

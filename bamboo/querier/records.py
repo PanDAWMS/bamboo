@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 
 #: the panda-server tree every reading here is taken from: ``PANDA_PIN``, a pinned copy (a ``git archive`` of the
 #: commit the logs were written by), so every run reads a tree no one edits.  Required: a default to a live tree
@@ -281,6 +281,9 @@ class Log:
     #: ``(machine, mark) -> why`` for the marks whose records are the key's alone, the rest not asked: a run of one is
     #: read as cut at both ends, and rule 8 reads no row missing from it (a recorded search asked for S1's movers)
     partial: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: ``(machine, mark) -> method`` for the marks asked for the method's own rows and every line at WARNING and above
+    #: (``recorded._read``): a row of another function below WARNING is not searched in a run of one
+    narrowed: dict[tuple[str, str], str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -325,6 +328,10 @@ def read_log(path: str) -> Log:
 
 #: (from, to) in the statuslog's form, ``YYYY-MM-DD HH:MM:SS``
 Window = tuple[str, str]
+#: the functions an asker reads runs of, by the name ``rerun._of_mover`` reads in a method's mark, each with the fixed
+#: text its own rows below WARNING start with (``rows.mark_heads``; empty where one may start with a hole): its mark
+#: is asked for those rows and every line at WARNING and above
+Owners = Mapping[str, tuple[str, ...]]
 
 
 class Unrecorded(Exception):
@@ -353,7 +360,7 @@ class Logs(Protocol):
         ...
 
     def log(
-        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None
     ) -> Log:
         """*owners*: the functions the asker reads runs of, as ``rerun._of_mover`` names them, or None for any."""
         ...
@@ -381,7 +388,7 @@ class FileLogs:
         return [name for name in self._logs if name in wanted]
 
     def log(
-        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None
     ) -> Log:
         return self._logs[name]
 
@@ -413,7 +420,14 @@ class Run:
     def has_level(self, level: str) -> bool:
         return any(r.level == level for r in self.records)
 
-    def would_print(self, level: str) -> bool:
+    def holds(self, func: str | None, level: str) -> bool:
+        """Whether the run's records hold every line *func* prints through its mark at *level*: not where the door
+        asked the mark for another method's rows (``Log.narrowed``) and the level is below WARNING; *func* None for a
+        reader that does not say whose row it reads."""
+        method = self.log.narrowed.get((self.machine, self.token))
+        return method is None or (func is not None and func == method) or LEVEL_RANK.get(level, 0) >= LEVEL_RANK["WARNING"]
+
+    def would_print(self, level: str, func: str | None = None) -> bool:
         """Whether a row at *level* missing from this run says it was not printed (rule 8).
 
         A logger passes every level at or above its threshold, so a run that
@@ -440,11 +454,14 @@ class Run:
         row that prints before it is missing whether it printed or not (a
         getJobs call's ``Start`` read as absent, and the call that sent the
         job was excluded).  A run whose mark holds the key is whole in it.  Nor in a run of a mark whose other records
-        were not asked (``Log.partial``).
+        were not asked (``Log.partial``), nor for a row of *func* a run asked for another's rows does not hold
+        (:meth:`holds`).
         """
         if self.log.extract_key and not keyed(self.log.extract_key).search(self.token):
             return False
         if (self.machine, self.token) in self.log.partial:
+            return False
+        if not self.holds(func, level):
             return False
         if self.log.whole is not None and not self.log.whole(self.machine, self.first, self.last):
             return False
@@ -471,9 +488,11 @@ class Run:
         where = f"{self.log.name}@{self.machine.split('.')[0]}" if self.machine else self.log.name
         cut = self.log.edges(self.machine, self.first, self.last) if self.log.edges is not None and self.machine else ""
         cut = self.log.partial.get((self.machine, self.token), cut)
+        method = self.log.narrowed.get((self.machine, self.token))
+        asked = f"; asked for {method}'s rows and WARNING and above" if method else ""
         return (
             f"{where} token={self.token} {len(self.records)} record(s) "
-            f"{self.first} .. {self.last} (key on {len(self.found_by)}{'; read as cut: ' + cut if cut else ''})"
+            f"{self.first} .. {self.last} (key on {len(self.found_by)}{'; read as cut: ' + cut if cut else ''}{asked})"
         )
 
 
@@ -482,9 +501,12 @@ def runs_for(log: Log, key: str) -> list[Run]:
     is two runs (a file handed in is one machine's)."""
     pattern = keyed(key)
     hits = [r for r in log.records if pattern.search(r.message) or (r.token and pattern.search(r.token))]
-    runs: list[Run] = []
-    for mark in dict.fromkeys((r.machine, r.token) for r in hits if r.token):
-        runs.append(
-            Run(log, mark[1], [r for r in log.records if (r.machine, r.token) == mark], [r for r in hits if (r.machine, r.token) == mark])
-        )
-    return runs
+    # each mark's records in one pass over the log, not one pass a mark: a log of thousands of marks was read again for
+    # each (MT-running-stuck's day-long marks: 879 of its 928 s under cProfile)
+    by_mark: dict[tuple[str, str], list[Record]] = {}
+    for r in log.records:
+        by_mark.setdefault((r.machine, r.token), []).append(r)
+    found: dict[tuple[str, str], list[Record]] = {}
+    for r in hits:
+        found.setdefault((r.machine, r.token), []).append(r)
+    return [Run(log, mark[1], by_mark[mark], held) for mark, held in found.items() if mark[1]]

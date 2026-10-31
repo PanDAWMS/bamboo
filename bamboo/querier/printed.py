@@ -1571,7 +1571,8 @@ def _handler_rule(w: Walker, fn: R.Function, sn: R.Seen, paths: list[Path]) -> l
     exception did not happen.  A TB with no handler is the callers' (lib/callers,
     ``P_FOLLOW_OUT``): their traceback holds this function's frames too, and a
     caller tied only by ``same?`` must print in the run first.  ``LOG``: a row at the top of the handler whose
-    absence counts (``Row.absence_counts``) is missing from the run, a run of a file it lands in (``Row.lands_in``).
+    absence counts (``Row.absence_counts``) is missing from the run, a run of a file it lands in (``Row.lands_in``)
+    asked for its lines (``Run.holds``).
     """
     raised: tuple[bool, set[int] | None] | None = None
     out = []
@@ -1590,7 +1591,8 @@ def _handler_rule(w: Walker, fn: R.Function, sn: R.Seen, paths: list[Path]) -> l
                 continue
         elif cls == "LOG" and handler is not None:
             top = [fn.row_at(st) for st in handler.body]
-            if any(r is not None and r.absence_counts(sn.mode) and r.lands_in(sn.run.log.name) and not sn.present(r) for r in top):
+            if any(r is not None and r.absence_counts(sn.mode) and r.lands_in(sn.run.log.name) and sn.run.holds(r.func, r.level)
+                   and not sn.present(r) for r in top):
                 w.dropped["E6 handler"] += 1
                 continue
         out.append(p)

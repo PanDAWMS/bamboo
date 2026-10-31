@@ -883,6 +883,37 @@ def test_the_record_door_answers_a_narrower_ask_from_a_wider_record_by_the_lines
     ]
 
 
+def test_the_record_door_asks_a_narrower_ask_anew_where_the_wider_record_was_cut_over_its_window(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            W, AT = ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), ("2026-09-28 08:31:10", "2026-09-28 08:31:15")
+            A = "insertNewJob < <JediTaskID=111 idPool=3 >"
+            hit = {**line("08:31:12", "12345 -> defined", A), "offset": 150}
+            key_rec = record(Ask("panda-x.log", ("12345",), W), {M1: answered({**TODAY, "records": [hit]})})
+            got = []
+            # the bare method's record cut at 1 MB at 08:31:12, inside the window; then the same with the record saying
+            # every string was read to 08:35:00; then the tagged mark's own record, cut alike
+            for ask, more in ((("insertNewJob",), {}), (("insertNewJob",), {"searched": [["2026-09-28 06:40:00", "2026-09-28 08:35:00"]]}),
+                              ((A,), {})):
+                cut = record(Ask("panda-x.log", ask, W), {M1: answered({**TODAY, "truncated": True, **more, "records": [
+                    {**line("08:31:11", "start", A), "offset": 100}, hit]})})
+                log, asks = ask_of([key_rec, cut], "panda-x.log", "12345", AT, M1)
+                got.append([[a["strings"] for a, _ in asks], log.holes if log else None])
+            print(json.dumps(got))
+            """),
+        )
+    )
+    cut, searched, own = json.loads(out)
+    # an ask of the tagged mark reads fewer lines a second than the bare method's cut one: asked anew
+    assert cut == [[["insertNewJob < <JediTaskID=111 idPool=3 >"]], None]
+    # a cut record that read every string through the window answers it, as does an ask's own record, cut or not
+    assert searched == [[], []]
+    assert own[0] == [] and own[1] != []
+
+
 def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared_one_as_cut(tmp_path):
     out = _ok(
         _run(
@@ -898,7 +929,7 @@ def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared
             key_rec = record(Ask("panda-x.log", (K,), W), {M1: answered({**TODAY, "records": hits})})
             Path("k.jsonl").write_text(json.dumps(key_rec) + "\\n")
             asked = {}
-            for label, owners in (("s1", frozenset({"getX", "upd"})), ("any", None)):
+            for label, owners in (("s1", {"getX": (), "upd": ()}), ("any", None)):
                 try:
                     RecordedLogs(["k.jsonl"]).log("panda-x.log", K, W, owners=owners)
                 except Unrecorded as e:
@@ -907,7 +938,7 @@ def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared
             tok_rec = record(tok_ask, {M1: answered({**TODAY, "records": [hits[1], {**line("08:31:13", "done", OWN), "offset": 21},
                                                                            hits[3], {**line("08:35:01", "end", WORKER), "offset": 41}]})})
             Path("t.jsonl").write_text(json.dumps(tok_rec) + "\\n")
-            log = RecordedLogs(["k.jsonl", "t.jsonl"]).log("panda-x.log", K, W, owners=frozenset({"getX", "upd"}))
+            log = RecordedLogs(["k.jsonl", "t.jsonl"]).log("panda-x.log", K, W, owners={"getX": (), "upd": ()})
             runs = {r.token: [len(r.records), r.would_print("DEBUG"), r.describe()] for r in runs_for(log, K)}
             print(json.dumps([asked, runs, log.notes]))
             """),
@@ -925,6 +956,101 @@ def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared
     assert runs["getX < vo=None label=None >"][:2] == [2, False] and "a mark the method's calls share" in runs["getX < vo=None label=None >"][2]
     assert runs["push < 2026-09-28/08:33:00.0 >"][:2] == [1, False] and "a method no step asked reads" in runs["push < 2026-09-28/08:33:00.0 >"][2]
     assert notes == ["2 mark(s) read from the key's records alone, as cut: a mark the method's calls share; a method no step asked reads"]
+
+
+def test_the_record_door_asks_an_s1_method_mark_for_its_own_rows_and_a_run_of_it_holds_no_other_functions_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            K, W, TOK = "52410322", ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), "getX < vo=atlas pid=1 >"
+            hit = {**line("08:31:12", f"getting jediTaskID={K}", TOK), "offset": 20}
+            warn = {"head": True, "cut": False, "offset": 40,
+                    "lines": [f"2026-09-28 08:31:15,000 panda.log.X: WARNING  {TOK} too many datasets"]}
+            # the call's lines: its own rows, a callee's line for another task written with its logger, a warning
+            whole = [{**line("08:31:10", "start label=managed", TOK), "offset": 10}, hit,
+                     {**line("08:31:13", "jediTaskID=1 datasetID=2 tmpNumFiles=3", TOK), "offset": 30}, warn,
+                     {**line("08:31:16", "returning 1 tasks", TOK), "offset": 50}]
+            Path("k.jsonl").write_text(json.dumps(record(Ask("panda-x.log", (K,), W), {M1: answered({**TODAY, "records": [hit]})})) + "\\n")
+            Path("t.jsonl").write_text(json.dumps(record(Ask("panda-x.log", (TOK,), W, M1), {M1: answered({**TODAY, "records": whole})})) + "\\n")
+            got = {}
+            for label, heads in (("narrowed", ("getting jediTaskID=", "returning ", "start label=")), ("whole", ())):
+                try:
+                    RecordedLogs(["k.jsonl"]).log("panda-x.log", K, W, owners={"getX": heads})
+                except Unrecorded as e:
+                    asked = [list(a.canonical()["strings"]) for a, _ in e.asks]
+                log = RecordedLogs(["k.jsonl", "t.jsonl"]).log("panda-x.log", K, W, owners={"getX": heads})
+                run, = runs_for(log, K)
+                got[label] = [asked, [r.message for r in run.records],
+                              [run.would_print(level, func) for level, func in (("DEBUG", "getX"), ("DEBUG", "f"), ("DEBUG", None), ("WARNING", "f"))],
+                              run.describe(), log.notes]
+            print(json.dumps(got))
+            """),
+        )
+    )
+    got = json.loads(out)
+    asked, messages, would, described, notes = got["narrowed"]
+    # the mark followed by each head of the method's own rows, and the mark after each level from WARNING up
+    assert sorted(asked[0]) == sorted([
+        "getX < vo=atlas pid=1 > getting jediTaskID=", "getX < vo=atlas pid=1 > returning ", "getX < vo=atlas pid=1 > start label=",
+        "WARNING  getX < vo=atlas pid=1 >", "ERROR    getX < vo=atlas pid=1 >", "CRITICAL getX < vo=atlas pid=1 >"]) and len(asked) == 1
+    # answered from the whole mark's record by the lines holding them: not the callee's line for another task
+    assert messages == ["start label=managed", "getting jediTaskID=52410322", "too many datasets", "returning 1 tasks"]
+    # a row of the method missing from the run is evidence; another function's below WARNING, or a row not said whose,
+    # is not searched; at WARNING and above every line was asked
+    assert would == [True, False, False, True]
+    assert "asked for getX's rows and WARNING and above" in described
+    assert notes[-1] == "1 mark(s) asked for their method's own rows and every line at WARNING and above: ['getX']"
+    # a method whose rows do not all start with fixed text: its mark asked whole, as before
+    asked, messages, would, described, notes = got["whole"]
+    assert asked == [["getX < vo=atlas pid=1 >"]] and len(messages) == 5 and would == [True, True, True, True]
+    assert "asked for" not in described
+
+
+_HEADS = """
+def h(self, tmp_log, x):
+    tmp_log.debug("start")
+    tmp_log.info(f"got {x} rows")
+    tmp_log.error(f"{x} failed")
+    if x:
+        msg = "done"
+    else:
+        msg = "skipped"
+    tmp_log.debug(msg)
+
+
+def k(self, tmp_log, x):
+    tmp_log.debug("start")
+    tmp_log.debug(f"{x} rows")
+
+
+def c(self, tmp_log, x):
+    tmp_log.debug("start")
+    tmp_log.debug("done" if x else "skipped")
+"""
+
+
+def test_a_methods_mark_heads_are_its_own_rows_below_warning_and_none_where_one_starts_with_a_hole(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_HEADS)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+
+            R.ROWS_FROM = "walk"
+            print(json.dumps([R.mark_heads("pandaserver/a.py", f) for f in ("h", "k", "c")]))
+            """,
+        )
+    )
+    h, k, c = json.loads(out.splitlines()[-1])
+    # each shape's leading text, of every row below WARNING (a message bound in two branches: both); the error row is
+    # asked by its level, whatever it starts with
+    assert h == ["done", "got ", "skipped", "start"]
+    # a row that may start with anything -- a leading hole, an expression read as one -- and the mark is asked whole
+    assert k == [] and c == []
 
 
 def test_the_record_door_widens_once_past_an_end_and_reads_a_run_still_there_as_cut(tmp_path):
@@ -3125,6 +3251,60 @@ def test_a_row_proves_its_arm_only_by_a_record_no_other_row_of_its_function_prin
     assert not any("print only on a path through it" in r for r in got["f"][1])
     # g's other arm prints another text: the record is the arm's own
     assert got["g"] == ["positive", ["row(s) [17] print only on a path through it"]]
+
+
+_NARROWED = """
+def f(self, job, ok):
+    self.logger.debug("start f")
+    if ok:
+        job.jobStatus = "activated"
+        self.logger.debug("activated it in f")
+    self.logger.debug("end f")
+
+
+def g(self, job, ok):
+    self.logger.debug("start g")
+    if ok:
+        job.jobStatus = "activated"
+        self.logger.debug("activated it in g")
+    self.logger.debug("end g")
+"""
+
+
+def test_rule_8_reads_a_row_of_another_function_than_the_one_a_run_was_asked_for_as_not_searched(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_NARROWED)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "x.log").write_text("".join(stamp.format(i, m) for i, m in enumerate(("start f", "end f", "start g", "end g"))))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import records
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, judge
+
+            records.level_filters = lambda: []
+            R.ROWS_FROM = "walk"
+            got = {}
+            for label, narrowed in (("whole", None), ("f's rows", "f")):
+                run, = runs_for(read_log("x.log"), "1")
+                if narrowed:
+                    run.log.narrowed = {(run.machine, run.token): narrowed}
+                for func, line in (("f", 5), ("g", 13)):
+                    c = Candidate("pandaserver/a.py", func, [line], [run.log.name], run=run)
+                    v, = judge([c], {run.log.name: [run]}, question_run=run).verdicts
+                    got[f"{label} {func}"] = v.kind
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # a run asked whole: each arm's row missing is evidence
+    assert got["whole f"] == got["whole g"] == "excluded"
+    # a run asked for f's rows alone: f's missing row still is; g's below WARNING was not searched
+    assert got["f's rows f"] == "excluded" and got["f's rows g"] != "excluded"
 
 
 def test_h2_reads_a_window_in_one_run_only_where_it_is_the_one_run_of_one_log_at_it(tmp_path):

@@ -559,7 +559,7 @@ def judge(
                     continue
                 if sn.present(row):
                     elsewhere = other_elements(fn, stmt, row, sn, env) if LOOP_ELEMENT else ""
-                    if elsewhere and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level):
+                    if elsewhere and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func):
                         absent.append(row.line)
                         per_element.append(elsewhere)
                         continue
@@ -571,7 +571,7 @@ def judge(
                             for expr, val in row.capture(run.records[i]).items():
                                 if re.fullmatch(rf"[\w.]+\.{re.escape(subject)}", expr) and val.strip() != observed:
                                     wrong_value.append(f"{row.line} shows {expr}={val.strip()}")
-                elif (trust := R.absence_trusted(row, run.log, mode))[0] and run.would_print(row.level):
+                elif (trust := R.absence_trusted(row, run.log, mode))[0] and run.would_print(row.level, row.func):
                     absent.append(row.line)
                 else:
                     neutral.append(row.line)

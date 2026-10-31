@@ -53,8 +53,9 @@ of the log when no machine is named, so the wider record holds every file the as
 the strings; the files past the ask's window only add seconds that were searched.  A line holding one of the ask's
 strings holds one of the record's, so the record returned it: the record is read for the records whose lines hold the
 ask's strings, and a file it cut is read as far as the record read it (an ask that now names a mark with its tag, or
-drops a mark, needs no new round).  It is read for the ask's machine alone, and a machine an every-machine
-record does not name holds no file of the log there.  The log's notes say which record answered.
+drops a mark, needs no new round) -- unless the cut leaves part of the ask's window unread: an ask of fewer lines
+may come back whole there, so it is asked anew (``_cut_over``).  It is read for the ask's machine alone, and a machine
+an every-machine record does not name holds no file of the log there.  The log's notes say which record answered.
 """
 from __future__ import annotations
 
@@ -64,7 +65,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from bamboo.querier.records import PREFIX, STAMP, Log, Record, Unrecorded, Window, keyed
+from bamboo.querier.records import (
+    PREFIX,
+    STAMP,
+    Log,
+    Owners,
+    Record,
+    Unrecorded,
+    Window,
+    keyed,
+)
 
 EDGE = datetime.timedelta(minutes=10)
 #: the windows are on the database's clock (statuslog, as_of); a log's stamps are its machine's.  The server's statuslog rows fell inside their runs' log times to the second (bamboo-e1,
@@ -254,6 +264,33 @@ class _Gathered:
         return out
 
 
+def _cut_over(record: dict, want: dict) -> bool:
+    """Whether *record* has a file cut at 1 MB (``truncated``) that leaves part of *want*'s window unread on its
+    machine: read up to its last record returned, or inside its ``searched`` stretches where it names them.  An ask of
+    fewer lines a second may come back whole there, so it is asked anew rather than read from the cut one: round 5's
+    getTasksToBeProcessed_JEDI marks, cut where one call wrote thousands of its callee's lines in a second, left
+    MT-ready-stuck 188 lines not searched; asked for the method's own rows (``_narrowed``), they are asked again."""
+    lo, hi = want["window"]
+    for machine, got in record.get("machines", {}).items():
+        if want["machine"] not in (None, machine):
+            continue
+        for f in got.get("files", []):
+            if not (f.get("truncated") and f.get("covers")):
+                continue
+            start, end = f["covers"]
+            a, b = max(lo, start or lo), min(hi, end)
+            if a > b:
+                continue  # the file holds none of the window
+            if f.get("searched") is not None:
+                read = [(s, e) for s, e in f["searched"]]
+            else:
+                stamps = [r["lines"][0][:19] for r in f.get("records", []) if r.get("head")]
+                read = [(start or a, max(stamps))] if stamps else []
+            if not any(s <= a and b <= e for s, e in read):
+                return True
+    return False
+
+
 def _record(machine: str, file: str, r: dict) -> Record:
     head, *rest = r["lines"]
     m = PREFIX.match(head) if STAMP.match(head) else None
@@ -300,11 +337,11 @@ class RecordedLogs:
         return list(dict.fromkeys(wanted))
 
     def log(
-        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: frozenset[str] | None = None
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None
     ) -> Log:
         if window is None:
             raise ValueError(f"{name}: the recorded logs are asked over a window")
-        at = (name, key, window, machine, owners)
+        at = (name, key, window, machine, None if owners is None else tuple(sorted(owners.items())))
         if at not in self._logs:
             self._logs[at] = self._read(name, key, window, machine, owners)
         return self._logs[at]
@@ -322,13 +359,14 @@ class RecordedLogs:
     def _within(self, ask: Ask) -> dict | None:
         """*ask*'s answer from the record of a wider ask (the module's doc), or None where none holds it: a record of
         the ask's own strings first, then its own machine's record before every machine's, the fewest strings, the
-        narrowest window."""
+        narrowest window.  A record of other strings cut at 1 MB over the ask's window answers none (:func:`_cut_over`)."""
         want = ask.canonical()
         lo, hi = want["window"]
         found = [
             r for r in self._alike.get(_alike(want), [])
             if r["ask"]["machine"] in (None, want["machine"]) and r["ask"]["window"][0] <= lo and hi <= r["ask"]["window"][1]
             and all(any(s in w for s in r["ask"]["strings"]) for w in want["strings"])
+            and (r["ask"]["strings"] == want["strings"] or not _cut_over(r, want))
         ]
         if not found:
             return None
@@ -344,7 +382,7 @@ class RecordedLogs:
         return {**record, **only, "ask": want, "machines": machines,
                 "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')}{strings})"}
 
-    def _read(self, name: str, key: str, window: Window, machine: str | None, owners: frozenset[str] | None = None) -> Log:
+    def _read(self, name: str, key: str, window: Window, machine: str | None, owners: Owners | None = None) -> Log:
         notes: list[str] = []
         (first,) = self._get([(Ask(name, (key,), window, machine), "")], notes)
         if machine is not None and first.get("machines", {}).get(machine, {}).get("status") == "not listed":
@@ -355,7 +393,8 @@ class RecordedLogs:
 
         # the marks that do not hold the key: their records need not -- every such mark, near the window or not
         # (KNOWN_ISSUES.md K13); for an asker that reads some functions' runs alone, a DB proxy method's mark is asked
-        # only where it is one of theirs and its run can be made whole by it (_partial)
+        # only where it is one of theirs and its run can be made whole by it (_partial), and for the method's own rows
+        # and every line at WARNING and above where its rows below WARNING all start with fixed text (_narrowed)
         pattern = keyed(key)
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
@@ -363,8 +402,10 @@ class RecordedLogs:
                 marks.setdefault(r.machine, set()).add(r.token)
         partial = _partial(got, marks, owners)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
+        narrowed = _narrowed(marks, owners)
         why = "the records of the key's runs whose mark does not hold the key"
-        for record in self._get([(Ask(name, tuple(sorted(t)), window, m), why) for m, t in sorted(marks.items())], notes):
+        asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners))), window, m), why) for m, t in sorted(marks.items())]
+        for record in self._get(asks, notes):
             got.add(record)
 
         # the ends of what was searched: widened past once, where a part of a run that reaches the window lies near one
@@ -372,7 +413,7 @@ class RecordedLogs:
         for (m, token), lo, hi in _runs(got, pattern, window):
             if (m, token) in partial:
                 continue
-            strings = {key} if pattern.search(token) else {token}
+            strings = {key} if pattern.search(token) else _strings(m, {token}, narrowed, owners)
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
             # again), nor past today's file's end: the run is read as cut there
             if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0]:
@@ -387,9 +428,13 @@ class RecordedLogs:
         log.whole = _whole_in(got)
         log.edges = _edges_in(got)
         log.partial = partial
+        log.narrowed = narrowed
         if partial:
             kinds = sorted(set(partial.values()))
             notes.append(f"{len(partial)} mark(s) read from the key's records alone, as cut: {'; '.join(kinds)}")
+        if narrowed:
+            methods = sorted(set(narrowed.values()))
+            notes.append(f"{len(narrowed)} mark(s) asked for their method's own rows and every line at WARNING and above: {methods}")
         if not got.asked:
             notes.append("no machine lists it: the log is on none")
         if got.without:
@@ -404,7 +449,7 @@ class RecordedLogs:
 _METHOD_MARK = re.compile(r"([A-Za-z_]\w*) <")
 
 
-def _partial(got: _Gathered, marks: dict[str, set[str]], owners: frozenset[str] | None) -> dict[tuple[str, str], str]:
+def _partial(got: _Gathered, marks: dict[str, set[str]], owners: Owners | None) -> dict[tuple[str, str], str]:
     """The marks among *marks* (``machine -> the marks not holding the key``) not asked for whole, each with why, for
     an asker that reads the runs of *owners* alone (None: every mark is asked).  A mark naming no method is a worker's,
     any function's of it, and is asked.  A DB proxy method's mark of no owner is not: no run of it is read.  Nor is an
@@ -428,6 +473,40 @@ def _partial(got: _Gathered, marks: dict[str, set[str]], owners: frozenset[str] 
     return out
 
 
+def _narrowed(marks: dict[str, set[str]], owners: Owners | None) -> dict[tuple[str, str], str]:
+    """``(machine, mark) -> method`` for the marks among *marks* asked for the method's own rows: an owner's whose rows
+    below WARNING all start with fixed text (``rows.mark_heads``).  The readers of its run read its own rows and the
+    tracebacks its handlers print (``dump_error_message`` writes at ERROR), and a row of another function below
+    WARNING in it as not searched (``records.Run.holds``).  A call of getTasksToBeProcessed_JEDI is thousands of lines
+    its callee ``_make_dicts_tasks_datasets_with_unprocessed_inputs`` writes with its logger, one per task listed
+    (381,600 of 382,661 in MT-ready-stuck, the harness's round 5): no reader of the method reads them, and a second of
+    them is more than a page, which stops the recorder (to-querier-63)."""
+    if owners is None:
+        return {}
+    out = {}
+    for machine, tokens in marks.items():
+        for token in tokens:
+            method = _METHOD_MARK.match(token)
+            if method is not None and owners.get(method[1]):
+                out[(machine, token)] = method[1]
+    return out
+
+
+def _strings(machine: str, tokens: set[str], narrowed: dict[tuple[str, str], str], owners: Owners | None) -> set[str]:
+    """What the records of *tokens* on *machine* are asked by: a mark, or -- one asked for its method's rows -- the mark
+    and a blank before each head, and the level padded to 8 and a blank before the mark at each level from WARNING up
+    (PanDA's ``%(levelname)-8s %(message)s``; LogWrapper and MsgWrapper write the mark, a blank, the message)."""
+    out = set()
+    for token in tokens:
+        method = narrowed.get((machine, token))
+        if method is None or owners is None:
+            out.add(token)
+            continue
+        out |= {f"{token} {head}" for head in owners[method]}
+        out |= {f"{level:<8} {token}" for level in ("WARNING", "ERROR", "CRITICAL")}
+    return out
+
+
 def _runs(got: _Gathered, pattern, window: Window) -> list[tuple[tuple[str, str], tuple | None, tuple | None]]:
     """``((machine, mark), lo, hi)`` of every run the key is in that reaches *window*: *lo* the searched stretch the
     first record of its part near the window is in, as ``(start, end, first)``, and *hi* the one its last is in, as
@@ -438,9 +517,13 @@ def _runs(got: _Gathered, pattern, window: Window) -> list[tuple[tuple[str, str]
     """
     lo_w, hi_w = _t(window[0]) - EDGE, _t(window[1]) + EDGE
     hits = {(r.machine, r.token) for r in got.records.values() if r.token and (pattern.search(r.message) or pattern.search(r.token))}
+    stamps_of: dict[tuple[str, str], list[datetime.datetime]] = {}
+    for r in got.records.values():
+        if (r.machine, r.token) in hits:
+            stamps_of.setdefault((r.machine, r.token), []).append(_t(r.stamp))
     out = []
     for mark in sorted(hits):
-        stamps = sorted(_t(r.stamp) for r in got.records.values() if (r.machine, r.token) == mark)
+        stamps = sorted(stamps_of[mark])
         pieces = [[stamps[0]]]
         for t in stamps[1:]:
             if t - pieces[-1][-1] >= EDGE:
