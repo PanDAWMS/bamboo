@@ -475,6 +475,11 @@ class LoggerFiles:
             for value in pathcond.assigned_expressions(func).get(name, [])  # type: ignore[arg-type]
             if at is None or pathcond.can_reach(value, at, current=True)
         ]
+        if at is not None:
+            # Not a binding a later one replaces on every way to *at*, as the runs and the SQL slice read a name:
+            # workflow_processor.process's tmpLog past 67's LogWrapper(self.log, log_token).
+            alive = {id(value) for value in pathcond.reaching_definitions(func, name, at)}  # type: ignore[arg-type]
+            values = [value for value in values if id(value) in alive]
         for value in values:
             self._value(trail, file, func, value, value, way)
         if _is_parameter(func, name):

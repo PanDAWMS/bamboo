@@ -3506,6 +3506,9 @@ class Watcher:
         if job:
             twice = LogWrapper(_logger, "<b>")
         twice.debug("twice")
+        again = LogWrapper(_logger, "<a>")
+        again = LogWrapper(_logger, "<c>")
+        again.debug("again")
         keyed = LogWrapper(_logger, prefix="<k>")
         keyed.debug("keyed")
         said = LogWrapper(_logger, f"<run {job.PandaID}>")
@@ -3527,6 +3530,8 @@ class Watcher:
         "'plain'": ("", ""),
         "'wrapped'": (r"token\ ", ""),
         "'twice'": ("", trace_mod.PREFIX_MARKS.format(logger="twice")),
+        # Made again on the only way to the line: the binding that reaches it is the one it prints through.
+        "'again'": (r"<c>\ ", ""),
         "'keyed'": ("", trace_mod.PREFIX_KEYWORD.format(logger="keyed")),
         "'said'": (r"<run\ .*?>\ ", ""),
         "f'{job.name}'": ("", trace_mod.PREFIX_REFUSED),
