@@ -284,7 +284,25 @@ arm, 241, writes the pilot's own job by the `PandaID` it is handed.  On M d62d62
 leaves 2 calls open), said; `resetInputToReGenCoJumbo_JEDI` at `running` is keyed through its chain.  An arm whose
 key, or a key on the way, the map did not read keeps the mover as before.
 
-*Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]", or "...
+Rows that can be the statement's count as its own (`same_rows`; the map, 2026-10-31): a statement on the way that
+takes one table by a term on a column the selecting statement compares too, every such term of the two filled from
+the same sources and none a value the map did not follow.  `insertFilesForDataset_JEDI` sets lost at 1113 files of
+757's rows, the dataset's, and 923 selects the dataset's ready and pending files by the same `jediTaskID` and
+`datasetID` (datasetSpec's): a file 923 selects can be the one 1113 writes, and read as another row S1 moved the writer
+to by key at `ready`.  A term only one of them compares narrows its rows, not where they come from.  On C4b
+(x13xiiiC4bm), over the nine subjects the movers census asks, 18 (value, statement, write term) rows are keyed so and
+not by the statement's own rows; that one moved S1's verdict.  The others' owners are movers by another way --
+`throttleUserJobs` at `activated`, `unThrottleUserJobs` at `throttled`, `resetFileStatusInJEDI` at `finished`,
+`insertFilesForDataset_JEDI` at `pending`, `_read_unprocessed_inputs` at `ready` -- and only the mover's line can
+move.  A write whose terms are filled from the values the selecting statement compares, with no statement's rows, is
+not read so: `updateJob`'s 619 names its file by the `job` file's fields 597 compares, but 597 and 619 are an `if` and
+its `elif`, which S1 is not given; read alike, 619 would be kept wrongly.  A term the two fill otherwise is not
+read either (`insertFilesForDataset_JEDI`'s 283 takes the parent task's files by `parent_tid`), nor rows of another
+table naming the same object (`getTasksToExecCommand_JEDI`'s 4339, a command naming its task: K16's writer by key).
+
+*Shows:* the mover's line "<statement> selects the value, and its rows fill the key of the write(s) at [...]" -- with
+"(<arm>: <term> by <function>@<statement>'s rows, which take the same table by the same values)" where only rows
+that can be the statement's fill it --, or "...
 the map could not read what fills the key of the write(s) at [...] (<terms and why>): kept", or "... no write in the
 function persists the value(s) set at [...] (<object> (<where its fields go>)): kept" (the two joined by ", and "
 where a statement has both); for rows that reach none of the arms, "the rows <statements> select(s) reach none of its
@@ -292,7 +310,8 @@ arms [...]: ..." -- "a writer that takes a row by its key" or "; kept: <the reac
 `K14` with the reach.
 *Revisit:* when a census on a new map finds an arm keyed by another column or at a value in `never_at` (v's fields
 make both readable); with objects followed across a call (a field set on an element of a container handed on, a key of
-an object a call returns).
+an object a call returns); with the branches of one turn read as exclusive, when terms filled by the same values can
+be read alike too.
 
 ### K29. A birth is no arm only where the map says every write on its lines makes the row
 
@@ -544,6 +563,17 @@ refusal, not a limit.)
 *Shows:* said: such a mover is `undecided` or `by key`, not `could have`.
 *Revisit:* status-history terms with the column values over the window (the map's (b)).
 
+### K43. A -late question whose value has several stays needs `--since`
+
+L1 asked the first stay of the value; a value can come back many times (a task between pending and running), and a
+case picks one stay -- the case set's rule, the longest stay begun in the 5.5 hours before its SQL -- so 5 of pin m's
+17 -late cases were answered about another stay (MT-exhausted-late: the 240 h from 10-19 for the 1.7 h of 10-29;
+MT-defined-late's stay is the 65th of 71).  `--since` names the stay by the time_extended of the row that begins it
+(`rerun._stay_of`; tmaeno: "OK", 10-31, and not to pick up every pending <-> running bounce).
+*Shows:* a stop at L1 that names the stays (how many; the first, the last, the longest) where the value has more than
+one and no stay is named.  The cases carry it once the harness writes `question.since` and fieldtest hands it on.
+*Revisit:* when a question means every stay, or the longest, rather than one the case names.
+
 ## Row values at a step's time (`held.py`)
 
 ### K22. A row value read at another time than the step's run is not read
@@ -611,10 +641,29 @@ every machine (`windows.value_now`); else each arm is placed on the object's his
 same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
 history call records where they are literals, any row otherwise), and read newest first (K38): the first whose pass a
 writer is shown to write in is the write that left the value, the answer (below).  Only the last write is
-asked; one of the same value before it is not.  It stops where an arm is on no row of the object -- its pairs are
-another object's, the map does not follow the object to its pass's history call, or it has none: its run may have
-written the value after any row, and asking its logs over the rest of the window (F3) is not built -- and where H1
-names no writer (a value the pilot reports through updateJob's SET, which the map does not read).  A name bound to
+asked; one of the same value before it is not.  An arm on no row of the object -- its pairs are another object's,
+the map does not follow the object to its pass's history call, or it has none -- may have written the value after any
+row.  Since 2026-10-31 two such arms are read all the same (tmaeno: "build both", 13:2x).  A birth (`born`, K29: the
+INSERT that makes the row) wrote as the row was made: its row is the scan's last, at the row's creation (the map's
+`tables[].creation`, the rows file's value), asking nothing, an arm that may have written there and is never the
+answer by elimination -- getTasksToRefine_JEDI's INSERT INTO JEDI_Tasks (1209) writes taskName as a uuid4 placeholder
+the value then held need not be.  An arm whose function marks its runs by the object's key (`marked_by_key`: a
+`function_prints` run whose mark's key holds the class's identity) is asked over the object's life, from the row's
+creation to when the value was read, on every machine (F3, `windows.lifetime`), for its mark as its rows' prefix
+prints it with the key (`key_marks`: "changeTaskSplitRulePanda < jediTaskID=53351604 >", "; jediTaskID=53351078;
+siteID="), not the key alone -- a task's ID is on every line of the calls listing it (getTasksToBeProcessed_JEDI), and
+the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Each run found there whose mark holds
+the key is read as a row is, by its first record's time among the rows (`_runs_as_rows`), asked for the same marks; a
+run naming the key in its lines alone is another call's.  A life with no run, its logs shown to
+name the key and searched whole, is no pass of those writers, and one not searched whole leaves them open, newer than
+any row.  Any other unplaced arm stops H2 at "every writer of <subject> on a history row of the object, a birth or
+marking its runs by the object's key ... (k of n not: K37)" before anything is asked: its absence from a log cannot be
+shown.  Counted on C4b's map (out/k37c, tools/k37_inserts.py): of the 264 unplaced arms of jobs and tasks, 9 are the
+one birth's (getTasksToRefine_JEDI's INSERT), and of the other 255, 133 are in a function marking its runs by the
+object's key, 85 by another object's (changeTaskPriorityPanda's <jediTaskID> for a job's currentPriority), 26 have
+no run of their own (printing through a caller, K25), 11 a mark with no key (doForPriorityMassage's "label=user").
+It also stops where H1 names no writer (a value the pilot reports through updateJob's SET, which the map does not
+read).  A name bound to
 the time earlier in the pass (`timeNow`, `now_time`) or the time less a span (`CURRENT_DATE-1`) is not read as
 the time.  Counted on the harness's 57 (attr-time-shape.md): every arm placed 23, some 13, none 18, no writer 3;
 the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's storeJobs leaves 12 of the 18
@@ -650,12 +699,17 @@ window instead.
 "END <subject>=<value> written last by <arm>[, called at <call>] (shown in its run; it has no guard | its guards hold
 in the run's values), in the pass of the statuslog row <status> at <time>: <run>", or "(by elimination: no run shows
 the line ran; it has no guard | its guards hold in the rows' values), at <time>[; not searched there: <log> on
-<machines>]"; a stop "every writer of <subject> on a history
-row of the object ... (k of n not: K37)", "a writer of <subject> in the map", or at H3 "a method the guard reads
-through (its conditions: '<condition>' not read)" or "a run that shows <arm> ran, to read its guards in (by
-elimination; its conditions: ...)".
-*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
-arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
+<machines>]"; "<arm> ...; a birth: it wrote as the row was made" or "; its runs are marked by the object's key",
+"F3: <arms> asked over the object's life, from the row's creation at <t> to when the value was read at <t>",
+"-- row n of m: a run of <key> at <first>..<last> (F3)", a possibility "may have at the row's making <t>" or "at the
+object's life <t>" (result.json's possibility rows carry `f3`: made, run, span or open); a stop "every writer of
+<subject> on a history row of the object, a birth or marking its runs by the object's key ... (k of n not: K37)",
+"the object's life, to ask <arms> over: <why>", "when the row was made, for the birth <arm> ...", "a writer of
+<subject> in the map", or at H3 "a method the guard reads through (its conditions: '<condition>' not read)" or "a run
+that shows <arm> ran, to read its guards in (by elimination; its conditions: ...)".
+*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
+marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
+row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 
 ### K38. H2's scan of the rows names the arms that wrote last or may have, and goes on from none of them but one
 
@@ -854,11 +908,16 @@ is as it was before PC, and can name a guard whose flip alone would not move the
 JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), none of them in a case of mine
 (2026-10-25).
 
-An arm's guards are `pathcond.path_condition`'s, the tests of the `if`s enclosing it; S3 does not read what the map's
-`pathcond.enclosing_guards` adds (an early exit above the arm, an `except` around it).  So an arm after an early
-return the pass took, or one in a handler, shows no guard made false, and S3 stops at "every arm has a guard the
-passes made false" -- the need it could not meet, not a claim (records-cut, 7a05464: MJ-merging-stuck's
-check_output_file_metadata 200 / 209 after the return at 181, and parse_job_output_report 820 in its handler).  And a
+An arm's guards are `pathcond.path_condition`'s, the tests of the `if`s enclosing it, and since 2026-10-31 each early
+exit's above it that `pathcond.enclosing_guards` names (`if t: return` puts `not (t)` on what follows;
+`rerun.arm_guards`), S3 going on from that `if` (`early_exit_if`): check_output_file_metadata's arms 200 / 209 after
+the return at 181 the pass took are kept off by `not (self.job_status in [...])`.  S4 then stops at "one name the
+guard reads" (it says "reads []"): it follows bare names, and this guard reads the attribute `self.job_status`, bound in
+`__init__` (48, `self.job_status = self.job.jobStatus`), which its walk in the function does not reach (s3a,
+MJ-transferring-stuck on records-cut; the only such S4 in the four sets).  An arm in an `except` handler has
+no guard to show false -- it is reached only where something above raised -- and S3 stops at "a guard the passes made
+false against every arm (none shown against arm N (in an except handler))", the need it could not meet, not a claim
+(parse_job_output_report 820, MJ-merging-stuck on records-cut, 7a05464).  And a
 pass that leaves a loop at its terminator is read as leaving at that exit: setupper's assign_dispatch_data_blocks
 walks `self.jobs + [None]` and leaves at 324 (`if job is None: break`) after every job, so S2's "left by 324" and S3's
 {'job is None': True} are the call's, not the key's iteration (the investigator's round 2, 2026-10-31).  Neither

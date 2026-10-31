@@ -25,7 +25,10 @@ one reaches the other -- ``reaching(H, [S])`` or ``reaching(S, [H])`` -- with
 every logger the function binds by a factory and the header of every loop
 holding both as killers: a new run, or the next turn of a loop over jobs, is
 another row's pass.  H is a call whose closure writes a history row, followed
-through plain calls only.  A function handed on (``Thread(target=...)``,
+through plain calls only, each callee as the classes it runs as -- a call's
+``for_classes`` and ``runs_as``, as the reach reads them: a
+``JobGeneratorThread``'s ``run()`` reaches its own ``runImpl``, not
+``PostProcessor``'s.  A function handed on (``Thread(target=...)``,
 ``submit``), a lambda's body and a thread's ``run`` are not followed, since
 what they write is not written in this pass; a function handed to one that
 calls it at once is left out with them.
@@ -376,7 +379,7 @@ class _Reader:
                     for line in call.lines or [call.line]:
                         if line not in lines:
                             lines.append(line)
-        self.below: dict[str, set[str]] = {}
+        self.below: dict[tuple[str, str], set[str]] = {}
         self.subject_of: dict[str, str] = {}
 
     # -- runs ----------------------------------------------------------------- #
@@ -656,21 +659,51 @@ class _Reader:
                 self.subject_of[f"{row.owner}:{line}"] = subject
             count += len(row.history)
         # What each function's closure can write, through plain calls: its own
-        # history calls and every one below.
-        below: dict[str, set[str]] = defaultdict(set)
-        pending: deque[str] = deque()
+        # history calls and every one below -- per class the function runs as,
+        # a call taken for its for_classes and entering its runs_as, as
+        # ReachGraph.reach walks them: WorkerThread.run's self.runImpl() is
+        # JobGeneratorThread's runImpl when the thread is one, not every
+        # thread class's.
+        callers: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+        for row in self.fragment.reach_graph:
+            for cls in row.classes or [""]:
+                for call in row.calls:
+                    if call.how != "call" or call.thread:
+                        continue
+                    if call.for_classes and cls not in call.for_classes:
+                        continue
+                    for one in self._runs_as(call):
+                        callers[(call.to, one)].add((row.owner, cls))
+        below: dict[tuple[str, str], set[str]] = defaultdict(set)
+        pending: deque[tuple[str, str]] = deque()
         for row in self.fragment.reach_graph:
             if row.history:
-                below[row.owner] = {f"{row.owner}:{held.line}" for held in row.history}
-                pending.append(row.owner)
+                for cls in row.classes or [""]:
+                    below[(row.owner, cls)] = {
+                        f"{row.owner}:{held.line}" for held in row.history
+                    }
+                    pending.append((row.owner, cls))
         while pending:
-            owner = pending.popleft()
-            for caller in self.callers.get(owner, {}):
-                if not below[owner] <= below[caller]:
-                    below[caller] |= below[owner]
+            node = pending.popleft()
+            for caller in callers.get(node, ()):
+                if not below[node] <= below[caller]:
+                    below[caller] |= below[node]
                     pending.append(caller)
         self.below = dict(below)
         return count
+
+    def _runs_as(self, call: ReachCall) -> list[str]:
+        """The classes *call*'s callee runs as: its ``runs_as``, else every class of the callee's row."""
+        entered = self.rows.get(call.to)
+        if entered is None:
+            return []
+        return call.runs_as or entered.classes or [""]
+
+    def _below(self, call: ReachCall) -> set[str]:
+        """The history writes *call* can lead to, below its callee as the classes it runs as."""
+        return set().union(
+            *(self.below.get((call.to, one), set()) for one in self._runs_as(call))
+        )
 
     def _values(
         self, func: ast.AST, line: int, subject: str, arms: list[tuple[ast.stmt, str]]
@@ -834,7 +867,7 @@ class _Reader:
         for call in row.calls:
             if call.how != "call" or call.thread:
                 continue
-            if call.to in self.writers or self.below.get(call.to):
+            if call.to in self.writers or self._below(call):
                 for line in call.lines or [call.line]:
                     candidates.setdefault(line, []).append(call)
         if not candidates:
@@ -863,7 +896,7 @@ class _Reader:
                 writes |= (
                     {f"{owner}:{line}"}
                     if call.to in self.writers
-                    else self.below.get(call.to, set())
+                    else self._below(call)
                 )
             row_said, row_why, held, start, steps = self._row(
                 level,

@@ -56,9 +56,18 @@ from its first byte with no stamped line holds no record and covers from its
 mtime: server machines list an empty ``panda-JediDBProxy.log`` (2026-10-14).
 
 **Greps.**  One request per machine and file, to that machine alone, with the
-strings of every ask reading it.  An answer cut at 1 MB is asked again in
-halves, down to a string alone, whose files are then said ``truncated``.  A
-grep that fails fails its own strings alone: the other greps are still asked
+strings of every ask reading it.  An answer of several strings cut at 1 MB is
+the cut answer of the strings that filled it -- each whose records hold at
+least as large a part of the answer as the part of the file it read, so that
+alone it would be cut as well -- and the others are asked again without them;
+one that none filled, or that holds no stamped record, is asked again in
+halves.  A string cut, alone or so, makes its files ``truncated``.  (Halving
+threw each cut answer away: 1012 of the 1737 greps of pin m's round 6 were
+cut, 5.8 of its 12.7 h of grep time, though the strings that were not cut
+alone held 2.3 MB in aipanda085's JediDBProxy-20261030.gz; of the 861 strings
+the rule takes in that round's 850 cut answers of several, none was read whole
+by a grep of its own, 2026-10-31.)  A grep that fails fails its own strings
+alone: the other greps are still asked
 (a two-string half timed out after its file's 19 strings were cut,
 2026-10-30).  A grep stopped at the API's timeout is asked again at once, up
 to :data:`TIMEOUT_RETRIES` times: what keeps a whole read of a ``.gz`` past
@@ -72,8 +81,8 @@ and only the other strings are asked (a round asked 16 rotated files again
 whole for their new strings, with the 2-17 strings each one's earlier answers
 held, 2026-10-30).
 
-**A cut string.**  A string cut alone is read from the file's start to the
-second before its last record's: the cut can fall inside that second.  Where
+**A cut string.**  A cut string is read from the file's start to the second
+before its answer's last record's: the cut can fall inside that second.  Where
 an ask's window, widened by :data:`CONTINUE_SLACK` on each side, reaches past
 that in a rotated file, the string is asked again in the API's pattern mode, a
 regular expression for a line that starts with a stamp inside the stretch
@@ -407,7 +416,7 @@ class Job:
     fragments: dict[int, dict] = field(default_factory=dict)  # by offset: head false
     truncated: set[str] = field(
         default_factory=set
-    )  # strings cut even alone, or read in part by an earlier round
+    )  # strings cut alone or filling a cut answer, or read in part by an earlier round
     read: dict[str, Stretches] = field(
         default_factory=dict
     )  # by string of truncated: what of the file was read for it
@@ -763,7 +772,8 @@ def leaf_read(leaf: dict) -> dict[str, Stretches] | None:
 
 
 class Grepper:
-    """Runs the round's jobs: a grep per machine and file, halved when cut, waited for when being compressed."""
+    """Runs the round's jobs: a grep per machine and file, asked again without the strings filling it when cut,
+    waited for when being compressed."""
 
     def __init__(
         self,
@@ -970,7 +980,8 @@ class Grepper:
                 f.kind = "compressing"
 
     async def grep(self, job: Job, strings: list[str]) -> str:
-        """Grep *strings* in the job's file; halve them while the answer is cut.  'compressing' when refused for it;
+        """Grep *strings* in the job's file; while an answer of several is cut, ask again without the strings that
+        filled it (:func:`filled_by`), in halves where none did.  'compressing' when refused for it;
         'failed' when a grep failed, once every other grep was asked (:attr:`Job.failed` holds its strings)."""
         f = job.file
         tail = None
@@ -1039,17 +1050,28 @@ class Grepper:
                 dict.fromkeys(strings, got.get("error") or got.get("status"))
             )
             return "failed"
-        if got.get("truncated") and len(strings) > 1:
-            half = len(strings) // 2
-            outcomes = []
-            for part in (strings[:half], strings[half:]):
-                outcome = await self.leaf(job, part, tail)
-                if outcome == "compressing":
-                    return outcome
-                outcomes.append(outcome)
-            return "failed" if "failed" in outcomes else "answered"
         result = got.get("result") or {}
         records = result.get("records") or []
+        rest: list[str] = []
+        if got.get("truncated") and len(strings) > 1:
+            window = result.get("window") or {}
+            began = window.get("first_stamp") if tail else None
+            filled = filled_by(
+                records, strings, stamp(began) if began else f.start, f.end or asked
+            )
+            if not filled:
+                half = len(strings) // 2
+                outcomes = []
+                for part in (strings[:half], strings[half:]):
+                    outcome = await self.leaf(job, part, tail)
+                    if outcome == "compressing":
+                        return outcome
+                    outcomes.append(outcome)
+                return "failed" if "failed" in outcomes else "answered"
+            # the answer is the cut answer of the strings that filled it; the others are asked again without them
+            rest = [s for s in strings if s not in filled]
+            strings = filled
+            records = [r for r in records if holds_any(r, set(filled))]
         heads = [r for r in records if r.get("head")]
         fragments = [r for r in records if not r.get("head")]
         self.take(job, heads, fragments)
@@ -1081,6 +1103,8 @@ class Grepper:
                 }
             )
         job.status = "answered"
+        if rest:
+            return await self.leaf(job, rest, tail)
         return "answered"
 
     def take(self, job: Job, heads: list[dict], fragments: list[dict]) -> None:
@@ -1162,6 +1186,29 @@ async def run_jobs(grepper: Grepper, jobs: list[Job]) -> None:
 
 def holds_any(record: dict, strings: set[str]) -> bool:
     return any(s in line for line in record.get("lines", []) for s in strings)
+
+
+def filled_by(
+    records: list[dict],
+    strings: list[str],
+    lo: datetime.datetime | None,
+    hi: datetime.datetime,
+) -> list[str]:
+    """The strings of a cut answer that alone would be cut as well: each whose records hold at least as large a
+    part of the answer as the part of the file the answer read -- from *lo* to its last record's stamp, of *lo* to
+    *hi*.  None where there is no time to measure that part by (no stamped record, a file whose start is not
+    known)."""
+    last = last_stamp(records)
+    if last is None or lo is None or hi <= lo:
+        return []
+    part = (last - lo) / (hi - lo)
+    sizes = [len(json.dumps(r)) for r in records]
+    whole = sum(sizes)
+    held = {
+        s: sum(n for r, n in zip(records, sizes, strict=True) if holds_any(r, {s}))
+        for s in strings
+    }
+    return [s for s in strings if held[s] and held[s] >= part * whole]
 
 
 def file_entry(
