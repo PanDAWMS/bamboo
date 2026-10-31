@@ -47,6 +47,8 @@ class Asking:
     window: Window | None
     machine: str | None
     why: str
+    #: the strings to ask for, where not the key alone: F3's writers' marks holding the key (``rerun.key_marks``)
+    strings: tuple[str, ...] = ()
 
 
 def when(text: str) -> datetime.datetime:
@@ -108,17 +110,19 @@ def value_now(column: str, value: str) -> Asking:
                                 f"runs (the last write), on every machine")
 
 
-def lifetime(made: str | None, read: str | None) -> Asking:
+def lifetime(made: str | None, read: str | None, strings: tuple[str, ...]) -> Asking:
     """H2's F3, for an attribute's writer on no history row of the object that marks its runs by the object's key
     (``attr_time``, KNOWN_ISSUES.md K37): from the row's creation *made* to when the value was read *read*, on every
-    machine -- the write that left the value is in it, whenever it ran.  No window where either end is not known."""
+    machine -- the write that left the value is in it, whenever it ran -- for *strings*, the writers' marks holding the
+    key, not the key alone: a task's ID is on every line of the calls listing it.  No window where either end is not
+    known."""
     if not made:
         return Asking(None, None, "the row's creation time is not known")
     if not read:
         return Asking(None, None, "when the value was read is not known")
     lo, hi = _down(when(made)), _down(when(read))
     return Asking((lo, hi), None, f"the object's life, from the row's creation at {lo} to when the value was read at {hi}, "
-                                  f"on every machine")
+                                  f"on every machine, for {', '.join(repr(s) for s in strings)}", strings)
 
 
 def rows_until(states: list[dict], until: str) -> list[tuple[dict, Asking]]:

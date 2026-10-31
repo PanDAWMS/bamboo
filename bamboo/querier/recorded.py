@@ -373,13 +373,14 @@ class RecordedLogs:
         return list(dict.fromkeys(wanted))
 
     def log(
-        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None
+        self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
+        strings: tuple[str, ...] = (),
     ) -> Log:
         if window is None:
             raise ValueError(f"{name}: the recorded logs are asked over a window")
-        at = (name, key, window, machine, None if owners is None else tuple(sorted(owners.items())))
+        at = (name, key, window, machine, None if owners is None else tuple(sorted(owners.items())), tuple(sorted(strings)))
         if at not in self._logs:
-            self._logs[at] = self._read(name, key, window, machine, owners)
+            self._logs[at] = self._read(name, key, window, machine, owners, strings)
         return self._logs[at]
 
     def _get(self, asks: list[tuple[Ask, str]], notes: list[str]) -> list[dict]:
@@ -418,11 +419,14 @@ class RecordedLogs:
         return {**record, **only, "ask": want, "machines": machines,
                 "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')}{strings})"}
 
-    def _read(self, name: str, key: str, window: Window, machine: str | None, owners: Owners | None = None) -> Log:
+    def _read(self, name: str, key: str, window: Window, machine: str | None, owners: Owners | None = None,
+              strings: tuple[str, ...] = ()) -> Log:
         notes: list[str] = []
-        (first,) = self._get([(Ask(name, (key,), window, machine), "")], notes)
+        # the key, or what the asker names in its place: marks holding it (F3), whose lines are all a run's
+        asked = tuple(strings) or (key,)
+        (first,) = self._get([(Ask(name, asked, window, machine), "")], notes)
         if machine is not None and first.get("machines", {}).get(machine, {}).get("status") == "not listed":
-            (first,) = self._get([(Ask(name, (key,), window), f"{machine} is not in list_logs: every machine asked")], notes)
+            (first,) = self._get([(Ask(name, asked, window), f"{machine} is not in list_logs: every machine asked")], notes)
             notes.append(f"{machine} is not in list_logs, so every machine was asked")
         got = _Gathered()
         got.add(first)
@@ -449,13 +453,13 @@ class RecordedLogs:
         for (m, token), lo, hi in _runs(got, pattern, window):
             if (m, token) in partial:
                 continue
-            strings = {key} if pattern.search(token) else _strings(m, {token}, narrowed, owners)
+            again = set(asked) if pattern.search(token) else _strings(m, {token}, narrowed, owners)
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
             # again), nor past today's file's end: the run is read as cut there
             if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0]:
-                widen.setdefault((m, (_text(lo[0] - _SECOND), window[1])), set()).update(strings)
+                widen.setdefault((m, (_text(lo[0] - _SECOND), window[1])), set()).update(again)
             if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1] and (m, hi[1]) in got.rotated_ends:
-                widen.setdefault((m, (window[0], _text(hi[1] + _SECOND))), set()).update(strings)
+                widen.setdefault((m, (window[0], _text(hi[1] + _SECOND))), set()).update(again)
         why = f"a run within {int(EDGE.total_seconds() // 60)} min of an end of what was searched"
         for record in self._get([(Ask(name, tuple(sorted(s)), w, m), why) for (m, w), s in sorted(widen.items())], notes):
             got.add(record)

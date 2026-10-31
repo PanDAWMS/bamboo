@@ -630,8 +630,12 @@ INSERT that makes the row) wrote as the row was made: its row is the scan's last
 answer by elimination -- getTasksToRefine_JEDI's INSERT INTO JEDI_Tasks (1209) writes taskName as a uuid4 placeholder
 the value then held need not be.  An arm whose function marks its runs by the object's key (`marked_by_key`: a
 `function_prints` run whose mark's key holds the class's identity) is asked over the object's life, from the row's
-creation to when the value was read, on every machine (F3, `windows.lifetime`), and each run of the key found there is
-read as a row is, by its first record's time among the rows (`_runs_as_rows`); a life with no run, its logs shown to
+creation to when the value was read, on every machine (F3, `windows.lifetime`), for its mark as its rows' prefix
+prints it with the key (`key_marks`: "changeTaskSplitRulePanda < jediTaskID=53351604 >", "; jediTaskID=53351078;
+siteID="), not the key alone -- a task's ID is on every line of the calls listing it (getTasksToBeProcessed_JEDI), and
+the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Each run found there whose mark holds
+the key is read as a row is, by its first record's time among the rows (`_runs_as_rows`), asked for the same marks; a
+run naming the key in its lines alone is another call's.  A life with no run, its logs shown to
 name the key and searched whole, is no pass of those writers, and one not searched whole leaves them open, newer than
 any row.  Any other unplaced arm stops H2 at "every writer of <subject> on a history row of the object, a birth or
 marking its runs by the object's key ... (k of n not: K37)" before anything is asked: its absence from a log cannot be

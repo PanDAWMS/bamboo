@@ -883,6 +883,56 @@ def test_the_record_door_answers_a_narrower_ask_from_a_wider_record_by_the_lines
     ]
 
 
+def test_the_record_door_asks_the_strings_handed_in_place_of_the_key_and_reads_no_other_mark_naming_it(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            W, AT = ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), ("2026-09-28 08:31:10", "2026-09-28 08:31:15")
+            OWN, OTHER = "changeTaskSplitRulePanda < jediTaskID=53 >", "getTasksToBeProcessed_JEDI < vo=atlas >"
+            MARK = ("changeTaskSplitRulePanda < jediTaskID=53 >",)
+            got = {}
+            # nothing recorded: the ask is for the strings handed, not the key
+            Path("none.jsonl").write_text("")
+            try:
+                RecordedLogs(["none.jsonl"]).log("panda-x.log", "53", W, strings=MARK)
+            except Unrecorded as e:
+                got["asked"] = [a.canonical() for a, _ in e.asks]
+            # a record of the key alone: its own run's lines, and another call listing the task under its mark
+            bare = record(Ask("panda-x.log", ("53",), W), {M1: answered({**TODAY, "records": [
+                {**line("08:31:11", "changing splitRule=x", OWN), "offset": 100},
+                {**line("08:31:12", "jediTaskID=53 status=running", OTHER), "offset": 200}]})})
+            Path("bare.jsonl").write_text(json.dumps(bare) + "\\n")
+            log = RecordedLogs(["bare.jsonl"]).log("panda-x.log", "53", AT, strings=MARK)
+            got["marked"] = [[r.token for r in runs_for(log, "53")], [r.span for r in log.records]]
+            # the key alone over the same window: the other mark naming it is asked whole, a round later
+            try:
+                RecordedLogs(["bare.jsonl"]).log("panda-x.log", "53", AT)
+            except Unrecorded as e:
+                got["bare"] = [a.canonical()["strings"] for a, _ in e.asks]
+            # a run of the mark near the file's start: the window is widened past it for the same strings
+            EDGE_W = ("2026-09-28 06:45:00", "2026-09-28 06:45:00")
+            edge = record(Ask("panda-x.log", MARK, EDGE_W, M1), {M1: answered({**TODAY, "records": [
+                {**line("06:42:00", "start", OWN), "offset": 10}, {**line("06:46:00", "end", OWN), "offset": 20}]})})
+            Path("edge.jsonl").write_text(json.dumps(edge) + "\\n")
+            try:
+                RecordedLogs(["edge.jsonl"]).log("panda-x.log", "53", EDGE_W, machine=M1, strings=MARK)
+            except Unrecorded as e:
+                got["widened"] = [[a.canonical()["strings"], a.canonical()["window"]] for a, _ in e.asks]
+            print(json.dumps(got))
+            """),
+        )
+    )
+    got = json.loads(out)
+    assert got["asked"] == [{"name": "panda-x.log", "service": "unsettled", "machine": None, "strings": [
+        "changeTaskSplitRulePanda < jediTaskID=53 >"], "window": ["2026-09-28 08:21:12", "2026-09-28 08:41:13"], "whole_records": True}]
+    # the mark read from the key's record by the lines holding it: one run, its own, and no other mark asked
+    assert got["marked"] == [["changeTaskSplitRulePanda < jediTaskID=53 >"], ["aipanda093:panda-x.log-20260929.gz@100"]]
+    assert got["bare"] == [["getTasksToBeProcessed_JEDI < vo=atlas >"]]
+    assert got["widened"] == [[["changeTaskSplitRulePanda < jediTaskID=53 >"], ["2026-09-28 06:39:59", "2026-09-28 06:45:00"]]]
+
+
 def test_the_record_door_asks_a_narrower_ask_anew_where_the_wider_record_was_cut_over_its_window(tmp_path):
     out = _ok(
         _run(
@@ -4480,11 +4530,28 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                              N(owner="pandaserver/t.py::TaskModule.ready", history=[N(line=5, values=["ready"])])],
                 key_froms=[N(owner="pandaserver/s.py::getTasksToRefine_JEDI", writes={"JediTaskSpec.taskName": [1188]}, new_row=True)],
                 tables=[N(spec_class="JediTaskSpec", rows_of="JediTaskSpec", identity_attrs=["JediTaskSpec.jediTaskID"],
-                          creation=["JediTaskSpec.creationDate"])],
+                          creation=["JediTaskSpec.creationDate"]),
+                        N(spec_class="JobSpec", rows_of="JobSpec", identity_attrs=["JobSpec.PandaID"], creation=["JobSpec.creationTime"])],
             )]
-            marks = {"initialize_cpu_time_task": ["JobSpec.PandaID", "JediTaskSpec.jediTaskID"], "massage": ["JobSpec.PandaID"]}
-            rerun.R._prints_of = lambda owner, lines=(): (N(runs=[N(key=[N(columns=[c]) for c in marks[owner.split("::")[-1]]])])
-                                                          if owner.split("::")[-1] in marks else None)
+            # each function's run: its mark's holes' columns, the mark, and the prefix its rows print it in (as the map's)
+            marks = {"initialize_cpu_time_task": ([["JobSpec.PandaID"], ["JediTaskSpec.jediTaskID", "JobSpec.jediTaskID"], []],
+                                                  "PandaID={}; jediTaskID={}; siteID={}",
+                                                  r"initialize_cpu_time_task\\ <\\ PandaID=.*?;\\ jediTaskID=.*?;\\ siteID=.*?\\ >\\ "),
+                     "massage": ([["JobSpec.PandaID"]], "PandaID={}", r"massage\\ <\\ PandaID=.*?\\ >\\ "),
+                     "changeTaskSplitRulePanda": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}",
+                                                  r"changeTaskSplitRulePanda\\ <\\ jediTaskID=.*?\\ >\\ "),
+                     # a prefix of other holes than the mark's (another logger's): no text to ask
+                     "odd": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"odd\\ <\\ a=.*?\\ b=.*?\\ >\\ "),
+                     # one of the mark's holes but not its text
+                     "odd2": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"odd2\\ <\\ taskid=.*?\\ >\\ ")}
+
+            def prints(owner, lines=()):
+                if owner.split("::")[-1] not in marks:
+                    return None
+                holes, mark, prefix = marks[owner.split("::")[-1]]
+                return N(runs=[N(key=[N(columns=c) for c in holes], mark=mark)], statements=[N(rows=[N(prefix=prefix), N(prefix="")])])
+
+            rerun.R._prints_of = prints
             r = object.__new__(rerun.Rerun)
             r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "H2", {}, []
             states = [{"status": s, "time": t, "host": "h"} for s, t in
@@ -4512,7 +4579,8 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                 try:
                     tries = r._attribute_tries(subject, subject.split(".")[1], value, readings)
                     got[name] = [[s["status"] if s else None, a.window if a else None, a.machine if a else None]
-                                 + ([s["f3"], s["time"], [[x.owner.split("::")[-1], x.lines] for x in own]] if s and s.get("f3") else [])
+                                 + ([s["f3"], s["time"], [[x.owner.split("::")[-1], x.lines] for x in own], list(a.strings) if a else None]
+                                    if s and s.get("f3") else [])
                                  for s, a, own in tries]
                 except rerun.Stop as e:
                     got[name] = e.args[0]
@@ -4520,6 +4588,9 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
             for name, (subject, value, readings) in asks.items():
                 tries_of(name, subject, value, readings)
             got["F3 said"] = [x for x in r.lines if x.startswith("F3") or "408 is on no" in x]
+            got["key marks"] = [list(rerun.key_marks(f"p.py::{f}", 1, cls, "53")) for f, cls in (
+                ("changeTaskSplitRulePanda", "JediTaskSpec"), ("initialize_cpu_time_task", "JobSpec"), ("massage", "JediTaskSpec"),
+                ("odd", "JediTaskSpec"), ("odd2", "JediTaskSpec"), ("none", "JediTaskSpec"))]
             # the row's creation not known: neither the life nor the birth's row can be placed
             r.data["rows"]["task"].pop("creationDate")
             tries_of("no creation, F3", *asks["marked by the key"])
@@ -4553,17 +4624,20 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
     assert got["no writer"] == "H2: a writer of JediTaskSpec.transUses in the map, to say when it took 'Atlas'"
     # a birth wrote as the row was made: after the rows, at the row's creation, asking nothing
     assert got["a birth"][:3] == got["any row"]
-    assert got["a birth"][3] == [None, None, None, "made", "2026-10-29 07:08:39", [["getTasksToRefine_JEDI", [1188]]]]
+    assert got["a birth"][3] == [None, None, None, "made", "2026-10-29 07:08:39", [["getTasksToRefine_JEDI", [1188]]], None]
     # one marking its runs by the task's key is asked over the task's life, from its creation to when the value was
-    # read, on every machine (F3): before the rows
+    # read, on every machine (F3), for its mark as its lines print it with the key, not the key alone: before the rows
     assert got["marked by the key"][0] == [None, ["2026-10-29 07:08:39", "2026-10-29 14:02:50"], None, "span",
-                                           "2026-10-29 14:02:50", [["initialize_cpu_time_task", [408]]]]
+                                           "2026-10-29 14:02:50", [["initialize_cpu_time_task", [408]]], ["; jediTaskID=53; siteID="]]
     assert got["marked by the key"][1:] == got["any row"]
     assert got["F3 said"] == [
         "  initialize_cpu_time_task:408 is on no history row of the object: the object is not followed to its passes' "
         "history call (not followed); its runs are marked by the object's key",
         "F3: initialize_cpu_time_task:408 asked over the object's life, from the row's creation at 2026-10-29 07:08:39 to "
-        "when the value was read at 2026-10-29 14:02:50, on every machine"]
+        "when the value was read at 2026-10-29 14:02:50, on every machine, for '; jediTaskID=53; siteID='"]
+    # the text around the key's hole of the mark as the rows print it: a job's key at the first hole takes the
+    # function's name; no text for a mark not by the class's key, a prefix of other holes, or no prints
+    assert got["key marks"] == [["changeTaskSplitRulePanda < jediTaskID=53 >"], ["initialize_cpu_time_task < PandaID=53; jediTaskID="], [], [], [], []]
     assert got["no creation, F3"] == ("H2: the object's life, to ask initialize_cpu_time_task:408 over: the row's creation time "
                                       "is not known")
     assert got["no creation, a birth"] == ("H2: when the row was made, for the birth getTasksToRefine_JEDI:1188 (its creation "
@@ -4782,15 +4856,18 @@ def test_h2_reads_f3s_life_run_by_run_among_the_rows_and_a_births_row_last_as_on
             P, W = rerun.Possible, rerun.W
             init = [N(owner="pandaserver/m.py::initialize_cpu_time_task", lines=[408])]
             birth = [N(owner="pandaserver/s.py::getTasksToRefine_JEDI", lines=[1188])]
-            life = W.Asking(("2026-10-29 04:10:00", "2026-10-29 14:02:50"), None, "the object's life")
+            MARK = ("; jediTaskID=53; siteID=",)
+            life = W.Asking(("2026-10-29 04:10:00", "2026-10-29 14:02:50"), None, "the object's life", MARK)
             rows = [{"status": s, "time": t} for s, t in (("running", "2026-10-29 11:38:00"), ("defined", "2026-10-29 04:10:00"))]
             tries = ([({"status": None, "time": "2026-10-29 14:02:50", "f3": "span"}, life, init)]
                      + [(s, N(why=f"the statuslog's {s['status']!r}"), None) for s in rows]
                      + [({"status": None, "time": "2026-10-29 04:10:00", "f3": "made"}, None, birth)])
             log = "panda-JediDBProxy.log"
-            run = lambda first, last: N(first=first, last=last)
+            run = lambda first, last, token="initialize_cpu_time_task < PandaID=1; jediTaskID=53; siteID=X >": N(first=first, last=last, token=token)
             runs = {log: [run("2026-10-29 10:00:00,123", "2026-10-29 10:00:05,000"), run("2026-10-29 12:00:00,000", "2026-10-29 12:00:01,000"),
-                          run("2026-10-29 15:00:00,000", "2026-10-29 15:00:01,000")]}  # the last after the value was read
+                          run("2026-10-29 15:00:00,000", "2026-10-29 15:00:01,000"),  # after the value was read
+                          # another call naming the task in its lines, under its own mark
+                          run("2026-10-29 11:00:00,000", "2026-10-29 11:00:02,000", "getTasksToBeProcessed_JEDI < vo=atlas >")]}
             holes = {log: ["2026-10-29 05:00:00..2026-10-29 06:00:00"]}
             answer = N(question="the run")
 
@@ -4806,7 +4883,7 @@ def test_h2_reads_f3s_life_run_by_run_among_the_rows_and_a_births_row_last_as_on
                 return r
 
             def rows_of(runs, holes):
-                return [[rerun._f3(s) or s["status"], s["time"]] + (list(a.window) if rerun._f3(s) == "run" else [])
+                return [[rerun._f3(s) or s["status"], s["time"]] + (list(a.window) + [list(a.strings) == list(MARK)] if rerun._f3(s) == "run" else [])
                         for s, a, _ in rerun_with(runs, holes)._runs_as_rows("JediTaskSpec.cpuTimeUnit", "53", tries)]
 
             def scan(runs, holes, at_rows=None):
@@ -4826,16 +4903,17 @@ def test_h2_reads_f3s_life_run_by_run_among_the_rows_and_a_births_row_last_as_on
         )
     )
     got = json.loads(out.splitlines()[-1])
-    # each run of the key in the life is a row at its first record, newest first among the rows; the birth's last of
-    # its second; a run after the value was read is no run of the life
-    assert got["runs"] == [["run", "2026-10-29 12:00:00", "2026-10-29 12:00:00", "2026-10-29 12:00:01"], ["running", "2026-10-29 11:38:00"],
-                           ["run", "2026-10-29 10:00:00", "2026-10-29 10:00:00", "2026-10-29 10:00:05"], ["defined", "2026-10-29 04:10:00"],
+    # each run of the key in the life is a row at its first record, newest first among the rows, the birth's last of
+    # its second (each asked for the life's marks); a run after the value was read is no run of the life, and another's
+    # run naming the key in its lines alone is none of the writers'
+    assert got["runs"] == [["run", "2026-10-29 12:00:00", "2026-10-29 12:00:00", "2026-10-29 12:00:01", True], ["running", "2026-10-29 11:38:00"],
+                           ["run", "2026-10-29 10:00:00", "2026-10-29 10:00:00", "2026-10-29 10:00:05", True], ["defined", "2026-10-29 04:10:00"],
                            ["made", "2026-10-29 04:10:00"]]
     # no run: the life stays one try, read as a row is (no run there is no pass only of a log shown to name the key)
     assert got["no run"] == [["span", "2026-10-29 14:02:50"], ["running", "2026-10-29 11:38:00"], ["defined", "2026-10-29 04:10:00"],
                              ["made", "2026-10-29 04:10:00"]]
     # a log not searched whole over the life: the life stays open, newer than any row, beside the runs it holds
-    assert got["not searched whole"] == [["open", "2026-10-29 14:02:50"], ["run", "2026-10-29 12:00:00", "2026-10-29 12:00:00", "2026-10-29 12:00:01"],
+    assert got["not searched whole"] == [["open", "2026-10-29 14:02:50"], ["run", "2026-10-29 12:00:00", "2026-10-29 12:00:00", "2026-10-29 12:00:01", True],
                                          ["running", "2026-10-29 11:38:00"], ["defined", "2026-10-29 04:10:00"], ["made", "2026-10-29 04:10:00"]]
     # nothing shown to write: the birth is left, as one that may have, read on no run
     code, text, possibilities, read = got["nothing shown"]
@@ -4878,15 +4956,15 @@ def test_h2_reads_no_run_of_the_key_at_a_row_as_no_pass_only_of_a_log_some_recor
             # try naming its own writers is read on theirs
             held = {("panda-TaskRefiner.log", "m91"): ["a run"], ("panda-TaskBuffer.log", "m86"): ["a run"]}
 
-            def log(name, key, window, machine=None):
+            def log(name, key, window, machine=None, strings=()):
                 if name == "panda-DataService.log":
                     raise rerun.Unrecorded([])
                 return N(runs=held.get((name, machine), []))
 
             r.logs = N(names=lambda wanted: wanted + ["panda-DataService.log"], log=log)
             rerun.runs_for = lambda log, key: log.runs
-            tries = [({"status": "pending"}, N(window=("10:05", "10:05"), machine="m86"), None),
-                     ({"status": "defined"}, N(window=("04:10", "04:10"), machine="m91"), None)]
+            tries = [({"status": "pending"}, rerun.W.Asking(("10:05", "10:05"), "m86", "the row"), None),
+                     ({"status": "defined"}, rerun.W.Asking(("04:10", "04:10"), "m91", "the row"), None)]
             named = r._named("JobSpec.nucleus", "7", ["every writer"], tries)
             named_own = r._named("JobSpec.nucleus", "7", ["every writer"], [(tries[0][0], tries[0][1], ["its writer"])])
 

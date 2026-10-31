@@ -1369,15 +1369,30 @@ def _identity_attrs(cls: str) -> list[str]:
     return next((t.identity_attrs for t in (fragment.tables if fragment else []) if t.spec_class == cls and t.identity_attrs), [])
 
 
-def marked_by_key(owner: str, line: int, cls: str) -> bool:
-    """Whether *owner* marks its runs by *cls*'s key: a run the map records for the function (``FunctionPrintsNode``'s
-    ``runs``) whose mark's key holds the class's identity (``_identity_attrs``) -- initialize_cpu_time_task's
-    "PandaID=...; jediTaskID=..." for a task; not doForPriorityMassage's "label=user", nor changeTaskPriorityPanda's
-    "<jediTaskID=...>" for a job.  Such a function's runs of the key are its passes for the object, and a log of it
-    searched over a span holds each (F3, KNOWN_ISSUES.md K37)."""
+def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
+    """What *owner*'s lines carry where its run's mark holds *cls*'s key *key*: for a run the map records for the
+    function (``FunctionPrintsNode``'s ``runs``) whose mark's key holds the class's identity (``_identity_attrs``),
+    each printed prefix of its rows that has the mark's holes (``.*?``, in the mark's order) cut to the text around the
+    key's hole, the key in it -- "changeTaskSplitRulePanda < jediTaskID=53351604 >", "; jediTaskID=53351078;
+    siteID=".  Every line of such a run holds it, and no line of another function's run does, so asked over a span it
+    reads the writer's runs of the key alone (F3, KNOWN_ISSUES.md K37).  None for a function marking no run by the
+    class's key: doForPriorityMassage's "label=user"; changeTaskPriorityPanda's "<jediTaskID=...>" for a job."""
     ident = set(_identity_attrs(cls))
     found = R._prints_of(owner, [line])
-    return bool(ident) and any(ident & set(k.columns) for run in (getattr(found, "runs", None) or []) for k in run.key or [])
+    if not ident or found is None:
+        return ()
+    prefixes = {r.prefix for st in (getattr(found, "statements", None) or []) for r in st.rows or [] if r.prefix}
+    out = set()
+    for run in getattr(found, "runs", None) or []:
+        at = [i for i, k in enumerate(run.key or []) if ident & set(k.columns)]
+        for prefix in prefixes if at else ():
+            parts = [re.sub(r"\\(.)", r"\1", p) for p in prefix.split(".*?")]
+            if len(parts) != len(run.key) + 1 or any(p not in "".join(parts) for p in run.mark.split("{}")):
+                continue
+            text = (parts[at[0]] + key + parts[at[0] + 1]).strip()
+            if text != key:
+                out.add(text)
+    return tuple(sorted(out))
 
 
 def _f3(state: dict | None) -> str:
@@ -1798,7 +1813,7 @@ class Rerun:
         out, unanswered, holes = {}, [], {}
         for name in self.logs.names(names):
             try:
-                log = self.logs.log(name, key, window, machine=asking.machine, owners=owners)
+                log = self.logs.log(name, key, window, machine=asking.machine, owners=owners, strings=asking.strings)
             except Unrecorded as e:
                 unanswered += [(ask, why or asking.why) for ask, why in e.asks]
                 continue
@@ -2278,12 +2293,15 @@ class Rerun:
 
     def _runs_as_rows(self, subject: str, key: str, tries: list) -> list:
         """*tries* with F3's life (``_f3`` "span": the logs of writers on no history row of the object that mark their
-        runs by its key) read run by run: each run of the key the records hold in it becomes a try at its first record,
-        on every machine, read as a row is (KNOWN_ISSUES.md K37), and all are put newest first, a birth's last among
-        those of its time.  A life with no run stays one try: no run there is no pass of those writers only in logs
+        runs by its key, asked for those marks) read run by run: each run the records hold in it whose mark holds the
+        key becomes a try at its first record, on every machine, for the same marks, read as a row is (KNOWN_ISSUES.md
+        K37), and all are put newest first, a birth's last among those of its time.  A run naming the key in its lines
+        alone is another's -- getTasksToBeProcessed_JEDI's call listing the task under its own mark -- and is no pass
+        of these writers.  A life with no run stays one try: no run there is no pass of those writers only in logs
         shown to name the key (:meth:`_row_at`).  One whose logs were not searched whole stays "open", before the
         rows: its writers may have written in what was not searched."""
         out = []
+        pattern = keyed(key)
         for state, asking, own in tries:
             if _f3(state) != "span":
                 out.append((state, asking, own))
@@ -2292,7 +2310,7 @@ class Rerun:
             runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
             lo, hi = asking.window
             found = sorted({(r.first[:19], r.last[:19]) for rs in runs.values() for r in rs
-                            if r.first[:19] <= hi and r.last[:19] >= lo}, reverse=True)
+                            if pattern.search(r.token or "") and r.first[:19] <= hi and r.last[:19] >= lo}, reverse=True)
             self.say(f"F3: {len(found)} run(s) of {key} in {', '.join(dict.fromkeys(f for c in cands for f in c.log_files))} "
                      f"over {asking.why}" + (f"; not searched whole: {', '.join(holes)}" if holes else ""))
             if holes:
@@ -2300,7 +2318,7 @@ class Rerun:
             elif not found:
                 out.append((state, asking, own))
             out += [({"status": None, "time": first, "f3": "run"}, W.Asking((first, last), None, f"a run of {key} at "
-                     f"{first}..{last} (F3), on every machine"), own) for first, last in found]
+                     f"{first}..{last} (F3), on every machine", asking.strings), own) for first, last in found]
         return sorted(out, key=lambda t: t[0]["time"] if t[0] else "", reverse=True)
 
     def _named(self, subject: str, key: str, readings: list, tries: list) -> set[str]:
@@ -2315,7 +2333,7 @@ class Rerun:
             cands = self._h2_candidates(subject, readings if own is None else own)
             for name in self.logs.names(list(dict.fromkeys(f for c in cands for f in c.log_files))):
                 try:
-                    log = self.logs.log(name, key, self.window(asking), machine=asking.machine)
+                    log = self.logs.log(name, key, self.window(asking), machine=asking.machine, strings=asking.strings)
                 except Unrecorded:
                     continue
                 if runs_for(log, key):
@@ -2432,7 +2450,7 @@ class Rerun:
         with the readings of the writers that can write it (``attr_time.row_writers``), whose logs alone it is asked of.
         A writer on no history row of the object is read where the map says more of it: a birth (``born``) wrote as the
         row was made, a try at the row's creation that asks nothing, after the rows; one that marks its runs by the
-        object's key (``marked_by_key``) is asked over the object's life, from its creation to when the value was read
+        object's key (``key_marks``) is asked over the object's life, from its creation to when the value was read
         (``windows.lifetime``, F3), a try before the rows that :meth:`_scan` reads run by run.  Any other stops."""
         fragment = mapdump.fragment()
         found = AT.arms(fragment, subject, readings, born=lambda owner, b: born(b, birth_marks(owner, subject)))
@@ -2446,7 +2464,8 @@ class Rerun:
             return [(None, asking, None)]
         cls = subject.partition(".")[0]
         births = [a for a in found if a.unplaced and a.born]
-        marked = [a for a in found if a.unplaced and not a.born and marked_by_key(a.owner, a.line, cls)]
+        marks = {a: key_marks(a.owner, a.line, cls, self.args.key) for a in found if a.unplaced and not a.born}
+        marked = [a for a, m in marks.items() if m]
         for a in found:
             self.say(f"  {a.owner.split('::')[-1]}:{a.line} " + (f"is on no history row of the object: {a.unplaced}" if a.unplaced else
                      "writes in a pass that writes the object's history row (" + ", ".join(sorted({f"{p.caller.split('::')[-1]}:{p.call} "
@@ -2466,7 +2485,7 @@ class Rerun:
             (s, W.at_transition(s), AT.readings_of(readings, arms)) for s, arms in rows]
         made = self._made_at(cls) if births or marked else None
         if marked:
-            life = W.lifetime(made, self._read_at(subject))
+            life = W.lifetime(made, self._read_at(subject), tuple(sorted({s for a in marked for s in marks[a]})))
             names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in marked)
             self.need(f"the object's life, to ask {names} over: {life.why}", life.window)
             self.say(f"F3: {names} asked over {life.why}")
