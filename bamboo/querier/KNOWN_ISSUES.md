@@ -118,6 +118,34 @@ whose run is every call in the window: G's round asked 492 marks, 9 of them a wr
 1 MB in all 18 files (bamboo-e1).  Such a mark's key records are read as a run cut at both ends (`Log.partial`: rule
 8 reads no row missing from it), so a mover whose run it is is followed on positive evidence only.  A shared mark
 seen in one piece is still asked, and comes back cut.
+A mark of theirs whose rows below WARNING all start with fixed text (`rows.mark_heads`) is asked for those rows and
+every line at WARNING and above (`recorded._narrowed`, 2026-10-31; the harness's to-querier-63): a call of
+getTasksToBeProcessed_JEDI was 382,661 lines in MT-ready-stuck's round 5, 381,600 of them its callee's, one per task
+listed, and a second of them stopped the recorder's paging.  A run of such a mark holds no other function's line below
+WARNING, and rule 8 and E6 read such a row as not searched (`Run.holds`; said on the run's line).  A message the
+shapes read as a leading hole (an f-string's expression, a conditional) leaves the mark asked whole: insertNewJob's
+rows start with `job.PandaID`.  A narrowed ask is not read from a record of the whole mark cut at 1 MB over its window
+(`recorded._cut_over`): it is asked anew, so the next round reads what the cut left unread -- where the record says what
+was read for each cut string (fieldtest ca43fb9's `read`), only if a string the ask needs is cut, and an ask that
+drops the string that filled the stopped second is read from it whole (`recorded._read_for`).  H2 still asks every mark
+whole (it reads a candidate's rows in any run of the key, and a writer handed its caller's logger prints under the
+caller's mark); by the harness's count over rounds 1-5 (to-querier-64), only getTasksToBeProcessed_JEDI's marks come
+near a page's stop, and a round that stops on one is left to the recorder's split of the stopped second.
+
+### K40. A truncated file with no `searched` is read up to its last record, whichever string's
+
+A file is `truncated` where any string of its ask was cut at 1 MB, while the ask's other strings ran on to the file's
+end; read up to its last record returned, it counts as searched the stretch past a cut string's last record, where
+that string's records were never fetched (and the cut record's second).  On pin m's records (the harness, 10-30 20:4x):
+157 of 315 truncated entries end on a record after a cut string's last, 99 of those over the ask's window --
+MR-T-53354737-queuedTime reads aipanda081's panda-JediDBProxy.log-20261029.gz as searched at 10-29 07:43:04, though
+`getTasksToRefine_JEDI < vo=None label=managed >` was cut at 10-28 07:52:08.  A record saying where every string was
+read (`searched`) is read only there, and a later round writes such records again with `replaces` (tmaeno: "OK", 10-30
+20:5x).
+*Shows:* silent: the "not searched" lines of H2 and S2 leave the machine out, and a log read as searched whole with no
+run of the key there reads as no writer's pass.
+*Revisit:* when the harness's round rewrites every truncated entry with `searched`; the records snapshots taken
+before it keep the overread.
 
 ## The rows ask (`Rerun.ask_rows`)
 
@@ -826,11 +854,79 @@ is as it was before PC, and can name a guard whose flip alone would not move the
 JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), none of them in a case of mine
 (2026-10-25).
 
+An arm's guards are `pathcond.path_condition`'s, the tests of the `if`s enclosing it; S3 does not read what the map's
+`pathcond.enclosing_guards` adds (an early exit above the arm, an `except` around it).  So an arm after an early
+return the pass took, or one in a handler, shows no guard made false, and S3 stops at "every arm has a guard the
+passes made false" -- the need it could not meet, not a claim (records-cut, 7a05464: MJ-merging-stuck's
+check_output_file_metadata 200 / 209 after the return at 181, and parse_job_output_report 820 in its handler).  And a
+pass that leaves a loop at its terminator is read as leaving at that exit: setupper's assign_dispatch_data_blocks
+walks `self.jobs + [None]` and leaves at 324 (`if job is None: break`) after every job, so S2's "left by 324" and S3's
+{'job is None': True} are the call's, not the key's iteration (the investigator's round 2, 2026-10-31).  Neither
+gives a wrong answer: S3 stops.
+
 *Shows:* stopped: "the if whose test is '<guard>'" for a guard with no test above the arm; a marked guard in an arm's
 "needs [...]" and never in "false in the passes".
 *Revisit:* when S3 must go on from such a guard: the map would record each entry's place (its `if`'s line, or the
 replacing write's, and for a callee's test the method and how its names map to the caller's); for an `[at N]`
-entry, when a reader holds a name's value at a line rather than for the whole pass.
+entry, when a reader holds a name's value at a line rather than for the whole pass.  S3 to read enclosing_guards and
+to say its stop as the need it is (promised to the map, 2026-10-31); a loop's terminator, when S2 reads a key's
+iteration rather than the call.
+
+### K41. P reads the arm's own function's rows, by what a call is handed, and a positive says the arm ran
+
+P (`printed.py`) reads a run against the arm's own function only.  Of the 103 pairs of possibilities the
+investigator read in the possibilities task (round 1, 2026-10-30), the print that tells them apart sits in the arm's
+function for 96 and in a function it calls for 7 (doBasicPostProcess's getTaskStatus_JEDI 2596 and
+get_event_statistics 4633 in task_standalone_module; archiveJob's check_fine_grained_processing 1945): those are not
+read.  What a call changes is read from what it is handed -- by name, and below ``self`` by
+chain (`printed.self_effects`, the core's (c)) -- so an object stored elsewhere earlier and changed through that alias
+is not seen, nor is a local bound to the target's object in the walked function (``job = self.job`` then
+``job.jobStatus = ...`` binds ``job.jobStatus``, not the target).  (c) resolves ``self.m()`` with the map's
+``calls.Types`` (the class, its corpus subclasses, each along its order): a base outside the corpus listed before the
+class in a subclass's bases, defining the same name, is not seen.  The second P (the core's (d), `printed.Reaching`)
+rests on the candidates being every writer of the observed value: on a map without the writers of a value known at
+run time only (RD, codemap-rd), a call that writes the target from such a value is not seen.
+
+A positive says the arm ran in the run.  Where the value or its row is written by a later call of the pass (for a
+status the map's `HistoryPair`, reachable and not taken; for an attribute set in memory, the call that stores the
+object), a test in the callee can refuse the write and the caller go on unaware: ContentsFeeder's
+updateTaskStatusByContFeeder_JEDI writes nothing where the task is locked by another process or its status is not one
+for contents update (task_complex_module 1324-1331), and the caller's print after the call reads the same.  On
+x13xiiC2m (the 65 texts, the attribute 60, MT; 2026-10-31), of the 14 arms judged positive, 9 are DB proxy methods that
+write the value with their own statement (5 of them leave the history row to a later recordStatusChange or
+record_task_status_change); 2 are stored by the adder's updateJobs -- process_job_report 441 (32 texts) and
+adder_atlas_plugin execute 170 (6), whose runs print rows only after updateJobs returned success; 2 by TaskRefiner's
+registerTaskInOneShot_JEDI -- runImpl 211 (14 texts) and AtlasAnalTaskRefiner doRefine 260 (1), where a refusal prints
+"failed to register the task to JEDI in a single shot", in none of the 14 runs, an absence P does not read; and
+doBasicPostProcess 114 (endTime, 1 text) by updateTask_JEDI, whose result it does not read: one arm in one text that
+no row can tell.
+
+*Shows:* H2's verdicts: P's reason, and "read with the other verdicts: a call reaching no writer of '<value>' left
+standing does not write it" for a positive of the second P.
+*Revisit:* when a pass's runs of a called function's log are read as the caller's (K21's join, inside the call); when
+the map holds a call's write conditions; when RD lands.
+
+### K42. A record two rows print alike proves neither, and rule 6 reads a caller's guard on any object of the class
+
+`rows.Seen.proven` counts a record only where the function reads it with that row alone (`Seen.unambiguous`, after
+`rows.claim`): activateJob prints its files' UPDATE alike at 92 (in the arm that activates) and 124 (in the one that
+does not), and such a record had made 71 positive (the investigator's round 2, 2026-10-31).  The record proves
+neither row even where the other's path is ruled out on its own, or its place in the run rules the other out:
+parse_job_output_report prints "parse_job_output_report end" at 750 (before the early return 751) and at 966.  On
+records-cut (out/pv1) MJ-merging-stuck and MJ-transferring-stuck lose 967's positive, though 751 is excluded by rule 4
+and the record follows rows 869-873, which 750 cannot follow; those branches stop at S2.
+
+Rule 6 (`which_ran.rewriter`) solves the callers' guards too (`callers_guards`) and reads `<x>.<attr>` in them as the
+key's object whatever x is: archiveJob 1783's `job.jobStatus == 'finished'` tests the merge job, while
+updateUnmergedJobs 1236 writes the jobs it merged.  On records-cut before pv1 it excluded 1236 in MJ-merging-late (the
+key 7390523881, the merge job 7390910703).  With the row's second read run by run (pv1) the env no longer settles
+that guard there and 1236 is positive; the defect is not fixed.
+
+*Shows:* "row(s) [..] print only on a path through it" names only rows a record is read by alone; "rule 6: reached
+only when <x>.<attr> is already ..." with a caller's guard.
+*Revisit:* when an ambiguous record can be given to the one row the run's order or another rule leaves (P's order
+check reads rows read alone too); rule 6, when the map says which object a caller's guard tests against the callee's
+argument.
 
 ## The walks (`asked.py`)
 
