@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import ast
 import logging
-from typing import Iterator, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
 
 from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as C
@@ -55,6 +55,9 @@ from bamboo.codemap.models import (
     SourceModule,
 )
 from bamboo.codemap.panda import objects, pathcond, sql, sqltext
+
+if TYPE_CHECKING:
+    from bamboo.codemap.panda.recognizers import sqlwrite
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +135,17 @@ def _value(node: ast.expr, key: str) -> Optional[ast.expr]:
     return None
 
 
-def attach(fragment: MapFragment, modules: list[SourceModule], calls: C.Calls) -> int:
-    """Set *fragment*'s :attr:`MapFragment.endpoints`; returns how many statements they read, counted per endpoint."""
+def attach(
+    fragment: MapFragment,
+    modules: list[SourceModule],
+    calls: C.Calls,
+    returned: Optional[dict[str, sqlwrite.Returned]] = None,
+) -> int:
+    """Set *fragment*'s :attr:`MapFragment.endpoints`; returns how many statements they read, counted per endpoint.
+
+    With *returned* -- :func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_crossings`' walks asked for every
+    endpoint's answer -- each read says where its rows are in what the endpoint returns, and the holes on the way in
+    the endpoint's closure (:attr:`EndpointRead.returned`, :attr:`EndpointRead.returned_open`)."""
     record = reach.ReachGraph(fragment.reach_graph)
     sites: dict[str, list[ReadSiteNode]] = {}
     for site in fragment.read_sites:
@@ -174,8 +186,10 @@ def attach(fragment: MapFragment, modules: list[SourceModule], calls: C.Calls) -
             for site in sites.get(function, ()):
                 reached.setdefault(site.name, (site, []))[1].append(node)
         fills = _Fills(record, code, came, owner, shut)
+        inside = {function for function, _cls in came}
         reads = []
         for site, nodes in reached.values():
+            answer = returned.get(site.name) if returned is not None else None
             reads.append(
                 EndpointRead(
                     site=site.name,
@@ -191,6 +205,16 @@ def attach(fragment: MapFragment, modules: list[SourceModule], calls: C.Calls) -
                         for key_from in terms.get((site.owner, _line(site)), ())
                     ],
                     way=reach.way(came, nodes[0]),
+                    returned=answer.paths.get(owner, []) if answer is not None else [],
+                    returned_open=sorted(
+                        {
+                            f"{function}:{line}"
+                            for function, line, _callee in answer.holes
+                            if function in inside
+                        }
+                    )
+                    if answer is not None
+                    else [],
                 )
             )
         functions = list(dict.fromkeys(function for function, _cls in came))

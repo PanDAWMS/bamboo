@@ -3243,6 +3243,27 @@ class EndpointRead(BaseModel):
             ":attr:`ReachWrite.chain`: one way, the fewest calls; empty in the endpoint itself."
         ),
     )
+    returned: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the statement's rows are in what the endpoint's function returns -- its answer -- as the walk "
+            "carrying them back up the calls reads it (:func:`bamboo.codemap.panda.recognizers.sqlwrite."
+            "attach_crossings`), spelled as :attr:`KeySource.paths`: ``()`` the value itself, else its steps "
+            "(``['data']``, ``[*]``, ``.Files``; ``[key]`` a dict's keys, ``.*`` any field).  ``generate_response`` "
+            "puts its data under ``['data']``.  A part of the rows here reads as them, and a path may be one a run "
+            "never takes: a branch on the value's type is read both ways.  Empty where it returns none of them -- "
+            "``job/kill``'s ``peekJob`` -- as far as *returned_open* says."
+        ),
+    )
+    returned_open: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``owner:line`` of each hole that walk met in a function of the endpoint's closure, as "
+            ":attr:`Endpoint.holes` spells them: a call handed a part of the rows that no reading places, or a "
+            "caller the rows may be returned to that it cannot place -- where more of them may come back than "
+            "*returned* says."
+        ),
+    )
 
 
 class EndpointWrite(BaseModel):

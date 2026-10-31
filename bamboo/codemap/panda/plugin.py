@@ -698,6 +698,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # Where the walk reaches the database through calls with a statement's rows in its binds: the KeyFroms'
         # sources across calls, read in the next step.
         landings: dict[str, list] = {}
+        # And what each endpoint's function returns of a statement's rows -- where they are in its answer -- read in
+        # the same walks, for the endpoints below.
+        returned: dict[str, sqlwrite.Returned] = {}
         self.crossings = sqlwrite.attach_crossings(
             fragment.read_sites,
             self._modules,
@@ -705,6 +708,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._calls,
             record,
             landings=landings,
+            returned=returned,
+            returning=frozenset(owner for _version, _route, owner in endpoints.routes(self._modules)),
         )
         lap("crossings")
         # Where each write's row keys were filled from, and who handed a guarded write its keys: read by the carry,
@@ -814,7 +819,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             off = offrow.attach(fragment, self._modules, self._calls)
             logger.info("PandaCodeMapPlugin: %d branch(es) write their object to no row", off)
             # The statements each API endpoint's calls reach, on the reach record and the read terms.
-            read = endpoints.attach(fragment, self._modules, self._calls)
+            read = endpoints.attach(fragment, self._modules, self._calls, returned)
             logger.info(
                 "PandaCodeMapPlugin: %d endpoint(s), %d statement(s) they read", len(fragment.endpoints), read
             )

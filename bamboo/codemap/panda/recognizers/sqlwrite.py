@@ -5991,10 +5991,19 @@ class _Crossings:
     declared ``Any``.
     """
 
-    def __init__(self, reading: _Reading, landing: bool = False, routed: bool = False):
+    def __init__(
+        self, reading: _Reading, landing: bool = False, routed: bool = False, returning: frozenset[str] = frozenset()
+    ):
         self.reading = reading
         #: Whether to keep where the rows reach the database through calls (:attr:`landings`).
         self.landing = landing
+        #: The owners of the module's functions whose answers are asked -- an API's endpoints: the paths of the rows
+        #: each returns (:attr:`returned`), and the holes met on the way (:attr:`met`).
+        self.returning = returning
+        self.returned: dict[str, set[tuple[str, ...]]] = {}
+        #: ``(owner, line, callee)`` of each hole on the way as :attr:`open` has them, but every hole handed a part
+        #: of the rows: what of them comes back is asked, not what reads them.  Kept only with *returning*.
+        self.met: dict[tuple[str, int, str], None] = {}
         #: Whether to keep each found owner's ways back up (:attr:`ways`): only :func:`attach_crossings`' walk reads
         #: them, and the key sources' walks, many more, keep them for nothing.
         self.routed = routed
@@ -6071,6 +6080,8 @@ class _Crossings:
         hole = reading.record.hole_at(carry.file, call)
         if hole is not None and (not isinstance(call.func, ast.Attribute) or call.func.attr in reading.owner_names):
             self.open[hole] = None
+        if hole is not None and self.returning:
+            self.met[hole] = None
         for value in carry.handed_bound(call) if not everything else ():
             try:
                 bound = reading.calls.named_callables(carry.file, carry.func, value, carry.bound)
@@ -6138,9 +6149,14 @@ class _Crossings:
             self._again(("back", key))
             return
         self._returned.add(key)
+        owner = f"{file}::{func.name}"  # type: ignore[attr-defined]
+        if owner in self.returning and isinstance(getattr(func, "parent", None), ast.Module):
+            self.returned.setdefault(owner, set()).update(paths)
         reading = self.reading
         for hole in reading.record.holes_spelled(func.name):  # type: ignore[attr-defined]
             self.open[hole] = None
+            if self.returning:
+                self.met[hole] = None
         held = reading.calls.types.method_class(file, func)
         self._backing += 1
         with self._going(("back", key)):
@@ -6173,14 +6189,16 @@ def _walk(
     item: Optional[int] = None,
     landing: bool = False,
     routed: bool = False,
+    returning: frozenset[str] = frozenset(),
 ) -> tuple[_Crossings, _Paths]:
     """Carry *site*'s rows on from its statement in *func* (:func:`attach_crossings`) -- with *item*, that select item
     of them alone (:class:`_PathCarry`), with *landing* keeping where they reach the database through calls, with
-    *routed* each found owner's ways back up (:attr:`_Crossings.ways`): the walk, and what *func* returns of them."""
+    *routed* each found owner's ways back up (:attr:`_Crossings.ways`), with *returning* what the functions it names
+    return of them (:attr:`_Crossings.returned`): the walk, and what *func* returns of them."""
     file, line = site.anchor.file, site.anchor.line_start
     rows = _rows_written(func, line, site.region[1])
     carry = _PathCarry(reading, file, func, (), start=rows, item=item)
-    crossings = _Crossings(reading, landing, routed)
+    crossings = _Crossings(reading, landing, routed, returning)
     for call in _own_calls(func):
         if call.lineno == line:
             # The call running the statement, followed with all it hands:
@@ -6292,6 +6310,15 @@ def _item_choice(
     return "", KEY_COLUMN_EXPRESSION
 
 
+class Returned(NamedTuple):
+    """What one statement's rows come to in the answers :func:`attach_crossings` is asked for (*returning*)."""
+
+    #: ``{owner: paths}``: the parts of the rows each function returns, spelled as :attr:`KeySource.paths`.
+    paths: dict[str, list[str]]
+    #: ``(owner, line, callee)`` of each hole the walk met (:attr:`_Crossings.met`), sorted.
+    holes: list[tuple[str, int, str]]
+
+
 def attach_crossings(
     read_sites: list[ReadSiteNode],
     modules: list[SourceModule],
@@ -6300,6 +6327,8 @@ def attach_crossings(
     record: Optional["ReachGraph"],
     unread_kept: bool = True,
     landings: Optional[dict[str, list[_Landing]]] = None,
+    returned: Optional[dict[str, Returned]] = None,
+    returning: frozenset[str] = frozenset(),
 ) -> CrossingCensus:
     """Say which junction a row handled here is carried on to.
 
@@ -6382,12 +6411,21 @@ def attach_crossings(
     (:class:`_Landing`, each select item's too): the key a statement of another
     function names its rows by, which the KeyFroms read
     (:func:`attach_key_sources`).  Not the statement's own run handed on.
+
+    With *returned*, what the walk carried back to each of the functions
+    *returning* names -- an API's endpoints, whose answers are what they
+    return -- goes into it by the statement's read site, with every hole the
+    walk met on the way (:class:`Returned`): a part of the rows a function
+    returns is where the rows are in its answer, and a hole where more may
+    be.  ``pilot/get_job_status`` returns ``peekJobs``'s jobs at
+    ``['data'][*]['status']`` ...; ``job/kill`` returns none of them.
     """
     if calls is None or record is None:
         return CrossingCensus(0, 0, 0, 0)
     owners = {junction.owner for junction in junctions}
     trees = {module.rel_path: module.tree for module in modules}
     reading = _Reading(calls, owners, record, unread_kept)
+    asked = returning if returned is not None else frozenset()
     stored = handing_back = resolved = opened = 0
     for site in read_sites:
         if not site.region:
@@ -6395,7 +6433,12 @@ def attach_crossings(
         func = _site_function(trees, site)
         if func is None:
             continue
-        crossings, returned = _walk(reading, func, site, landing=landings is not None, routed=True)
+        crossings, handed = _walk(reading, func, site, landing=landings is not None, routed=True, returning=asked)
+        if returned is not None:
+            returned[site.name] = Returned(
+                {owner: _spelled_paths(frozenset(paths)) for owner, paths in sorted(crossings.returned.items())},
+                sorted(crossings.met),
+            )
         if landings is not None:
             found = [one for one in crossings.landings if not _own_run(one, func, site)]
             for landing in found:
@@ -6409,7 +6452,7 @@ def attach_crossings(
         # lead was back to themselves.
         crossings.found.discard(site.owner)
         crossings.found_back.discard(site.owner)
-        handing_back += 1 if returned else 0
+        handing_back += 1 if handed else 0
         resolved += 1 if crossings.found_back else 0
         site.crosses_to = sorted(crossings.found)
         site.crosses_open = [

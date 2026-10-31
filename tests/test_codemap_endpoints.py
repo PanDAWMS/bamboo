@@ -183,7 +183,9 @@ def _site(
     return site, term
 
 
-def _build(tmp_path: Path) -> MapFragment:
+def _build(
+    tmp_path: Path, returned: dict[str, sqlwrite.Returned] | None = None
+) -> MapFragment:
     root = tmp_path / PACKAGE
     modules = []
     for rel, text in FILES.items():
@@ -218,7 +220,7 @@ def _build(tmp_path: Path) -> MapFragment:
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
         )
         panda_objects.attach(fragment, modules, calls)
-        endpoints.attach(fragment, modules, calls)
+        endpoints.attach(fragment, modules, calls, returned)
     return fragment
 
 
@@ -278,6 +280,37 @@ def test_an_endpoint_reads_the_statements_its_calls_reach_as_the_class_they_run_
         (f"{proxy}::Archiver.impl", ["atlas_pandaarch.jobsarchived"])
     ]
     assert by_route["creds/get_key"].reads == []
+
+
+def test_a_read_says_where_its_rows_are_in_the_answer_as_the_walk_carried_them_back(
+    tmp_path: Path,
+) -> None:
+    """What the crossings' walk carried back to each endpoint's function (``sqlwrite.Returned``) is where the read's
+    rows are in that endpoint's answer, and none where it carried nothing there; a hole the walk met is said only
+    where a function of the endpoint's closure makes it -- ``Archiver.impl``'s is no way to ``get_status``'s."""
+    proxy, api = f"{PACKAGE}/taskbuffer/proxy.py", f"{PACKAGE}/api/v1/job_api.py"
+    returned = {
+        f"panda:{proxy}::impl@{_line(PROXY, 'P')}": sqlwrite.Returned(
+            {f"{api}::get_status": ["()"], f"{api}::get_task": ["[*][0]"]},
+            [
+                (f"{proxy}::Peeker.impl", 12, "x.f"),
+                (f"{proxy}::Archiver.impl", 30, "y.g"),
+            ],
+        )
+    }
+    by_route = {one.route: one for one in _build(tmp_path, returned).endpoints}
+
+    assert [
+        (read.returned, read.returned_open)
+        for route in ("job/get_status", "job/get_task", "job/get_fixed")
+        for read in by_route[route].reads
+    ] == [
+        (["()"], [f"{proxy}::Peeker.impl:12"]),
+        (["[*][0]"], [f"{proxy}::Peeker.impl:12"]),
+        ([], [f"{proxy}::Peeker.impl:12"]),
+    ]
+    (archived,) = by_route["job/get_archived"].reads
+    assert (archived.returned, archived.returned_open) == ([], [])
 
 
 def test_an_endpoint_says_where_its_calls_may_go_where_no_edge_says(
