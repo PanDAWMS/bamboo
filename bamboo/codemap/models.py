@@ -3245,6 +3245,15 @@ class EndpointRead(BaseModel):
     )
 
 
+class EndpointWrite(BaseModel):
+    """A statement writing rows that an endpoint's calls reach: one per statement and kind of :attr:`Endpoint.writes`."""
+
+    function: str = Field(description="The :attr:`ReachNode.owner` of the function running it.")
+    line: int = Field(description="The line of the call that runs it.")
+    kind: str = Field(description="``insert``, ``update`` or ``delete``, as the statement's text reads.")
+    tables: list[str] = Field(default_factory=list, description="The tables it writes, lowered.")
+
+
 class Endpoint(BaseModel):
     """A function the server runs for a request, and the statements reading rows its calls reach.
 
@@ -3261,7 +3270,24 @@ class Endpoint(BaseModel):
         default_factory=list,
         description="``owner:line`` of each :class:`ReachHole` in the closure: a call that may go where no edge says.",
     )
+    shut: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file:line`` of each call left out of the closure because a constant every way hands a parameter "
+            "rules it out (:func:`bamboo.codemap.panda.endpoints._shut`): ``get_task_details_json``'s "
+            "``_resolve_parent_task_id`` under ``if resolve_parent:``, for ``task/get_detailed_info``."
+        ),
+    )
     reads: list[EndpointRead] = Field(default_factory=list)
+    writes: list[EndpointWrite] = Field(
+        default_factory=list,
+        description=(
+            "Every statement writing rows a function of the closure runs -- an ``INSERT``, ``UPDATE`` or ``DELETE`` "
+            "(:func:`bamboo.codemap.panda.sqltext.creates` / ``updates`` / ``deletes``) -- however it is guarded: "
+            "the closure is where the calls can go, not where a request makes them go.  A write past one of "
+            "*holes* is not here; ``job/kill`` writes, ``job/get_description_incl_archive`` does not."
+        ),
+    )
 
 
 class CoverageStat(BaseModel):

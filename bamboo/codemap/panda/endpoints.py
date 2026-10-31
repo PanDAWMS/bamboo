@@ -47,13 +47,14 @@ from bamboo.codemap.models import (
     EndpointFill,
     EndpointRead,
     EndpointTerm,
+    EndpointWrite,
     KeyFrom,
     MapFragment,
     ReachCall,
     ReadSiteNode,
     SourceModule,
 )
-from bamboo.codemap.panda import objects
+from bamboo.codemap.panda import objects, pathcond, sql, sqltext
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,11 @@ def attach(fragment: MapFragment, modules: list[SourceModule], calls: C.Calls) -
             )
             continue
         came = record.closure([owner])
+        shut = _shut(record, code, came)
+        if shut:
+            came = record.closure(
+                [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
+            )
         holes = []
         reached: dict[str, tuple[ReadSiteNode, list[tuple[str, str]]]] = {}
         for node in came:
@@ -167,7 +173,7 @@ def attach(fragment: MapFragment, modules: list[SourceModule], calls: C.Calls) -
             )
             for site in sites.get(function, ()):
                 reached.setdefault(site.name, (site, []))[1].append(node)
-        fills = _Fills(record, code, came, owner)
+        fills = _Fills(record, code, came, owner, shut)
         reads = []
         for site, nodes in reached.values():
             reads.append(
@@ -187,14 +193,23 @@ def attach(fragment: MapFragment, modules: list[SourceModule], calls: C.Calls) -
                     way=reach.way(came, nodes[0]),
                 )
             )
+        functions = list(dict.fromkeys(function for function, _cls in came))
         found.append(
             Endpoint(
                 route=route,
                 version=version,
                 function=owner,
-                closure=len({function for function, _cls in came}),
+                closure=len(functions),
                 holes=list(dict.fromkeys(holes)),
+                shut=sorted(
+                    {
+                        f"{node[0].partition('::')[0]}:{line}"
+                        for node, call in _calls_shut(record, came, shut)
+                        for line in call.lines or [call.line]
+                    }
+                ),
                 reads=reads,
+                writes=[one for function in functions for one in code.writes(function)],
             )
         )
     fragment.endpoints = found
@@ -215,6 +230,26 @@ class _Code:
         self.funcs = {owner: (file, func) for file, func, owner in self.names.functions}
         self._versions: dict[str, objects._Versions] = {}
         self._lines: dict[str, dict[int, list[ast.AST]]] = {}
+        self._writes: dict[str, list[EndpointWrite]] = {}
+        self._bound: dict[
+            tuple[str, int, str], list[tuple[ast.Call, dict[str, Optional[ast.expr]]]]
+        ] = {}
+
+    def writes(self, owner: str) -> list[EndpointWrite]:
+        """The statements writing rows *owner* runs, one per statement and kind."""
+        found = self._writes.get(owner)
+        if found is None:
+            found = self._writes[owner] = []
+            held = self.funcs.get(owner)
+            for run in sql.executions(held[1]) if held is not None else []:  # type: ignore[arg-type]
+                for kind, read in _WRITES:
+                    tables = sorted({table.lower() for table in read(run.reading)})
+                    one = EndpointWrite(
+                        function=owner, line=run.call.lineno, kind=kind, tables=tables
+                    )
+                    if tables and one not in found:
+                        found.append(one)
+        return found
 
     def versions(self, owner: str) -> objects._Versions:
         found = self._versions.get(owner)
@@ -234,13 +269,17 @@ class _Code:
                 lines.setdefault(getattr(node, "lineno", 0), []).append(node)
         return lines.get(line, [])
 
-    def handed(
-        self, caller: str, call: ReachCall, callee: str, parameter: str
-    ) -> list[Optional[ast.expr]]:
-        """What each call of *call*'s lines in *caller* landing in *callee* hands its *parameter*; ``None`` where the
-        call does not say."""
+    def bound(
+        self, caller: str, call: ReachCall, callee: str
+    ) -> list[tuple[ast.Call, dict[str, Optional[ast.expr]]]]:
+        """Each call of *call*'s lines in *caller* landing in *callee*, with what it hands each parameter
+        (:func:`calls.bind`: ``None`` where it does not say)."""
+        key = (caller, id(call), callee)
+        found = self._bound.get(key)
+        if found is not None:
+            return found
         file, func = self.funcs[caller]
-        found: list[Optional[ast.expr]] = []
+        found = self._bound[key] = []
         for line in call.lines or [call.line]:
             for node in self.at(caller, line):
                 if not isinstance(node, ast.Call):
@@ -251,10 +290,17 @@ class _Code:
                     continue
                 for target in placed.targets:
                     if self.names.of(target.func) == callee:
-                        found.append(
-                            C.bind(node, target, placed.on_class).get(parameter)
-                        )
+                        found.append((node, C.bind(node, target, placed.on_class)))
         return found
+
+    def handed(
+        self, caller: str, call: ReachCall, callee: str, parameter: str
+    ) -> list[Optional[ast.expr]]:
+        """What each call of *call*'s lines in *caller* landing in *callee* hands its *parameter*; ``None`` where the
+        call does not say."""
+        return [
+            given.get(parameter) for _node, given in self.bound(caller, call, callee)
+        ]
 
 
 class _Fills:
@@ -262,21 +308,15 @@ class _Fills:
     parameters (:class:`EndpointFill`)."""
 
     def __init__(
-        self, record: reach.ReachGraph, code: _Code, came: reach.Came, endpoint: str
+        self,
+        record: reach.ReachGraph,
+        code: _Code,
+        came: reach.Came,
+        endpoint: str,
+        shut: frozenset[tuple[Node, int]] = frozenset(),
     ):
         self.record, self.code, self.endpoint = record, code, endpoint
-        self.into: dict[Node, list[tuple[Node, ReachCall]]] = {}
-        for node in came:
-            owner, cls = node
-            for call in record.rows[owner].calls:
-                if call.for_classes and cls not in call.for_classes:
-                    continue
-                entered = record.rows.get(call.to)
-                if entered is None:
-                    continue
-                for one in call.runs_as or entered.classes or [""]:
-                    if (call.to, one) in came:
-                        self.into.setdefault((call.to, one), []).append((node, call))
+        self.into = _into(record, came, shut)
         # Each call between functions of the closure, ``file:line``: a way rows of a statement can come by here.
         self.calls = {
             f"{caller[0].partition('::')[0]}:{line}"
@@ -490,6 +530,162 @@ class _Fills:
         return self.value(node, values[0], steps, depth)
 
 
+def _into(
+    record: reach.ReachGraph,
+    came: reach.Came,
+    shut: frozenset[tuple[Node, int]] = frozenset(),
+) -> dict[Node, list[tuple[Node, ReachCall]]]:
+    """Each function of the closure *came* as a class, with every call into it from one of the closure, as the closure
+    walks them; not one of *shut*."""
+    found: dict[Node, list[tuple[Node, ReachCall]]] = {}
+    for node in came:
+        owner, cls = node
+        for call in record.rows[owner].calls:
+            if call.for_classes and cls not in call.for_classes:
+                continue
+            if (node, id(call)) in shut:
+                continue
+            entered = record.rows.get(call.to)
+            if entered is None:
+                continue
+            for one in call.runs_as or entered.classes or [""]:
+                if (call.to, one) in came:
+                    found.setdefault((call.to, one), []).append((node, call))
+    return found
+
+
+def _calls_shut(
+    record: reach.ReachGraph, came: reach.Came, shut: frozenset[tuple[Node, int]]
+) -> Iterator[tuple[Node, ReachCall]]:
+    """Each call of *shut* a function of the closure *came* makes."""
+    for node in came:
+        for call in record.rows[node[0]].calls:
+            if (node, id(call)) in shut:
+                yield node, call
+
+
+def _shut(
+    record: reach.ReachGraph, code: _Code, came: reach.Came
+) -> frozenset[tuple[Node, int]]:
+    """The calls of the closure *came* no way into it makes: ``(the function and class making it, id(its call))``.
+
+    A parameter of a function of the closure holds a constant where every call into the function, on the ways still
+    open, hands it the same one -- a literal, the default the call leaves it to (:func:`calls.bind`), a parameter of
+    the caller holding one --; the endpoint's own parameters are the request's and hold none.  A call is shut where
+    every call of its lines is ruled out (:func:`pathcond.ruled_out_at`) by such a parameter of the function making
+    it: ``get_task_details_json`` calls ``_resolve_parent_task_id`` under ``if resolve_parent:``, and
+    ``task/get_detailed_info``'s way leaves ``resolve_parent`` to its default, ``False``.  Read again without the
+    calls shut, until no more is.
+    """
+    starts = [node for node, came_from in came.items() if came_from is None]
+    shut: set[tuple[Node, int]] = set()
+    while True:
+        into = _into(record, came, frozenset(shut))
+        open_ = _reached(starts, into)
+        held: dict[Node, dict[str, tuple[type, object]]] = {node: {} for node in starts}
+        changed = True
+        while changed:
+            changed = False
+            for node in open_:
+                if node in starts:
+                    continue
+                found = _constants(
+                    code,
+                    node,
+                    [one for one in into.get(node, ()) if one[0] in open_],
+                    held,
+                )
+                if found != held.get(node):
+                    held[node] = found
+                    changed = True
+        more = set()
+        for callee, edges in into.items():
+            for caller, call in edges:
+                values = held.get(caller)
+                if caller not in open_ or not values or call.how != "call":
+                    continue
+                runs = code.bound(caller[0], call, callee[0])
+                func = code.funcs[caller[0]][1]
+                if runs and all(
+                    any(
+                        pathcond.ruled_out_at(node, func, name, value)
+                        for name, (_kind, value) in values.items()
+                    )
+                    for node, _given in runs
+                ):
+                    more.add((caller, id(call)))
+        if more <= shut:
+            return frozenset(shut)
+        shut |= more
+
+
+def _reached(
+    starts: list[Node], into: dict[Node, list[tuple[Node, ReachCall]]]
+) -> set[Node]:
+    """The nodes *starts* reach by the calls of *into*."""
+    out: dict[Node, list[Node]] = {}
+    for callee, edges in into.items():
+        for caller, _call in edges:
+            out.setdefault(caller, []).append(callee)
+    found = set(starts)
+    pending = list(starts)
+    while pending:
+        for callee in out.get(pending.pop(), ()):
+            if callee not in found:
+                found.add(callee)
+                pending.append(callee)
+    return found
+
+
+def _constants(
+    code: _Code,
+    node: Node,
+    edges: list[tuple[Node, ReachCall]],
+    held: dict[Node, dict[str, tuple[type, object]]],
+) -> dict[str, tuple[type, object]]:
+    """``{parameter: (type, value)}`` of *node*'s function for each parameter every call of *edges* hands the same
+    constant."""
+    func = code.funcs[node[0]][1]
+    found: dict[str, tuple[type, object]] = {}
+    for name in sorted(_parameters(func) - {"self", "cls"}):
+        values = []
+        for caller, call in edges:
+            runs = code.bound(caller[0], call, node[0]) if call.how == "call" else []
+            if not runs:
+                values.append(None)
+            for _node, given in runs:
+                values.append(_constant(code, caller, given.get(name), held))
+        if (
+            values
+            and all(one is not None for one in values)
+            and len(set(map(repr, values))) == 1
+        ):
+            found[name] = values[0]  # type: ignore[assignment]
+    return found
+
+
+def _constant(
+    code: _Code,
+    caller: Node,
+    value: Optional[ast.expr],
+    held: dict[Node, dict[str, tuple[type, object]]],
+) -> Optional[tuple[type, object]]:
+    """``(type, value)`` of the constant *value*, an argument *caller* hands, holds; ``None`` where it holds none."""
+    if isinstance(value, ast.Constant):
+        return type(value.value), value.value
+    if isinstance(value, ast.Name) and code.versions(caller[0]).paths(value) == [
+        value.id
+    ]:
+        return held.get(caller, {}).get(value.id)
+    return None
+
+
+#: The kinds of statement writing rows, each with what reads its tables off its text.
+_WRITES = (
+    ("insert", sqltext.creates),
+    ("update", sqltext.updates),
+    ("delete", sqltext.deletes),
+)
 #: How an element of a value is spelt in :attr:`EndpointFill.parameter`, as :attr:`KeySource.paths` spells it.
 ELEMENT = "[*]"
 #: How many calls up a fill is followed.

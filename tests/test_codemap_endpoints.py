@@ -11,6 +11,7 @@ from bamboo.codemap.models import (
     FILL_CONSTANT,
     Anchor,
     EndpointFill,
+    EndpointWrite,
     KeyFrom,
     KeySource,
     MapFragment,
@@ -41,7 +42,7 @@ def module_mapping(version, api_module):
 """
 
 JOB_API = """\
-from pandaserver.taskbuffer.proxy import Archiver, Peeker
+from pandaserver.taskbuffer.proxy import Archiver, Layer, Peeker
 
 
 def init_task_buffer(task_buffer):
@@ -81,6 +82,18 @@ def get_fixed(req):
 
 def get_both(req, job_ids, more_ids):
     Peeker().run_each(job_ids + more_ids)
+
+
+def get_peek(req, job_id):
+    return Peeker().peek(job_id)
+
+
+def get_peek_files(req, job_id):
+    return Peeker().peek(job_id, with_files=True)
+
+
+def get_layered(req, job_id):
+    return Layer().go(job_id)
 """
 
 CREDS_API = """\
@@ -103,10 +116,24 @@ class Peeker(Reader):
         self.cur.execute("SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID", {":PandaID": job_id})  # P
         return self.cur.fetchall()
 
+    def peek(self, job_id, with_files=False):
+        self.impl(job_id)
+        if with_files:
+            self.files(job_id)  # G
+
+    def files(self, job_id):
+        self.cur.execute("SELECT lfn FROM ATLAS_PANDA.filesTable4 WHERE PandaID=:PandaID", {":PandaID": job_id})  # L
+
+
+class Layer:
+    def go(self, job_id, with_files=False):
+        return Peeker().peek(job_id, with_files)
+
 
 class Archiver(Reader):
     def impl(self, job_id):
         self.cur.execute("SELECT jobStatus FROM ATLAS_PANDAARCH.jobsArchived WHERE PandaID=:PandaID", {":PandaID": job_id})  # A
+        self.cur.execute("UPDATE ATLAS_PANDAARCH.jobsArchived SET jobStatus=:s WHERE PandaID=:PandaID", {":s": "closed", ":PandaID": job_id})  # W
         return self.cur.fetchall()
 """
 
@@ -124,12 +151,14 @@ def _line(text: str, marker: str) -> int:
     )
 
 
-def _site(marker: str, table: str, via: str) -> tuple[ReadSiteNode, KeyFrom]:
+def _site(
+    marker: str, table: str, via: str, function: str = "impl"
+) -> tuple[ReadSiteNode, KeyFrom]:
     """The read site and the read term of PROXY's statement at *marker*, as the build records them: owned by the
     function's bare name.  The term is filled by ``job_id``, and by the statement's own rows come by a call at
     *via*."""
     file, line = f"{PACKAGE}/taskbuffer/proxy.py", _line(PROXY, marker)
-    owner = f"{file}::impl"
+    owner = f"{file}::{function}"
     site = ReadSiteNode(
         map_id="m",
         derived_from="v",
@@ -175,16 +204,17 @@ def _build(tmp_path: Path) -> MapFragment:
     for folder in ("", "server", "api", "api/v1", "taskbuffer"):
         (root / folder / "__init__.py").write_text("")
     calls = sqlwrite.corpus_calls(modules, {PACKAGE: root})
-    peeked, archived = (
+    peeked, archived, listed = (
         _site("P", "jobsActive4", f"{PACKAGE}/taskbuffer/elsewhere.py:9"),
         _site("A", "ATLAS_PANDAARCH.jobsArchived", f"{PACKAGE}/taskbuffer/proxy.py:3"),
+        _site("L", "filesTable4", f"{PACKAGE}/taskbuffer/elsewhere.py:9", "files"),
     )
     with sql.across_calls(calls):
         fragment = MapFragment(
             map_id="m",
             derived_from="v",
-            read_sites=[peeked[0], archived[0]],
-            key_froms=[peeked[1], archived[1]],
+            read_sites=[peeked[0], archived[0], listed[0]],
+            key_froms=[peeked[1], archived[1], listed[1]],
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
         )
         panda_objects.attach(fragment, modules, calls)
@@ -214,6 +244,9 @@ def test_the_endpoints_are_the_routed_modules_public_functions(tmp_path: Path) -
                 "get_many",
                 "get_fixed",
                 "get_both",
+                "get_peek",
+                "get_peek_files",
+                "get_layered",
             )
         ),
     }
@@ -346,3 +379,39 @@ def test_a_terms_column_is_a_subject_of_the_class_its_table_holds_or_its_history
         sqlwrite._spec_attr(attributor, "ATLAS_PANDAARCH.filesTable_ARCH", "PandaID")
         == ""
     )
+
+
+def test_an_endpoint_says_which_statements_writing_rows_its_calls_reach(
+    tmp_path: Path,
+) -> None:
+    """``Archiver.impl`` updates the archived job it reads; ``Peeker.impl`` writes nothing."""
+    by_route = {one.route: one for one in _build(tmp_path).endpoints}
+
+    assert by_route["job/get_archived"].writes == [
+        EndpointWrite(
+            function=f"{PACKAGE}/taskbuffer/proxy.py::Archiver.impl",
+            line=_line(PROXY, "W"),
+            kind="update",
+            tables=["jobsarchived"],
+        )
+    ]
+    assert by_route["job/get_status"].writes == []
+
+
+def test_a_call_a_constant_flag_rules_out_on_every_way_in_is_left_out(
+    tmp_path: Path,
+) -> None:
+    """``peek`` reads the files only ``if with_files:``.  ``get_peek`` leaves it to its default, ``False``, and so
+    does ``Layer.go``, which hands ``peek`` its own parameter: the call is shut and the files are not read.
+    ``get_peek_files`` hands ``True``: they are."""
+    by_route = {one.route: one for one in _build(tmp_path).endpoints}
+    proxy = f"{PACKAGE}/taskbuffer/proxy.py"
+    files = f"panda:{proxy}::files@{_line(PROXY, 'L')}"
+
+    for route in ("job/get_peek", "job/get_layered"):
+        assert [
+            read.site for read in by_route[route].reads if read.site == files
+        ] == [], route
+        assert by_route[route].shut == [f"{proxy}:{_line(PROXY, 'G')}"], route
+    assert files in [read.site for read in by_route["job/get_peek_files"].reads]
+    assert by_route["job/get_peek_files"].shut == []

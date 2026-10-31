@@ -2690,13 +2690,16 @@ class ReachGraph:
         """The owner of every function of the record named *name*: where a call of that name can land."""
         return self._functions.get(name, [])
 
-    def closure(self, starts: list[str]) -> Came:
+    def closure(
+        self, starts: list[str], cut: Optional[Callable[[tuple[str, str], ReachCall], bool]] = None
+    ) -> Came:
         """Every function *starts* reach through their calls, each as every class ``self`` can be there, and how.
 
         Each start as each of its :attr:`ReachNode.classes` (or none); from a function as a class, every call it
         makes for that class (:attr:`ReachCall.for_classes`), into the callee as the classes it runs as
         (:attr:`ReachCall.runs_as`, else each it can be).  Breadth first, so each is reached by the fewest calls;
-        every start must be a row of the record."""
+        every start must be a row of the record.  A call *cut* says of the function and class making it is not
+        followed."""
         start_nodes = [
             (owner, one) for owner in starts for one in self.rows[owner].classes or [""]
         ]
@@ -2707,6 +2710,8 @@ class ReachGraph:
             owner, cls = node
             for call in self.rows[owner].calls:
                 if call.for_classes and cls not in call.for_classes:
+                    continue
+                if cut is not None and cut(node, call):
                     continue
                 entered = self.rows.get(call.to)
                 if entered is None:
