@@ -426,6 +426,53 @@ def test_an_arm_pairs_with_the_writer_called_after_it_on_the_same_row(
     )
 
 
+KEYED = """\
+from pkg.spec import JobSpec
+
+
+class DBProxy:
+    def note_change(self, panda_id, status):
+        sql = "INSERT INTO ATLAS_PANDA.jobs_StatusLog (PandaID,jobStatus) VALUES (:PandaID,:jobStatus)"
+        self.cur.execute(sql, {":PandaID": panda_id, ":jobStatus": status})
+
+    def update_status(self, panda_id, status, param):
+        sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus"
+        varMap = {}
+        varMap[":jobStatus"] = status
+        for key in list(param):
+            sql += f",{key}=:{key}"
+            varMap[f":{key}"] = param[key]  # K1
+        sql += " WHERE PandaID=:PandaID"
+        varMap[":PandaID"] = panda_id
+        self.cur.execute(sql, varMap)
+        self.note_change(panda_id, status)  # K2
+
+
+def update_job(proxy: DBProxy, panda_id, code):
+    param = {}
+    param["transExitCode"] = code
+    proxy.update_status(panda_id, "running", param)
+"""
+
+
+def test_a_column_named_by_a_mapping_s_key_is_on_the_row_its_statement_keys(
+    tmp_path: Path,
+) -> None:
+    """``updateJobStatus``' ``,{key}=:{key}`` writes ``transExitCode`` from the put at K1 (sql.with_keyed_columns):
+    the statement's row is the one ``WHERE PandaID=:PandaID`` names, and the history call after it, on
+    ``panda_id``, can be that row's -- as for a column the statement spells."""
+    spec = SPEC.replace(
+        '("PandaID", "jobStatus")', '("PandaID", "jobStatus", "transExitCode")'
+    )
+    arms = [("keyed", "DBProxy.update_status", "K1", "JobSpec.transExitCode")]
+    fragment = _build(tmp_path, arms, spec=spec, keyed=KEYED)
+    branch = _branch(fragment, "K1")
+    assert branch.history is not None, branch.history_hole
+    (pair,) = branch.history
+    assert (pair.call, pair.order) == (_line(KEYED, "K2"), HISTORY_AFTER)
+    assert (pair.row, pair.row_why, pair.object) == (HISTORY_ROW_CAN, "", "panda_id")
+
+
 def test_the_next_turn_of_a_loop_is_another_pass(tmp_path: Path) -> None:
     """The writer before the arm in the loop is before it, never after: the next turn is another job's."""
     fragment = _proxy(tmp_path, ("DBProxy.loop", "A4"))

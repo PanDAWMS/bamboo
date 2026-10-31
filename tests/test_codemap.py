@@ -18170,6 +18170,126 @@ def test_a_mapping_that_arrives_as_a_parameter_is_the_callers_to_state():
     )
 
 
+_KEYED_SPEC = """
+class JobSpec(object):
+    _attributes = ("PandaID", "jobStatus", "pilotErrorCode", "jobMetrics", "memory_leak", "memory_leak_x2",
+                   "corruptedFiles")
+"""
+
+_KEYED_SET = '''
+class JobModule:
+    def updateJobStatus(self, pandaID, jobStatus, param):
+        sql1 = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus"
+        varMap = {}
+        varMap[":jobStatus"] = jobStatus
+        for key in list(param):
+            if key in ["corruptedFiles"]:
+                continue
+            sql1 += f",{key}=:{key}"
+            varMap[f":{key}"] = param[key]
+            if key == "pilotErrorCode" and param[key].startswith("-"):
+                varMap[f":{key}"] = param[key][1:]
+            if key == "jobMetrics":
+                tmpKey = "memory_leak"
+                sql1 += ",{0}=:{0}".format(tmpKey)
+                varMap[f":{tmpKey}"] = leak(param[key])
+                tmpKey = "memory_leak_x2"
+                sql1 += ",{0}=:{0}".format(tmpKey)
+                varMap[f":{tmpKey}"] = chi2(param[key])
+        sql1 += " WHERE PandaID=:PandaID "
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql1 + comment, varMap)
+
+
+def update_job(proxy: JobModule, job_id, status, code, metrics, files):
+    param = {}
+    param["pilotErrorCode"] = code
+    param["jobMetrics"] = metrics
+    param["corruptedFiles"] = files
+    proxy.updateJobStatus(job_id, status, param)
+'''
+
+
+def _keyed_extract(tmp_path, source: str):
+    """The SQL slice over *source* and the job's spec, written under *tmp_path* and read the way a build reads it,
+    through the corpus's calls: the junctions of ``updateJobStatus`` by subject, as ``{(outcome, line)}``, and the
+    slice's stops."""
+    files = {
+        "pandaserver/taskbuffer/JobSpec.py": _KEYED_SPEC,
+        "pandaserver/taskbuffer/db_proxy_mods/job_module.py": source,
+    }
+    modules = []
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+        modules.append(_module(text, rel))
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    with sql.across_calls(sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})):
+        _s, junctions, _c, _u, _d, _x, stops = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    written = {
+        j.subject: {(b.outcome, b.line) for b in j.branches} for j in junctions if j.owner.endswith("updateJobStatus")
+    }
+    return written, stops
+
+
+def _line_of(source: str, text: str) -> int:
+    (line,) = [number for number, one in enumerate(source.splitlines(), 1) if one.endswith(text)]
+    return line
+
+
+def test_a_set_named_by_a_mapping_s_keys_writes_each_key_its_callers_put_from_the_mapping_there(tmp_path):
+    """``updateJobStatus`` adds ``,{key}=:{key}`` for each key of the ``param`` it is handed, filled by
+    ``varMap[f":{key}"] = param[key]``.  The keys are ``update_job``'s puts, less the one the loop skips, and each
+    is a column the statement writes from the mapping at that key, as ``col=:bind`` is -- so ``pilotErrorCode``
+    has a writer here, where the map named none.  The put a test of the key guards is that key's alone, and the
+    columns a pass names through ``tmpKey`` are each filled by the binding of ``tmpKey`` that reaches its put.  The
+    stop stays: the text names those columns through an interpolation, which a reading of the one file says too."""
+    written, stops = _keyed_extract(tmp_path, _KEYED_SET)
+
+    put = _line_of(_KEYED_SET, 'varMap[f":{key}"] = param[key]')
+    assert written["JobSpec.pilotErrorCode"] == {
+        ("runtime(param['pilotErrorCode'])", put),
+        ("runtime(param['pilotErrorCode'][1:])", _line_of(_KEYED_SET, "param[key][1:]")),
+    }
+    assert written["JobSpec.jobMetrics"] == {("runtime(param['jobMetrics'])", put)}
+    assert written["JobSpec.memory_leak"] == {
+        ("runtime(leak(param['jobMetrics']))", _line_of(_KEYED_SET, "leak(param[key])"))
+    }
+    assert written["JobSpec.memory_leak_x2"] == {
+        ("runtime(chi2(param['jobMetrics']))", _line_of(_KEYED_SET, "chi2(param[key])"))
+    }
+    assert "JobSpec.corruptedFiles" not in written
+    assert [s.detail for s in stops if s.reason == sqltext.SET_COLUMN_IS_A_HOLE] == ["SET {}=:{}"]
+
+
+def test_a_set_named_by_keys_no_caller_states_stays_a_hole(tmp_path):
+    """Handed a mapping whose keys nothing says -- ``from_rest``'s parameter, which no call fills -- the item
+    names no column: the statement writes ``jobStatus`` alone, and the stop says the rest is not read."""
+    source = (
+        _KEYED_SET
+        + "\n\ndef from_rest(proxy: JobModule, data):\n    proxy.updateJobStatus(1, 'running', data)\n"
+    )
+    written, stops = _keyed_extract(tmp_path, source)
+
+    assert sorted(written) == ["JobSpec.jobStatus"]
+    assert [s.detail for s in stops if s.reason == sqltext.SET_COLUMN_IS_A_HOLE] == ["SET {}=:{}"]
+
+
+def test_a_test_of_the_key_is_decided_by_any_part_that_decides_it():
+    """``key == "pilotErrorCode" and param[key].startswith("-")`` is false at every other key, though the second
+    part is not known; an ``or`` with a true part is true."""
+    loop = ast.parse("for key in d:\n    pass\n").body[0]
+
+    def value(text: str, key: str):
+        return sql._test_value(ast.parse(text, mode="eval").body, {"key": key}, loop)
+
+    both = "key == 'pilotErrorCode' and param[key].startswith('-')"
+    either = "key == 'pilotErrorCode' or param[key].startswith('-')"
+    assert (value(both, "jobMetrics"), value(both, "pilotErrorCode")) == (False, None)
+    assert (value(either, "pilotErrorCode"), value(either, "jobMetrics")) == (True, None)
+
+
 # ---------------------------------------------------------------------------
 # The executions nothing was read out of, and who named a guarded write's rows
 # ---------------------------------------------------------------------------

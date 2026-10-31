@@ -523,11 +523,13 @@ def _base_name(base: ast.expr) -> Optional[str]:
 
 
 def path_condition(node: ast.AST) -> list[str]:
-    """Return the conjunction of tests dominating *node*, outermost first.
+    """Return the tests of the ``if`` statements enclosing *node*, outermost first.
 
     Walks the ancestor chain rather than the call stack: an ``else`` branch
     contributes ``not <test>``, because "the condition did not hold" is as much
-    a reason for the outcome as the condition holding.
+    a reason for the outcome as the condition holding.  Only the enclosing
+    ``if``s: an early exit above *node*, a handler, a loop or a ``with`` it sits
+    in constrain reaching it too, and :func:`enclosing_guards` says those.
     """
     conditions: list[str] = []
     func = enclosing_function(node)

@@ -352,45 +352,24 @@ class _Reader:
         self, func: ast.AST, run: sql.Execution, column_holes, versions: "_Versions"
     ) -> tuple[list[WrittenValue], list[str]]:
         """The columns *run*'s ``SET`` items ``{}=:{}`` write, where a loop over a mapping's keys fills the holes with
-        its key (:func:`sql.map_key`): one for each key the mapping can hold (:meth:`reach._Receivers.keys`) that
-        the loop's ``continue`` tests let through (:func:`sql.kept_map_keys`), valued by the mapping at it -- and the
-        items so read, as the statement spells them (``SET {}=:{}``).  ``updateJobStatus``' ``for key in
-        list(param): ... sql1 += f",{key}=:{key}"; varMap[f":{key}"] = param[key]``, ``param`` filled by
-        ``pilot_api.update_job``."""
+        its key: one for each key the mapping can hold (:meth:`reach._Receivers.keys`) that the loop lets through
+        (:func:`sql.keyed_items`, which the junctions read too), valued by the mapping at it -- and the items so
+        read, as the statement spells them (``SET {}=:{}``)."""
         file = self.types.file_of(func)
-        holes = run.reading_holes
         found: dict[str, WrittenValue] = {}
         items: list[str] = []
-        for column, bind, numbers in column_holes:
-            if file is None or not all(
-                0 < number <= len(holes) for number in (column, *numbers)
-            ):
-                continue
-            hole = holes[column - 1]
-            try:
-                mapping = sql.map_key(
-                    func,  # type: ignore[arg-type]
-                    run,
-                    hole,
-                    bind,
-                    tuple(holes[number - 1] for number in numbers),
-                )
-                keys = (
-                    self.receivers.keys(file, func, mapping.id)
-                    if isinstance(mapping, ast.Name)
-                    else None
-                )
-                kept = (
-                    sql.kept_map_keys(hole, sorted(keys)) if keys is not None else None
-                )
-            except Exception:  # noqa: BLE001 -- not read: the item stays a hole
-                kept = None
-            if kept is None:
-                continue
-            items.append(f"SET {{}}={bind}")
-            for key in kept:
+        if file is None:
+            return [], items
+        for item in sql.keyed_items(
+            func,  # type: ignore[arg-type]
+            run,
+            column_holes,
+            lambda name: self.receivers.keys(file, func, name),
+        ):
+            items.append(item.spelled)
+            for key in item.binds:
                 value = ast.Subscript(
-                    value=mapping, slice=ast.Constant(value=key), ctx=ast.Load()
+                    value=item.mapping, slice=ast.Constant(value=key), ctx=ast.Load()
                 )
                 held = versions.paths(value)
                 for one in [WrittenValue(column=key, path=path) for path in held] or [

@@ -388,7 +388,7 @@ def _reads(expression: ast.AST) -> list[str]:
 
 
 def _guard_reads(node: ast.AST) -> list[str]:
-    """The names the ``if`` tests dominating *node* depend on.
+    """The names the tests of the ``if`` statements enclosing *node* depend on.
 
     Walked as well as the value, which is what makes a constant right-hand
     side explainable at all: the reason ``status = "tobroken"`` ran is the

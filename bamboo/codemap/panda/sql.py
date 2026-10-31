@@ -65,6 +65,7 @@ from bamboo.codemap.panda.pathcond import (
     enclosing_function,
     only_through,
     parted,
+    reaching_definitions,
     replacements,
     ruled_out_by,
     site_of,
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from bamboo.codemap.calls import Calls, Placed
+    from bamboo.codemap.reach import _Receivers
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +324,9 @@ def _imported_lists(func: ast.AST) -> dict[str, InList]:
 #: The corpus's calls, while a build reads statements through them.
 _CALLS: Optional["Calls"] = None
 
+#: What a mapping can hold, read through :data:`_CALLS` (:func:`_corpus_keys`), with the calls it was read through.
+_RECEIVERS: Optional[tuple["Calls", "_Receivers"]] = None
+
 #: How many calls out a statement's text or binds are followed.  ``getJobs``
 #: is two: its ``WHERE`` is a closure's return, which is
 #: ``construct_where_clause``'s.
@@ -346,6 +351,21 @@ def across_calls(calls: Optional["Calls"]) -> Iterator[None]:
     finally:
         _CALLS = previous
         sqleval.use_runners(held)
+
+
+def _corpus_keys(func: ast.AST, name: str) -> Optional[frozenset[str]]:
+    """The keys the mapping *name* holds in *func* can be at, read through the corpus's calls from every name
+    holding it (:meth:`reach._Receivers.keys`); ``None`` outside a build, or where they are not read."""
+    global _RECEIVERS
+    if _CALLS is None:
+        return None
+    if _RECEIVERS is None or _RECEIVERS[0] is not _CALLS:
+        # reach reads statements through this module: imported once a build runs.
+        from bamboo.codemap import reach
+
+        _RECEIVERS = (_CALLS, reach._Receivers(_CALLS, None))
+    file = _CALLS.types.file_of(func)
+    return _RECEIVERS[1].keys(file, func, name) if file is not None else None
 
 
 def _slot(target: ast.expr, name: str) -> Optional[int]:
@@ -1234,18 +1254,19 @@ def _mapping_keys(
     -- the class the receiver is, not a same-named function of the same file),
     and the name returned at the slot the mapping is unpacked from is
     subscripted with literal strings.  A mapping that arrives as a
-    **parameter** is not resolved here -- its keys are the caller's to state,
-    and five of the corpus's seven mapping loops are that shape.  Returning
-    nothing there is the map saying it does not know the columns, which is
-    true; filling them in from one caller would make it say something false
-    about the others.
+    **parameter** -- five of the corpus's seven mapping loops are that shape --
+    has its keys stated by its callers, so they are read from every name
+    holding it (:func:`_corpus_keys`): ``updateJobStatus``' ``param``, filled
+    by ``pilot_api.update_job``.  All the callers' puts together, which is what
+    it can hold; one caller's would say something false about the others.
+    Outside a build nothing is read, and nothing is returned.
     """
     if not isinstance(mapping, ast.Name):
         return []
     for callee, value in returned(func, mapping.id):
         if isinstance(value, ast.Name) and (keys := _literal_keys(callee, value.id)):
             return keys
-    return []
+    return sorted(_corpus_keys(func, mapping.id) or ())
 
 
 def _string_value(
@@ -1255,7 +1276,10 @@ def _string_value(
 
     ``None`` is not "empty": it says this piece of the column name is decided
     at run time, and a hole filled with a guess reads exactly like one the code
-    wrote out.
+    wrote out.  A name is what the bindings reaching it render, where they all
+    render one text: ``updateJobStatus`` binds ``tmpKey`` to ``"memory_leak"``
+    and, further down the same pass, to ``"memory_leak_x2"``, and each
+    ``varMap[f":{tmpKey}"]`` reads the one above it.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
@@ -1264,6 +1288,13 @@ def _string_value(
             return bound[node.id]
         if hops >= _KEY_HOPS:
             return None
+        func = enclosing_function(node)
+        if func is not None:
+            rendered = {
+                _string_value(value, bound, scope, hops + 1)
+                for value in reaching_definitions(func, node.id, node)
+            }
+            return rendered.pop() if len(rendered) == 1 else None
         for other in walk(scope):
             value = written_value(other)
             if value is not None and any(
@@ -1313,16 +1344,19 @@ def _test_value(
     reading only the first leaves the merge loop writing sixteen columns where
     it writes four.  Anything outside these forms answers ``None``, and the
     caller then declines the whole loop rather than assuming the skip never
-    fires.
+    fires.  An ``and`` with a false part is false and an ``or`` with a true
+    part true, whatever the others: ``key == "pilotErrorCode" and
+    param[key].startswith("-")`` is false at every other key.
     """
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         inner = _test_value(test.operand, bound, scope)
         return None if inner is None else not inner
     if isinstance(test, ast.BoolOp):
         values = [_test_value(one, bound, scope) for one in test.values]
-        if any(one is None for one in values):
-            return None
-        return all(values) if isinstance(test.op, ast.And) else any(values)
+        settles = isinstance(test.op, ast.Or)
+        if settles in values:
+            return settles
+        return None if None in values else not settles
     if isinstance(test, ast.Compare) and len(test.ops) == len(test.comparators) == 1:
         left = _string_value(test.left, bound, scope)
         if left is None:
@@ -1387,27 +1421,81 @@ def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
 
 def spells_key(
     func: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.AST, spelled: ast.expr, key: str
-) -> bool:
-    """Whether ``<varmap>[<spelled>]`` fills *key* on one pass of its loop.
+) -> Optional[tuple[str, str]]:
+    """The loop's key and the value it takes where ``<varmap>[<spelled>]`` fills *key* on one pass, or ``None``.
 
     The bind side of a column named from a key.  ``setScoutJobData_JEDI`` writes
     ``varMap[tmpScoutKey] = scoutVal`` beside the fragment that names the
     column, so a statement whose ``SET`` clause now spells ``:cpuTime`` still
     had no value for it: the placeholder was read as computed and passed over.
     Both halves come from the same key, so both are answered by the same
-    substitution or neither is.
+    substitution or neither is.  A put under a test of the key fills it only
+    where the test can hold: ``updateJobStatus``' ``if key == "pilotErrorCode"
+    and ...: varMap[f":{key}"] = param[key][1:]`` fills ``:pilotErrorCode``
+    alone.
     """
     loop = next((one for one in ancestors(node) if isinstance(one, ast.For)), None)
     if loop is None:
-        return False
+        return None
     name, mapping = _mapping_iterated(loop)
     if not name or mapping is None:
-        return False
+        return None
     keys = _mapping_keys(func, mapping)
     kept = _kept_keys(loop, name, keys) if keys else None
     if not kept:
-        return False
-    return any(_string_value(spelled, {name: one}, loop) == key for one in kept)
+        return None
+    tests = _tests_inside(node, loop)
+    for one in kept:
+        if _string_value(spelled, {name: one}, loop) == key and not any(
+            _test_value(test, {name: one}, loop) is False for test in tests
+        ):
+            return name, one
+    return None
+
+
+def _tests_inside(node: ast.AST, loop: ast.For) -> list[ast.expr]:
+    """The ``if`` tests between *loop* and *node*, an ``else`` branch's negated: what a pass held to reach *node*."""
+    tests: list[ast.expr] = []
+    previous = node
+    for ancestor in ancestors(node):
+        if ancestor is loop:
+            break
+        if isinstance(ancestor, ast.If):
+            if previous in ancestor.body:
+                tests.append(ancestor.test)
+            elif previous in ancestor.orelse:
+                tests.append(ast.UnaryOp(op=ast.Not(), operand=ancestor.test))
+        previous = ancestor
+    return tests
+
+
+def at_key(value: ast.expr, name: str, key: str) -> ast.expr:
+    """*value* as a pass of the loop puts it, the loop's key *name* read as *key*: ``param[key]`` is
+    ``param['transExitCode']``.  *value* itself where it does not read the key.  The new nodes hang where *value*
+    does, on its line, so a reader asking where they sit finds the put."""
+    if not any(isinstance(one, ast.Name) and one.id == name for one in walk(value)):
+        return value
+    copied = ast.parse(ast.unparse(value), mode="eval").body
+    for parent in walk(copied):
+        for field, child in ast.iter_fields(parent):
+            if isinstance(child, ast.Name) and child.id == name and isinstance(child.ctx, ast.Load):
+                setattr(parent, field, ast.Constant(value=key))
+            elif isinstance(child, list):
+                child[:] = [
+                    ast.Constant(value=key)
+                    if isinstance(one, ast.Name) and one.id == name and isinstance(one.ctx, ast.Load)
+                    else one
+                    for one in child
+                ]
+    if isinstance(copied, ast.Name) and copied.id == name:
+        copied = ast.Constant(value=key)
+    for one in walk(copied):
+        for attribute in ("lineno", "col_offset", "end_lineno", "end_col_offset"):
+            setattr(one, attribute, getattr(value, attribute, None))
+        for child in ast.iter_child_nodes(one):
+            child.parent = one  # type: ignore[attr-defined]
+    copied.parent = getattr(value, "parent", None)  # type: ignore[attr-defined]
+    return copied
 
 
 def map_key(
@@ -1477,6 +1565,66 @@ def map_key(
             ):
                 return mapping
     return None
+
+
+class KeyedItem(NamedTuple):
+    """A ``SET`` item ``{}=:{}`` read for each key of the mapping its loop walks (:func:`keyed_items`)."""
+
+    #: The item as the statement spells it: ``SET {}=:{}``.
+    spelled: str
+    mapping: ast.expr
+    #: Each key the loop lets through -- the column the item writes -- and the bind it puts there: ``:transExitCode``.
+    binds: dict[str, str]
+
+
+def keyed_items(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: Execution,
+    column_holes: Sequence[tuple[int, str, tuple[int, ...]]],
+    keys_of: Optional[Callable[[str], Optional[frozenset[str]]]] = None,
+) -> list[KeyedItem]:
+    """The ``SET`` items of *run* whose holes a loop over a mapping's keys fills with its key (:func:`map_key`), each
+    with the keys the mapping can hold that the loop's ``continue`` tests let through (:func:`kept_map_keys`):
+    ``updateJobStatus``' ``for key in list(param): ... sql1 += f",{key}=:{key}"; varMap[f":{key}"] = param[key]``,
+    ``param`` filled by ``pilot_api.update_job``.  *keys_of* says what a mapping named so can hold, by default from
+    every name holding it through the corpus's calls (:func:`_corpus_keys`).  An item not read so stays a hole."""
+    holes = run.reading_holes
+    found: list[KeyedItem] = []
+    for column, bind, numbers in column_holes:
+        if not all(0 < number <= len(holes) for number in (column, *numbers)):
+            continue
+        hole = holes[column - 1]
+        mapping: Optional[ast.expr] = None
+        try:
+            mapping = map_key(func, run, hole, bind, tuple(holes[number - 1] for number in numbers))
+            if isinstance(mapping, ast.Name):
+                keys = keys_of(mapping.id) if keys_of is not None else _corpus_keys(func, mapping.id)
+            else:
+                keys = None
+            kept = kept_map_keys(hole, sorted(keys)) if keys is not None else None
+        except Exception:  # noqa: BLE001 -- not read: the item stays a hole
+            kept = None
+        if kept is None or mapping is None:
+            continue
+        found.append(KeyedItem(f"SET {{}}={bind}", mapping, {key: bind.replace("{}", key) for key in kept}))
+    return found
+
+
+def with_keyed_columns(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution, statement: sqltext.SqlWrite
+) -> sqltext.SqlWrite:
+    """*statement* with its ``SET`` items ``{}=:{}`` read for each key of the mapping their loop walks
+    (:func:`keyed_items`) as the columns they write, each filled by its bind as ``col=:bind`` is:
+    ``updateJobStatus``' ``,{key}=:{key}`` over the pilot's keys writes ``transExitCode`` from ``:transExitCode``,
+    which the run's map gets at ``varMap[f":{key}"] = param[key]`` (:func:`spells_key`).  Every reader of the
+    columns a run writes reads them so: the junctions, and where a history row is placed."""
+    added = {
+        column: sqltext.ColumnValue(kind="bind", text=bind)
+        for item in keyed_items(func, run, statement.column_holes)
+        for column, bind in item.binds.items()
+        if column not in statement.columns
+    }
+    return statement.model_copy(update={"columns": {**statement.columns, **added}}) if added else statement
 
 
 class KeyColumnCensus(NamedTuple):
@@ -2561,11 +2709,12 @@ def scan_binds(
                     # see :func:`spells_key`.  Where it is not, it names a
                     # placeholder the statement does not spell either, so there
                     # is nothing to pair it with.
-                    if not spells_key(func, node, target.slice, key):
+                    by_key = spells_key(func, node, target.slice, key)
+                    if by_key is None:
                         computed += 1
                         continue
                     spelled_keys.add(key)
-                    keep(Bind(node.value, node), node)
+                    keep(Bind(at_key(node.value, *by_key), node), node)
                     continue
                 spelled_keys.add(target.slice.value)
                 if not _same_placeholder(target.slice.value, key):

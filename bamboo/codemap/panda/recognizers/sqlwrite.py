@@ -1132,7 +1132,10 @@ def extract(
                     _unspelled_froms(
                         keyed, key_froms, func, _owner, run, made_of, module.rel_path, attributor, writing, sequenced
                     )
-                for statement in statements:
+                # A SET item ``{}=:{}`` read for each key of the mapping its loop walks is a column.  Its stop stays:
+                # the text names the column through an interpolation, and derive-strategy, reading one file, says so
+                # too (statement_stops; plugin._stops_read_again compares the two).
+                for statement in [sql.with_keyed_columns(func, run, one) for one in statements]:
                     spec_class = attributor.class_for_table(statement.table)
                     # Settled once per statement, not once per column: every
                     # column of one ``SET`` is bounded by the same ``WHERE``,
