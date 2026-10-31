@@ -3363,6 +3363,76 @@ def test_h2_reads_a_window_in_one_run_only_where_it_is_the_one_run_of_one_log_at
     assert json.loads(out.splitlines()[-1]) == ["updateTask_JEDI", None, None, None]
 
 
+def test_s3_reads_an_early_exit_above_an_arm_as_its_guard_and_says_an_arm_in_an_except_handler(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json, textwrap
+            from types import SimpleNamespace as N
+            from bamboo.codemap.panda.pathcond import attach_parents
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun as RR
+            from bamboo.querier.rerun import Arm, arm_guards, early_exit_if, guard_if
+
+            # check_output_file_metadata's shape: an early return, then the arms; and one in a handler
+            func = ast.parse(textwrap.dedent('''
+                def check(self, files):
+                    if self.job_status in ["failed", "cancelled", "closed"]:
+                        return 0
+                    for f in files:
+                        if f.type == "output":
+                            self.job.jobStatus = "failed"
+                    try:
+                        x = 1
+                    except Exception:
+                        self.job.jobStatus = "failed"
+            ''')).body[0]
+            attach_parents(func)  # as the corpus is read
+            after, handled = Arm(7, ["failed"], ["f.type == 'output'"]), Arm(11, ["failed"], [])
+            (g1, h1), (g2, h2) = arm_guards(func, after), arm_guards(func, handled)
+            stmt = next(n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.lineno == 7)
+            guard = g1[1]
+            read = [g1, [u.kind for u in h1], g2, [(u.kind, u.line) for u in h2],
+                    guard_if(stmt, guard) is None, early_exit_if(func, stmt, guard).lineno]
+
+            # S3 itself (it says its lines on stdout): a pass that left by the return at 4, and a function whose only arm is in a handler
+            lone = ast.parse(textwrap.dedent('''
+                def lone(self):
+                    try:
+                        x = 1
+                    except Exception:
+                        self.job.jobStatus = "failed"
+                    return 0
+            ''')).body[0]
+            attach_parents(lone)
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.opened, r.hand, r.hand_used, r.hop = [], [], {}, [], None
+            went = r.blocked(RR.Blocked(N(node=func, name="check"), 4, [None], [E.Env()], [after, handled]))
+            try:
+                r.blocked(RR.Blocked(N(node=lone, name="lone"), 7, [None], [E.Env()], [Arm(6, ["failed"], [])]))
+                stop = None
+            except RR.Stop as e:
+                stop = e.args[0]
+            print(json.dumps(read))
+            print(json.dumps([went.guard, went.line, stop]))
+            """,
+        )
+    )
+    g1, h1, g2, h2, not_enclosing, early_line = json.loads(out.splitlines()[-2])
+    went_guard, went_line, stop = json.loads(out.splitlines()[-1])
+    # the path condition's guard, then the early exit's: what follows the return holds its test false
+    assert g1 == ["f.type == 'output'", "not (self.job_status in ['failed', 'cancelled', 'closed'])"] and h1 == []
+    # an arm in a handler: the early exit above the try, and the handler itself, said apart (no guard says it)
+    assert g2 == ["not (self.job_status in ['failed', 'cancelled', 'closed'])"] and h2 == [["except", 10]]
+    # S3 goes on from the early exit's if, which no if around the arm tests
+    assert not_enclosing and early_line == 3
+    # the exit taken settles the early exit's test true, which keeps both arms off: S3 names it and goes on from 3
+    assert went_guard == "not (self.job_status in ['failed', 'cancelled', 'closed'])" and went_line == 3
+    # an arm in a handler with nothing shown false stops, saying where it is, not that its guard was made false
+    assert stop == "S3: a guard the passes made false against every arm (none shown against arm 6 (in an except handler))"
+
+
 def test_a_late_question_asks_the_stay_it_names_and_stops_where_the_value_has_several_and_it_names_none(tmp_path):
     out = _ok(
         _run(

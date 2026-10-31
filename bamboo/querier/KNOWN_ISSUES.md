@@ -865,11 +865,16 @@ is as it was before PC, and can name a guard whose flip alone would not move the
 JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), none of them in a case of mine
 (2026-10-25).
 
-An arm's guards are `pathcond.path_condition`'s, the tests of the `if`s enclosing it; S3 does not read what the map's
-`pathcond.enclosing_guards` adds (an early exit above the arm, an `except` around it).  So an arm after an early
-return the pass took, or one in a handler, shows no guard made false, and S3 stops at "every arm has a guard the
-passes made false" -- the need it could not meet, not a claim (records-cut, 7a05464: MJ-merging-stuck's
-check_output_file_metadata 200 / 209 after the return at 181, and parse_job_output_report 820 in its handler).  And a
+An arm's guards are `pathcond.path_condition`'s, the tests of the `if`s enclosing it, and since 2026-10-31 each early
+exit's above it that `pathcond.enclosing_guards` names (`if t: return` puts `not (t)` on what follows;
+`rerun.arm_guards`), S3 going on from that `if` (`early_exit_if`): check_output_file_metadata's arms 200 / 209 after
+the return at 181 the pass took are kept off by `not (self.job_status in [...])`.  S4 then stops at "one name the
+guard reads" (it says "reads []"): it follows bare names, and this guard reads the attribute `self.job_status`, bound in
+`__init__` (48, `self.job_status = self.job.jobStatus`), which its walk in the function does not reach (s3a,
+MJ-transferring-stuck on records-cut; the only such S4 in the four sets).  An arm in an `except` handler has
+no guard to show false -- it is reached only where something above raised -- and S3 stops at "a guard the passes made
+false against every arm (none shown against arm N (in an except handler))", the need it could not meet, not a claim
+(parse_job_output_report 820, MJ-merging-stuck on records-cut, 7a05464).  And a
 pass that leaves a loop at its terminator is read as leaving at that exit: setupper's assign_dispatch_data_blocks
 walks `self.jobs + [None]` and leaves at 324 (`if job is None: break`) after every job, so S2's "left by 324" and S3's
 {'job is None': True} are the call's, not the key's iteration (the investigator's round 2, 2026-10-31).  Neither

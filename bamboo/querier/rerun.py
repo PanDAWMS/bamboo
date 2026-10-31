@@ -462,6 +462,27 @@ def guard_if(arm_stmt: ast.AST, guard: str) -> ast.If | ast.While | None:
     return None
 
 
+def arm_guards(func: ast.AST, arm: Arm) -> tuple[list[str], list]:
+    """``(guards, handlers)``: an arm's guards as S3 reads them -- its path condition's (the tests of the ``if``s around
+    it) and each early exit's above it in its blocks (``if t: return`` puts ``not (t)`` on what follows;
+    ``pathcond.enclosing_guards``) -- and the ``except`` handlers around it, which no guard says (an arm in one is
+    reached only where something above raised).  check_output_file_metadata's arms 200 / 209 follow the return at 181
+    the pass took: their path condition shows nothing the pass made false."""
+    stmt = R.statement_at(func, arm.line)
+    unseen = pathcond.enclosing_guards(stmt) if stmt is not None else []
+    early = [u.detail for u in unseen if u.kind == pathcond.UNSEEN_EARLY_EXIT and u.detail not in arm.guards]
+    return arm.guards + early, [u for u in unseen if u.kind == pathcond.UNSEEN_EXCEPT]
+
+
+def early_exit_if(func: ast.AST, arm_stmt: ast.AST, guard: str) -> ast.If | None:
+    """The ``if`` of the early exit above *arm_stmt* whose condition on what follows is *guard* (:func:`arm_guards`):
+    where S3 goes on from such a guard, as ``guard_if`` finds an enclosing one."""
+    for u in pathcond.enclosing_guards(arm_stmt):
+        if u.kind == pathcond.UNSEEN_EARLY_EXIT and u.detail == E.strip_annotation(guard):
+            return next((n for n in ast.walk(func) if isinstance(n, ast.If) and n.lineno == u.line), None)
+    return None
+
+
 def lines_after(func: ast.AST, arm_stmt: ast.stmt, name: str) -> list[tuple[int, int]]:
     """The spans of the statements after *arm_stmt* in its own block, up to the first that binds *name*: a row printed
     there holds *name* as the arm read it (updateJobStatus' ``varMap[":jobStatus"] = jobStatus`` at 241, then ``new=
@@ -3402,6 +3423,7 @@ class Rerun:
         exit_stmt = R.statement_at(fn.node, q.exit_line)
         path = pathcond.path_condition(exit_stmt)
         self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
+        read = {a.line: arm_guards(fn.node, a) for a in q.arms}
         per_pass = []
         for env in q.envs:
             fixed: dict[str, bool] = {}
@@ -3412,7 +3434,7 @@ class Rerun:
             blocking = {}
             for arm in q.arms:
                 blocking[arm.line] = [
-                    g for g in arm.guards
+                    g for g in read[arm.line][0]
                     if not E.read_elsewhere(g)
                     and E._truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
                 ]
@@ -3421,8 +3443,12 @@ class Rerun:
         self.need("the same guards against the arms in every pass", all(b == blocking for _, b in per_pass))
         self.say(f"settled by the exit taken: {fixed}")
         for arm in q.arms:
-            self.say(f"  arm {arm.line} {arm.outcomes}: needs {arm.guards}; false in the passes: {blocking[arm.line]}")
-        self.need("every arm has a guard the passes made false", all(blocking[a.line] for a in q.arms))
+            guards, handlers = read[arm.line]
+            inside = "".join(f"; in an except handler at {u.line} ({u.detail})" for u in handlers)
+            self.say(f"  arm {arm.line} {arm.outcomes}: needs {guards}{inside}; false in the passes: {blocking[arm.line]}")
+        # what S3 needs to go on, not a finding: an arm none of whose guards the passes were shown to make false
+        unshown = [str(a.line) + (" (in an except handler)" if read[a.line][1] else "") for a in q.arms if not blocking[a.line]]
+        self.need(f"a guard the passes made false against every arm (none shown against arm {', '.join(unshown)})", not unshown)
         fewest = min(len(v) for v in blocking.values())
         nearest = [a for a in q.arms if len(blocking[a.line]) == fewest]
         guards = sorted({g for a in nearest for g in blocking[a.line]})
@@ -3433,7 +3459,7 @@ class Rerun:
                 self.say(f"  not followed: arm {a.line} also needs {[g for g in blocking[a.line] if g != guard]}")
         self.say(f"the nearest arm(s) {[a.line for a in nearest]} were kept off by: {guard!r} (rule 21)")
         arm_stmt = R.statement_at(fn.node, nearest[0].line)
-        where = guard_if(arm_stmt, guard)
+        where = guard_if(arm_stmt, guard) or early_exit_if(fn.node, arm_stmt, guard)
         where = self.need(f"the if whose test is {guard!r}", where)
         return Input(fn, guard, where.lineno, q.passes, q.envs, sorted({o for a in nearest for o in a.outcomes}))
 
