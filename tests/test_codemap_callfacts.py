@@ -522,6 +522,82 @@ def test_a_queue_and_a_thread_are_said_once():
     assert trigger._DISPATCH == {callfacts.START, callfacts.RUN}
 
 
+_CHANGING = (
+    "import os\n"
+    "import shutil\n"
+    "import subprocess\n"
+    "import tarfile\n"
+    "from pathlib import Path\n\n"
+    "import requests\n"
+    "from rucio.client import Client as RucioClient\n"
+    "from rucio.common.exception import CannotAuthenticate\n\n\n"
+    "def changes(path: Path, mode, name):\n"
+    "    open(name, 'w')\n"
+    "    open(name)\n"
+    "    open(name, 'rb')\n"
+    "    open(name, mode)\n"
+    "    tarfile.open(name, 'w:gz')\n"
+    "    os.remove(name)\n"
+    "    os.path.join(name, name)\n"
+    "    shutil.rmtree(name)\n"
+    "    path.write_text(name)\n"
+    "    path.read_text()\n"
+    "    subprocess.Popen([name])\n"
+    "    RucioClient()\n"
+    "    requests.post(name)\n"
+    "    raise CannotAuthenticate(name)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("open(name, 'w')", (callfacts.CHANGE_FILE, "", "open 'w'")),
+        ("open(name)", None),
+        ("open(name, 'rb')", None),
+        ("open(name, mode)", (callfacts.CHANGE_FILE, "", "open (a mode not read)")),
+        ("tarfile.open(name, 'w:gz')", (callfacts.CHANGE_FILE, "", "tarfile.open 'w:gz'")),
+        ("os.remove(name)", (callfacts.CHANGE_FILE, "", "os.remove")),
+        ("os.path.join(name, name)", None),
+        ("shutil.rmtree(name)", (callfacts.CHANGE_FILE, "", "shutil.rmtree")),
+        ("path.write_text(name)", (callfacts.CHANGE_FILE, "", "pathlib.Path.write_text")),
+        ("path.read_text()", None),
+        ("subprocess.Popen([name])", (callfacts.CHANGE_PROCESS, "", "subprocess.Popen")),
+        ("RucioClient()", (callfacts.CHANGE_SYSTEM, "DDM / Rucio", "rucio.client.Client")),
+        ("requests.post(name)", (callfacts.CHANGE_SYSTEM, "HTTP", "requests.post")),
+        ("CannotAuthenticate(name)", None),
+    ],
+    ids=[
+        "open-to-write",
+        "open-to-read",
+        "open-to-read-bytes",
+        "a-mode-not-read",
+        "a-library-s-open",
+        "a-file-removed",
+        "a-path-joined",
+        "a-tree-removed",
+        "a-path-written",
+        "a-path-read",
+        "a-process",
+        "another-system-s-client-built",
+        "another-system-s-function",
+        "an-exception-raised",
+    ],
+)
+def test_a_call_changing_something_beside_the_tables_is_read_off_the_imports(tmp_path, text, expected):
+    """A file written, made or removed -- ``open`` by its mode, or a mode not read --, a process started, a call into a
+    package another system's client is in; not a file read, a path joined, nor an exception of that package made to
+    be raised (``raise CannotAuthenticate(...)`` reaches no system)."""
+    types = calls_mod.Types(_tree(tmp_path, mod=_CHANGING), {})
+    file = f"{PACKAGE}/mod.py"
+    func = next(
+        node for node in ast.walk(types.tree(file)) if isinstance(node, ast.FunctionDef) and node.name == "changes"
+    )
+    (call,) = [node for node in ast.walk(func) if isinstance(node, ast.Call) and ast.unparse(node) == text]
+
+    assert callfacts.change(types, file, func, call) == expected
+
+
 def test_the_rest_of_the_library_facts_are_said_once():
     """The copy module, the calls reading a value again, the computing modules, the iterator helpers, the catch-all
     exceptions and the dunders are callfacts', and sqleval's changing methods are the containers' (callfacts.CHANGING)

@@ -5375,7 +5375,10 @@ class _PathCarry:
 
     def _call_value(self, call: ast.Call, at: ast.AST) -> _Paths:
         if id(call) in self.call_values:
-            return self.call_values[id(call)]
+            # What the definition returned, unless the call's value is None whatever it returns -- a thread started,
+            # a call forwarded, whose function's value goes where the method keeps it (:meth:`_Reading.kept_by`).
+            placed = self.reading.place(self, call)
+            return _NOTHING if placed is not None and placed.returns_none else self.call_values[id(call)]
         name = _callee_name(call)
         if name in callfacts.LOGGER_MAKERS:  # its tag is a log line's: the makers' `if tag is None` is no use of it
             return _NOTHING
@@ -5456,7 +5459,7 @@ class _PathCarry:
                 summary = self.reading.summary(target, given)
                 if target.func.name == "__init__":  # type: ignore[attr-defined]
                     found |= summary.kept.get(receiver_parameter(target) or "", _NOTHING)
-                elif not placed.thread:
+                elif not placed.returns_none:
                     found |= summary.returns
             return frozenset(found)
         if args and name in _CHUNKING | _SLICING | _CHAINING:
@@ -5681,12 +5684,23 @@ class _Reading:
             for name, value in handed.items():
                 if value is None:
                     got[name] = _WHOLE
-        if not placed.on_class and isinstance(call.func, ast.Attribute):
+        made_on = self._made_on(carry, call, placed)
+        if made_on is not None:
             receiver = receiver_parameter(target)
-            paths = _WHOLE if everything else carry.held(call.func.value, call)
+            paths = _WHOLE if everything else carry.held(made_on, call)
             if receiver is not None and paths:
                 got[receiver] = paths
         return got
+
+    def _made_on(self, carry: _PathCarry, call: ast.Call, placed: Placed) -> Optional[ast.expr]:
+        """The object *call*'s targets run on, as *carry*'s function names it: its receiver, or for a call forwarded
+        the object the function was read off (:meth:`Calls.made_on`: ``global_task_buffer``, not ``timed_method``);
+        ``None`` for a method read off a class, handed its object as an argument."""
+        if placed.on_class or not isinstance(call.func, ast.Attribute):
+            return None
+        if placed.forwarded:
+            return self.calls.made_on(carry.file, carry.func, call)
+        return call.func.value
 
     def _key(self, target: Target, given: dict[str, _Paths]) -> tuple:
         return (target.file, target.func.lineno, target.bound, frozenset(given.items()))  # type: ignore[attr-defined]
@@ -5722,7 +5736,33 @@ class _Reading:
     def kept_by(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
         """``{(name, steps): paths}`` what *call* puts into the objects *carry*'s function names, as
         :func:`callfacts.meaning` reads it: what the definitions it lands at keep (their summaries), the object a
-        protocol copies into, what a library object's or a builtin container's method puts into its object."""
+        protocol copies into, what a library object's or a builtin container's method puts into its object -- and
+        what a call forwarded keeps of its function's value in the object it is made on (:attr:`Placed.kept_at`):
+        ``timed_method.result`` holds what ``peekJobs`` returned once ``timed_method.run(...)`` has."""
+        found = self._kept_by(carry, call)
+        for where, paths in self._forwarded_kept(carry, call).items():
+            found[where] = found.get(where, _NOTHING) | paths
+        return found
+
+    def _forwarded_kept(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
+        if not isinstance(call.func, ast.Attribute):
+            return {}
+        placed = self.place(carry, call)
+        where = _access_path(call.func.value)
+        if placed is None or not placed.kept_at or where is None:
+            return {}
+        if id(call) in carry.call_values:
+            value = carry.call_values[id(call)]
+        else:
+            value = frozenset(
+                path
+                for target in placed.targets
+                if (given := self.given(carry, call, placed, target))
+                for path in self.summary(target, given).returns
+            )
+        return {where: _below(("." + placed.kept_at,), value)} if value else {}
+
+    def _kept_by(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
         name = _callee_name(call)
         if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return {}
@@ -5760,8 +5800,9 @@ class _Reading:
             except Exception:  # noqa: BLE001 -- the record has the call as a hole
                 continue
             receiver = receiver_parameter(target)
-            if receiver is not None and not placed.on_class and isinstance(call.func, ast.Attribute):
-                handed[receiver] = call.func.value
+            made_on = self._made_on(carry, call, placed)
+            if receiver is not None and made_on is not None:
+                handed[receiver] = made_on
             for parameter, paths in summary.kept.items():
                 value = handed.get(parameter)
                 where = _access_path(value) if value is not None else None
@@ -5991,10 +6032,19 @@ class _Crossings:
     declared ``Any``.
     """
 
-    def __init__(self, reading: _Reading, landing: bool = False, routed: bool = False):
+    def __init__(
+        self, reading: _Reading, landing: bool = False, routed: bool = False, returning: frozenset[str] = frozenset()
+    ):
         self.reading = reading
         #: Whether to keep where the rows reach the database through calls (:attr:`landings`).
         self.landing = landing
+        #: The owners of the module's functions whose answers are asked -- an API's endpoints: the paths of the rows
+        #: each returns (:attr:`returned`), and the holes met on the way (:attr:`met`).
+        self.returning = returning
+        self.returned: dict[str, set[tuple[str, ...]]] = {}
+        #: ``(owner, line, callee)`` of each hole on the way as :attr:`open` has them, but every hole handed a part
+        #: of the rows: what of them comes back is asked, not what reads them.  Kept only with *returning*.
+        self.met: dict[tuple[str, int, str], None] = {}
         #: Whether to keep each found owner's ways back up (:attr:`ways`): only :func:`attach_crossings`' walk reads
         #: them, and the key sources' walks, many more, keep them for nothing.
         self.routed = routed
@@ -6071,6 +6121,8 @@ class _Crossings:
         hole = reading.record.hole_at(carry.file, call)
         if hole is not None and (not isinstance(call.func, ast.Attribute) or call.func.attr in reading.owner_names):
             self.open[hole] = None
+        if hole is not None and self.returning:
+            self.met[hole] = None
         for value in carry.handed_bound(call) if not everything else ():
             try:
                 bound = reading.calls.named_callables(carry.file, carry.func, value, carry.bound)
@@ -6138,9 +6190,14 @@ class _Crossings:
             self._again(("back", key))
             return
         self._returned.add(key)
+        owner = f"{file}::{func.name}"  # type: ignore[attr-defined]
+        if owner in self.returning and isinstance(getattr(func, "parent", None), ast.Module):
+            self.returned.setdefault(owner, set()).update(paths)
         reading = self.reading
         for hole in reading.record.holes_spelled(func.name):  # type: ignore[attr-defined]
             self.open[hole] = None
+            if self.returning:
+                self.met[hole] = None
         held = reading.calls.types.method_class(file, func)
         self._backing += 1
         with self._going(("back", key)):
@@ -6173,14 +6230,16 @@ def _walk(
     item: Optional[int] = None,
     landing: bool = False,
     routed: bool = False,
+    returning: frozenset[str] = frozenset(),
 ) -> tuple[_Crossings, _Paths]:
     """Carry *site*'s rows on from its statement in *func* (:func:`attach_crossings`) -- with *item*, that select item
     of them alone (:class:`_PathCarry`), with *landing* keeping where they reach the database through calls, with
-    *routed* each found owner's ways back up (:attr:`_Crossings.ways`): the walk, and what *func* returns of them."""
+    *routed* each found owner's ways back up (:attr:`_Crossings.ways`), with *returning* what the functions it names
+    return of them (:attr:`_Crossings.returned`): the walk, and what *func* returns of them."""
     file, line = site.anchor.file, site.anchor.line_start
     rows = _rows_written(func, line, site.region[1])
     carry = _PathCarry(reading, file, func, (), start=rows, item=item)
-    crossings = _Crossings(reading, landing, routed)
+    crossings = _Crossings(reading, landing, routed, returning)
     for call in _own_calls(func):
         if call.lineno == line:
             # The call running the statement, followed with all it hands:
@@ -6292,6 +6351,15 @@ def _item_choice(
     return "", KEY_COLUMN_EXPRESSION
 
 
+class Returned(NamedTuple):
+    """What one statement's rows come to in the answers :func:`attach_crossings` is asked for (*returning*)."""
+
+    #: ``{owner: paths}``: the parts of the rows each function returns, spelled as :attr:`KeySource.paths`.
+    paths: dict[str, list[str]]
+    #: ``(owner, line, callee)`` of each hole the walk met (:attr:`_Crossings.met`), sorted.
+    holes: list[tuple[str, int, str]]
+
+
 def attach_crossings(
     read_sites: list[ReadSiteNode],
     modules: list[SourceModule],
@@ -6300,6 +6368,8 @@ def attach_crossings(
     record: Optional["ReachGraph"],
     unread_kept: bool = True,
     landings: Optional[dict[str, list[_Landing]]] = None,
+    returned: Optional[dict[str, Returned]] = None,
+    returning: frozenset[str] = frozenset(),
 ) -> CrossingCensus:
     """Say which junction a row handled here is carried on to.
 
@@ -6382,12 +6452,21 @@ def attach_crossings(
     (:class:`_Landing`, each select item's too): the key a statement of another
     function names its rows by, which the KeyFroms read
     (:func:`attach_key_sources`).  Not the statement's own run handed on.
+
+    With *returned*, what the walk carried back to each of the functions
+    *returning* names -- an API's endpoints, whose answers are what they
+    return -- goes into it by the statement's read site, with every hole the
+    walk met on the way (:class:`Returned`): a part of the rows a function
+    returns is where the rows are in its answer, and a hole where more may
+    be.  ``pilot/get_job_status`` returns ``peekJobs``'s jobs at
+    ``['data'][*]['status']`` ...; ``job/kill`` returns none of them.
     """
     if calls is None or record is None:
         return CrossingCensus(0, 0, 0, 0)
     owners = {junction.owner for junction in junctions}
     trees = {module.rel_path: module.tree for module in modules}
     reading = _Reading(calls, owners, record, unread_kept)
+    asked = returning if returned is not None else frozenset()
     stored = handing_back = resolved = opened = 0
     for site in read_sites:
         if not site.region:
@@ -6395,7 +6474,12 @@ def attach_crossings(
         func = _site_function(trees, site)
         if func is None:
             continue
-        crossings, returned = _walk(reading, func, site, landing=landings is not None, routed=True)
+        crossings, handed = _walk(reading, func, site, landing=landings is not None, routed=True, returning=asked)
+        if returned is not None:
+            returned[site.name] = Returned(
+                {owner: _spelled_paths(frozenset(paths)) for owner, paths in sorted(crossings.returned.items())},
+                sorted(crossings.met),
+            )
         if landings is not None:
             found = [one for one in crossings.landings if not _own_run(one, func, site)]
             for landing in found:
@@ -6409,7 +6493,7 @@ def attach_crossings(
         # lead was back to themselves.
         crossings.found.discard(site.owner)
         crossings.found_back.discard(site.owner)
-        handing_back += 1 if returned else 0
+        handing_back += 1 if handed else 0
         resolved += 1 if crossings.found_back else 0
         site.crosses_to = sorted(crossings.found)
         site.crosses_open = [

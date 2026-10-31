@@ -503,7 +503,9 @@ def runs_for(log: Log, key: str) -> list[Run]:
     """Every run of *log* the key appears in, keyed by the machine and the instance token: one mark on two machines
     is two runs (a file handed in is one machine's)."""
     pattern = keyed(key)
-    hits = [r for r in log.records if pattern.search(r.message) or (r.token and pattern.search(r.token))]
+    # the pattern finds the key only where its text is, so a record without the text is passed over without it (most
+    # of a day-long mark's records: MT-ready-stuck's S1, 62% of its time in this line)
+    hits = [r for r in log.records if (key in r.message and pattern.search(r.message)) or (key in r.token and pattern.search(r.token))]
     # each mark's records in one pass over the log, not one pass a mark: a log of thousands of marks was read again for
     # each (MT-running-stuck's day-long marks: 879 of its 928 s under cProfile)
     by_mark: dict[tuple[str, str], list[Record]] = {}

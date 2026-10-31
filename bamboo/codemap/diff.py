@@ -338,6 +338,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: the statements each API endpoint's calls reach -- see Endpoint; "
         "a dump's section compare reads them"
     ),
+    "handlers": (
+        "records beside the nodes, not nodes: the endpoints' records of the async requests' handlers -- see "
+        "MapFragment.handlers; a dump's section compare reads them"
+    ),
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,
     "spec_annotation_forms": _REPORT,

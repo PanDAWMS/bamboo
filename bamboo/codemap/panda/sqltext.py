@@ -761,6 +761,21 @@ def deletes(sql: str) -> list[str]:
     return _deletes_in_text(plain(sql)) if found is None else found
 
 
+_MERGE = re.compile(r"\bMERGE\s+(?:/\*.*?\*/\s*)?INTO\s+([\w{}.]+)", re.IGNORECASE | re.DOTALL)
+
+
+def merges(sql: str) -> list[str]:
+    """Return the tables *sql* merges rows into.
+
+    A ``MERGE INTO`` updates its target's rows that match a source row and
+    inserts the others, and neither :func:`creates` nor :func:`updates` reads
+    it.  The corpus runs none today; a reader of every write must not miss the
+    first one.
+    """
+    found = _targets(sql, exp.Merge)
+    return [_table_of(match.group(1)) for match in _MERGE.finditer(plain(sql))] if found is None else found
+
+
 def _statement(sql: str):
     """*sql*'s ``UPDATE`` or ``INSERT`` node and its tokens, or ``None`` for any other statement.
 

@@ -1072,7 +1072,6 @@ PREFIX_NOT_FOLLOWED = "the logger {logger} is built by {call}(...), which is not
 PREFIX_STAMP = "the logger {logger} marks its lines with the time it is made: a mark of None, or a MsgWrapper's absent token"
 PREFIX_NOT_FOLDED = "the logger {logger}'s prefix {prefix} is not a string this reading folds"
 PREFIX_KEYWORD = "the logger {logger}'s prefix is given by keyword, which is not read"
-PREFIX_MARKS = "the logger {logger} is made with different marks on its paths"
 #: How many calls deep a maker's parameters are folded through the callers that came into it (:meth:`Trace._env_at`).
 _RETURN_DEPTH = 3
 #: How many wrappers deep a wrapper's own logger is followed for its mark (:meth:`Trace._wrapped_mark`).
@@ -2079,7 +2078,7 @@ class _Walk:
         #: hundred logging calls asks for the same local a hundred times.
         self._sites: dict[tuple[int, str], tuple] = {}
         self._asked: dict[tuple[str, str], str] = {}
-        self._prefixes: dict[tuple[str, int], tuple[str, str, list[SkeletonHole]]] = {}
+        self._prefixes: dict[tuple[str, int], list[tuple[str, str, list[SkeletonHole]]]] = {}
         #: The walk back from a logging call to the calls making its logger (:meth:`_makers`), made on first use.
         self._loggers = None
         #: The role the name being explained was asked in -- see
@@ -2877,9 +2876,9 @@ class _Walk:
             return [[_hole(expr)]], []
         return ways, refused
 
-    def prefix_of(self, frame: _Frame, argument: ast.expr) -> tuple[str, str, list[SkeletonHole]]:
+    def prefixes_of(self, frame: _Frame, argument: ast.expr) -> list[tuple[str, str, list[SkeletonHole]]]:
         """The pattern a logging call's logger writes before *argument*, why it is ``""`` if it may not be, and its
-        holes with what fills them.
+        holes with what fills them -- one each per mark its paths make it with.
 
         The logger is followed back, on every path, to the first call making one, as the log file is
         (:meth:`logfile.LoggerFiles.makers_of`): a local's bindings reaching the call, a parameter's callers, a
@@ -2887,35 +2886,42 @@ class _Walk:
         bound -- ``self.create_tagged_logger(comment, tag)`` is the ``LogWrapper`` its body makes, its ``tag`` the
         caller's.  Each maker's mark is folded where it is made (:meth:`_mark_of`): ``getLogger`` and
         ``setup_logger`` make a logger that marks nothing, ``("", "", [])``.  Every path one mark: that mark; marks
-        that differ, or a path that stops short, say why instead (:attr:`SkeletonLine.prefix_hole`) -- where the
-        logger is a local bound once by a call, the reading of that call alone (:meth:`_logger_prefix`).
+        that differ, each that is folded, in their patterns' order -- ``activateJob``'s ``PandaID=None`` where it
+        is handed no job, ``PandaID={job.PandaID}`` where it is, and a helper's logger marked with its caller's name
+        (``kill``, ``get_user_attributes``, ...); a mark that is not, or a path that stops short, says why instead
+        (:attr:`SkeletonLine.prefix_hole`) -- where the logger is a local bound once by a call, the reading of that
+        call alone (:meth:`_logger_prefix`).
         """
         call = getattr(argument, "parent", None)
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
-            return "", PREFIX_NOT_A_NAME.format(logger=_text(call) if call is not None else ""), []
+            return [("", PREFIX_NOT_A_NAME.format(logger=_text(call) if call is not None else ""), [])]
         receiver = call.func.value
         key = (frame.file, id(call))
         if key in self._prefixes:
             return self._prefixes[key]
         makers, stopped = self._makers().makers_of(frame.file, frame.func, call)
         marks = [self._mark_of(maker) for maker in makers] if makers and not stopped else []
-        said: tuple[str, str, list[SkeletonHole]]
+        said: list[tuple[str, str, list[SkeletonHole]]]
         if not marks:
-            said = self._bound_prefix(frame, receiver)
+            said = [self._bound_prefix(frame, receiver)]
         elif any(pieces is None for pieces, _why in marks):
             why = next(why for pieces, why in marks if pieces is None)
-            said = ("", why.replace("{logger}", _text(receiver)), [])
-        elif len({_spelled(pieces) for pieces, _why in marks}) > 1:
-            said = ("", PREFIX_MARKS.format(logger=_text(receiver)), [])
+            said = [("", why.replace("{logger}", _text(receiver)), [])]
         else:
-            pieces = marks[0][0]
-            said = (_folded_pattern(pieces) + r"\ " if pieces else "", "", _prefix_holes(pieces))
+            distinct = {_spelled(pieces): pieces for pieces, _why in marks}
+            said = sorted(
+                (
+                    (_folded_pattern(pieces) + r"\ " if pieces else "", "", _prefix_holes(pieces))
+                    for pieces in distinct.values()
+                ),
+                key=lambda one: (one[0], [hole.expression for hole in one[2]]),
+            )
         self._prefixes[key] = said
         return said
 
     def _bound_prefix(self, frame: _Frame, receiver: ast.expr) -> tuple[str, str, list[SkeletonHole]]:
         """The prefix of a logger that is a local this function binds once by a call, or why there is none: read
-        where the walk back to its makers stops short (:meth:`prefix_of`)."""
+        where the walk back to its makers stops short (:meth:`prefixes_of`)."""
         if not isinstance(receiver, ast.Name):
             return "", PREFIX_NOT_A_NAME.format(logger=_text(receiver)), []
         bound = pathcond.single_definition(frame.func, receiver.id)
@@ -3252,36 +3258,40 @@ class _Walk:
                     pattern = _constant_pattern(message)
                     value, hole, because = "", "", ""
                 refused = "" if pattern else _refusal(message)
-                prefix, prefix_hole, prefix_holes = (
-                    self.prefix_of(frame, argument) if pattern else ("", PREFIX_REFUSED, [])
-                )
-                # Deduped on what the row would *say*, refusals included: one
-                # call can resolve to several messages that render the same,
-                # and three identical refusals on one line tell a reader
-                # nothing three times.
-                if any(
-                    (row.pattern, row.text) == (pattern, _text(message)) for row in rows
+                # A row per mark the logger is made with on its paths: the line carries one of them.
+                for prefix, prefix_hole, prefix_holes in (
+                    self.prefixes_of(frame, argument) if pattern else [("", PREFIX_REFUSED, [])]
                 ):
-                    continue
-                rows.append(
-                    SkeletonLine(
-                        kind=SKELETON_PRINT,
-                        line=line,
-                        depth=depth,
-                        text=_text(message),
-                        pattern=pattern,
-                        refused=refused,
-                        keyed=bool(pattern) and keyed(message),
-                        holes=_holes_of(message),
-                        prefix=prefix,
-                        prefix_hole=prefix_hole,
-                        prefix_holes=prefix_holes,
-                        arms=sorted(arms),
-                        value=value,
-                        hole=hole,
-                        because=because,
+                    # Deduped on what the row would *say*, refusals included: one
+                    # call can resolve to several messages that render the same,
+                    # and three identical refusals on one line tell a reader
+                    # nothing three times.
+                    marked = (prefix, [one.expression for one in prefix_holes])
+                    if any(
+                        (row.pattern, row.text, (row.prefix, [one.expression for one in row.prefix_holes]))
+                        == (pattern, _text(message), marked)
+                        for row in rows
+                    ):
+                        continue
+                    rows.append(
+                        SkeletonLine(
+                            kind=SKELETON_PRINT,
+                            line=line,
+                            depth=depth,
+                            text=_text(message),
+                            pattern=pattern,
+                            refused=refused,
+                            keyed=bool(pattern) and keyed(message),
+                            holes=_holes_of(message),
+                            prefix=prefix,
+                            prefix_hole=prefix_hole,
+                            prefix_holes=prefix_holes,
+                            arms=sorted(arms),
+                            value=value,
+                            hole=hole,
+                            because=because,
+                        )
                     )
-                )
         if line in self.armed:
             rows.append(
                 SkeletonLine(
@@ -5611,7 +5621,7 @@ def function_prints(
     of the calls and both the build's check and a reader's own count say so.
 
     *calls* is the build's (the corpus's, its module names read off the instance's record), where it is given: the
-    prefix follows a logger to its callers (:meth:`_Walk.prefix_of`), and :meth:`calls.Calls.callers`' index is
+    prefix follows a logger to its callers (:meth:`_Walk.prefixes_of`), and :meth:`calls.Calls.callers`' index is
     one per corpus, so a second reading of the calls would leave the build's later readers the callers this one
     placed.
     """

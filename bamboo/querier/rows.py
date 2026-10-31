@@ -53,7 +53,8 @@ EXITS = (ast.Return, ast.Raise)
 JUMPS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
 DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 #: a row proves a path only when it says something -- a pattern of fewer
-#: literal characters than this can be present by accident
+#: literal characters than this can be present by accident, and proves only
+#: as a whole message under a mark one function writes (``Seen.proves``)
 MIN_PROOF = 8
 #: where a function's print rows come from: ``walk`` (the skeleton of the map's walk, ``trace.Asker.start``, per
 #: asking) or ``graph`` (the map's ``FunctionPrintsNode``), whose
@@ -111,13 +112,21 @@ def own_nodes(root: ast.AST) -> Iterable[ast.AST]:
 
 
 def statement_at(func: ast.AST, line: int) -> ast.stmt | None:
-    """The innermost statement of *func* that starts on *line*."""
-    found = None
-    for node in own_nodes(func):
-        if isinstance(node, ast.stmt) and node.lineno == line and node is not func:
-            if found is None or _depth(node) > _depth(found):
-                found = node
-    return found
+    """The innermost statement of *func* that starts on *line* (the first in ``own_nodes``' order of equal depth).
+
+    The function's statements are indexed by line once and the index kept on its node, as ``pathcond`` keeps each
+    node's parent: ``which_ran.rows_around`` asks for a pair of lines at a time, and walked the whole function anew
+    for each (superStatus 53354352: 64% of its time)."""
+    index = getattr(func, "statements_at", None)
+    if index is None:
+        index = {}
+        for node in own_nodes(func):
+            if isinstance(node, ast.stmt) and node is not func:
+                found = index.get(node.lineno)
+                if found is None or _depth(node) > _depth(found):
+                    index[node.lineno] = node
+        func.statements_at = index  # type: ignore[attr-defined]
+    return index.get(line)
 
 
 def _depth(node: ast.AST) -> int:
@@ -1010,6 +1019,45 @@ def _prefix_regex(prefixes: tuple[str, ...]) -> re.Pattern[str]:
     return re.compile(r"\s*" + (bare[0] if len(bare) == 1 else "(?:" + "|".join(bare) + ")"), re.S)
 
 
+#: ``[fragment, [(pattern, owner, prefix regex or None, logs or None)], {text: [(owner, prefix, logs)]},
+#: {(log, token, text): writers}]`` for the installed dump (:func:`line_writers`); the fragment is held, so a dump
+#: installed after is told from it by identity
+_WRITERS: list = []
+
+
+def line_writers(record: Record, log: str) -> frozenset[str]:
+    """The functions (``rel::Class.method``) of the installed dump that can have printed *record*, a line of the log
+    *log*: those with a row whose map pattern is found in the record's text, whose prefix stands where the record's
+    line starts or which has none (the map gives none where the logger is made with different marks on its paths:
+    calculateRWwithPrio_JEDI's two tags -- such a row holds any mark), and whose statement's lines can land in *log*
+    (``PrintStatement.log_files``; anywhere where the map did not follow the logger to them, ``log_files_basis``
+    other than ``logger``).  A comment copied from another method gives two methods one mark
+    (configurator_read_panda_sites's ``configurator_read_sites < ... >``).  A row with no pattern the map can ask with
+    (all holes) is not counted: it can print any text at any length, which MIN_PROOF does not read either.  A mark
+    inside an outer one's text (:meth:`Row.written_by`) is not read: the message is then more than the row's text,
+    which proves nothing below MIN_PROOF.  None without a dump."""
+    fragment = mapdump.fragment()
+    if fragment is None:
+        return frozenset()
+    if not _WRITERS or _WRITERS[0] is not fragment:
+        rows = []
+        for f in fragment.function_prints:
+            for st in f.statements:
+                logs = frozenset(st.log_files) if st.log_files_basis == "logger" else None
+                for r in st.rows:
+                    if r.pattern and _map_usable(r.pattern):
+                        rows.append((re.compile(r.pattern, re.S), f.owner, _prefix_regex((r.prefix,)) if r.prefix else None, logs))
+        _WRITERS[:] = [fragment, rows, {}, {}]
+    by_text, known = _WRITERS[2], _WRITERS[3]
+    if (log, record.token, record.text) not in known:
+        if record.text not in by_text:
+            by_text[record.text] = [(o, p, logs) for regex, o, p, logs in _WRITERS[1] if regex.search(record.text)]
+        line = f"{record.token} {record.text}"
+        known[log, record.token, record.text] = frozenset(
+            o for o, p, logs in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line)))
+    return known[log, record.token, record.text]
+
+
 def _prefixes(mapped: list) -> list[str]:
     """The distinct prefixes of a statement's map rows, when every one has one (59 of 5732 statements have
     several: a logger bound two ways); none when any row lacks one, which reads every record as before."""
@@ -1180,11 +1228,27 @@ class Seen:
         return bool(self.hits.get(row.line))
 
     def proven(self, row: Row) -> bool:
-        """Whether a record of the run is this row's, read at MIN_PROOF and by no other row of the function: a text
-        two rows print alike is either one's (activateJob's filesTable4 UPDATE, 92 in the arm that activates and
-        124 in the one that does not)."""
+        """Whether a record of the run is this row's, read by no other row of the function (a text two rows print
+        alike is either one's: activateJob's filesTable4 UPDATE, 92 in the arm that activates and 124 in the one that
+        does not) and proving it (:meth:`proves`)."""
         mine = set(self.unambiguous.get(row.line, ()))
-        return any(lit >= MIN_PROOF and i in mine for i, lit, _ in self.hits.get(row.line, ()))
+        return any(i in mine and self.proves(row, i, lit) for i, lit, _ in self.hits.get(row.line, ()))
+
+    def proves(self, row: Row, i: int, literal: int) -> bool:
+        """Whether record *i*, which *row* finds at *literal* characters, proves the row: at MIN_PROOF; below it where
+        the record cannot be another line -- its message is the row's text whole, and no other function can have
+        printed it there (:func:`line_writers`): activateJob's "start" and "done" (5 and 4 characters) under
+        ``activateJob < PandaID=... >``, once the map gives a mark to every logger that prints "start" in its logs.  A
+        message that only holds the text (``restart``; a traceback another function prints with the caller's logger)
+        proves nothing below MIN_PROOF, nor does a record the search cut."""
+        if literal >= MIN_PROOF:
+            return True
+        record = self.run.records[i]
+        if not (PREFIX and row.map_prefixes) or record.cut:
+            return False
+        if not any(regex.fullmatch(record.text.strip()) for regex, _, _ in row.patterns(self.mode)):
+            return False
+        return line_writers(record, self.run.log.name) == {f"{self.fn.rel}::{pathcond.qualified_name(self.fn.node)}"}
 
     def single_call(self) -> bool:
         return all(len(v) <= 1 for v in self.unambiguous.values())

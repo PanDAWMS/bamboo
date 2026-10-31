@@ -469,6 +469,169 @@ def other_system(module: str) -> Optional[str]:
     return None
 
 
+#: What a call changes beside PanDA's tables (:func:`change`): a file, a process, another system.
+CHANGE_FILE, CHANGE_PROCESS, CHANGE_SYSTEM = "file", "process", "system"
+#: The standard library's functions and classes making, changing or removing a file, by ``(module, name)``.
+FILE_CHANGES = frozenset(
+    {
+        ("os", name)
+        for name in (
+            "remove",
+            "unlink",
+            "rename",
+            "renames",
+            "replace",
+            "utime",
+            "makedirs",
+            "mkdir",
+            "rmdir",
+            "removedirs",
+            "chmod",
+            "chown",
+            "symlink",
+            "link",
+            "truncate",
+        )
+    }
+    | {
+        ("shutil", name)
+        for name in (
+            "copy",
+            "copy2",
+            "copyfile",
+            "copytree",
+            "copyfileobj",
+            "move",
+            "rmtree",
+        )
+    }
+    | {
+        ("tempfile", name)
+        for name in (
+            "mkstemp",
+            "mkdtemp",
+            "NamedTemporaryFile",
+            "TemporaryFile",
+            "TemporaryDirectory",
+        )
+    }
+)
+#: ``pathlib``'s path classes, and their methods changing the file a path names.
+PATH_CLASSES = frozenset({("pathlib", "Path"), ("pathlib", "PosixPath")})
+PATH_CHANGES = frozenset(
+    {
+        "write_text",
+        "write_bytes",
+        "unlink",
+        "touch",
+        "mkdir",
+        "rename",
+        "replace",
+        "rmdir",
+        "symlink_to",
+        "chmod",
+    }
+)
+#: The standard library's functions and classes starting another process, or signalling one.
+PROCESS_STARTS = frozenset(
+    {
+        ("subprocess", name)
+        for name in (
+            "run",
+            "Popen",
+            "call",
+            "check_call",
+            "check_output",
+            "getoutput",
+            "getstatusoutput",
+        )
+    }
+    | {
+        ("os", name)
+        for name in (
+            "system",
+            "popen",
+            "kill",
+            "killpg",
+            "fork",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+            "spawnv",
+        )
+    }
+)
+#: The letters of a mode that let ``open`` change the file: write, append, create, update.
+CHANGING_MODES = frozenset("wax+")
+
+
+def change(
+    types: Types, file: str, func: ast.AST, call: ast.Call
+) -> Optional[tuple[str, str, str]]:
+    """``(kind, system, callee)`` where *call*, made in *func*, changes something beside PanDA's tables; ``None`` for
+    any other call.
+
+    Read off the imports (:meth:`calls.Types.library_class`, :meth:`calls.Types.library_classes`): a file
+    (:data:`FILE_CHANGES`, a path's :data:`PATH_CHANGES`; the builtin ``open`` or a library's -- ``gzip``'s,
+    ``tarfile``'s -- with a mode holding one of :data:`CHANGING_MODES`, or one not read), a process
+    (:data:`PROCESS_STARTS`), or another system: a function, a class or an object's method of a package
+    :data:`OTHER_SYSTEMS` names, the system its *system* -- Rucio's ``Client`` built, the broker's ``send``.  Not a
+    call whose value is raised: an exception made reaches no system (``raise CannotAuthenticate(...)``).  A call on
+    an object whose class is not said is not read here: it is the reach record's hole.
+    """
+    if isinstance(getattr(call, "parent", None), ast.Raise):
+        return None
+    called = call.func
+    if (
+        isinstance(called, ast.Name)
+        and called.id == "open"
+        and called.id not in types.imports(file)
+    ):
+        return _opened(call, "open")
+    held = types.library_class(file, called)
+    if held is not None and held[0].split(".")[0] not in types.roots:
+        module, name = held
+        if name == "open":
+            return _opened(call, f"{module}.open")
+        if (module, name) in FILE_CHANGES:
+            return CHANGE_FILE, "", f"{module}.{name}"
+        if (module, name) in PROCESS_STARTS:
+            return CHANGE_PROCESS, "", f"{module}.{name}"
+        system = other_system(module)
+        return (
+            (CHANGE_SYSTEM, system, f"{module}.{name}") if system is not None else None
+        )
+    if not isinstance(called, ast.Attribute):
+        return None
+    classes = types.library_classes(file, func, called.value) or frozenset()
+    for module, name in sorted(classes):
+        if (module, name) in PATH_CLASSES and called.attr in PATH_CHANGES:
+            return CHANGE_FILE, "", f"{module}.{name}.{called.attr}"
+        system = other_system(module)
+        if system is not None:
+            return CHANGE_SYSTEM, system, f"{module}.{name}.{called.attr}"
+    return None
+
+
+def _opened(call: ast.Call, callee: str) -> Optional[tuple[str, str, str]]:
+    """:func:`change` for an ``open``: its mode, the second argument or ``mode=``, ``"r"`` where it is not given."""
+    mode = (
+        call.args[1]
+        if len(call.args) > 1
+        else next((one.value for one in call.keywords if one.arg == "mode"), None)
+    )
+    if mode is None:
+        return None
+    if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
+        return CHANGE_FILE, "", f"{callee} (a mode not read)"
+    return (
+        (CHANGE_FILE, "", f"{callee} {mode.value!r}")
+        if set(mode.value) & CHANGING_MODES
+        else None
+    )
+
+
 #: A class of the corpus that is another system's interface, by the file declaring it -> that system: what a call on
 #: one hands back is the system's (:data:`bamboo.codemap.panda.provenance.INTERFACE_CLASSES` says how the walk reads
 #: it).  ``rucioAPI = RucioAPI()`` at the foot of ``ddm.py`` is imported by name everywhere the server registers,

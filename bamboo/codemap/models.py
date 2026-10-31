@@ -3243,6 +3243,27 @@ class EndpointRead(BaseModel):
             ":attr:`ReachWrite.chain`: one way, the fewest calls; empty in the endpoint itself."
         ),
     )
+    returned: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the statement's rows are in what the endpoint's function returns -- its answer -- as the walk "
+            "carrying them back up the calls reads it (:func:`bamboo.codemap.panda.recognizers.sqlwrite."
+            "attach_crossings`), spelled as :attr:`KeySource.paths`: ``()`` the value itself, else its steps "
+            "(``['data']``, ``[*]``, ``.Files``; ``[key]`` a dict's keys, ``.*`` any field).  ``generate_response`` "
+            "puts its data under ``['data']``.  A part of the rows here reads as them, and a path may be one a run "
+            "never takes: a branch on the value's type is read both ways.  Empty where it returns none of them -- "
+            "``job/kill``'s ``peekJob`` -- as far as *returned_open* says."
+        ),
+    )
+    returned_open: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``owner:line`` of each hole that walk met in a function of the endpoint's closure, as "
+            ":attr:`Endpoint.holes` spells them: a call handed a part of the rows that no reading places, or a "
+            "caller the rows may be returned to that it cannot place -- where more of them may come back than "
+            "*returned* says."
+        ),
+    )
 
 
 class EndpointWrite(BaseModel):
@@ -3250,8 +3271,64 @@ class EndpointWrite(BaseModel):
 
     function: str = Field(description="The :attr:`ReachNode.owner` of the function running it.")
     line: int = Field(description="The line of the call that runs it.")
-    kind: str = Field(description="``insert``, ``update`` or ``delete``, as the statement's text reads.")
+    kind: str = Field(description="``insert``, ``update``, ``delete`` or ``merge``, as the statement's text reads.")
     tables: list[str] = Field(default_factory=list, description="The tables it writes, lowered.")
+
+
+class EndpointChange(BaseModel):
+    """A call of an endpoint's closure that changes something beside PanDA's tables, as
+    :func:`bamboo.codemap.callfacts.change` reads it: a file made, changed or removed, a process started, a call into
+    another system's package."""
+
+    kind: str = Field(
+        description="``file``, ``process`` or ``system`` (:data:`bamboo.codemap.callfacts.CHANGE_FILE` ...)."
+    )
+    system: str = Field(
+        default="",
+        description=(
+            "``system``: which, as :data:`bamboo.codemap.callfacts.OTHER_SYSTEMS` names it -- ``DDM / Rucio``, "
+            "``message broker``, ``iDDS``, ``HTTP``."
+        ),
+    )
+    callee: str = Field(
+        description="What is called, by its module: ``os.remove``, ``open 'w'``, ``rucio.client.Client``."
+    )
+    function: str = Field(description="The :attr:`ReachNode.owner` of the function making the call.")
+    line: int = Field(description="The call's line.")
+
+
+#: How a hole of an endpoint's closure is bounded by its callee's name (:attr:`EndpointHole.bound`).
+HOLE_CLOSED, HOLE_MAY_CHANGE, HOLE_OPEN = "closed", "may_change", "open"
+
+
+class EndpointHole(BaseModel):
+    """One of :attr:`Endpoint.holes`, bounded by its callee's name as the reach record bounds a mover's
+    (:meth:`bamboo.codemap.reach.ReachGraph.reach`, ``closed_by_name``): ``x.f(...)`` lands at a function of the
+    corpus named ``f``, if in the corpus at all -- here asked whether one may write a table or change something
+    (:class:`EndpointChange`), not a mover's arm."""
+
+    at: str = Field(description="``owner:line``, as :attr:`Endpoint.holes` spells it.")
+    callee: str = Field(description="The called expression, as :attr:`ReachHole.callee`.")
+    why: str = Field(
+        default="",
+        description=(
+            "As :attr:`ReachHole.why`: why no reading places it -- for an ``open`` one, whether a value is handed to "
+            "whoever takes it from a queue (``DBProxyPool.putProxy``'s pool) or a callee is chosen at run time."
+        ),
+    )
+    bound: str = Field(
+        description=(
+            "``closed``: no function of the corpus of the name, nor any call they make, writes a table or changes "
+            "anything, nor leaves a hole no name bounds (a name no function has is no hole: the reach record "
+            "settles it, ``no_runtime_methods``); ``may_change``: one of them may (*through*); "
+            "``open``: no name bounds it -- a local or a parameter called, a callee chosen at run time, whoever "
+            "takes a queue's value, a statement not read."
+        )
+    )
+    through: list[str] = Field(
+        default_factory=list,
+        description="``may_change``: the functions of the name that may, by :attr:`ReachNode.owner`.",
+    )
 
 
 class Endpoint(BaseModel):
@@ -3285,7 +3362,24 @@ class Endpoint(BaseModel):
             "Every statement writing rows a function of the closure runs -- an ``INSERT``, ``UPDATE`` or ``DELETE`` "
             "(:func:`bamboo.codemap.panda.sqltext.creates` / ``updates`` / ``deletes``) -- however it is guarded: "
             "the closure is where the calls can go, not where a request makes them go.  A write past one of "
-            "*holes* is not here; ``job/kill`` writes, ``job/get_description_incl_archive`` does not."
+            "*holes* is not here; ``job/kill`` writes, ``job/get_description_incl_archive`` does not.  A ``MERGE`` "
+            "too (:func:`bamboo.codemap.panda.sqltext.merges`), none in the corpus today."
+        ),
+    )
+    changes: list[EndpointChange] = Field(
+        default_factory=list,
+        description=(
+            "Every call of the closure changing something beside PanDA's tables -- a file, a process, another "
+            "system -- however it is guarded, as *writes* are; one past one of *holes* is not here.  "
+            "``file_server/upload_cache_file`` writes the cache file and posts to HTTP; ``job/kill`` reaches Rucio, "
+            "iDDS and the message broker."
+        ),
+    )
+    hole_bounds: list[EndpointHole] = Field(
+        default_factory=list,
+        description=(
+            "Each of *holes*, bounded by its callee's name: which may hide a write or a change.  What a reader may "
+            "call without changing anything is its own definition, read off *writes*, *changes* and these."
         ),
     )
 
@@ -3368,6 +3462,15 @@ class MapFragment(BaseModel):
     key_froms: list[KeyFrom] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
+    handlers: list[Endpoint] = Field(
+        default_factory=list,
+        description=(
+            "The functions PanDA's async requests' daemon runs for a request it picks, read as *endpoints* are "
+            "(:func:`bamboo.codemap.panda.endpoints.handlers`): one per request type its table names "
+            "(``processor.HANDLERS``), *route* ``async/<type>``, *version* ``async``.  A request is a row an "
+            "endpoint inserts; which endpoint inserts which type is not read here."
+        ),
+    )
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
         description=(
@@ -4880,8 +4983,12 @@ class SkeletonLine(BaseModel):
             "does not see it.  Apart from ``pattern`` because "
             "the line holds it before the message, and it names the writer "
             "where the message alone -- ``start``, ``done`` -- is shared by "
-            "many.  Empty where none is read, and then ``prefix_hole`` says "
-            "why when the logger may write one."
+            "many.  Where the paths make the logger with different marks, a "
+            "row per mark, alike but for this and ``prefix_holes``: the line "
+            "carries one of them -- ``activateJob``'s ``PandaID=None`` where it "
+            "is handed no job and ``PandaID=.*?`` where it is.  Empty where none "
+            "is read, and then ``prefix_hole`` says why when the logger may "
+            "write one."
         ),
     )
     prefix_hole: str = Field(
@@ -4889,8 +4996,7 @@ class SkeletonLine(BaseModel):
         description=(
             "Why ``prefix`` is empty where the logger may write one: the "
             "row has no pattern, a path back from the call stops short of "
-            "where its logger is made, its paths make it with different "
-            "marks, or the mark does not fold -- a prefix of ``None`` (a time "
+            "where its logger is made, or a mark does not fold -- a prefix of ``None`` (a time "
             "stamp).  Empty where ``prefix`` is the whole reading: said, or a "
             "logger that marks nothing (``getLogger``, ``setup_logger``, a "
             "``LogWrapper`` built with none), whose lines start with the "
