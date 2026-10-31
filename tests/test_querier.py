@@ -883,6 +883,33 @@ def test_the_record_door_answers_a_narrower_ask_from_a_wider_record_by_the_lines
     ]
 
 
+def test_a_wider_records_lines_are_kept_for_a_narrower_ask_by_its_strings_as_written(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            from bamboo.querier.recorded import _Gathered
+
+            A = "getJobs < SITE 2026-09-28T08:31:00.000000 (x) >"
+            wide = {"machines": {M1: answered({**TODAY, "records": [
+                {**line("08:31:11", "start", A), "offset": 100},
+                # the dot and the brackets as written: a pattern of them would take this line too
+                {**line("08:31:12", "start", "getJobs < SITE 2026-09-28T08:31:00X000000 x >"), "offset": 200},
+                {**line("08:31:20", "end", "other < mark >"), "offset": 300}]})}}
+            kept = []
+            # the ask's string, none (an ask of no string holds no line), and no narrower ask (every line)
+            for only in ([A], [], None):
+                got = _Gathered()
+                got.add({**wide, **({} if only is None else {"only": only, "needed": None})})
+                kept.append(sorted(offset for _, _, offset in got.records))
+            print(json.dumps(kept))
+            """),
+        )
+    )
+    assert json.loads(out) == [[100], [], [100, 200, 300]]
+
+
 def test_the_record_door_asks_the_strings_handed_in_place_of_the_key_and_reads_no_other_mark_naming_it(tmp_path):
     out = _ok(
         _run(

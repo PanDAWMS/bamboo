@@ -173,9 +173,11 @@ class _Gathered:
         self.rotated_ends: set[tuple[str, datetime.datetime]] = set()
 
     def add(self, record: dict) -> None:
-        # a wider record read for a narrower ask (RecordedLogs._within): its records holding the ask's strings; a cut
-        # file is still read as far as the whole record read it -- for the strings the ask needs, where it says so
+        # a wider record read for a narrower ask (RecordedLogs._within): its records holding the ask's strings, each
+        # line searched once for all of them; a cut file is still read as far as the whole record read it -- for the
+        # strings the ask needs, where it says so
         only, needed = record.get("only"), record.get("needed")
+        held = None if only is None else re.compile("|".join(map(re.escape, only))) if only else re.compile(r"(?!)")
         for machine, got in record.get("machines", {}).items():
             self.asked = True
             status = got.get("status")
@@ -191,14 +193,14 @@ class _Gathered:
             for f in got.get("files", []):
                 last = None
                 for r in f.get("records", []):
-                    kept = only is None or any(s in x for x in r["lines"] for s in only)
+                    kept = held is None or any(map(held.search, r["lines"]))
                     if not r.get("head"):
                         self.fragments += kept
                         continue
-                    rec = _record(machine, f["file"], r)
                     if kept:
-                        self.records.setdefault((machine, f["file"], r["offset"]), rec)
-                    last = rec.stamp
+                        self.records.setdefault((machine, f["file"], r["offset"]), _record(machine, f["file"], r))
+                    last = r
+                last = _record(machine, f["file"], last).stamp if last is not None else None
                 if not f.get("covers"):
                     continue
                 start, end = f["covers"]
