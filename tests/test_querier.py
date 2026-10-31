@@ -914,6 +914,40 @@ def test_the_record_door_asks_a_narrower_ask_anew_where_the_wider_record_was_cut
     assert own[0] == [] and own[1] != []
 
 
+def test_the_record_door_reads_a_cut_file_for_the_strings_an_ask_needs_where_it_says_what_was_read_for_each(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            W, AT = ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), ("2026-09-28 08:31:10", "2026-09-28 08:31:15")
+            A, B = "getX < 2026-09-28/08:31:10.1 >", "getX < 2026-09-28/08:31:13.0 >"
+            hit = {**line("08:31:12", "12345 -> defined", A), "offset": 150}
+            key_rec = record(Ask("panda-x.log", ("12345",), W), {M1: answered({**TODAY, "records": [hit]})})
+            stop = [["2026-09-28 06:40:00", "2026-09-28 08:31:12"]]
+            whole = [["2026-09-28 06:40:00", "2026-09-29 06:50:00"]]
+            got = []
+            # the two calls' marks asked together, cut where B's call filled the second after 08:31:12; then A's call
+            # filling it; then a record of before the field
+            for read in ({B: stop}, {A: stop, B: whole}, None):
+                entry = {**TODAY, "truncated": True, "searched": stop, "records": [{**line("08:31:11", "start", A), "offset": 100}, hit]}
+                if read is not None:
+                    entry["read"] = read
+                cut = record(Ask("panda-x.log", (A, B), W), {M1: answered(entry)})
+                log, asks = ask_of([key_rec, cut], "panda-x.log", "12345", AT, M1)
+                got.append([[a["strings"] for a, _ in asks], log.holes if log else None])
+            print(json.dumps(got))
+            """),
+        )
+    )
+    other, own, before = json.loads(out)
+    # the ask of A's mark alone needs A's lines, read whole: answered from the cut record, with no hole
+    assert other == [[], []]
+    # A's own string filled the stopped second: asked anew, as is an ask of a record that does not say
+    assert own == [[["getX < 2026-09-28/08:31:10.1 >"]], None]
+    assert before == own
+
+
 def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared_one_as_cut(tmp_path):
     out = _ok(
         _run(

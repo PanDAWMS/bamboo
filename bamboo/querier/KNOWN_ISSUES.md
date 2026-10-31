@@ -125,7 +125,9 @@ listed, and a second of them stopped the recorder's paging.  A run of such a mar
 WARNING, and rule 8 and E6 read such a row as not searched (`Run.holds`; said on the run's line).  A message the
 shapes read as a leading hole (an f-string's expression, a conditional) leaves the mark asked whole: insertNewJob's
 rows start with `job.PandaID`.  A narrowed ask is not read from a record of the whole mark cut at 1 MB over its window
-(`recorded._cut_over`): it is asked anew, so the next round reads what the cut left unread.  H2 still asks every mark
+(`recorded._cut_over`): it is asked anew, so the next round reads what the cut left unread -- where the record says what
+was read for each cut string (fieldtest ca43fb9's `read`), only if a string the ask needs is cut, and an ask that
+drops the string that filled the stopped second is read from it whole (`recorded._read_for`).  H2 still asks every mark
 whole (it reads a candidate's rows in any run of the key, and a writer handed its caller's logger prints under the
 caller's mark); by the harness's count over rounds 1-5 (to-querier-64), only getTasksToBeProcessed_JEDI's marks come
 near a page's stop, and a round that stops on one is left to the recorder's split of the stopped second.
