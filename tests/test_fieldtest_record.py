@@ -401,7 +401,7 @@ async def test_asks_of_one_file_share_a_grep_and_each_record_keeps_its_own_strin
     assert [x["offset"] for x in fb["records"]] == [2] and fb["fragments"] == 0
 
 
-async def test_a_cut_answer_is_asked_again_in_halves_and_a_string_cut_alone_marks_its_files(
+async def test_a_cut_answer_with_no_stamped_record_is_asked_again_in_halves_and_a_string_cut_alone_marks_its_files(
     tmp_path,
 ):
     def reply(strings, _tail):
@@ -426,12 +426,69 @@ async def test_a_cut_answer_is_asked_again_in_halves_and_a_string_cut_alone_mark
     assert b["machines"][SERVER[0]]["files"][0]["truncated"] is False
 
 
+async def test_a_cut_answer_of_several_is_the_cut_answer_of_the_strings_that_filled_it_and_the_rest_are_asked_again(
+    tmp_path,
+):
+    # pin m's round 6 (2026-10-31): halving threw each cut answer away, 1012 of 1737 greps; one string filled
+    # 97-99.7% of a file's first cut answer, and the strings not cut alone held 2.3 MB in aipanda085's 649
+    busy = [rec(10 * i, f"2026-10-13 07:{12 + i:02d}:00,1 a 111") for i in range(1, 41)]
+    rare = rec(185, "2026-10-13 07:30:30,5 b 222")
+
+    def reply(strings, _tail):
+        # cut in its first hour of the file's 24: "111" holds 40 of 41 records
+        if "111" in strings:
+            return {**found(*busy[:18], rare, *busy[18:]), "truncated": True}
+        return found(rare, rec(1000, "2026-10-14 05:00:00,1 c 333"))
+
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}), {(SERVER[0], DAY): [reply]}
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:01")
+    _, (a, b, c) = await run(
+        tmp_path, panda, [ask(ADDER, [s], w, SERVER[0]) for s in ("111", "222", "333")]
+    )
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [
+        ("111", "222", "333"),
+        ("222", "333"),
+    ]
+    assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
+        R.continuation_pattern(
+            {"111": [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:01"))]}
+        )
+    ]
+    fa, fb, fc = (r["machines"][SERVER[0]]["files"][0] for r in (a, b, c))
+    assert fa["truncated"] is True and [x["offset"] for x in fa["records"]] == list(
+        range(10, 410, 10)
+    )
+    assert fa["read"] == {
+        "111": [
+            [fa["covers"][0], "2026-10-13 07:51:59"],
+            ["2026-10-14 05:50:00", "2026-10-14 06:10:01"],
+        ]
+    }
+    assert fb["truncated"] is False and [x["offset"] for x in fb["records"]] == [185]
+    assert fc["truncated"] is False and [x["offset"] for x in fc["records"]] == [1000]
+
+
+def test_a_string_fills_a_cut_answer_when_it_holds_as_large_a_part_of_it_as_the_part_of_the_file_read():
+    lo, hi = t("2026-10-14 00:00:00"), t("2026-10-14 10:00:00")
+    one = [rec(1, "2026-10-14 01:00:00,1 111"), rec(2, "2026-10-14 01:00:00,2 222")]
+    # an answer that read a tenth of the file: each string holds half of it
+    assert R.filled_by(one, ["111", "222", "333"], lo, hi) == ["111", "222"]
+    # one that read nine tenths: neither half fills it, so neither would fill a page alone
+    late = [rec(1, "2026-10-14 09:00:00,1 111"), rec(2, "2026-10-14 09:00:00,2 222")]
+    assert R.filled_by(late, ["111", "222"], lo, hi) == []
+    # no stamped record, or a file whose start is not known: nothing to measure by
+    assert R.filled_by([rec(1, "111")], ["111", "222"], lo, hi) == []
+    assert R.filled_by(one, ["111", "222"], None, hi) == []
+
+
 async def test_a_half_whose_grep_fails_defers_the_asks_of_its_strings_alone(tmp_path):
     day = "panda-adder.log-20261014.gz"
 
     def reply(strings, _tail):
-        if len(strings) > 2:
-            return {**found(rec(1, "2026-10-14 06:00:00,1 a 111")), "truncated": True}
+        if len(strings) > 2:  # no stamped record: halved
+            return {**found(rec(1, "a 111")), "truncated": True}
         if strings == ["111", "222"]:
             return {"status": "failed", "error": "timeout"}
         return found(rec(3, "2026-10-14 06:00:00,3 c 333"), rec(4, "d 444"))
@@ -686,11 +743,7 @@ async def test_a_cut_string_is_read_to_the_second_before_its_last_record_and_ask
     )
     w = ("2026-10-14 06:00:00", "2026-10-14 06:00:01")
     _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["111", "222"], w, SERVER[0])])
-    assert [c[3] for c in panda.calls if c[0] == "grep"] == [
-        ("111", "222"),
-        ("111",),
-        ("222",),
-    ]
+    assert [c[3] for c in panda.calls if c[0] == "grep"] == [("111", "222"), ("222",)]
     wanted = {"111": [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:01"))]}
     assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
         R.continuation_pattern(wanted)
