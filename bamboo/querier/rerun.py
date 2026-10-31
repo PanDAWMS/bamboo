@@ -1369,6 +1369,32 @@ def _identity_attrs(cls: str) -> list[str]:
     return next((t.identity_attrs for t in (fragment.tables if fragment else []) if t.spec_class == cls and t.identity_attrs), [])
 
 
+def marked_by_key(owner: str, line: int, cls: str) -> bool:
+    """Whether *owner* marks its runs by *cls*'s key: a run the map records for the function (``FunctionPrintsNode``'s
+    ``runs``) whose mark's key holds the class's identity (``_identity_attrs``) -- initialize_cpu_time_task's
+    "PandaID=...; jediTaskID=..." for a task; not doForPriorityMassage's "label=user", nor changeTaskPriorityPanda's
+    "<jediTaskID=...>" for a job.  Such a function's runs of the key are its passes for the object, and a log of it
+    searched over a span holds each (F3, KNOWN_ISSUES.md K37)."""
+    ident = set(_identity_attrs(cls))
+    found = R._prints_of(owner, [line])
+    return bool(ident) and any(ident & set(k.columns) for run in (getattr(found, "runs", None) or []) for k in run.key or [])
+
+
+def _f3(state: dict | None) -> str:
+    """The kind of an attribute's H2 try that is no statuslog row (``Rerun._attribute_tries``): "span" (the object's
+    life, asked of F3's writers), "run" (a run found in it), "open" (the life, not searched whole), "made" (a birth's
+    row); "" for a row."""
+    return (state or {}).get("f3", "")
+
+
+def _row_said(row: dict) -> str:
+    """A try's row as H2's stops say it: a statuslog row by its status and time, else what F3's or a birth's is."""
+    kind = _f3(row)
+    if not kind:
+        return f"{row['status']!r} {row['time']}"
+    return {"made": "the row's making", "run": "a run of the key", "span": "the object's life", "open": "the object's life"}[kind] + f" {row['time']}"
+
+
 def _statement_subjects(st) -> set[str]:
     """Every subject *st*'s pairs and condition trees read."""
     subjects = {p.partition("=")[0] for p in [*st.selects, *st.excludes, *st.refuses, *st.restricts]}
@@ -2126,11 +2152,11 @@ class Rerun:
             tries = [(state, W.at_transition(state), None)]
         self._stand_ins: dict[tuple[str, int], list[StandIn]] = {}
         names = self._writer_logs(subject, readings, self._h2_candidates(subject, readings) if readings else [])
-        if len(tries) > 1:
+        if len(tries) > 1 or any(_f3(state) for state, _, _ in tries):
             # every row's asks in one round, for the recording step to answer together, each of the logs of the
             # writers that can write it; the rows are then read newest first, and the first whose pass a writer is
-            # shown to write in ends the scan
-            self._stop_unanswered([u for _, asking, own in tries for u in self._ask(
+            # shown to write in ends the scan.  A birth's row (no asking) asks nothing
+            self._stop_unanswered([u for _, asking, own in tries if asking is not None for u in self._ask(
                 key, names if own is None else self._writer_logs(subject, own, self._h2_candidates(subject, own)), asking)[1]])
             return self._scan(subject, attr, value, key, readings, tries)
         state, asking, own = tries[0]
@@ -2222,12 +2248,25 @@ class Rerun:
         """H2 over the statuslog rows the writers' passes can write, newest first (attr-time-shape.md 5): a row whose pass
         a writer is shown to write in ends the scan; one shown to have no writer's pass goes; one that may have stays.
         The answer is a writer that prints shown to write, with nothing newer that may have; else the arms left are
-        named (:meth:`_one_of`).  A row is read on the writers that can write it, where the try names them."""
+        named (:meth:`_one_of`).  A row is read on the writers that can write it, where the try names them.  F3's life
+        is read run by run (:meth:`_runs_as_rows`); a birth's row asks nothing: its arms may have written there, as
+        the row was made, which no run shows (KNOWN_ISSUES.md K37)."""
         left: list[Possible] = []
         named = self._named(subject, key, readings, tries)
+        tries = self._runs_as_rows(subject, key, tries)
         for n, (state, asking, own) in enumerate(tries, 1):
-            self.say(f"-- row {n} of {len(tries)}: {asking.why}")
-            found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking, named)
+            kind = _f3(state)
+            if kind in ("made", "open"):
+                why = (f"a birth: it wrote as the row was made, at {state['time']}; no run is read" if kind == "made" else
+                       f"its logs were not searched whole over {asking.why}: it may have written in what was not")
+                self.say(f"-- row {n} of {len(tries)}: {_row_said(state)}")
+                found = [Possible(f"{Path(r.owner.partition('::')[0]).name}::{r.owner.split('::')[-1]}:{line}", state, False, [why])
+                         for r in own for line in r.lines]
+                for p in found:
+                    self.say(f"  may have written: {p.arm} ({why})")
+            else:
+                self.say(f"-- row {n} of {len(tries)}: {asking.why}")
+                found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking, named)
             left += found
             if any(p.wrote for p in found):
                 break
@@ -2237,6 +2276,33 @@ class Rerun:
         self._one_of(subject, value, left, len(tries))
         raise AssertionError("_one_of stops")
 
+    def _runs_as_rows(self, subject: str, key: str, tries: list) -> list:
+        """*tries* with F3's life (``_f3`` "span": the logs of writers on no history row of the object that mark their
+        runs by its key) read run by run: each run of the key the records hold in it becomes a try at its first record,
+        on every machine, read as a row is (KNOWN_ISSUES.md K37), and all are put newest first, a birth's last among
+        those of its time.  A life with no run stays one try: no run there is no pass of those writers only in logs
+        shown to name the key (:meth:`_row_at`).  One whose logs were not searched whole stays "open", before the
+        rows: its writers may have written in what was not searched."""
+        out = []
+        for state, asking, own in tries:
+            if _f3(state) != "span":
+                out.append((state, asking, own))
+                continue
+            cands = self._h2_candidates(subject, own)
+            runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+            lo, hi = asking.window
+            found = sorted({(r.first[:19], r.last[:19]) for rs in runs.values() for r in rs
+                            if r.first[:19] <= hi and r.last[:19] >= lo}, reverse=True)
+            self.say(f"F3: {len(found)} run(s) of {key} in {', '.join(dict.fromkeys(f for c in cands for f in c.log_files))} "
+                     f"over {asking.why}" + (f"; not searched whole: {', '.join(holes)}" if holes else ""))
+            if holes:
+                out.append(({**state, "f3": "open"}, asking, own))
+            elif not found:
+                out.append((state, asking, own))
+            out += [({"status": None, "time": first, "f3": "run"}, W.Asking((first, last), None, f"a run of {key} at "
+                     f"{first}..{last} (F3), on every machine"), own) for first, last in found]
+        return sorted(out, key=lambda t: t[0]["time"] if t[0] else "", reverse=True)
+
     def _named(self, subject: str, key: str, readings: list, tries: list) -> set[str]:
         """The writers' logs some run of *key* is in, in the records of any row of *tries*: a log shown to name its runs
         by the key, where no run at a row is no pass of its writers (:meth:`_row_at`).  JobGenerator's pass marks its
@@ -2244,6 +2310,8 @@ class Rerun:
         to-querier-62)."""
         out: set[str] = set()
         for _, asking, own in tries:
+            if asking is None:  # a birth's row: nothing asked
+                continue
             cands = self._h2_candidates(subject, readings if own is None else own)
             for name in self.logs.names(list(dict.fromkeys(f for c in cands for f in c.log_files))):
                 try:
@@ -2327,7 +2395,8 @@ class Rerun:
             arms.setdefault(p.arm, []).append(p)
         self.result["possibilities"] = [
             {"arm": arm, "rows": [{"status": p.row["status"] if p.row else None, "time": p.row["time"] if p.row else None,
-                                   "wrote": p.wrote, "premises": p.premises} for p in ps]}
+                                   **({"f3": _f3(p.row)} if _f3(p.row) else {}), "wrote": p.wrote, "premises": p.premises}
+                                  for p in ps]}
             for arm, ps in arms.items()
         ]
         if not arms:
@@ -2335,7 +2404,7 @@ class Rerun:
                        f"can write (none shows a writer's pass: KNOWN_ISSUES.md K38)", "one-of")
         said = []
         for arm, ps in arms.items():
-            at = ", ".join(f"{'wrote' if p.wrote else 'may have'} at {p.row['status']!r} {p.row['time']}" if p.row else
+            at = ", ".join(f"{'wrote' if p.wrote else 'may have'} at {_row_said(p.row)}" if p.row else
                            ("wrote" if p.wrote else "may have") for p in ps)
             said.append(f"{arm} ({at})")
         raise Stop(f"{self.hop}: one arm that wrote {subject}={value!r} last, of {len(arms)} left: {'; '.join(said)} "
@@ -2357,12 +2426,16 @@ class Rerun:
                        f"KNOWN_ISSUES.md K25)")
         return names
 
-    def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking, list | None]]:
+    def _attribute_tries(self, subject: str, attr: str, value: str, readings: list) -> list[tuple[dict | None, W.Asking | None, list | None]]:
         """H2's windows for an attribute no history records (``attr_time``, KNOWN_ISSUES.md K37): the value itself where
         every writer writes the time it runs, else the statuslog rows the writers' passes can write, newest first, each
-        with the readings of the writers that can write it (``attr_time.row_writers``), whose logs alone it is asked of."""
+        with the readings of the writers that can write it (``attr_time.row_writers``), whose logs alone it is asked of.
+        A writer on no history row of the object is read where the map says more of it: a birth (``born``) wrote as the
+        row was made, a try at the row's creation that asks nothing, after the rows; one that marks its runs by the
+        object's key (``marked_by_key``) is asked over the object's life, from its creation to when the value was read
+        (``windows.lifetime``, F3), a try before the rows that :meth:`_scan` reads run by run.  Any other stops."""
         fragment = mapdump.fragment()
-        found = AT.arms(fragment, subject, readings)
+        found = AT.arms(fragment, subject, readings, born=lambda owner, b: born(b, birth_marks(owner, subject)))
         self.need(f"a writer of {subject} in the map, to say when it took {value!r}", found)
         if AT.now_valued(found):
             asking = W.value_now(attr, value)
@@ -2371,13 +2444,17 @@ class Rerun:
                 asking = W.Asking((got, got), None, f"the time handed for {value}, on every machine")
             self.say(f"{len(found)} writer line(s), each writing the time it runs: {asking.why}")
             return [(None, asking, None)]
+        cls = subject.partition(".")[0]
+        births = [a for a in found if a.unplaced and a.born]
+        marked = [a for a in found if a.unplaced and not a.born and marked_by_key(a.owner, a.line, cls)]
         for a in found:
             self.say(f"  {a.owner.split('::')[-1]}:{a.line} " + (f"is on no history row of the object: {a.unplaced}" if a.unplaced else
                      "writes in a pass that writes the object's history row (" + ", ".join(sorted({f"{p.caller.split('::')[-1]}:{p.call} "
-                     f"{p.callee.split('.')[-1]} {p.order}" for p in a.placed})) + ")"))
-        unplaced = [a for a in found if a.unplaced]
-        self.need(f"every writer of {subject} on a history row of the object, to say when it took {value!r} "
-                  f"({len(unplaced)} of {len(found)} not: KNOWN_ISSUES.md K37)", not unplaced)
+                     f"{p.callee.split('.')[-1]} {p.order}" for p in a.placed})) + ")") +
+                     ("; a birth: it wrote as the row was made" if a in births else "; its runs are marked by the object's key" if a in marked else ""))
+        unplaced = [a for a in found if a.unplaced and a not in births and a not in marked]
+        self.need(f"every writer of {subject} on a history row of the object, a birth or marking its runs by the object's key, "
+                  f"to say when it took {value!r} ({len(unplaced)} of {len(found)} not: KNOWN_ISSUES.md K37)", not unplaced)
         states = self.data["statuslog"]["states"]
         rows = AT.row_writers(found, states, AT.recorded_values(fragment))
         self.say(f"the writers' passes can write {len(rows)} of the {len(states)} statuslog row(s): asked newest first, "
@@ -2385,10 +2462,23 @@ class Rerun:
         if len(found) > 1:
             for a in found:
                 self.say(f"  {a.owner.split('::')[-1]}:{a.line}: {sum(a in arms for _, arms in rows)} row(s)")
-        got = self.need(f"a statuslog row the writers of {subject} can write", [s for s, _ in rows])
+        tries: list[tuple[dict | None, W.Asking | None, list | None]] = [
+            (s, W.at_transition(s), AT.readings_of(readings, arms)) for s, arms in rows]
+        made = self._made_at(cls) if births or marked else None
+        if marked:
+            life = W.lifetime(made, self._read_at(subject))
+            names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in marked)
+            self.need(f"the object's life, to ask {names} over: {life.why}", life.window)
+            self.say(f"F3: {names} asked over {life.why}")
+            tries.insert(0, ({"status": None, "time": life.window[1], "f3": "span"}, life, AT.readings_of(readings, marked)))
+        if births:
+            names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in births)
+            self.need(f"when the row was made, for the birth {names} (its creation column, attr_time.creation_of)", made)
+            tries.append(({"status": None, "time": made, "f3": "made"}, None, AT.readings_of(readings, births)))
+        got = self.need(f"a statuslog row the writers of {subject} can write", tries)
         if isinstance(got, str):  # a time from --hand
             return [({"status": value, "time": got}, W.Asking((got, got), None, f"the time handed for {value}, on every machine"), None)]
-        return [(s, W.at_transition(s), AT.readings_of(readings, arms)) for s, arms in rows]
+        return tries
 
     def _wrote_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict | None,
                   asking: W.Asking, last: bool) -> Wrote | None:
@@ -3922,12 +4012,33 @@ class Rerun:
         read whatever the time (KNOWN_ISSUES.md K22).  None where the history names none or the rows file lacks it."""
         if not found.created:
             return None
-        cls = found.subject.partition(".")[0]
-        value = self._row_of(cls).get(found.created, {}).get("value")
+        return self._held_once(found.subject.partition(".")[0], found.created)
+
+    def _held_once(self, cls: str, attr: str) -> str | None:
+        """The rows file's value of *cls*'s *attr*, a column set once as the row is made, from its row or its ``after``
+        (:meth:`_created`); None where it lacks it."""
+        value = self._row_of(cls).get(attr, {}).get("value")
         if value is None:
-            value = self._read()[1].get(found.created)
+            value = self._read()[1].get(attr)
             value = value.get("value") if isinstance(value, dict) else value
         return str(value) if value else None
+
+    def _made_at(self, cls: str) -> str | None:
+        """When the row of *cls* was made: its creation column by the map's tables (``attr_time.creation_of``,
+        ``JediTaskSpec.creationDate``), as the rows file holds it, to the second; None where either says none."""
+        attr = AT.creation_of(mapdump.fragment(), cls)
+        made = self._held_once(cls, attr) if attr else None
+        return f"{W.when(made):%Y-%m-%d %H:%M:%S}" if made else None
+
+    def _read_at(self, subject: str) -> str | None:
+        """When the rows file read *subject*'s value: its cell's ``as_of``, or ``after``'s where the value went there
+        (``held.split``), else when it read the statuslog; None where none says."""
+        cls, _, attr = subject.partition(".")
+        cell = self._row_of(cls).get(attr)
+        if isinstance(cell, dict) and cell.get("as_of"):
+            return cell["as_of"]
+        after = self._read()[1]
+        return (after.get("as_of") if attr in after else None) or (self.data.get("statuslog") or {}).get("as_of")
 
     def _row_value(self, subject: str, q: Missed | None = None):
         """The rows file's value of ``Class.attr`` for this instance, or None; under *q* at the window's end, its

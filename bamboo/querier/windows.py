@@ -12,6 +12,8 @@ needs a window (``Logs.needs_window``), so the cases run on files go on as befor
   row before the last stretch of rows holding the value (or the row's creation) to the stretch's first row, on every
   machine.  A row holding the value says it was there by then, not which run wrote it: the history row is written by
   whichever run moves the status, and the run that wrote the value need not be that one (h2-value-time-design.md).
+* H2 (``lifetime``, F3), for an attribute's writer on no history row of the object that marks its runs by the
+  object's key: from the row's creation to when the value was read, on every machine (KNOWN_ISSUES.md K37).
 * H6 (``rows_until``): the job's own statuslog rows up to the run the object was missing in, each at its own time on
   the machine that wrote it, as H2's.  A row is the job's, so a run holding its second on its host can be one that
   handled the job; H6 takes a maker only from a run that also names the job.  Not the Datasets row: Datasets holds
@@ -104,6 +106,19 @@ def value_now(column: str, value: str) -> Asking:
         return Asking(None, None, f"{column}={value!r}, which its writers set to the time they run, is not a time")
     return Asking((t, t), None, f"{column}={value!r}, the time its writer ran: every writer of it writes the time it "
                                 f"runs (the last write), on every machine")
+
+
+def lifetime(made: str | None, read: str | None) -> Asking:
+    """H2's F3, for an attribute's writer on no history row of the object that marks its runs by the object's key
+    (``attr_time``, KNOWN_ISSUES.md K37): from the row's creation *made* to when the value was read *read*, on every
+    machine -- the write that left the value is in it, whenever it ran.  No window where either end is not known."""
+    if not made:
+        return Asking(None, None, "the row's creation time is not known")
+    if not read:
+        return Asking(None, None, "when the value was read is not known")
+    lo, hi = _down(when(made)), _down(when(read))
+    return Asking((lo, hi), None, f"the object's life, from the row's creation at {lo} to when the value was read at {hi}, "
+                                  f"on every machine")
 
 
 def rows_until(states: list[dict], until: str) -> list[tuple[dict, Asking]]:

@@ -622,10 +622,25 @@ every machine (`windows.value_now`); else each arm is placed on the object's his
 same or can), the statuslog rows the placed passes can write are asked in one round (rows holding the statuses the
 history call records where they are literals, any row otherwise), and read newest first (K38): the first whose pass a
 writer is shown to write in is the write that left the value, the answer (below).  Only the last write is
-asked; one of the same value before it is not.  It stops where an arm is on no row of the object -- its pairs are
-another object's, the map does not follow the object to its pass's history call, or it has none: its run may have
-written the value after any row, and asking its logs over the rest of the window (F3) is not built -- and where H1
-names no writer (a value the pilot reports through updateJob's SET, which the map does not read).  A name bound to
+asked; one of the same value before it is not.  An arm on no row of the object -- its pairs are another object's,
+the map does not follow the object to its pass's history call, or it has none -- may have written the value after any
+row.  Since 2026-10-31 two such arms are read all the same (tmaeno: "build both", 13:2x).  A birth (`born`, K29: the
+INSERT that makes the row) wrote as the row was made: its row is the scan's last, at the row's creation (the map's
+`tables[].creation`, the rows file's value), asking nothing, an arm that may have written there and is never the
+answer by elimination -- getTasksToRefine_JEDI's INSERT INTO JEDI_Tasks (1209) writes taskName as a uuid4 placeholder
+the value then held need not be.  An arm whose function marks its runs by the object's key (`marked_by_key`: a
+`function_prints` run whose mark's key holds the class's identity) is asked over the object's life, from the row's
+creation to when the value was read, on every machine (F3, `windows.lifetime`), and each run of the key found there is
+read as a row is, by its first record's time among the rows (`_runs_as_rows`); a life with no run, its logs shown to
+name the key and searched whole, is no pass of those writers, and one not searched whole leaves them open, newer than
+any row.  Any other unplaced arm stops H2 at "every writer of <subject> on a history row of the object, a birth or
+marking its runs by the object's key ... (k of n not: K37)" before anything is asked: its absence from a log cannot be
+shown.  Counted on C4b's map (out/k37c, tools/k37_inserts.py): of the 264 unplaced arms of jobs and tasks, 9 are the
+one birth's (getTasksToRefine_JEDI's INSERT), and of the other 255, 133 are in a function marking its runs by the
+object's key, 85 by another object's (changeTaskPriorityPanda's <jediTaskID> for a job's currentPriority), 26 have
+no run of their own (printing through a caller, K25), 11 a mark with no key (doForPriorityMassage's "label=user").
+It also stops where H1 names no writer (a value the pilot reports through updateJob's SET, which the map does not
+read).  A name bound to
 the time earlier in the pass (`timeNow`, `now_time`) or the time less a span (`CURRENT_DATE-1`) is not read as
 the time.  Counted on the harness's 57 (attr-time-shape.md): every arm placed 23, some 13, none 18, no writer 3;
 the map not following JobGeneratorThread.doGenerate's jobSpec back to runImpl's storeJobs leaves 12 of the 18
@@ -661,12 +676,17 @@ window instead.
 "END <subject>=<value> written last by <arm>[, called at <call>] (shown in its run; it has no guard | its guards hold
 in the run's values), in the pass of the statuslog row <status> at <time>: <run>", or "(by elimination: no run shows
 the line ran; it has no guard | its guards hold in the rows' values), at <time>[; not searched there: <log> on
-<machines>]"; a stop "every writer of <subject> on a history
-row of the object ... (k of n not: K37)", "a writer of <subject> in the map", or at H3 "a method the guard reads
-through (its conditions: '<condition>' not read)" or "a run that shows <arm> ran, to read its guards in (by
-elimination; its conditions: ...)".
-*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 asks an unplaced
-arm's logs; when a writer only reads the row into its spec (getTasksToRefine_JEDI and the like) is told apart.
+<machines>]"; "<arm> ...; a birth: it wrote as the row was made" or "; its runs are marked by the object's key",
+"F3: <arms> asked over the object's life, from the row's creation at <t> to when the value was read at <t>",
+"-- row n of m: a run of <key> at <first>..<last> (F3)", a possibility "may have at the row's making <t>" or "at the
+object's life <t>" (result.json's possibility rows carry `f3`: made, run, span or open); a stop "every writer of
+<subject> on a history row of the object, a birth or marking its runs by the object's key ... (k of n not: K37)",
+"the object's life, to ask <arms> over: <why>", "when the row was made, for the birth <arm> ...", "a writer of
+<subject> in the map", or at H3 "a method the guard reads through (its conditions: '<condition>' not read)" or "a run
+that shows <arm> ran, to read its guards in (by elimination; its conditions: ...)".
+*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
+marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
+row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 
 ### K38. H2's scan of the rows names the arms that wrote last or may have, and goes on from none of them but one
 
