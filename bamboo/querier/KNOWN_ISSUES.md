@@ -544,6 +544,17 @@ refusal, not a limit.)
 *Shows:* said: such a mover is `undecided` or `by key`, not `could have`.
 *Revisit:* status-history terms with the column values over the window (the map's (b)).
 
+### K43. A -late question whose value has several stays needs `--since`
+
+L1 asked the first stay of the value; a value can come back many times (a task between pending and running), and a
+case picks one stay -- the case set's rule, the longest stay begun in the 5.5 hours before its SQL -- so 5 of pin m's
+17 -late cases were answered about another stay (MT-exhausted-late: the 240 h from 10-19 for the 1.7 h of 10-29;
+MT-defined-late's stay is the 65th of 71).  `--since` names the stay by the time_extended of the row that begins it
+(`rerun._stay_of`; tmaeno: "OK", 10-31, and not to pick up every pending <-> running bounce).
+*Shows:* a stop at L1 that names the stays (how many; the first, the last, the longest) where the value has more than
+one and no stay is named.  The cases carry it once the harness writes `question.since` and fieldtest hands it on.
+*Revisit:* when a question means every stay, or the longest, rather than one the case names.
+
 ## Row values at a step's time (`held.py`)
 
 ### K22. A row value read at another time than the step's run is not read

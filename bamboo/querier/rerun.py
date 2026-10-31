@@ -1216,11 +1216,13 @@ class Field:
 
 @dataclass
 class Late:
-    """Why this value stayed on so long: what moved it on in the end, and when."""
+    """Why this value stayed on so long: what moved it on in the end, and when.  *since* names the stay asked, by the
+    time of the statuslog row that begins it, where the value has more than one."""
 
     subject: str
     observed: str
     key: str
+    since: str | None = None
 
 
 @dataclass
@@ -1428,6 +1430,43 @@ def _builds(under: dict | None, field: str, terms: list[str], took: bool, decide
 def _when(text: str) -> datetime.datetime:
     """A record's ``2026-01-01 00:00:00,000`` or a statuslog row's ``2026-01-01 00:00:00.000000``, as a time."""
     return datetime.datetime.fromisoformat(text.replace(",", "."))
+
+
+def _stay_of(states: list[dict], observed: str, since: str | None) -> tuple[int | None, str]:
+    """``(row, requirement)``: the statuslog row beginning the stay of *observed* a -late question asks about, or None
+    and the requirement not met.  A value can come back many times (a task between pending and running), and the first
+    stay is not the one a case picks (MT-exhausted-late asked the 240 h from 10-19, and means the 1.7 h of 10-29), so
+    where there is more than one, *since* names it: the row's time_extended, or its time in a row with none (two rows
+    of one second differ only in time_extended: 'toretry' and 'exhausted' at 09:33:01)."""
+    stays = [n for n, s in enumerate(states) if s["status"] == observed]
+    if not stays:
+        return None, f"a statuslog row for {observed!r}"
+    if since is not None:
+        at = next((n for n in stays if states[n].get("time_extended") == since), None)
+        if at is None:
+            at = next((n for n in stays if not states[n].get("time_extended") and states[n]["time"] == since[:19]), None)
+        return at, f"a stay of {observed!r} beginning at {since} (--since)"
+    if len(stays) > 1:
+        return None, f"one stay of {observed!r}, or --since naming the one asked: the statuslog holds {_stays_said(states, stays)}"
+    return stays[0], ""
+
+
+def _stays_said(states: list[dict], stays: list[int]) -> str:
+    """*stays* (the statuslog rows that begin a stay of one value) in a line: how many, the first, the last and the
+    longest, each by the time that names it to ``--since`` and how long it lasted ("on" for one with no row after)."""
+    def one(n: int) -> str:
+        begins = states[n].get("time_extended") or states[n]["time"]
+        if n + 1 >= len(states):
+            return f"{begins} (on)"
+        ends = states[n + 1].get("time_extended") or states[n + 1]["time"]
+        return f"{begins} ({(_when(ends) - _when(begins)).total_seconds() / 3600:.2f} h)"
+
+    def lasted(n: int) -> float:
+        if n + 1 >= len(states):
+            return -1.0
+        return (_when(states[n + 1].get("time_extended") or states[n + 1]["time"]) - _when(states[n].get("time_extended") or states[n]["time"])).total_seconds()
+
+    return f"{len(stays)} stays: the first {one(stays[0])}, the last {one(stays[-1])}, the longest that ended {one(max(stays, key=lasted))}"
 
 
 def _iso(text: str | None) -> str | None:
@@ -1836,7 +1875,7 @@ class Rerun:
             "version": 1,
             "outcome": outcome,
             "question": {"mode": "late" if a.late else "stuck" if a.stuck else "asked", "subject": a.subject,
-                         "observed": a.observed, "key": a.key},
+                         "observed": a.observed, "key": a.key, **({"since": a.since} if a.since else {})},
             "steps": self.opened,
             "inputs": {
                 "querier": {"tree": str(BAMBOO), "stamps": self.stamps,
@@ -1900,7 +1939,7 @@ class Rerun:
             Late: self.late, Missed: self.missed, Ordered: self.ordered,
         }
         if a.late:
-            q = Late(a.subject, a.observed, a.key)
+            q = Late(a.subject, a.observed, a.key, a.since)
         else:
             q = Stuck(a.subject, a.observed, a.key) if a.stuck else Asked(a.subject, a.observed, a.key)
         self.steps = steps
@@ -3615,8 +3654,8 @@ class Rerun:
     def late(self, q: Late):
         self.start("L1", "what moved it on, and when")
         states = self.data.get("statuslog", {}).get("states", [])
-        at = next((n for n, s in enumerate(states) if s["status"] == q.observed), None)
-        self.need(f"a statuslog row for {q.observed!r}", at is not None)
+        at, unmet = _stay_of(states, q.observed, q.since)
+        self.need(unmet, at is not None)
         after = self.need(f"a statuslog row after {q.observed!r}", states[at + 1] if at + 1 < len(states) else None)
         since = _when(states[at].get("time_extended") or states[at]["time"])
         moved = _when(after.get("time_extended") or after["time"])
@@ -4452,7 +4491,11 @@ def main() -> None:
     ap.add_argument("--result", default="", help="where the structured result is written (default: --out + .result.json)")
     ap.add_argument("--stuck", action="store_true", help="ask why nothing moved the observed value on")
     ap.add_argument("--late", action="store_true", help="ask why the observed value was moved on so late")
+    ap.add_argument("--since", default=None, help="with --late, the stay asked: the time_extended (or, in a row with none, the time) of "
+                                                  "the statuslog row that begins it; needed where the value has more than one stay")
     args = ap.parse_args()
+    if args.since and not args.late:
+        ap.error("--since names a stay of --late")
     args.asks = args.asks or (f"{args.out}.asks.jsonl" if args.out else "asks.jsonl")
     args.result = args.result or (f"{args.out}.result.json" if args.out else "")
     # a run that does not finish leaves none of its files: a reader never takes an earlier run's for this one's

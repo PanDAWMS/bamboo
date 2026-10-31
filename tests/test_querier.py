@@ -3363,6 +3363,41 @@ def test_h2_reads_a_window_in_one_run_only_where_it_is_the_one_run_of_one_log_at
     assert json.loads(out.splitlines()[-1]) == ["updateTask_JEDI", None, None, None]
 
 
+def test_a_late_question_asks_the_stay_it_names_and_stops_where_the_value_has_several_and_it_names_none(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.rerun import _stay_of
+
+            # MT-exhausted-late's shape: exhausted twice, its second stay begun in the second its toretry row holds
+            row = lambda t, s, ext=True: {"time": t[:19], "status": s, **({"time_extended": t} if ext else {})}
+            states = [row("2026-10-19 04:01:59.100000", "toretry"), row("2026-10-19 04:01:59.200000", "exhausted"),
+                      row("2026-10-29 04:02:22.726170", "finishing"), row("2026-10-29 09:33:01.581347", "toretry"),
+                      row("2026-10-29 09:33:01.716796", "exhausted"), row("2026-10-29 11:14:23.613054", "toretry")]
+            print(json.dumps([
+                _stay_of(states, "exhausted", "2026-10-29 09:33:01.716796")[0],
+                _stay_of(states, "exhausted", "2026-10-29 09:33:01.581347")[0],
+                _stay_of(states, "exhausted", None),
+                _stay_of(states, "finishing", None),
+                _stay_of([row("2026-10-29 09:33:01.716796", "exhausted", ext=False)], "exhausted", "2026-10-29 09:33:01.716796")[0],
+                _stay_of(states, "running", None),
+            ]))
+            """,
+        )
+    )
+    named, other_row, unnamed, one, by_time, none = json.loads(out.splitlines()[-1])
+    # the row whose time_extended it names; the toretry row of the same second begins no stay of exhausted
+    assert named == 4 and other_row is None
+    # several stays and none named: a stop that says them, the first by default no longer
+    assert unnamed[0] is None and "2 stays" in unnamed[1] and "--since" in unnamed[1]
+    assert "the first 2026-10-19 04:01:59.200000 (240.01 h)" in unnamed[1] and "the last 2026-10-29 09:33:01.716796 (1.69 h)" in unnamed[1]
+    # one stay needs no name; a row with no time_extended is named by its time
+    assert one == [2, ""] and by_time == 0
+    assert none[0] is None and none[1] == "a statuslog row for 'running'"
+
+
 # the adder's process_job_report, cut down: 416 binds the job's status from self.job_status, 441 sets it failed
 _ADDER = """
 class Adder:
