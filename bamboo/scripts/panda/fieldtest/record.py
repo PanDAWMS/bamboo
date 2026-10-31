@@ -103,6 +103,13 @@ its ``covers`` in which every one of the ask's strings was read (a start not
 known stays null), and ``truncated`` says one was cut.  Without it the
 querier read a cut file up to its last record, which another string's records
 could carry past the cut string's (157 of pin m's 315 cut files, 2026-10-30).
+Its ``read`` gives each cut string the stretches of ``covers`` read for it, in
+the same form: ``searched`` is where they all meet, and a string of the ask
+not in ``read`` was read over all of ``covers``.  So an ask narrower than the
+record that holds none of the strings left at a stopped second is read over
+its own strings' stretches, where ``searched`` would hole it at the stopped
+string's (the querier's door, 2026-10-31: a list of the cut strings alone would
+have it ask again strings read whole over their windows once they went on).
 
 **Again.**  ``--again`` records again, as a new round, the asks of a case
 whose latest record holds a cut file not searched over the ask's window
@@ -1194,17 +1201,20 @@ def file_entry(
     if f.margin:
         entry["margin_s"] = int(MARGIN.total_seconds())
     if job and (cut := strings & job.truncated):
-        searched: Stretches = []
+        span: Stretches = []
         if covers is not None:
-            searched = [
+            span = [
                 (
                     stamp(covers[0]) if covers[0] else LOW,
                     stamp(covers[1]) if covers[1] else HIGH,
                 )
             ]
-            for s in sorted(cut):
-                searched = common(searched, job.read.get(s, []))
+        read = {s: common(span, job.read.get(s, [])) for s in sorted(cut)}
+        searched = span
+        for s in sorted(cut):
+            searched = common(searched, read[s])
         entry["searched"] = stretches_text(searched)
+        entry["read"] = {s: stretches_text(r) for s, r in read.items()}
     if (
         entry["status"] == "answered"
         and f.kind == "current"

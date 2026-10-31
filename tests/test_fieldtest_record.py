@@ -716,6 +716,7 @@ async def test_an_uncut_file_says_nothing_of_what_was_searched(tmp_path):
     )
     fa, fb = a["machines"][SERVER[0]]["files"][0], b["machines"][SERVER[0]]["files"][0]
     assert "searched" in fa and "searched" not in fb and fb["truncated"] is False
+    assert fa["read"] == {"111": fa["searched"]} and "read" not in fb
 
 
 async def test_a_continuation_cut_again_goes_on_from_its_last_records_second_while_it_gets_further(
@@ -749,11 +750,10 @@ async def test_a_continuation_cut_again_goes_on_from_its_last_records_second_whi
     ]
 
 
-async def test_a_page_that_reads_no_further_goes_on_without_the_string_most_of_its_records_hold(
-    tmp_path,
-):
-    # pin m's round 5 (2026-10-30): a call printing a row per task filled 1 MB in one second of aipanda088's
-    # JediDBProxy.log, and the rarer strings of other asks sharing the grep were not read past it
+def stalled_second() -> FakePanda:
+    """A file where "111" and "333" are each cut alone, and their continuation stops at 05:50:00, a second holding two
+    records of "111" and one of "333", before "333" goes on to its record at 06:00:00."""
+
     def reply(strings, _tail):
         last = {"111": (1, "2026-10-14 01:00:00"), "333": (2, "2026-10-14 02:00:00")}
         return {
@@ -762,7 +762,7 @@ async def test_a_page_that_reads_no_further_goes_on_without_the_string_most_of_i
         }
 
     busy = "2026-10-14 05:50:00"
-    panda = FakePanda(
+    return FakePanda(
         lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
         {(SERVER[0], DAY): [reply]},
         patterns={
@@ -779,6 +779,14 @@ async def test_a_page_that_reads_no_further_goes_on_without_the_string_most_of_i
             ]
         },
     )
+
+
+async def test_a_page_that_reads_no_further_goes_on_without_the_string_most_of_its_records_hold(
+    tmp_path,
+):
+    # pin m's round 5 (2026-10-30): a call printing a row per task filled 1 MB in one second of aipanda088's
+    # JediDBProxy.log, and the rarer strings of other asks sharing the grep were not read past it
+    panda = stalled_second()
     w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
     a, b = ask(ADDER, ["111"], w, SERVER[0]), ask(ADDER, ["333"], w, SERVER[0])
     _, (ra, rb) = await run(tmp_path, panda, [a, b])
@@ -798,6 +806,27 @@ async def test_a_page_that_reads_no_further_goes_on_without_the_string_most_of_i
     ]
     assert [x["offset"] for x in fb["records"]] == [2, 12, 13]
     assert R.cut_asks(tmp_path) == [{"ask": a["ask"]}]
+
+
+async def test_a_cut_file_gives_each_cut_string_what_was_read_for_it_and_searched_is_where_they_meet(
+    tmp_path,
+):
+    # the querier's door (2026-10-31): an ask narrower than the record that holds only "333" is read over "333"'s
+    # stretches, which went on past the second "111" stopped at; "searched" holes it there
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, (r,) = await run(
+        tmp_path, stalled_second(), [ask(ADDER, ["111", "333"], w, SERVER[0])]
+    )
+    (f,) = r["machines"][SERVER[0]]["files"]
+    start = f["covers"][0]
+    assert f["read"] == {
+        "111": [[start, "2026-10-14 00:59:59"]],
+        "333": [
+            [start, "2026-10-14 01:59:59"],
+            ["2026-10-14 05:50:00", "2026-10-14 06:10:00"],
+        ],
+    }
+    assert f["searched"] == [[start, "2026-10-14 00:59:59"]]
 
 
 @pytest.mark.parametrize(
