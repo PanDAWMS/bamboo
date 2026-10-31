@@ -16567,6 +16567,28 @@ def _bound_by_text(func, key: str) -> list[tuple[int, str, list[str]]]:
     )
 
 
+def test_a_map_picking_keys_of_another_holds_its_binds_at_those_keys():
+    """``updateSiteData`` locks its summary row with ``{k: varMap[k] for k in [":FLAG", ":SITE", ":HOURS"]}``: the
+    picked map holds ``varMap``'s binds at those keys, as a copy holds the original's, and at no other."""
+    source = (
+        "def f(self, site):\n"
+        "    sqlCh = 'SELECT * FROM ATLAS_PANDAMETA.SiteData WHERE FLAG=:FLAG AND SITE=:SITE FOR UPDATE NOWAIT'\n"
+        "    varMap = {}\n"
+        "    varMap[':SITE'] = site\n"
+        "    varMap[':FLAG'] = 'production'\n"
+        "    varMap[':NOJOB'] = 0\n"
+        "    var_map = {k: varMap[k] for k in [':FLAG', ':SITE']}\n"
+        "    self.cur.execute(sqlCh + comment, var_map)\n"
+    )
+    func = _func(source)
+
+    bound = {
+        key: [ast.unparse(b.value) for b in sql.bound_values(func, "var_map", key)]
+        for key in (":FLAG", ":SITE", ":NOJOB")
+    }
+    assert bound == {":FLAG": ["'production'"], ":SITE": ["site"], ":NOJOB": []}
+
+
 def test_a_text_reads_only_the_binds_of_the_passes_that_build_it():
     """``updateTaskStatusByContFeeder_JEDI`` adds ``splitRule`` to its ``UPDATE``
     only when it is given a task, fills ``:status`` from the task in that case

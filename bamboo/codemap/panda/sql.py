@@ -2723,6 +2723,13 @@ def scan_binds(
             elif isinstance(target, ast.Name) and target.id == varmap:
                 assigned = True
                 copied = _copied_from(node.value)
+                picked = _picked_from(node.value)
+                if picked is not None:
+                    # A copy of some of the original's keys: ``updateSiteData``'s ``{k: varMap[k] for k in
+                    # [":FLAG", ":SITE", ":HOURS"]}`` holds those three.
+                    spelled_keys.update(picked[1])
+                    if any(_same_placeholder(one, key) for one in picked[1]):
+                        copied = picked[0]
                 if copied is not None and hops < RETURN_HOPS:
                     # What the copy holds is what the original held when the
                     # copy was taken, so the original's binds are paired with
@@ -3269,6 +3276,26 @@ def _copied_from(value: ast.expr) -> Optional[str]:
         if isinstance(value.args[0], ast.Name):
             return value.args[0].id
     return None
+
+
+def _picked_from(value: ast.expr) -> Optional[tuple[str, list[str]]]:
+    """The name a varmap copies some keys of, and those keys: ``{k: x[k] for k in [":a", ":b"]}``."""
+    if not (isinstance(value, ast.DictComp) and len(value.generators) == 1):
+        return None
+    loop = value.generators[0]
+    keys = _constant_strings(loop.iter)
+    if (
+        keys is None
+        or loop.ifs
+        or loop.is_async
+        or not isinstance(loop.target, ast.Name)
+        or not (isinstance(value.key, ast.Name) and value.key.id == loop.target.id)
+        or not isinstance(value.value, ast.Subscript)
+        or not isinstance(value.value.value, ast.Name)
+        or not (isinstance(value.value.slice, ast.Name) and value.value.slice.id == loop.target.id)
+    ):
+        return None
+    return value.value.value.id, keys
 
 
 # ---------------------------------------------------------------- read by running the function
