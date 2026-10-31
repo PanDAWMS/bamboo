@@ -39,10 +39,15 @@ something or to carry values: ``getScoutJobData_JEDI``'s ``taskSpec`` is given
   done in its function and in the calls it is handed to, each read;
 * no function it is held in writes a table of the class
   (:data:`OFF_ROW_NO_WRITE`), or each write of one there names the columns it
-  writes and takes neither the object whole nor the attribute of it
-  (:data:`OFF_ROW_NOT_TAKEN`): ``prepareTasksToBeFinished_JEDI`` locks the
-  task by an ``UPDATE`` of its row, ``lockedBy`` bound from ``pid``, not from
-  the ``taskSpec`` it gives ``lockedBy = None``.
+  writes, or the object it writes whole, and takes neither the object whole
+  nor the attribute of it (:data:`OFF_ROW_NOT_TAKEN`):
+  ``prepareTasksToBeFinished_JEDI`` locks the task by an ``UPDATE`` of its
+  row, ``lockedBy`` bound from ``pid``, not from the ``taskSpec`` it gives
+  ``lockedBy = None``; ``getEventRanges`` hands the ``tmpJobSpec`` it gives
+  ``PandaID``, ``jobsetID`` and ``jediTaskID`` to
+  ``killUnusedEventServiceConsumers``, which reads them as keys and inserts
+  another job, ``dJob``, whole -- which of its columns is not read, but every
+  one comes from ``dJob``.
 
 A class no table is learned for is not read: no row, so not this question.
 
@@ -173,9 +178,11 @@ class _Reader:
             for write in self.rows[at].writes:
                 if write.table.rpartition(".")[2].lower() not in found.tables:
                     continue
-                if write.unread or not (write.whole or write.columns):
-                    return False
-                if write.whole and objects._holds(set(held), write.whole):
+                if write.whole:
+                    # every column comes from the object it names, whichever the columns are
+                    if objects._holds(set(held), write.whole):
+                        return False
+                elif write.unread or not write.columns:
                     return False
                 if any(
                     value.path and objects._under(one, value.path) == f".{found.attr}"

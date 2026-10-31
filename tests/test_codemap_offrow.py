@@ -36,6 +36,19 @@ class JobSpec:
 
     def is_debug(self):
         return "debug" in (self.specialHandling or "")
+
+    def bindUpdateChangesExpression(self):
+        ret = ""
+        for attr in self._attributes:
+            if attr in self._changedAttrs:
+                ret += f"{attr}=:{attr},"
+        return ret[:-1] + " "
+
+    def valuesMap(self, onlyChanged=False):
+        ret = {}
+        for attr in self._attributes:
+            ret[f":{attr}"] = getattr(self, attr)
+        return ret
 """
 
 PROXY = """\
@@ -128,6 +141,34 @@ class DBProxy:
     def hand_on(self, runner):
         jobs = self.valued()
         runner(self.valued)
+
+    def carried(self, panda_id):
+        job = JobSpec()
+        job.PandaID = panda_id  # K1
+        self.close_others(job)
+
+    def close_others(self, job: JobSpec):
+        self.cur.execute("SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE PandaID<>:PandaID", {":PandaID": job.PandaID})
+        for (other_id,) in self.cur.fetchall():
+            other = JobSpec()
+            other.PandaID = other_id
+            other.jobStatus = "closed"
+            sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {other.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+            var_map = other.valuesMap(onlyChanged=True)
+            var_map[":PandaID"] = other_id
+            self.cur.execute(sql, var_map)  # K1w
+
+    def closed(self, panda_id):
+        job = JobSpec()
+        job.PandaID = panda_id  # K2
+        self.close(job)
+
+    def close(self, job: JobSpec):
+        job.jobStatus = "closed"
+        sql = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} WHERE PandaID=:PandaID"
+        var_map = job.valuesMap(onlyChanged=True)
+        var_map[":PandaID"] = job.PandaID
+        self.cur.execute(sql, var_map)
 
 
 class Viewer:
@@ -295,6 +336,32 @@ def test_a_returned_object_is_read_on_in_every_call_of_its_function(
     ]
     # The caller hands it to a write of its attribute; the method is handed on as a value, to be called anywhere.
     assert _off(fragment, "R2") is None and _off(fragment, "R3") is None
+
+
+def test_a_spec_handed_to_a_call_that_writes_another_object_whole_is_off_its_row(
+    tmp_path: Path,
+) -> None:
+    """getEventRanges' tmpJobSpec: given the keys, handed to killUnusedEventServiceConsumers, which reads them and
+    inserts another job whole -- which of its columns is not read, but every one comes from that job."""
+    fragment = _build(
+        tmp_path,
+        [
+            ("DBProxy.carried", "K1", "JobSpec.PandaID"),
+            ("DBProxy.closed", "K2", "JobSpec.PandaID"),
+        ],
+    )
+    carried = _off(fragment, "K1")
+    assert carried is not None and carried.why == OFF_ROW_NOT_TAKEN
+    assert carried.functions == [
+        "pkg/proxy.py::DBProxy.carried",
+        "pkg/proxy.py::DBProxy.close_others",
+        "pkg/spec.py::JobSpec.__init__",
+    ]
+    assert carried.writes == [
+        f"pkg/proxy.py::DBProxy.close_others:{_line(PROXY, 'K1w')} update jobsActive4"
+    ]
+    # The call writes the object it is handed whole.
+    assert _off(fragment, "K2") is None
 
 
 def test_a_reader_of_the_rows_value_skips_an_arm_off_its_row() -> None:
