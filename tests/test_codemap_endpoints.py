@@ -17,10 +17,10 @@ from bamboo.codemap.models import (
     ReadSiteNode,
     SourceModule,
 )
-from bamboo.codemap.panda import endpoints, pathcond, sql
+from bamboo.codemap.panda import attribution, endpoints, pathcond, sql, sqltext
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
-from bamboo.codemap.panda.recognizers import sqlwrite
+from bamboo.codemap.panda.recognizers import progress, sqlwrite
 
 PACKAGE = "pandaserver"
 
@@ -290,3 +290,59 @@ def test_a_term_is_filled_by_what_the_endpoint_is_handed_followed_up_the_calls(
         EndpointFill(parameter="job_ids[*]"),
         EndpointFill(parameter="more_ids[*]"),
     ]
+
+
+SPECS = """\
+class FileSpec:
+    _attributes = ("row_ID", "PandaID", "lfn")
+
+
+class JobSpec:
+    _attributes = ("PandaID", "jobStatus", "computingSite")
+"""
+
+
+def test_a_terms_column_is_a_subject_of_the_class_its_table_holds_or_its_history_is_of() -> (
+    None
+):
+    """``filesTable_ARCH``, an archive no statement inserts into, has no class the build learns, and every attribute
+    of ``FileSpec`` is one of its columns: its ``PandaID`` is ``FileSpec.PandaID``.  ``jobs_StatusLog`` holds a job's
+    past statuses: its ``PandaID``, the column its rows are keyed by, is the job's, and its ``jobStatus`` is none of
+    the job's attributes.  Outside the schema the archive's column is no subject."""
+    tree = ast.parse(SPECS)
+    pathcond.attach_parents(tree)
+    modules = [
+        SourceModule(
+            package=PACKAGE,
+            rel_path=f"{PACKAGE}/taskbuffer/Specs.py",
+            tree=tree,
+            source=SPECS,
+            blob_sha=blob_sha(SPECS),
+        )
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    columns = {
+        "filestable_arch": frozenset({"row_id", "pandaid", "lfn", "status"}),
+        "jobs_statuslog": frozenset({"pandaid", "jobstatus", "modificationtime"}),
+    }
+    with sqltext.with_schema(columns):
+        assert (
+            sqlwrite._spec_attr(
+                attributor, "ATLAS_PANDAARCH.filesTable_ARCH", "PandaID"
+            )
+            == "FileSpec.PandaID"
+        )
+        assert (
+            sqlwrite._spec_attr(attributor, "ATLAS_PANDA.jobs_StatusLog", "PandaID")
+            == "JobSpec.PandaID"
+        )
+        assert (
+            sqlwrite._spec_attr(attributor, "ATLAS_PANDA.jobs_StatusLog", "jobStatus")
+            == ""
+        )
+    assert (
+        sqlwrite._spec_attr(attributor, "ATLAS_PANDAARCH.filesTable_ARCH", "PandaID")
+        == ""
+    )

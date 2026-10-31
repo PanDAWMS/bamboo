@@ -9,6 +9,7 @@ named (the table's key, as the class spells it), which tables hold one class's r
 from __future__ import annotations
 
 import ast
+import functools
 from typing import Callable, Iterable, Optional
 
 from bamboo.codemap.models import (
@@ -72,14 +73,9 @@ def records(
     }
     created = _creation(key_froms, classes)
     found = []
+    lowered = lowered_classes(attributor)
     for table in sorted(spellings):
-        held = columns.get(table, frozenset())
-        rows_of = [
-            cls
-            for cls, names in classes.items()
-            if names and {n.lower() for n in names} <= held
-        ]
-        cls = rows_of[0] if len(rows_of) == 1 else ""
+        cls = rows_of(columns.get(table, frozenset()), lowered)
         spelled = {n.lower(): n for n in classes.get(cls, ())}
         key = sorted(keys.get(table, ()))
         identity = sorted(sqltext.table_identity(table))
@@ -111,6 +107,25 @@ def records(
             )
         )
     return found
+
+
+def rows_of(columns: frozenset[str], classes: dict[str, frozenset[str]]) -> str:
+    """The spec class of *classes* (``{class: its attributes lowered}``) every attribute of which is one of a table's
+    *columns* (lowered), where exactly one is: the class whose rows the table holds (:attr:`TableRecord.rows_of`),
+    the schema's reading -- ``filesTable_ARCH`` holds ``FileSpec``'s, which the corpus never inserts and nothing
+    learns.  ``""`` where none, or more than one, is."""
+    found = [cls for cls, names in classes.items() if names and names <= columns]
+    return found[0] if len(found) == 1 else ""
+
+
+@functools.lru_cache(maxsize=4)
+def lowered_classes(attributor: SpecAttributor) -> dict[str, frozenset[str]]:
+    """``{class: its declared attributes lowered}`` for every class *attributor* declares, as :func:`rows_of` reads
+    them."""
+    return {
+        cls: frozenset(name.lower() for name in attributor.declared_attributes(cls))
+        for cls in sorted(attributor.declared_classes())
+    }
 
 
 def _families(

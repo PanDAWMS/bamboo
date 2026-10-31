@@ -165,6 +165,8 @@ from bamboo.codemap.panda.pathcond import (
 # Both halves of the map disagreeing about a fact is the failure this codebase
 # has spent the most effort undoing.
 from bamboo.codemap.panda.recognizers import progress
+from bamboo.codemap.panda.recognizers import tables as table_records
+from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES
 
 if TYPE_CHECKING:
     from bamboo.codemap.reach import ReachGraph
@@ -6710,8 +6712,20 @@ def _spec_attr(
     attributor: SpecAttributor, table: str, column: str, class_of: Optional[Callable[[str], Optional[str]]] = None
 ) -> str:
     """*table*'s *column* as a subject where the table's spec class has it (``JediTaskSpec.jediTaskID``), else ``""``:
-    the class by *class_of* where given (the attributor that learned the tables), else *attributor*'s."""
+    the class by *class_of* where given (the attributor that learned the tables), else *attributor*'s; where neither
+    learned one, the class whose rows the schema says the table holds (:func:`table_records.rows_of`: ``filesTable_ARCH``'s
+    ``PandaID`` is ``FileSpec.PandaID``).  A history table's column its rows are keyed by is its object's key
+    (:data:`runs.HISTORY_KEYS`: ``jobs_StatusLog``'s ``PandaID`` is ``JobSpec.PandaID``); its other columns are none
+    of the object's."""
+    bare = table.rpartition(".")[2].lower()
+    history = HISTORY_TABLES.get(bare)
+    if history is not None:
+        cls = history.partition(".")[0]
+        key = HISTORY_KEYS.get(cls, "")
+        return SubjectNode.make_name(cls, key) if key and key.lower() == column.lower() else ""
     spec_class = class_of(table) if class_of is not None else attributor.class_for_table(table)
+    if not spec_class:
+        spec_class = table_records.rows_of(sqltext.table_columns(bare), table_records.lowered_classes(attributor)) or None
     qualifier, attribute, kind = _subject_of(attributor, spec_class, table, column)
     return SubjectNode.make_name(qualifier, attribute) if kind == "spec" else ""
 
