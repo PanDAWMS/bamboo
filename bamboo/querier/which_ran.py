@@ -68,7 +68,7 @@ def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
     if len(found) == 1 or not RUN_BY_ROWS:
         return found[0]
     fn = R.function(c.rel, c.func, c.lines)
-    counts = [sum(1 for row in fn.rows if R.seen(fn, r, mode).proven(row)) for r in found]
+    counts = [sum(1 for row in fn.rows if sn.proven(row)) for sn in (R.seen(fn, r, mode) for r in found)]
     best = max(counts)
     return found[counts.index(best)] if best else None
 

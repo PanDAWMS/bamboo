@@ -3375,6 +3375,52 @@ def test_a_candidates_must_rows_stop_where_a_traceback_of_its_run_shows_the_call
     assert got["caught"][:2] == [[6], "excluded"] and "rule 4: must row(s) [5] not in the run" in got["caught"][2]
 
 
+def test_the_run_holding_most_rows_reads_each_run_once_and_each_rows_patterns_once(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(textwrap.dedent("""
+        def f(self, job):
+            self.logger.debug("starting the update of the job")
+            self.logger.debug("the update of the job was handed")
+            self.logger.debug("finished the update of the job")
+        """))
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "a.log").write_text(stamp.format(0, "starting the update of the job"))
+    (tmp_path / "b.log").write_text(
+        stamp.format(0, "starting the update of the job") + stamp.format(1, "the update of the job was handed")
+        + stamp.format(2, "finished the update of the job")
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, run_holding
+
+            R.ROWS_FROM = "walk"
+            fn = R.function("pandaserver/a.py", "f", (3,))
+            found = [run for name in ("a", "b") for run in runs_for(read_log(f"{name}.log"), "1")]
+            calls = {"seen": 0, "regex": 0}
+            seen, regex = R.seen, R._regex
+            def counted(name, f):
+                def call(*a, **k):
+                    calls[name] += 1
+                    return f(*a, **k)
+                return call
+            R.seen, R._regex = counted("seen", seen), counted("regex", regex)
+            held = run_holding(Candidate("pandaserver/a.py", "f", [3], ["a.log"]), found, "outside")
+            row = fn.rows[0]
+            again = row.patterns("outside") is row.patterns("outside")
+            modes = [len(row.patterns(mode)) for mode in ("map", "outside")]
+            print(json.dumps([held.log.name, calls, len(fn.rows), again, modes]))
+            """,
+        )
+    )
+    # the run where most rows are proven; each run read once, not once per row, and each row's patterns made once,
+    # not once per record it is asked of -- per mode: the walk's pattern alone, and with the shape built here
+    assert json.loads(out.splitlines()[-1]) == ["b.log", {"seen": 2, "regex": 3}, 3, True, [1, 2]]
+
+
 # activateJob, cut down: f prints its files' UPDATE alike in both arms (92 and 124); g's other arm prints another text
 _ALIKE = """
 def f(self, job, ok):
