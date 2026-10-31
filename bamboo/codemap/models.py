@@ -3148,6 +3148,66 @@ class TableRecord(BaseModel):
             "and puts the time now (``JobSpec.creationTime``, ``JediTaskSpec.creationDate``)."
         ),
     )
+    history_of: str = Field(
+        default="",
+        description=(
+            "The subject whose past values its rows are, one row per change (``jobs_StatusLog``: "
+            "``JobSpec.jobStatus``), as :data:`bamboo.codemap.panda.runs.HISTORY_TABLES` names them; empty for "
+            "another table."
+        ),
+    )
+
+
+class EndpointTerm(BaseModel):
+    """One row-naming term of a statement an endpoint runs: a read :class:`KeyFrom` of the statement."""
+
+    term: str = Field(description="As the KeyFrom reads it: ``PandaID=:PandaID``.")
+    table: str = Field(description="The KeyFrom's table, as the source spells it.")
+    attr: str = Field(default="", description="The term's column as a subject, where the table's spec class has it.")
+
+
+class EndpointRead(BaseModel):
+    """A statement reading rows that an endpoint's calls reach: one per statement of :attr:`Endpoint.reads`."""
+
+    site: str = Field(description="The :class:`ReadSiteNode`'s name: ``panda:<owner>@<line>``.")
+    function: str = Field(
+        description="The :attr:`ReachNode.owner` of the function holding the statement, ``file::Class.method``."
+    )
+    tables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The tables the statement reads, as :attr:`TableRecord.name` (lowered): what kind of rows each holds, "
+            "live, archive (:class:`TableRecord`'s rule) or a subject's history (:attr:`TableRecord.history_of`), "
+            "is the table's record."
+        ),
+    )
+    terms: list[EndpointTerm] = Field(default_factory=list, description="The statement's row-naming terms.")
+    way: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file:line`` of each call from the endpoint to the statement's function, the first call first, as "
+            ":attr:`ReachWrite.chain`: one way, the fewest calls; empty in the endpoint itself."
+        ),
+    )
+
+
+class Endpoint(BaseModel):
+    """A function the server runs for a request, and the statements reading rows its calls reach.
+
+    Read off the server's routing (:mod:`bamboo.codemap.panda.endpoints`): ``/api/v1/job/get_status_history``
+    runs ``job_api.py``'s ``get_status_history``.  *reads* is what the reach record's closure from it holds, walked as
+    :meth:`~bamboo.codemap.reach.ReachGraph.reach` walks; a statement past one of *holes* is not in it.
+    """
+
+    route: str = Field(description="``<module>/<method>`` as the URL names it: ``job/get_description_incl_archive``.")
+    version: str = Field(description="The API version the URL names: ``v1``.")
+    function: str = Field(description="The :attr:`ReachNode.owner` the server calls.")
+    closure: int = Field(default=0, description="How many functions its calls reach, itself included.")
+    holes: list[str] = Field(
+        default_factory=list,
+        description="``owner:line`` of each :class:`ReachHole` in the closure: a call that may go where no edge says.",
+    )
+    reads: list[EndpointRead] = Field(default_factory=list)
 
 
 class CoverageStat(BaseModel):
@@ -3227,6 +3287,7 @@ class MapFragment(BaseModel):
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
     key_froms: list[KeyFrom] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
+    endpoints: list[Endpoint] = Field(default_factory=list)
     declaration_yields: dict[str, int] = Field(
         default_factory=dict,
         description=(

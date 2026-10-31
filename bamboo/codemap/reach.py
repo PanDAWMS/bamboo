@@ -99,6 +99,10 @@ ASSUMPTIONS: dict[str, str] = {
     ),
 }
 
+#: What :meth:`ReachGraph.closure` reached: ``(owner, class)`` -> the node and the call it was reached from, ``None``
+#: for a start.
+Came = dict[tuple[str, str], Optional[tuple[tuple[str, str], ReachCall]]]
+
 #: A database leaf or a hole for a call, as a build's plugin reads it:
 #: ``("database", assumption)`` or ``("hole", why)``.  ``None`` where the call
 #: is not the database's.  See :func:`graph`.
@@ -2686,28 +2690,21 @@ class ReachGraph:
         """The owner of every function of the record named *name*: where a call of that name can land."""
         return self._functions.get(name, [])
 
-    def reach(self, starts: list[str], destination: Destination, by_name: bool = True) -> Reach:
-        """What *starts* reach: the writes, or whether none can be said (see :class:`Reach`).
+    def closure(self, starts: list[str]) -> Came:
+        """Every function *starts* reach through their calls, each as every class ``self`` can be there, and how.
 
-        Where no write is reached, a hole whose call's name no function of the corpus reaching the destination has
-        (:class:`_ByName`) is closed by ``closed_by_name`` and listed in :attr:`Reach.closed`; *by_name* off, none
-        is."""
-        start_nodes = []
-        for owner in starts:
-            row = self.rows.get(owner)
-            if row is None:
-                return Reach(
-                    writes=None, holes=[f"{owner} -- no such function in the record"]
-                )
-            start_nodes.extend((owner, one) for one in row.classes or [""])
-        came: dict[tuple[str, str], Optional[tuple[tuple[str, str], str]]] = (
-            dict.fromkeys(start_nodes)
-        )
+        Each start as each of its :attr:`ReachNode.classes` (or none); from a function as a class, every call it
+        makes for that class (:attr:`ReachCall.for_classes`), into the callee as the classes it runs as
+        (:attr:`ReachCall.runs_as`, else each it can be).  Breadth first, so each is reached by the fewest calls;
+        every start must be a row of the record."""
+        start_nodes = [
+            (owner, one) for owner in starts for one in self.rows[owner].classes or [""]
+        ]
+        came: Came = dict.fromkeys(start_nodes)
         pending = deque(start_nodes)
         while pending:
             node = pending.popleft()
             owner, cls = node
-            file = owner.partition("::")[0]
             for call in self.rows[owner].calls:
                 if call.for_classes and cls not in call.for_classes:
                     continue
@@ -2717,8 +2714,22 @@ class ReachGraph:
                 for one in call.runs_as or entered.classes or [""]:
                     following = (call.to, one)
                     if following not in came:
-                        came[following] = (node, f"{file}:{call.line}")
+                        came[following] = (node, call)
                         pending.append(following)
+        return came
+
+    def reach(self, starts: list[str], destination: Destination, by_name: bool = True) -> Reach:
+        """What *starts* reach: the writes, or whether none can be said (see :class:`Reach`).
+
+        Where no write is reached, a hole whose call's name no function of the corpus reaching the destination has
+        (:class:`_ByName`) is closed by ``closed_by_name`` and listed in :attr:`Reach.closed`; *by_name* off, none
+        is."""
+        for owner in starts:
+            if owner not in self.rows:
+                return Reach(
+                    writes=None, holes=[f"{owner} -- no such function in the record"]
+                )
+        came = self.closure(starts)
         owners = list(dict.fromkeys(owner for owner, _cls in came))
         holes: list[str] = []
         for owner, cls in came:
@@ -2740,16 +2751,11 @@ class ReachGraph:
             if owner in destination.arms and all(
                 write.function != owner for write in writes
             ):
-                chain: list[str] = []
-                at: Optional[tuple[str, str]] = node
-                while at is not None and came[at] is not None:
-                    at, line = came[at]  # type: ignore[misc]
-                    chain.append(line)
                 writes.append(
                     ReachWrite(
                         function=owner,
                         arms=destination.arms[owner],
-                        chain=list(reversed(chain)),
+                        chain=way(came, node),
                     )
                 )
         if by_name and not writes and holes:
@@ -2771,6 +2777,17 @@ class ReachGraph:
             assumptions=dict(sorted(assumptions.items())),
             closure=len(owners),
         )
+
+
+def way(came: Came, node: tuple[str, str]) -> list[str]:
+    """``file:line`` of each call :meth:`ReachGraph.closure` took from a start to *node*, the first call first."""
+    chain: list[str] = []
+    at = came[node]
+    while at is not None:
+        caller, call = at
+        chain.append(f"{caller[0].partition('::')[0]}:{call.line}")
+        at = came[caller]
+    return list(reversed(chain))
 
 
 def every_write(junctions: list[JunctionNode], record: ReachGraph) -> Destination:

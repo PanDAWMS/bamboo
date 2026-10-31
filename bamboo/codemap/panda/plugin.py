@@ -43,6 +43,7 @@ from bamboo.codemap.models import (
     pooled_frames,
 )
 from bamboo.codemap.panda import (
+    endpoints,
     mustprints,
     objects,
     offrow,
@@ -812,6 +813,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             # value skips.
             off = offrow.attach(fragment, self._modules, self._calls)
             logger.info("PandaCodeMapPlugin: %d branch(es) write their object to no row", off)
+            # The statements each API endpoint's calls reach, on the reach record and the read terms.
+            read = endpoints.attach(fragment, self._modules)
+            logger.info(
+                "PandaCodeMapPlugin: %d endpoint(s), %d statement(s) they read", len(fragment.endpoints), read
+            )
 
         # What a row a statement selects waits on besides the mover: the writes its terms on other columns ask for,
         # joined from the junctions and the key sources once the arms off their row are marked.

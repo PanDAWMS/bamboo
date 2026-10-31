@@ -334,6 +334,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: what the schema and the corpus say of each table named -- see "
         "TableRecord; a dump's section compare reads them"
     ),
+    "endpoints": (
+        "records beside the nodes, not nodes: the statements each API endpoint's calls reach -- see Endpoint; "
+        "a dump's section compare reads them"
+    ),
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,
     "spec_annotation_forms": _REPORT,

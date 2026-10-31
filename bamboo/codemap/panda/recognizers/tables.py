@@ -21,6 +21,7 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import functions_with_owner
+from bamboo.codemap.panda.runs import HISTORY_TABLES
 
 #: The database's clocks a statement can write.
 _DATABASE_CLOCKS = sqltext.DATABASE_CLOCKS
@@ -106,6 +107,7 @@ def records(
                 inserted=bool(entity is not None and entity.created_by),
                 family=sorted(families.get(table, set()) - {table}),
                 creation=created.get(cls, []) if cls else [],
+                history_of=HISTORY_TABLES.get(table, ""),
             )
         )
     return found
