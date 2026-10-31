@@ -10119,6 +10119,69 @@ def test_a_crossing_takes_the_values_its_own_routes_select(tmp_path, broker, gen
     assert node.crossing_selects == selects
 
 
+_TIMED_RUN = (
+    "import threading\n\n\n"
+    "class Timed:\n"
+    "    def __init__(self, method, timeout):\n"
+    "        self.method = method\n"
+    "        self.result = None\n\n"
+    "    def __call__(self, *var):\n"
+    "        self.result = self.method(*var)\n\n"
+    "    def run(self, *var):\n"
+    "        thr = threading.Thread(target=self, args=var)\n"
+    "        thr.start()\n"
+    "        thr.join()\n"
+)
+
+
+def test_an_answer_holds_the_rows_the_function_an_object_was_built_with_returned(tmp_path):
+    """``pilot/get_job_status`` hands ``peekJobs`` to ``TimedMethod`` and reads the jobs back from
+    ``timed_method.result`` once ``timed_method.run(...)`` has run it (G1): the call gives nothing back, and the
+    object keeps what the function returned where its ``__call__`` stores it.  So a function asked for its answer
+    says where the rows are in what it returns -- ``get_status`` each row's first column under
+    ``['data'][*]['status']`` -- and ``kill``, which counts them, returns none of them."""
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import plugin
+
+    api = (
+        "from pandaserver.x import TaskModule\n"
+        "from pandaserver.common import Timed\n\n"
+        "task_module: TaskModule = None\n\n\n"
+        "def get_status(req, job_id):\n"
+        "    timed = Timed(task_module.pick, 10)\n"
+        "    timed.run(job_id)\n"
+        "    return {'data': [{'status': row[0]} for row in timed.result]}\n\n\n"
+        "def kill(req, job_id):\n"
+        "    timed = Timed(task_module.pick, 10)\n"
+        "    timed.run(job_id)\n"
+        "    return {'done': len(timed.result)}\n"
+    )
+    files = {
+        "pandaserver/taskbuffer/Specs.py": _SPECS,
+        "pandaserver/x.py": _PICK,
+        "pandaserver/common.py": _TIMED_RUN,
+        "pandaserver/api.py": api,
+    }
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    asked = frozenset({"pandaserver/api.py::get_status", "pandaserver/api.py::kill"})
+    returned: dict = {}
+    with sql.across_calls(calls):
+        nodes = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor, calls).statements, MAP_ID, VERSION)
+        record = reach.ReachGraph(reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves()))
+        sqlwrite.attach_crossings(nodes, modules, [], calls, record, returned=returned, returning=asked)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 10]
+    assert returned[node.name] == sqlwrite.Returned({"pandaserver/api.py::get_status": ["['data'][*]['status']"]}, [])
+
+
 @pytest.mark.parametrize(
     ("fill", "crosses"),
     [

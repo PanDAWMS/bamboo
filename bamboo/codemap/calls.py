@@ -282,6 +282,13 @@ class Placed(NamedTuple):
     handed as, whose receiver is the object it runs on (:meth:`Calls.made_on`).
     The method returns nothing, and nothing the function returns comes back
     through the call.
+
+    *kept_at*: for a call *forwarded*, the field of the object the method
+    keeps what the function returns in -- ``TimedMethod.__call__``'s
+    ``self.result = self.method(*var, **kwargs)``, so ``timed_method.result``
+    holds what ``updateJobStatus`` returned once ``timed_method.run(...)``
+    has; empty where it keeps nothing, or the classes the object can be keep
+    it in different fields.
     """
 
     targets: tuple[Target, ...] = ()
@@ -289,6 +296,7 @@ class Placed(NamedTuple):
     on_class: bool = False
     thread: bool = False
     forwarded: tuple[ast.expr, ...] = ()
+    kept_at: str = ""
 
     @property
     def returns_none(self) -> bool:
@@ -904,7 +912,9 @@ class Calls:
         ``self.<field>(*var, **kw)``, a call ``self(*var, **kw)``, or a
         ``Thread`` or ``Process`` (:data:`_STARTERS`) built with
         ``target=self, args=var, kwargs=kw``, started and joined by the next
-        two statements, the last two read through ``__call__`` the same way;
+        two statements, the last two read through ``__call__`` the same way
+        -- the call's value dropped, or bound to a field of the object
+        (:attr:`Placed.kept_at`);
         ``__init__`` binds the field to the parameter and reads the parameter
         nowhere else; and no method of the class or its bases binds the field
         again or reads it but to make that call.  ``None`` otherwise.
@@ -912,8 +922,9 @@ class Calls:
         found = self._forwarding_methods(declared).get(name)
         return found[1] if found is not None else None
 
-    def _forwarding_methods(self, declared: tuple[str, ast.ClassDef]) -> dict[str, tuple[str, str]]:
-        """``{method: (field, parameter)}`` for each method of *declared* :meth:`forwarding` reads."""
+    def _forwarding_methods(self, declared: tuple[str, ast.ClassDef]) -> dict[str, tuple[str, str, str]]:
+        """``{method: (field, parameter, the field it keeps the value in)}`` for each method of *declared*
+        :meth:`forwarding` reads."""
         key = (declared[0], declared[1].lineno)
         if key not in self._forwarders:
             names = {
@@ -927,13 +938,14 @@ class Calls:
             }
         return self._forwarders[key]
 
-    def _forwarder(self, declared: tuple[str, ast.ClassDef], name: str) -> Optional[tuple[str, str]]:
-        """``(field, parameter)`` where :meth:`forwarding` reads *declared*'s method *name*."""
+    def _forwarder(self, declared: tuple[str, ast.ClassDef], name: str) -> Optional[tuple[str, str, str]]:
+        """``(field, parameter, the field it keeps the value in)`` where :meth:`forwarding` reads *declared*'s method
+        *name*."""
         found = self._handing_on(declared, name, 0)
         init = self._method_of(declared, "__init__").targets
         if found is None or len(init) != 1:
             return None
-        field, made = found
+        field, made, kept = found
         stores = [
             statement
             for statement in init[0].func.body  # type: ignore[attr-defined]
@@ -960,12 +972,13 @@ class Calls:
                     continue
                 if not (isinstance(node.ctx, ast.Load) and any(node is call.func for call in made)):
                     return None
-        return field, parameter
+        return field, parameter, kept
 
     def _handing_on(
         self, declared: tuple[str, ast.ClassDef], name: str, depth: int
-    ) -> Optional[tuple[str, list[ast.Call]]]:
-        """``(field, the calls of it)`` where *declared*'s method *name* hands its own arguments to ``self.<field>``."""
+    ) -> Optional[tuple[str, list[ast.Call], str]]:
+        """``(field, the calls of it, the field the value is kept in)`` where *declared*'s method *name* hands its own
+        arguments to ``self.<field>``: ``self.result = self.method(*var, **kwargs)`` keeps it in ``result``."""
         targets = self._method_of(declared, name).targets
         if len(targets) != 1 or depth > 1:
             return None
@@ -989,14 +1002,24 @@ class Calls:
             if not isinstance(value, ast.Call):
                 continue
             called = value.func
-            found: Optional[tuple[str, list[ast.Call]]]
+            found: Optional[tuple[str, list[ast.Call], str]]
             if (
                 _hands_on(value, var, kw)
                 and isinstance(called, ast.Attribute)
                 and isinstance(called.value, ast.Name)
                 and called.value.id == own
             ):
-                found = (called.attr, [value])
+                # ``self.result = self.method(*var, **kwargs)``: the value kept in a field of the object.
+                stored = statement.targets if isinstance(statement, ast.Assign) else []
+                kept = (
+                    stored[0].attr
+                    if len(stored) == 1
+                    and isinstance(stored[0], ast.Attribute)
+                    and isinstance(stored[0].value, ast.Name)
+                    and stored[0].value.id == own
+                    else ""
+                )
+                found = (called.attr, [value], kept)
             elif (_hands_on(value, var, kw) and isinstance(called, ast.Name) and called.id == own) or (
                 isinstance(statement, ast.Assign)
                 and len(statement.targets) == 1
@@ -1071,7 +1094,7 @@ class Calls:
             return None
         for cls, _construction in built:
             methods = self._forwarding_methods(cls)
-            fields = {field for field, _parameter in methods.values()}
+            fields = {field for field, _parameter, _kept in methods.values()}
             if any((attr not in methods) if call is not None else (attr in fields) for attr, call in read):
                 return None
         found = (built, [call for _attr, call in read if call is not None])
@@ -1091,11 +1114,13 @@ class Calls:
         if wrapped is None:
             return None
         handed: list[ast.expr] = []
+        kept: set[str] = set()
         for cls, construction in wrapped[0]:
             value = self._built_with(cls, construction, called.attr)
             if value is None:
                 return None
             handed.append(value)
+            kept.add(self._forwarding_methods(cls)[called.attr][2])
         targets: list[Target] = []
         on_class: set[bool] = set()
         for value in handed:
@@ -1106,7 +1131,12 @@ class Calls:
             on_class.add(isinstance(value, ast.Attribute) and self.types.class_named(file, value.value) is not None)
         if len(on_class) != 1:
             return None
-        return Placed(tuple(targets), on_class=on_class.pop(), forwarded=tuple(handed))
+        return Placed(
+            tuple(targets),
+            on_class=on_class.pop(),
+            forwarded=tuple(handed),
+            kept_at=kept.pop() if len(kept) == 1 else "",
+        )
 
     def _built_with(self, cls: tuple[str, ast.ClassDef], construction: ast.Call, method: str) -> Optional[ast.expr]:
         """What *construction* hands the parameter whose function *cls*'s *method* calls; ``None`` where it does not say."""

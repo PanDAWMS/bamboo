@@ -5375,7 +5375,10 @@ class _PathCarry:
 
     def _call_value(self, call: ast.Call, at: ast.AST) -> _Paths:
         if id(call) in self.call_values:
-            return self.call_values[id(call)]
+            # What the definition returned, unless the call's value is None whatever it returns -- a thread started,
+            # a call forwarded, whose function's value goes where the method keeps it (:meth:`_Reading.kept_by`).
+            placed = self.reading.place(self, call)
+            return _NOTHING if placed is not None and placed.returns_none else self.call_values[id(call)]
         name = _callee_name(call)
         if name in callfacts.LOGGER_MAKERS:  # its tag is a log line's: the makers' `if tag is None` is no use of it
             return _NOTHING
@@ -5456,7 +5459,7 @@ class _PathCarry:
                 summary = self.reading.summary(target, given)
                 if target.func.name == "__init__":  # type: ignore[attr-defined]
                     found |= summary.kept.get(receiver_parameter(target) or "", _NOTHING)
-                elif not placed.thread:
+                elif not placed.returns_none:
                     found |= summary.returns
             return frozenset(found)
         if args and name in _CHUNKING | _SLICING | _CHAINING:
@@ -5681,12 +5684,23 @@ class _Reading:
             for name, value in handed.items():
                 if value is None:
                     got[name] = _WHOLE
-        if not placed.on_class and isinstance(call.func, ast.Attribute):
+        made_on = self._made_on(carry, call, placed)
+        if made_on is not None:
             receiver = receiver_parameter(target)
-            paths = _WHOLE if everything else carry.held(call.func.value, call)
+            paths = _WHOLE if everything else carry.held(made_on, call)
             if receiver is not None and paths:
                 got[receiver] = paths
         return got
+
+    def _made_on(self, carry: _PathCarry, call: ast.Call, placed: Placed) -> Optional[ast.expr]:
+        """The object *call*'s targets run on, as *carry*'s function names it: its receiver, or for a call forwarded
+        the object the function was read off (:meth:`Calls.made_on`: ``global_task_buffer``, not ``timed_method``);
+        ``None`` for a method read off a class, handed its object as an argument."""
+        if placed.on_class or not isinstance(call.func, ast.Attribute):
+            return None
+        if placed.forwarded:
+            return self.calls.made_on(carry.file, carry.func, call)
+        return call.func.value
 
     def _key(self, target: Target, given: dict[str, _Paths]) -> tuple:
         return (target.file, target.func.lineno, target.bound, frozenset(given.items()))  # type: ignore[attr-defined]
@@ -5722,7 +5736,33 @@ class _Reading:
     def kept_by(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
         """``{(name, steps): paths}`` what *call* puts into the objects *carry*'s function names, as
         :func:`callfacts.meaning` reads it: what the definitions it lands at keep (their summaries), the object a
-        protocol copies into, what a library object's or a builtin container's method puts into its object."""
+        protocol copies into, what a library object's or a builtin container's method puts into its object -- and
+        what a call forwarded keeps of its function's value in the object it is made on (:attr:`Placed.kept_at`):
+        ``timed_method.result`` holds what ``peekJobs`` returned once ``timed_method.run(...)`` has."""
+        found = self._kept_by(carry, call)
+        for where, paths in self._forwarded_kept(carry, call).items():
+            found[where] = found.get(where, _NOTHING) | paths
+        return found
+
+    def _forwarded_kept(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
+        if not isinstance(call.func, ast.Attribute):
+            return {}
+        placed = self.place(carry, call)
+        where = _access_path(call.func.value)
+        if placed is None or not placed.kept_at or where is None:
+            return {}
+        if id(call) in carry.call_values:
+            value = carry.call_values[id(call)]
+        else:
+            value = frozenset(
+                path
+                for target in placed.targets
+                if (given := self.given(carry, call, placed, target))
+                for path in self.summary(target, given).returns
+            )
+        return {where: _below(("." + placed.kept_at,), value)} if value else {}
+
+    def _kept_by(self, carry: _PathCarry, call: ast.Call) -> dict[tuple[str, tuple[str, ...]], _Paths]:
         name = _callee_name(call)
         if name in callfacts.LOG_METHODS or name in callfacts.LOGGER_MAKERS:
             return {}
@@ -5760,8 +5800,9 @@ class _Reading:
             except Exception:  # noqa: BLE001 -- the record has the call as a hole
                 continue
             receiver = receiver_parameter(target)
-            if receiver is not None and not placed.on_class and isinstance(call.func, ast.Attribute):
-                handed[receiver] = call.func.value
+            made_on = self._made_on(carry, call, placed)
+            if receiver is not None and made_on is not None:
+                handed[receiver] = made_on
             for parameter, paths in summary.kept.items():
                 value = handed.get(parameter)
                 where = _access_path(value) if value is not None else None

@@ -3470,9 +3470,9 @@ def _api(body: str = "") -> str:
 def test_a_call_on_an_object_built_with_a_function_it_hands_its_arguments_to_lands_at_the_function(tmp_path):
     """``Timed`` keeps ``method``; ``run`` starts a thread on the object with its own arguments and joins it, and the
     thread's ``__call__`` calls ``method`` with them: ``timed.run(job_id, param)`` calls ``buffer.update(job_id,
-    param)`` and returns nothing.  It is placed there, handed its arguments as a call of it is, run on ``buffer``,
-    and is among ``update``'s callers -- which leave nothing missed -- and the read of ``buffer.update`` that built
-    the object is one whose every call hands it on."""
+    param)`` and returns nothing, keeping what it returns in ``timed.result``.  It is placed there, handed its
+    arguments as a call of it is, run on ``buffer``, and is among ``update``'s callers -- which leave nothing missed
+    -- and the read of ``buffer.update`` that built the object is one whose every call hands it on."""
     roots = _tree(tmp_path, timed=_TIMED, buffer=_UPDATING, api=_api())
     calls = _calls(roots)
     func = _function(calls, "api", "update")
@@ -3483,7 +3483,7 @@ def test_a_call_on_an_object_built_with_a_function_it_hands_its_arguments_to_lan
     (target,) = placed.targets
     assert (target.file, target.func.name) == ("pkg/buffer.py", "update")
     assert [ast.unparse(one) for one in placed.forwarded] == ["buffer.update"]
-    assert (placed.thread, placed.on_class, placed.returns_none) == (False, False, True)
+    assert (placed.thread, placed.on_class, placed.returns_none, placed.kept_at) == (False, False, True, "result")
     assert ast.unparse(calls.made_on("pkg/api.py", func, call)) == "buffer"
     (site,) = calls.callers(target)
     assert site.call is call
@@ -3499,7 +3499,8 @@ def test_a_call_on_an_object_built_with_a_function_it_hands_its_arguments_to_lan
 
 def test_a_wrapper_hands_its_arguments_on_by_calling_the_function_or_itself(tmp_path):
     """The three ways a method hands its own arguments to the function the object keeps: calling it, calling the
-    object -- whose ``__call__`` calls it --, or a thread started on the object and joined."""
+    object -- whose ``__call__`` calls it --, or a thread started on the object and joined.  These drop what it
+    returns: the object keeps none of it."""
     forms = {
         "direct": "    def run(self, *var, **kwargs):\n        self.method(*var, **kwargs)\n",
         "called": (
@@ -3512,6 +3513,7 @@ def test_a_wrapper_hands_its_arguments_on_by_calling_the_function_or_itself(tmp_
         calls = _calls(_tree(tmp_path / name, timed=wrapper, buffer=_UPDATING, api=_api()))
         placed = _placed(calls, "api", "update", "timed.run")
         assert [(one.file, one.func.name) for one in placed.targets] == [("pkg/buffer.py", "update")], name
+        assert placed.kept_at == "", name
 
 
 def test_a_wrapper_or_an_object_whose_function_may_be_called_some_other_way_is_not_read_through(tmp_path):
