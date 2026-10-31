@@ -4792,7 +4792,18 @@ def _whole(paths: Iterable[tuple[str, ...]]) -> bool:
 
 
 def _any_field(paths: _Paths) -> _Paths:
-    """What some one field of a value holds: ``getattr(x, name)``, the name not a literal."""
+    """What some one field of a value holds: ``getattr(x, name)``, the name not a literal.
+
+    Any field the value holds, whatever the name can be: a limit, said and not built.  A spec's loop over its
+    attributes, ``for attr in self._attributes: val = getattr(self, attr)``, reads here every field the object
+    holds, not only the names the loop takes, and not as the loop leaves one -- ``JobSpec.valuesMap`` skips an
+    unchanged attribute under ``onlyChanged`` and sets ``jobParameters`` and ``metadata`` (``_suppAttrs``) to None;
+    a name made of literals, ``getattr(job_spec, source + "Code")`` over a literal list, is any name too.  On pin m
+    eight crossings of six read sites rest on this reading, and two are wrong: ``peekJob``'s ``metaData`` crossing to
+    ``updateJob`` through ``valuesMap(onlyChanged=True)``, and its ``jobParameters`` to ``copy_file_records``, where
+    the file reaches the job only through ``_owner``, a name ``FileSpec``'s loop never takes.  Of their six
+    statements five select no value, and the sixth only ``JediDatasetSpec.type``'s.
+    """
     fields = {_bare(path[1:]) for path in map(_bare, paths) if path and path[0].startswith(".")}
     return frozenset(fields | ({()} if _whole(paths) else set()))
 
