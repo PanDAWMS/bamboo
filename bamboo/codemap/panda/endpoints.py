@@ -39,18 +39,24 @@ from bamboo.codemap.models import (
     FILL_TERM,
     FILL_UNREAD,
     FILL_VALUE,
+    HOLE_CLOSED,
+    HOLE_MAY_CHANGE,
+    HOLE_OPEN,
     KEY_CONSTANT,
     KEY_PARAMETER,
     KEY_ROWS,
     KEY_SELF_FIELD,
     Endpoint,
+    EndpointChange,
     EndpointFill,
+    EndpointHole,
     EndpointRead,
     EndpointTerm,
     EndpointWrite,
     KeyFrom,
     MapFragment,
     ReachCall,
+    ReachHole,
     ReadSiteNode,
     SourceModule,
 )
@@ -66,6 +72,11 @@ SERVER = "pandaserver/server/panda.py"
 ROUTING = "module_mapping"
 #: A module's public functions the server does not route (``extract_allowed_methods``).
 NOT_ROUTED = frozenset({"init_task_buffer"})
+#: The file holding the async requests' daemon's table of handlers, and the table: a module's name bound to a dict of
+#: request types to functions.  :attr:`Endpoint.version` of a handler's record, and its route's head.
+HANDLING = "pandaserver/asyncprocess/processor.py"
+HANDLERS = "HANDLERS"
+ASYNC = "async"
 
 
 def routes(modules: list[SourceModule]) -> list[tuple[str, str, str]]:
@@ -141,7 +152,8 @@ def attach(
     calls: C.Calls,
     returned: Optional[dict[str, sqlwrite.Returned]] = None,
 ) -> int:
-    """Set *fragment*'s :attr:`MapFragment.endpoints`; returns how many statements they read, counted per endpoint.
+    """Set *fragment*'s :attr:`MapFragment.endpoints` and :attr:`MapFragment.handlers`; returns how many statements
+    the endpoints read, counted per endpoint.
 
     With *returned* -- :func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_crossings`' walks asked for every
     endpoint's answer -- each read says where its rows are in what the endpoint returns, and the holes on the way in
@@ -159,31 +171,68 @@ def attach(
         if key_from.reads:
             terms.setdefault((key_from.owner, key_from.statement), []).append(key_from)
     code = _Code(calls)
-    found = []
-    for version, route, owner in routes(modules):
+    read = _Reader(record, code, sites, terms, _Bounds(record, code))
+    fragment.endpoints = [
+        one
+        for version, route, owner in routes(modules)
+        if (one := read.endpoint(version, route, owner, returned)) is not None
+    ]
+    fragment.handlers = [
+        one
+        for request_type, owner in handlers(modules)
+        if (one := read.endpoint(ASYNC, f"{ASYNC}/{request_type}", owner)) is not None
+    ]
+    return sum(len(endpoint.reads) for endpoint in fragment.endpoints)
+
+
+class _Reader:
+    """An :class:`Endpoint` from its function: the closure and what it reads, writes, changes and leaves open."""
+
+    def __init__(
+        self,
+        record: reach.ReachGraph,
+        code: _Code,
+        sites: dict[str, list[ReadSiteNode]],
+        terms: dict[tuple[str, int], list[KeyFrom]],
+        bounds: _Bounds,
+    ):
+        self.record, self.code, self.sites, self.terms, self.bounds = (
+            record,
+            code,
+            sites,
+            terms,
+            bounds,
+        )
+
+    def endpoint(
+        self,
+        version: str,
+        route: str,
+        owner: str,
+        returned: Optional[dict[str, sqlwrite.Returned]] = None,
+    ) -> Optional[Endpoint]:
+        record, code = self.record, self.code
         if owner not in record.rows:
             logger.warning(
                 "endpoints: %s's function %s is no row of the reach record",
                 route,
                 owner,
             )
-            continue
+            return None
         came = record.closure([owner])
         shut = _shut(record, code, came)
         if shut:
             came = record.closure(
                 [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
             )
-        holes = []
+        holes = {}
         reached: dict[str, tuple[ReadSiteNode, list[tuple[str, str]]]] = {}
         for node in came:
             function, cls = node
-            holes.extend(
-                f"{function}:{hole.line}"
-                for hole in record.rows[function].holes
-                if not hole.for_classes or cls in hole.for_classes
-            )
-            for site in sites.get(function, ()):
+            for hole in record.rows[function].holes:
+                if not hole.for_classes or cls in hole.for_classes:
+                    holes.setdefault((function, hole.line, hole.callee), hole)
+            for site in self.sites.get(function, ()):
                 reached.setdefault(site.name, (site, []))[1].append(node)
         fills = _Fills(record, code, came, owner, shut)
         inside = {function for function, _cls in came}
@@ -202,7 +251,7 @@ def attach(
                             attr=key_from.attr,
                             fills=fills.term(nodes, key_from, set(reached)),
                         )
-                        for key_from in terms.get((site.owner, _line(site)), ())
+                        for key_from in self.terms.get((site.owner, _line(site)), ())
                     ],
                     way=reach.way(came, nodes[0]),
                     returned=answer.paths.get(owner, []) if answer is not None else [],
@@ -218,26 +267,29 @@ def attach(
                 )
             )
         functions = list(dict.fromkeys(function for function, _cls in came))
-        found.append(
-            Endpoint(
-                route=route,
-                version=version,
-                function=owner,
-                closure=len(functions),
-                holes=list(dict.fromkeys(holes)),
-                shut=sorted(
-                    {
-                        f"{node[0].partition('::')[0]}:{line}"
-                        for node, call in _calls_shut(record, came, shut)
-                        for line in call.lines or [call.line]
-                    }
-                ),
-                reads=reads,
-                writes=[one for function in functions for one in code.writes(function)],
-            )
+        return Endpoint(
+            route=route,
+            version=version,
+            function=owner,
+            closure=len(functions),
+            holes=list(
+                dict.fromkeys(f"{function}:{line}" for function, line, _callee in holes)
+            ),
+            shut=sorted(
+                {
+                    f"{node[0].partition('::')[0]}:{line}"
+                    for node, call in _calls_shut(record, came, shut)
+                    for line in call.lines or [call.line]
+                }
+            ),
+            reads=reads,
+            writes=[one for function in functions for one in code.writes(function)],
+            changes=[one for function in functions for one in code.changes(function)],
+            hole_bounds=[
+                self.bounds.of(function, hole)
+                for (function, _line, _callee), hole in holes.items()
+            ],
         )
-    fragment.endpoints = found
-    return sum(len(endpoint.reads) for endpoint in found)
 
 
 Node = tuple[str, str]
@@ -255,6 +307,7 @@ class _Code:
         self._versions: dict[str, objects._Versions] = {}
         self._lines: dict[str, dict[int, list[ast.AST]]] = {}
         self._writes: dict[str, list[EndpointWrite]] = {}
+        self._changes: dict[str, list[EndpointChange]] = {}
         self._bound: dict[
             tuple[str, int, str], list[tuple[ast.Call, dict[str, Optional[ast.expr]]]]
         ] = {}
@@ -273,6 +326,31 @@ class _Code:
                     )
                     if tables and one not in found:
                         found.append(one)
+        return found
+
+    def changes(self, owner: str) -> list[EndpointChange]:
+        """The calls *owner* makes that change something beside PanDA's tables (:func:`callfacts.change`)."""
+        found = self._changes.get(owner)
+        if found is None:
+            found = self._changes[owner] = []
+            file, func = self.funcs.get(owner, ("", None))
+            for node in C.own_nodes(func) if func is not None else []:
+                got = (
+                    callfacts.change(self.types, file, func, node)
+                    if isinstance(node, ast.Call)
+                    else None
+                )
+                if got is not None:
+                    kind, system, callee = got
+                    found.append(
+                        EndpointChange(
+                            kind=kind,
+                            system=system,
+                            callee=callee,
+                            function=owner,
+                            line=node.lineno,
+                        )
+                    )
         return found
 
     def versions(self, owner: str) -> objects._Versions:
@@ -704,11 +782,222 @@ def _constant(
     return None
 
 
+class _Bounds:
+    """Each hole bounded by its callee's name (:class:`EndpointHole`), by the reach record's rule for a mover's
+    (:class:`reach._ByName`): a function of the corpus of the name may write a table or change something
+    (:meth:`_Code.writes`, :meth:`_Code.changes`), or its closure does, or leaves a hole no name bounds, or makes a
+    call whose name may -- the least fixpoint over names."""
+
+    def __init__(self, record: reach.ReachGraph, code: _Code):
+        self.record = record
+        changing = [
+            owner for owner in record.rows if code.writes(owner) or code.changes(owner)
+        ]
+        self.destination = reach.Destination({owner: [] for owner in changing}, [])
+        self.names = reach._ByName(record, self.destination)
+        self._through: dict[str, list[str]] = {}
+
+    def of(self, function: str, hole: ReachHole) -> EndpointHole:
+        at = f"{function}:{hole.line}"
+        name = reach._named_call(f"{at} {hole.callee} -- {hole.why}")
+        through: list[str] = []
+        if name is None:
+            bound = HOLE_OPEN
+        elif self.names.can(name):
+            bound, through = HOLE_MAY_CHANGE, self.through(name)
+        else:
+            bound = HOLE_CLOSED
+        return EndpointHole(
+            at=at, callee=hole.callee, why=hole.why, bound=bound, through=through
+        )
+
+    def through(self, name: str) -> list[str]:
+        """The functions named *name* that may: each whose closure reaches one that writes or changes, leaves a hole
+        no name bounds, or makes a call whose name may."""
+        found = self._through.get(name)
+        if found is None:
+            found = self._through[name] = []
+            for owner in self.record.functions_named(name):
+                answer = self.record.reach([owner], self.destination, by_name=False)
+                inner = {reach._named_call(hole) for hole in answer.holes}
+                if (
+                    answer.writes
+                    or None in inner
+                    or any(self.names.can(one) for one in inner if one is not None)
+                ):
+                    found.append(owner)
+        return found
+
+
+def handlers(modules: list[SourceModule]) -> list[tuple[str, str]]:
+    """``(request type, owner)`` per entry of the async requests' daemon's table (:data:`HANDLING`'s
+    :data:`HANDLERS`); none where it is not read.
+
+    A dict literal, its keys a text, a module's name bound to one or a text made of a comprehension's names, its
+    values a function of the module or ``functools.partial`` of one, and ``**`` another module's table of the same
+    name -- or a dict comprehension over a module's tuple of texts.  What the reading cannot say is logged and
+    left out."""
+    by_path = {module.rel_path: module for module in modules}
+    found: list[tuple[str, str]] = []
+    _handlers_in(by_path, HANDLING, found, set())
+    return list(dict.fromkeys(found))
+
+
+def _handlers_in(
+    by_path: dict[str, SourceModule],
+    file: str,
+    found: list[tuple[str, str]],
+    seen: set[str],
+) -> None:
+    module = by_path.get(file)
+    if module is None or file in seen:
+        return
+    seen.add(file)
+    table = _bound_value(module.tree, HANDLERS)
+    imported = _imported(module.tree)
+    if isinstance(table, ast.Dict):
+        for key, value in zip(table.keys, table.values, strict=True):
+            if key is not None:
+                _handler(module, imported, key, value, {}, found)
+            elif (
+                isinstance(value, ast.Attribute)
+                and value.attr == HANDLERS
+                and isinstance(value.value, ast.Name)
+                and value.value.id in imported
+            ):
+                _handlers_in(by_path, imported[value.value.id], found, seen)
+            else:
+                logger.warning(
+                    "endpoints: %s's %s spreads %s", file, HANDLERS, ast.unparse(value)
+                )
+    elif (
+        isinstance(table, ast.DictComp)
+        and len(table.generators) == 1
+        and isinstance(table.generators[0].target, ast.Name)
+        and not table.generators[0].ifs
+    ):
+        loop = table.generators[0]
+        for one in _texts(module.tree, loop.iter):
+            _handler(
+                module, imported, table.key, table.value, {loop.target.id: one}, found
+            )  # type: ignore[union-attr]
+    else:
+        logger.warning("endpoints: %s's %s is not read", file, HANDLERS)
+
+
+def _handler(
+    module: SourceModule,
+    imported: dict[str, str],
+    key: ast.expr,
+    value: ast.expr,
+    names: dict[str, str],
+    found: list[tuple[str, str]],
+) -> None:
+    request_type = _text_of(module.tree, key, names)
+    owner = _function_of(module, imported, value)
+    if request_type is None or owner is None:
+        logger.warning(
+            "endpoints: %s's handler %s: %s is not read",
+            module.rel_path,
+            ast.unparse(key),
+            ast.unparse(value),
+        )
+        return
+    found.append((request_type, owner))
+
+
+def _bound_value(tree: ast.Module, name: str) -> Optional[ast.expr]:
+    """The value the module's own body last binds *name* to."""
+    value = None
+    for node in tree.body:
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AnnAssign)
+            else []
+        )
+        if any(isinstance(one, ast.Name) and one.id == name for one in targets):
+            value = node.value  # type: ignore[union-attr]
+    return value
+
+
+def _text_of(tree: ast.Module, node: ast.expr, names: dict[str, str]) -> Optional[str]:
+    """The text *node* is: a literal, a name the comprehension or the module binds to one, an f-string of them."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in names:
+            return names[node.id]
+        value = _bound_value(tree, node.id)
+        return (
+            value.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str)
+            else None
+        )
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for part in node.values:
+            if isinstance(part, ast.FormattedValue):
+                if part.conversion != -1 or part.format_spec is not None:
+                    return None
+                part = part.value
+            text = _text_of(tree, part, names)
+            if text is None:
+                return None
+            parts.append(text)
+        return "".join(parts)
+    return None
+
+
+def _texts(tree: ast.Module, node: ast.expr) -> list[str]:
+    """The texts of a tuple or a list *node* is, or the module binds its name to."""
+    if isinstance(node, ast.Name):
+        node = _bound_value(tree, node.id)  # type: ignore[assignment]
+    if not isinstance(node, (ast.Tuple, ast.List)):
+        return []
+    return [
+        one.value
+        for one in node.elts
+        if isinstance(one, ast.Constant) and isinstance(one.value, str)
+    ]
+
+
+def _function_of(
+    module: SourceModule, imported: dict[str, str], node: ast.expr
+) -> Optional[str]:
+    """The owner of the function *node* names: the module's own, a module's it imports, or ``functools.partial``'s
+    first argument."""
+    if isinstance(node, ast.Call) and node.args:
+        called = node.func
+        if (isinstance(called, ast.Name) and called.id == "partial") or (
+            isinstance(called, ast.Attribute)
+            and called.attr == "partial"
+            and isinstance(called.value, ast.Name)
+            and called.value.id == "functools"
+        ):
+            return _function_of(module, imported, node.args[0])
+        return None
+    if isinstance(node, ast.Name) and any(
+        isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)) and one.name == node.id
+        for one in module.tree.body
+    ):
+        return f"{module.rel_path}::{node.id}"
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in imported
+    ):
+        return f"{imported[node.value.id]}::{node.attr}"
+    return None
+
+
 #: The kinds of statement writing rows, each with what reads its tables off its text.
 _WRITES = (
     ("insert", sqltext.creates),
     ("update", sqltext.updates),
     ("delete", sqltext.deletes),
+    ("merge", sqltext.merges),
 )
 #: How an element of a value is spelt in :attr:`EndpointFill.parameter`, as :attr:`KeySource.paths` spells it.
 ELEMENT = "[*]"

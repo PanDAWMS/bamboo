@@ -838,6 +838,19 @@ def test_a_table_and_its_columns_are_read_off_the_tree():
     assert sqltext.updates("SELECT status FROM {}.JEDI_Tasks WHERE jediTaskID=:t FOR UPDATE NOWAIT") == []
 
 
+def test_a_merge_names_the_table_it_writes_and_no_other_reading_does():
+    """``MERGE INTO`` updates the target's matching rows and inserts the rest: its own reading, parsed or off the text
+    of one that does not parse; ``creates`` and ``updates`` do not read it."""
+    statement = (
+        "MERGE INTO ATLAS_PANDA.JEDI_Process_Lock t USING (SELECT :vo vo FROM dual) s ON (t.vo = s.vo) "
+        "WHEN MATCHED THEN UPDATE SET t.lockedTime = CURRENT_DATE WHEN NOT MATCHED THEN INSERT (vo) VALUES (s.vo)"
+    )
+    assert sqltext.merges(statement) == ["JEDI_Process_Lock"]
+    assert (sqltext.creates(statement), sqltext.updates(statement)) == ([], [])
+    assert sqltext.merges("MERGE /*+ hint */ INTO {}.JEDI_Process_Lock t USING {} ON ((( {}") == ["JEDI_Process_Lock"]
+    assert sqltext.merges("SELECT vo FROM ATLAS_PANDA.JEDI_Process_Lock") == []
+
+
 def test_a_join_partner_is_read_through_the_alias_it_is_joined_by():
     statement = (
         "DELETE FROM ATLAS_PANDA.Task_Evaluation te WHERE te.jediTaskID IN (SELECT jt.jediTaskID "

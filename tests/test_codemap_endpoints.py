@@ -9,6 +9,9 @@ from bamboo.codemap import reach
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     FILL_CONSTANT,
+    HOLE_CLOSED,
+    HOLE_MAY_CHANGE,
+    HOLE_OPEN,
     Anchor,
     EndpointFill,
     EndpointWrite,
@@ -184,11 +187,13 @@ def _site(
 
 
 def _build(
-    tmp_path: Path, returned: dict[str, sqlwrite.Returned] | None = None
+    tmp_path: Path,
+    returned: dict[str, sqlwrite.Returned] | None = None,
+    files: dict[str, str] = FILES,
 ) -> MapFragment:
     root = tmp_path / PACKAGE
     modules = []
-    for rel, text in FILES.items():
+    for rel, text in files.items():
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
@@ -203,7 +208,8 @@ def _build(
                 blob_sha=blob_sha(text),
             )
         )
-    for folder in ("", "server", "api", "api/v1", "taskbuffer"):
+    for folder in ("", "server", "api", "api/v1", "taskbuffer", "asyncprocess"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
         (root / folder / "__init__.py").write_text("")
     calls = sqlwrite.corpus_calls(modules, {PACKAGE: root})
     peeked, archived, listed = (
@@ -311,6 +317,123 @@ def test_a_read_says_where_its_rows_are_in_the_answer_as_the_walk_carried_them_b
     ]
     (archived,) = by_route["job/get_archived"].reads
     assert (archived.returned, archived.returned_open) == ([], [])
+
+
+OPS_API = """\
+import os
+
+
+def touch(req, name):
+    os.utime(name)
+
+
+def clean(req, keeper):
+    keeper.tidy()
+    keeper.peek()
+    keeper()
+"""
+
+STORE = """\
+class Store:
+    def tidy(self):
+        self.cur.execute("DELETE FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID", {":PandaID": 1})
+
+    def peek(self):
+        return 1
+"""
+
+PROCESSOR = """\
+import subprocess
+
+from pandaserver.asyncprocess import dc_handlers
+
+READ = "read"
+
+
+def _handle_grep(row, tb, log, machine):
+    subprocess.run(["rg", row])
+
+
+def _handle_read(row, tb, log, machine):
+    pass
+
+
+HANDLERS = {"grep": _handle_grep, READ: _handle_read, **dc_handlers.HANDLERS}
+"""
+
+DC_HANDLERS = """\
+import functools
+
+_NAMES = ("pin", "retire")
+
+
+def _handle(name, row, tb, log, machine):
+    pass
+
+
+HANDLERS = {f"dc_{name}": functools.partial(_handle, name) for name in _NAMES}
+"""
+
+CHANGING = {
+    **FILES,
+    "server/panda.py": SERVER.replace(
+        "from pandaserver.api.v1 import job_api as job_api_v1\n",
+        "from pandaserver.api.v1 import job_api as job_api_v1\nfrom pandaserver.api.v1 import ops_api as ops_api_v1\n",
+    ).replace(
+        '"job": {"module": job_api_v1, "allowed_methods": []},\n',
+        '"job": {"module": job_api_v1, "allowed_methods": []},\n'
+        '            "ops": {"module": ops_api_v1, "allowed_methods": []},\n',
+    ),
+    "api/v1/ops_api.py": OPS_API,
+    "taskbuffer/store.py": STORE,
+    "asyncprocess/processor.py": PROCESSOR,
+    "asyncprocess/dc_handlers.py": DC_HANDLERS,
+}
+
+
+def test_an_endpoint_says_what_it_changes_beside_the_tables_and_which_holes_may_hide_a_change(
+    tmp_path: Path,
+) -> None:
+    """``touch`` changes a file's times (``callfacts.change``).  ``clean``'s three calls on a parameter no one
+    declares are holes, bounded by their names as the reach record bounds a mover's: ``tidy`` may change rows,
+    ``Store.tidy`` deletes them; no ``peek`` of the corpus changes anything; a parameter called has no name."""
+    by_route = {one.route: one for one in _build(tmp_path, files=CHANGING).endpoints}
+    api, store = f"{PACKAGE}/api/v1/ops_api.py", f"{PACKAGE}/taskbuffer/store.py"
+
+    assert [
+        (one.kind, one.callee, one.function, one.line)
+        for one in by_route["ops/touch"].changes
+    ] == [("file", "os.utime", f"{api}::touch", 5)]
+    assert by_route["ops/touch"].hole_bounds == []
+    assert [
+        (one.at, one.callee, one.bound, one.through)
+        for one in by_route["ops/clean"].hole_bounds
+    ] == [
+        (f"{api}::clean:9", "keeper.tidy", HOLE_MAY_CHANGE, [f"{store}::Store.tidy"]),
+        (f"{api}::clean:10", "keeper.peek", HOLE_CLOSED, []),
+        (f"{api}::clean:11", "keeper", HOLE_OPEN, []),
+    ]
+    assert by_route["ops/clean"].changes == by_route["job/get_status"].changes == []
+
+
+def test_the_async_requests_handlers_are_read_off_the_daemons_table_as_endpoints_are(
+    tmp_path: Path,
+) -> None:
+    """``processor.HANDLERS``: a literal key, a name the module binds to a text, and another module's table spread
+    in, whose keys a comprehension makes over a tuple and whose values are ``functools.partial`` of one function.
+    Each request type is a record of its own, read as an endpoint is."""
+    handled = _build(tmp_path, files=CHANGING).handlers
+    asynced = f"{PACKAGE}/asyncprocess"
+
+    assert [(one.route, one.version, one.function) for one in handled] == [
+        ("async/grep", "async", f"{asynced}/processor.py::_handle_grep"),
+        ("async/read", "async", f"{asynced}/processor.py::_handle_read"),
+        ("async/dc_pin", "async", f"{asynced}/dc_handlers.py::_handle"),
+        ("async/dc_retire", "async", f"{asynced}/dc_handlers.py::_handle"),
+    ]
+    assert [(one.kind, one.callee) for one in handled[0].changes] == [
+        ("process", "subprocess.run")
+    ]
 
 
 def test_an_endpoint_says_where_its_calls_may_go_where_no_edge_says(
