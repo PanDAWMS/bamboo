@@ -1651,6 +1651,16 @@ def _of_mover(run, owner: str) -> bool:
     return m is None or m[1] == owner.split("::")[-1]
 
 
+def _the_arm_taken(j, arms: set[int]):
+    """S2's way for a pass whose judgement chose nothing: the one positive verdict on an arm, where every other
+    positive is an exit.  One call goes through the arm and then leaves by an exit (updateJobStatus 242, then the
+    return at 496 its "done" proves), so an arm and an exit are no two ways; an exit before the arm is a ``continue``
+    the call came back from.  None where no arm, or more than one, is positive."""
+    positive = [v for v in j.verdicts if v.kind == "positive"]
+    taken = [v for v in positive if v.line in arms]
+    return taken[0] if len(taken) == 1 and len(positive) > 1 else None
+
+
 def _number(value):
     try:
         return float(value)
@@ -3547,6 +3557,10 @@ class Rerun:
             self.say(f"-- pass {n}: {p.first} .. {p.last}, {len(p.records)} record(s); printed {self._printed(env)}")
             j = judge([Candidate(rel, func, lines, run=p)], {p.log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
             self.say(j.report(p))
+            if j.chosen is None and (arm := _the_arm_taken(j, {a.line for a in q.arms})) is not None:
+                j.chosen = arm
+                self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
+                         f"{sorted(v.line for v in j.verdicts if v.kind == 'positive' and v is not arm)} are where it left after")
             chosen.append(self.pick(f"which way pass {n} went", j))
             envs.append(env)
         taken = {v.line for v in chosen}

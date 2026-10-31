@@ -5445,6 +5445,142 @@ def test_a_rows_prefix_is_read_without_its_leading_blanks_which_the_records_cut_
                    "another method's tag": False}
 
 
+def test_a_row_shorter_than_min_proof_proves_only_as_its_whole_message_no_other_function_can_print_there(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(
+        textwrap.dedent(
+            """
+            class M:
+                def activateJob(self):
+                    tmp_log.debug("start")
+
+                def configurator_read_panda_sites(self):
+                    tmp_log.debug("done")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, printed, rows
+
+            own = "activateJob\\\\ <\\\\ PandaID=.*?\\\\ >\\\\ "
+            # configurator_read_panda_sites's comment names configurator_read_sites: both write its mark
+            shared = "configurator_read_sites\\\\ <\\\\ .*?\\\\ >\\\\ "
+            prints = lambda owner, prefix, pattern, logs=("j.log",), basis="logger": N(
+                owner=owner, statements=[N(rows=[N(prefix=prefix, pattern=pattern)], log_files=list(logs), log_files_basis=basis)])
+            base = [prints("pandaserver/m.py::M.activateJob", own, "start"),
+                    prints("pandaserver/m.py::M.configurator_read_panda_sites", shared, "done"),
+                    prints("pandaserver/n.py::N.configurator_read_sites", shared, "done"),
+                    # a logger whose mark the map cannot spell (the adder's), in another log
+                    prints("pandaserver/a.py::A.run", ".*?\\\\ ", "start", logs=("other.log",))]
+
+            def proves(name, prefix, text, token, message, cut=False, also=()):
+                fragment = N(function_prints=base + list(also))
+                mapdump.fragment = lambda: fragment
+                row = object.__new__(rows.Row)
+                row.map_prefixes, row.map_patterns, row.compiled = [prefix] if prefix else [], [text], {}
+                row.stmt = N(lineno=3)
+                fn = N(rel="pandaserver/m.py", node=rows.functions("pandaserver/m.py", name)[0])
+                run = N(records=[N(token=token, text=message, cut=cut)], log=N(name="j.log"))
+                sn = rows.Seen(fn, run, "map", {3: [(0, len(text), "map")]}, {3: [0]})
+                return [sn.proves(row, 0, len(text)), sn.proven(row), printed._proven_hits(sn, row)]
+
+            mark = "activateJob < PandaID=1 >"
+            start = lambda **k: proves("activateJob", own, "start", mark, "start", **k)
+            # calculateRWwithPrio_JEDI makes its logger with two tags: the map gives its rows no prefix
+            marks_on_paths = lambda **k: prints("pandaserver/c.py::C.calculateRWwithPrio_JEDI", "", "start", **k)
+            got = {
+                "its whole message, no other function's line there": start(),
+                "inside another word": proves("activateJob", own, "start", mark, "restart"),
+                "a record the search cut": start(cut=True),
+                "another function's mark": proves("activateJob", own, "start", "getJobs < PandaID=1 >", "start"),
+                "a mark two functions write": proves("configurator_read_panda_sites", shared, "done",
+                                                     "configurator_read_sites < 2026-10-31/09:00:00 >", "done"),
+                "a logger with marks on its paths, in the log": start(also=[marks_on_paths()]),
+                "a logger with marks on its paths, in another log": start(also=[marks_on_paths(logs=("other.log",))]),
+                "lines the map does not place": start(also=[marks_on_paths(logs=(), basis="module")]),
+                "a row of holes alone": start(also=[prints("pandaserver/c.py::C.dump", "", "")]),
+                "another text with no prefix, in the log": start(also=[prints("pandaserver/c.py::C.dump", "", "done")]),
+                "a row with no prefix": proves("activateJob", "", "start", mark, "start"),
+                "a row of MIN_PROOF": proves("activateJob", "", "a long row", mark, "in a long row too"),
+            }
+            rows.PREFIX = False
+            got["prefixes not read"] = start()
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    yes, no = [True, True, 1], [False, False, 0]
+    assert got == {"its whole message, no other function's line there": yes, "inside another word": no,
+                   "a record the search cut": no, "another function's mark": no, "a mark two functions write": no,
+                   "a logger with marks on its paths, in the log": no, "a logger with marks on its paths, in another log": yes,
+                   "lines the map does not place": no, "a row of holes alone": yes,
+                   "another text with no prefix, in the log": yes, "a row with no prefix": no,
+                   "a row of MIN_PROOF": yes, "prefixes not read": no}
+
+
+def test_s2_takes_the_one_positive_arm_as_a_passs_way_and_the_positive_exits_as_where_it_left_after(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun, which_ran
+
+            # arms at 3 and 7, exits at 4 and 5 (updateJobStatus: the write at 242, then the return at 496)
+            node = ast.parse("def f():\\n    if a:\\n        x = 1\\n        return 1\\n    return 2\\n    if b:\\n        x = 2\\n").body[0]
+            fn = N(node=node, owner="p/j.py::f", name="f")
+            run = N(describe=lambda: "the run", token="f < PandaID=1 >")
+            one = N(first="2026-10-29 08:23:18,275", last="2026-10-29 08:23:18,288", records=[0, 1], log=N(name="j.log"))
+            rerun.R.function = lambda rel, func, lines: fn
+            rerun.R.passes = lambda fn, run, mode: ([one], "1 pass")
+            rerun.R.seen = lambda fn, run, mode: None
+            rerun.stable_holes = lambda *a, **k: None
+            rerun.class_of = lambda fn: None
+            verdict = lambda line, kind: which_ran.Verdict(which_ran.Candidate("p/j.py", "f", [line]), line, kind)
+
+            def way(kinds):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.hop, r.hand, r.hand_used = [], "", {}, []
+                r.opened, r.ends, r.branches = [], [], []
+                r.mode, r.decide, r.data, r.args = "map", "positive", {"statuslog": {"states": []}}, N(observed="running")
+                r.logs = N(needs_window=False, log=lambda name, key: N(covers=("t0", "t1")))
+                r.runs = lambda key, logs, asking, owners: {"j.log": [run]}
+                r.base_env = lambda at=None: N(values={})
+                rerun.judge = lambda *a, **k: which_ran.Judgement([verdict(l, k) for l, k in kinds.items()], None, "undecided", None)
+                arms = [rerun.Arm(3, ["x"], []), rerun.Arm(7, ["y"], [])]
+                try:
+                    got = r.passes(rerun.Passes("p/j.py::f", ["j.log"], arms, "1", None)).exit_line
+                except rerun.Stop as e:
+                    got = str(e)
+                return [got, [l.strip() for l in r.lines if "the way pass" in l]]
+
+            print(json.dumps({
+                "an arm and an exit": way({3: "positive", 4: "positive", 5: "kept", 7: "excluded"}),
+                "an arm and two exits": way({3: "positive", 4: "positive", 5: "positive", 7: "kept"}),
+                "two arms": way({3: "positive", 4: "positive", 7: "positive"}),
+                "exits alone": way({3: "kept", 4: "positive", 5: "positive"}),
+                "the arm alone, not chosen": way({3: "positive", 4: "kept"}),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    stop = ["S2: which way pass 1 went", []]
+    assert got == {
+        "an arm and an exit": [3, ["the way pass 1 went is arm 3: the positive exit(s) [4] are where it left after"]],
+        "an arm and two exits": [3, ["the way pass 1 went is arm 3: the positive exit(s) [4, 5] are where it left after"]],
+        "two arms": stop,
+        "exits alone": stop,
+        "the arm alone, not chosen": stop,
+    }
+
+
 def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_those_not_read(tmp_path):
     out = _ok(
         _run(
