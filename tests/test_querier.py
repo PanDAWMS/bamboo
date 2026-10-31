@@ -3421,6 +3421,66 @@ def test_the_run_holding_most_rows_reads_each_run_once_and_each_rows_patterns_on
     assert json.loads(out.splitlines()[-1]) == ["b.log", {"seen": 2, "regex": 3}, 3, True, [1, 2]]
 
 
+def test_runs_of_a_key_try_its_pattern_only_on_a_message_or_mark_holding_the_keys_text(tmp_path):
+    log = tmp_path / "panda-x.log"
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID={}> {}\n"
+    log.write_text(
+        stamp.format(0, 7, "starting") + stamp.format(1, 8, "other") + stamp.format(2, 8, "about 7 too")
+        + stamp.format(3, 8, "no 17 here")
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            f"""
+            import json
+            from bamboo.querier import records as Rec
+            from bamboo.querier.records import read_log, runs_for
+
+            searched, keyed = [], Rec.keyed
+            class Counted:
+                def __init__(self, pattern):
+                    self.pattern = pattern
+                def search(self, text):
+                    searched.append(text)
+                    return self.pattern.search(text)
+            Rec.keyed = lambda key: Counted(keyed(key))
+            runs = runs_for(read_log({str(log)!r}), "7")
+            print(json.dumps([[(r.token, [x.lineno for x in r.records], [x.lineno for x in r.found_by]) for r in runs], searched]))
+            """,
+        )
+    )
+    runs, searched = json.loads(out.splitlines()[-1])
+    # the same runs as the pattern alone finds (17 is not the key 7), the pattern tried only where "7" is written
+    assert runs == [["<PandaID=7>", [1], [1]], ["<PandaID=8>", [2, 3, 4], [3]]]
+    assert searched == ["<PandaID=7>", "about 7 too", "no 17 here"]
+
+
+def test_the_statement_at_a_line_is_the_innermost_the_first_of_equal_depth_and_the_function_is_walked_once(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from bamboo.codemap.panda import pathcond
+            from bamboo.querier import rows as R
+
+            fn = ast.parse("def f(x):\\n    a = 1; b = 2\\n    if x: y = 3\\n    return a\\n").body[0]
+            pathcond.attach_parents(fn)
+            walks, own_nodes = [0], R.own_nodes
+            def counted(root):
+                walks[0] += 1
+                return own_nodes(root)
+            R.own_nodes = counted
+            got = [R.statement_at(fn, line) for line in (1, 2, 3, 4, 5, 3, 2)]
+            print(json.dumps([[None if s is None else ast.unparse(s) for s in got], walks[0]]))
+            """,
+        )
+    )
+    # not the def itself; of two on a line, the one own_nodes meets first (its stack takes the later); the if's body,
+    # not the if; nothing where none starts -- and one walk of the function for every line asked
+    assert json.loads(out.splitlines()[-1]) == [[None, "b = 2", "y = 3", "return a", None, "y = 3", "b = 2"], 1]
+
+
 # activateJob, cut down: f prints its files' UPDATE alike in both arms (92 and 124); g's other arm prints another text
 _ALIKE = """
 def f(self, job, ok):

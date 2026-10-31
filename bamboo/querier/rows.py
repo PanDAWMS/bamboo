@@ -111,13 +111,21 @@ def own_nodes(root: ast.AST) -> Iterable[ast.AST]:
 
 
 def statement_at(func: ast.AST, line: int) -> ast.stmt | None:
-    """The innermost statement of *func* that starts on *line*."""
-    found = None
-    for node in own_nodes(func):
-        if isinstance(node, ast.stmt) and node.lineno == line and node is not func:
-            if found is None or _depth(node) > _depth(found):
-                found = node
-    return found
+    """The innermost statement of *func* that starts on *line* (the first in ``own_nodes``' order of equal depth).
+
+    The function's statements are indexed by line once and the index kept on its node, as ``pathcond`` keeps each
+    node's parent: ``which_ran.rows_around`` asks for a pair of lines at a time, and walked the whole function anew
+    for each (superStatus 53354352: 64% of its time)."""
+    index = getattr(func, "statements_at", None)
+    if index is None:
+        index = {}
+        for node in own_nodes(func):
+            if isinstance(node, ast.stmt) and node is not func:
+                found = index.get(node.lineno)
+                if found is None or _depth(node) > _depth(found):
+                    index[node.lineno] = node
+        func.statements_at = index  # type: ignore[attr-defined]
+    return index.get(line)
 
 
 def _depth(node: ast.AST) -> int:
