@@ -3066,6 +3066,89 @@ def test_a_candidates_must_rows_stop_where_a_traceback_of_its_run_shows_the_call
     assert got["caught"][:2] == [[6], "excluded"] and "rule 4: must row(s) [5] not in the run" in got["caught"][2]
 
 
+# activateJob, cut down: f prints its files' UPDATE alike in both arms (92 and 124); g's other arm prints another text
+_ALIKE = """
+def f(self, job, ok):
+    self.logger.debug("activating the job now")
+    if ok:
+        job.jobStatus = "activated"
+        self.logger.debug(f"UPDATE ATLAS_PANDA.filesTable4 SET {job.changes} WHERE row_ID=:row_ID")
+    else:
+        job.modificationTime = 1
+        self.logger.debug(f"UPDATE ATLAS_PANDA.filesTable4 SET {job.changes} WHERE row_ID=:row_ID")
+    self.logger.debug("finished activating the job")
+
+
+def g(self, job, ok):
+    self.logger.debug("activating the job now")
+    if ok:
+        job.jobStatus = "activated"
+        self.logger.debug(f"UPDATE ATLAS_PANDA.filesTable4 SET {job.changes} WHERE row_ID=:row_ID")
+    else:
+        job.modificationTime = 1
+        self.logger.debug(f"UPDATE ATLAS_PANDA.jobsDefined4 SET {job.changes} WHERE PandaID=:PandaID")
+    self.logger.debug("finished activating the job")
+"""
+
+
+def test_a_row_proves_its_arm_only_by_a_record_no_other_row_of_its_function_prints_alike(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_ALIKE)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "x.log").write_text(
+        stamp.format(0, "activating the job now")
+        + stamp.format(1, "UPDATE ATLAS_PANDA.filesTable4 SET modificationTime=:modificationTime WHERE row_ID=:row_ID")
+        + stamp.format(2, "finished activating the job")
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, judge
+
+            R.ROWS_FROM = "walk"
+            run, = runs_for(read_log("x.log"), "1")
+            got = {}
+            for func, line in (("f", 5), ("g", 16)):
+                c = Candidate("pandaserver/a.py", func, [line], [run.log.name], run=run)
+                v, = judge([c], {run.log.name: [run]}, question_run=run).verdicts
+                got[func] = [v.kind, v.reasons]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # f's other arm prints the same text: the record is either arm's, and proves neither
+    assert got["f"][0] != "positive", got["f"]
+    assert not any("print only on a path through it" in r for r in got["f"][1])
+    # g's other arm prints another text: the record is the arm's own
+    assert got["g"] == ["positive", ["row(s) [17] print only on a path through it"]]
+
+
+def test_h2_reads_a_window_in_one_run_only_where_it_is_the_one_run_of_one_log_at_it(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.rerun import _question_run
+
+            two_day, own, other = "prepareTasksToBeFinished_JEDI", "updateTask_JEDI", "panda-other"
+            print(json.dumps([
+                _question_run({"panda-JediDBProxy.log": [own]}),
+                _question_run({"panda-JediDBProxy.log": [two_day, own]}),
+                _question_run({"panda-JediDBProxy.log": [own], "panda-DBProxy.log": [other]}),
+                _question_run({}),
+            ]))
+            """,
+        )
+    )
+    # the row's second is no exception: a mark spanning days covers it beside the pass that wrote
+    assert json.loads(out.splitlines()[-1]) == ["updateTask_JEDI", None, None, None]
+
+
 # the adder's process_job_report, cut down: 416 binds the job's status from self.job_status, 441 sets it failed
 _ADDER = """
 class Adder:

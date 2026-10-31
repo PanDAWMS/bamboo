@@ -1479,6 +1479,20 @@ def _overlaps(run, window: Window) -> bool:
     return run.first[:19] <= window[1] and run.last[:19] >= window[0]
 
 
+def _question_run(at: dict[str, list]):
+    """The run H2's question is read in, of *at* (log -> the key's runs at the window): the one run of one log, or
+    None, and each candidate is judged on its own run.  Runs in more than one log: the machines' clocks are not known
+    finer than a second against the database's, so no run is the question's until the judge picks the candidate that
+    ran (Fr1, 2026-10-14) -- taking the first would take the asker's order of the logs, not the case's.  Several runs
+    of one log: a window can hold several passes of the key, and so can the row's second -- a mark that spans days
+    covers it as well as the pass that wrote (the 'done' second of MR-T-53354352: a two-day
+    prepareTasksToBeFinished_JEDI run and updateTask_JEDI's own)."""
+    if len(at) != 1:
+        return None
+    (runs,) = at.values()
+    return runs[0] if len(runs) == 1 else None
+
+
 def _of_mover(run, owner: str) -> bool:
     """Whether *run* can be a run of the mover *owner*: a mark that names a method (a DB proxy's tagged logger,
     ``getJobs < SITE 2026-01-01T00:00:00 >``) is one call of that method, so it is the mover's only when the method is
@@ -2215,8 +2229,7 @@ class Rerun:
             for p in maybe:
                 self.say(f"  may have written: {p.arm} ({'; '.join(p.premises)})")
             return maybe
-        # as _wrote_at: runs in several logs, or several in a window, are each judged on their own; else the one
-        question = None if len(at) != 1 or (lo != hi and len(next(iter(at.values()))) > 1) else next(iter(at.values()))[0]
+        question = _question_run(at)
         if question is not None:
             self.say(f"the run: {question.describe()}")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
@@ -2333,19 +2346,13 @@ class Rerun:
             self.say(f"  no run of {key} at {when}")
             return None
         self.need(f"a run of {key} at {when}", at)
-        if len(at) > 1:
-            # the row's second holds runs in more than one log, and the machines' clocks are not known finer than a
-            # second against the database's: no run is the question's until the judge picks the candidate that ran
-            # (Fr1, 2026-10-14).  Taking the first would take the asker's order of the logs, not the case's
-            question = None
-            self.say(f"runs of {key} at {when} in {len(at)} logs ({', '.join(at)}): each candidate is judged on its own run")
-        elif lo != hi and len(only := next(iter(at.values()))) > 1:
-            # a window, not the row's second, can hold several passes of the key in one log: the same holds
-            question = None
-            self.say(f"{len(only)} runs of {key} at {when} in {next(iter(at))}: each candidate is judged on its own run")
-        else:
-            (question, *_), = at.values()
+        question = _question_run(at)
+        if question is not None:
             self.say(f"the run: {question.describe()}")
+        elif len(at) > 1:
+            self.say(f"runs of {key} at {when} in {len(at)} logs ({', '.join(at)}): each candidate is judged on its own run")
+        else:
+            self.say(f"{len(next(iter(at.values())))} runs of {key} at {when} in {next(iter(at))}: each candidate is judged on its own run")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
         for c in cands:
             if any(name in c.log_files for name in at):

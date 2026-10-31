@@ -1158,7 +1158,11 @@ class Seen:
         return bool(self.hits.get(row.line))
 
     def proven(self, row: Row) -> bool:
-        return any(lit >= MIN_PROOF for _, lit, _ in self.hits.get(row.line, ()))
+        """Whether a record of the run is this row's, read at MIN_PROOF and by no other row of the function: a text
+        two rows print alike is either one's (activateJob's filesTable4 UPDATE, 92 in the arm that activates and
+        124 in the one that does not)."""
+        mine = set(self.unambiguous.get(row.line, ()))
+        return any(lit >= MIN_PROOF and i in mine for i, lit, _ in self.hits.get(row.line, ()))
 
     def single_call(self) -> bool:
         return all(len(v) <= 1 for v in self.unambiguous.values())

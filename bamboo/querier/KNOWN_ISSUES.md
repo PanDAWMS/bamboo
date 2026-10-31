@@ -841,11 +841,23 @@ is as it was before PC, and can name a guard whose flip alone would not move the
 JediTaskSpec.status at registered, rerefine and staged (TaskRefiner.runImpl), none of them in a case of mine
 (2026-10-25).
 
+An arm's guards are `pathcond.path_condition`'s, the tests of the `if`s enclosing it; S3 does not read what the map's
+`pathcond.enclosing_guards` adds (an early exit above the arm, an `except` around it).  So an arm after an early
+return the pass took, or one in a handler, shows no guard made false, and S3 stops at "every arm has a guard the
+passes made false" -- the need it could not meet, not a claim (records-cut, 7a05464: MJ-merging-stuck's
+check_output_file_metadata 200 / 209 after the return at 181, and parse_job_output_report 820 in its handler).  And a
+pass that leaves a loop at its terminator is read as leaving at that exit: setupper's assign_dispatch_data_blocks
+walks `self.jobs + [None]` and leaves at 324 (`if job is None: break`) after every job, so S2's "left by 324" and S3's
+{'job is None': True} are the call's, not the key's iteration (the investigator's round 2, 2026-10-31).  Neither
+gives a wrong answer: S3 stops.
+
 *Shows:* stopped: "the if whose test is '<guard>'" for a guard with no test above the arm; a marked guard in an arm's
 "needs [...]" and never in "false in the passes".
 *Revisit:* when S3 must go on from such a guard: the map would record each entry's place (its `if`'s line, or the
 replacing write's, and for a callee's test the method and how its names map to the caller's); for an `[at N]`
-entry, when a reader holds a name's value at a line rather than for the whole pass.
+entry, when a reader holds a name's value at a line rather than for the whole pass.  S3 to read enclosing_guards and
+to say its stop as the need it is (promised to the map, 2026-10-31); a loop's terminator, when S2 reads a key's
+iteration rather than the call.
 
 ### K41. P reads the arm's own function's rows, by what a call is handed, and a positive says the arm ran
 
@@ -880,6 +892,28 @@ no row can tell.
 standing does not write it" for a positive of the second P.
 *Revisit:* when a pass's runs of a called function's log are read as the caller's (K21's join, inside the call); when
 the map holds a call's write conditions; when RD lands.
+
+### K42. A record two rows print alike proves neither, and rule 6 reads a caller's guard on any object of the class
+
+`rows.Seen.proven` counts a record only where the function reads it with that row alone (`Seen.unambiguous`, after
+`rows.claim`): activateJob prints its files' UPDATE alike at 92 (in the arm that activates) and 124 (in the one that
+does not), and such a record had made 71 positive (the investigator's round 2, 2026-10-31).  The record proves
+neither row even where the other's path is ruled out on its own, or its place in the run rules the other out:
+parse_job_output_report prints "parse_job_output_report end" at 750 (before the early return 751) and at 966.  On
+records-cut (out/pv1) MJ-merging-stuck and MJ-transferring-stuck lose 967's positive, though 751 is excluded by rule 4
+and the record follows rows 869-873, which 750 cannot follow; those branches stop at S2.
+
+Rule 6 (`which_ran.rewriter`) solves the callers' guards too (`callers_guards`) and reads `<x>.<attr>` in them as the
+key's object whatever x is: archiveJob 1783's `job.jobStatus == 'finished'` tests the merge job, while
+updateUnmergedJobs 1236 writes the jobs it merged.  On records-cut before pv1 it excluded 1236 in MJ-merging-late (the
+key 7390523881, the merge job 7390910703).  With the row's second read run by run (pv1) the env no longer settles
+that guard there and 1236 is positive; the defect is not fixed.
+
+*Shows:* "row(s) [..] print only on a path through it" names only rows a record is read by alone; "rule 6: reached
+only when <x>.<attr> is already ..." with a caller's guard.
+*Revisit:* when an ambiguous record can be given to the one row the run's order or another rule leaves (P's order
+check reads rows read alone too); rule 6, when the map says which object a caller's guard tests against the callee's
+argument.
 
 ## The walks (`asked.py`)
 
