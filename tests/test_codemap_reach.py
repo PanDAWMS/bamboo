@@ -326,6 +326,30 @@ def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_
     assert row.settled == {"outside_returns_outside": 1}
 
 
+def test_what_json_makes_of_a_value_handed_it_is_a_builtin_inside_and_out(tmp_path):
+    """``json.loads(req_row["parameters"] or "{}")`` is a dict, a list or a scalar whatever the row is -- and so is
+    every value in it: ``params.get(k)`` on it, or on a value in it, is a builtin's method.  With an ``object_hook``,
+    the hook makes the values, and the call stays open."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "import json\n\n"
+            "class Cache:\n"
+            "    def get(self, key):\n"
+            "        pass\n\n"
+            "def read(row, hook):\n"
+            "    params = json.loads(row['parameters'] or '{}')\n"
+            "    params.get('a')\n"
+            "    params['b'].get('c')\n"
+            "    json.loads(row['meta']).get('d')\n"
+            "    hooked = json.loads(row['parameters'], object_hook=hook)\n"
+            "    hooked.get('e')\n"
+        ),
+    )
+
+    assert [hole.line for hole in record.rows["pkg/mod.py::read"].holes] == [13]
+
+
 
 def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):
     """``base_module``'s ``self.jedi_mb_proxy_dict: "PassiveProxies | None"``, assigned from a callable field's call no

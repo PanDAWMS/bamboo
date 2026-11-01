@@ -153,6 +153,9 @@ IMPLICIT_DUNDERS = callfacts.IMPLICIT_DUNDERS
 HOW_SETATTR = "setattr"
 
 _BUILTIN, _OUTSIDE, _QUEUE, _UNKNOWN = "builtin", "outside", "queue", "unknown"
+#: A builtin's detail for a value ``json.loads`` makes (:data:`callfacts.JSON_MAKERS`): a builtin, and every value
+#: inside it, and every method's result, a builtin too.
+_JSON = "a value json makes"
 #: What a binding read inside its own reading adds: nothing.  ``diag =
 #: re.sub(..., diag)`` beside ``diag: str`` is a str; the second binding
 #: says no more than the first.  Never an answer: a reading that finds
@@ -515,6 +518,8 @@ class _Receivers:
             )
             if library in _QUEUES:
                 return _QUEUE, ".".join(library)
+            if library in callfacts.JSON_MAKERS and not any(one.arg in callfacts.JSON_HOOKS for one in call.keywords):
+                return _BUILTIN, _JSON
             if isinstance(called, ast.Attribute):
                 receiver = self.of(file, func, called.value, depth + 1)
                 if receiver[0] in (_BUILTIN, _QUEUE):
@@ -549,6 +554,8 @@ class _Receivers:
     def _method_result(receiver: tuple[str, str], method: str) -> tuple[str, str]:
         """What a builtin's or a queue's method returns: one of what it holds, another of its type (a copy), or a builtin."""
         kind, held = receiver
+        if held == _JSON:
+            return receiver
         if kind == _QUEUE:
             return (
                 (_UNKNOWN, f"what {_a(held)} holds")
@@ -787,6 +794,8 @@ def _element(container: tuple[str, str]) -> tuple[str, str]:
     kind, detail = container
     if kind == _OUTSIDE:
         return _OUTSIDE, f"an element of {detail}"
+    if detail == _JSON:
+        return container
     if kind == _BUILTIN and detail in ("str", "bytes", "range"):
         return _BUILTIN, "str" if detail == "str" else ""
     if kind == _UNKNOWN:

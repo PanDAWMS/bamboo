@@ -350,6 +350,12 @@ FETCHES: dict[str, Rows] = {
 #: The cursor's count of the rows its statement ran on.
 ROW_COUNT = "rowcount"
 
+#: The standard library's functions that make a value of JSON's out of text, whatever they are handed -- a dict, a
+#: list, a str, an int, a float, a bool or None, and each value inside one of those --, by ``(module, name)``; and the
+#: keywords that hand them a function making other values, ``object_hook`` and the like.
+JSON_MAKERS = frozenset({("json", "loads"), ("json", "load")})
+JSON_HOOKS = frozenset({"object_hook", "object_pairs_hook", "cls", "parse_float", "parse_int", "parse_constant"})
+
 #: The standard library's classes whose ``put()`` hands a value to whoever ``get()``s it -- another thread, another
 #: process, another task -- by ``(module, name)``, and their methods putting and getting it.
 QUEUES = frozenset(
