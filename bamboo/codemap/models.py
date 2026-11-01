@@ -3329,6 +3329,16 @@ class EndpointHole(BaseModel):
         default_factory=list,
         description="``may_change``: the functions of the name that may, by :attr:`ReachNode.owner`.",
     )
+    held_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``closed`` on this endpoint's objects where the name may: the call is on a field of the object its "
+            "method runs on, and every object the endpoint's calls run it on was built -- ``file:line`` of each "
+            "construction -- with a function whose declared value fills the field with a builtin.  "
+            "``CachedObject.get``'s ``self.cachedObj.get(...)`` on the cache ``async_process_api`` builds with "
+            "``get_special_dispatch_params``, a ``tuple[bool, dict[str, Any]]`` whose dict the field keeps."
+        ),
+    )
 
 
 class Endpoint(BaseModel):

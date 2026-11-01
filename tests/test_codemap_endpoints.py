@@ -416,6 +416,92 @@ def test_an_endpoint_says_what_it_changes_beside_the_tables_and_which_holes_may_
     assert by_route["ops/clean"].changes == by_route["job/get_status"].changes == []
 
 
+CACHE = """\
+from typing import Any, Callable
+
+
+class CachedObject:
+    cachedObj: Any
+
+    def __init__(self, update_func: Callable[[], tuple[Any, Any]]) -> None:
+        self.cachedObj = None
+        self.updateFunc = update_func
+
+    def update(self) -> None:
+        tmp_stat, tmp_out = self.updateFunc()
+        if tmp_stat:
+            self.cachedObj = tmp_out
+
+    def get(self, *var: Any) -> Any:
+        self.update()
+        return self.cachedObj.get(*var)
+
+
+class Writer:
+    def get(self, key):
+        self.cur.execute("DELETE FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID", {":PandaID": 1})
+"""
+
+CACHED_API = """\
+from typing import Any
+
+from pandaserver.taskbuffer.cache import CachedObject
+
+params_cache: CachedObject = None
+any_cache: CachedObject = None
+
+
+def params() -> tuple[bool, dict[str, Any]]:
+    return True, {}
+
+
+def anything() -> tuple[bool, Any]:
+    return True, None
+
+
+def init(req):
+    global params_cache, any_cache
+    params_cache = CachedObject(params)
+    any_cache = CachedObject(anything)
+
+
+def allowed(req):
+    return params_cache.get("allow", [])
+
+
+def unsure(req):
+    return any_cache.get("allow", [])
+"""
+
+
+def test_a_hole_on_a_field_its_object_fills_with_a_builtin_is_closed_on_that_object(
+    tmp_path: Path,
+) -> None:
+    """``CachedObject.get`` calls ``self.cachedObj.get(*var)``, a hole the corpus's other ``get`` -- ``Writer``'s,
+    a delete -- may be.  The field holds what the function the object was built with returns, at its second slot:
+    ``allowed``'s cache is built with ``params``, a dict there, and is closed on it, said by the construction;
+    ``unsure``'s with ``anything``, declared ``Any``, may be ``Writer.get``."""
+    files = {
+        **CHANGING,
+        "api/v1/ops_api.py": CACHED_API,
+        "taskbuffer/cache.py": CACHE,
+    }
+    by_route = {one.route: one for one in _build(tmp_path, files=files).endpoints}
+    cache, api = f"{PACKAGE}/taskbuffer/cache.py", f"{PACKAGE}/api/v1/ops_api.py"
+
+    def bound(route: str) -> list[tuple[str, list[str], list[str]]]:
+        return [
+            (one.bound, one.through, one.held_by)
+            for one in by_route[route].hole_bounds
+            if one.callee == "self.cachedObj.get"
+        ]
+
+    assert bound("ops/allowed") == [(HOLE_CLOSED, [], [f"{api}:19"])]
+    assert bound("ops/unsure") == [
+        (HOLE_MAY_CHANGE, [f"{cache}::CachedObject.get", f"{cache}::Writer.get"], [])
+    ]
+
+
 def test_the_async_requests_handlers_are_read_off_the_daemons_table_as_endpoints_are(
     tmp_path: Path,
 ) -> None:

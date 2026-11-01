@@ -203,6 +203,26 @@ class _Reader:
             terms,
             bounds,
         )
+        self.objects = _Objects(code)
+
+    def _bounded(
+        self,
+        function: str,
+        hole: ReachHole,
+        nodes: list[Node],
+        into: dict[Node, list[tuple[Node, ReachCall]]],
+    ) -> EndpointHole:
+        """*hole* bounded by its callee's name (:class:`_Bounds`), or closed on the endpoint's objects
+        (:meth:`_Objects.held`)."""
+        bounded = self.bounds.of(function, hole)
+        if bounded.bound == HOLE_CLOSED:
+            return bounded
+        held = self.objects.held(function, hole, nodes, into)
+        if not held:
+            return bounded
+        return bounded.model_copy(
+            update={"bound": HOLE_CLOSED, "through": [], "held_by": held}
+        )
 
     def endpoint(
         self,
@@ -226,12 +246,16 @@ class _Reader:
                 [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
             )
         holes = {}
+        held_in: dict[tuple[str, int, str], list[Node]] = {}
         reached: dict[str, tuple[ReadSiteNode, list[tuple[str, str]]]] = {}
         for node in came:
             function, cls = node
             for hole in record.rows[function].holes:
                 if not hole.for_classes or cls in hole.for_classes:
                     holes.setdefault((function, hole.line, hole.callee), hole)
+                    held_in.setdefault((function, hole.line, hole.callee), []).append(
+                        node
+                    )
             for site in self.sites.get(function, ()):
                 reached.setdefault(site.name, (site, []))[1].append(node)
         fills = _Fills(record, code, came, owner, shut)
@@ -267,6 +291,7 @@ class _Reader:
                 )
             )
         functions = list(dict.fromkeys(function for function, _cls in came))
+        into = _into(record, came, shut)
         return Endpoint(
             route=route,
             version=version,
@@ -286,8 +311,9 @@ class _Reader:
             writes=[one for function in functions for one in code.writes(function)],
             changes=[one for function in functions for one in code.changes(function)],
             hole_bounds=[
-                self.bounds.of(function, hole)
-                for (function, _line, _callee), hole in holes.items()
+                self._bounded(function, hole, held_in[key], into)
+                for key, hole in holes.items()
+                for function in [key[0]]
             ],
         )
 
@@ -780,6 +806,316 @@ def _constant(
     ]:
         return held.get(caller, {}).get(value.id)
     return None
+
+
+class _Objects:
+    """A hole on a field of the object its method runs on, read per object: ``CachedObject.get`` calls
+    ``self.cachedObj.get(*var)``, the field filled from what the function the object was built with returns
+    (``tmp_stat, tmp_out = self.updateFunc()``, ``self.cachedObj = tmp_out``).  The reach record reads one row a
+    function, for every object; an endpoint reaches the method through its own calls, on objects it can name.
+    """
+
+    #: How far back through calls on ``self`` an object is followed to the call that names it.
+    DEPTH = 3
+
+    def __init__(self, code: _Code):
+        self.code, self.calls = code, code.calls
+        self.receivers = reach._Receivers(code.calls, None)
+
+    def held(
+        self,
+        function: str,
+        hole: ReachHole,
+        nodes: list[Node],
+        into: dict[Node, list[tuple[Node, ReachCall]]],
+    ) -> list[str]:
+        """``file:line`` of each construction of the objects the endpoint's calls run *function* on, where every one
+        fills the field the hole's call is made on with a builtin; ``[]`` where one does not, or is not read.
+
+        The field is read from the class's methods: set only to ``None`` or to what a call of another field returns
+        -- a slot of it, unpacked --, that field set only in ``__init__`` from a parameter.  Each object is read from
+        the call into the method -- back through calls on ``self`` in the class -- to its name's bindings, a local's
+        or a module's: ``None``, or a construction of the class, whose argument for that parameter names functions
+        each declared to return a builtin there."""
+        try:
+            called = ast.parse(hole.callee, mode="eval").body
+        except SyntaxError:
+            return []
+        if not (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Attribute)
+            and isinstance(called.value.value, ast.Name)
+            and called.value.value.id == "self"
+            and function in self.code.funcs
+        ):
+            return []
+        file, func = self.code.funcs[function]
+        owned = self.calls.types.method_class(file, func)
+        if owned is None:
+            return []
+        sources = self._sources(owned[1], called.value.attr)
+        init = _function_in(owned[1], "__init__")
+        if not sources or init is None:
+            return []
+        found: set[str] = set()
+        for node in nodes:
+            built = self._objects(node, owned[1], into, 0)
+            if not built:
+                return []
+            for where, scope, construction in built:
+                if not all(
+                    self._builtin(
+                        where, scope, construction, owned, init, parameter, slot
+                    )
+                    for parameter, slot in sources
+                ):
+                    return []
+                found.add(f"{where}:{construction.lineno}")
+        return sorted(found)
+
+    def _sources(
+        self, cls: ast.ClassDef, field: str
+    ) -> list[tuple[str, Optional[int]]]:
+        """``(parameter of __init__, slot)`` for each value the class sets *field* to other than ``None``: what the
+        function handed as the parameter returns, at the slot; ``[]`` where one is set any other way."""
+        found: list[tuple[str, Optional[int]]] = []
+        for method in _methods(cls):
+            for node in ast.walk(method):
+                if isinstance(node, (ast.AugAssign, ast.AnnAssign)) and _is_field(
+                    node.target, field
+                ):
+                    return []
+                if not isinstance(node, ast.Assign) or not any(
+                    _is_field(target, field) for target in node.targets
+                ):
+                    continue
+                if len(node.targets) != 1:
+                    return []
+                value = node.value
+                if isinstance(value, ast.Constant) and value.value is None:
+                    continue
+                returned = _returned_by_field(method, value)
+                parameter = (
+                    _init_parameter(cls, returned[0]) if returned is not None else None
+                )
+                if returned is None or parameter is None:
+                    return []
+                found.append((parameter, returned[1]))
+        return found
+
+    def _objects(
+        self,
+        node: Node,
+        cls: ast.ClassDef,
+        into: dict[Node, list[tuple[Node, ReachCall]]],
+        depth: int,
+    ) -> Optional[list[tuple[str, ast.AST, ast.Call]]]:
+        """``(file, scope, construction)`` of each object the closure's calls run *node*'s function on; ``None``
+        where one is not read."""
+        edges = into.get(node)
+        if not edges or depth > self.DEPTH:
+            return None
+        name = self.code.funcs[node[0]][1].name  # type: ignore[attr-defined]
+        found: list[tuple[str, ast.AST, ast.Call]] = []
+        for caller, call in edges:
+            file, func = self.code.funcs[caller[0]]
+            lines = set(call.lines or [call.line])
+            made = [
+                one
+                for one in ast.walk(func)
+                if isinstance(one, ast.Call)
+                and getattr(one, "lineno", 0) in lines
+                and isinstance(one.func, ast.Attribute)
+                and one.func.attr == name
+            ]
+            if not made:
+                return None
+            for one in made:
+                receiver = one.func.value  # type: ignore[attr-defined]
+                if isinstance(receiver, ast.Name) and receiver.id == "self":
+                    owned = self.calls.types.method_class(file, func)
+                    inner = (
+                        self._objects(caller, cls, into, depth + 1)
+                        if owned is not None and owned[1] is cls
+                        else None
+                    )
+                else:
+                    inner = self._built(file, func, receiver, cls)
+                if inner is None:
+                    return None
+                found.extend(inner)
+        return found
+
+    def _built(
+        self, file: str, func: ast.AST, receiver: ast.expr, cls: ast.ClassDef
+    ) -> Optional[list[tuple[str, ast.AST, ast.Call]]]:
+        """The constructions of *cls* a name's bindings are, a local's or its module's -- ``None`` bound beside them;
+        ``None`` where one is anything else."""
+        if not isinstance(receiver, ast.Name):
+            return None
+        local = [one for one in pathcond.bindings(func, receiver.id) if not one.nested]
+        module = self.calls.types.tree(file)
+        if local and not _declares_global(func, receiver.id):
+            sites = [(func, one.value) for one in local]
+        elif module is not None:
+            sites = [
+                (_scope_of(one.site, module), one.value)
+                for one in pathcond.bindings(module, receiver.id)
+                if not one.nested
+                or _declares_global(_scope_of(one.site, module), receiver.id)
+            ]
+        else:
+            return None
+        found: list[tuple[str, ast.AST, ast.Call]] = []
+        for scope, value in sites:
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue
+            if not isinstance(value, ast.Call):
+                return None
+            try:
+                placed = self.calls.callees(file, scope, value)
+            except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+                return None
+            if placed.unplaced or not any(
+                target.cls is cls and target.func.name == "__init__"  # type: ignore[attr-defined]
+                for target in placed.targets
+            ):
+                return None
+            found.append((file, scope, value))
+        return found or None
+
+    def _builtin(
+        self,
+        file: str,
+        scope: ast.AST,
+        construction: ast.Call,
+        owned: tuple[str, ast.ClassDef],
+        init: ast.AST,
+        parameter: str,
+        slot: Optional[int],
+    ) -> bool:
+        """Whether the function *construction* hands *parameter* is declared to return a builtin at *slot*."""
+        target = C.Target(owned[0], init, owned[1])
+        try:
+            handed = self.calls.handed(C.CallSite(file, scope, construction), target)
+        except Exception:  # noqa: BLE001
+            return False
+        value = handed.get(parameter)
+        named = (
+            self.calls.named_callables(file, scope, value) if value is not None else ()
+        )
+        if not named:
+            return False
+        for one in named:
+            returns = getattr(one.func, "returns", None)
+            declared = (
+                C._slot_of(returns, slot)
+                if returns is not None and slot is not None
+                else returns
+            )
+            if (
+                declared is None
+                or self.receivers.annotation(one.file, declared)[0] != reach._BUILTIN
+            ):
+                return False
+        return True
+
+
+def _methods(cls: ast.ClassDef) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return [
+        one
+        for one in cls.body
+        if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _function_in(
+    cls: ast.ClassDef, name: str
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return next((one for one in _methods(cls) if one.name == name), None)
+
+
+def _is_field(target: ast.expr, field: str) -> bool:
+    return (
+        isinstance(target, ast.Attribute)
+        and target.attr == field
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    )
+
+
+def _field_called(value: Optional[ast.expr]) -> Optional[str]:
+    """The field ``self.<field>(...)`` calls."""
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "self"
+    ):
+        return value.func.attr
+    return None
+
+
+def _returned_by_field(
+    method: ast.AST, value: ast.expr
+) -> Optional[tuple[str, Optional[int]]]:
+    """``(field, slot)``: *value* is what ``self.<field>(...)`` returns, or the name its slot is unpacked to."""
+    field = _field_called(value)
+    if field is not None:
+        return field, None
+    if not isinstance(value, ast.Name):
+        return None
+    found = {
+        (_field_called(one.value), one.slot)
+        for one in pathcond.bindings(method, value.id)
+        if not one.nested
+    }
+    if len(found) != 1:
+        return None
+    field, slot = found.pop()
+    return (field, slot) if field is not None else None
+
+
+def _init_parameter(cls: ast.ClassDef, field: str) -> Optional[str]:
+    """The parameter of ``__init__`` the class sets *field* to, where it sets it nowhere else."""
+    init = _function_in(cls, "__init__")
+    found: set[str] = set()
+    for method in _methods(cls):
+        for node in ast.walk(method):
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, (ast.AugAssign, ast.AnnAssign))
+                else []
+            )
+            if not any(_is_field(target, field) for target in targets):
+                continue
+            if (
+                method is not init
+                or not isinstance(node, ast.Assign)
+                or not isinstance(node.value, ast.Name)
+                or node.value.id not in _parameters(method)
+            ):
+                return None
+            found.add(node.value.id)
+    return found.pop() if len(found) == 1 else None
+
+
+def _declares_global(scope: ast.AST, name: str) -> bool:
+    return any(
+        isinstance(node, ast.Global) and name in node.names for node in ast.walk(scope)
+    )
+
+
+def _scope_of(site: ast.AST, module: ast.Module) -> ast.AST:
+    """The function *site* is in, or the module."""
+    at: Optional[ast.AST] = getattr(site, "parent", None)
+    while at is not None and not isinstance(
+        at, (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        at = getattr(at, "parent", None)
+    return at if at is not None else module
 
 
 class _Bounds:
