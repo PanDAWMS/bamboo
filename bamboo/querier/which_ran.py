@@ -20,12 +20,14 @@ Every candidate comes out as one of four, with the rule that put it there:
   other way through (P, :mod:`bamboo.querier.printed`) -- read once more after
   every other verdict, where a call changes the subject to the observed value
   only through a writer of it not excluded (``printed.Reaching``);
-* **unexamined** -- no run to read it against: no log to hand, or the log does
-  not cover the time the question is about;
+* **unexamined** -- no run to read it against: no log to hand, the log does
+  not cover the time the question is about, or no pass of the candidate's
+  function at the window holds the key (:func:`passes_at`);
 * **kept** -- read, and nothing above decided it.
 
 The choice: one positive candidate; otherwise, when the list is complete and
-every other one is excluded, the one left (elimination).  ``--decide strict``
+every other one is excluded, the one left (elimination) -- unexamined too, in
+a window that holds the write itself (*holds_write*).  ``--decide strict``
 takes neither while anything is unexamined.
 
 P is read for every candidate, whatever else decided it: a candidate another
@@ -85,6 +87,95 @@ def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
     counts = [sum(1 for row in fn.rows if sn.proven(row)) for sn in (R.seen(fn, r, mode) for r in found)]
     best = max(counts)
     return found[counts.index(best)] if best else None
+
+
+def of_mover(run: Run, owner: str) -> bool:
+    """Whether *run* can be a run of the mover *owner*: a mark that names a method (a DB proxy's tagged logger,
+    ``getJobs < SITE 2026-01-01T00:00:00 >``) is one call of that method, so it is the mover's only when the method is
+    the mover's function -- a DB proxy's log holds every method's calls of the key (S1's rule, tmaeno 2026-10-13).  A
+    mark that names none (``< jediTaskID=1 >``, the adder's PandaID) may be any function's of the worker.  The name is
+    the tag's, which the method writes in its own comment: a comment copied from another method hides its runs."""
+    m = re.match(r"([A-Za-z_]\w*) <", run.token)
+    return m is None or m[1] == owner.split("::")[-1]
+
+
+def _at(run: Run, window: tuple[str, str]) -> bool:
+    return run.first[:19] <= window[1] and run.last[:19] >= window[0]
+
+
+def _key_through_call(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
+                      called_at: Callable[[R.Function, Candidate], list[str]] | None) -> str:
+    """A run of the key that ran inside one of *part*'s calls, said as where it is; '' for none.  *part* is a pass of
+    *fn* whose mark and records hold no key (``reactivatePendingTasks_JEDI < vo=atlas label=user ... >``), and the
+    inner run's mark does (``release_task_on_hold < jediTaskID=... >``): its function is the one the map's rows say
+    printed its key records (``rows.line_writers``), and *fn* must call on into it at a call the pass was inside
+    (:func:`inside_call`, on the machine both name: a log line names no process, so a concurrent thread's run in the
+    same seconds reads the same)."""
+    if called_at is None:
+        return ""
+    caller: R.Seen | None = None
+    for inner in (r for runs in logs.values() for r in runs):
+        if (inner.token == part.token or inner.machine != part.machine or not inner.found_by
+                or not (part.first <= inner.first and inner.last <= part.last)):
+            continue
+        owners = set.intersection(*(set(R.line_writers(r, inner.log.name)) for r in inner.found_by))
+        lines = R.print_lines(next(iter(owners))) if len(owners) == 1 else []
+        if not lines:
+            continue
+        owner = next(iter(owners))
+        callee = Candidate(owner.partition("::")[0], owner.rpartition("::")[2].rpartition(".")[2], lines[:1])
+        caller = caller or R.seen(fn, part, mode)
+        for site in called_at(fn, callee):
+            if inside_call(caller, inner, site) is not None:
+                return f"{inner.describe()}, inside the call at {site}"
+    return ""
+
+
+def holds_key(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
+              called_at: Callable[[R.Function, Candidate], list[str]] | None = None) -> bool:
+    """Whether *part*, a pass of *fn*, holds the key: in one of its records, or in a run of the key inside one of its
+    calls (:func:`_key_through_call`).  H2 judges a candidate (:func:`passes_at`) and S2 a mover's way
+    (``Rerun.passes``) only on such a pass: a poller's pass that never touched the row went its way for other rows
+    (KNOWN_ISSUES.md K47)."""
+    return bool(part.found_by) or bool(_key_through_call(fn, part, logs, mode, called_at))
+
+
+def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dict[str, list[Run]], mode: str,
+              called_at: Callable[[R.Function, Candidate], list[str]] | None = None) -> tuple[list[Run], list[str]]:
+    """``(passes, why the rest went)``: of the key's runs whose span holds *window*, the passes of *c*'s function the
+    window is in and that hold the key -- what *c* is judged on (KNOWN_ISSUES.md K47).
+
+    A run whose mark names another method is not *c*'s (:func:`of_mover`).  A run is cut into passes at the
+    function's entry row (``rows.entries``), the records before the first entry a pass of their own -- the log can
+    start inside one; a function with no entry row, or one pass, keeps the run whole.  A pass is at the window where
+    its span holds it, and it holds the key where one of its records does, or where a run of the key ran inside one
+    of its calls (:func:`_key_through_call`).  A mark that names no key spans every pass of a worker:
+    rescueUnLockedTasksWithPicked_JEDI's ``< vo=atlas label=user >`` on aipanda081 held 155 passes, the key in one at
+    19:11, and was read for a write at 13:09:14 that aipanda082's pass made."""
+    fn = R.function(c.rel, c.func, c.lines)
+    kept: list[Run] = []
+    why: list[str] = []
+    others: dict[str, int] = {}
+    for run in found:
+        where = f"{run.machine.split('.')[0] or run.log.name} {run.token!r}"
+        if not of_mover(run, c.owner):
+            method = run.token.partition(" <")[0]
+            others[method] = others.get(method, 0) + 1
+            continue
+        cuts = sorted({0, *R.entries(fn, run, mode), len(run.records)})
+        parts = [run] if len(cuts) == 2 else [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
+        at = [p for p in parts if _at(p, window)]
+        if not at:
+            why.append(f"{where}: none of its {len(parts)} pass(es) of {fn.name} is at the window")
+            continue
+        keyed = [p for p in at if holds_key(fn, p, logs, mode, called_at)]
+        if not keyed:
+            why.append(f"{where}: its pass at the window holds no record of the key, nor a run of it inside a call")
+            continue
+        kept += keyed
+    if others:
+        why.append(f"{sum(others.values())} run(s) under another method's mark ({', '.join(sorted(others))})")
+    return kept, why
 
 
 @dataclass
@@ -467,6 +558,7 @@ def judge(
     env: E.Env | None = None,
     complete: bool = True,
     called_at: Callable[[R.Function, Candidate], list[str]] | None = None,
+    holds_write: bool = False,
 ) -> Judgement:
     """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of every
     call from which it goes on there.  Given it, and no *question_run*, runs of the key in several logs are read as
@@ -490,7 +582,12 @@ def judge(
             # every log handed says why it holds no run of the candidate, in the candidate's order of its logs
             reasons: list[str] = []
             for name in to_hand:
-                found = [r for r in logs[name] if window is None or (r.first[:19] <= window[1] and r.last[:19] >= window[0])]
+                found = [r for r in logs[name] if window is None or _at(r, window)]
+                if found and window is not None:
+                    found, dropped = passes_at(c, found, window, logs, mode, called_at)
+                    if not found:
+                        reasons.append(f"{name}: no pass of the key at {window}: {'; '.join(dropped)}")
+                        continue
                 if found:
                     run = run_holding(c, found, mode)
                     if run is not None:
@@ -729,7 +826,9 @@ def judge(
         chosen, how = positives[0], "positive evidence"
     elif len(positives) > 1:
         how = f"{len(positives)} positive"
-    elif complete and len(left) == 1 and not unexamined:
+    elif complete and len(left) == 1 and (not unexamined or (holds_write and decide != "strict")):
+        # the one left wrote it: where it is unexamined, only in a window that holds the write itself (K47) -- a
+        # statuslog row asked is a guess at when it was written, and its next row is asked instead
         chosen, how = left[0], "elimination over a complete list"
     elif decide == "strict" and unexamined:
         how = f"strict: {len(unexamined)} unexamined"
@@ -738,7 +837,8 @@ def judge(
         chosen = in_run[0]
         how = f"elimination within the run the value changed in; {others} function(s) never placed in it are not excluded"
     elif left:
-        how = f"{len(left)} left: " + ", ".join(sorted({f"{v.candidate.func}:{v.line}" for v in left if v.kind != 'unexamined'}))
+        read = sorted({f"{v.candidate.func}:{v.line}" for v in left if v.kind != "unexamined"})
+        how = f"{len(left)} left: " + ", ".join(read) if read else f"{len(left)} left, all unexamined"
     notes = join_notes + [f"MAP: {m}" for m in sorted(map_findings)] + p_notes
     return Judgement(verdicts, chosen, how, bracket, notes, runs_of, question_run if joined else None)
 

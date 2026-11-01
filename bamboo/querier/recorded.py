@@ -487,7 +487,7 @@ class RecordedLogs:
         return log
 
 
-#: a DB proxy method's mark: the method's name, then its tag (``records.PREFIX``), as ``rerun._of_mover`` reads it
+#: a DB proxy method's mark: the method's name, then its tag (``records.PREFIX``), as ``which_ran.of_mover`` reads it
 _METHOD_MARK = re.compile(r"([A-Za-z_]\w*) <")
 
 

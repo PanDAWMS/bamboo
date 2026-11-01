@@ -328,7 +328,7 @@ def read_log(path: str) -> Log:
 
 #: (from, to) in the statuslog's form, ``YYYY-MM-DD HH:MM:SS``
 Window = tuple[str, str]
-#: the functions an asker reads runs of, by the name ``rerun._of_mover`` reads in a method's mark, each with the fixed
+#: the functions an asker reads runs of, by the name ``which_ran.of_mover`` reads in a method's mark, each with the fixed
 #: text its own rows below WARNING start with (``rows.mark_heads``; empty where one may start with a hole): its mark
 #: is asked for those rows and every line at WARNING and above
 Owners = Mapping[str, tuple[str, ...]]
@@ -363,7 +363,7 @@ class Logs(Protocol):
         self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
         strings: tuple[str, ...] = (),
     ) -> Log:
-        """*owners*: the functions the asker reads runs of, as ``rerun._of_mover`` names them, or None for any.
+        """*owners*: the functions the asker reads runs of, as ``which_ran.of_mover`` names them, or None for any.
         *strings*: what to ask for, where not the key alone (F3's marks holding the key)."""
         ...
 

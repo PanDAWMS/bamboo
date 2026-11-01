@@ -815,6 +815,9 @@ class Row:
     #: the files the map places this statement's lines in (``PrintStatement.log_files``, its logger followed); None
     #: where it does not place them (another ``log_files_basis``, no statement, ``ROWS_OWN_FILES=0``)
     log_files: list[str] | None = None
+    #: the map's rows of this statement (``PrintRow``, or the walk's ``SkeletonLine``), for what only the map reads:
+    #: a record read whole (:meth:`reads_whole`)
+    map_rows: list = field(default_factory=list, repr=False, compare=False)
     #: :meth:`patterns` per mode, made on the first ask: a row is built once per function (``_function``) and its
     #: patterns and shapes are not changed after, while ``matches`` asks for them once per record
     compiled: dict[str, list[tuple[re.Pattern[str], int, str]]] = field(default_factory=dict, repr=False, compare=False)
@@ -886,6 +889,14 @@ class Row:
                 best = (literal, source)
         return best
 
+    def reads_whole(self, record: Record) -> bool | None:
+        """Whether the map reads *record* as this row's line whole (``trace.reads_whole``: its mark, then its
+        message, anchored at both ends), not only a line holding its text: ``start`` finds ``start 3/10
+        jediTaskID=...`` too, which is another row's line.  None where none of the map's rows of it can say: no
+        capture, or a mark its logger may write that the map did not read."""
+        said = {trace.reads_whole(m, record.token, record.text) for m in self.map_rows}
+        return True if True in said else False if False in said else None
+
     def capture(self, record: Record) -> dict[str, str]:
         """Hole values in *record*, keyed by the expression each hole prints; none from a record the search cut."""
         if record.cut:
@@ -931,6 +942,13 @@ def _function_prints(owner: str):
     found = _GRAPH["loop"].run_until_complete(_GRAPH["map"].function_prints([owner]))
     _GRAPH[owner] = found.get(owner)
     return _GRAPH[owner]
+
+
+def print_lines(owner: str) -> list[int]:
+    """The lines of the print statements the map's ``FunctionPrintsNode`` of *owner* (``rel::Class.method``) holds,
+    in order: a line inside the function, for a reader holding only its owner (``line_writers``' answer)."""
+    found = _function_prints(owner)
+    return sorted(s.line for s in found.statements) if found is not None else []
 
 
 def _prints_of(owner: str, lines: Iterable[int] = ()):
@@ -1175,6 +1193,7 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
                 _capture_shapes(call.args[0], node, stmt),
                 _prefixes(mapped),
                 files_of.get(stmt.lineno) if OWN_FILES else None,
+                mapped,
             )
         )
     rows.sort(key=lambda r: r.line)
@@ -1390,11 +1409,21 @@ def entry_row(fn: Function) -> Row | None:
 
 
 def entries(fn: Function, run: Run, mode: str) -> list[int]:
-    """Indexes of the records in *run* that *fn*'s entry row reads: one per pass of *fn*."""
+    """Indexes of the records in *run* that the map reads as *fn*'s entry row whole (:meth:`Row.reads_whole`): one
+    per pass of *fn*.  The row's pattern finds more: the ``start`` of prepareTasksToBeFinished_JEDI finds its loop's
+    ``start 3/10 jediTaskID=...``, and TaskRefiner's runImpl's finds doRefine's ``start taskType=anal`` through the
+    same logger -- not a pass begun.  A record the map cannot read whole does not cut either: the passes it may begin
+    stay one (KNOWN_ISSUES.md K47)."""
+    return sorted(i for i, whole in _entry_reads(fn, run, mode) if whole)
+
+
+def _entry_reads(fn: Function, run: Run, mode: str) -> list[tuple[int, bool | None]]:
+    """Each record of *run* *fn*'s entry row finds, with whether the map reads it as the row's line whole."""
     entry = entry_row(fn)
     if entry is None:
         return []
-    return sorted(i for i, _, _ in seen(fn, run, mode).hits.get(entry.line, ()))
+    hits = seen(fn, run, mode).hits.get(entry.line, ())
+    return [(i, entry.reads_whole(run.records[i])) for i, _, _ in hits]
 
 
 def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
@@ -1402,14 +1431,22 @@ def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
 
     Records before the first entry are not a pass of *fn*: another function
     that shares the mark printed them, or the log starts inside a pass.  They
-    are counted in the word, not returned.
+    are counted in the word, not returned.  Whether the map can read the entry
+    row whole is the row's, not a record's (:meth:`Row.reads_whole` is None only
+    where none of its map rows has a capture and a mark read), so a run with a
+    record the map cannot read whole has no entry read whole: it is not split,
+    and the word counts those records.
     """
     entry = entry_row(fn)
     if entry is None:
         return [run], f"{fn.name} has no entry row: the run is not split"
-    starts = entries(fn, run, mode)
+    read = _entry_reads(fn, run, mode)
+    starts = sorted(i for i, whole in read if whole)
     if not starts:
-        return [run], f"entry row {entry.line} of {fn.name} is not in the run: the run is not split"
+        unread = sum(1 for _, whole in read if whole is None)
+        found = (f"is read whole at none of its {len(read)} record(s) in the run"
+                 + (f" ({unread} the map cannot read whole)" if unread else "")) if read else "is not in the run"
+        return [run], f"entry row {entry.line} of {fn.name} {found}: the run is not split"
     cuts = starts + [len(run.records)]
     parts = [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
     before = f"; {starts[0]} record(s) before the first are not a pass of it" if starts[0] else ""

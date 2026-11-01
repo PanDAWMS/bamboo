@@ -49,6 +49,9 @@ class Asking:
     why: str
     #: the strings to ask for, where not the key alone: F3's writers' marks holding the key (``rerun.key_marks``)
     strings: tuple[str, ...] = ()
+    #: the window holds the write itself: the value is the time its writer ran (:func:`value_now`), so a writer left
+    #: alone by elimination wrote there, whether a pass of it is read or not (KNOWN_ISSUES.md K47)
+    holds_write: bool = False
 
 
 def when(text: str) -> datetime.datetime:
@@ -107,7 +110,7 @@ def value_now(column: str, value: str) -> Asking:
     except ValueError:
         return Asking(None, None, f"{column}={value!r}, which its writers set to the time they run, is not a time")
     return Asking((t, t), None, f"{column}={value!r}, the time its writer ran: every writer of it writes the time it "
-                                f"runs (the last write), on every machine")
+                                f"runs (the last write), on every machine", holds_write=True)
 
 
 def lifetime(made: str | None, read: str | None, strings: tuple[str, ...]) -> Asking:
