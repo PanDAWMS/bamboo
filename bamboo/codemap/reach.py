@@ -97,6 +97,10 @@ ASSUMPTIONS: dict[str, str] = {
         "A call left open lands, if anywhere in the corpus, at a function of the corpus of its name: where none of "
         "those, nor anything they reach, writes the destination, the call writes none of it (MV 4, O1)."
     ),
+    "queue_given_back": (
+        "A value put back into the queue it was taken from hands no work on: whoever takes it next runs its own "
+        "(DBProxyPool's proxies, a child process kept in a queue, a lock's token)."
+    ),
 }
 
 #: What :meth:`ReachGraph.closure` reached: ``(owner, class)`` -> the node and the call it was reached from, ``None``
@@ -2389,6 +2393,7 @@ def graph(
                 _close(
                     row,
                     receivers,
+                    calls,
                     defined,
                     file,
                     func,
@@ -2480,9 +2485,88 @@ def _groups(
         yield [spelled], (one,)
 
 
+
+def _given_back(calls: C.Calls, file: str, func: ast.AST, call: ast.Call) -> bool:
+    """Whether the value *call* puts into a queue is one taken from that same queue (``queue_given_back``).
+
+    Taken in the same function -- ``i = self.childlock.get()`` ... ``self.childlock.put(i)`` -- or handed in by
+    every call of the function, each a value its caller took through a method of the same class that returns a get
+    of the queue: ``DBProxyPool.get()`` takes ``proxy = self.getProxy()``, which returns ``self.proxyList.get()``,
+    and gives it back with ``self.putProxy(proxy)``.  A queue the value came into some other way -- a process just
+    started, a message read, a request -- may carry work to whoever takes it, and is a hole (:data:`HOLE_QUEUE`).
+    """
+    queue = ast.unparse(call.func.value)  # type: ignore[attr-defined]
+    value = call.args[0] if call.args else next((one.value for one in call.keywords if one.arg == "item"), None)
+    if not isinstance(value, ast.Name):
+        return False
+    if value.id not in _parameters(func):
+        return _taken_from(func, value.id, queue)
+    owned = calls.types.method_class(file, func)
+    if owned is None or not queue.startswith("self."):
+        return False
+    target = C.Target(file, func, owned[1])
+    try:
+        sites = calls.callers(target)
+    except Exception:  # noqa: BLE001 -- no caller read is no caller known
+        return False
+    return bool(sites) and all(_handed_back(calls, site, target, value.id, owned, queue) for site in sites)
+
+
+def _handed_back(
+    calls: C.Calls, site: C.CallSite, target: C.Target, parameter: str, owned: tuple[str, ast.ClassDef], queue: str
+) -> bool:
+    """Whether *site* hands *parameter* a value its function took through a method of *owned* returning a get of
+    *queue*."""
+    try:
+        handed = calls.handed(site, target).get(parameter)
+    except Exception:  # noqa: BLE001
+        return False
+    if not isinstance(handed, ast.Name) or handed.id in _parameters(site.func):
+        return False
+    found = [one for one in pathcond.bindings(site.func, handed.id) if not one.nested]
+    if not found or any(not isinstance(one.value, ast.Call) or one.slot is not None for one in found):
+        return False
+    for one in found:
+        try:
+            placed = calls.callees(site.file, site.func, one.value)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            return False
+        if placed.unplaced or not placed.targets:
+            return False
+        for getter in placed.targets:
+            if getter.cls is not owned[1] or not _returns_taken(getter.func, queue):
+                return False
+    return True
+
+
+def _returns_taken(func: ast.AST, queue: str) -> bool:
+    """Whether every ``return`` of *func* gives back a value taken from *queue*."""
+    returns = [node for node in walk(func) if isinstance(node, ast.Return)]
+    return bool(returns) and all(
+        _is_get(one.value, queue) or (isinstance(one.value, ast.Name) and _taken_from(func, one.value.id, queue))
+        for one in returns
+    )
+
+
+def _taken_from(func: ast.AST, name: str, queue: str) -> bool:
+    """Whether every binding of *name* in *func* is a get of *queue*."""
+    found = [one for one in pathcond.bindings(func, name) if not one.nested]
+    return bool(found) and all(one.slot is None and _is_get(one.value, queue) for one in found)
+
+
+def _is_get(value: Optional[ast.expr], queue: str) -> bool:
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr in _GETS
+        and ast.unparse(value.func.value) == queue
+    )
+
+
 def _close(
     row: _Row,
     receivers: _Receivers,
+    calls: C.Calls,
     defined: set[str],
     file: str,
     func: ast.AST,
@@ -2507,7 +2591,10 @@ def _close(
     if reads_receiver and isinstance(called, ast.Attribute):
         kind, detail = receivers.of(file, func, called.value)
         if kind == _QUEUE and called.attr in _PUTS:
-            row.hole(call, HOLE_QUEUE, for_classes)
+            if _given_back(calls, file, func, call):
+                row.settle(call, "queue_given_back")
+            else:
+                row.hole(call, HOLE_QUEUE, for_classes)
             return
         if reason == C.UNPLACED_OUTSIDE or kind in (_BUILTIN, _QUEUE):
             return

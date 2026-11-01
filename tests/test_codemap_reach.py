@@ -239,6 +239,69 @@ def test_putting_a_value_on_a_queue_is_a_hole(tmp_path):
     assert [(hole.line, hole.why) for hole in holes] == [(8, reach.HOLE_QUEUE)]
 
 
+def test_a_value_given_back_to_the_queue_it_was_taken_from_is_no_hole(tmp_path):
+    """``DBProxyPool``: ``get()`` takes a proxy with ``getProxy``, which returns ``self.proxyList.get()``, and gives it
+    back with ``putProxy``; a token taken and put back in one function is the same.  The next taker runs its own
+    work -- but a value from elsewhere, here a name handed in, may carry work to it."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "import queue\n\n"
+            "class Proxy:\n"
+            "    def wake(self):\n"
+            "        pass\n\n"
+            "class Pool:\n"
+            "    def __init__(self):\n"
+            "        self.proxyList: queue.Queue[Proxy] = queue.Queue()\n"
+            "        self.locks: queue.Queue[int] = queue.Queue()\n\n"
+            "    def getProxy(self) -> Proxy:\n"
+            "        proxy = self.proxyList.get()\n"
+            "        proxy.wake()\n"
+            "        return proxy\n\n"
+            "    def putProxy(self, proxy: Proxy) -> None:\n"
+            "        self.proxyList.put(proxy)\n\n"
+            "    def get(self):\n"
+            "        proxy = self.getProxy()\n"
+            "        self.putProxy(proxy)\n\n"
+            "    def locked(self):\n"
+            "        i = self.locks.get()\n"
+            "        self.locks.put(i)\n\n"
+            "    def hand(self, name: int):\n"
+            "        self.locks.put(name)\n"
+        ),
+    )
+
+    put_back, locked, handed = (record.rows[f"pkg/mod.py::Pool.{one}"] for one in ("putProxy", "locked", "hand"))
+
+    assert (put_back.holes, put_back.settled) == ([], {"queue_given_back": 1})
+    assert (locked.holes, locked.settled) == ([], {"queue_given_back": 1})
+    assert [(hole.line, hole.why) for hole in handed.holes] == [(29, reach.HOLE_QUEUE)]
+
+
+def test_a_put_handed_a_value_one_caller_took_from_elsewhere_is_a_hole(tmp_path):
+    record = _record(
+        tmp_path,
+        mod=(
+            "import queue\n\n"
+            "class Pool:\n"
+            "    def __init__(self):\n"
+            "        self.items: queue.Queue[str] = queue.Queue()\n\n"
+            "    def take(self) -> str:\n"
+            "        return self.items.get()\n\n"
+            "    def give(self, item: str) -> None:\n"
+            "        self.items.put(item)\n\n"
+            "    def round_trip(self):\n"
+            "        item = self.take()\n"
+            "        self.give(item)\n\n"
+            "    def submit(self, request: str):\n"
+            "        item = request.strip()\n"
+            "        self.give(item)\n"
+        ),
+    )
+
+    assert [(hole.line, hole.why) for hole in record.rows["pkg/mod.py::Pool.give"].holes] == [(11, reach.HOLE_QUEUE)]
+
+
 def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_value_by_an_assumption(
     tmp_path,
 ):
