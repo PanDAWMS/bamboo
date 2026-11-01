@@ -4124,7 +4124,7 @@ def test_l2_stops_on_a_late_mover_it_cannot_read_yet_and_sends_one_lost_on_order
                  limits=["<= :n"] if order else [])
 
     q.mover, said = "p/w.py::moved", []
-    for statements, ordered in (([], []), ([st(10)], []), ([st(10, True)], [st(10, True)])):
+    for statements, ordered in (([st(10)], []), ([st(10, True)], [st(10, True)])):
         q.statements = statements
         try:
             r._why_late(q, ordered)
@@ -4135,9 +4135,7 @@ def test_l2_stops_on_a_late_mover_it_cannot_read_yet_and_sends_one_lost_on_order
     """,
         )
     )
-    by_key, unordered, ordered = json.loads(out.splitlines()[-1])
-    assert by_key == ("L2: why w.py::moved moved it only at 2026-01-05 00:00:00: it takes the row by its key, and its runs "
-                      "in the window are read pass by pass (S2-S4 over the window; build order 2, KNOWN_ISSUES.md K15)")
+    unordered, ordered = json.loads(out.splitlines()[-1])
     assert unordered == ("L2: why w.py::moved took it only at 2026-01-05 00:00:00: moved@10 held for the row all the window, "
                          "and it returns no first rows of an order (not read)")
     assert ordered == "on to L3"
@@ -5580,6 +5578,119 @@ def test_s2_takes_the_one_positive_arm_as_a_passs_way_and_the_positive_exits_as_
         "the arm alone, not chosen": stop,
     }
 
+
+
+def test_judgement_4_asks_a_late_movers_marks_over_its_stay_and_reads_its_passes_before_the_move(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, datetime, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun, which_ran
+
+            # the mover: an arm at 3 (the move), an exit at 4
+            node = ast.parse("def f():\\n    if a:\\n        x = 1\\n    return 2\\n").body[0]
+            fn = N(node=node, owner="p/j.py::f", name="f")
+            mark = "f < PandaID=1 >"
+
+            def pas(first, last):
+                return N(first=first, last=last, records=[0], log=N(name="j.log"))
+
+            rerun.R.function = lambda rel, func, lines: fn
+            rerun.R.seen = lambda fn, run, mode: None
+            rerun.stable_holes = lambda *a, **k: None
+            rerun.class_of = lambda fn: None
+            rerun.arms_of = lambda writers, owner, subject, observed: {3: rerun.Arm(3, ["activated"], [])}
+            rerun.key_marks = lambda owner, line, cls, key: (mark,) if marked else ()
+            left = which_ran.Verdict(which_ran.Candidate("p/j.py", "f", [4]), 4, "positive")
+            rerun.judge = lambda cands, runs, **k: which_ran.Judgement([left], left, "positive evidence", None)
+
+            def rerun_(passes, missed=(), holes=None, hand=("j.log",)):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.hop, r.hand, r.hand_used, r.unanswered = [], "L2", {}, [], []
+                r.opened, r.ends, r.branches = [], [], []
+                r.mode, r.decide = "map", "positive"
+                r.data, r.args = {"statuslog": {"states": []}}, N(observed="assigned", key="1", asks="asks.jsonl")
+                r.logs = N(needs_window=True, names=lambda files: [f for f in files if f in hand])
+                r.files_of = lambda owner, today, lines: today
+                run = N(token=mark, first="2026-10-29 09:00:00,000", last="2026-10-29 13:33:47,000", describe=lambda: "the run")
+                r.asked = []
+                r._ask = lambda key, names, asking, owners=None: (r.asked.append(asking) or ({"j.log": [run]}, list(missed), holes or {}))
+                r.runs = lambda key, logs, asking, owners: {"j.log": [run]}
+                rerun.R.passes = lambda fn, run, mode: (passes, f"{len(passes)} pass(es)")
+                r.base_env = lambda at=None: N(values={})
+                return r
+
+            q = rerun.Missed("JobSpec.jobStatus", "assigned", "activated", datetime.datetime(2026, 10, 29, 9, 6, 9),
+                             datetime.datetime(2026, 10, 29, 13, 33, 46), [], "p/j.py::f", None,
+                             writers=[N(owner="p/j.py::f", log_files=["j.log"])])
+            got = {}
+            for name, marked, passes, missed, holes in (
+                ("passes before the move", True, [pas("2026-10-29 10:00:00,000", "2026-10-29 10:00:01,000"),
+                                                  pas("2026-10-29 13:33:46,500", "2026-10-29 13:33:47,000")], (), None),
+                ("the move alone", True, [pas("2026-10-29 13:33:45,900", "2026-10-29 13:33:46,100")], (), None),
+                ("no mark holds the key", False, [], (), None),
+                ("a hole in the search", True, [], (), {"j.log": ["aipanda081"]}),
+                ("an ask not recorded", True, [], [(N(key="a"), "why")], None),
+                ("a log not to hand", True, [], (), None),
+                ("no arm", True, [], (), None),
+            ):
+                r = rerun_(passes, missed, holes)
+                if name == "a log not to hand":
+                    q.writers = [N(owner="p/j.py::f", log_files=["j.log", "k.log"])]
+                arms_of = rerun.arms_of
+                if name == "no arm":
+                    rerun.arms_of = lambda writers, owner, subject, observed: {}
+                try:
+                    p = r._late_passes(q)
+                    said = [p.since, p.before, p.logs, r.asked[0].window, r.asked[0].strings, r.asked[0].why]
+                    try:
+                        said.append(["exit", r.passes(p).exit_line])
+                    except rerun.Stop as e:
+                        said.append(["stop", str(e), e.code])
+                except rerun.Stop as e:
+                    said = ["stop", str(e), e.code]
+                got[name] = said
+                got[name + ": lines"] = [l.strip() for l in r.lines if "not read" in l]
+                q.writers, rerun.arms_of = [N(owner="p/j.py::f", log_files=["j.log"])], arms_of
+            # L2 sends a mover that takes the row by its key to judgement 4, and one with a statement of its own on
+            r = rerun_([])
+            r._row_of = lambda cls: {"PandaID": 1}
+            r._movers_in_window = lambda q, kinds: None
+            r._late_passes = lambda q: "judgement 4"
+            got["L2, by its key"] = r.missed(q)
+            q.statements = [N(owner="p/j.py::f", line=9, order_by=["x"], limits=["<= :n"], crosses_to=[], result="rows")]
+            r._passed_over = lambda st, q, took: ("not settled", [])
+            r._why_late = lambda q, ordered: None
+            got["L2, a statement of its own"] = type(r.missed(q)).__name__
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    window = ["2026-10-29 09:06:09", "2026-10-29 13:33:46"]
+    asked = ["2026-10-29 09:06:09", "2026-10-29 13:33:46", ["j.log"], window, ["f < PandaID=1 >"],
+             "from the stay's start to the move, for 'f < PandaID=1 >'"]
+    none = ("S2: a pass of f before the one that moved it on at 2026-10-29 13:33:46: none from 2026-10-29 09:06:09, "
+            "asked from the stay's start to the move, for 'f < PandaID=1 >' -- the delay is in what calls f on the row, "
+            "not followed here (KNOWN_ISSUES.md K45)")
+    open_ = ("S2: a pass of f before the one that moved it on at 2026-10-29 13:33:46: none found from 2026-10-29 09:06:09, "
+             "asked from the stay's start to the move, {}, and not ruled out: {} (KNOWN_ISSUES.md K45)")
+    # the pass before the move is read, the move's is not; with the move's alone, or none, the delay is upstream
+    assert got["passes before the move"] == [*asked, ["exit", 4]]
+    assert got["passes before the move: lines"] == ["1 pass(es) ending at 2026-10-29 13:33:46 or later, the one that moved it on among them, not read"]
+    assert got["the move alone"] == [*asked, ["stop", none, "K45"]]
+    # a mover whose mark holds no key is asked by the key alone (tmaeno: "B"), and none found is not none run; nor
+    # where the search left a hole
+    alone = "for the key alone (its mark holds none)"
+    assert got["no mark holds the key"] == [*asked[:4], [], f"from the stay's start to the move, {alone}",
+                                            ["stop", open_.format(alone, "a pass printing no line with the key is not found"), "K45"]]
+    assert got["a hole in the search"] == [*asked, ["stop", open_.format("for 'f < PandaID=1 >'", "j.log not searched all the window"), "K45"]]
+    assert got["an ask not recorded"] == ["stop", "L2: 1 ask(s) of the logs not in the records (written to asks.jsonl)", "asks"]
+    assert got["a log not to hand"] == [*asked, ["stop", open_.format("for 'f < PandaID=1 >'", "k.log not to hand"), "K45"]]
+    assert got["no arm"] == ["stop", "L2: an arm of f that writes another value than 'assigned'", None]
+    assert got["L2, by its key"] == "judgement 4" and got["L2, a statement of its own"] == "Ordered"
 
 def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_those_not_read(tmp_path):
     out = _ok(

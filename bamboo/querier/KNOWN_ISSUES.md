@@ -551,7 +551,8 @@ window searched in every log its process writes to (a DB proxy method writes `pa
 
 *Shows:* said (`by key`, counted among "not ruled out").
 *Revisit:* build order 2: the absence rule, the logs narrowed by the callers' processes (the map's upward union; two
-hops of `called_from` until then), the window's asks, and S2-S4 over the window for a writer that ran.
+hops of `called_from` until then), the window's asks, and S2-S4 over the window for a writer that ran.  The writer
+that moved a late value on is read so (judgement 4, K45); the others are not.
 
 ### K18. "Could have" needs every term known true
 
@@ -987,7 +988,7 @@ only when <x>.<attr> is already ..." with a caller's guard.
 check reads rows read alone too); rule 6, when the map says which object a caller's guard tests against the callee's
 argument.
 
-### K44. A row shorter than MIN_PROOF proves only as its whole message no other function can print there, and none does yet
+### K44. A row shorter than MIN_PROOF proves only as its whole message no other function can print there
 
 `rows.Seen.proves` reads a record found at fewer than `MIN_PROOF` (8) literal characters as proof of its row only where
 the record's message is the row's text whole and no other function can have printed it there (`rows.line_writers`:
@@ -997,13 +998,12 @@ function prints with the caller's logger, a record the search cut, or a row whos
 nothing below 8 characters.  A row of holes alone is not counted as another's line: it can print any text at any
 length, which MIN_PROOF does not read either.
 
-On M cbe29b6's map this proves no row of the DB proxy logs.  activateJob's "start" and "done" under
-`activateJob < PandaID=... >` (the harness's to-querier-74, MJ-assigned-late) can also be the lines of 5 methods that
-print the same words there and whose rows the map gives no prefix, because each makes its logger with different marks
-on its paths (calculateRWwithPrio_JEDI's two `create_tagged_logger` calls with two tags; 91 rows with a pattern in the
-DB proxy logs lack a prefix so).  Their marks begin with their own method's name on every path; the map is asked to
-give each path's mark (the analyzer handover's out/mp2).  With the probe that read the run's mark alone (out/mp1),
-MJ-assigned-late, MJ-defined-late and MT-defined-late went past H2.
+On M cbe29b6's map this proved no row of the DB proxy logs: activateJob's "start" and "done" under
+`activateJob < PandaID=... >` (the harness's to-querier-74, MJ-assigned-late) could also be the lines of 5 methods that
+print the same words there, whose rows the map gave no prefix because each makes its logger with different marks on
+its paths (calculateRWwithPrio_JEDI's two `create_tagged_logger` calls with two tags; 91 rows with a pattern in the
+DB proxy logs).  Since xvi the map gives a print row per mark (PFX), and those two words have activateJob alone as
+writer there: MJ-assigned-late and MJ-defined-late go past H2 (the analyzer handover's out/xvit).
 
 A DB proxy method's mark is the name its `comment` gives (`create_tagged_logger`).  On the pin, 12 of the 474 methods
 that call it pass a comment naming another method.  S1 reads a run as a mover's by that name (`_of_mover`), so their
@@ -1013,8 +1013,30 @@ configurator_read_panda_sites's mark, the same as configurator_read_sites's, mak
 fixed the 12 comments (tmaeno/panda-server 4f89a3d7, 2026-10-31); no release holds it yet.
 
 *Shows:* a short row's record among "row(s) [..] print only on a path through it"; else the row is kept, not positive.
-*Revisit:* when the map gives a mark to a logger made with different marks on its paths; when production runs a
-release with the fixed comments (the records keep the old names until then).
+*Revisit:* when production runs a release with the fixed comments (the records keep the old names until then).
+
+### K45. A late value's mover is read over its own passes before the move, and no further back
+
+Where the run that moved a late value on is of a mover that takes the row by its key -- no statement of its own
+selects on the value (L2's statements) -- why it moved it only then is in its own passes before (judgement 4,
+`Rerun._late_passes`).  Its logs are asked from the stay's start to the move for its marks holding the key
+(`key_marks`), as F3 asks a writer's life; a bare key over hours takes every listing of a DB proxy's log.  S2 reads
+the passes that end before the second the statuslog shows it moving on, and S3 what kept them from moving it.
+
+- A mover whose mark holds no key (`setCloudToTasks_JEDI`'s time) is asked by the key alone (tmaeno: "B", 11-01):
+  a pass of it that prints no line with the key is not found, so finding none rules nothing out.
+- The second is the statuslog's, the database's clock, against the log's: a pass of the same second as the move is
+  read as the move's.
+- With no pass before it, where every line of its runs holds the key and the window was searched whole in every log
+  of it, the mover moved the value on its first pass of the key in the window, and the delay is in what calls it on
+  the row: not followed (the callers' runs, by their keys).  Elsewhere none found is said, with why it may still have
+  run.
+- The other writers L2 lists by key stay as K15 says: "a run in the window, did not move it" is not read.
+
+*Shows:* "STOP S2: a pass of <func> before the one that moved it on at <t>: none from <since>, asked <how> -- the
+delay is in what calls <func> on the row, not followed here", or "...: none found from <since>, asked <how>, and not
+ruled out: <why>", code K45; else S2's and S3's lines over the passes.
+*Revisit:* when the callers' runs are followed by their keys (the map's upward reach and its run marks).
 
 ## The walks (`asked.py`)
 

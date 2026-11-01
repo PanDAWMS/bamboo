@@ -1238,9 +1238,9 @@ class Seen:
         """Whether record *i*, which *row* finds at *literal* characters, proves the row: at MIN_PROOF; below it where
         the record cannot be another line -- its message is the row's text whole, and no other function can have
         printed it there (:func:`line_writers`): activateJob's "start" and "done" (5 and 4 characters) under
-        ``activateJob < PandaID=... >``, once the map gives a mark to every logger that prints "start" in its logs.  A
+        ``activateJob < PandaID=... >``, since the map gives a mark to every logger that prints "start" in its logs.  A
         message that only holds the text (``restart``; a traceback another function prints with the caller's logger)
-        proves nothing below MIN_PROOF, nor does a record the search cut."""
+        proves nothing below MIN_PROOF, nor does a record the search cut (KNOWN_ISSUES.md K44)."""
         if literal >= MIN_PROOF:
             return True
         record = self.run.records[i]
