@@ -876,6 +876,52 @@ def ruled_out_at(node: ast.AST, func: ast.AST, name: str, value: object) -> bool
     return False
 
 
+#: The builtin types a test of a value's type narrows it to (:func:`narrowed`).
+_NARROWING_TYPES = frozenset({"dict", "list", "tuple", "set", "frozenset", "str", "bytes", "int", "float", "bool"})
+
+
+def narrowed(node: ast.AST, func: ast.AST, name: str) -> Optional[str]:
+    """The builtin type a test on *node*'s way in *func* narrows *name* to: ``isinstance(name, dict)`` that holds
+    where *node* runs -- an ``if`` holding it, or one before it that leaves otherwise, ``if not isinstance(raw,
+    dict): raise ...`` --, with no binding of *name* between the test and *node*; ``""`` for a tuple of builtin types,
+    ``None`` where no such test is on the way.  As :func:`ruled_out_at` reads a test on a value."""
+    statement = node if isinstance(node, ast.stmt) else None
+    if statement is None:
+        statement = next((one for one in ancestors(node) if isinstance(one, ast.stmt)), None)
+    if statement is None:
+        return None
+    sites = [one.site for one in bindings(func, name) if not one.nested]
+    for test, keeps in _tests_on(statement, func):
+        held = _isinstance_type(test, name, keeps)
+        if held is None:
+            continue
+        guard = getattr(test, "parent", None)
+        if guard is None or any(_leads_to(guard, site) and _leads_to(site, statement, (guard,)) for site in sites):
+            continue
+        return held
+    return None
+
+
+def _isinstance_type(test: ast.expr, name: str, keeps: bool) -> Optional[str]:
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        test, keeps = test.operand, not keeps
+    if not (
+        keeps
+        and isinstance(test, ast.Call)
+        and isinstance(test.func, ast.Name)
+        and test.func.id == "isinstance"
+        and len(test.args) == 2
+        and isinstance(test.args[0], ast.Name)
+        and test.args[0].id == name
+    ):
+        return None
+    kinds = test.args[1].elts if isinstance(test.args[1], ast.Tuple) else [test.args[1]]
+    names = [one.id for one in kinds if isinstance(one, ast.Name)]
+    if not names or len(names) != len(kinds) or not set(names) <= _NARROWING_TYPES:
+        return None
+    return names[0] if len(set(names)) == 1 else ""
+
+
 def tests_on(node: ast.AST, func: ast.AST) -> list[ast.expr]:
     """The tests :func:`ruled_out_by` reads for *node* in *func*: what its parameters must settle to rule on it."""
     return [test for test, _keeps in _tests_on(node, func)]

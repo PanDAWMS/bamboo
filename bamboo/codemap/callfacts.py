@@ -380,6 +380,10 @@ QUEUE_PUTS, QUEUE_GETS = (
 #: process, and returns -- Python's rule, as ``C(...)`` runs ``C.__init__`` -- and whose ``join()`` waits for it, by
 #: ``(module, name)``.  ``pandacommon``'s ``GenericThread`` is one too, but outside the corpus nothing says so.
 STARTERS = frozenset({("threading", "Thread"), ("multiprocessing", "Process")})
+#: The standard library's classes whose object holds a function it is handed only to call it, on a thread or in a
+#: process -- ``Thread(target=f)``, ``Timer(interval, f)``, ``Process(target=f)`` --: their methods hand back nothing
+#: of it, and the call of the function is the construction's (a callable handed is taken as called).
+RUNNERS = STARTERS | {("threading", "Timer")}
 START, RUN, JOIN = "start", "run", "join"
 
 #: The ``copy`` module's functions -> the method a class defines to be copied some other way: ``copy.copy(x)`` is an

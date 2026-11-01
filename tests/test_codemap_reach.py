@@ -382,6 +382,55 @@ def test_what_a_dict_holds_at_a_key_is_read_from_what_is_put_there(tmp_path):
     assert (holes["decode"], holes["local"], holes["reads"]) == ([], [], [22])
 
 
+def test_the_async_handlers_four_values_are_read_by_what_the_code_says_of_them(tmp_path):
+    """``_run_grep``'s ``threading.Timer(t, stop)`` holds ``stop`` only to run it; ``parse_query``'s ``raw`` is a dict
+    past ``if not isinstance(raw, dict): raise``; ``find_daemon``'s table is an attribute of an outside module, or
+    json's value; ``_kind_of``'s ``info.columns`` is declared ``dict[str, str]`` on ``TableInfo``.  The same ``raw``
+    with no test is still a hole."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "import json\n"
+            "import sys\n"
+            "import threading\n"
+            "from dataclasses import dataclass\n"
+            "from typing import Any\n\n"
+            "class Holder:\n"
+            "    def get(self, key):\n"
+            "        pass\n\n"
+            "    def start(self):\n"
+            "        pass\n\n"
+            "@dataclass(frozen=True)\n"
+            "class TableInfo:\n"
+            "    columns: dict[str, str]\n\n"
+            "def grep(matcher):\n"
+            "    def stop():\n"
+            "        matcher.kill()\n\n"
+            "    timer = threading.Timer(5, stop)\n"
+            "    timer.start()\n\n"
+            "def parse(raw: Any):\n"
+            "    if not isinstance(raw, dict):\n"
+            "        raise ValueError('bad')\n"
+            "    return raw.get('tables')\n\n"
+            "def find(module):\n"
+            "    table = getattr(sys.modules[__name__], 'config', None)\n"
+            "    if not isinstance(table, dict):\n"
+            "        table = json.loads(table)\n"
+            "    for name, attrs in table.items():\n"
+            "        attrs.get('module', name)\n\n"
+            "def kind_of(info: TableInfo, column: str):\n"
+            "    return info.columns.get(column)\n\n"
+            "def unsure(raw: Any):\n"
+            "    return raw.get('tables')\n"
+        ),
+    )
+
+    holes = {owner.rpartition("::")[2]: len(row.holes) for owner, row in record.rows.items()}
+
+    assert [holes[one] for one in ("grep", "parse", "find", "kind_of", "unsure")] == [0, 0, 0, 0, 1]
+
+
+
 
 def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):
     """``base_module``'s ``self.jedi_mb_proxy_dict: "PassiveProxies | None"``, assigned from a callable field's call no

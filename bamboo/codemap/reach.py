@@ -398,6 +398,9 @@ class _Receivers:
         if isinstance(expression, ast.Call):
             return self._called(file, func, expression, depth)
         if isinstance(expression, ast.Name):
+            narrowed = None if isinstance(func, ast.Module) else pathcond.narrowed(expression, func, expression.id)
+            if narrowed is not None:
+                return _BUILTIN, narrowed
             return self._named(file, func, expression.id, depth)
         if isinstance(expression, ast.Attribute):
             return self._attribute(file, func, expression, depth)
@@ -527,6 +530,8 @@ class _Receivers:
                 return _QUEUE, ".".join(library)
             if library in callfacts.JSON_MAKERS and not any(one.arg in callfacts.JSON_HOOKS for one in call.keywords):
                 return _BUILTIN, _JSON
+            if library in callfacts.RUNNERS:
+                return _OUTSIDE, f"{_a('.'.join(library))} holding a function only to run it"
             if isinstance(called, ast.Attribute):
                 receiver = self.of(file, func, called.value, depth + 1)
                 if receiver[0] in (_BUILTIN, _QUEUE):
@@ -540,6 +545,10 @@ class _Receivers:
             and isinstance(called, ast.Name)
             and self._is_builtin(file, func, called.id)
         ):
+            if called.id == "getattr" and len(call.args) >= 2:
+                got = self._getattr(file, func, call, depth)
+                if got is not None:
+                    return got
             function = callfacts.BUILTIN_FUNCTIONS.get(called.id)
             result = function.result if function is not None else None
             if result is None:
@@ -556,6 +565,18 @@ class _Receivers:
                 return self._got(file, func, call, receiver, depth) or self._method_result(receiver, called.attr)
             return receiver
         return _UNKNOWN, placed.unplaced or "placed nowhere"
+
+    def _getattr(self, file: str, func: ast.AST, call: ast.Call, depth: int) -> Optional[tuple[str, str]]:
+        """What ``getattr(x, name, default)`` is where ``x.name`` can be said by what *x* is -- an attribute of an
+        outside object or a scalar -- joined with the default; ``None`` otherwise.  ``find_daemon``'s
+        ``getattr(tmpSelf, "config", None)``, ``tmpSelf`` the module ``sys.modules`` hands back."""
+        owner = self.of(file, func, call.args[0], depth + 1)
+        if owner == _NOTHING or not (owner[0] == _OUTSIDE or (owner[0] == _BUILTIN and owner[1] in _SCALARS)):
+            return None
+        kinds = [(owner[0], f"an attribute of {owner[1]}")]
+        if len(call.args) > 2:
+            kinds.append(self.of(file, func, call.args[2], depth + 1))
+        return _joined(kinds)
 
     def _got(
         self, file: str, func: ast.AST, call: ast.Call, receiver: tuple[str, str], depth: int
@@ -853,7 +874,31 @@ class _Receivers:
             return _NOTHING
         if owner[0] == _OUTSIDE or (owner[0] == _BUILTIN and owner[1] in _SCALARS):
             return owner[0], f"an attribute of {owner[1]}"
+        declared = self._declared_field(file, func, root, expression.attr)
+        if declared is not None:
+            return declared
         return _UNKNOWN, f"an attribute of another object ({owner[1]})"
+
+    def _declared_field(
+        self, file: str, func: ast.AST, root: ast.expr, field: str
+    ) -> Optional[tuple[str, str]]:
+        """What *field* of an object declared as classes of the corpus is, where each class declares it a builtin or
+        an outside class -- ``TableInfo``'s ``columns: dict[str, str]`` --; ``None`` otherwise
+        (``declared_types_hold``)."""
+        try:
+            classes = self.types.declared(file, func, root)
+        except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+            return None
+        if not classes:
+            return None
+        kinds = []
+        for one in sorted(classes, key=lambda held: (held[0], held[1].lineno)):
+            annotated = self.types._field_annotation(one, field)
+            if annotated is None:
+                return None
+            kinds.append(self.annotation(*annotated))
+        said = _joined(kinds)
+        return said if said[0] in (_BUILTIN, _OUTSIDE) else None
 
 
 def _joined(kinds: list[tuple[str, str]]) -> tuple[str, str]:
