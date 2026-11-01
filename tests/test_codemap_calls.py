@@ -2892,6 +2892,33 @@ def test_a_receiver_a_builtin_function_makes_is_of_the_type_callfacts_says(tmp_p
         assert (placed.targets, placed.unplaced) == ((), calls_mod.UNPLACED_OUTSIDE), text
     assert _placed(calls, "m", "run", "kind.write").unplaced != calls_mod.UNPLACED_OUTSIDE
 
+
+def test_a_receiver_a_builtin_s_method_hands_back_is_of_the_type_callfacts_says(tmp_path):
+    """``msg = update_msg.copy()`` of a dict is a dict, and ``parts = text.split(",")`` of a text a list: their
+    methods are a builtin's, not ``PickleSpec.update``'s or ``Parts.append``'s.  What ``given.copy()`` hands back is
+    not known where ``given``'s class is not."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m="class PickleSpec:\n    def update(self, x):\n        return x\n\n"
+            "class Parts:\n    def append(self, x):\n        return x\n\n"
+            "def run(given, x):\n"
+            "    update_msg = {'a': 1}\n"
+            "    msg = update_msg.copy()\n"
+            "    msg.update(x)\n"
+            "    parts = 'a,b'.split(',')\n"
+            "    parts.append(x)\n"
+            "    other = given.copy()\n"
+            "    other.update(x)\n",
+        )
+    )
+
+    for text in ("msg.update", "parts.append"):
+        placed = _placed(calls, "m", "run", text)
+        assert (placed.targets, placed.unplaced) == ((), calls_mod.UNPLACED_OUTSIDE), text
+    assert _placed(calls, "m", "run", "other.update").unplaced == calls_mod.UNPLACED_RECEIVER
+
+
 def test_a_builtin_beside_a_corpus_class_leaves_the_call_open_as_before(tmp_path):
     """``held`` is a list on one branch and a ``ListWithLock`` on the other: either may run the call."""
     calls = _calls(_tree(tmp_path, m=_LISTS))
