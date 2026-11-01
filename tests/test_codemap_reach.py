@@ -460,6 +460,39 @@ def test_a_parameter_called_lands_at_what_every_call_hands_it(tmp_path):
     assert [hole.why for hole in record.rows["pkg/mod.py::tell"].holes] == [reach.HOLE_LOCAL_CALLED]
 
 
+def test_a_container_a_callee_returns_is_read_in_the_callee(tmp_path):
+    """``get_result``'s ``response.get("async_meta", {}).get("status")``: ``response`` is what
+    ``_structured_result_response`` returns -- ``generate_response``'s dict literal, with ``response["async_meta"]``
+    put in it, or another such literal.  A callee handing back what it was handed is read no further."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "class Cache:\n"
+            "    def get(self, key, default=None):\n"
+            "        pass\n\n"
+            "def generate_response(success, message) -> dict:\n"
+            "    return {'success': success, 'message': message}\n\n"
+            "def structured(row) -> dict:\n"
+            "    if row is None:\n"
+            "        return generate_response(False, 'none')\n"
+            "    response = generate_response(True, '')\n"
+            "    response['async_meta'] = {'status': row}\n"
+            "    return response\n\n"
+            "def get_result(row):\n"
+            "    response = structured(row)\n"
+            "    return response.get('async_meta', {}).get('status')\n\n"
+            "def unknown(handed) -> dict:\n"
+            "    return handed\n\n"
+            "def elsewhere(row):\n"
+            "    response = unknown(row)\n"
+            "    return response.get('async_meta', {}).get('status')\n"
+        ),
+    )
+
+    holes = {owner.rpartition("::")[2]: len(row.holes) for owner, row in record.rows.items()}
+
+    assert (holes["get_result"], holes["elsewhere"]) == (0, 1)
+
 
 
 def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):

@@ -1133,8 +1133,9 @@ class _Holders:
     ask is in hands the container to its caller when the call ends, after every read of the call, and goes nowhere
     those reads see -- ``collect_existing_files`` returns the ``dataset_file_map`` it fills; a caller that fills
     what was returned and hands it in again does so by a name the walk reads up through the parameter
-    (``getOutputFiles_JEDI``'s ``parallelOutMap``).  A callee's return is the container under a name of its caller
-    the walk does not read, and is not read.  So is a binding not read here
+    (``getOutputFiles_JEDI``'s ``parallelOutMap``).  A container a callee returns is read in the callee, through what
+    each of its ``return`` statements hands back (:meth:`_returned`): ``get_result``'s ``response`` is what
+    ``_structured_result_response`` returns.  Not read: a binding not read here
     (``with``, ``except``, ``global``), a name the function does not bind, a module's name, ``self``, a merge from a
     value not read as a mapping or a set, a path longer than :data:`_PATH_CUT` keys, and more than
     :data:`_HOLDERS_CUT` holders.
@@ -1159,6 +1160,11 @@ class _Holders:
             tuple[int, str, tuple[Optional[str], ...], tuple[Optional[str], ...]]
         ] = set()
         self.failed = False
+        #: The functions whose returns :meth:`_returned` is reading now: a call of one inside it is read no further.
+        self.returning: set[tuple[int, str]] = set()
+        #: Every function whose returns were read, by id: its ``return`` of the container hands it back to the call
+        #: the walk came from, as the ask's own does.
+        self.entered: set[int] = set()
 
     def values(
         self, file: str, func: ast.AST, name: str
@@ -1359,8 +1365,44 @@ class _Holders:
                     if keyword.arg is None
                     else (*of, ast.Constant(value=keyword.arg)),
                 )
-        else:
+        elif not self._returned(file, func, value, of):
             self.found.append((file, func, value, self.keys[len(of) :]))
+
+    def _returned(self, file: str, func: ast.AST, value: ast.expr, of: _Path) -> bool:
+        """Whether *value*, the container at *of*, is what corpus functions a call is placed at alone return, each
+        value one of their ``return`` statements hands back read in it -- ``_structured_result_response`` puts
+        ``response["async_meta"]`` into what ``generate_response`` returned, a dict literal, and returns it.  Not where
+        a function returns a value no ``return`` spells, or is being read already, its own call inside it."""
+        if not isinstance(value, ast.Call):
+            return False
+        try:
+            placed = self.calls.callees(file, func, value)
+        except Exception:  # noqa: BLE001 -- a call not read is a move not read
+            return False
+        if not placed.targets or placed.unplaced or placed.returns_none:
+            return False
+        found: list[tuple[str, ast.AST, ast.expr]] = []
+        reading = {(id(target.func), target.file) for target in placed.targets}
+        if reading & self.returning:
+            return False
+        for target in placed.targets:
+            for node in walk(target.func):
+                if isinstance(node, (ast.Yield, ast.YieldFrom)) or (
+                    isinstance(node, ast.Return) and node.value is None
+                ):
+                    return False
+                if isinstance(node, ast.Return) and pathcond.enclosing_function(node) is target.func:
+                    found.append((target.file, target.func, node.value))  # type: ignore[arg-type]
+        if not found:
+            return False
+        self.returning |= reading
+        self.entered.update(id(target.func) for target in placed.targets)
+        try:
+            for where, scope, one in found:
+                self._place(where, scope, one, (), of)
+        finally:
+            self.returning -= reading
+        return True
 
     def _constructed(self, value: ast.expr) -> bool:
         """``dict()``, ``list()``, ``set()``, ``dict(k=v, ...)``: a builtin container from keywords alone."""
@@ -1617,8 +1659,8 @@ class _Holders:
                 ),
             ):  # fmt: skip
                 return
-            elif isinstance(parent, ast.Return) and func is self.start:
-                return
+            elif isinstance(parent, ast.Return) and (func is self.start or id(func) in self.entered):
+                return  # back to the call it came from: the ask's, or a call whose returns are read (_returned)
             else:
                 self._unread(at, of)
                 return
