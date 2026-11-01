@@ -3273,6 +3273,16 @@ class EndpointWrite(BaseModel):
     line: int = Field(description="The line of the call that runs it.")
     kind: str = Field(description="``insert``, ``update``, ``delete`` or ``merge``, as the statement's text reads.")
     tables: list[str] = Field(default_factory=list, description="The tables it writes, lowered.")
+    values: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Column -> the constants the endpoint's way puts in it, as ``repr`` spells them: a literal in the "
+            "statement, or a bind each of whose values is a constant on the way -- a literal, a parameter every "
+            "call on the way hands the same one, a module's constant, an f-string of those.  "
+            "``async_requests``' ``request_type``: ``'grep'`` on ``submit_grep_request``.  A column not here is not "
+            "said."
+        ),
+    )
 
 
 class EndpointChange(BaseModel):

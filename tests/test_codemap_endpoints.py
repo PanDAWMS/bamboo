@@ -502,6 +502,62 @@ def test_a_hole_on_a_field_its_object_fills_with_a_builtin_is_closed_on_that_obj
     ]
 
 
+REQUESTS = """\
+class Requests:
+    def insert_request(self, request_type, payload):
+        sql = "INSERT INTO ATLAS_PANDA.async_requests (request_type, parameters, state) VALUES (:request_type, :parameters, 'new')"
+        var_map = {":request_type": request_type, ":parameters": payload}
+        self.cur.execute(sql, var_map)
+"""
+
+SUBMITTING_API = """\
+from pandaserver.asyncprocess.kinds import REQUEST_TYPE as READ_TYPE
+from pandaserver.taskbuffer.requests import Requests
+
+PREFIX = "dc_"
+store = Requests()
+
+
+def _submit(operation, payload):
+    store.insert_request(f"{PREFIX}{operation}", payload)
+
+
+def submit_grep(req, payload):
+    store.insert_request("grep", payload)
+
+
+def submit_read(req, payload):
+    store.insert_request(READ_TYPE, payload)
+
+
+def submit_pin(req, payload):
+    _submit("pin", payload)
+"""
+
+
+def test_a_write_says_the_constants_the_endpoint_s_way_puts_in_its_columns(
+    tmp_path: Path,
+) -> None:
+    """Which request type a submit inserts: a literal handed down, a constant another module defines, an f-string of
+    the module's prefix and a parameter every call hands the same text.  The payload is the request's: not said."""
+    files = {
+        **CHANGING,
+        "api/v1/ops_api.py": SUBMITTING_API,
+        "taskbuffer/requests.py": REQUESTS,
+        "asyncprocess/kinds.py": 'REQUEST_TYPE = "db_read"\n',
+    }
+    by_route = {one.route: one for one in _build(tmp_path, files=files).endpoints}
+
+    assert {
+        route: [write.values for write in by_route[route].writes]
+        for route in ("ops/submit_grep", "ops/submit_read", "ops/submit_pin")
+    } == {
+        "ops/submit_grep": [{"request_type": ["'grep'"], "state": ["'new'"]}],
+        "ops/submit_read": [{"request_type": ["'db_read'"], "state": ["'new'"]}],
+        "ops/submit_pin": [{"request_type": ["'dc_pin'"], "state": ["'new'"]}],
+    }
+
+
 def test_the_async_requests_handlers_are_read_off_the_daemons_table_as_endpoints_are(
     tmp_path: Path,
 ) -> None:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from typing import TYPE_CHECKING, Iterator, Optional
 
 from bamboo.codemap import callfacts, reach
@@ -240,7 +241,7 @@ class _Reader:
             )
             return None
         came = record.closure([owner])
-        shut = _shut(record, code, came)
+        shut, constants = _shut(record, code, came)
         if shut:
             came = record.closure(
                 [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
@@ -308,7 +309,13 @@ class _Reader:
                 }
             ),
             reads=reads,
-            writes=[one for function in functions for one in code.writes(function)],
+            writes=[
+                code.valued(
+                    one, [node for node in came if node[0] == function], constants
+                )
+                for function in functions
+                for one in code.writes(function)
+            ],
             changes=[one for function in functions for one in code.changes(function)],
             hole_bounds=[
                 self._bounded(function, hole, held_in[key], into)
@@ -319,6 +326,9 @@ class _Reader:
 
 
 Node = tuple[str, str]
+
+#: A literal number in a statement's text, said as written; any other literal is a text.
+_NUMBER = re.compile(r"-?\d+(\.\d+)?")
 
 
 class _Code:
@@ -337,6 +347,117 @@ class _Code:
         self._bound: dict[
             tuple[str, int, str], list[tuple[ast.Call, dict[str, Optional[ast.expr]]]]
         ] = {}
+        self._module_constants: dict[
+            tuple[str, str], Optional[tuple[type, object]]
+        ] = {}
+
+    def module_constant(self, owner: str, name: str) -> Optional[tuple[type, object]]:
+        """The constant *name* is in *owner*'s module: bound there once to a literal and never declared ``global``, or
+        imported from a module of the corpus where it is; ``None`` otherwise."""
+        held = self.funcs.get(owner)
+        if (
+            held is None
+            or name in _parameters(held[1])
+            or any(not one.nested for one in pathcond.bindings(held[1], name))
+        ):
+            return None
+        return self._constant_in(held[0], name, 0)
+
+    def _constant_in(
+        self, file: str, name: str, depth: int
+    ) -> Optional[tuple[type, object]]:
+        key = (file, name)
+        if key in self._module_constants:
+            return self._module_constants[key]
+        self._module_constants[key] = None
+        found: Optional[tuple[type, object]] = None
+        tree = self.types.tree(file)
+        if tree is not None and depth < 3:
+            bound = [one for one in pathcond.bindings(tree, name) if not one.nested]
+            rebound = any(
+                isinstance(node, ast.Global) and name in node.names
+                for node in ast.walk(tree)
+            )
+            if (
+                len(bound) == 1
+                and not rebound
+                and bound[0].slot is None
+                and isinstance(bound[0].value, ast.Constant)
+            ):
+                found = type(bound[0].value.value), bound[0].value.value
+            elif not bound:
+                imported = self.types.imports(file).get(name)
+                source = (
+                    self.types.module_file(imported[0])
+                    if imported is not None and imported[1]
+                    else None
+                )
+                if source is not None and imported is not None:
+                    found = self._constant_in(source, imported[1], depth + 1)
+        self._module_constants[key] = found
+        return found
+
+    def valued(
+        self,
+        write: EndpointWrite,
+        nodes: list[Node],
+        held: dict[Node, dict[str, tuple[type, object]]],
+    ) -> EndpointWrite:
+        """*write* with the constants the endpoint's way puts in its columns (:attr:`EndpointWrite.values`): a
+        literal in the statement, or a bind each of whose values is a constant there (:func:`_constant`), for every
+        class the function runs as on the way."""
+        held_func = self.funcs.get(write.function)
+        if held_func is None or not nodes:
+            return write
+        func = held_func[1]
+        found: dict[str, set[str]] = {}
+        unsaid: set[str] = set()
+        for run in sql.executions(func):  # type: ignore[arg-type]
+            if run.call.lineno != write.line:
+                continue
+            for statement in sqltext.writes(run.sql):
+                if statement.kind != write.kind or statement.table.lower() not in {
+                    table.rpartition(".")[2] for table in write.tables
+                }:
+                    continue
+                for column, value in statement.columns.items():
+                    said = self._column_values(func, run, value, nodes, held)
+                    if said is None:
+                        unsaid.add(column)
+                    else:
+                        found.setdefault(column, set()).update(said)
+        values = {
+            column: sorted(said)
+            for column, said in found.items()
+            if column not in unsaid
+        }
+        return write.model_copy(update={"values": values}) if values else write
+
+    def _column_values(
+        self,
+        func: ast.AST,
+        run: sql.Execution,
+        value: sqltext.ColumnValue,
+        nodes: list[Node],
+        held: dict[Node, dict[str, tuple[type, object]]],
+    ) -> Optional[set[str]]:
+        """The constants, as ``repr`` spells them, a column is written: ``None`` where one value is not one."""
+        if value.kind == "literal":
+            text = value.text
+            return {text if text == "None" or _NUMBER.fullmatch(text) else repr(text)}
+        if value.kind != "bind" or not run.varmap:
+            return None
+        binds = sql.bound_values(func, run.varmap, value.text, at=run)  # type: ignore[arg-type]
+        if not binds:
+            return None
+        found: set[str] = set()
+        for bind in binds:
+            for node in nodes:
+                got = _constant(self, node, bind.value, held)
+                if got is None:
+                    return None
+                found.add(repr(got[1]))
+        return found
 
     def writes(self, owner: str) -> list[EndpointWrite]:
         """The statements writing rows *owner* runs, one per statement and kind."""
@@ -694,8 +815,9 @@ def _calls_shut(
 
 def _shut(
     record: reach.ReachGraph, code: _Code, came: reach.Came
-) -> frozenset[tuple[Node, int]]:
-    """The calls of the closure *came* no way into it makes: ``(the function and class making it, id(its call))``.
+) -> tuple[frozenset[tuple[Node, int]], dict[Node, dict[str, tuple[type, object]]]]:
+    """The calls of the closure *came* no way into it makes: ``(the function and class making it, id(its call))``;
+    and the constants the parameters hold on the ways left open, by function and class.
 
     A parameter of a function of the closure holds a constant where every call into the function, on the ways still
     open, hands it the same one -- a literal, the default the call leaves it to (:func:`calls.bind`), a parameter of
@@ -743,7 +865,7 @@ def _shut(
                 ):
                     more.add((caller, id(call)))
         if more <= shut:
-            return frozenset(shut)
+            return frozenset(shut), held
         shut |= more
 
 
@@ -798,14 +920,37 @@ def _constant(
     value: Optional[ast.expr],
     held: dict[Node, dict[str, tuple[type, object]]],
 ) -> Optional[tuple[type, object]]:
-    """``(type, value)`` of the constant *value*, an argument *caller* hands, holds; ``None`` where it holds none."""
+    """``(type, value)`` of the constant *value*, an argument *caller* hands, holds; ``None`` where it holds none.
+
+    A literal; a parameter holding one on the way (*held*); a name of the module bound once to one, there or in a
+    module of the corpus it is imported from (``DB_READ_REQUEST_TYPE``); an f-string of those
+    (``f"{REQUEST_TYPE_PREFIX}{operation}"``)."""
     if isinstance(value, ast.Constant):
         return type(value.value), value.value
-    if isinstance(value, ast.Name) and code.versions(caller[0]).paths(value) == [
-        value.id
-    ]:
-        return held.get(caller, {}).get(value.id)
-    return None
+    if isinstance(value, ast.JoinedStr):
+        parts = []
+        for one in value.values:
+            if isinstance(one, ast.Constant):
+                parts.append(str(one.value))
+                continue
+            if (
+                not isinstance(one, ast.FormattedValue)
+                or one.conversion != -1
+                or one.format_spec is not None
+            ):
+                return None
+            got = _constant(code, caller, one.value, held)
+            if got is None or got[0] not in (str, int):
+                return None
+            parts.append(str(got[1]))
+        return str, "".join(parts)
+    if not isinstance(value, ast.Name):
+        return None
+    if code.versions(caller[0]).paths(value) == [value.id]:
+        found = held.get(caller, {}).get(value.id)
+        if found is not None:
+            return found
+    return code.module_constant(caller[0], value.id)
 
 
 class _Objects:
