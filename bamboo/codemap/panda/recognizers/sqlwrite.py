@@ -5540,8 +5540,9 @@ class _PathCarry:
     def returns(self) -> _Paths:
         """What a call of the function gives back of the rows: its returns, and a generator's yields as elements."""
         found: set[tuple[str, ...]] = set()
+        ruled = self.reading.ruled.get(id(self.func), frozenset())
         for node in own_nodes(self.func):
-            if isinstance(node, ast.Return) and node.value is not None:
+            if isinstance(node, ast.Return) and node.value is not None and id(node) not in ruled:
                 found |= self.held(node.value, node)
             elif isinstance(node, ast.Yield) and node.value is not None:
                 found |= _below((_ALL,), self.held(node.value, node))
@@ -5579,6 +5580,9 @@ class _Reading:
     def __init__(self, calls: Calls, owners: set[str], record: "ReachGraph", unread_kept: bool = False):
         self.calls, self.owners, self.record = calls, owners, record
         self.unread_kept = unread_kept
+        #: ``{id(function): ids of its returns}`` no run on the way asked takes (:func:`returned_under`): left out of
+        #: what a call of it gives back.
+        self.ruled: dict[int, frozenset[int]] = {}
         #: The names junction owners' functions have: where a hole spelled ``x.f(...)`` could land at one.
         self.owner_names = {owner.rsplit("::", 1)[-1] for owner in owners}
         self._summaries: dict[tuple, _Summary] = {}
@@ -6503,6 +6507,25 @@ def attach_crossings(
         stored += len(site.crosses_to)
         opened += 1 if site.crosses_open else 0
     return CrossingCensus(stored, handing_back, resolved, opened)
+
+
+def returned_under(
+    calls: Calls,
+    owners: set[str],
+    record: "ReachGraph",
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    site: ReadSiteNode,
+    owner: str,
+    ruled: dict[int, frozenset[int]],
+) -> list[str]:
+    """What *site*'s rows come to in *owner*'s answer, the walk taking no return of *ruled* -- the returns the
+    constants on the endpoint's way rule out (:func:`bamboo.codemap.panda.endpoints._ruled_returns`):
+    ``get_task_details_json`` returns its 3-tuple only ``if include_resolve_status:``, which
+    ``task/get_detailed_info``'s way leaves ``False``.  Spelled as :attr:`Returned.paths`."""
+    reading = _Reading(calls, owners, record, True)
+    reading.ruled = ruled
+    crossings, _handed = _walk(reading, func, site, returning=frozenset({owner}))
+    return _spelled_paths(frozenset(crossings.returned.get(owner, set())))
 
 
 def _crossing_selects(site: ReadSiteNode, ways: dict[str, set[tuple[str, ...]]]) -> dict[str, list[str]]:

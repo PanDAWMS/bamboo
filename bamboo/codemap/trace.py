@@ -53,6 +53,7 @@ import ast
 import builtins
 import itertools
 import logging
+import math
 import re
 import string
 import sys
@@ -1697,6 +1698,185 @@ def _still_written(
     return still("plain"), still("appended"), still("opaque")
 
 
+#: How many ways one binding and what ``+=`` adds after it may print before it is read as it is alone, then a hole.
+_MAX_JOINED = 16
+
+_Chains = Optional[list[list[ast.expr]]]
+
+_TRIES = (ast.Try, getattr(ast, "TryStar", ast.Try))
+
+
+def _added_after(value: ast.expr, appended: list[ast.expr], at: ast.AST, spelled: str) -> _Chains:
+    """What each way from *value*'s binding down to the call at *at* adds to the name with ``+=``: per way, the
+    right-hand sides of *appended* it runs, in their order; ``None`` where a way cannot be told.
+
+    ``sqlD = "UPDATE ... "; sqlD += "SET ... "; sqlD += "WHERE ... "; tmpLog.debug(sqlD + comment)`` prints one
+    statement, ``UPDATE ... SET ... WHERE ...``, and ``msg = f"sent {job.id} "`` with ``msg += "for merge"`` under
+    ``if merging:`` and ``msg += "for retry"`` under its ``else`` prints one of two.  The statements are read in
+    their order, from the binding down to the call: an ``if`` is a way per arm, a ``with`` its body, a ``try`` its
+    body and ``else`` or one of its handlers, then its ``finally``.  A way that returns, raises or leaves a loop
+    reaches no call here, and one that binds the name outright is that binding's.  Not told: a ``+=`` a loop runs on
+    every turn -- what the line holds then depends on how many there were --, a name bound by a walrus on the way,
+    and more than :data:`_MAX_JOINED` ways.
+    """
+    tracked = {id(one) for one in appended}
+    end = pathcond.site_of(at)
+    current = pathcond.site_of(value)
+    ways: _Chains = [[]]
+    while ways:
+        block = _block_holding(current)
+        if block is None:
+            return None
+        index = next(number for number, one in enumerate(block) if one is current)
+        target = next((number for number, one in enumerate(block) if _lies_in(one, end)), None)
+        if target is not None:
+            if target <= index:
+                return None  # the call comes first: only a loop around both runs the binding before it
+            ways = _then(ways, _run_ways(block[index + 1 : target], tracked, spelled))
+            return _into(ways, block[target], end, tracked, spelled)
+        ways = _then(ways, _run_ways(block[index + 1 :], tracked, spelled))
+        owner = getattr(current, "parent", None)
+        if isinstance(owner, (ast.ExceptHandler, ast.match_case)):
+            owner = getattr(owner, "parent", None)
+        if isinstance(owner, _TRIES):
+            if block is owner.body:
+                ran = owner.orelse + owner.finalbody
+            else:
+                ran = [] if block is owner.finalbody else owner.finalbody
+            ways = _then(ways, _run_ways(ran, tracked, spelled))
+        elif not isinstance(owner, (ast.If, ast.With, ast.AsyncWith, ast.Match)):
+            return None  # the end of a loop's body runs it again; the function's end reaches no call after it
+        current = owner
+    return None
+
+
+def _block_holding(statement: ast.AST) -> Optional[list[ast.stmt]]:
+    owner = getattr(statement, "parent", None)
+    for field in ("body", "orelse", "finalbody"):
+        block = getattr(owner, field, None)
+        if isinstance(block, list) and any(one is statement for one in block):
+            return block
+    return None
+
+
+def _lies_in(statement: ast.AST, node: ast.AST) -> bool:
+    """Whether *node* is *statement* or inside it."""
+    at: Optional[ast.AST] = node
+    while at is not None and at is not statement:
+        at = getattr(at, "parent", None)
+    return at is not None
+
+
+def _then(ways: _Chains, more: _Chains) -> _Chains:
+    """Each of *ways* followed by each of *more*."""
+    if ways is None or more is None:
+        return None
+    return _distinct([one + other for one in ways for other in more])
+
+
+def _either(*alternatives: _Chains) -> _Chains:
+    if any(one is None for one in alternatives):
+        return None
+    return _distinct([way for one in alternatives for way in one])  # type: ignore[union-attr]
+
+
+def _distinct(ways: list[list[ast.expr]]) -> _Chains:
+    """*ways* once each -- an ``if`` adding nothing in either arm is one way on, not two -- or ``None`` past
+    :data:`_MAX_JOINED`."""
+    kept = list({tuple(map(id, way)): way for way in ways}.values())
+    return kept if len(kept) <= _MAX_JOINED else None
+
+
+def _run_ways(statements: list[ast.stmt], tracked: set[int], spelled: str) -> _Chains:
+    """What each way through *statements*, run in order, adds with ``+=``; ``[]`` where none goes on past them."""
+    ways: _Chains = [[]]
+    for statement in statements:
+        ways = _then(ways, _statement_ways(statement, tracked, spelled))
+        if not ways:
+            return ways
+    return ways
+
+
+def _statement_ways(statement: ast.stmt, tracked: set[int], spelled: str) -> _Chains:
+    if isinstance(statement, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+        return []
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [[]]
+    if isinstance(statement, ast.AugAssign) and _text(statement.target) == spelled:
+        if not isinstance(statement.op, ast.Add):
+            return None
+        # A ``+=`` that is not among the ones reaching the call is on no way that does (:func:`_still_written`).
+        return [[statement.value]] if id(statement.value) in tracked else []
+    if isinstance(statement, ast.If):
+        return _either(_run_ways(statement.body, tracked, spelled), _run_ways(statement.orelse, tracked, spelled))
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        if any(item.optional_vars is not None and _binds_name(item.optional_vars, spelled) for item in statement.items):
+            return []
+        return _run_ways(statement.body, tracked, spelled)
+    if isinstance(statement, _TRIES):
+        ran = _then(_run_ways(statement.body, tracked, spelled), _run_ways(statement.orelse, tracked, spelled))
+        caught = [
+            [] if handler.name == spelled else _run_ways(handler.body, tracked, spelled)
+            for handler in statement.handlers
+        ]
+        return _then(_either(ran, *caught), _run_ways(statement.finalbody, tracked, spelled))
+    if isinstance(statement, ast.Match):
+        return _either(*[_run_ways(case.body, tracked, spelled) for case in statement.cases], [[]])
+    if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+        return None if _touches(statement, spelled) else [[]]
+    if any(isinstance(node, ast.NamedExpr) and _text(node.target) == spelled for node in ast.walk(statement)):
+        return None
+    if isinstance(statement, ast.Assign) and any(_binds_name(target, spelled) for target in statement.targets):
+        return []
+    if isinstance(statement, ast.AnnAssign) and statement.value is not None and _binds_name(statement.target, spelled):
+        return []
+    if isinstance(statement, ast.Delete) and any(_binds_name(target, spelled) for target in statement.targets):
+        return []
+    return [[]]
+
+
+def _binds_name(target: ast.expr, spelled: str) -> bool:
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_binds_name(one, spelled) for one in target.elts)
+    if isinstance(target, ast.Starred):
+        return _binds_name(target.value, spelled)
+    return _text(target) == spelled
+
+
+def _touches(loop: ast.stmt, spelled: str) -> bool:
+    """Whether *loop* binds the name anywhere in it, its own target among them."""
+    for node in ast.walk(loop):
+        if isinstance(node, ast.Assign) and any(_binds_name(target, spelled) for target in node.targets):
+            return True
+        if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor)):
+            if _binds_name(node.target, spelled):
+                return True
+        if isinstance(node, ast.NamedExpr) and _text(node.target) == spelled:
+            return True
+    return False
+
+
+def _into(ways: _Chains, statement: ast.stmt, end: ast.AST, tracked: set[int], spelled: str) -> _Chains:
+    """*ways* on into *statement*, which holds the call's statement *end*: what each way adds before it there."""
+    while ways and statement is not end:
+        if isinstance(statement, ast.If):
+            arm = statement.body if any(_lies_in(one, end) for one in statement.body) else statement.orelse
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            arm = statement.body
+        elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)) and not _touches(statement, spelled):
+            arm = statement.body if any(_lies_in(one, end) for one in statement.body) else statement.orelse
+        elif isinstance(statement, _TRIES) and any(_lies_in(one, end) for one in statement.body):
+            arm = statement.body
+        else:
+            return None
+        number = next((n for n, one in enumerate(arm) if _lies_in(one, end)), None)
+        if number is None:
+            return None
+        ways = _then(ways, _run_ways(arm[:number], tracked, spelled))
+        statement = arm[number]
+    return ways
+
+
 def _clip(text: str, width: int = 72) -> str:
     """*text* on one line, cut to *width* with an ellipsis when it is longer."""
     flat = " ".join(text.split())
@@ -2816,13 +2996,16 @@ class _Walk:
 
         What this function writes into it before the call: every outright
         binding that can still be what it prints (:func:`_still_written`),
-        each a way of its own, and what ``+=`` adds
-        after as a hole at the end.  What ``+=`` adds is a way of its own too,
-        where it has literal text -- the line then *contains* it, wherever the
-        first binding left off.  ``err_str += traceback.format_exc()`` has
-        none, and adds no row: the line is the one the first binding wrote.
-        A short one is kept and marked like any other -- ``for merge`` and
-        ``for retry`` added to one message are what says which branch ran.
+        each with what ``+=`` adds after it on each way down to the call
+        (:func:`_added_after`), joined in order -- ``sqlD = "UPDATE ... "``,
+        ``sqlD += "SET ... "``, ``sqlD += "WHERE ... "`` print one statement,
+        and ``for merge`` and ``for retry`` added under the two arms of an
+        ``if`` are two lines, each with the text before it.  Where a binding's
+        ways are not told -- a loop adds on every turn -- it is printed as it
+        is, then a hole for what ``+=`` adds, and what ``+=`` adds is a way of
+        its own, where it has literal text: the line then *contains* it,
+        wherever the binding left off.  ``err_str += traceback.format_exc()``
+        has none, and adds no row of its own.
 
         One row per binding however many there are, as the build's own
         reading of the same call always gave; only a message nested inside
@@ -2863,11 +3046,28 @@ class _Walk:
         if outside and not any(_dominates(pathcond.site_of(value), at) for value in plain):
             refused.append(outside)
         tail = [_appended(expr)] if appended else []
+        # Each binding's text with what ``+=`` adds after it on each way to the call; a binding whose ways are not
+        # told is printed as before, its text then a hole, and the ``+=`` parts then each a row of their own.
+        alone = not plain
         for value in plain:
             found, why = self._message_ways(frame, value, value, depth + 1, seen)
-            ways.extend(way + tail for way in found)
+            chains = _added_after(value, appended, at, spelled) if appended else [[]]
+            joined = [
+                [found] + [self._operand(frame, one, one, depth, seen) for one in chain] for chain in chains or []
+            ]
+            if not found and any(_has_literal(way) for parts in joined for part in parts[1:] for way in part):
+                # The binding's text cannot be written out -- ``sqlTSD = sqlTSD[:-1]`` -- and what ``+=`` adds after
+                # it can: a hole, then that.
+                found, why = [[_hole(value)]], []
+                joined = [[found] + parts[1:] for parts in joined]
             refused.extend(why)
-        for value in appended:
+            if chains is None or sum(math.prod(len(part) for part in parts) for parts in joined) > _MAX_JOINED:
+                alone = True
+                ways.extend(way + tail for way in found)
+                continue
+            for parts in joined:
+                ways.extend([piece for part in way for piece in part] for way in itertools.product(*parts))
+        for value in appended if alone else []:
             found, _why = self._message_ways(frame, value, value, depth + 1, seen)
             ways.extend(tail + way + tail for way in found if _has_literal(way))
         if opaque:

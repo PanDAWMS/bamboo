@@ -93,9 +93,17 @@ ASSUMPTIONS: dict[str, str] = {
         "run it, and nothing of the corpus."
     ),
     "driver_talks_only_to_db": "A call on the database driver -- a cursor, a connection -- goes only to the database.",
+    "select_reads_only": (
+        "A statement every text of which begins SELECT reads rows and writes none: the call running it is the "
+        "database, though the rest of its text is not read."
+    ),
     "closed_by_name": (
         "A call left open lands, if anywhere in the corpus, at a function of the corpus of its name: where none of "
         "those, nor anything they reach, writes the destination, the call writes none of it (MV 4, O1)."
+    ),
+    "queue_given_back": (
+        "A value put back into the queue it was taken from hands no work on: whoever takes it next runs its own "
+        "(DBProxyPool's proxies, a child process kept in a queue, a lock's token)."
     ),
 }
 
@@ -149,6 +157,15 @@ IMPLICIT_DUNDERS = callfacts.IMPLICIT_DUNDERS
 HOW_SETATTR = "setattr"
 
 _BUILTIN, _OUTSIDE, _QUEUE, _UNKNOWN = "builtin", "outside", "queue", "unknown"
+#: A builtin's detail for a value ``json.loads`` makes (:data:`callfacts.JSON_MAKERS`): a builtin, and every value
+#: inside it, and every method's result, a builtin too.
+_JSON = "a value json makes"
+#: A mapping's methods that hand back the value at a key, or a default: read as ``d[k]`` is.
+_KEYED_GETS = frozenset({"get", "pop", "setdefault"})
+#: A builtin container's methods that change what it holds.
+_CHANGING = frozenset(
+    {"update", "setdefault", "pop", "popitem", "clear", "append", "extend", "insert", "remove", "add", "discard"}
+)
 #: What a binding read inside its own reading adds: nothing.  ``diag =
 #: re.sub(..., diag)`` beside ``diag: str`` is a str; the second binding
 #: says no more than the first.  Never an answer: a reading that finds
@@ -278,6 +295,7 @@ class _Receivers:
         self._scopes: dict[int, _Scope] = {}
         self._as_values: Optional[set[str]] = None
         self._keys: dict[tuple[int, str], Optional[frozenset[str]]] = {}
+        self._changed: Optional[frozenset[str]] = None
 
     def of(
         self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
@@ -384,6 +402,9 @@ class _Receivers:
         if isinstance(expression, ast.Call):
             return self._called(file, func, expression, depth)
         if isinstance(expression, ast.Name):
+            narrowed = None if isinstance(func, ast.Module) else pathcond.narrowed(expression, func, expression.id)
+            if narrowed is not None:
+                return _BUILTIN, narrowed
             return self._named(file, func, expression.id, depth)
         if isinstance(expression, ast.Attribute):
             return self._attribute(file, func, expression, depth)
@@ -511,10 +532,14 @@ class _Receivers:
             )
             if library in _QUEUES:
                 return _QUEUE, ".".join(library)
+            if library in callfacts.JSON_MAKERS and not any(one.arg in callfacts.JSON_HOOKS for one in call.keywords):
+                return _BUILTIN, _JSON
+            if library in callfacts.RUNNERS:
+                return _OUTSIDE, f"{_a('.'.join(library))} holding a function only to run it"
             if isinstance(called, ast.Attribute):
                 receiver = self.of(file, func, called.value, depth + 1)
                 if receiver[0] in (_BUILTIN, _QUEUE):
-                    return self._method_result(receiver, called.attr)
+                    return self._got(file, func, call, receiver, depth) or self._method_result(receiver, called.attr)
             handed = self._handed_only_outside(file, func, call, depth)
             return (
                 (_UNKNOWN, handed) if handed else (_OUTSIDE, "built outside the corpus")
@@ -524,6 +549,10 @@ class _Receivers:
             and isinstance(called, ast.Name)
             and self._is_builtin(file, func, called.id)
         ):
+            if called.id == "getattr" and len(call.args) >= 2:
+                got = self._getattr(file, func, call, depth)
+                if got is not None:
+                    return got
             function = callfacts.BUILTIN_FUNCTIONS.get(called.id)
             result = function.result if function is not None else None
             if result is None:
@@ -537,14 +566,96 @@ class _Receivers:
                 handed = self._handed_only_outside(file, func, call, depth)
                 return (_UNKNOWN, handed) if handed else (_OUTSIDE, receiver[1])
             if receiver[0] in (_BUILTIN, _QUEUE):
-                return self._method_result(receiver, called.attr)
+                return self._got(file, func, call, receiver, depth) or self._method_result(receiver, called.attr)
             return receiver
         return _UNKNOWN, placed.unplaced or "placed nowhere"
+
+    def _getattr(self, file: str, func: ast.AST, call: ast.Call, depth: int) -> Optional[tuple[str, str]]:
+        """What ``getattr(x, name, default)`` is where ``x.name`` can be said by what *x* is -- an attribute of an
+        outside object or a scalar -- joined with the default; ``None`` otherwise.  ``find_daemon``'s
+        ``getattr(tmpSelf, "config", None)``, ``tmpSelf`` the module ``sys.modules`` hands back."""
+        owner = self.of(file, func, call.args[0], depth + 1)
+        if owner == _NOTHING or not (owner[0] == _OUTSIDE or (owner[0] == _BUILTIN and owner[1] in _SCALARS)):
+            return None
+        kinds = [(owner[0], f"an attribute of {owner[1]}")]
+        if len(call.args) > 2:
+            kinds.append(self.of(file, func, call.args[2], depth + 1))
+        return _joined(kinds)
+
+    def _got(
+        self, file: str, func: ast.AST, call: ast.Call, receiver: tuple[str, str], depth: int
+    ) -> Optional[tuple[str, str]]:
+        """What ``d.get(k, default)`` -- or ``pop``, ``setdefault`` -- on a builtin mapping is: what ``d[k]`` is
+        (:meth:`_filled_at`) or the default; ``None`` where that is not read."""
+        called = call.func
+        if (
+            receiver[0] != _BUILTIN
+            or receiver[1] in _SCALARS
+            or not isinstance(called, ast.Attribute)
+            or called.attr not in _KEYED_GETS
+            or not isinstance(called.value, ast.Name)
+            or not call.args
+            or isinstance(func, ast.Module)
+        ):
+            return None
+        filled = self._filled_at(file, func, called.value, [call.args[0]], depth)
+        if filled is None:
+            return None
+        default = self.of(file, func, call.args[1], depth + 1) if len(call.args) > 1 else (_BUILTIN, "NoneType")
+        return _joined([filled, default])
+
+    def _constant_dict(self, module: ast.Module, func: ast.AST, name: str) -> Optional[ast.Dict]:
+        """The literal a name of the *module* is bound to once, where the name is not bound in *func* and no code of
+        the corpus changes what it holds, nor hands it to a call -- ``task_split_rules``' ``split_rule_value_dict``, its
+        values the module's other dicts; ``None`` otherwise.  Read by the name alone across the corpus: a store into
+        anything so named, a changing method on it, ``global`` of it, or a call handed it, anywhere, and it is not one.
+        """
+        if name in _parameters(func) or any(not one.nested for one in pathcond.bindings(func, name)):
+            return None
+        if name in self._changed_names():
+            return None
+        bound = [one for one in pathcond.bindings(module, name) if not one.nested]
+        if len(bound) != 1 or not isinstance(bound[0].value, ast.Dict) or bound[0].slot is not None:
+            return None
+        literal = bound[0].value
+        return literal if all(key is not None for key in literal.keys) else None
+
+    def _changed_names(self) -> frozenset[str]:
+        """Every name the corpus may change what it holds, or hands on: stored into, deleted from, a changing method
+        called on it, ``+=``-ed, declared ``global``, an argument of a call -- by its last part (``x`` and ``m.x``)."""
+        if self._changed is None:
+            found: set[str] = set()
+
+            def last(node: ast.AST) -> Optional[str]:
+                if isinstance(node, ast.Name):
+                    return node.id
+                if isinstance(node, ast.Attribute):
+                    return node.attr
+                return None
+
+            for file in self.types.corpus_files():
+                tree = self.types.tree(file)
+                for node in walk(tree) if tree is not None else ():
+                    if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                        found.add(last(node.value) or "")
+                    elif isinstance(node, ast.AugAssign):
+                        found.add(last(node.target) or "")
+                    elif isinstance(node, ast.Global):
+                        found.update(node.names)
+                    elif isinstance(node, ast.Call):
+                        if isinstance(node.func, ast.Attribute) and node.func.attr in _CHANGING:
+                            found.add(last(node.func.value) or "")
+                        for one in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                            found.add(last(one.value if isinstance(one, ast.Starred) else one) or "")
+            self._changed = frozenset(found)
+        return self._changed
 
     @staticmethod
     def _method_result(receiver: tuple[str, str], method: str) -> tuple[str, str]:
         """What a builtin's or a queue's method returns: one of what it holds, another of its type (a copy), or a builtin."""
         kind, held = receiver
+        if held == _JSON:
+            return receiver
         if kind == _QUEUE:
             return (
                 (_UNKNOWN, f"what {_a(held)} holds")
@@ -575,6 +686,17 @@ class _Receivers:
         root, keys = _subscripted(expression)
         if root is None or isinstance(func, ast.Module):
             return None
+        return self._filled_at(file, func, root, keys, depth)
+
+    def _filled_at(
+        self, file: str, func: ast.AST, root: ast.Name, keys: list[ast.expr], depth: int
+    ) -> Optional[tuple[str, str]]:
+        """:meth:`_filled` for ``root[keys[0]]...``; a module's dict no code changes (:meth:`_constant_dict`) is what
+        its literal holds."""
+        module = self.types.tree(file)
+        literal = self._constant_dict(module, func, root.id) if module is not None and len(keys) == 1 else None
+        if module is not None and literal is not None:
+            return _joined([self.of(file, module, value, depth + 1) for value in literal.values])
         container = self.of(file, func, root, depth + 1)
         if container[0] in (_OUTSIDE, _QUEUE) or (
             container[0] == _BUILTIN and container[1] in _SCALARS
@@ -756,7 +878,31 @@ class _Receivers:
             return _NOTHING
         if owner[0] == _OUTSIDE or (owner[0] == _BUILTIN and owner[1] in _SCALARS):
             return owner[0], f"an attribute of {owner[1]}"
+        declared = self._declared_field(file, func, root, expression.attr)
+        if declared is not None:
+            return declared
         return _UNKNOWN, f"an attribute of another object ({owner[1]})"
+
+    def _declared_field(
+        self, file: str, func: ast.AST, root: ast.expr, field: str
+    ) -> Optional[tuple[str, str]]:
+        """What *field* of an object declared as classes of the corpus is, where each class declares it a builtin or
+        an outside class -- ``TableInfo``'s ``columns: dict[str, str]`` --; ``None`` otherwise
+        (``declared_types_hold``)."""
+        try:
+            classes = self.types.declared(file, func, root)
+        except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+            return None
+        if not classes:
+            return None
+        kinds = []
+        for one in sorted(classes, key=lambda held: (held[0], held[1].lineno)):
+            annotated = self.types._field_annotation(one, field)
+            if annotated is None:
+                return None
+            kinds.append(self.annotation(*annotated))
+        said = _joined(kinds)
+        return said if said[0] in (_BUILTIN, _OUTSIDE) else None
 
 
 def _joined(kinds: list[tuple[str, str]]) -> tuple[str, str]:
@@ -783,6 +929,8 @@ def _element(container: tuple[str, str]) -> tuple[str, str]:
     kind, detail = container
     if kind == _OUTSIDE:
         return _OUTSIDE, f"an element of {detail}"
+    if detail == _JSON:
+        return container
     if kind == _BUILTIN and detail in ("str", "bytes", "range"):
         return _BUILTIN, "str" if detail == "str" else ""
     if kind == _UNKNOWN:
@@ -989,8 +1137,9 @@ class _Holders:
     ask is in hands the container to its caller when the call ends, after every read of the call, and goes nowhere
     those reads see -- ``collect_existing_files`` returns the ``dataset_file_map`` it fills; a caller that fills
     what was returned and hands it in again does so by a name the walk reads up through the parameter
-    (``getOutputFiles_JEDI``'s ``parallelOutMap``).  A callee's return is the container under a name of its caller
-    the walk does not read, and is not read.  So is a binding not read here
+    (``getOutputFiles_JEDI``'s ``parallelOutMap``).  A container a callee returns is read in the callee, through what
+    each of its ``return`` statements hands back (:meth:`_returned`): ``get_result``'s ``response`` is what
+    ``_structured_result_response`` returns.  Not read: a binding not read here
     (``with``, ``except``, ``global``), a name the function does not bind, a module's name, ``self``, a merge from a
     value not read as a mapping or a set, a path longer than :data:`_PATH_CUT` keys, and more than
     :data:`_HOLDERS_CUT` holders.
@@ -1015,6 +1164,11 @@ class _Holders:
             tuple[int, str, tuple[Optional[str], ...], tuple[Optional[str], ...]]
         ] = set()
         self.failed = False
+        #: The functions whose returns :meth:`_returned` is reading now: a call of one inside it is read no further.
+        self.returning: set[tuple[int, str]] = set()
+        #: Every function whose returns were read, by id: its ``return`` of the container hands it back to the call
+        #: the walk came from, as the ask's own does.
+        self.entered: set[int] = set()
 
     def values(
         self, file: str, func: ast.AST, name: str
@@ -1215,8 +1369,44 @@ class _Holders:
                     if keyword.arg is None
                     else (*of, ast.Constant(value=keyword.arg)),
                 )
-        else:
+        elif not self._returned(file, func, value, of):
             self.found.append((file, func, value, self.keys[len(of) :]))
+
+    def _returned(self, file: str, func: ast.AST, value: ast.expr, of: _Path) -> bool:
+        """Whether *value*, the container at *of*, is what corpus functions a call is placed at alone return, each
+        value one of their ``return`` statements hands back read in it -- ``_structured_result_response`` puts
+        ``response["async_meta"]`` into what ``generate_response`` returned, a dict literal, and returns it.  Not where
+        a function returns a value no ``return`` spells, or is being read already, its own call inside it."""
+        if not isinstance(value, ast.Call):
+            return False
+        try:
+            placed = self.calls.callees(file, func, value)
+        except Exception:  # noqa: BLE001 -- a call not read is a move not read
+            return False
+        if not placed.targets or placed.unplaced or placed.returns_none:
+            return False
+        found: list[tuple[str, ast.AST, ast.expr]] = []
+        reading = {(id(target.func), target.file) for target in placed.targets}
+        if reading & self.returning:
+            return False
+        for target in placed.targets:
+            for node in walk(target.func):
+                if isinstance(node, (ast.Yield, ast.YieldFrom)) or (
+                    isinstance(node, ast.Return) and node.value is None
+                ):
+                    return False
+                if isinstance(node, ast.Return) and pathcond.enclosing_function(node) is target.func:
+                    found.append((target.file, target.func, node.value))  # type: ignore[arg-type]
+        if not found:
+            return False
+        self.returning |= reading
+        self.entered.update(id(target.func) for target in placed.targets)
+        try:
+            for where, scope, one in found:
+                self._place(where, scope, one, (), of)
+        finally:
+            self.returning -= reading
+        return True
 
     def _constructed(self, value: ast.expr) -> bool:
         """``dict()``, ``list()``, ``set()``, ``dict(k=v, ...)``: a builtin container from keywords alone."""
@@ -1473,8 +1663,8 @@ class _Holders:
                 ),
             ):  # fmt: skip
                 return
-            elif isinstance(parent, ast.Return) and func is self.start:
-                return
+            elif isinstance(parent, ast.Return) and (func is self.start or id(func) in self.entered):
+                return  # back to the call it came from: the ask's, or a call whose returns are read (_returned)
             else:
                 self._unread(at, of)
                 return
@@ -2389,6 +2579,7 @@ def graph(
                 _close(
                     row,
                     receivers,
+                    calls,
                     defined,
                     file,
                     func,
@@ -2480,9 +2671,88 @@ def _groups(
         yield [spelled], (one,)
 
 
+
+def _given_back(calls: C.Calls, file: str, func: ast.AST, call: ast.Call) -> bool:
+    """Whether the value *call* puts into a queue is one taken from that same queue (``queue_given_back``).
+
+    Taken in the same function -- ``i = self.childlock.get()`` ... ``self.childlock.put(i)`` -- or handed in by
+    every call of the function, each a value its caller took through a method of the same class that returns a get
+    of the queue: ``DBProxyPool.get()`` takes ``proxy = self.getProxy()``, which returns ``self.proxyList.get()``,
+    and gives it back with ``self.putProxy(proxy)``.  A queue the value came into some other way -- a process just
+    started, a message read, a request -- may carry work to whoever takes it, and is a hole (:data:`HOLE_QUEUE`).
+    """
+    queue = ast.unparse(call.func.value)  # type: ignore[attr-defined]
+    value = call.args[0] if call.args else next((one.value for one in call.keywords if one.arg == "item"), None)
+    if not isinstance(value, ast.Name):
+        return False
+    if value.id not in _parameters(func):
+        return _taken_from(func, value.id, queue)
+    owned = calls.types.method_class(file, func)
+    if owned is None or not queue.startswith("self."):
+        return False
+    target = C.Target(file, func, owned[1])
+    try:
+        sites = calls.callers(target)
+    except Exception:  # noqa: BLE001 -- no caller read is no caller known
+        return False
+    return bool(sites) and all(_handed_back(calls, site, target, value.id, owned, queue) for site in sites)
+
+
+def _handed_back(
+    calls: C.Calls, site: C.CallSite, target: C.Target, parameter: str, owned: tuple[str, ast.ClassDef], queue: str
+) -> bool:
+    """Whether *site* hands *parameter* a value its function took through a method of *owned* returning a get of
+    *queue*."""
+    try:
+        handed = calls.handed(site, target).get(parameter)
+    except Exception:  # noqa: BLE001
+        return False
+    if not isinstance(handed, ast.Name) or handed.id in _parameters(site.func):
+        return False
+    found = [one for one in pathcond.bindings(site.func, handed.id) if not one.nested]
+    if not found or any(not isinstance(one.value, ast.Call) or one.slot is not None for one in found):
+        return False
+    for one in found:
+        try:
+            placed = calls.callees(site.file, site.func, one.value)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            return False
+        if placed.unplaced or not placed.targets:
+            return False
+        for getter in placed.targets:
+            if getter.cls is not owned[1] or not _returns_taken(getter.func, queue):
+                return False
+    return True
+
+
+def _returns_taken(func: ast.AST, queue: str) -> bool:
+    """Whether every ``return`` of *func* gives back a value taken from *queue*."""
+    returns = [node for node in walk(func) if isinstance(node, ast.Return)]
+    return bool(returns) and all(
+        _is_get(one.value, queue) or (isinstance(one.value, ast.Name) and _taken_from(func, one.value.id, queue))
+        for one in returns
+    )
+
+
+def _taken_from(func: ast.AST, name: str, queue: str) -> bool:
+    """Whether every binding of *name* in *func* is a get of *queue*."""
+    found = [one for one in pathcond.bindings(func, name) if not one.nested]
+    return bool(found) and all(one.slot is None and _is_get(one.value, queue) for one in found)
+
+
+def _is_get(value: Optional[ast.expr], queue: str) -> bool:
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr in _GETS
+        and ast.unparse(value.func.value) == queue
+    )
+
+
 def _close(
     row: _Row,
     receivers: _Receivers,
+    calls: C.Calls,
     defined: set[str],
     file: str,
     func: ast.AST,
@@ -2507,7 +2777,10 @@ def _close(
     if reads_receiver and isinstance(called, ast.Attribute):
         kind, detail = receivers.of(file, func, called.value)
         if kind == _QUEUE and called.attr in _PUTS:
-            row.hole(call, HOLE_QUEUE, for_classes)
+            if _given_back(calls, file, func, call):
+                row.settle(call, "queue_given_back")
+            else:
+                row.hole(call, HOLE_QUEUE, for_classes)
             return
         if reason == C.UNPLACED_OUTSIDE or kind in (_BUILTIN, _QUEUE):
             return

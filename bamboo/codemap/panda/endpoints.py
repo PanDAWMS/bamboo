@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import ast
 import logging
-from typing import TYPE_CHECKING, Iterator, Optional
+import re
+from typing import TYPE_CHECKING, Callable, Iterator, Optional
 
 from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as C
@@ -172,6 +173,22 @@ def attach(
             terms.setdefault((key_from.owner, key_from.statement), []).append(key_from)
     code = _Code(calls)
     read = _Reader(record, code, sites, terms, _Bounds(record, code))
+    if returned is not None:
+        # Imported where the walks are asked again alone, as the type hints import it.
+        from bamboo.codemap.panda.recognizers import sqlwrite as walks
+
+        trees = {module.rel_path: module.tree for module in modules}
+        owners = {junction.owner for junction in fragment.junctions}
+
+        def rewalk(
+            site: ReadSiteNode, owner: str, ruled: dict[int, frozenset[int]]
+        ) -> Optional[list[str]]:
+            func = walks._site_function(trees, site)
+            if func is None:
+                return None
+            return walks.returned_under(calls, owners, record, func, site, owner, ruled)
+
+        read.rewalk = rewalk
     fragment.endpoints = [
         one
         for version, route, owner in routes(modules)
@@ -203,6 +220,33 @@ class _Reader:
             terms,
             bounds,
         )
+        self.objects = _Objects(code)
+        #: Read again what a read's rows come to in the answer, taking no return the way's constants rule out
+        #: (:func:`sqlwrite.returned_under`); set where the build asked the walks for answers.
+        self.rewalk: Optional[
+            Callable[
+                [ReadSiteNode, str, dict[int, frozenset[int]]], Optional[list[str]]
+            ]
+        ] = None
+
+    def _bounded(
+        self,
+        function: str,
+        hole: ReachHole,
+        nodes: list[Node],
+        into: dict[Node, list[tuple[Node, ReachCall]]],
+    ) -> EndpointHole:
+        """*hole* bounded by its callee's name (:class:`_Bounds`), or closed on the endpoint's objects
+        (:meth:`_Objects.held`)."""
+        bounded = self.bounds.of(function, hole)
+        if bounded.bound == HOLE_CLOSED:
+            return bounded
+        held = self.objects.held(function, hole, nodes, into)
+        if not held:
+            return bounded
+        return bounded.model_copy(
+            update={"bound": HOLE_CLOSED, "through": [], "held_by": held}
+        )
 
     def endpoint(
         self,
@@ -220,18 +264,23 @@ class _Reader:
             )
             return None
         came = record.closure([owner])
-        shut = _shut(record, code, came)
+        shut, constants = _shut(record, code, came)
+        ruled = _ruled_returns(code, came, constants)
         if shut:
             came = record.closure(
                 [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
             )
         holes = {}
+        held_in: dict[tuple[str, int, str], list[Node]] = {}
         reached: dict[str, tuple[ReadSiteNode, list[tuple[str, str]]]] = {}
         for node in came:
             function, cls = node
             for hole in record.rows[function].holes:
                 if not hole.for_classes or cls in hole.for_classes:
                     holes.setdefault((function, hole.line, hole.callee), hole)
+                    held_in.setdefault((function, hole.line, hole.callee), []).append(
+                        node
+                    )
             for site in self.sites.get(function, ()):
                 reached.setdefault(site.name, (site, []))[1].append(node)
         fills = _Fills(record, code, came, owner, shut)
@@ -239,6 +288,12 @@ class _Reader:
         reads = []
         for site, nodes in reached.values():
             answer = returned.get(site.name) if returned is not None else None
+            paths = answer.paths.get(owner, []) if answer is not None else []
+            if paths and ruled and self.rewalk is not None:
+                # Read again wherever a return in the closure is ruled out: the rows can come back through it from
+                # the read's own function, a caller on the way or a callee they are handed to.
+                again = self.rewalk(site, owner, ruled)
+                paths = paths if again is None else again
             reads.append(
                 EndpointRead(
                     site=site.name,
@@ -254,7 +309,7 @@ class _Reader:
                         for key_from in self.terms.get((site.owner, _line(site)), ())
                     ],
                     way=reach.way(came, nodes[0]),
-                    returned=answer.paths.get(owner, []) if answer is not None else [],
+                    returned=paths,
                     returned_open=sorted(
                         {
                             f"{function}:{line}"
@@ -267,6 +322,7 @@ class _Reader:
                 )
             )
         functions = list(dict.fromkeys(function for function, _cls in came))
+        into = _into(record, came, shut)
         return Endpoint(
             route=route,
             version=version,
@@ -283,16 +339,26 @@ class _Reader:
                 }
             ),
             reads=reads,
-            writes=[one for function in functions for one in code.writes(function)],
+            writes=[
+                code.valued(
+                    one, [node for node in came if node[0] == function], constants
+                )
+                for function in functions
+                for one in code.writes(function)
+            ],
             changes=[one for function in functions for one in code.changes(function)],
             hole_bounds=[
-                self.bounds.of(function, hole)
-                for (function, _line, _callee), hole in holes.items()
+                self._bounded(function, hole, held_in[key], into)
+                for key, hole in holes.items()
+                for function in [key[0]]
             ],
         )
 
 
 Node = tuple[str, str]
+
+#: A literal number in a statement's text, said as written; any other literal is a text.
+_NUMBER = re.compile(r"-?\d+(\.\d+)?")
 
 
 class _Code:
@@ -311,6 +377,117 @@ class _Code:
         self._bound: dict[
             tuple[str, int, str], list[tuple[ast.Call, dict[str, Optional[ast.expr]]]]
         ] = {}
+        self._module_constants: dict[
+            tuple[str, str], Optional[tuple[type, object]]
+        ] = {}
+
+    def module_constant(self, owner: str, name: str) -> Optional[tuple[type, object]]:
+        """The constant *name* is in *owner*'s module: bound there once to a literal and never declared ``global``, or
+        imported from a module of the corpus where it is; ``None`` otherwise."""
+        held = self.funcs.get(owner)
+        if (
+            held is None
+            or name in _parameters(held[1])
+            or any(not one.nested for one in pathcond.bindings(held[1], name))
+        ):
+            return None
+        return self._constant_in(held[0], name, 0)
+
+    def _constant_in(
+        self, file: str, name: str, depth: int
+    ) -> Optional[tuple[type, object]]:
+        key = (file, name)
+        if key in self._module_constants:
+            return self._module_constants[key]
+        self._module_constants[key] = None
+        found: Optional[tuple[type, object]] = None
+        tree = self.types.tree(file)
+        if tree is not None and depth < 3:
+            bound = [one for one in pathcond.bindings(tree, name) if not one.nested]
+            rebound = any(
+                isinstance(node, ast.Global) and name in node.names
+                for node in ast.walk(tree)
+            )
+            if (
+                len(bound) == 1
+                and not rebound
+                and bound[0].slot is None
+                and isinstance(bound[0].value, ast.Constant)
+            ):
+                found = type(bound[0].value.value), bound[0].value.value
+            elif not bound:
+                imported = self.types.imports(file).get(name)
+                source = (
+                    self.types.module_file(imported[0])
+                    if imported is not None and imported[1]
+                    else None
+                )
+                if source is not None and imported is not None:
+                    found = self._constant_in(source, imported[1], depth + 1)
+        self._module_constants[key] = found
+        return found
+
+    def valued(
+        self,
+        write: EndpointWrite,
+        nodes: list[Node],
+        held: dict[Node, dict[str, tuple[type, object]]],
+    ) -> EndpointWrite:
+        """*write* with the constants the endpoint's way puts in its columns (:attr:`EndpointWrite.values`): a
+        literal in the statement, or a bind each of whose values is a constant there (:func:`_constant`), for every
+        class the function runs as on the way."""
+        held_func = self.funcs.get(write.function)
+        if held_func is None or not nodes:
+            return write
+        func = held_func[1]
+        found: dict[str, set[str]] = {}
+        unsaid: set[str] = set()
+        for run in sql.executions(func):  # type: ignore[arg-type]
+            if run.call.lineno != write.line:
+                continue
+            for statement in sqltext.writes(run.sql):
+                if statement.kind != write.kind or statement.table.lower() not in {
+                    table.rpartition(".")[2] for table in write.tables
+                }:
+                    continue
+                for column, value in statement.columns.items():
+                    said = self._column_values(func, run, value, nodes, held)
+                    if said is None:
+                        unsaid.add(column)
+                    else:
+                        found.setdefault(column, set()).update(said)
+        values = {
+            column: sorted(said)
+            for column, said in found.items()
+            if column not in unsaid
+        }
+        return write.model_copy(update={"values": values}) if values else write
+
+    def _column_values(
+        self,
+        func: ast.AST,
+        run: sql.Execution,
+        value: sqltext.ColumnValue,
+        nodes: list[Node],
+        held: dict[Node, dict[str, tuple[type, object]]],
+    ) -> Optional[set[str]]:
+        """The constants, as ``repr`` spells them, a column is written: ``None`` where one value is not one."""
+        if value.kind == "literal":
+            text = value.text
+            return {text if text == "None" or _NUMBER.fullmatch(text) else repr(text)}
+        if value.kind != "bind" or not run.varmap:
+            return None
+        binds = sql.bound_values(func, run.varmap, value.text, at=run)  # type: ignore[arg-type]
+        if not binds:
+            return None
+        found: set[str] = set()
+        for bind in binds:
+            for node in nodes:
+                got = _constant(self, node, bind.value, held)
+                if got is None:
+                    return None
+                found.add(repr(got[1]))
+        return found
 
     def writes(self, owner: str) -> list[EndpointWrite]:
         """The statements writing rows *owner* runs, one per statement and kind."""
@@ -668,8 +845,9 @@ def _calls_shut(
 
 def _shut(
     record: reach.ReachGraph, code: _Code, came: reach.Came
-) -> frozenset[tuple[Node, int]]:
-    """The calls of the closure *came* no way into it makes: ``(the function and class making it, id(its call))``.
+) -> tuple[frozenset[tuple[Node, int]], dict[Node, dict[str, tuple[type, object]]]]:
+    """The calls of the closure *came* no way into it makes: ``(the function and class making it, id(its call))``;
+    and the constants the parameters hold on the ways left open, by function and class.
 
     A parameter of a function of the closure holds a constant where every call into the function, on the ways still
     open, hands it the same one -- a literal, the default the call leaves it to (:func:`calls.bind`), a parameter of
@@ -717,7 +895,7 @@ def _shut(
                 ):
                     more.add((caller, id(call)))
         if more <= shut:
-            return frozenset(shut)
+            return frozenset(shut), held
         shut |= more
 
 
@@ -736,6 +914,43 @@ def _reached(
             if callee not in found:
                 found.add(callee)
                 pending.append(callee)
+    return found
+
+
+def _ruled_returns(
+    code: _Code,
+    came: reach.Came,
+    constants: dict[Node, dict[str, tuple[type, object]]],
+) -> dict[int, frozenset[int]]:
+    """``{id(function): ids of its returns}`` the constants the closure holds rule out (:func:`pathcond.ruled_out_at`),
+    for every class the function runs as on the way: ``get_task_details_json``'s ``return ..., resolve_status``
+    under ``if include_resolve_status:``, left ``False`` by ``task/get_detailed_info``."""
+    by_function: dict[str, list[Node]] = {}
+    for node in came:
+        by_function.setdefault(node[0], []).append(node)
+    found: dict[int, frozenset[int]] = {}
+    for function, nodes in by_function.items():
+        if function not in code.funcs or not all(constants.get(node) for node in nodes):
+            continue
+        func = code.funcs[function][1]
+        returns = [
+            one
+            for one in ast.walk(func)
+            if isinstance(one, ast.Return) and pathcond.enclosing_function(one) is func
+        ]
+        ruled = frozenset(
+            id(one)
+            for one in returns
+            if all(
+                any(
+                    pathcond.ruled_out_at(one, func, name, value)
+                    for name, (_kind, value) in constants[node].items()
+                )
+                for node in nodes
+            )
+        )
+        if ruled:
+            found[id(func)] = ruled
     return found
 
 
@@ -772,14 +987,347 @@ def _constant(
     value: Optional[ast.expr],
     held: dict[Node, dict[str, tuple[type, object]]],
 ) -> Optional[tuple[type, object]]:
-    """``(type, value)`` of the constant *value*, an argument *caller* hands, holds; ``None`` where it holds none."""
+    """``(type, value)`` of the constant *value*, an argument *caller* hands, holds; ``None`` where it holds none.
+
+    A literal; a parameter holding one on the way (*held*); a name of the module bound once to one, there or in a
+    module of the corpus it is imported from (``DB_READ_REQUEST_TYPE``); an f-string of those
+    (``f"{REQUEST_TYPE_PREFIX}{operation}"``)."""
     if isinstance(value, ast.Constant):
         return type(value.value), value.value
-    if isinstance(value, ast.Name) and code.versions(caller[0]).paths(value) == [
-        value.id
-    ]:
-        return held.get(caller, {}).get(value.id)
+    if isinstance(value, ast.JoinedStr):
+        parts = []
+        for one in value.values:
+            if isinstance(one, ast.Constant):
+                parts.append(str(one.value))
+                continue
+            if (
+                not isinstance(one, ast.FormattedValue)
+                or one.conversion != -1
+                or one.format_spec is not None
+            ):
+                return None
+            got = _constant(code, caller, one.value, held)
+            if got is None or got[0] not in (str, int):
+                return None
+            parts.append(str(got[1]))
+        return str, "".join(parts)
+    if not isinstance(value, ast.Name):
+        return None
+    if code.versions(caller[0]).paths(value) == [value.id]:
+        found = held.get(caller, {}).get(value.id)
+        if found is not None:
+            return found
+    return code.module_constant(caller[0], value.id)
+
+
+class _Objects:
+    """A hole on a field of the object its method runs on, read per object: ``CachedObject.get`` calls
+    ``self.cachedObj.get(*var)``, the field filled from what the function the object was built with returns
+    (``tmp_stat, tmp_out = self.updateFunc()``, ``self.cachedObj = tmp_out``).  The reach record reads one row a
+    function, for every object; an endpoint reaches the method through its own calls, on objects it can name.
+    """
+
+    #: How far back through calls on ``self`` an object is followed to the call that names it.
+    DEPTH = 3
+
+    def __init__(self, code: _Code):
+        self.code, self.calls = code, code.calls
+        self.receivers = reach._Receivers(code.calls, None)
+
+    def held(
+        self,
+        function: str,
+        hole: ReachHole,
+        nodes: list[Node],
+        into: dict[Node, list[tuple[Node, ReachCall]]],
+    ) -> list[str]:
+        """``file:line`` of each construction of the objects the endpoint's calls run *function* on, where every one
+        fills the field the hole's call is made on with a builtin; ``[]`` where one does not, or is not read.
+
+        The field is read from the class's methods: set only to ``None`` or to what a call of another field returns
+        -- a slot of it, unpacked --, that field set only in ``__init__`` from a parameter.  Each object is read from
+        the call into the method -- back through calls on ``self`` in the class -- to its name's bindings, a local's
+        or a module's: ``None``, or a construction of the class, whose argument for that parameter names functions
+        each declared to return a builtin there."""
+        try:
+            called = ast.parse(hole.callee, mode="eval").body
+        except SyntaxError:
+            return []
+        if not (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Attribute)
+            and isinstance(called.value.value, ast.Name)
+            and called.value.value.id == "self"
+            and function in self.code.funcs
+        ):
+            return []
+        file, func = self.code.funcs[function]
+        owned = self.calls.types.method_class(file, func)
+        if owned is None:
+            return []
+        sources = self._sources(owned[1], called.value.attr)
+        init = _function_in(owned[1], "__init__")
+        if not sources or init is None:
+            return []
+        found: set[str] = set()
+        for node in nodes:
+            built = self._objects(node, owned[1], into, 0)
+            if not built:
+                return []
+            for where, scope, construction in built:
+                if not all(
+                    self._builtin(
+                        where, scope, construction, owned, init, parameter, slot
+                    )
+                    for parameter, slot in sources
+                ):
+                    return []
+                found.add(f"{where}:{construction.lineno}")
+        return sorted(found)
+
+    def _sources(
+        self, cls: ast.ClassDef, field: str
+    ) -> list[tuple[str, Optional[int]]]:
+        """``(parameter of __init__, slot)`` for each value the class sets *field* to other than ``None``: what the
+        function handed as the parameter returns, at the slot; ``[]`` where one is set any other way."""
+        found: list[tuple[str, Optional[int]]] = []
+        for method in _methods(cls):
+            for node in ast.walk(method):
+                if isinstance(node, (ast.AugAssign, ast.AnnAssign)) and _is_field(
+                    node.target, field
+                ):
+                    return []
+                if not isinstance(node, ast.Assign) or not any(
+                    _is_field(target, field) for target in node.targets
+                ):
+                    continue
+                if len(node.targets) != 1:
+                    return []
+                value = node.value
+                if isinstance(value, ast.Constant) and value.value is None:
+                    continue
+                returned = _returned_by_field(method, value)
+                parameter = (
+                    _init_parameter(cls, returned[0]) if returned is not None else None
+                )
+                if returned is None or parameter is None:
+                    return []
+                found.append((parameter, returned[1]))
+        return found
+
+    def _objects(
+        self,
+        node: Node,
+        cls: ast.ClassDef,
+        into: dict[Node, list[tuple[Node, ReachCall]]],
+        depth: int,
+    ) -> Optional[list[tuple[str, ast.AST, ast.Call]]]:
+        """``(file, scope, construction)`` of each object the closure's calls run *node*'s function on; ``None``
+        where one is not read."""
+        edges = into.get(node)
+        if not edges or depth > self.DEPTH:
+            return None
+        name = self.code.funcs[node[0]][1].name  # type: ignore[attr-defined]
+        found: list[tuple[str, ast.AST, ast.Call]] = []
+        for caller, call in edges:
+            file, func = self.code.funcs[caller[0]]
+            lines = set(call.lines or [call.line])
+            made = [
+                one
+                for one in ast.walk(func)
+                if isinstance(one, ast.Call)
+                and getattr(one, "lineno", 0) in lines
+                and isinstance(one.func, ast.Attribute)
+                and one.func.attr == name
+            ]
+            if not made:
+                return None
+            for one in made:
+                receiver = one.func.value  # type: ignore[attr-defined]
+                if isinstance(receiver, ast.Name) and receiver.id == "self":
+                    owned = self.calls.types.method_class(file, func)
+                    inner = (
+                        self._objects(caller, cls, into, depth + 1)
+                        if owned is not None and owned[1] is cls
+                        else None
+                    )
+                else:
+                    inner = self._built(file, func, receiver, cls)
+                if inner is None:
+                    return None
+                found.extend(inner)
+        return found
+
+    def _built(
+        self, file: str, func: ast.AST, receiver: ast.expr, cls: ast.ClassDef
+    ) -> Optional[list[tuple[str, ast.AST, ast.Call]]]:
+        """The constructions of *cls* a name's bindings are, a local's or its module's -- ``None`` bound beside them;
+        ``None`` where one is anything else."""
+        if not isinstance(receiver, ast.Name):
+            return None
+        local = [one for one in pathcond.bindings(func, receiver.id) if not one.nested]
+        module = self.calls.types.tree(file)
+        if local and not _declares_global(func, receiver.id):
+            sites = [(func, one.value) for one in local]
+        elif module is not None:
+            sites = [
+                (_scope_of(one.site, module), one.value)
+                for one in pathcond.bindings(module, receiver.id)
+                if not one.nested
+                or _declares_global(_scope_of(one.site, module), receiver.id)
+            ]
+        else:
+            return None
+        found: list[tuple[str, ast.AST, ast.Call]] = []
+        for scope, value in sites:
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue
+            if not isinstance(value, ast.Call):
+                return None
+            try:
+                placed = self.calls.callees(file, scope, value)
+            except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+                return None
+            if placed.unplaced or not any(
+                target.cls is cls and target.func.name == "__init__"  # type: ignore[attr-defined]
+                for target in placed.targets
+            ):
+                return None
+            found.append((file, scope, value))
+        return found or None
+
+    def _builtin(
+        self,
+        file: str,
+        scope: ast.AST,
+        construction: ast.Call,
+        owned: tuple[str, ast.ClassDef],
+        init: ast.AST,
+        parameter: str,
+        slot: Optional[int],
+    ) -> bool:
+        """Whether the function *construction* hands *parameter* is declared to return a builtin at *slot*."""
+        target = C.Target(owned[0], init, owned[1])
+        try:
+            handed = self.calls.handed(C.CallSite(file, scope, construction), target)
+        except Exception:  # noqa: BLE001
+            return False
+        value = handed.get(parameter)
+        named = (
+            self.calls.named_callables(file, scope, value) if value is not None else ()
+        )
+        if not named:
+            return False
+        for one in named:
+            returns = getattr(one.func, "returns", None)
+            declared = (
+                C._slot_of(returns, slot)
+                if returns is not None and slot is not None
+                else returns
+            )
+            if (
+                declared is None
+                or self.receivers.annotation(one.file, declared)[0] != reach._BUILTIN
+            ):
+                return False
+        return True
+
+
+def _methods(cls: ast.ClassDef) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return [
+        one
+        for one in cls.body
+        if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _function_in(
+    cls: ast.ClassDef, name: str
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return next((one for one in _methods(cls) if one.name == name), None)
+
+
+def _is_field(target: ast.expr, field: str) -> bool:
+    return (
+        isinstance(target, ast.Attribute)
+        and target.attr == field
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    )
+
+
+def _field_called(value: Optional[ast.expr]) -> Optional[str]:
+    """The field ``self.<field>(...)`` calls."""
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "self"
+    ):
+        return value.func.attr
     return None
+
+
+def _returned_by_field(
+    method: ast.AST, value: ast.expr
+) -> Optional[tuple[str, Optional[int]]]:
+    """``(field, slot)``: *value* is what ``self.<field>(...)`` returns, or the name its slot is unpacked to."""
+    field = _field_called(value)
+    if field is not None:
+        return field, None
+    if not isinstance(value, ast.Name):
+        return None
+    found = {
+        (_field_called(one.value), one.slot)
+        for one in pathcond.bindings(method, value.id)
+        if not one.nested
+    }
+    if len(found) != 1:
+        return None
+    field, slot = found.pop()
+    return (field, slot) if field is not None else None
+
+
+def _init_parameter(cls: ast.ClassDef, field: str) -> Optional[str]:
+    """The parameter of ``__init__`` the class sets *field* to, where it sets it nowhere else."""
+    init = _function_in(cls, "__init__")
+    found: set[str] = set()
+    for method in _methods(cls):
+        for node in ast.walk(method):
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, (ast.AugAssign, ast.AnnAssign))
+                else []
+            )
+            if not any(_is_field(target, field) for target in targets):
+                continue
+            if (
+                method is not init
+                or not isinstance(node, ast.Assign)
+                or not isinstance(node.value, ast.Name)
+                or node.value.id not in _parameters(method)
+            ):
+                return None
+            found.add(node.value.id)
+    return found.pop() if len(found) == 1 else None
+
+
+def _declares_global(scope: ast.AST, name: str) -> bool:
+    return any(
+        isinstance(node, ast.Global) and name in node.names for node in ast.walk(scope)
+    )
+
+
+def _scope_of(site: ast.AST, module: ast.Module) -> ast.AST:
+    """The function *site* is in, or the module."""
+    at: Optional[ast.AST] = getattr(site, "parent", None)
+    while at is not None and not isinstance(
+        at, (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        at = getattr(at, "parent", None)
+    return at if at is not None else module
 
 
 class _Bounds:

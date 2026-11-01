@@ -81,6 +81,18 @@ and only the other strings are asked (a round asked 16 rotated files again
 whole for their new strings, with the 2-17 strings each one's earlier answers
 held, 2026-10-30).
 
+**The list after.**  Once its greps are answered, a round lists the logs
+again and holds each file it read to that list (:func:`moved`): a rotated file
+to the size and mtime it was read at, with no plain name beside it; the
+current file to no rotated file of its log the first list lacked, and to no
+shrinking.  A log whose files changed is read again from the list after, and
+the round lists again, up to :data:`RELIST_TRIES` times; a file still changed
+then, or on a machine the list after does not know, fails its strings, so its
+asks are deferred.  So a round may run while machines rotate (until
+2026-11-01 none ran 06:30-08:30 UTC, the hours they rotate in; tmaeno: list
+before and after, and read again what changed).  Each record's ``list_logs``
+has ``after``: each list after, when it was asked, its answers, and what moved.
+
 **A cut string.**  A cut string is read from the file's start to the second
 before its answer's last record's: the cut can fall inside that second.  Where
 an ask's window, widened by :data:`CONTINUE_SLACK` on each side, reaches past
@@ -171,6 +183,9 @@ BEING_COMPRESSED = "Being compressed"
 #: the error of a grep the API stopped at its subprocess timeout (240 s), and how many times one is asked again
 TIMED_OUT = "timeout"
 TIMEOUT_RETRIES = 2
+#: how many times a round reads again the logs whose files changed between its list and the list after its greps (a
+#: machine rotates a log once a day, so once is the most a round is expected to need)
+RELIST_TRIES = 2
 #: how far past each end of an ask's window a cut string is asked again: the querier's EDGE, within which a run near
 #: an end of what was searched may go on past it (its door asks again for that once)
 CONTINUE_SLACK = datetime.timedelta(minutes=10)
@@ -431,6 +446,10 @@ class Job:
     )  # first_stamp, offset, asked
     tail_bytes: int | None = None
     requests: list[dict] = field(default_factory=list)
+    listed_at: datetime.datetime = LOW  # when the list its file is from was asked
+    seen: tuple[int, datetime.datetime] | None = (
+        None  # a rotated file's size and mtime as listed when it was read
+    )
 
 
 class Answers:
@@ -781,14 +800,15 @@ class Grepper:
         answers: Answers,
         earlier: Earlier,
         deadline: datetime.datetime,
-        listed_at: datetime.datetime,
     ) -> None:
         self.parts, self.answers, self.earlier = parts, answers, earlier
-        self.deadline, self.listed_at = deadline, listed_at
+        self.deadline = deadline
         self.leaves: list[dict] = []
 
     async def run(self, job: Job) -> None:
         f = job.file
+        if f.kind == "rotated":
+            job.seen = (f.size, f.mtime)
         if f.kind == "compressing" and not await self.compressed(job):
             return
         reused, asking = [], job.strings
@@ -955,10 +975,10 @@ class Grepper:
                     "relist", f"{f.machine}-{f.log}", {"response": response}
                 )
                 got = PC.per_machine(response, True).get(f.machine) or {}
-                names = (
-                    {e["name"] for e in (got.get("result") or [])}
+                listed = (
+                    {e["name"]: e for e in (got.get("result") or [])}
                     if got.get("status") == "done"
-                    else set()
+                    else {}
                 )
                 plain = f.name[: -len(".gz")]
                 job.requests.append(
@@ -966,15 +986,17 @@ class Grepper:
                         "machine": f.machine,
                         "file": f.log,
                         "list": kept,
-                        "plain_listed": plain in names,
+                        "plain_listed": plain in listed,
                     }
                 )
                 if (
                     got.get("status") == "done"
-                    and plain not in names
-                    and f.name in names
+                    and plain not in listed
+                    and f.name in listed
                 ):
                     f.kind = "rotated"
+                    e = listed[f.name]
+                    job.seen = (int(e["size"]), stamp(e["mtime"]))
                     return True
             else:
                 f.kind = "compressing"
@@ -1116,7 +1138,7 @@ class Grepper:
     def settle_tail(self, job: Job) -> None:
         """Note a tail that began after the window it was read for (read again once with twice the bytes).  A file
         read from its first byte with no stamped line has no more to read."""
-        covers, covers_from = tail_covers(job, self.listed_at)
+        covers, covers_from = tail_covers(job, job.listed_at)
         if covers is None or covers_from == "unstamped":
             return
         need = max(job.since, job.file.start) if job.file.start else job.since
@@ -1179,9 +1201,84 @@ async def run_jobs(grepper: Grepper, jobs: list[Job]) -> None:
     await asyncio.gather(*(one(j) for j in jobs))
 
 
+def dates_of(entries: list[dict], log: str) -> set[str]:
+    """The dates of *log*'s rotated files in a list, compressed or not."""
+    return {
+        d["date"] for e in entries if (d := DATED.match(e["name"])) and d["log"] == log
+    }
+
+
+def moved(job: Job, before: Machine, after: Machine | None) -> str | None:
+    """Why the file a job read may not be the one the list after its greps names, or None when it is.
+
+    A rotated file listed with the size and mtime it was read with, and not being compressed, is the file read: a
+    rotated ``.gz`` does not change once written.  The current file is the one read while no rotated file of its log
+    is listed that *before*, the list it was read from, lacks, and it has not shrunk: it grows as it is written, so
+    its size says no more."""
+    f = job.file
+    if after is None or after.status != "listed":
+        return f"the list after: {f'{after.status}: {after.error}' if after else 'not listed'}"
+    listed = {e["name"]: e for e in after.entries}
+    if f.kind == "current":
+        if new := dates_of(after.entries, f.log) - dates_of(before.entries, f.log):
+            return f"{f.log} rotated after it was listed ({', '.join(sorted(new))})"
+        e = listed.get(f.log)
+        if e is None or int(e["size"]) < f.size:
+            return f"{f.log} {'is gone' if e is None else 'shrank'} after it was listed"
+        return None
+    if f.name[: -len(".gz")] in listed:
+        return f"{f.name} is being compressed"
+    e = listed.get(f.name)
+    if e is None:
+        return f"{f.name} is no longer listed"
+    if job.seen != (int(e["size"]), stamp(e["mtime"])):
+        size, mtime = job.seen or (None, None)
+        return f"{f.name} was listed as {size} bytes at {text(mtime)}, now as {e['size']} bytes at {e['mtime']}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # the round
 # ---------------------------------------------------------------------------
+
+
+def place(
+    asks: list[dict],
+    plans: list[dict[str, dict]],
+    machines: dict[str, Machine],
+    listed_at: datetime.datetime,
+    sources: dict[tuple[str, str], tuple[Machine, datetime.datetime]],
+    chains: dict[tuple[str, str], list[File]],
+    jobs: dict[tuple[str, str], Job],
+    ignored: list[str],
+) -> list[Job]:
+    """Give each listed machine of each ask's plan the files that meet its window, and each file a job: the jobs
+    made now.  A log's files are from its list in *sources*, by default the round's (*machines*, *listed_at*)."""
+    made: dict[tuple[str, str], Job] = {}
+    for entry, plan in zip(asks, plans, strict=True):
+        ask = entry["ask"]
+        lo, hi = (stamp(w) for w in ask["window"])
+        for name, p in plan.items():
+            if p["status"] != "listed":
+                continue
+            at = (name, ask["name"])
+            m, at_time = sources.setdefault(at, (machines[name], listed_at))
+            if at not in chains:
+                chains[at], notes = chain(name, ask["name"], m)
+                ignored.extend(notes)
+            p["files"] = [f for f in chains[at] if f.meets(lo, hi)]
+            for f in p["files"]:
+                key = (name, f.name)
+                if key not in jobs:
+                    jobs[key] = made[key] = Job(f, set(), lo, listed_at=at_time)
+                job = made.get(key)
+                if job is None:  # read already, from a list that has not changed
+                    continue
+                job.strings.update(ask["strings"])
+                job.since = min(job.since, lo)
+                for s in ask["strings"]:
+                    job.windows.setdefault(s, []).append((lo, hi))
+    return list(made.values())
 
 
 def holds_any(record: dict, strings: set[str]) -> bool:
@@ -1338,14 +1435,10 @@ async def record_rounds(
     names = sorted({a["ask"]["name"] for a in asks})
     machines, failed, kept, listed_at = await list_machines(parts, names, answers)
 
-    # each ask's machines and the files of each that meet its window
+    # each ask's machines
     plans: list[dict[str, dict]] = []
-    jobs: dict[tuple[str, str], Job] = {}
-    ignored: list[str] = []
-    chains: dict[tuple[str, str], list[File]] = {}
     for entry in asks:
         ask = entry["ask"]
-        lo, hi = (stamp(w) for w in ask["window"])
         plan: dict[str, dict] = {}
         if ask["machine"] is not None:
             m = machines.get(ask["machine"])
@@ -1396,25 +1489,58 @@ async def record_rounds(
                     "error": why,
                     "service": service,
                 }
-        for name, p in plan.items():
-            if p["status"] != "listed":
-                continue
-            at = (name, ask["name"])
-            if at not in chains:
-                chains[at], notes = chain(name, ask["name"], machines[name])
-                ignored.extend(notes)
-            p["files"] = [f for f in chains[at] if f.meets(lo, hi)]
-            for f in p["files"]:
-                job = jobs.setdefault((name, f.name), Job(f, set(), lo))
-                job.strings.update(ask["strings"])
-                job.since = min(job.since, lo)
-                for s in ask["strings"]:
-                    job.windows.setdefault(s, []).append((lo, hi))
         plans.append(plan)
 
+    # the files of each that meet its window, read, and listed again after: a log whose files changed meanwhile is
+    # read again from the list after
+    sources: dict[tuple[str, str], tuple[Machine, datetime.datetime]] = {}
+    chains: dict[tuple[str, str], list[File]] = {}
+    jobs: dict[tuple[str, str], Job] = {}
+    ignored: list[str] = []
+    after_lists: list[dict] = []
     earlier = Earlier.read(*(directory for _, directory in cases))
-    grepper = Grepper(parts, answers, earlier, started + max_wait, listed_at)
-    await run_jobs(grepper, list(jobs.values()))
+    grepper = Grepper(parts, answers, earlier, started + max_wait)
+    for tries in range(RELIST_TRIES + 1):
+        fresh = place(asks, plans, machines, listed_at, sources, chains, jobs, ignored)
+        await run_jobs(grepper, fresh)
+        after, _, after_kept, after_at = await list_machines(parts, names, answers)
+        moves: dict[tuple[str, str], str] = {}
+        for job in jobs.values():
+            at = (job.file.machine, job.file.log)
+            if job.status == "answered" and at not in moves:
+                why = moved(job, sources[at][0], after.get(job.file.machine))
+                if why:
+                    moves[at] = why
+        after_lists.append(
+            {
+                "asked_at": text(after_at),
+                "answers": after_kept,
+                "moved": {f"{m} {log}": why for (m, log), why in sorted(moves.items())},
+            }
+        )
+        if not moves:
+            break
+        if tries == RELIST_TRIES:
+            # still moving: its asks are asked again in a later round
+            for job in jobs.values():
+                if why := moves.get((job.file.machine, job.file.log)):
+                    job.failed.update(
+                        dict.fromkeys(
+                            job.strings,
+                            f"not known to be the file listed after the greps: {why}",
+                        )
+                    )
+            break
+        for at in moves:
+            m = after.get(at[0])
+            if m is None or m.status != "listed":
+                continue  # not known after the greps: listed again, not read again
+            sources[at] = (m, after_at)
+            del chains[at]
+            for key in [
+                k for k, j in jobs.items() if (j.file.machine, j.file.log) == at
+            ]:
+                del jobs[key]
 
     records = []
     for entry, plan, n, replaces in zip(
@@ -1428,7 +1554,9 @@ async def record_rounds(
             files = []
             for f in p.get("files", []):
                 job = jobs.get((name, f.name))
-                files.append(file_entry(job, f, strings, listed_at))
+                files.append(
+                    file_entry(job, f, strings, job.listed_at if job else listed_at)
+                )
                 requests.extend(job.requests if job else [])
             out_machines[name] = {
                 "service": p["service"],
@@ -1456,6 +1584,7 @@ async def record_rounds(
                         if m in machines
                     },
                     "failed": failed,
+                    "after": after_lists,
                 },
                 "ignored": sorted(set(ignored)),
                 "requests": requests,

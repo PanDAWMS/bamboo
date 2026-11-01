@@ -591,6 +591,8 @@ class Calls:
         #: The parameters :meth:`handed_classes` is reading now: one asked
         #: again on the way is a cycle, and says nothing.
         self._handing: set[tuple[str, int, str]] = set()
+        #: The parameters :meth:`handed_callables` is reading now, as :attr:`_handing` for classes.
+        self._handing_callables: set[tuple[str, int, str]] = set()
         #: :meth:`forwarding` by class, the locals :meth:`_wrapped` reads, and
         #: what :meth:`_wrappings` finds across the corpus.
         self._forwarders: dict[tuple[str, int], dict[str, tuple[str, str]]] = {}
@@ -700,7 +702,7 @@ class Calls:
         if isinstance(called, ast.Name):
             named = self._named(file, func, called.id)
             if named.unplaced == UNPLACED_NAME and func is not None:
-                return self._constructed(file, func, called) or named
+                return self._constructed(file, func, called) or self._handed_in(file, func, called) or named
             return named
         if not isinstance(called, ast.Attribute):
             return Placed((), UNPLACED_DYNAMIC)
@@ -1477,6 +1479,49 @@ class Calls:
             return frozenset(found) or None
         finally:
             self._handing.discard(key)
+
+    def _handed_in(self, file: str, func: ast.AST, called: ast.Name) -> Optional[Placed]:
+        """A parameter called -- ``run(sql, names)`` in ``schema_info._read_oracle`` -- placed at the callables every
+        call of the function hands it (:meth:`handed_callables`); ``None`` where they are not read."""
+        targets = self.handed_callables(file, func, called.id, 0)
+        return Placed(targets) if targets else None
+
+    def handed_callables(self, file: str, func: ast.AST, name: str, depth: int) -> tuple[Target, ...]:
+        """The definitions every call of *func* hands its parameter *name*, a callable it calls.
+
+        Each call names them as :meth:`named_callables` reads a callable handed (``self.round_trip``), or hands on
+        a parameter of its own that its callers fill so, read up the same way: ``_Batch`` hands ``self.round_trip``
+        to ``get_table_info``, which hands its ``run`` to ``read_table_info``, which hands it to ``_read_oracle``.
+        Nothing where a call hands anything else or nothing -- the default --, where the calls placed at *func* may
+        not be all of them (:meth:`missed`), or where a parameter handed on is bound again in its function.
+        """
+        key = (file, getattr(func, "lineno", 0), name)
+        if depth > self.types.DEPTH or key in self._handing_callables or name not in _parameter_names(func):
+            return ()
+        self._handing_callables.add(key)
+        try:
+            owned = self.types.method_class(file, func)
+            target = Target(file, func, owned[1] if owned else None)
+            if self.missed(target):
+                return ()
+            found: dict[tuple, Target] = {}
+            for site in self.callers(target):
+                value = self.handed(site, target).get(name)
+                if value is None:
+                    return ()
+                if isinstance(value, ast.Name) and value.id in _parameter_names(site.func):
+                    if any(not one.nested for one in pathcond.bindings(site.func, value.id)):
+                        return ()
+                    inner = self.handed_callables(site.file, site.func, value.id, depth + 1)
+                else:
+                    inner = self.named_callables(site.file, site.func, value)
+                if not inner:
+                    return ()
+                for one in inner:
+                    found.setdefault((one.file, id(one.func), one.bound), one)
+            return tuple(found.values())
+        finally:
+            self._handing_callables.discard(key)
 
     def filled(self, site: CallSite, target: Target) -> set[str]:
         """:func:`said` for *site*, as :meth:`handed`."""

@@ -128,7 +128,14 @@ from bamboo.querier.records import (
     keyed,
     runs_for,
 )
-from bamboo.querier.which_ran import Candidate, Verdict, class_of, judge, stable_holes
+from bamboo.querier.which_ran import (
+    Candidate,
+    Verdict,
+    class_of,
+    judge,
+    once_loops_of,
+    stable_holes,
+)
 from bamboo.scripts.derive_strategy import _investigate
 
 BAMBOO = Path(R.BAMBOO_TREE)
@@ -138,6 +145,9 @@ BAMBOO = Path(R.BAMBOO_TREE)
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
 #: the tables that assumption is about: a job sits in one of them until it reaches FINAL_STATES -- PanDA's too
 ACTIVE_TABLES = ("jobsDefined4", "jobsActive4")
+#: ``RERUN_S3_ROWS=0``: S3 settles a pass's guards by the exit it left by alone, not also by the rows it printed on
+#: the way (``Rerun._ways_printed``, KNOWN_ISSUES.md K46)
+S3_ROWS = os.environ.get("RERUN_S3_ROWS", "1") != "0"
 
 
 def handed_to(func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call) -> dict[str, ast.expr]:
@@ -1223,6 +1233,11 @@ class Passes:
     key: str
     asking: W.Asking
     owners: Owners | None = None
+    #: judgement 4 of a late value (``Rerun._late_passes``): the stay's start, and the second it moved on -- the passes
+    #: ending before that second alone are read -- and why a pass not found may still have run ("" where none can)
+    since: str | None = None
+    before: str | None = None
+    unsure: str = ""
 
 
 @dataclass
@@ -3524,8 +3539,8 @@ class Rerun:
         # the runs come machine by machine; the passes are read, and the first and the last taken, in time
         found.sort(key=lambda p: p.first)
         states = self.data.get("statuslog", {}).get("states", [])
-        # the stint the value is stuck in began at its last row
-        since = next((s["time"] for s in reversed(states) if s["status"] == self.args.observed), None)
+        # the stint the value is stuck in began at its last row; a late value's at the stay L1 read
+        since = q.since or next((s["time"] for s in reversed(states) if s["status"] == self.args.observed), None)
         if since is None:
             # a log's coverage stands in for the window only in a file handed in: a door that searches has no other
             self.need(f"a statuslog row for {self.args.observed!r} to start the window at", not self.logs.needs_window)
@@ -3546,6 +3561,17 @@ class Rerun:
             if later:
                 found = [p for p in found if p.first[:19] <= q.asking.window[1]]
                 self.say(f"{len(later)} pass(es) after {q.asking.window[1]}, the end of the window, not read")
+        if q.before is not None:
+            # judgement 4: the pass that moved the value on is not why it moved only then; the ones before it are
+            moving = [p for p in found if p.last[:19] >= q.before]
+            found = [p for p in found if p.last[:19] < q.before]
+            self.say(f"{len(moving)} pass(es) ending at {q.before} or later, the one that moved it on among them, not read")
+            if q.unsure:
+                self.need(f"a pass of {func} before the one that moved it on at {q.before}: none found from {since}, "
+                          f"asked {q.asking.why}, and not ruled out: {q.unsure} (KNOWN_ISSUES.md K45)", found, "K45")
+            self.need(f"a pass of {func} before the one that moved it on at {q.before}: none from {since}, asked "
+                      f"{q.asking.why} -- the delay is in what calls {func} on the row, not followed here "
+                      f"(KNOWN_ISSUES.md K45)", found, "K45")
         self.need("a pass of the mover in the window", found)
         exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
         lines = sorted({a.line for a in q.arms} | set(exits))
@@ -3594,9 +3620,15 @@ class Rerun:
         self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
         per_pass = []
-        for env in q.envs:
+        for run, env in zip(q.passes, q.envs, strict=True):
             fixed: dict[str, bool] = {}
             for g in path:
+                sol = E.solve(g, True, env)
+                fixed.update(sol.known)
+                fixed.update(sol.settled)
+            by_exit = dict(fixed)
+            ways = self._ways_printed(fn, run)
+            for g in sorted({g for _, conds in ways for g in conds}):
                 sol = E.solve(g, True, env)
                 fixed.update(sol.known)
                 fixed.update(sol.settled)
@@ -3607,10 +3639,13 @@ class Rerun:
                     if not E.read_elsewhere(g)
                     and E._truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
                 ]
-            per_pass.append((fixed, blocking))
-        fixed, blocking = per_pass[0]
-        self.need("the same guards against the arms in every pass", all(b == blocking for _, b in per_pass))
-        self.say(f"settled by the exit taken: {fixed}")
+            per_pass.append((by_exit, fixed, ways, blocking))
+        by_exit, fixed, ways, blocking = per_pass[0]
+        self.need("the same guards against the arms in every pass", all(b == blocking for *_, b in per_pass))
+        self.say(f"settled by the exit taken: {by_exit}")
+        if fixed != by_exit:
+            self.say(f"settled by the rows the pass printed on the way {[line for line, _ in ways]}: "
+                     f"{ {k: v for k, v in fixed.items() if k not in by_exit} }")
         for arm in q.arms:
             guards, handlers = read[arm.line]
             inside = "".join(f"; in an except handler at {u.line} ({u.detail})" for u in handlers)
@@ -3631,6 +3666,22 @@ class Rerun:
         where = guard_if(arm_stmt, guard) or early_exit_if(fn.node, arm_stmt, guard)
         where = self.need(f"the if whose test is {guard!r}", where)
         return Input(fn, guard, where.lineno, q.passes, q.envs, sorted({o for a in nearest for o in a.outcomes}))
+
+    def _ways_printed(self, fn: R.Function, run) -> list[tuple[int, list[str]]]:
+        """``(row line, its path condition)`` of each row one call's pass *run* printed (unambiguous), outside any loop
+        the pass may have gone round more than once (``which_ran.once_loops_of``): the tests of the ``if``s around it
+        held when it printed -- activateJob's 111, in the else of 70, says ``not (len(res) == 0 or allOK)``, though
+        the exit the pass left by (153, ``return True``) is reached either way (KNOWN_ISSUES.md K46).  None of a run of
+        several calls, nor where no run is handed."""
+        if not S3_ROWS or run is None or not getattr(fn, "rows", None):
+            return []
+        sn = R.claim([R.seen(fn, run, self.mode)])[0]
+        if not sn.single_call():
+            return []
+        once = once_loops_of(fn, sn, run, self.mode)
+        return [(row.line, conds) for row in fn.rows
+                if sn.unambiguous.get(row.line) and R.loops_over(row.stmt, fn.node) <= set(once)
+                and (conds := pathcond.path_condition(row.stmt))]
 
     def _arm_taken(self, q: Blocked, arm: Arm) -> None:
         """S3 where every pass left by an arm that writes the subject: no guard kept the passes off it, so what kept the
@@ -3913,6 +3964,9 @@ class Rerun:
                 self.say(f"      returns the first rows ({', '.join(st.limits)}) of {st.order_by}")
                 ordered.append(st)
         self._movers_in_window(q, kinds)
+        if not any(st.owner == q.mover for st in q.statements):
+            # judgement 4: a mover that takes the row by its key moved it only then for what its passes before did
+            return self._late_passes(q)
         self._why_late(q, ordered)
         mine = [st for st in ordered if st.owner == q.mover]
         self.need("the statement that moved the value on returns the first rows of an order", len(mine) == 1)
@@ -4057,15 +4111,43 @@ class Rerun:
         self.say(f"not ruled out: {len(left)} mover(s)")
         return out
 
+    def _late_passes(self, q: Missed) -> Passes:
+        """Judgement 4: the mover that moved the value on takes the row by its key, so it moved it only then for what
+        its own passes before did (KNOWN_ISSUES.md K15).  Its logs are asked from the stay's start to the move for its
+        marks holding the key (``key_marks``): a bare key over hours takes every listing of a DB proxy's log (tmaeno,
+        10-26).  S2 then reads the passes ending before the second it moved on, as it reads a stuck mover's."""
+        rel, func = q.mover.split("::", 1)
+        arms = arms_of(q.writers, q.mover, q.subject, q.observed)
+        self.need(f"an arm of {func} that writes another value than {q.observed!r}", arms)
+        cls = q.subject.partition(".")[0]
+        marks = tuple(sorted({m for line in arms for m in key_marks(q.mover, line, cls, self.args.key)}))
+        files = self.files_of(q.mover, list(dict.fromkeys(f for j in q.writers if j.owner == q.mover for f in j.log_files)), list(arms))
+        to_hand = self.need(f"a log of {func} to hand ({files})", self.logs.names(files))
+        since, before = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}"
+        how = f"for {', '.join(repr(m) for m in marks)}" if marks else "for the key alone (its mark holds none)"
+        asking = W.Asking((since, before), None, f"from the stay's start to the move, {how}", marks)
+        self.say(f"  {func}: {len(arms)} arm(s) that write another value {[(a.line, a.outcomes) for a in arms.values()]}; "
+                 f"logs {files}, asked {asking.why}")
+        found, missed, holes = self._ask(self.args.key, to_hand, asking)
+        self._stop_unanswered(missed)
+        # no pass found says none ran only where every line of its runs holds the key and the window was searched whole
+        unasked = [f for f in files if f not in to_hand]
+        unsure = "; ".join([*([] if marks else ["a pass printing no line with the key is not found"]),
+                            *([f"{', '.join(holes)} not searched all the window"] if holes else []),
+                            *([f"{', '.join(unasked)} not to hand"] if unasked else [])])
+        if holes:
+            self.say(f"  {func}: {', '.join(holes)} not searched all the window: a pass there is not read")
+        return Passes(q.mover, self._runs_of(found, q.mover, asking), list(arms.values()), self.args.key, asking,
+                      since=since, before=before, unsure=unsure)
+
     def _why_late(self, q: Missed, ordered: list) -> None:
-        """Judgement 1: why the mover that moved the value on did it only then.  One whose own statement returns the
-        first rows of an order goes on to L3 (lost on order); one whose statement took the row in no such order, or that
-        takes the row by its key, stops here, saying what is not read yet."""
+        """Judgement 1: why the mover that moved the value on did it only then, where a statement of its own took the
+        row.  One that returns the first rows of an order goes on to L3 (lost on order); one that took the row in no
+        such order stops here, saying what is not read yet.  One that takes the row by its key goes to judgement 4
+        (``_late_passes``)."""
         rel, func = q.mover.split("::", 1)
         name = f"{Path(rel).name}::{func}"
         took = [st for st in q.statements if st.owner == q.mover]
-        self.need(f"why {name} moved it only at {q.moved}: it takes the row by its key, and its runs in the window are "
-                  f"read pass by pass (S2-S4 over the window; build order 2, KNOWN_ISSUES.md K15)", took, "K15")
         if any(st.owner == q.mover for st in ordered):
             return
         spans = _union([span for st in took for span in self._statement_true(st, q)])

@@ -80,6 +80,12 @@ class FakePanda:
             if service
             else {machine: self.lists["by machine"][machine]}
         )
+        if (
+            machine
+        ):  # the machine is in that state from now on, as its service lists it too
+            for s in ("server", "jedi"):
+                if machine in self.lists.get(s, {}):
+                    self.lists[s][machine] = self.lists["by machine"][machine]
         out = {}
         for m, r in rows.items():
             r = dict(r)
@@ -634,6 +640,94 @@ async def test_a_round_that_cannot_settle_writes_nothing(tmp_path):
             max_wait=1200,
         )
     assert not list(tmp_path.glob("records-r*.jsonl"))
+
+
+async def test_a_log_rotated_during_the_round_is_read_again_from_the_list_after(
+    tmp_path,
+):
+    older = entry("panda-adder.log-20261013.gz", "2026-10-13 07:11:35")
+    before = [entry(ADDER, "2026-10-14 11:49:00", 50_000), older]
+    rotated = [
+        entry(ADDER, "2026-10-14 11:50:00", 100),
+        entry("panda-adder.log-20261014", "2026-10-14 11:49:30", 50_000),
+        older,
+    ]
+    done = [
+        rotated[0],
+        entry("panda-adder.log-20261014.gz", "2026-10-14 11:49:30", 9_000),
+        older,
+    ]
+    lists = lists_with({SERVER[0]: before, SERVER[1]: []})
+    lists["by machine"] = {SERVER[0]: {"result": done}}
+
+    def rotate(strings, tail):  # the machine rotates the log while its grep runs
+        lists["server"][SERVER[0]] = {"result": rotated}
+        return found(rec(1, "2026-10-14 10:00:00,1 a 7339"))
+
+    day = "panda-adder.log-20261014.gz"
+    greps = {
+        (SERVER[0], ADDER): [rotate],
+        (SERVER[0], day): [found(rec(7, "2026-10-14 10:00:00,1 a 7339"))],
+    }
+    panda = FakePanda(lists, greps)
+    w = ("2026-10-14 10:00:00", "2026-10-14 10:00:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])])
+    assert [c[2] for c in panda.calls if c[0] == "grep"] == [ADDER, day]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["file"] == day and f["status"] == "answered"
+    assert [x["offset"] for x in f["records"]] == [7]
+    assert [a["moved"] for a in r["list_logs"]["after"]] == [
+        {f"{SERVER[0]} {ADDER}": f"{ADDER} rotated after it was listed (20261014)"},
+        {},
+    ]
+
+
+async def test_a_file_that_still_changes_after_the_last_list_defers_its_asks(
+    tmp_path,
+):
+    files = list(ADDER_FILES)
+    lists = lists_with({SERVER[0]: files, SERVER[1]: []})
+    day = "panda-adder.log-20261014.gz"
+
+    def grow(strings, tail):
+        files[2] = entry(day, "2026-10-14 06:59:58", files[2]["size"] + 1)
+        return found(rec(1, "2026-10-14 06:00:00,1 a 7339"))
+
+    panda = FakePanda(lists, {(SERVER[0], day): [grow]})
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, records, (d,) = await run_round(
+        tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])]
+    )
+    assert records == []
+    assert len([c for c in panda.calls if c[0] == "grep"]) == 1 + R.RELIST_TRIES
+    assert d["why"] == [
+        f"{SERVER[0]} {day}: failed: not known to be the file listed after the greps: {day} was listed as 1002 bytes at"
+        " 2026-10-14 06:59:58, now as 1003 bytes at 2026-10-14 06:59:58"
+    ]
+
+
+async def test_a_machine_whose_list_after_fails_is_listed_again_and_its_asks_deferred(
+    tmp_path,
+):
+    lists = lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []})
+    day = "panda-adder.log-20261014.gz"
+
+    def fail_after(strings, tail):
+        lists["server"][SERVER[0]] = {"status": "failed", "error": "boom"}
+        return found(rec(1, "2026-10-14 06:00:00,1 a 7339"))
+
+    panda = FakePanda(lists, {(SERVER[0], day): [fail_after]})
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, records, (d,) = await run_round(
+        tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])]
+    )
+    assert records == []
+    assert len([c for c in panda.calls if c[0] == "grep"]) == 1
+    # once before the greps and 1 + RELIST_TRIES times after, each by both services
+    assert len([c for c in panda.calls if c[0] == "list"]) == 2 * (2 + R.RELIST_TRIES)
+    assert d["why"] == [
+        f"{SERVER[0]} {day}: failed: not known to be the file listed after the greps: the list after: list failed: boom"
+    ]
 
 
 async def test_a_later_round_reads_a_rotated_files_earlier_answer_again(tmp_path):
@@ -1256,8 +1350,8 @@ async def test_the_asks_of_several_cases_share_one_list_and_one_grep_and_each_ca
         ("grep", SERVER[0], "panda-adder.log-20261014.gz", ("111", "222"), None)
     ]
     assert (
-        len([c for c in calls if c[0] == "list"]) == 2
-    )  # once per service, for both cases
+        len([c for c in calls if c[0] == "list"]) == 4
+    )  # once per service before the greps and once after, for both cases
     assert (pa, pb) == (a / "records-r1.jsonl", b / "records-r2.jsonl")
     assert (ra["round"], rb["round"]) == (1, 2)
     fa, fb = (

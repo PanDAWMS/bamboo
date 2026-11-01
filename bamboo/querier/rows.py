@@ -178,8 +178,50 @@ def loops_over(node: ast.AST, func: ast.AST) -> set[int]:
     return found
 
 
-def share_loop(a: ast.AST, b: ast.AST, func: ast.AST) -> bool:
-    return bool(loops_over(a, func) & loops_over(b, func))
+def share_loop(a: ast.AST, b: ast.AST, func: ast.AST, once: Iterable[int] = ()) -> bool:
+    """Whether *a* and *b* sit in one loop of *func*, which a pass may go round between them; *once* (ids, as
+    :func:`once_loops` gives them): loops the pass went round once, which do not count."""
+    return bool((loops_over(a, func) & loops_over(b, func)) - set(once))
+
+
+def completes(block: list) -> bool:
+    """Whether a run of *block* may reach its end, rather than leave by a return, raise, break or continue on every
+    way through it; True where unsure (a ``with`` may swallow what its body raised, a loop may end)."""
+    if not block:
+        return True
+    last = block[-1]
+    if isinstance(last, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+        return False
+    if isinstance(last, ast.If):
+        return completes(last.body) or completes(last.orelse)
+    if isinstance(last, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+        normal = completes(last.body) and completes(last.orelse)
+        return (normal or any(completes(h.body) for h in last.handlers)) and completes(last.finalbody)
+    return True
+
+
+def once_loops(func: ast.AST, absent) -> dict[int, str]:
+    """``{id(loop): why}``: the loops of *func* one pass went round once.  No way through the body reaches its end
+    (:func:`completes`), and before each ``continue`` of the loop a row inside it must print (:func:`must_rows`) that
+    *absent* (a print statement -> bool) says the pass did not print -- the DB proxy's retry, ``for iTry in
+    range(nTry): try: ... return ... except: ... tmp_log.debug(f"retry: {iTry}"); continue`` (activateJob), with no
+    "retry" in the run.  A ``continue`` with no such row, or a body that may run to its end, leaves the loop out:
+    the pass may have gone round again."""
+    out = {}
+    for loop in own_nodes(func):
+        if not isinstance(loop, LOOPS) or completes(loop.body):
+            continue
+        rows = []
+        for c in own_nodes(loop):
+            if isinstance(c, ast.Continue) and _loop_of(c, func) is loop:
+                gone = [s.lineno for s in must_rows(func, c)[0] if pathcond._within(s, loop) and absent(s)]
+                if not gone:
+                    break
+                rows.append(gone[0])
+        else:
+            out[id(loop)] = (f"the loop at {loop.lineno} went round once: its way back prints row(s) {sorted(rows)}, "
+                             "not in the run" if rows else f"the loop at {loop.lineno} cannot go round: no way back")
+    return out
 
 
 def _direct_prints(block: list, stop: ast.AST | None = None) -> list[ast.stmt]:
@@ -1238,9 +1280,9 @@ class Seen:
         """Whether record *i*, which *row* finds at *literal* characters, proves the row: at MIN_PROOF; below it where
         the record cannot be another line -- its message is the row's text whole, and no other function can have
         printed it there (:func:`line_writers`): activateJob's "start" and "done" (5 and 4 characters) under
-        ``activateJob < PandaID=... >``, once the map gives a mark to every logger that prints "start" in its logs.  A
+        ``activateJob < PandaID=... >``, since the map gives a mark to every logger that prints "start" in its logs.  A
         message that only holds the text (``restart``; a traceback another function prints with the caller's logger)
-        proves nothing below MIN_PROOF, nor does a record the search cut."""
+        proves nothing below MIN_PROOF, nor does a record the search cut (KNOWN_ISSUES.md K44)."""
         if literal >= MIN_PROOF:
             return True
         record = self.run.records[i]

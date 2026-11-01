@@ -3251,7 +3251,9 @@ class EndpointRead(BaseModel):
             "attach_crossings`), spelled as :attr:`KeySource.paths`: ``()`` the value itself, else its steps "
             "(``['data']``, ``[*]``, ``.Files``; ``[key]`` a dict's keys, ``.*`` any field).  ``generate_response`` "
             "puts its data under ``['data']``.  A part of the rows here reads as them, and a path may be one a run "
-            "never takes: a branch on the value's type is read both ways.  Empty where it returns none of them -- "
+            "never takes: a branch on the value's type is read both ways.  A return the constants on the endpoint's "
+            "way rule out is not taken -- ``task/get_detailed_info`` leaves ``include_resolve_status`` ``False``, and "
+            "``get_task_details_json`` returns its 3-tuple only if it is true.  Empty where it returns none of them -- "
             "``job/kill``'s ``peekJob`` -- as far as *returned_open* says."
         ),
     )
@@ -3273,6 +3275,16 @@ class EndpointWrite(BaseModel):
     line: int = Field(description="The line of the call that runs it.")
     kind: str = Field(description="``insert``, ``update``, ``delete`` or ``merge``, as the statement's text reads.")
     tables: list[str] = Field(default_factory=list, description="The tables it writes, lowered.")
+    values: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Column -> the constants the endpoint's way puts in it, as ``repr`` spells them: a literal in the "
+            "statement, or a bind each of whose values is a constant on the way -- a literal, a parameter every "
+            "call on the way hands the same one, a module's constant, an f-string of those.  "
+            "``async_requests``' ``request_type``: ``'grep'`` on ``submit_grep_request``.  A column not here is not "
+            "said."
+        ),
+    )
 
 
 class EndpointChange(BaseModel):
@@ -3328,6 +3340,16 @@ class EndpointHole(BaseModel):
     through: list[str] = Field(
         default_factory=list,
         description="``may_change``: the functions of the name that may, by :attr:`ReachNode.owner`.",
+    )
+    held_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``closed`` on this endpoint's objects where the name may: the call is on a field of the object its "
+            "method runs on, and every object the endpoint's calls run it on was built -- ``file:line`` of each "
+            "construction -- with a function whose declared value fills the field with a builtin.  "
+            "``CachedObject.get``'s ``self.cachedObj.get(...)`` on the cache ``async_process_api`` builds with "
+            "``get_special_dispatch_params``, a ``tuple[bool, dict[str, Any]]`` whose dict the field keeps."
+        ),
     )
 
 
@@ -4908,7 +4930,10 @@ class SkeletonHole(BaseModel):
         default=False,
         description=(
             "Whether this hole is what ``+=`` adds after the message was first "
-            "written.  Always the last hole, and left out of the pattern."
+            "written, where the ways it is added are not told -- a loop adds on "
+            "every turn; where they are, each way's parts are joined in order "
+            "and are holes or text like any other.  Always the last hole, and "
+            "left out of the pattern."
         ),
     )
 

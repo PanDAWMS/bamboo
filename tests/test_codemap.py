@@ -10182,6 +10182,72 @@ def test_an_answer_holds_the_rows_the_function_an_object_was_built_with_returned
     assert returned[node.name] == sqlwrite.Returned({"pandaserver/api.py::get_status": ["['data'][*]['status']"]}, [])
 
 
+def test_an_answer_takes_no_return_the_endpoint_s_constants_rule_out(tmp_path):
+    """``task/get_detailed_info`` leaves ``include_resolve_status`` to its default, ``False``, and
+    ``get_task_details_json`` returns its 3-tuple only ``if include_resolve_status:``.  The endpoint's closure holds
+    that constant (``endpoints._shut``), which rules the return out (``endpoints._ruled_returns``): the walk asked for
+    every endpoint's answer takes both returns, and the endpoint's read, read again taking no such return
+    (``sqlwrite.returned_under``), says the rows are where the other return puts them alone."""
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import endpoints, objects, plugin
+
+    server = (
+        "from pandaserver.api.v1 import task_api as task_api_v1\n\n\n"
+        "def module_mapping(version, api_module):\n"
+        "    mapping = {'v1': {'task': {'module': task_api_v1, 'allowed_methods': []}}}\n"
+        "    return mapping[version][api_module]\n"
+    )
+    api = (
+        "from pandaserver.x import TaskModule\n\n"
+        "task_module: TaskModule = None\n\n\n"
+        "def details(req, task_id):\n"
+        "    return {'data': _wrap(task_id)}\n\n\n"
+        "def _wrap(task_id, with_status=False):\n"
+        "    res = task_module.pick(task_id)\n"
+        "    if with_status:\n"
+        "        return res, res[0]\n"
+        "    return res\n"
+    )
+    files = {
+        "pandaserver/taskbuffer/Specs.py": _SPECS,
+        "pandaserver/x.py": _PICK,
+        "pandaserver/server/panda.py": server,
+        "pandaserver/api/v1/task_api.py": api,
+    }
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    owner = "pandaserver/api/v1/task_api.py::details"
+    returned: dict = {}
+    with sql.across_calls(calls):
+        nodes = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor, calls).statements, MAP_ID, VERSION)
+        graph = reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves(calls))
+        record = reach.ReachGraph(graph)
+        sqlwrite.attach_crossings(nodes, modules, [], calls, record, returned=returned, returning=frozenset({owner}))
+        code = endpoints._Code(calls)
+        came = record.closure([owner])
+        _shut, constants = endpoints._shut(record, code, came)
+        ruled = endpoints._ruled_returns(code, came, constants)
+        fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=nodes, reach_graph=graph)
+        objects.attach(fragment, modules, calls)
+        endpoints.attach(fragment, modules, calls, returned)
+
+    wrap = next(one for one in ast.walk(modules[3].tree) if isinstance(one, ast.FunctionDef) and one.name == "_wrap")
+    (tupled,) = [one for one in ast.walk(wrap) if isinstance(one, ast.Return) and isinstance(one.value, ast.Tuple)]
+    assert ruled == {id(wrap): frozenset({id(tupled)})}
+    (node,) = [n for n in nodes if n.anchor.line_start == 10]
+    assert "['data']" in returned[node.name].paths[owner] and len(returned[node.name].paths[owner]) > 1
+    (endpoint,) = fragment.endpoints
+    assert endpoint.route == "task/details"
+    assert [(read.site, read.returned) for read in endpoint.reads] == [(node.name, ["['data']"])]
+
+
 @pytest.mark.parametrize(
     ("fill", "crosses"),
     [

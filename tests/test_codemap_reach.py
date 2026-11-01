@@ -239,6 +239,69 @@ def test_putting_a_value_on_a_queue_is_a_hole(tmp_path):
     assert [(hole.line, hole.why) for hole in holes] == [(8, reach.HOLE_QUEUE)]
 
 
+def test_a_value_given_back_to_the_queue_it_was_taken_from_is_no_hole(tmp_path):
+    """``DBProxyPool``: ``get()`` takes a proxy with ``getProxy``, which returns ``self.proxyList.get()``, and gives it
+    back with ``putProxy``; a token taken and put back in one function is the same.  The next taker runs its own
+    work -- but a value from elsewhere, here a name handed in, may carry work to it."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "import queue\n\n"
+            "class Proxy:\n"
+            "    def wake(self):\n"
+            "        pass\n\n"
+            "class Pool:\n"
+            "    def __init__(self):\n"
+            "        self.proxyList: queue.Queue[Proxy] = queue.Queue()\n"
+            "        self.locks: queue.Queue[int] = queue.Queue()\n\n"
+            "    def getProxy(self) -> Proxy:\n"
+            "        proxy = self.proxyList.get()\n"
+            "        proxy.wake()\n"
+            "        return proxy\n\n"
+            "    def putProxy(self, proxy: Proxy) -> None:\n"
+            "        self.proxyList.put(proxy)\n\n"
+            "    def get(self):\n"
+            "        proxy = self.getProxy()\n"
+            "        self.putProxy(proxy)\n\n"
+            "    def locked(self):\n"
+            "        i = self.locks.get()\n"
+            "        self.locks.put(i)\n\n"
+            "    def hand(self, name: int):\n"
+            "        self.locks.put(name)\n"
+        ),
+    )
+
+    put_back, locked, handed = (record.rows[f"pkg/mod.py::Pool.{one}"] for one in ("putProxy", "locked", "hand"))
+
+    assert (put_back.holes, put_back.settled) == ([], {"queue_given_back": 1})
+    assert (locked.holes, locked.settled) == ([], {"queue_given_back": 1})
+    assert [(hole.line, hole.why) for hole in handed.holes] == [(29, reach.HOLE_QUEUE)]
+
+
+def test_a_put_handed_a_value_one_caller_took_from_elsewhere_is_a_hole(tmp_path):
+    record = _record(
+        tmp_path,
+        mod=(
+            "import queue\n\n"
+            "class Pool:\n"
+            "    def __init__(self):\n"
+            "        self.items: queue.Queue[str] = queue.Queue()\n\n"
+            "    def take(self) -> str:\n"
+            "        return self.items.get()\n\n"
+            "    def give(self, item: str) -> None:\n"
+            "        self.items.put(item)\n\n"
+            "    def round_trip(self):\n"
+            "        item = self.take()\n"
+            "        self.give(item)\n\n"
+            "    def submit(self, request: str):\n"
+            "        item = request.strip()\n"
+            "        self.give(item)\n"
+        ),
+    )
+
+    assert [(hole.line, hole.why) for hole in record.rows["pkg/mod.py::Pool.give"].holes] == [(11, reach.HOLE_QUEUE)]
+
+
 def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_value_by_an_assumption(
     tmp_path,
 ):
@@ -261,6 +324,213 @@ def test_a_call_on_a_builtin_value_is_closed_by_a_premise_and_one_on_an_outside_
 
     assert row.holes == []
     assert row.settled == {"outside_returns_outside": 1}
+
+
+def test_what_json_makes_of_a_value_handed_it_is_a_builtin_inside_and_out(tmp_path):
+    """``json.loads(req_row["parameters"] or "{}")`` is a dict, a list or a scalar whatever the row is -- and so is
+    every value in it: ``params.get(k)`` on it, or on a value in it, is a builtin's method.  With an ``object_hook``,
+    the hook makes the values, and the call stays open."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "import json\n\n"
+            "class Cache:\n"
+            "    def get(self, key):\n"
+            "        pass\n\n"
+            "def read(row, hook):\n"
+            "    params = json.loads(row['parameters'] or '{}')\n"
+            "    params.get('a')\n"
+            "    params['b'].get('c')\n"
+            "    json.loads(row['meta']).get('d')\n"
+            "    hooked = json.loads(row['parameters'], object_hook=hook)\n"
+            "    hooked.get('e')\n"
+        ),
+    )
+
+    assert [hole.line for hole in record.rows["pkg/mod.py::read"].holes] == [13]
+
+
+def test_what_a_dict_holds_at_a_key_is_read_from_what_is_put_there(tmp_path):
+    """``split_rule_value_dict.get(tag, {}).get(value, value)``: the module's dict holds its other dicts, and nothing
+    changes it, so the second ``get`` is a dict's.  A local dict holds what is put into it.  A module's dict some
+    function stores into holds whatever that is."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "SPLIT = {'US': ENUM_A, 'LS': ENUM_B}\n"
+            "ENUM_A = {'1': 'only'}\n"
+            "ENUM_B = {'2': 'all'}\n"
+            "CHANGED = {'k': {}}\n\n"
+            "class Cache:\n"
+            "    def get(self, key, default=None):\n"
+            "        pass\n\n"
+            "def decode(tag, value):\n"
+            "    return SPLIT.get(tag, {}).get(value, value)\n\n"
+            "def local():\n"
+            "    held = {}\n"
+            "    held['a'] = {'b': 1}\n"
+            "    return held.get('a', {}).get('b')\n\n"
+            "def change(x):\n"
+            "    CHANGED['k'] = x\n\n"
+            "def reads(k):\n"
+            "    return CHANGED.get(k, {}).get('z')\n"
+        ),
+    )
+
+    holes = {owner.rpartition("::")[2]: [hole.line for hole in row.holes] for owner, row in record.rows.items()}
+
+    assert (holes["decode"], holes["local"], holes["reads"]) == ([], [], [22])
+
+
+def test_the_async_handlers_four_values_are_read_by_what_the_code_says_of_them(tmp_path):
+    """``_run_grep``'s ``threading.Timer(t, stop)`` holds ``stop`` only to run it; ``parse_query``'s ``raw`` is a dict
+    past ``if not isinstance(raw, dict): raise``; ``find_daemon``'s table is an attribute of an outside module, or
+    json's value; ``_kind_of``'s ``info.columns`` is declared ``dict[str, str]`` on ``TableInfo``.  The same ``raw``
+    with no test is still a hole."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "import json\n"
+            "import sys\n"
+            "import threading\n"
+            "from dataclasses import dataclass\n"
+            "from typing import Any\n\n"
+            "class Holder:\n"
+            "    def get(self, key):\n"
+            "        pass\n\n"
+            "    def start(self):\n"
+            "        pass\n\n"
+            "@dataclass(frozen=True)\n"
+            "class TableInfo:\n"
+            "    columns: dict[str, str]\n\n"
+            "def grep(matcher):\n"
+            "    def stop():\n"
+            "        matcher.kill()\n\n"
+            "    timer = threading.Timer(5, stop)\n"
+            "    timer.start()\n\n"
+            "def parse(raw: Any):\n"
+            "    if not isinstance(raw, dict):\n"
+            "        raise ValueError('bad')\n"
+            "    return raw.get('tables')\n\n"
+            "def find(module):\n"
+            "    table = getattr(sys.modules[__name__], 'config', None)\n"
+            "    if not isinstance(table, dict):\n"
+            "        table = json.loads(table)\n"
+            "    for name, attrs in table.items():\n"
+            "        attrs.get('module', name)\n\n"
+            "def kind_of(info: TableInfo, column: str):\n"
+            "    return info.columns.get(column)\n\n"
+            "def unsure(raw: Any):\n"
+            "    return raw.get('tables')\n"
+        ),
+    )
+
+    holes = {owner.rpartition("::")[2]: len(row.holes) for owner, row in record.rows.items()}
+
+    assert [holes[one] for one in ("grep", "parse", "find", "kind_of", "unsure")] == [0, 0, 0, 0, 1]
+
+
+def test_a_parameter_called_lands_at_what_every_call_hands_it(tmp_path):
+    """``_Batch`` hands ``self.round_trip`` to ``get_table_info``, which hands its ``run`` on to ``_read_oracle``:
+    ``run(...)`` there is ``round_trip``.  Where one call hands a value nothing names, the call stays a hole."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "class Batch:\n"
+            "    def round_trip(self, sql, binds):\n"
+            "        return []\n\n"
+            "    def answer(self):\n"
+            "        return get_table_info(self.round_trip, 't')\n\n"
+            "def get_table_info(run, name):\n"
+            "    return _read(run, name)\n\n"
+            "def _read(run, name):\n"
+            "    return run('SELECT 1', {})\n\n"
+            "def tell(callback, value):\n"
+            "    return callback(value)\n\n"
+            "def first(value):\n"
+            "    return value\n\n"
+            "def uses(handed):\n"
+            "    tell(first, 1)\n"
+            "    tell(handed, 2)\n"
+        ),
+    )
+
+    assert _to(record, "pkg/mod.py::_read") == ["pkg/mod.py::Batch.round_trip"]
+    assert record.rows["pkg/mod.py::_read"].holes == []
+    assert [hole.why for hole in record.rows["pkg/mod.py::tell"].holes] == [reach.HOLE_LOCAL_CALLED]
+
+
+def test_a_container_a_callee_returns_is_read_in_the_callee(tmp_path):
+    """``get_result``'s ``response.get("async_meta", {}).get("status")``: ``response`` is what
+    ``_structured_result_response`` returns -- ``generate_response``'s dict literal, with ``response["async_meta"]``
+    put in it, or another such literal.  A callee handing back what it was handed is read no further."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "class Cache:\n"
+            "    def get(self, key, default=None):\n"
+            "        pass\n\n"
+            "def generate_response(success, message) -> dict:\n"
+            "    return {'success': success, 'message': message}\n\n"
+            "def structured(row) -> dict:\n"
+            "    if row is None:\n"
+            "        return generate_response(False, 'none')\n"
+            "    response = generate_response(True, '')\n"
+            "    response['async_meta'] = {'status': row}\n"
+            "    return response\n\n"
+            "def get_result(row):\n"
+            "    response = structured(row)\n"
+            "    return response.get('async_meta', {}).get('status')\n\n"
+            "def unknown(handed) -> dict:\n"
+            "    return handed\n\n"
+            "def elsewhere(row):\n"
+            "    response = unknown(row)\n"
+            "    return response.get('async_meta', {}).get('status')\n"
+        ),
+    )
+
+    holes = {owner.rpartition("::")[2]: len(row.holes) for owner, row in record.rows.items()}
+
+    assert (holes["get_result"], holes["elsewhere"]) == (0, 1)
+
+
+def test_a_statement_every_text_of_which_begins_select_is_the_database_unrendered(tmp_path):
+    """``_Batch.answer`` runs ``statement.sql``, a field of a dataclass every construction of which hands it an
+    f-string beginning ``SELECT`` that ``+=`` adds clauses to: a read, whatever the rest is.  A field built
+    ``UPDATE ...`` is still a hole."""
+    record = _database(
+        tmp_path,
+        "from dataclasses import dataclass\n\n"
+        "@dataclass(frozen=True)\n"
+        "class Statement:\n"
+        "    sql: str\n"
+        "    binds: dict\n\n"
+        "@dataclass(frozen=True)\n"
+        "class Change:\n"
+        "    sql: str\n"
+        "    binds: dict\n\n"
+        "def compose(cols, table) -> Statement:\n"
+        "    sql = f'SELECT {cols} FROM {table}'\n"
+        "    sql += ' WHERE a=:a'\n"
+        "    return Statement(sql + ' /* read */', {})\n\n"
+        "def compose_change(table) -> Change:\n"
+        "    return Change(sql=f'UPDATE {table} SET a=1', binds={})\n\n"
+        "class Batch:\n"
+        "    def round_trip(self, sql, binds):\n"
+        "        self.cur.execute(sql, binds)\n"
+        "        return self.cur.fetchall()\n\n"
+        "    def answer(self, cols, table):\n"
+        "        statement = compose(cols, table)\n"
+        "        return self.round_trip(statement.sql, statement.binds)\n\n"
+        "    def change(self, table):\n"
+        "        statement = compose_change(table)\n"
+        "        return self.round_trip(statement.sql, statement.binds)\n",
+    )
+
+    answer, change = (record.rows[f"pkg/db.py::Batch.{one}"] for one in ("answer", "change"))
+
+    assert (answer.holes, answer.settled) == ([], {"select_reads_only": 1})
+    assert [hole.why.partition(":")[0] for hole in change.holes] == [reach.HOLE_STATEMENT_NOT_READ]
 
 
 
@@ -743,7 +1013,7 @@ def _database(tmp_path, text: str) -> reach.ReachGraph:
     )
     calls = sqlwrite.corpus_calls([module], roots)
     with sql.across_calls(calls):
-        return reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
+        return reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves(calls)))
 
 
 def test_a_statement_the_map_reads_is_the_database_and_one_it_cannot_read_is_a_hole(

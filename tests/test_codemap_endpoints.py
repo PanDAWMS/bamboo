@@ -416,6 +416,148 @@ def test_an_endpoint_says_what_it_changes_beside_the_tables_and_which_holes_may_
     assert by_route["ops/clean"].changes == by_route["job/get_status"].changes == []
 
 
+CACHE = """\
+from typing import Any, Callable
+
+
+class CachedObject:
+    cachedObj: Any
+
+    def __init__(self, update_func: Callable[[], tuple[Any, Any]]) -> None:
+        self.cachedObj = None
+        self.updateFunc = update_func
+
+    def update(self) -> None:
+        tmp_stat, tmp_out = self.updateFunc()
+        if tmp_stat:
+            self.cachedObj = tmp_out
+
+    def get(self, *var: Any) -> Any:
+        self.update()
+        return self.cachedObj.get(*var)
+
+
+class Writer:
+    def get(self, key):
+        self.cur.execute("DELETE FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID", {":PandaID": 1})
+"""
+
+CACHED_API = """\
+from typing import Any
+
+from pandaserver.taskbuffer.cache import CachedObject
+
+params_cache: CachedObject = None
+any_cache: CachedObject = None
+
+
+def params() -> tuple[bool, dict[str, Any]]:
+    return True, {}
+
+
+def anything() -> tuple[bool, Any]:
+    return True, None
+
+
+def init(req):
+    global params_cache, any_cache
+    params_cache = CachedObject(params)
+    any_cache = CachedObject(anything)
+
+
+def allowed(req):
+    return params_cache.get("allow", [])
+
+
+def unsure(req):
+    return any_cache.get("allow", [])
+"""
+
+
+def test_a_hole_on_a_field_its_object_fills_with_a_builtin_is_closed_on_that_object(
+    tmp_path: Path,
+) -> None:
+    """``CachedObject.get`` calls ``self.cachedObj.get(*var)``, a hole the corpus's other ``get`` -- ``Writer``'s,
+    a delete -- may be.  The field holds what the function the object was built with returns, at its second slot:
+    ``allowed``'s cache is built with ``params``, a dict there, and is closed on it, said by the construction;
+    ``unsure``'s with ``anything``, declared ``Any``, may be ``Writer.get``."""
+    files = {
+        **CHANGING,
+        "api/v1/ops_api.py": CACHED_API,
+        "taskbuffer/cache.py": CACHE,
+    }
+    by_route = {one.route: one for one in _build(tmp_path, files=files).endpoints}
+    cache, api = f"{PACKAGE}/taskbuffer/cache.py", f"{PACKAGE}/api/v1/ops_api.py"
+
+    def bound(route: str) -> list[tuple[str, list[str], list[str]]]:
+        return [
+            (one.bound, one.through, one.held_by)
+            for one in by_route[route].hole_bounds
+            if one.callee == "self.cachedObj.get"
+        ]
+
+    assert bound("ops/allowed") == [(HOLE_CLOSED, [], [f"{api}:19"])]
+    assert bound("ops/unsure") == [
+        (HOLE_MAY_CHANGE, [f"{cache}::CachedObject.get", f"{cache}::Writer.get"], [])
+    ]
+
+
+REQUESTS = """\
+class Requests:
+    def insert_request(self, request_type, payload):
+        sql = "INSERT INTO ATLAS_PANDA.async_requests (request_type, parameters, state) VALUES (:request_type, :parameters, 'new')"
+        var_map = {":request_type": request_type, ":parameters": payload}
+        self.cur.execute(sql, var_map)
+"""
+
+SUBMITTING_API = """\
+from pandaserver.asyncprocess.kinds import REQUEST_TYPE as READ_TYPE
+from pandaserver.taskbuffer.requests import Requests
+
+PREFIX = "dc_"
+store = Requests()
+
+
+def _submit(operation, payload):
+    store.insert_request(f"{PREFIX}{operation}", payload)
+
+
+def submit_grep(req, payload):
+    store.insert_request("grep", payload)
+
+
+def submit_read(req, payload):
+    store.insert_request(READ_TYPE, payload)
+
+
+def submit_pin(req, payload):
+    _submit("pin", payload)
+"""
+
+
+def test_a_write_says_the_constants_the_endpoint_s_way_puts_in_its_columns(
+    tmp_path: Path,
+) -> None:
+    """Which request type a submit inserts: a literal handed down, a constant another module defines, an f-string of
+    the module's prefix and a parameter every call hands the same text.  The payload is the request's: not said."""
+    files = {
+        **CHANGING,
+        "api/v1/ops_api.py": SUBMITTING_API,
+        "taskbuffer/requests.py": REQUESTS,
+        "asyncprocess/kinds.py": 'REQUEST_TYPE = "db_read"\n',
+    }
+    by_route = {one.route: one for one in _build(tmp_path, files=files).endpoints}
+
+    assert {
+        route: [write.values for write in by_route[route].writes]
+        for route in ("ops/submit_grep", "ops/submit_read", "ops/submit_pin")
+    } == {
+        "ops/submit_grep": [{"request_type": ["'grep'"], "state": ["'new'"]}],
+        "ops/submit_read": [{"request_type": ["'db_read'"], "state": ["'new'"]}],
+        "ops/submit_pin": [{"request_type": ["'dc_pin'"], "state": ["'new'"]}],
+    }
+
+
 def test_the_async_requests_handlers_are_read_off_the_daemons_table_as_endpoints_are(
     tmp_path: Path,
 ) -> None:
