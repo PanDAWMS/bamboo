@@ -22,7 +22,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from typing import TYPE_CHECKING, Iterator, Optional
+from typing import TYPE_CHECKING, Callable, Iterator, Optional
 
 from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as C
@@ -173,6 +173,22 @@ def attach(
             terms.setdefault((key_from.owner, key_from.statement), []).append(key_from)
     code = _Code(calls)
     read = _Reader(record, code, sites, terms, _Bounds(record, code))
+    if returned is not None:
+        # Imported where the walks are asked again alone, as the type hints import it.
+        from bamboo.codemap.panda.recognizers import sqlwrite as walks
+
+        trees = {module.rel_path: module.tree for module in modules}
+        owners = {junction.owner for junction in fragment.junctions}
+
+        def rewalk(
+            site: ReadSiteNode, owner: str, ruled: dict[int, frozenset[int]]
+        ) -> Optional[list[str]]:
+            func = walks._site_function(trees, site)
+            if func is None:
+                return None
+            return walks.returned_under(calls, owners, record, func, site, owner, ruled)
+
+        read.rewalk = rewalk
     fragment.endpoints = [
         one
         for version, route, owner in routes(modules)
@@ -205,6 +221,13 @@ class _Reader:
             bounds,
         )
         self.objects = _Objects(code)
+        #: Read again what a read's rows come to in the answer, taking no return the way's constants rule out
+        #: (:func:`sqlwrite.returned_under`); set where the build asked the walks for answers.
+        self.rewalk: Optional[
+            Callable[
+                [ReadSiteNode, str, dict[int, frozenset[int]]], Optional[list[str]]
+            ]
+        ] = None
 
     def _bounded(
         self,
@@ -242,6 +265,7 @@ class _Reader:
             return None
         came = record.closure([owner])
         shut, constants = _shut(record, code, came)
+        ruled = _ruled_returns(code, came, constants)
         if shut:
             came = record.closure(
                 [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
@@ -264,6 +288,12 @@ class _Reader:
         reads = []
         for site, nodes in reached.values():
             answer = returned.get(site.name) if returned is not None else None
+            paths = answer.paths.get(owner, []) if answer is not None else []
+            if paths and ruled and self.rewalk is not None:
+                # Read again wherever a return in the closure is ruled out: the rows can come back through it from
+                # the read's own function, a caller on the way or a callee they are handed to.
+                again = self.rewalk(site, owner, ruled)
+                paths = paths if again is None else again
             reads.append(
                 EndpointRead(
                     site=site.name,
@@ -279,7 +309,7 @@ class _Reader:
                         for key_from in self.terms.get((site.owner, _line(site)), ())
                     ],
                     way=reach.way(came, nodes[0]),
-                    returned=answer.paths.get(owner, []) if answer is not None else [],
+                    returned=paths,
                     returned_open=sorted(
                         {
                             f"{function}:{line}"
@@ -884,6 +914,43 @@ def _reached(
             if callee not in found:
                 found.add(callee)
                 pending.append(callee)
+    return found
+
+
+def _ruled_returns(
+    code: _Code,
+    came: reach.Came,
+    constants: dict[Node, dict[str, tuple[type, object]]],
+) -> dict[int, frozenset[int]]:
+    """``{id(function): ids of its returns}`` the constants the closure holds rule out (:func:`pathcond.ruled_out_at`),
+    for every class the function runs as on the way: ``get_task_details_json``'s ``return ..., resolve_status``
+    under ``if include_resolve_status:``, left ``False`` by ``task/get_detailed_info``."""
+    by_function: dict[str, list[Node]] = {}
+    for node in came:
+        by_function.setdefault(node[0], []).append(node)
+    found: dict[int, frozenset[int]] = {}
+    for function, nodes in by_function.items():
+        if function not in code.funcs or not all(constants.get(node) for node in nodes):
+            continue
+        func = code.funcs[function][1]
+        returns = [
+            one
+            for one in ast.walk(func)
+            if isinstance(one, ast.Return) and pathcond.enclosing_function(one) is func
+        ]
+        ruled = frozenset(
+            id(one)
+            for one in returns
+            if all(
+                any(
+                    pathcond.ruled_out_at(one, func, name, value)
+                    for name, (_kind, value) in constants[node].items()
+                )
+                for node in nodes
+            )
+        )
+        if ruled:
+            found[id(func)] = ruled
     return found
 
 

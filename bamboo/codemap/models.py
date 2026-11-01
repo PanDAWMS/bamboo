@@ -3251,7 +3251,9 @@ class EndpointRead(BaseModel):
             "attach_crossings`), spelled as :attr:`KeySource.paths`: ``()`` the value itself, else its steps "
             "(``['data']``, ``[*]``, ``.Files``; ``[key]`` a dict's keys, ``.*`` any field).  ``generate_response`` "
             "puts its data under ``['data']``.  A part of the rows here reads as them, and a path may be one a run "
-            "never takes: a branch on the value's type is read both ways.  Empty where it returns none of them -- "
+            "never takes: a branch on the value's type is read both ways.  A return the constants on the endpoint's "
+            "way rule out is not taken -- ``task/get_detailed_info`` leaves ``include_resolve_status`` ``False``, and "
+            "``get_task_details_json`` returns its 3-tuple only if it is true.  Empty where it returns none of them -- "
             "``job/kill``'s ``peekJob`` -- as far as *returned_open* says."
         ),
     )
