@@ -431,18 +431,6 @@ def _job_files(
     }
 
 
-#: how an aggregate's column comes back from R, and what L3 reads it as (its SQL's ``COUNT(*) AS n``,
-#: ``MIN(pandaid) AS min_pandaid``)
-AGGREGATE = re.compile(r"^(?P<function>count|min|max)\((?P<column>[^)]*)\)$")
-
-
-def _aggregate_name(column: str) -> str:
-    m = AGGREGATE.match(column)
-    if m is None:
-        return column
-    return "n" if m["function"] == "count" else f"{m['function']}_{m['column']}"
-
-
 def answered(
     docs: list[dict], key_class: str, key: str, spellings: dict[str, dict[str, str]]
 ) -> tuple[dict, list[str]]:
@@ -451,10 +439,10 @@ def answered(
 
     A statement's rows, their histories and counts are the sections a task's fetch gives (``job_rows``,
     ``job_statuslog``, ``counts``); the key's job's ``Files``, its ``files`` and ``collections``; the rows of
-    a class joined to a row by the ask's one pair (``via``), ``linked`` entries (:func:`joined`); an sql
-    ask's groups, ``answers[<name>]``, with R's aggregate columns named as L3's SQL names them.  The rows of
-    another row's attribute have no section yet, and are left out.  *spellings* holds the classes the
-    answers' rows are of, those it can.
+    a class joined to a row by the ask's one pair (``via``), ``linked`` entries (:func:`joined`).  The rows of
+    another row's attribute have no section yet, and are left out; an sql ask no call answers is left out with
+    its why (a hand's answer is laid by :func:`hand_answers`).  *spellings* holds the classes the answers'
+    rows are of, those it can.
     """
     out: dict[str, Any] = {}
     left_out: list[str] = []
@@ -490,24 +478,27 @@ def answered(
                     left_out.append(
                         f"{name}: {why or 'no section of the rows file holds the rows of ' + held + ' yet'}"
                     )
-            elif ask["kind"] == "sql":
-                if not laid.complete("sql"):
-                    left_out.append(
-                        f"{name}: {laid.incomplete.get('sql', 'not asked')}"
-                    )
-                    continue
-                out.setdefault("answers", {})[ask["name"]] = {
-                    "source": f"R as of {laid.as_of.get('sql')}, by db_read's form of the ask",
-                    "as_of": down_to_second(laid.as_of.get("sql")),
-                    "clock": DATABASE,
-                    "rows": [
-                        {_aggregate_name(c): text(v) for c, v in r.items()}
-                        for _, r in laid.rows["sql"]
-                    ],
-                }
     if linked_by:
         out["linked"] = list(linked_by.values())
     return out, left_out
+
+
+#: a hand's answers to the querier's sql asks in a records directory, round by round
+HAND_ROUND = re.compile(r"^hand-r(\d+)\.json$")
+
+
+def hand_answers(docs: list[dict]) -> dict:
+    """The answers a hand read for the querier's sql asks (``hand-r<n>.json`` in the case's records directory, a
+    later round's over an earlier's), as the querier reads them: ``answers[<name>]`` ``{"source", "rows"}``, the
+    rows with the columns the ask's SQL names, and ``as_of`` and ``clock`` where the hand's file says when the SQL
+    ran.  No call answers such an ask (rowsask lists it for a hand), so a file holds what was run (``source``, each
+    answer's ``sql``) beside its rows."""
+    out: dict[str, dict] = {}
+    for doc in docs:
+        when = {"as_of": doc["as_of"], "clock": DATABASE} if doc.get("as_of") else {}
+        for name, a in doc["answers"].items():
+            out[name] = {"source": doc["source"], "rows": a["rows"]} | when
+    return out
 
 
 def joined(

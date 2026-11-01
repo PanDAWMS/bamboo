@@ -28,7 +28,10 @@ handed ``rows-asks.jsonl`` beside its out.txt, and result.json's
 logs too -- is followed by the rows step (:mod:`rowsask`), which answers them
 from production into the records directory (``rows-r<n>.json``), and a case
 whose rows file is built from its answers is built again with every round of
-them (``r<n+1>/rows.json``; :func:`rows.answered`).
+them (``r<n+1>/rows.json``; :func:`rows.answered`).  An sql ask no call reads
+is listed for a hand; a hand's answers in the records directory
+(``hand-r<n>.json``) are laid into the rows file's ``answers``
+(:func:`rows.hand_answers`).
 
 **A stay.**  A ``late`` question may name the stay it asks about: ``since``,
 the time_extended of the statuslog row that begins it (the case set's SQL
@@ -97,6 +100,8 @@ ROUNDS = 3
 RECORDS_GLOB = "records-r*.jsonl"
 #: the rows step's answers in a case's records directory
 ROWS_GLOB = "rows-r*.json"
+#: a hand's answers to the sql asks there (:func:`rows.hand_answers`)
+HAND_GLOB = "hand-r*.json"
 
 #: the code that builds a dump and reads it: a dump goes with a run tree whose commit holds this code as the
 #: dump's own commit does
@@ -262,7 +267,8 @@ def build_rows(
     answers: Path, pair: dict, out: Path, records: Path | None = None
 ) -> Path:
     """Lay the fetch record *answers* out as a rows file at *out*, spelled and keyed by the pair's pin and dump, with
-    the rows step's answers in *records* (``rows-r<n>.json``, round by round) laid over it."""
+    the rows step's answers in *records* (``rows-r<n>.json``, round by round) and a hand's (``hand-r<n>.json``)
+    laid over it."""
     # here, not at the top: rows imports fetch, which imports this module
     from bamboo.scripts.panda.fieldtest import rows, rowsask  # noqa: PLC0415
 
@@ -285,6 +291,11 @@ def build_rows(
     )
     spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), dump, classes)
     tables = rows.Tables.read(dump)
+    hands = sorted(
+        (int(m.group(1)), f)
+        for f in (records.glob(HAND_GLOB) if records else [])
+        if (m := rows.HAND_ROUND.match(f.name))
+    )
     record = json.loads(answers.read_text())
     built = rows.build(record, spellings, tables)
     if rounds:
@@ -292,7 +303,6 @@ def build_rows(
         sections, left_out = rows.answered(
             docs, record["key_class"], q["key"], spellings
         )
-        built.setdefault("answers", {}).update(sections.pop("answers", {}))
         built["linked"] = rows.lay_linked(
             built.get("linked", []), sections.pop("linked", [])
         )
@@ -302,8 +312,13 @@ def build_rows(
         )
         if left_out:
             built["about"] += "  Left out of them: " + "; ".join(left_out) + "."
-        if not built["answers"]:
-            del built["answers"]
+    if hands:
+        built["answers"] = rows.hand_answers(
+            [json.loads(f.read_text()) for _, f in hands]
+        )
+        built["about"] += (
+            f"  Laid over it: a hand's answers {[str(f) for _, f in hands]}."
+        )
     out.write_text(json.dumps(built, indent=1) + "\n")
     return out
 
@@ -362,7 +377,9 @@ def score(result: dict | None) -> dict:
     """How far a run got, from its result.json: the steps it opened, how it ended, and the hands it used.
 
     ``terminal`` is ``STOP`` or ``END``; ``code`` names the class of what a stop
-    needs (``asks``, a KNOWN_ISSUES number, or None where none is named yet);
+    needs (``asks``, a KNOWN_ISSUES number, or None where none is named yet), and
+    an end's is ``one-of`` where it rests on the arms a step left (querier-k37),
+    else None;
     ``text`` is the ``STOP`` line or the ``END`` lines; ``possibilities`` is
     result.json's, each arm a step left open with its rows (code ``one-of``,
     querier-ab), None otherwise.  A run with no result, or one of another

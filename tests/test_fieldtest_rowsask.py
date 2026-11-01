@@ -236,35 +236,18 @@ def test_a_statement_no_rule_reads_says_why():
     assert not other_tables.calls and "are not all JobSpec's" in other_tables.why
 
 
-def test_an_sql_ask_is_read_by_its_db_read_form_where_its_terms_are_structured():
-    form = {
-        "table": "ATLAS_PANDA.jobsActive4",
-        "where": [
-            ["jobStatus", "=", "activated"],
-            ["computingSite", "=", "BOINC_MCORE"],
-        ],
-        "group_by": ["gshare", "currentpriority"],
-        "least": "pandaid",
-    }
+def test_an_sql_ask_is_listed_for_a_hand():
     ask = {
         "kind": "sql",
-        "name": "getJobs@2404 groups now",
-        "sql": "SELECT ...",
+        "name": "getJobs@2404 held 'activated' at the move, by the order's items before the key",
+        "sql": "WITH ...",
         "binds": {},
+        "question": {"part": "H held at"},
     }
-    got = _plan({**ask, "db_read": form})
-    assert [c.request for c in got.calls] == [
-        {
-            "tables": ["jobsActive4"],
-            "where": form["where"],
-            "group_by": ["gshare", "currentpriority"],
-            "aggregates": [["count", "*"], ["min", "pandaid"]],
-        }
-    ]
-    text = _plan({**ask, "db_read": {**form, "where": "jobStatus='activated'"}})
-    assert not text.calls and "SQL text" in text.why
-    window = _plan(ask)
-    assert not window.calls and "listed for a hand" in window.why
+    got = _plan(ask)
+    assert (
+        not got.calls and "listed for a hand" in got.why and "hand-r<n>.json" in got.why
+    )
 
 
 # ------------------------------------------------------------------ answers, laid out
@@ -317,49 +300,6 @@ async def test_the_key_jobs_files_answer_lays_out_as_the_jobs_fetch_lays_them_ou
         other == {}
         and "no section of the rows file holds the rows of JobSpec.Files" in why[0]
     )
-
-
-async def test_an_sql_answer_names_rs_aggregates_as_l3s_sql_names_them():
-    async def db_read(queries):
-        rows = [
-            {
-                "gshare": "Express",
-                "currentpriority": 900,
-                "count(*)": 3,
-                "min(pandaid)": 11,
-            }
-        ]
-        answer = {
-            "status": "done",
-            "truncated": False,
-            "tables": [{"table": "jobsActive4", "rows": rows}],
-        }
-        return {"success": True, "data": {"as_of": T(AS_OF), "answers": [answer]}}
-
-    form = {
-        "table": "ATLAS_PANDA.jobsActive4",
-        "where": [["jobStatus", "=", "activated"]],
-        "group_by": ["gshare", "currentpriority"],
-        "least": "pandaid",
-    }
-    line = _line(
-        {
-            "kind": "sql",
-            "name": "getJobs@2404 groups now",
-            "sql": "SELECT ...",
-            "binds": {},
-            "db_read": form,
-        }
-    )
-    got = await RA.answer(
-        line, RA.plan(line, TABLES, SITES), FE.Parts(db_read=db_read), TABLES
-    )
-    sections, _ = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS)
-    answer = sections["answers"]["getJobs@2404 groups now"]
-    assert answer["rows"] == [
-        {"gshare": "Express", "currentpriority": 900, "n": 3, "min_pandaid": 11}
-    ]
-    assert answer["clock"] == RB.DATABASE and answer["as_of"] == "2026-10-13 10:00:00"
 
 
 #: the spellings with a dataset's columns, as the pin's JediDatasetSpec.attributes spells them
@@ -451,7 +391,7 @@ async def test_an_ask_no_rule_reads_asks_nothing_and_is_left_out_with_its_why():
     assert panda.calls == [] and got["steps"] == []
     sections, left_out = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS)
     assert sections == {} and left_out == [
-        "sql w: no db_read form (a window question): listed for a hand"
+        "sql w: a window over the history no call reads: listed for a hand (hand-r<n>.json in the records directory)"
     ]
 
 

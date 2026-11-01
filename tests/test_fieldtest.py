@@ -968,13 +968,6 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
             "response": {"success": True, "data": data},
         }
 
-    def sql(name: str, rows: list[dict]) -> dict:
-        return {
-            "ask": {"rows": {"kind": "sql", "name": name}},
-            "why": "",
-            "steps": [read("sql", "jobsActive4", rows)],
-        }
-
     via = {"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.jediTaskID"}
     datasets = {
         "ask": {
@@ -993,18 +986,33 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
 
     window = {
         "ask": {"rows": {"kind": "sql", "name": "w"}},
-        "why": "no db_read form",
+        "why": "listed for a hand",
         "steps": [],
     }
+    _write(records, "rows-r1.json", {"answers": [window]})
+    _write(records, "rows-r2.json", {"answers": [datasets]})
+    # a hand's answers to the sql asks, a later round's over an earlier's; as_of and clock only where it says when
     _write(
         records,
-        "rows-r1.json",
-        {"answers": [sql("g", [{"gshare": "a", "count(*)": 1}]), window]},
+        "hand-r1.json",
+        {
+            "source": "s1",
+            "answers": {
+                "w": {"sql": "WITH ...", "rows": [{"N": 1}]},
+                "v": {"sql": "WITH ...", "rows": [{"N": 5}]},
+            },
+        },
     )
     _write(
         records,
-        "rows-r2.json",
-        {"answers": [sql("g", [{"gshare": "a", "count(*)": 2}]), datasets]},
+        "hand-r2.json",
+        {
+            "source": "s2",
+            "as_of": "2026-11-01 20:58:00",
+            "answers": {
+                "w": {"sql": "WITH ...", "rows": [{"N": 2, "NEXT_VALUE": "sent"}]}
+            },
+        },
     )
     pair = {"MAP_DUMP": "dump.json", "PANDA_PIN": "pin"}
 
@@ -1012,16 +1020,19 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
         F.build_rows(answers, pair, tmp_path / "rows.json", records).read_text()
     )
     assert built["answers"] == {
-        "g": {
-            "source": "R as of 2026-10-13 10:00:00, by db_read's form of the ask",
-            "as_of": "2026-10-13 10:00:00",
+        "w": {
+            "source": "s2",
+            "rows": [{"N": 2, "NEXT_VALUE": "sent"}],
+            "as_of": "2026-11-01 20:58:00",
             "clock": "database",
-            "rows": [{"gshare": "a", "n": 2}],
-        }
+        },
+        "v": {"source": "s1", "rows": [{"N": 5}]},
     }
     assert (
         "rows-r1.json" in built["about"]
-        and "Left out of them: sql w: no db_read form" in built["about"]
+        and "Left out of them: sql w: listed for a hand" in built["about"]
+        and "a hand's answers" in built["about"]
+        and "hand-r2.json" in built["about"]
     )
     # the joined rows go to linked, spelled as their class -- asked of the pin with the fetch's classes
     assert [(e["class"], e["via"], e["asked"], e["rows"]) for e in built["linked"]] == [
