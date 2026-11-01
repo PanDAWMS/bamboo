@@ -430,6 +430,36 @@ def test_the_async_handlers_four_values_are_read_by_what_the_code_says_of_them(t
     assert [holes[one] for one in ("grep", "parse", "find", "kind_of", "unsure")] == [0, 0, 0, 0, 1]
 
 
+def test_a_parameter_called_lands_at_what_every_call_hands_it(tmp_path):
+    """``_Batch`` hands ``self.round_trip`` to ``get_table_info``, which hands its ``run`` on to ``_read_oracle``:
+    ``run(...)`` there is ``round_trip``.  Where one call hands a value nothing names, the call stays a hole."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "class Batch:\n"
+            "    def round_trip(self, sql, binds):\n"
+            "        return []\n\n"
+            "    def answer(self):\n"
+            "        return get_table_info(self.round_trip, 't')\n\n"
+            "def get_table_info(run, name):\n"
+            "    return _read(run, name)\n\n"
+            "def _read(run, name):\n"
+            "    return run('SELECT 1', {})\n\n"
+            "def tell(callback, value):\n"
+            "    return callback(value)\n\n"
+            "def first(value):\n"
+            "    return value\n\n"
+            "def uses(handed):\n"
+            "    tell(first, 1)\n"
+            "    tell(handed, 2)\n"
+        ),
+    )
+
+    assert _to(record, "pkg/mod.py::_read") == ["pkg/mod.py::Batch.round_trip"]
+    assert record.rows["pkg/mod.py::_read"].holes == []
+    assert [hole.why for hole in record.rows["pkg/mod.py::tell"].holes] == [reach.HOLE_LOCAL_CALLED]
+
+
 
 
 def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):
