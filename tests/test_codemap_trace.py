@@ -3564,6 +3564,50 @@ def f(self, job, varMap, a, b):
     assert trace_mod.hole_values(pair, "pair xy n=4 done") == (["xy", "xy", "4"], [])
 
 
+def test_a_printed_map_says_the_entries_it_may_hold_where_it_is_printed(tmp_path):
+    """A record prints ``str(varMap)`` as ``{':status': 'done', ...}``; the hole says what fills each entry, on the
+    binding that reaches the print: a literal's entry, a key the source computes by its spelling, a spec's
+    ``valuesMap()`` copied entry by entry as its row, and each way an entry is filled.  Where the map may get an
+    entry no key spells -- ``update`` -- the line; the cursor's ``execute`` only reads it.  A map bound again holds
+    only what is filled after, and a hole that is not a map is not read as one."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, taskSpec, criteria, comment, tmp_log):
+    varMap = {":jediTaskID": taskSpec.jediTaskID}
+    for tmpKey, tmpVal in criteria.items():
+        varMap[f":cr_{tmpKey}"] = tmpVal
+    self.cur.execute("SELECT status FROM JEDI_Tasks WHERE jediTaskID=:jediTaskID " + comment, varMap)
+    varMap.update(more(criteria))
+    for tmpKey, tmpVal in taskSpec.valuesMap(onlyChanged=True).items():
+        varMap[tmpKey] = tmpVal
+    tmp_log.debug("UPDATE JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID " + comment + str(varMap))
+    varMap = {}
+    varMap[":status"] = "finished"
+    if taskSpec.x:
+        varMap[":status"] = "done"
+    tmp_log.debug("UPDATE T_TASK SET status=:status " + comment + str(varMap))
+    taskSpec.status = "done"
+''',
+    )
+
+    first, second = _printed(roots, file="m", owner="f", lines=[15])
+
+    comment, printed = first.holes
+    assert (comment.entries, comment.entries_open) == (None, [])
+    assert [(e.key, e.expression, e.line, e.computed, e.row) for e in printed.entries] == [
+        (":jediTaskID", "taskSpec.jediTaskID", 2, False, ""),
+        ("f':cr_{tmpKey}'", "tmpVal", 4, True, ""),
+        ("tmpKey", "tmpVal", 8, True, "taskSpec"),
+    ]
+    assert printed.entries_open == [6]
+    assert [(e.key, e.expression, e.line) for e in second.holes[-1].entries] == [
+        (":status", "'finished'", 11),
+        (":status", "'done'", 13),
+    ]
+    assert second.holes[-1].entries_open == []
+
+
 def test_a_row_reads_a_record_whole_only_where_its_mark_and_message_run_end_to_end(tmp_path):
     """A search finds ``start`` in another row's line, ``start 7 jediTaskID=12``; ``reads_whole`` tells the row's own
     line from it.  The record comes as a reader splits it after the level -- the mark, or the first word where none

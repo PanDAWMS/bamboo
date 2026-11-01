@@ -4943,6 +4943,32 @@ SKELETON_PRINT = "print"
 SKELETON_ARM = "arm"
 
 
+class MapEntry(BaseModel):
+    """An entry a printed map may hold where it is printed, and what fills it.
+
+    ``varMap[":status"] = taskSpec.status`` before ``tmpLog.debug(sql + comment + str(varMap))``: the record prints
+    ``':status': 'running'``, and this says the value is ``taskSpec.status``.
+    """
+
+    key: str = Field(
+        description=(
+            "The key: its value where the source spells it (``:status``); where it is computed, the source's "
+            "spelling of it (``crKey``, ``f':old_{i}'``); empty for a map bound to a spec's ``valuesMap()``."
+        )
+    )
+    expression: str = Field(description="What fills the entry, as the source spells it.")
+    line: int = Field(description="The line filling it: the store, or the binding whose literal holds it.")
+    computed: bool = Field(default=False, description="Whether the key is computed at run time.")
+    row: str = Field(
+        default="",
+        description=(
+            "Where the entries are a spec's ``valuesMap()`` copied -- ``for k, v in taskSpec.valuesMap().items(): "
+            "varMap[k] = v``, or the map bound to it -- the spec, ``taskSpec``: each key is ``:`` and an attribute "
+            "of it, holding that attribute."
+        ),
+    )
+
+
 class SkeletonHole(BaseModel):
     """One hole of a printed line, and the expression the source fills it with.
 
@@ -4974,6 +5000,23 @@ class SkeletonHole(BaseModel):
             "The group of the row's ``capture`` -- of ``prefix_capture`` for a hole of the mark -- that holds what "
             "this hole printed, counted from 1.  Holes side by side share one, whose text is theirs joined: "
             "``f\"{a}{b}\"`` cannot say where ``a`` ends.  0 where the row has no capture."
+        ),
+    )
+    entries: Optional[list[MapEntry]] = Field(
+        default=None,
+        description=(
+            "Where the hole prints a map whole (``str(varMap)``), the entries it may hold there, on the binding "
+            "that reaches the print: each filled after it on a path to the print and not filled again before it "
+            "(:func:`mapentries.entries`).  ``None`` where the hole is not read as a map; ``[]``, a map with no "
+            "entry known."
+        ),
+    )
+    entries_open: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where *entries* is read, the lines on a path to the print where the map may get entries the source "
+            "does not spell: ``varMap.update(other)``, a call it is handed to, ``varMap = f()``; 0 for a "
+            "parameter.  Empty: *entries* are every entry it may hold."
         ),
     )
 

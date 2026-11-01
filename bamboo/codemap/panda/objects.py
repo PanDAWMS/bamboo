@@ -101,7 +101,7 @@ from bamboo.codemap.models import (
     WrittenValue,
 )
 from bamboo.codemap.objects import RETURN, table_classes
-from bamboo.codemap.panda import order, pathcond, specwrites, sql, sqltext
+from bamboo.codemap.panda import mapentries, order, pathcond, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
 #: The classes whose columns an assignment is kept for (tmaeno, 10-18: D1).
@@ -1326,7 +1326,7 @@ def _whole_row(func: ast.AST, run, versions: "_Versions") -> tuple[str, bool, bo
                 and targets[0].id == one.id
             ]
             # A copy adds to the map and takes nothing from it: read as a reread, which overwrites nothing.
-            copies = _row_copies(func, one.id)
+            copies = mapentries.row_copies(func, one.id)
             try:
                 live = (
                     pathcond.surviving_writes(
@@ -1365,41 +1365,6 @@ def _whole_row(func: ast.AST, run, versions: "_Versions") -> tuple[str, bool, bo
             }
             return held, "onlyChanged" in flags, "useSeq" in flags
     return "", False, False
-
-
-def _row_copies(func: ast.AST, name: str) -> dict[ast.expr, ast.AST]:
-    """Each ``name[k] = v`` in ``for k, v in X.valuesMap(...).items()``, under the ``X.valuesMap(...)`` it copies."""
-    found: dict[ast.expr, ast.AST] = {}
-    for loop in C.own_nodes(func):
-        if not (
-            isinstance(loop, ast.For)
-            and isinstance(loop.iter, ast.Call)
-            and isinstance(loop.iter.func, ast.Attribute)
-            and loop.iter.func.attr == "items"
-            and not loop.iter.args
-            and isinstance(copied := loop.iter.func.value, ast.Call)
-            and isinstance(copied.func, ast.Attribute)
-            and copied.func.attr == "valuesMap"
-            and isinstance(loop.target, ast.Tuple)
-            and len(loop.target.elts) == 2
-            and all(isinstance(part, ast.Name) for part in loop.target.elts)
-        ):
-            continue
-        key, value = (part.id for part in loop.target.elts)  # type: ignore[attr-defined]
-        for node in loop.body:
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(target := node.targets[0], ast.Subscript)
-                and isinstance(target.value, ast.Name)
-                and target.value.id == name
-                and isinstance(target.slice, ast.Name)
-                and target.slice.id == key
-                and isinstance(node.value, ast.Name)
-                and node.value.id == value
-            ):
-                found[copied] = node
-    return found
 
 
 def _copied(copies: dict[ast.expr, ast.AST], site: ast.AST) -> Optional[ast.expr]:

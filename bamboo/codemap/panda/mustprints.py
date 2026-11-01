@@ -79,7 +79,7 @@ from bamboo.codemap.models import (
     SourceModule,
     TableRecord,
 )
-from bamboo.codemap.panda import changes, pathcond
+from bamboo.codemap.panda import changes, mapentries, pathcond
 from bamboo.codemap.panda.reaching import reaching
 
 if TYPE_CHECKING:
@@ -733,15 +733,7 @@ def _printed_map(expression: str) -> str:
         read = ast.parse(expression, mode="eval").body
     except SyntaxError:
         return ""
-    if (
-        isinstance(read, ast.Call)
-        and isinstance(read.func, ast.Name)
-        and read.func.id in ("str", "repr")
-        and len(read.args) == 1
-        and not read.keywords
-    ):
-        read = read.args[0]
-    return read.id if isinstance(read, ast.Name) else ""
+    return mapentries.printed_map(read)
 
 
 def _map_holds_key(func: ast.AST, key: _Key, printed: ast.stmt) -> bool:
