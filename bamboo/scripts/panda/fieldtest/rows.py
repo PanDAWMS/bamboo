@@ -24,10 +24,19 @@ to them; the sections above stay as they were until it has.
 -- ``_attributes``, or ``attributes`` in JEDI's specs -- gives the columns and
 their spelling (:func:`column_spellings`), read from the pin with ``ast``.  A
 key's row and a job's files are kept to those columns: what else an endpoint
-adds (a task's progress, its parameters) is left out and named in ``about``,
-and a task's ``splitRule`` is the column as stored (``split_rule_raw``), not
-the server's decoding of it.  The task's job rows keep R's lower-case names,
-as the querier reads them.
+adds (a task's progress) is left out and named in ``about``, and a task's
+``splitRule`` is the column as stored (``split_rule_raw``), not the server's
+decoding of it.  The task's job rows keep R's lower-case names, as the querier
+reads them.
+
+**A task's parameters.**  ``task_params`` holds what task/get_detailed_info
+answers as ``raw_task_params``: JEDI_TaskParams.taskParams, which the server
+decodes with ``json.loads`` (``get_task_details_json``), so the map and not
+the text as stored.  The refiner decodes the same column the same way
+(``RefinerUtils.decodeJSON``), so it is the ``taskParamMap`` a refine would
+have read when it was asked; the column may have been written since the task
+was refined (``insertUpdateTaskParams_JEDI`` and others).  Its ``as_of`` and
+``clock`` are the key row's.
 
 **When.**  The endpoints that read a row by its key say no time of the
 database's, so each value's source says when it was asked, on this machine's
@@ -97,6 +106,8 @@ ENDPOINT = {
 }
 #: where task/get_detailed_info holds the splitRule column as stored
 SPLIT_RULE_RAW = "split_rule_raw"
+#: where task/get_detailed_info holds the task's parameters, decoded
+RAW_TASK_PARAMS = "raw_task_params"
 DECLARED = re.compile(r"^(?P<cls>\w+) \((?P<path>[^)]+)\)$")
 
 
@@ -234,6 +245,24 @@ def key_row(laid: Laid, cls: str, key: str) -> tuple[dict | None, dict, str]:
     return found, read, ""
 
 
+def task_params(raw: dict, read: dict) -> tuple[dict | None, str]:
+    """The task's parameters from its row's answer, read when the row was; None and why when there are none."""
+    # the server leaves the key out when it cannot read or decode the column (get_task_details_json)
+    value = raw.get(RAW_TASK_PARAMS)
+    if not isinstance(value, dict):
+        return (
+            None,
+            f"{RAW_TASK_PARAMS} is {type(value).__name__ if value is not None else 'absent'}",
+        )
+    return {
+        "jediTaskID": raw.get("jediTaskID"),
+        "value": value,
+        "as_of": read["as_of"],
+        "clock": read["clock"],
+        "source": f"{read['source']}, as {RAW_TASK_PARAMS}: JEDI_TaskParams.taskParams decoded by the server, not the text as stored",
+    }, ""
+
+
 def states_of(response: dict, kind: str) -> tuple[list[dict] | None, str]:
     """The history's rows as the querier reads them, and the source; None when the call did not succeed."""
     if not response or not response.get("success"):
@@ -349,11 +378,13 @@ def build(record: dict, spellings: dict[str, dict[str, str]], tables: Tables) ->
     raw, read, why = key_row(laid, cls, q["key"])
     if raw is None:
         left_out.append(
-            f"rows.{entity}{', files' if cls == 'JobSpec' else ''}: {tables.key[cls]}={q['key']}: {why}"
+            f"rows.{entity}{', files' if cls == 'JobSpec' else ', task_params'}: {tables.key[cls]}={q['key']}: {why}"
         )
     else:
         row = columns(
-            {k: v for k, v in raw.items() if k != FILES}, spellings[cls], other
+            {k: v for k, v in raw.items() if k not in (FILES, RAW_TASK_PARAMS)},
+            spellings[cls],
+            other,
         )
         out["rows"] = {entity: {c: {"value": v, **read} for c, v in row.items()}}
 
@@ -361,6 +392,12 @@ def build(record: dict, spellings: dict[str, dict[str, str]], tables: Tables) ->
         if raw is not None:
             _job_files(out, raw, read, spellings, other)
     else:
+        if raw is not None:
+            params, why = task_params(raw, read)
+            if params is None:
+                left_out.append(f"task_params: {why}")
+            else:
+                out["task_params"] = params
         _task_sections(out, laid, left_out)
     out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings, tables)
     out["statuslogs"] = statuslogs(laid, int(q["key"]), tables)
