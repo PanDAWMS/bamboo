@@ -1038,6 +1038,33 @@ delay is in what calls <func> on the row, not followed here", or "...: none foun
 ruled out: <why>", code K45; else S2's and S3's lines over the passes.
 *Revisit:* when the callers' runs are followed by their keys (the map's upward reach and its run marks).
 
+### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
+
+S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it
+(`rows.share_loop`): a printed row's arms then do not leave the site out, and rule 3 does not order them.  A loop
+that no way through its body runs to the end of, each of whose `continue`s comes after a row inside it that the
+pass did not print, went round once in that pass (`rows.once_loops`, `which_ran.once_loops_of`).  Two shapes:
+- the DB proxy's retry, `for iTry in range(nTry)`, with no "retry: {iTry}" in the run (on pin m: activateJob,
+  updateJobStatus, updateJob, retryJob, keepJob, peekJob, peekJobLog, addMetadata, countFilesWithMap; and
+  workflow_core's process_step_checking);
+- a loop whose body always breaks (`for (clob,) in self.cur: ... break`).
+
+S3 (`Rerun.blocked`) also reads the path condition of each row the pass printed outside any other loop
+(`Rerun._ways_printed`), beside the exit's.  MJ-defined-late's activateJob row 111, in the else of 70, says
+`not (len(res) == 0 or allOK)`; the exit the pass left by (153, `return True`) is reached either way.
+
+What is still read as a loop that may go round:
+- a loop that goes round by running off the end of its body: getJobs 2378 (a retry over candidates, which breaks
+  when it got one), and the retries of updateInFilesReturnPandaIDs, updateOutFilesReturnPandaIDs and setGUIDs,
+  whose handlers end with neither a `continue` nor a `return`;
+- a loop over items (`for file in job.Files`), which prints nothing on its way back;
+- any loop in a run of several calls.  S3 reads no row's path condition in such a run either.
+
+*Shows:* "row N printed and its arms [...] leave L out (the loop at M went round once: its way back prints row(s)
+[R], not in the run)"; "settled by the rows the pass printed on the way [N]: {...}".  `WHICH_RUN_ONCE_LOOPS=0` and
+`RERUN_S3_ROWS=0` read as before.
+*Revisit:* a way back that runs off the body's end and still must print (a handler that prints "retry" and ends).
+
 ## The walks (`asked.py`)
 
 ### K32. The walks read the code alone, not the instance record the map was built with
