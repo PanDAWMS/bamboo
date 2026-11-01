@@ -3564,6 +3564,60 @@ def f(self, job, varMap, a, b):
     assert trace_mod.hole_values(pair, "pair xy n=4 done") == (["xy", "xy", "4"], [])
 
 
+def test_a_row_reads_a_record_whole_only_where_its_mark_and_message_run_end_to_end(tmp_path):
+    """A search finds ``start`` in another row's line, ``start 7 jediTaskID=12``; ``reads_whole`` tells the row's own
+    line from it.  The record comes as a reader splits it after the level -- the mark, or the first word where none
+    is written -- and the two are read again as one, the row's mark then its message, anchored at both ends.  A
+    ``LogWrapper``'s prefix is read wherever the split left it, and a logger whose mark is not read cannot say."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def f(job, n, commandStr):
+    _logger.debug("start")
+    _logger.debug(f"start {n} jediTaskID={job.jediTaskID}")
+    _logger.debug(f"start for {commandStr}")
+    job.status = "done"
+
+
+def g(job, n):
+    tmp_log = LogWrapper(_logger, "<setup_destination>")
+    tmp_log.debug(f"idx:{n} n:{job.nFiles}")
+    job.status = "done"
+
+
+def h(self, job):
+    self.logger.debug("start")
+    job.status = "done"
+''',
+    )
+
+    start, counted, command = _printed(roots, file="m", owner="f", lines=[10])
+    (wrapped,) = _printed(roots, file="m", owner="g", lines=[16])
+    (unread,) = _printed(roots, file="m", owner="h", lines=[21])
+
+    assert trace_mod.reads_whole(start, "start", "")
+    assert trace_mod.hole_values(start, "start 7 jediTaskID=12") == ([], [])
+    assert trace_mod.reads_whole(start, "start", "7 jediTaskID=12") is False
+    assert trace_mod.reads_whole(counted, "start", "7 jediTaskID=12")
+    assert command.pattern == r"start\ for\ "
+    assert trace_mod.reads_whole(command, "start", "for retry")
+    assert trace_mod.hole_values(command, "for retry", "start", whole=True) == (["retry"], [])
+
+    assert wrapped.prefix == r"<setup_destination>\ "
+    assert trace_mod.reads_whole(wrapped, "<setup_destination>", "idx:3 n:4")
+    assert trace_mod.reads_whole(wrapped, None, "<setup_destination> idx:3 n:4")
+    assert trace_mod.reads_whole(wrapped, None, "idx:3 n:4") is False
+    assert trace_mod.hole_values(wrapped, "idx:3 n:4", "<setup_destination>", whole=True) == (["3", "4"], [])
+
+    assert unread.prefix == "" and unread.prefix_hole
+    assert trace_mod.reads_whole(unread, "start", "") is None
+
+
 def test_a_logger_built_here_says_its_prefix(tmp_path):
     """The wrapper's own mark, after what the logger it wraps writes: here ``self.logger``, which nothing here
     makes, so that part is one hole spelled as the wrapped logger."""

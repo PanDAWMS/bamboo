@@ -5021,7 +5021,9 @@ class SkeletonLine(BaseModel):
             "The line as a pattern that reads its holes' values back: every hole a group (:attr:`SkeletonHole.group`), "
             "closed as ``pattern`` closes it, the leading ones kept and the last running to the end of the text.  "
             "Searched in a record's message with ``re.S``, so a last hole takes the record's continuation lines too "
-            "-- ``str(varMap)`` after an SQL text, a traceback after ``f\"execute() : {e}\"``.  Apart from "
+            "-- ``str(varMap)`` after an SQL text, a traceback after ``f\"execute() : {e}\"``; or, after "
+            "``prefix_capture``, matched against the record whole (:func:`bamboo.codemap.trace.reads_whole`), which "
+            "tells the row's own line from another row's holding its text.  Apart from "
             "``pattern``, the text a search sends, which leaves out the holes at either end because an unanchored "
             "search asks nothing more with them.  Empty when refused."
         ),

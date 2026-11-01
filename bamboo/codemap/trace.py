@@ -764,12 +764,22 @@ def line_capture(message: ast.JoinedStr) -> tuple[str, list[int]]:
 
 
 def hole_values(
-    row: PrintRow | SkeletonLine, message: str, token: Optional[str] = None
+    row: PrintRow | SkeletonLine, message: str, token: Optional[str] = None, whole: bool = False
 ) -> Optional[tuple[list[str], list[str]]]:
     """What *row*'s holes printed in a record whose message is *message*, and -- given the record's mark *token* --
     what its prefix holes printed: ``(by hole, by prefix hole)``, in their order, a hole sharing its group with its
     neighbours given their text joined.  ``None`` where the row does not read the record: no capture, the message
-    not found, or a mark it does not match.  The reading every reader of a row's values shares."""
+    not found, or a mark it does not match.  The reading every reader of a row's values shares.
+
+    With *whole*, read where the record is the row's line from end to end (:func:`reads_whole`), the mark and the
+    message as one match: a text hole then runs to the literal the rest of the line needs, not to the first."""
+    if whole:
+        matched = _whole_match(row, token, message)
+        if matched is None:
+            return None
+        line, before = matched
+        read = [line.group(before + hole.group) for hole in row.holes]
+        return read, [line.group(hole.group) for hole in row.prefix_holes] if row.prefix_capture else []
     if not row.capture:
         return None
     found = re.search(row.capture, message, re.S)
@@ -783,6 +793,51 @@ def hole_values(
             return None
         marks = [mark.group(hole.group) for hole in row.prefix_holes]
     return values, marks
+
+
+def reads_whole(row: PrintRow | SkeletonLine, token: Optional[str], message: str) -> Optional[bool]:
+    """Whether a record is *row*'s line whole, not only a line holding its text.
+
+    *token* and *message* are the record after its level as a reader split it -- the mark it cuts off first, or the
+    first word where there is none -- and *message* holds the continuation lines too.  They are joined again and read
+    by the row's mark (``prefix_capture``) and then its message (``capture``), anchored at both ends; the blanks at
+    the ends and between the two are not counted, since a reader's split drops one and a ``MsgWrapper``'s token starts
+    with one a padded level hides.  ``"start"`` does not read ``start jediTaskID=12 status=ready`` whole, while
+    ``f"start for {commandStr}"`` reads ``start for retry``, though its pattern ends at ``for``.  A ``LogWrapper``'s
+    prefix is read wherever the split left it.  ``None`` where the row cannot say: it has no capture, or its logger
+    may write a mark this reading did not read (``prefix_hole``)."""
+    if not _reads_whole_at_all(row):
+        return None
+    return _whole_match(row, token, message) is not None
+
+
+def _reads_whole_at_all(row: PrintRow | SkeletonLine) -> bool:
+    """Whether *row* says its whole line: a capture, and a mark read or none written."""
+    return bool(row.capture) and (bool(row.prefix) or not row.prefix_hole)
+
+
+def _whole_match(
+    row: PrintRow | SkeletonLine, token: Optional[str], message: str
+) -> Optional[tuple[re.Match[str], int]]:
+    """The match reading the record whole (:func:`reads_whole`), and how many of its groups are the mark's."""
+    if not _reads_whole_at_all(row):
+        return None
+    head, before = "", 0
+    if row.prefix_capture:
+        # The logger writes a blank after a mark whose pattern ends with one.
+        head = row.prefix_capture + (r"\s+" if row.prefix.endswith("\\ ") and row.capture else r"\s*")
+        before = re.compile(row.prefix_capture).groups
+    pattern = re.compile(r"\s*" + head + row.capture + r"\s*", re.S)
+    # A record with no message after its mark is the mark alone: no blank after it for a last hole to take.
+    lines = [message] if not token else [f"{token} {message}" if message else token]
+    if token and token.endswith(">"):
+        # A bracketed mark may be followed by the message with no blank between.
+        lines.append(token + message)
+    for line in lines:
+        found = pattern.fullmatch(line)
+        if found is not None:
+            return found, before
+    return None
 
 
 def _enclosing_statement(node: ast.AST) -> Optional[ast.stmt]:
