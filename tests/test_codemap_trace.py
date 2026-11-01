@@ -3662,6 +3662,49 @@ def h(self, job):
     assert trace_mod.reads_whole(unread, "start", "") is None
 
 
+
+def test_a_record_only_its_literals_read_whole_is_said_neither_way(tmp_path):
+    """``killJob`` prints ``f"code={code} user={user} wg={wg}"``, and its capture closes ``user`` at the blank before
+    ``wg=``: a guess from that literal, which a DN holding blanks breaks.  ``Freezer.run``'s ``end {name} `` reads
+    393's ``end JEDI closer for {name} `` only by its literals, and ``name`` could hold those words.  Neither is
+    said: ``reads_whole`` is ``None`` where ``reads_literally`` alone reads the record, ``False`` where the literals
+    are not the row's, and a row whose classes read the record keeps it."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def k(job, code, user, wg):
+    _logger.debug(f"code={code} user={user} wg={wg}")
+    job.status = "done"
+
+
+def r(job, name):
+    _logger.debug(f"start JEDI closer for {name} ")
+    _logger.debug(f"end JEDI closer for {name} ")
+    _logger.debug(f"end {name} ")
+    job.status = "done"
+''',
+    )
+
+    (killed,) = _printed(roots, file="m", owner="k", lines=[8])
+    started, closed, ended = _printed(roots, file="m", owner="r", lines=[15])
+
+    dn = "user=/DC=ch/OU=Organic Units/CN=Robot: ATLAS wg=[]"
+    assert trace_mod.reads_whole(killed, "code=4", dn) is None
+    assert trace_mod.reads_literally(killed, "code=4", dn)
+    assert trace_mod.reads_whole(killed, "code=4", "user=/DC=ch wg=[]")
+    assert trace_mod.reads_whole(killed, "code=4", "role=x wg=[]") is False
+
+    assert trace_mod.reads_whole(closed, "end", "JEDI closer for x ")
+    assert trace_mod.reads_whole(ended, "end", "JEDI closer for x ") is None
+    assert trace_mod.reads_whole(ended, "end", "x ")
+    assert trace_mod.reads_whole(started, "end", "JEDI closer for x ") is False
+    assert trace_mod.reads_literally(started, "end", "JEDI closer for x ") is False
+
 def test_a_logger_built_here_says_its_prefix(tmp_path):
     """The wrapper's own mark, after what the logger it wraps writes: here ``self.logger``, which nothing here
     makes, so that part is one hole spelled as the wrapped logger."""
