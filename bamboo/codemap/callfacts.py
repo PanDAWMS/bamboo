@@ -692,6 +692,10 @@ ASSUMPTIONS: dict[str, str] = {
         "A method of an object whose class is outside the corpus, or is built on a base outside it that supplies the "
         "method, keeps all it is handed in that object."
     ),
+    "library_sets_no_corpus_attribute": (
+        "A function or method outside the corpus, and a builtin class built, stores no attribute of an object of the "
+        "corpus it is handed: it may keep it, read it or call what it is handed (bamboo.codemap.panda.changes)."
+    ),
     "logger_keeps_nothing": (
         "A method named as a logger's (debug, info, warning, error, ...) that no definition of the corpus answers for "
         "writes a line and keeps nothing it is handed."

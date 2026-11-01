@@ -794,6 +794,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._declarations,
             fragment.key_froms,
             fragment.tables,
+            self._calls,
         )
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
         lap("prints")

@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import NamedTuple, Optional, Sequence
+from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -69,8 +69,11 @@ from bamboo.codemap.models import (
     SourceModule,
     TableRecord,
 )
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap.panda import changes, pathcond
 from bamboo.codemap.panda.reaching import reaching
+
+if TYPE_CHECKING:
+    from bamboo.codemap.calls import Calls
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
@@ -84,7 +87,7 @@ HOLE_NOT_REACHED = (
 )
 WHY_REBOUND = (
     "between the print and the arm the object or the attribute can be bound again,"
-    " or the object handed to a call"
+    " or the object handed to a call that may store the attribute"
 )
 NAMES_NOT_ATTRIBUTE = (
     "names: the arm does not write the subject as an attribute of an object"
@@ -125,6 +128,7 @@ def attach(
     declarations: dict[str, set[str]],
     key_froms: Sequence[KeyFrom] = (),
     tables: Sequence[TableRecord] = (),
+    calls: Optional["Calls"] = None,
 ) -> int:
     """Read every branch's must prints and names into it.  Returns how many branches have a must print.
 
@@ -132,8 +136,34 @@ def attach(
     prints that come before every one of them, and the names every one of
     them has.  With *key_froms* and *tables*, the names of the row's key too:
     held in a hole of the logger's mark, or by a name bound to it, and an SQL
-    arm's (:func:`_key_names`).
+    arm's (:func:`_key_names`).  With *calls*, a call between a print and the
+    arm changes a value only where :func:`changes.may_change` says it may;
+    without, every call on the object or handed it may.
     """
+    global _ACROSS
+    files = {
+        id(node): module.rel_path
+        for module in modules
+        for node in ast.walk(module.tree)
+        if isinstance(node, _FUNCTIONS)
+    }
+    _ACROSS = (calls, files) if calls is not None else None
+    try:
+        return _attach(
+            junctions, function_prints, modules, declarations, key_froms, tables
+        )
+    finally:
+        _ACROSS = None
+
+
+def _attach(
+    junctions: list[JunctionNode],
+    function_prints: list[FunctionPrintsNode],
+    modules: list[SourceModule],
+    declarations: dict[str, set[str]],
+    key_froms: Sequence[KeyFrom],
+    tables: Sequence[TableRecord],
+) -> int:
     trees = {module.rel_path: module.tree for module in modules}
     printed: dict[str, list[int]] = {}
     holes: dict[tuple[str, int], list[str]] = {}
@@ -635,16 +665,19 @@ def _unbound_since(
 
     The writes are the name's bindings in the function, every store to the
     chain ``job``, ``job.PandaID`` (``self.job`` and ``self.job.PandaID`` for
-    ``self.job``), every call made on an object of the chain or handed one --
+    ``self.job``), every call made on an object of the chain or handed one
+    that may change the value (:func:`_may_change`) --
     ``self.ppEventServiceJob(job, ...)`` between ``archiveJob``'s first print
-    and its arms may set any of ``job``'s attributes, and ``self.retry()``
-    may rebind ``self.job`` -- and the call's own binding of the parameters;
-    the print kills them.  None of them reaching the arm means the print saw
-    what the arm sees.  A store through another name for the object (``j =
-    job; j.PandaID = 3``) is not seen.  Without *entered*, *printed* need not
-    be on every path: only whether, where it ran, the value lasts to the arm.
+    and its arms may set ``job``'s, and ``self.retry()`` may rebind
+    ``self.job``; ``job.valuesMap()`` sets none -- and the call's own binding
+    of the parameters; the print kills them.  None of them reaching the arm
+    means the print saw what the arm sees.  A store through another name for
+    the object (``j = job; j.PandaID = 3``) in this function is not seen.
+    Without *entered*, *printed* need not be on every path: only whether,
+    where it ran, the value lasts to the arm.
     """
     chain = [ast.unparse(written) + "." + attribute]
+    value = ast.Attribute(value=written, attr=attribute, ctx=ast.Load())
     root: ast.expr = written
     while isinstance(root, ast.Attribute):
         chain.append(ast.unparse(root))
@@ -669,7 +702,11 @@ def _unbound_since(
         ):
             if ast.unparse(node) in stored:
                 sites.append(_statement_of(node))
-        elif isinstance(node, ast.Call) and _given(node, holding):
+        elif (
+            isinstance(node, ast.Call)
+            and _given(node, holding)
+            and _may_change(func, node, value)
+        ):
             sites.append(_statement_of(node))
     return not reaching(
         arm,
@@ -686,6 +723,22 @@ def _given(call: ast.Call, holding: set[str]) -> bool:
     return any(
         ast.unparse(value.value if isinstance(value, ast.Starred) else value) in holding
         for value in given
+    )
+
+
+#: While :func:`attach` reads with the corpus's calls: them, and the file of each function of the build.
+_ACROSS: Optional[tuple["Calls", dict[int, str]]] = None
+
+
+def _may_change(func: ast.AST, call: ast.Call, value: ast.expr) -> bool:
+    """Whether *call*, in *func*, may change what *value* holds (:func:`changes.may_change`); every call may where
+    the corpus's calls are not read."""
+    if _ACROSS is None:
+        return True
+    calls, files = _ACROSS
+    file = files.get(id(func))
+    return (
+        file is None or changes.may_change(calls, file, func, call, value) is not None
     )
 
 
