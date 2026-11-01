@@ -4936,6 +4936,14 @@ class SkeletonHole(BaseModel):
             "left out of the pattern."
         ),
     )
+    group: int = Field(
+        default=0,
+        description=(
+            "The group of the row's ``capture`` -- of ``prefix_capture`` for a hole of the mark -- that holds what "
+            "this hole printed, counted from 1.  Holes side by side share one, whose text is theirs joined: "
+            "``f\"{a}{b}\"`` cannot say where ``a`` ends.  0 where the row has no capture."
+        ),
+    )
 
 
 class SkeletonLine(BaseModel):
@@ -4989,6 +4997,17 @@ class SkeletonLine(BaseModel):
         default_factory=list,
         description="Every hole of the pattern, in order, with what fills it.",
     )
+    capture: str = Field(
+        default="",
+        description=(
+            "The line as a pattern that reads its holes' values back: every hole a group (:attr:`SkeletonHole.group`), "
+            "closed as ``pattern`` closes it, the leading ones kept and the last running to the end of the text.  "
+            "Searched in a record's message with ``re.S``, so a last hole takes the record's continuation lines too "
+            "-- ``str(varMap)`` after an SQL text, a traceback after ``f\"execute() : {e}\"``.  Apart from "
+            "``pattern``, the text a search sends, which leaves out the holes at either end because an unanchored "
+            "search asks nothing more with them.  Empty when refused."
+        ),
+    )
     prefix: str = Field(
         default="",
         description=(
@@ -5039,6 +5058,14 @@ class SkeletonLine(BaseModel):
             "filling it spells them."
         ),
     )
+    prefix_capture: str = Field(
+        default="",
+        description=(
+            "The mark as a pattern that reads ``prefix_holes``' values back: each a group, in order, the literal at "
+            "its ends without blanks.  Matched whole against the mark a record carries between its level and its "
+            "message, its blanks stripped -- ``get_result < async_id=(.*?) >``.  Empty where ``prefix`` is."
+        ),
+    )
     arms: list[int] = Field(
         default_factory=list,
         description=(
@@ -5073,11 +5100,13 @@ class PrintRow(BaseModel):
     holes: list[SkeletonHole] = Field(
         default_factory=list, description="As :attr:`SkeletonLine.holes`."
     )
+    capture: str = Field(default="", description="As :attr:`SkeletonLine.capture`.")
     prefix: str = Field(default="", description="As :attr:`SkeletonLine.prefix`.")
     prefix_hole: str = Field(default="", description="As :attr:`SkeletonLine.prefix_hole`.")
     prefix_holes: list[SkeletonHole] = Field(
         default_factory=list, description="As :attr:`SkeletonLine.prefix_holes`."
     )
+    prefix_capture: str = Field(default="", description="As :attr:`SkeletonLine.prefix_capture`.")
 
 
 #: How a print statement's ``log_files`` was found -- see

@@ -3529,6 +3529,41 @@ class Proxy(Base):
     assert [(hole.expression, hole.prints) for hole in row.prefix_holes] == [("jediTaskID", "token")]
 
 
+def test_a_row_reads_its_holes_values_back_the_ends_and_the_mark_too(tmp_path):
+    """The pattern leaves out the holes at either end -- an unanchored search asks nothing more with them -- so it
+    cannot read their values: ``capture`` keeps them, every hole a group closed as the pattern closes it and the
+    last running to the end of the text, and ``prefix_capture`` reads the mark's.  An SQL print's ``str(varMap)``
+    is the map the statement ran with.  Holes side by side cannot say where one ends: they share a group."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, job, varMap, a, b):
+    tmp_log = LogWrapper(self.logger, f"<jediTaskID={job.jediTaskID}>")
+    tmp_log.debug(f"{job.name} UPDATE T_TASK SET status=:status WHERE taskID=:id {str(varMap)}")
+    tmp_log.debug(f"pair {a}{b} n={job.nFiles} done")
+    job.status = "done"
+''',
+    )
+
+    sql, pair = _printed(roots, file="m", owner="f", lines=[5])
+
+    assert sql.pattern == r"\ UPDATE\ T_TASK\ SET\ status=:status\ WHERE\ taskID=:id\ "
+    assert sql.capture == r"([^\ ]*)\ UPDATE\ T_TASK\ SET\ status=:status\ WHERE\ taskID=:id\ (.*)"
+    assert [(hole.expression, hole.group) for hole in sql.holes] == [("job.name", 1), ("str(varMap)", 2)]
+    assert sql.prefix_capture == r"(.*?)<jediTaskID=(.*?)>"
+    assert [(hole.expression, hole.group) for hole in sql.prefix_holes] == [("self.logger", 1), ("job.jediTaskID", 2)]
+    record = "j7 UPDATE T_TASK SET status=:status WHERE taskID=:id {':status': 'done', ':id': 7}\nnext line"
+    assert trace_mod.hole_values(sql, record, " <jediTaskID=7> ") == (
+        ["j7", "{':status': 'done', ':id': 7}\nnext line"],
+        ["", "7"],
+    )
+    assert trace_mod.hole_values(sql, "nothing of it") is None
+    assert trace_mod.hole_values(sql, record, "<PandaID=7>") is None
+
+    assert [(hole.expression, hole.group) for hole in pair.holes] == [("a", 1), ("b", 1), ("job.nFiles", 2)]
+    assert trace_mod.hole_values(pair, "pair xy n=4 done") == (["xy", "xy", "4"], [])
+
+
 def test_a_logger_built_here_says_its_prefix(tmp_path):
     """The wrapper's own mark, after what the logger it wraps writes: here ``self.logger``, which nothing here
     makes, so that part is one hole spelled as the wrapped logger."""
