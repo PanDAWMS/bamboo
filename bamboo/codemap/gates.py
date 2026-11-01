@@ -1490,9 +1490,10 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     written beside.  A ``can`` row names the caller's path holding the arm's
     object and a way to one of the pair's writes through calls of reach rows:
     a reader asks the run of that path, and checks the way.  A run's key
-    names a column of a class a table holds (:attr:`EntityNode.spec_class`)
-    or says where each reading stopped (:attr:`RunKey.stops`), never both: a
-    reader matches a history row by it.
+    that names no column of a class a table holds
+    (:attr:`EntityNode.spec_class`) says where each reading stopped
+    (:attr:`RunKey.stops`); one that names one may say where others stopped,
+    and a time stamp says none: a reader matches a history row by it.
     """
     rows = {row.owner: row for row in fragment.reach_graph}
     prints = {node.owner: node for node in fragment.function_prints}
@@ -1505,11 +1506,12 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
             failures.append(f"{node.owner}: two runs start on one line, so a line names neither")
         for run in node.runs:
             for key in run.key:
-                named = key.columns == [RUN_KEY_TIME] or any(one.partition(".")[0] in holding for one in key.columns)
-                if named == bool(key.stops):
+                stamped = key.columns == [RUN_KEY_TIME]
+                named = stamped or any(one.partition(".")[0] in holding for one in key.columns)
+                if (stamped and key.stops) or (not named and not key.stops):
                     failures.append(
                         f"{node.owner}: run {run.line}'s key {key.expression!r} "
-                        + ("names a row's column and stops" if named else "names no row's column and no stop")
+                        + ("is a time stamp and stops" if stamped else "names no row's column and no stop")
                     )
         for statement in node.statements:
             for line in statement.runs:

@@ -39,9 +39,10 @@ are every caller's.  ``recordRetryHistoryJEDI``'s ``newPandaID`` is
 ``JobSpec.PandaID`` and ``JobSpec.jobsetID``: ``insertNewJob`` hands it
 ``job.PandaID`` at one call and ``job.jobsetID`` at another.  The uses are
 not followed at a caller: what the value is used as is read where the key
-is.  A parameter a call leaves to its default holds the default.  Where no
-call is placed, a call's ``*args`` or ``**kwargs`` may fill it, or the
-callers go further up, the stop says so.  On pin k the uses alone had named
+is.  A parameter a call leaves to its default holds the default, read
+where the function's signature writes it.  Where no call is placed, a
+call's ``*args`` or ``**kwargs`` may fill it, or the callers go further up,
+the stop says so.  On pin k the uses alone had named
 all but 3 pair holes; on pin m 66 of the 382 run keys stopping at a
 parameter are named this way.
 
@@ -141,10 +142,11 @@ class Reader:
                 self.holds_rows(one) for one in found
             ):
                 return sorted(found), []
-            before = {one for one in found if self.holds_rows(one)}
-            self._forward(owner, self.paths.of(func, node), found, uses)
-            if {one for one in found if self.holds_rows(one)} == before and not uses:
+            used: set[str] = set()
+            self._forward(owner, self.paths.of(func, node), used, uses)
+            if not any(self.holds_rows(one) for one in used) and not uses:
                 uses.append(_stop("no_use", at=_short(owner)))
+            found |= used
         except Exception as error:  # noqa: BLE001 -- a key unread, not the build's end
             uses.append(_stop("failed", what=type(error).__name__))
         return sorted(found), _merged([*bound, *uses])
@@ -309,7 +311,7 @@ class Reader:
                         self._field(where, cls, node.attr, found, stops, seen)
             return
         if not isinstance(node, ast.Name):
-            stops.append(_stop("value", what=_kind(node)))
+            stops.append(_stop("value", what=_kind(node), at=at))
             return
         if (owner, f"{node.id}@{id(node)}") in seen:
             return
@@ -405,6 +407,12 @@ class Reader:
             if handed is None:
                 at = f"{_short(caller) or site.file}:{site.call.lineno}"
                 stops.append(_stop("handed_spread", name=name, at=at))
+                continue
+            on_class = self.calls.callees(site.file, site.func, site.call).on_class
+            if name not in C.said(site.call, target, on_class):
+                # Left to its default: written in the function's own signature, not at the call.
+                at = f"{_short(owner)}:{getattr(handed, 'lineno', '?')}"
+                stops.append(_stop("value", what=_kind(handed), at=at))
                 continue
             value = callfacts.unconverted(self.types, site.file, site.func, handed)
             self._backward(

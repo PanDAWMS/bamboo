@@ -1638,7 +1638,7 @@ class Keys(DBProxy):
     def through_caller(self, job: JobSpec):
         self.through_once(job.PandaID)
 
-    def defaulted(self, pid=None):
+    def defaulted(self, pid=None):  # K26
         tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K23
         tmp_log.debug("defaulted")
 
@@ -1697,24 +1697,18 @@ def _keys(tmp_path: Path) -> dict[int, RunKey]:
 def test_a_key_no_declaration_names_is_the_column_its_function_uses_it_as(
     tmp_path: Path,
 ) -> None:
-    """A key of a row the function writes, a term it reads rows by (spelled as the class declares it), two calls down."""
+    """A key of a row the function writes, a term it reads rows by (spelled as the class declares it), two calls down;
+    named, it still says where a reading stopped: a parameter no call of is placed, a value no use names."""
     keys = _keys(tmp_path)
-    assert (keys[_line(KEYS, "K1")].columns, keys[_line(KEYS, "K1")].stops) == (
-        ["JobSpec.PandaID"],
-        [],
-    )
-    assert (keys[_line(KEYS, "K2")].columns, keys[_line(KEYS, "K2")].stops) == (
-        ["JobSpec.PandaID"],
-        [],
-    )
-    assert (keys[_line(KEYS, "K3")].columns, keys[_line(KEYS, "K3")].stops) == (
-        ["JobSpec.PandaID"],
-        [],
-    )
-    assert (keys[_line(KEYS, "K8")].columns, keys[_line(KEYS, "K8")].stops) == (
-        ["JobSpec.PandaID"],
-        [],
-    )
+    stops = {
+        "K1": [KeyStop(kind="no_caller", name="panda_id", at=["Keys.kill"])],
+        "K2": [],
+        "K3": [KeyStop(kind="no_caller", name="job_id", at=["Keys.refine"])],
+        "K8": [KeyStop(kind="no_use", at=["Keys.bound"])],
+    }
+    for marker, said in stops.items():
+        key = keys[_line(KEYS, marker)]
+        assert (key.columns, key.stops) == (["JobSpec.PandaID"], said), marker
 
 
 def test_a_key_is_the_column_it_is_used_as_wherever_it_is_followed(
@@ -1722,11 +1716,23 @@ def test_a_key_is_the_column_it_is_used_as_wherever_it_is_followed(
 ) -> None:
     """Followed as an object is: inside a list to a callee looping over it, through a name the function gives it, as a part of an object handed whole, and into the call returning the object it is read from."""
     keys = _keys(tmp_path)
-    for marker in ("K6", "K11", "K12", "K13"):
-        assert (keys[_line(KEYS, marker)].columns, keys[_line(KEYS, marker)].stops) == (
-            ["JobSpec.PandaID"],
-            [],
-        ), marker
+    stops = {
+        "K6": [KeyStop(kind="no_caller", name="pid", at=["Keys.listed"])],
+        "K11": [KeyStop(kind="no_caller", name="panda_id", at=["Keys.aliased"])],
+        "K12": [
+            KeyStop(
+                kind="undeclared", name="task", at=[f"Keys.part:{_line(KEYS, 'K12')}"]
+            )
+        ],
+        "K13": [
+            KeyStop(
+                kind="undeclared", name="held", at=[f"Keys.made:{_line(KEYS, 'K13')}"]
+            )
+        ],
+    }
+    for marker, said in stops.items():
+        key = keys[_line(KEYS, marker)]
+        assert (key.columns, key.stops) == (["JobSpec.PandaID"], said), marker
 
 
 def test_a_key_its_uses_name_no_rows_column_says_where_the_reading_stopped(
@@ -1773,13 +1779,15 @@ def test_a_parameter_key_is_what_its_callers_hand_read_up_to_the_cap(
     default is what a call leaving it hands, a spread says where it may fill the parameter; read one call up at most,
     the caller's parameter is where it stops."""
     keys = _keys(tmp_path)
-    for marker in ("K21", "K25"):
+    for marker, function in (("K21", "Keys.handed_key"), ("K25", "Keys.deep_key")):
         assert (keys[_line(KEYS, marker)].columns, keys[_line(KEYS, marker)].stops) == (
             ["JobSpec.PandaID"],
-            [],
+            [KeyStop(kind="no_use", at=[function])],
         ), marker
     assert keys[_line(KEYS, "K23")].stops == [
-        KeyStop(kind="value", what="a literal"),
+        KeyStop(
+            kind="value", what="a literal", at=[f"Keys.defaulted:{_line(KEYS, 'K26')}"]
+        ),
         KeyStop(
             kind="handed_spread",
             name="pid",
@@ -2054,7 +2062,10 @@ def test_a_message_hole_says_the_column_its_value_is_where_the_message_is_writte
     }
 
     status = holes[("status", _line(HOLES, "M1"))]
-    assert (status.columns, status.stops) == (["JobSpec.jobStatus"], [])
+    assert (status.columns, status.stops) == (
+        ["JobSpec.jobStatus"],
+        [KeyStop(kind="no_caller", name="status", at=["Holes.massage"])],
+    )
     assert holes[("job.PandaID", _line(HOLES, "M1"))].columns == ["JobSpec.PandaID"]
     counted = holes[("len(status)", _line(HOLES, "M3"))]
     assert counted.columns == []
@@ -2086,7 +2097,10 @@ def test_a_message_hole_s_uses_are_followed_through_fewer_states_than_a_mark_s(
     there and says so, and the mark's, followed apart, still reaches the use."""
     columns, hole = _handed(tmp_path)
     assert columns == ["JobSpec.jobStatus"]
-    assert (hole.columns, hole.stops) == (["JobSpec.jobStatus"], [])
+    assert (hole.columns, hole.stops) == (
+        ["JobSpec.jobStatus"],
+        [KeyStop(kind="no_caller", name="status", at=["Holes.handed"])],
+    )
     monkeypatch.setattr(runs, "HOLE_STATES", 1)
     columns, hole = _handed(tmp_path / "capped")
     assert columns == ["JobSpec.jobStatus"]

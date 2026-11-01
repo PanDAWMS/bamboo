@@ -5037,8 +5037,8 @@ class SkeletonHole(BaseModel):
     stops: list[KeyStop] = Field(
         default_factory=list,
         description=(
-            "Where *columns* names no column of a class holding rows, where each reading stopped, as "
-            ":attr:`RunKey.stops` says it."
+            "Where each reading of the value stopped, as :attr:`RunKey.stops` says it, whether *columns* names a "
+            "column of a class holding rows or not."
         ),
     )
 
@@ -5305,7 +5305,7 @@ KEY_STOPS: dict[str, str] = {
     "outside": "{name} is bound outside {at}",
     "bound": "{name} is {what} at {at}",
     "element": "{name} is an element of {what} at {at}",
-    "value": "it is {what}",
+    "value": "it is {what} at {at}",
     "undeclared": "the class of {name} is not declared at {at}",
     "several": "{name} is declared as several classes at {at}: {what}",
     "declaration_failed": "reading the declaration of {name} failed: {what}",
@@ -5376,8 +5376,13 @@ class RunKey(BaseModel):
     is at the use it was read at, so the columns can name two attributes of
     one class -- ``retryTask_JEDI``'s ``jediTaskID`` keys the task and picks
     its children by ``parent_tid`` -- and a value used nowhere the reading
-    goes may be a column it does not name.  What the callers hand is not
-    read.
+    goes may be a column it does not name.  A parameter is what the calls
+    placed at its function hand it, read up to six calls up.  Where a reading
+    stops short -- of a use, or at a caller -- ``stops`` says so whether a
+    column is named or not, so a key named by one caller and unread at
+    another says both: ``isSuperUser``'s ``userName`` is
+    ``JobSpec.workingGroup`` from ``storeJobs``, and an item of
+    ``taskParamMap`` from ``AtlasAnalTaskRefiner``.
     """
 
     expression: str = Field(description="What fills the hole, as source; empty for a time stamp.")
@@ -5393,15 +5398,17 @@ class RunKey(BaseModel):
     stops: list[KeyStop] = Field(
         default_factory=list,
         description=(
-            "Where ``columns`` names no column of a class holding rows, where "
-            "each reading stopped: what the value is bound to first, then its "
-            "uses.  Empty wherever one is named, and for a time stamp."
+            "Where each reading of the value stopped short of a column of a "
+            "class holding rows: what the value is bound to first, then its "
+            "uses.  Said whether ``columns`` names one or not.  Empty for a time "
+            "stamp, and for an attribute of a name declared as a class holding "
+            "rows: the declaration says it."
         ),
     )
 
     @property
     def why(self) -> str:
-        """Why ``columns`` names no column of a class holding rows: ``stops``, said (:data:`KEY_STOPS`)."""
+        """Where each reading of the value stopped: ``stops``, said (:data:`KEY_STOPS`); empty where none did."""
         return "; ".join(stop.said() for stop in self.stops)
 
 

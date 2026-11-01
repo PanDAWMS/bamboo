@@ -559,10 +559,8 @@ class _Reader:
     ) -> RunKey:
         """The columns one hole of a mark holds: ``JediTaskSpec.jediTaskID`` for ``taskSpec.jediTaskID`` declared so,
         else what the value's uses and bindings say (:mod:`bamboo.codemap.panda.keycolumns`), its uses followed
-        through at most *states* states."""
+        through at most *states* states; and where each reading stopped, whether a column is named or not."""
         columns, stops = self.keys.read(file, func, expression, states)
-        if any(self.keys.holds_rows(one) for one in columns):
-            return RunKey(expression=ast.unparse(expression), columns=columns)
         return RunKey(expression=ast.unparse(expression), columns=columns, stops=stops)
 
     # -- the columns of the messages' holes -------------------------------------- #
