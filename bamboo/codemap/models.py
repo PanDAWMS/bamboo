@@ -5298,7 +5298,10 @@ RUN_KEY_TIME = "time"
 #: wording is here rather than in the dump: a reader gets this module's, and
 #: rewording it rebuilds no map.
 KEY_STOPS: dict[str, str] = {
-    "parameter": "{name} is a parameter of {at}: what the callers hand is not read",
+    "no_caller": "{name} is a parameter of {at}, and no call of it is placed",
+    "callers_up": "{name} is a parameter of {at}, {what} calls up: the calls further up are not read",
+    "handed_spread": "{name} is a parameter a call's *args or **kwargs may fill at {at}",
+    "callers_failed": "reading the calls of {at} failed: {what}",
     "outside": "{name} is bound outside {at}",
     "bound": "{name} is {what} at {at}",
     "element": "{name} is an element of {what} at {at}",
@@ -5322,8 +5325,8 @@ KEY_STOPS: dict[str, str] = {
 class KeyStop(BaseModel):
     """Where one reading of a run key's value ended without a column of a class holding rows (:attr:`RunKey.stops`).
 
-    ``pandaID`` handed to ``Watcher.__init__`` is a parameter there, and what
-    the callers hand is not read: ``KeyStop(kind="parameter", name="pandaID",
+    ``pandaID`` handed to ``Watcher.__init__`` is a parameter there, and no
+    call of it is placed: ``KeyStop(kind="no_caller", name="pandaID",
     at=["Watcher.__init__"])``.  One stop said at several sites is one, with
     each site.
     """

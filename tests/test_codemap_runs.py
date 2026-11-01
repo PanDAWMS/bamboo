@@ -31,8 +31,8 @@ from bamboo.codemap.models import (
     SkeletonHole,
     SourceModule,
 )
+from bamboo.codemap.panda import keycolumns, pathcond, runs, sql
 from bamboo.codemap.panda import objects as panda_objects
-from bamboo.codemap.panda import pathcond, runs, sql
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import sqlwrite
 
@@ -1382,7 +1382,7 @@ def test_a_mark_given_none_is_a_time_stamp_or_nothing_as_its_factory_writes(
     no_use = KeyStop(kind="no_use", at=["marks"])
     assert [(key.columns, key.stops) for key in by_logger["e"].key] == [
         ([], [KeyStop(kind="undeclared", name="task", at=[f"marks:{line}"]), no_use]),
-        ([], [KeyStop(kind="parameter", name="n", at=["marks"]), no_use]),
+        ([], [KeyStop(kind="no_caller", name="n", at=["marks"]), no_use]),
     ]
     assert [statement.runs for statement in node.statements] == [
         [by_logger[name].line] for name in "abcde"
@@ -1412,7 +1412,11 @@ def test_an_objects_run_is_its_init_logger_unless_bound_again(tmp_path: Path) ->
         RunKey(
             expression="str(pandaID)",
             stops=[
-                KeyStop(kind="parameter", name="pandaID", at=["Watcher.__init__"]),
+                KeyStop(
+                    kind="no_caller",
+                    name="pandaID",
+                    at=["Watcher.__init__"],
+                ),
                 KeyStop(kind="no_use", at=["Watcher.__init__"]),
             ],
         )
@@ -1617,6 +1621,33 @@ class Keys(DBProxy):
         tmp_log = LogWrapper(_logger, f"<PandaID={tmp_id}>")  # K8
         tmp_log.debug("bound")
 
+    def handed_key(self, pid):
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K21
+        tmp_log.debug("handed key")
+
+    def hands_key(self, job: JobSpec):
+        self.handed_key(job.PandaID)
+
+    def deep_key(self, pid):
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K25
+        tmp_log.debug("deep key")
+
+    def through_once(self, tmp_id):
+        self.deep_key(tmp_id)  # K22
+
+    def through_caller(self, job: JobSpec):
+        self.through_once(job.PandaID)
+
+    def defaulted(self, pid=None):
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # K23
+        tmp_log.debug("defaulted")
+
+    def hands_default(self):
+        self.defaulted()
+
+    def hands_spread(self, *ids):
+        self.defaulted(*ids)  # K24
+
 
 class Closer:
     def __init__(self, job: JobSpec):
@@ -1710,14 +1741,14 @@ def test_a_key_its_uses_name_no_rows_column_says_where_the_reading_stopped(
     assert (keys[_line(KEYS, "K4")].columns, keys[_line(KEYS, "K4")].stops) == (
         [],
         [
-            KeyStop(kind="parameter", name="task_id", at=["Keys.other_table"]),
+            KeyStop(kind="no_caller", name="task_id", at=["Keys.other_table"]),
             KeyStop(kind="no_class", name="T_TASK.taskID", at=sites),
         ],
     )
     assert (keys[_line(KEYS, "K14")].columns, keys[_line(KEYS, "K14")].stops) == (
         [],
         [
-            KeyStop(kind="parameter", name="pid", at=["Keys.handed_on"]),
+            KeyStop(kind="no_caller", name="pid", at=["Keys.handed_on"]),
             KeyStop(kind="spread", at=[f"Keys.handed_on:{_line(KEYS, 'K15')}"]),
             KeyStop(kind="hole", at=[f"Keys.handed_on:{_line(KEYS, 'K16')}"]),
         ],
@@ -1725,7 +1756,7 @@ def test_a_key_its_uses_name_no_rows_column_says_where_the_reading_stopped(
     assert (keys[_line(KEYS, "K17")].columns, keys[_line(KEYS, "K17")].stops) == (
         [],
         [
-            KeyStop(kind="parameter", name="pid", at=["Keys.deep"]),
+            KeyStop(kind="no_caller", name="pid", at=["Keys.deep"]),
             KeyStop(
                 kind="capped",
                 name="box.a.b.c.d.e.f.g",
@@ -1735,8 +1766,43 @@ def test_a_key_its_uses_name_no_rows_column_says_where_the_reading_stopped(
     )
 
 
+def test_a_parameter_key_is_what_its_callers_hand_read_up_to_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``handed_key``'s pid is the ``job.PandaID`` its caller hands, ``deep_key``'s the one handed two calls up; a
+    default is what a call leaving it hands, a spread says where it may fill the parameter; read one call up at most,
+    the caller's parameter is where it stops."""
+    keys = _keys(tmp_path)
+    for marker in ("K21", "K25"):
+        assert (keys[_line(KEYS, marker)].columns, keys[_line(KEYS, marker)].stops) == (
+            ["JobSpec.PandaID"],
+            [],
+        ), marker
+    assert keys[_line(KEYS, "K23")].stops == [
+        KeyStop(kind="value", what="a literal"),
+        KeyStop(
+            kind="handed_spread",
+            name="pid",
+            at=[f"Keys.hands_spread:{_line(KEYS, 'K24')}"],
+        ),
+        KeyStop(kind="no_use", at=["Keys.defaulted"]),
+    ]
+    monkeypatch.setattr(keycolumns, "CALLERS_UP", 1)
+    keys = _keys(tmp_path / "capped")
+    assert keys[_line(KEYS, "K21")].columns == ["JobSpec.PandaID"]
+    assert (keys[_line(KEYS, "K25")].columns, keys[_line(KEYS, "K25")].stops) == (
+        [],
+        [
+            KeyStop(
+                kind="callers_up", name="tmp_id", what="1", at=["Keys.through_once"]
+            ),
+            KeyStop(kind="no_use", at=["Keys.deep_key"]),
+        ],
+    )
+
+
 def test_a_field_of_a_class_holding_no_row_is_read_in_its_class(tmp_path: Path) -> None:
-    """``Closer.panda_id`` is assigned ``job.PandaID``; ``Adder.job_id`` a parameter, its callers not read."""
+    """``Closer.panda_id`` is assigned ``job.PandaID``; ``Adder.job_id`` a parameter no call of is placed."""
     keys = _keys(tmp_path)
     assert (keys[_line(KEYS, "K9")].columns, keys[_line(KEYS, "K9")].stops) == (
         ["Closer.panda_id", "JobSpec.PandaID"],
@@ -1746,13 +1812,13 @@ def test_a_field_of_a_class_holding_no_row_is_read_in_its_class(tmp_path: Path) 
     assert adder.columns == ["Adder.job_id"]
     assert adder.stops == [
         KeyStop(kind="no_row", name="Adder"),
-        KeyStop(kind="parameter", name="job_id", at=["Adder.__init__"]),
+        KeyStop(kind="no_caller", name="job_id", at=["Adder.__init__"]),
         KeyStop(kind="no_use", at=["Adder.__init__"]),
     ]
     sender = keys[_line(KEYS, "K19")]
     assert sender.stops == [
         KeyStop(kind="no_row", name="Sender"),
-        KeyStop(kind="parameter", name="pid", at=["Sender.__init__"]),
+        KeyStop(kind="no_caller", name="pid", at=["Sender.__init__"]),
         KeyStop(kind="hole", at=[f"Sender.__init__:{_line(KEYS, 'K20')}"]),
     ]
 
@@ -1762,7 +1828,7 @@ def test_a_keys_why_is_its_stops_said_and_is_not_kept_in_the_dump() -> None:
     key = RunKey(
         expression="task_id",
         stops=[
-            KeyStop(kind="parameter", name="task_id", at=["Keys.other_table"]),
+            KeyStop(kind="no_caller", name="task_id", at=["Keys.other_table"]),
             KeyStop(
                 kind="no_class",
                 name="T_TASK.taskID",
@@ -1771,7 +1837,7 @@ def test_a_keys_why_is_its_stops_said_and_is_not_kept_in_the_dump() -> None:
         ],
     )
     assert key.why == (
-        "task_id is a parameter of Keys.other_table: what the callers hand is not read; "
+        "task_id is a parameter of Keys.other_table, and no call of it is placed; "
         "keys T_TASK.taskID, a table no class holds, at Keys.other_table:5, Keys.other_table:6"
     )
     assert "why" not in key.model_dump()
@@ -2027,7 +2093,7 @@ def test_a_message_hole_s_uses_are_followed_through_fewer_states_than_a_mark_s(
     assert (hole.columns, hole.stops) == (
         [],
         [
-            KeyStop(kind="parameter", name="status", at=["Holes.handed"]),
+            KeyStop(kind="no_caller", name="status", at=["Holes.handed"]),
             KeyStop(kind="cut", what="states", at=["Holes.handed"]),
         ],
     )
