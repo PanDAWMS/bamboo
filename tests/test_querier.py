@@ -561,7 +561,7 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
     from bamboo.querier import windows as W
 
     r.data["statuslog"] = {"as_of": "2026-10-13 20:00:00", "states": [{"status": "finishing", "time": "2026-10-13 01:00:00"}]}
-    first = W.stuck(r.data["statuslog"], "finishing")
+    first, rest = W.stuck(r.data["statuslog"], "finishing"), W.rest(r.data["statuslog"], "finishing")
     asked = []
 
     def run(at, token=""):
@@ -583,22 +583,22 @@ def test_s1_asks_the_rest_of_the_window_only_for_a_mover_with_no_run_in_its_last
         return {names[0]: held.get(names[0], {}).get(asking.window, [])}, [], {}
 
     r._ask = ask
-    s = rerun.Stuck("JobSpec.jobStatus", "finishing", "1")
     got = {}
     r.logs = N(needs_window=True)
     for name in ["ran-late", "ran-early", "silent", "holes", "unanswered", "another's"]:
-        found, missed, holes, searched = r._ask_mover(s, "a.py::mover", [name], first)
+        found, missed, holes, searched = r._ask_mover("1", "a.py::mover", [name], first, rest)
         got[name] = [searched.window, r._runs_of(found, "a.py::mover", searched)]
     # a writer that takes a row by its key: the last part alone, a run before it not looked for
-    found, missed, holes, searched = r._ask_mover(s, "a.py::mover", ["ran-early"], first, rest=False)
+    found, missed, holes, searched = r._ask_mover("1", "a.py::mover", ["ran-early"], first, None)
     got["by key"] = [searched.window, r._runs_of(found, "a.py::mover", searched)]
     # a window that starts at the row has no rest
     r.data["statuslog"]["as_of"] = "2026-10-13 05:00:00"
     short = W.stuck(r.data["statuslog"], "finishing")
-    got["short"] = [r._ask_mover(s, "a.py::mover", ["silent"], short)[3].window, W.rest(r.data["statuslog"], "finishing")]
+    got["short"] = [r._ask_mover("1", "a.py::mover", ["silent"], short, W.rest(r.data["statuslog"], "finishing"))[3].window,
+                    W.rest(r.data["statuslog"], "finishing")]
     # the door over files reads each file whole: one ask
     r.logs = N(needs_window=False)
-    got["files"] = [r._ask_mover(s, "a.py::mover", ["silent"], first)[3].window]
+    got["files"] = [r._ask_mover("1", "a.py::mover", ["silent"], first, rest)[3].window]
     print(json.dumps([got, asked, r.lines]))
     """,
         )
@@ -631,7 +631,6 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
 
     r.data["statuslog"] = {"as_of": "2026-10-13 20:00:00", "states": [{"status": "finishing", "time": "2026-10-13 01:00:00"}]}
     first, rest = W.stuck(r.data["statuslog"], "finishing"), W.rest(r.data["statuslog"], "finishing")
-    s = rerun.Stuck("JobSpec.jobStatus", "finishing", "1")
     held = lambda p: [p["held"], p["why"]]
     got = {}
     r.logs = N(needs_window=True)
@@ -643,13 +642,13 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
         ("holes and unanswered", first, [("an ask", "why")], {"a.log": ["m1: 2026-10-13 15:00:00 .. 2026-10-13 16:00:00"]}, ["a.log", "b.log"]),
         ("no log", first, [], {}, []),
     ]:
-        got[name] = held(r._searched_whole(s, to_hand, first, searched, missed, holes))
+        got[name] = held(r._searched_whole(to_hand, first, searched, missed, holes, rest))
     # a window that starts at the row is whole in its last part
     r.data["statuslog"]["as_of"] = "2026-10-13 05:00:00"
     short = W.stuck(r.data["statuslog"], "finishing")
-    got["short"] = held(r._searched_whole(s, ["a.log"], short, short, [], {}))
+    got["short"] = held(r._searched_whole(["a.log"], short, short, [], {}, W.rest(r.data["statuslog"], "finishing")))
     r.logs = N(needs_window=False)
-    got["files"] = held(r._searched_whole(s, ["a.log"], first, first, [], {}))
+    got["files"] = held(r._searched_whole(["a.log"], first, first, [], {}, rest))
 
     # the map's prints, by owner
     p = lambda basis, *files: N(log_files_basis=basis, log_files=list(files))
@@ -665,7 +664,7 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
     logs["walk"] = held(rerun.every_log_asked("x.py::logger", [], ["a.log", "b.log"]))
     rerun.R.ROWS_FROM = "graph"
     r.logs = N(needs_window=True)
-    premises = r._premises(s, "x.py::logger", [], ["a.log", "b.log"], short, short, [], {})
+    premises = r._premises("JobSpec.jobStatus", "1", "x.py::logger", [], ["a.log", "b.log"], short, short, [], {}, [], None)
     keys = [sorted(r._key_columns("JobSpec.jobStatus", "1")), sorted(r._key_columns("JobSpec.jobStatus", "2"))]
     print(json.dumps([got, logs, premises, keys]))
     """,
@@ -2104,16 +2103,19 @@ def test_judgement_3s_prints_premise_holds_only_where_a_line_before_every_arm_na
     def name(line, column, row="written"):
         return N(line=line, expression="job.x", column=column, row=row, why="" if row else "rebound")
 
-    def branch(line, prints, names=None, hole=""):
-        return N(line=line, must_prints=prints, must_names=names, must_hole=hole)
+    def branch(line, prints, names=None, hole="", whole=False):
+        return N(line=line, must_prints=prints, must_names=names, must_hole=hole, must_names_whole=whole)
 
     key = name(5, "JobSpec.PandaID")
     writers = [N(owner="p/w.py::w", branches=[
         branch(10, [5], [key]),
         branch(11, [5], [key, name(5, "JobSpec.jobStatus")]),
+        branch(12, [5], [key], whole=True),
         branch(20, [5], [name(5, "JobSpec.jobStatus")]),
         branch(21, [5], [name(5, "JobSpec.PandaID", row="")]),
         branch(22, [5], None, "names: the arm does not write the subject as an attribute of an object"),
+        branch(23, [5], [name(5, "JobSpec.jobStatus")], whole=True),
+        branch(24, [5], [], whole=True),
         branch(30, []),
         branch(40, None, None, "not read: a lambda"),
     ])]
@@ -2121,16 +2123,27 @@ def test_judgement_3s_prints_premise_holds_only_where_a_line_before_every_arm_na
     held = lambda lines, columns=cols: (lambda p: [p["held"], p["why"]])(prints_naming(writers, "p/w.py::w", lines, columns))
     print(json.dumps({"named": held([10, 11]), "another column": held([10, 20]), "not the row": held([21]),
                       "sql": held([22]), "none before": held([10, 30, 20]), "unread": held([10, 40]),
-                      "no key column": held([10], set()), "no arm": held([])}))
+                      "no key column": held([10], set()), "no arm": held([]), "named whole": held([10, 12]),
+                      "whole, another column": held([10, 23]), "whole, none": held([24]), "whole before unread": held([40, 24]),
+                      "none before whole": held([23, 30]), "whole and not": held([20, 23])}))
     """,
         )
     )
     got = json.loads(out.splitlines()[-1])
     # a line before every arm names the written row's key: a run that wrote it printed what the asks search by
     assert got["named"] == [True, "a line before every arm at [10, 11] names the written row's ['JobSpec.PandaID']"]
-    # a name of another column, of a row not known to be the written one, or none read (an SQL arm): not known
+    # a name of another column, of a row not known to be the written one, or none read (an SQL arm), where the map did
+    # not read the names whole: not known
     for case in ("another column", "not the row", "sql"):
-        assert got[case][0] is None and "the map pairs neither a run's mark nor an SQL statement's key bind" in got[case][1]
+        assert got[case][0] is None and "the map did not read their names whole" in got[case][1]
+    # read whole: the key named still holds; none naming it says no run need print it, ahead of an arm not known
+    assert got["named whole"] == [True, "a line before every arm at [10, 12] names the written row's ['JobSpec.PandaID']"]
+    whole = ("were read whole and none names the written row's ['JobSpec.PandaID']: a search by the key cannot show a "
+             "run absent")
+    assert got["whole, another column"] == [False, f"the lines before the arm(s) at [23] {whole}"]
+    assert got["whole, none"] == got["whole before unread"] == [False, f"the lines before the arm(s) at [24] {whole}"]
+    assert got["whole and not"] == [False, f"the lines before the arm(s) at [23] {whole}"]
+    assert got["none before whole"] == [False, "no line runs before the arm(s) at [30] on every path"]
     assert "[20]" in got["another column"][1] and "[22]" in got["sql"][1]
     # an arm no line comes before on every path: a run need print nothing, whatever the other arms say
     assert got["none before"] == [False, "no line runs before the arm(s) at [30] on every path"]
@@ -3011,6 +3024,12 @@ def test_l2_says_each_movers_verdict(tmp_path):
     q.by_key, q.refusing, q.mover = ["p/w.py::keyed"], ["p/w.py::refusing"], "p/w.py::moved"
     q.writers = [writer("p/w.py::armed", "failed"), writer("p/w.py::keyed", "closed"), writer("p/w.py::moved", "sent"),
                  writer("p/w.py::refusing", "sent", ["jobStatus='defined'"])]
+    # judgement 3: these writers' runs are not known to print the key, so their logs are not asked
+    rerun.prints_nothing = lambda owner, lines: False
+    rerun.prints_naming = lambda writers, owner, lines, columns: {"held": None, "why": "not known"}
+    rerun.every_log_asked = lambda owner, lines, asked: {"held": True, "why": "every file"}
+    r.files_of = lambda owner, today, lines: today
+    r.logs = N(names=lambda files: list(files), needs_window=True)
     verdicts = r._movers_in_window(q, {("d/a.py::main", 10): "refused", ("d/a.py::main", 20): "not settled",
                                       ("d/a.py::main", 30): "not settled"})
     print(json.dumps([verdicts, r.lines[-1], r.result["movers"]]))
@@ -3045,6 +3064,97 @@ def test_l2_says_each_movers_verdict(tmp_path):
         "p/w.py::refusing": "write refuses",
     }
     assert last == "not ruled out: 4 mover(s)"
+    assert by_owner["p/w.py::armed"]["premises"]["window"] == {"held": None, "why": "not asked"}
+    assert by_owner["p/w.py::armed"]["reasons"][0]["text"] == (
+        "its logs are not asked: a run not found would not rule it out (prints: not known) (KNOWN_ISSUES.md K15)")
+
+
+def test_l2_asks_a_movers_logs_only_where_judgement_3_could_rule_it_out_and_goes_on_past_unanswered_asks(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    def writer(owner):
+        return N(owner=owner, log_files=[f"{owner.split('::')[1]}.log"],
+                 branches=[N(line=5, outcome="sent", path_condition=[], row_precondition=[])])
+
+    q.by_key = [f"p/w.py::{n}" for n in ["unknown", "silent", "printless", "ran", "unanswered", "holes"]]
+    # a writer reached by a guard, not by its key: the part before the last is asked too
+    q.movers = {"p/w.py::selected": "its write requires the value"}
+    q.writers, q.mover = [writer(o) for o in [*q.movers, *q.by_key]], "p/w.py::moved"
+    # a stay of three hours: the window's last part is the whole of it
+    q.since, q.moved = datetime.datetime(2026, 1, 1, 12), datetime.datetime(2026, 1, 1, 15)
+    rerun.prints_nothing = lambda owner, lines: owner.endswith("printless")
+    rerun.prints_naming = lambda writers, owner, lines, columns: (
+        {"held": None, "why": "not known"} if owner.endswith("unknown") else {"held": True, "why": "named"})
+    rerun.every_log_asked = lambda owner, lines, asked: (
+        {"held": False, "why": "the map has no prints of its own for it"} if owner.endswith("printless")
+        else {"held": True, "why": "every file"})
+    rerun.owners_of = lambda ids: {}
+    r.files_of, r.warn_split = (lambda owner, today, lines: today), (lambda owner, lines: None)
+    r.logs, r.unanswered, asked = N(names=lambda files: list(files), needs_window=True), [], []
+
+    def ask(key, logs, asking, owners=None):
+        asked.append([logs[0], list(asking.window)])
+        if logs[0] == "unanswered.log":
+            return {}, [(N(key="k1"), "why")], {}
+        if logs[0] == "holes.log":
+            return {}, [], {"holes.log": ["m1: 2026-01-01 13:00:00 .. 2026-01-01 14:00:00"]}
+        return {logs[0]: [N(first="2026-01-01 13:00:00", last="2026-01-01 13:00:01", token="")] if logs[0] == "ran.log" else []}, [], {}
+
+    r._ask = ask
+    verdicts = dict(map(tuple, r._movers_in_window(q, {})))
+    movers = {m["owner"].split("::")[1]: m for m in r.result["movers"]}
+    lines, r.lines, kept = r.lines, [], len(r.unanswered)
+    # a stay of 51 hours: a writer reached by its key is asked over the last six alone
+    q.since = datetime.datetime(2025, 12, 30, 12)
+    long = dict(map(tuple, r._movers_in_window(q, {})))
+    silent = next(m for m in r.result["movers"] if m["owner"].endswith("silent"))
+    print(json.dumps([verdicts, {n: [m["premises"], [x["code"] for x in m["reasons"]]] for n, m in movers.items()},
+                      asked, kept, lines, long, silent["premises"]["window"], r.lines]))
+    """,
+        )
+    )
+    verdicts, movers, asked, unanswered, lines, long, window, long_lines = json.loads(out.splitlines()[-1])
+    assert verdicts == {"p/w.py::selected": "did not run", "p/w.py::unknown": "by key", "p/w.py::silent": "did not run",
+                        "p/w.py::printless": "prints nothing",
+                        "p/w.py::ran": "ran", "p/w.py::unanswered": "asks unanswered", "p/w.py::holes": "not searched",
+                        "p/w.py::moved": "moved it"}
+    # a premise the map decides not held: not asked, and said so
+    assert movers["unknown"] == [{"window": {"held": None, "why": "not asked"}, "logs": {"held": True, "why": "every file"},
+                                  "prints": {"held": None, "why": "not known"}}, ["K15"]]
+    # asked over the stay, from its row less 10 min to the move, one ask per log; the others not asked
+    stay = ["2026-01-01 11:50:00", "2026-01-01 15:00:00"]
+    assert asked[:5] == [["selected.log", stay], ["silent.log", stay], ["ran.log", stay], ["unanswered.log", stay],
+                         ["holes.log", stay]]
+    assert movers["silent"][0]["window"] == {"held": True, "why": "2026-01-01 11:50:00 .. 2026-01-01 15:00:00 searched in "
+                                                                   "['silent.log'], none of it unsearched"}
+    assert movers["silent"][1] == ["judgement-3"] and movers["printless"] == [None, ["K25"]]
+    assert movers["ran"] == [None, ["K15"]] and movers["unanswered"][1] == ["asks"]
+    assert movers["unanswered"][0]["window"] == {"held": None, "why": "1 ask(s) not answered yet"}
+    assert movers["holes"][0]["window"]["held"] is False
+    # the ask no record answers is kept for the asks file, and the walk goes on
+    assert unanswered == 1
+    assert any(x.startswith("  w.py::unanswered: asks unanswered -- a writer [5], which takes a row by its key too; 1 ask(s) "
+                            "of its logs not in the records ('activated' since 2026-01-01 12:00:00; from its row less 10 min "
+                            "to the move 2026-01-01 15:00:00): whether it ran is not known yet") for x in lines)
+    assert any(x.startswith("  w.py::ran: ran -- a writer [5], which takes a row by its key too; ran: a run of the key in "
+                            "['ran.log'] between 2026-01-01 11:50:00 and 2026-01-01 15:00:00, and L1 names another mover")
+               for x in lines)
+    # did not run is ruled out; prints nothing, ran, unanswered and not searched are not
+    assert lines[-1] == "not ruled out: 5 mover(s)"
+    # the long stay: the last six hours alone, so a run not found there rules nothing out
+    last = ["2026-01-01 09:00:00", "2026-01-01 15:00:00"]
+    assert [a for a in asked[5:] if a[0] == "silent.log"] == [["silent.log", last]]
+    assert long["p/w.py::silent"] == "no run found" and long["p/w.py::ran"] == "ran"
+    # the writer reached by a guard: the rest asked where the last six hours hold no run, so it did not run
+    assert [a for a in asked[5:] if a[0] == "selected.log"] == [["selected.log", last],
+                                                                 ["selected.log", ["2025-12-30 11:50:00", "2026-01-01 09:00:00"]]]
+    assert long["p/w.py::selected"] == "did not run"
+    assert window == {"held": False, "why": "searched from 2026-01-01 09:00:00 only"}
+    assert "  silent: no run of its own found in ['silent.log'] from 2026-01-01 09:00:00, the window's last part, which alone " \
+           "is asked of a writer that takes a row by its key (KNOWN_ISSUES.md K16): not followed, though not ruled out " \
+           "(KNOWN_ISSUES.md K19)" in long_lines
 
 
 def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_statements_join_to_the_row(tmp_path):

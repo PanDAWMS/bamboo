@@ -459,9 +459,22 @@ of K15 (the whole window searched, every log its process writes to, and every ru
 print a string the asks search by).  Since build order 2a S1 searches the whole window for such a mover (K5).  The
 third premise (`prints_naming`) holds where, before every arm, a line the map says runs on every path
 (`Branch.must_prints`) has a hole it says holds the written row's key (`must_names`, the row's key being the rows
-file's column holding the key asked).  The map reads such names off an attribute write's message only: it pairs
-neither a run's mark (`PandaID={}`) nor an SQL arm's key bind with the written row (`mustprints`), so an arm with must
-prints and no such name leaves the premise unknown.  On pin k (dce1e07's dump, out/p3 of the analyzer handover) the
+file's column holding the key asked).  Since xviii the map reads such names in the message, the run's mark and an
+SQL arm's bind map (`MustName.part`), and says whether it read them over every must print whole
+(`Branch.must_names_whole`).  Where it did and none names the key, the premise does not hold (False): a run need not
+print what the asks search by.  Where it did not, an arm with must prints and no such name leaves the premise
+unknown (None).  On xviii's dump (out/j3l of the analyzer handover, l3e's runs), 411 of the 1114 S1 movers with
+premises move from None to False so (True 311, False 271, None 121 stay); no verdict moves, since `did-not-run`
+needs True.  The False errs one way only: a print holding the key where the map does not see it (TaskCommando.py:155's
+mark holding the value the key is assigned from; a hole printing a whole object, `str(job)`) keeps a mover from
+being ruled out, never rules one out.
+
+Judgement 3 is one part, S1's and L2's (`Rerun._absence`): its asks over the window's last part, the part before it
+for a mover not reached by its key, and its premises.  The window is one rule with its end a parameter
+(`windows.last_part`, `rest_of`): stuck's as_of, late's move.  L2's use is K15's.
+
+Before xviii, on pin k (dce1e07's dump, out/p3 of the analyzer handover), with the names read off an attribute
+write's message only, the
 premise can hold for 2 of the 22 arms of the movers S1 keeps for `JobSpec.jobStatus` (datasetManager's run 735,
 retryJob 4016) and none of the 57 for `JediTaskSpec.status`; a mark holds a key column of the class on 7 and 39, the
 written row's or not -- retryChildTasks_JEDI's is the parent's, its arm writes the children.  And most of the owners
@@ -473,8 +486,9 @@ says, for each mover with no run found, which of the three hold (`premises`: `wi
 `TaskBuffer.killJobs`, `analy_pmerge_jobs_wait_time` and `get_site_strr_stats`.
 
 *Shows:* said ("no run of its own found in [...] over the whole window: not followed, though not ruled out", or "...:
-it did not run (judgement 3)"); result.json's verdict `no-run-found` or `did-not-run`, with its `premises`.
-*Revisit:* when the map pairs a run's mark and an SQL statement's key bind with the written row.
+it did not run (judgement 3)"); result.json's verdict `no-run-found` or `did-not-run`, with its `premises` (prints:
+"the lines before the arm(s) at [...] were read whole and none names the written row's [...]").
+*Revisit:* when the map sees a key a print holds through another value (a key chain, a whole object printed).
 
 ### K25. S1 does not follow a function that prints nothing of its own, and H2 stops where no writer has a log
 
@@ -527,17 +541,32 @@ value"; else stopped, with what is not read.
 
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
-### K15. A writer that takes a row by its key is not ruled out
+### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is not read
 
-Every writer with an arm that can move the value (`arms_of`) is listed `by key`: whether it ran on the key in the
-window is read from its runs there, which L2 does not ask.  Ruling one out needs more than finding no run: the whole
-window searched in every log its process writes to (a DB proxy method writes `panda-DBProxy.log` or
-`panda-JediDBProxy.log` by the process that called it), and its runs bound to name the key.
+Every writer with an arm that can move the value (`arms_of`) gets judgement 3, S1's part (K19), over the stay
+(`Rerun._late_absence`; tmaeno, 2026-11-01).  The window is S1's rule with the move for as_of: from the stay's row
+less SLACK, no earlier than the move less STUCK_SPAN, to the move, and the part before it for a writer not reached
+by its key.  Ruling one out needs more than finding no run: the whole window searched in every log its process
+writes to (a DB proxy method writes `panda-DBProxy.log` or `panda-JediDBProxy.log` by the process that called it), and
+its runs bound to name the key.
+- Its logs are asked only where the two premises the map decides hold (every log to hand, every run printing the
+  key); otherwise a run not found would rule nothing out, so it stays `by key` (or `could have`) with the premise
+  said.
+- On today's cases (l3e's results, xviii's dump, out/j3l): 63 of the 360 (case, mover) pairs L2 leaves are asked (66 hold both
+  premises on the records door; D runs on the file door with two logs).  A
+  stay longer than six hours (D 152.6 h, Fr1 93.2 h) is asked over its last six for a writer reached by its key, so
+  nothing is ruled out there.
+- An ask no record answers is kept for the asks file and the walk goes on: L2's movers are the answer's context, so a
+  late case ENDs with asks.
+- A writer that ran on the key in the stay is said, not followed: which way its passes went -- why it passed the row
+  over -- is not read for late.
 
-*Shows:* said (`by key`, counted among "not ruled out").
-*Revisit:* build order 2: the absence rule, the logs narrowed by the callers' processes (the map's upward union; two
-hops of `called_from` until then), the window's asks, and S2-S4 over the window for a writer that ran.  The writer
-that moved a late value on is read so (judgement 4, K45); the others are not.
+*Shows:* said ("by key -- ...; its logs are not asked: a run not found would not rule it out (...)", "ran -- ...; ran: a
+run of the key in [...] between ... and ..., and L1 names another mover", "asks unanswered -- ...; N ask(s) of its logs
+not in the records (...)", "did not run", "no run found", "not searched", "prints nothing"); result.json's movers'
+`verdict` and `premises`; "did not run" is not counted among "not ruled out".
+*Revisit:* S2-S4 over the stay for a writer that ran (the writer that moved a late value on is read so, judgement 4,
+K45); a stay longer than six hours asked whole; the logs narrowed by the callers' processes.
 
 ### K18. "Could have" needs every term known true
 
@@ -1078,7 +1107,7 @@ the passes that end before the second the statuslog shows it moving on, and S3 w
   of it, the mover moved the value on its first pass of the key in the window, and the delay is in what calls it on
   the row: not followed (the callers' runs, by their keys).  Elsewhere none found is said, with why it may still have
   run.
-- The other writers L2 lists by key stay as K15 says: "a run in the window, did not move it" is not read.
+- The other writers L2 lists get judgement 3 (K15); one that ran in the window and did not move it is said, not read.
 
 *Shows:* "STOP S2: a pass of <func> before the one that moved it on at <t>: none from <since>, asked <how> -- the
 delay is in what calls <func> on the row, not followed here", or "...: none found from <since>, asked <how>, and not

@@ -24,6 +24,8 @@ needs a window (``Logs.needs_window``), so the cases run on files go on as befor
   :data:`STUCK_SPAN`, to ``as_of``, when the statuslog was read.  A mover retries every few hours (tmaeno,
   2026-10-13), so the last six hours are asked first; but no pass in six hours is not no pass in the window, so S1
   asks the rest of it (``rest``) for a mover with no run of its own there (build order 2a; tmaeno, 2026-10-16).
+* L2, late (``last_part``, ``rest_of``): judgement 3's asks of the movers in the window, by the same rule with the
+  move for ``as_of`` -- only the window's end differs.
 
 SLACK is the margin the server's statuslog rows were measured to need against their runs' log times (a second;
 e1, to-querier-3), widened; JEDI's clocks were measured on five machines of nine (to-querier-13).
@@ -142,14 +144,19 @@ def stuck(statuslog: dict, observed: str) -> Asking:
     rows = [s for s in statuslog.get("states", []) if s["status"] == observed]
     if not rows:
         return Asking(None, None, f"the statuslog has no row for {observed!r}")
-    since, upto = when(rows[-1]["time"]), when(as_of)
-    start = max(since - SLACK, upto - STUCK_SPAN)
-    bound = "its row less" if start == since - SLACK else "as_of less"
+    return last_part(observed, rows[-1]["time"], as_of, "as_of", f"the statuslog's as_of {as_of}")
+
+
+def last_part(observed: str, since: str, end: str, end_name: str, end_said: str) -> Asking:
+    """The part of a window asked first, S1's and L2's alike: from the observed value's row *since* less SLACK, no
+    earlier than *end* less STUCK_SPAN, to *end* -- stuck's as_of, late's move; only the window's end differs."""
+    start = max(when(since) - SLACK, when(end) - STUCK_SPAN)
+    bound = "its row less" if start == when(since) - SLACK else f"{end_name} less"
     return Asking(
-        (_down(start), _down(upto)),
+        (_down(start), _down(when(end))),
         None,
-        f"{observed!r} since {rows[-1]['time']}; from {bound} {_minutes(SLACK if bound == 'its row less' else STUCK_SPAN)} "
-        f"to the statuslog's as_of {as_of}",
+        f"{observed!r} since {since}; from {bound} {_minutes(SLACK if bound == 'its row less' else STUCK_SPAN)} "
+        f"to {end_said}",
     )
 
 
@@ -160,8 +167,14 @@ def rest(statuslog: dict, observed: str) -> Asking | None:
     if first.window is None:
         return None
     since = [s for s in statuslog["states"] if s["status"] == observed][-1]["time"]
+    return rest_of(observed, since, statuslog["as_of"], first)
+
+
+def rest_of(observed: str, since: str, end: str, first: Asking) -> Asking | None:
+    """The window before *first* (:func:`last_part`'s), from the row *since* less SLACK to *end* less STUCK_SPAN; None
+    where *first* has no window or already starts at the row."""
     start = when(since) - SLACK
-    if start >= when(statuslog["as_of"]) - STUCK_SPAN:
+    if first.window is None or start >= when(end) - STUCK_SPAN:
         return None
     return Asking(
         (_down(start), first.window[0]),
