@@ -788,7 +788,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # holes hold a column of the row the arm writes: what tells the run that
         # wrote a value from the runs that only printed the same lines.
         self._must_prints = mustprints.attach(
-            fragment.junctions, fragment.function_prints, self._modules, self._declarations
+            fragment.junctions,
+            fragment.function_prints,
+            self._modules,
+            self._declarations,
+            fragment.key_froms,
+            fragment.tables,
         )
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
         lap("prints")

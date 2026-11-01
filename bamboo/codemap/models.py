@@ -393,6 +393,10 @@ class ConditionalGuard(BaseModel):
 
 #: :attr:`MustName.row` for a hole holding a column of the row the arm writes.
 MUST_ROW_WRITTEN = "written"
+#: :attr:`MustName.part`: a hole of the message, of the logger's mark, or an entry of a printed bind map.
+MUST_PART_MESSAGE = "message"
+MUST_PART_MARK = "mark"
+MUST_PART_BIND = "bind"
 
 
 class MustName(BaseModel):
@@ -424,6 +428,18 @@ class MustName(BaseModel):
         ),
     )
     why: str = Field(default="", description="Why the hole is not known to hold the written row's column.")
+    part: str = Field(
+        default=MUST_PART_MESSAGE,
+        description=(
+            f"Where the print holds the value: {MUST_PART_MESSAGE!r}, a hole of the message (read with "
+            f":attr:`PrintRow.capture`); {MUST_PART_MARK!r}, a hole of the logger's mark, taken where the logger is "
+            f"made (:attr:`PrintRow.prefix_capture`) -- ``create_tagged_logger(comment, f\"PandaID={{tmp_id}}\")``; "
+            f"{MUST_PART_BIND!r}, the entry *bind* of a printed bind map."
+        ),
+    )
+    bind: str = Field(
+        default="", description=f"The bind map's key, ``:jediTaskID``, where *part* is {MUST_PART_BIND!r}."
+    )
 
 
 #: :attr:`HistoryPair.row` where the history row is the arm's row: the writer
@@ -805,9 +821,11 @@ class Branch(BaseModel):
         description=(
             "The holes of the must prints that read an attribute of the object "
             "the arm writes, each saying whether it holds the written row's "
-            "column.  ``None`` when not read, with ``must_hole``: the names of "
-            "an arm that does not write the subject as an object's attribute "
-            "-- an SQL statement's binds -- are not read yet."
+            "column, and those holding a key of the written row, in the message "
+            "or the logger's mark (:attr:`MustName.part`) -- for an SQL arm, the "
+            "values its statement's row-naming binds are filled with.  ``None`` "
+            "when not read, with ``must_hole``: an arm writing the subject "
+            "neither as an object's attribute nor by a statement's bind."
         ),
     )
     must_hole: str = Field(

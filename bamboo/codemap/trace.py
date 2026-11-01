@@ -3196,7 +3196,7 @@ class _Walk:
                         _folded_pattern(pieces) + r"\ " if pieces else "",
                         "",
                         _prefix_holes(pieces),
-                        _folded_capture(pieces),
+                        _folded_capture(pieces) if pieces else "",
                     )
                     for pieces in distinct.values()
                 ),

@@ -10,13 +10,19 @@ from bamboo.codemap.gates import must_prints_resolve
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
     LOG_FILES_OF_MODULE,
+    MUST_PART_MARK,
+    MUST_PART_MESSAGE,
     MUST_ROW_WRITTEN,
     Anchor,
     Branch,
     FunctionPrintsNode,
     JunctionNode,
+    KeyFrom,
+    KeySource,
     MapFragment,
+    MustName,
     SourceModule,
+    TableRecord,
 )
 from bamboo.codemap.panda import mustprints
 from bamboo.codemap.panda.plugin import _merge_junctions
@@ -24,6 +30,16 @@ from bamboo.codemap.panda.plugin import _merge_junctions
 PACKAGE = "pkg"
 FILE = f"{PACKAGE}/m"
 DECLARED = {"JobSpec": {"PandaID", "jobStatus", "computingSite"}}
+TABLES = (
+    TableRecord(
+        name="jobsactive4", rows_of="JobSpec", identity_attrs=["JobSpec.PandaID"]
+    ),
+    TableRecord(
+        name="jedi_tasks",
+        rows_of="JediTaskSpec",
+        identity_attrs=["JediTaskSpec.jediTaskID"],
+    ),
+)
 
 
 def _line(text: str, marker: str) -> int:
@@ -41,6 +57,8 @@ def _build(
     *arms: tuple[str, str],
     subject: str = "JobSpec.jobStatus",
     others: tuple[str, ...] = (),
+    key_froms: tuple[KeyFrom, ...] = (),
+    declared: dict[str, set[str]] = DECLARED,
 ) -> MapFragment:
     """Read *text* as the build does and attach must prints to one junction per (owner, marker) of *arms*.
 
@@ -99,7 +117,7 @@ def _build(
     module = SourceModule(
         package=PACKAGE, rel_path=FILE, tree=ast.parse(text), source=text, blob_sha="0"
     )
-    mustprints.attach(junctions, nodes, [module], DECLARED)
+    mustprints.attach(junctions, nodes, [module], declared, key_froms, TABLES)
     return MapFragment(
         map_id="m", derived_from="v", junctions=junctions, function_prints=nodes
     )
@@ -412,3 +430,121 @@ def test_merged_junctions_keep_the_line_of_the_write_they_drop() -> None:
 
     (merged,) = _merge_junctions([junction(5, []), junction(9, [12]), junction(5, [])])
     assert [(b.line, b.other_lines) for b in merged.branches] == [(5, [9, 12])]
+
+
+MARKED = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def f(job):
+    if job is None:
+        tmp_id = None
+    else:
+        tmp_id = job.PandaID
+    tmp_log = LogWrapper(_logger, f"PandaID={tmp_id}")
+    if job is None:
+        return
+    tmp_log.debug("start")  # P
+    job.jobStatus = "activated"  # A
+
+
+def g(job, other):
+    tmp_id = job.PandaID
+    tmp_log = LogWrapper(_logger, f"PandaID={tmp_id}")
+    tmp_log.debug("start")  # Q
+    job = other
+    job.jobStatus = "activated"  # B
+"""
+
+
+def test_a_mark_names_the_written_row_where_the_logger_is_made_after_its_key(
+    tmp_path: Path,
+) -> None:
+    """``activateJob`` makes its logger with ``f"PandaID={tmp_id}"`` after ``tmp_id = job.PandaID``, and every
+    line it prints carries that mark: the mark names the job the arm writes.  ``tmp_id = None`` is on no run
+    that reaches the arm, which the same ``if job is None`` leaves.  Where ``job`` is bound again before the arm,
+    the mark names another job."""
+    fragment = _build(tmp_path, MARKED, ("f", "A"), ("g", "B"))
+
+    assert _branch(fragment, "A").must_names == [
+        MustName(
+            line=_line(MARKED, "P"),
+            expression="tmp_id",
+            column="JobSpec.PandaID",
+            row=MUST_ROW_WRITTEN,
+            part=MUST_PART_MARK,
+        )
+    ]
+    assert _branch(fragment, "B").must_names == []
+
+
+SQL_ARM = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def h(self, jediTaskID, status):
+    tmp_log = LogWrapper(_logger, f"<jediTaskID={jediTaskID}>")
+    tmp_log.debug(f"set {status} for {jediTaskID}")  # S
+    varMap = {}
+    varMap[":jediTaskID"] = jediTaskID  # K
+    varMap[":status"] = status  # W
+    self.cur.execute(SQL, varMap)  # X
+
+
+def k(self, jediTaskID, status):
+    tmp_log = LogWrapper(_logger, f"<jediTaskID={jediTaskID}>")
+    tmp_log.debug(f"set {status} for {jediTaskID}")  # T
+    jediTaskID = int(jediTaskID)
+    varMap = {":jediTaskID": jediTaskID}  # L
+    varMap[":status"] = status  # V
+    self.cur.execute(SQL, varMap)  # Y
+"""
+
+
+def _term(owner: str, ran: str, writes: str, filled: str) -> KeyFrom:
+    """``jediTaskID=:jediTaskID`` of the UPDATE *owner* runs at *ran*, writing the status at *writes*."""
+    return KeyFrom(
+        owner=f"{FILE}::{owner}",
+        file=FILE,
+        statement=_line(SQL_ARM, ran),
+        table="JEDI_Tasks",
+        term="jediTaskID=:jediTaskID",
+        writes={"JediTaskSpec.status": [_line(SQL_ARM, writes)]},
+        sources=[
+            KeySource(
+                kind="parameter",
+                line=_line(SQL_ARM, filled),
+                name="jediTaskID",
+                paths=["()"],
+            )
+        ],
+    )
+
+
+def test_an_sql_arm_is_named_by_what_its_statement_s_key_bind_is_filled_with(
+    tmp_path: Path,
+) -> None:
+    """An SQL arm fills a bind of a statement whose ``WHERE jediTaskID=:jediTaskID`` names the rows it writes: a
+    must print holding what that bind is filled with -- the message's hole, the mark's -- names them, where the
+    print and the fill hold one value.  Bound again between the print and the fill, it names another task."""
+    fragment = _build(
+        tmp_path,
+        SQL_ARM,
+        ("h", "W"),
+        ("k", "V"),
+        subject="JediTaskSpec.status",
+        key_froms=(_term("h", "X", "W", "K"), _term("k", "Y", "V", "L")),
+        declared={**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}},
+    )
+
+    named = _branch(fragment, "W").must_names
+    assert named is not None
+    assert sorted((one.expression, one.column, one.row, one.part) for one in named) == [
+        ("jediTaskID", "JediTaskSpec.jediTaskID", MUST_ROW_WRITTEN, MUST_PART_MARK),
+        ("jediTaskID", "JediTaskSpec.jediTaskID", MUST_ROW_WRITTEN, MUST_PART_MESSAGE),
+    ]
+    assert _branch(fragment, "V").must_names == []

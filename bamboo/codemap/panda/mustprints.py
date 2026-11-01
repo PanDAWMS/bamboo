@@ -28,13 +28,18 @@ are its statement in the owner's :class:`FunctionPrintsNode`, and
 are not: whether a hole holds the written row's column is a question of
 which binding the print and the arm see, which needs the syntax tree.
 
-**Names are read off the message, for an attribute write.**  The holes of
-the line itself, on the object the arm writes to.  Not read yet: the
-logger's mark -- ``create_tagged_logger(comment, f"PandaID={pandaID}")``
-folds its tag to a hole whose expression is gone -- which is the run's key
-and is asked with it; and the row an SQL statement lands on, whose key binds
-are paired with its run and not with the deciding statement a branch's line
-is.  Such an arm's names are ``None``, with why.
+**Names are read off the message and the logger's mark.**  The holes of the
+line itself, on the object the arm writes to; and those holding a key of the
+written row -- its identity, or for an SQL arm each term naming its rows --
+in the message or in the mark of the logger it writes through, which is
+taken where the logger is made: ``tmp_log =
+self.create_tagged_logger(comment, f"PandaID={tmp_id}")`` after ``tmp_id =
+job.PandaID``.  An SQL arm is a line its statement writes the subject on
+(:attr:`KeyFrom.writes`), and the key is what each place filling the term's
+bind fills it with (:attr:`KeySource.line`): ``varMap[":jediTaskID"] =
+jediTaskID``.  A name is said where the hole holds what the key holds where
+the write counts (:func:`_holds_key`).  An arm writing the subject neither
+way has ``None``, with why.
 
 **Every write of a branch.**  One branch can stand for several writes
 (:attr:`Branch.other_lines`), and a print before the first need not come
@@ -44,20 +49,25 @@ before the others: a branch has what all of them have.
 from __future__ import annotations
 
 import ast
-from typing import NamedTuple, Optional
+import re
+from typing import NamedTuple, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.callfacts import LOG_METHODS
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
+    MUST_PART_MARK,
     MUST_ROW_WRITTEN,
     Branch,
     FunctionPrintsNode,
     JunctionNode,
+    KeyFrom,
     MustName,
     PrintRow,
     SourceModule,
+    TableRecord,
 )
 from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.reaching import reaching
@@ -79,6 +89,10 @@ WHY_REBOUND = (
 NAMES_NOT_ATTRIBUTE = (
     "names: the arm does not write the subject as an attribute of an object"
 )
+NAMES_NO_KEY = (
+    "names: no term of the arm's statement naming its rows is a bind this reading"
+    " pairs with the value filling it"
+)
 
 
 class _Site(NamedTuple):
@@ -88,6 +102,20 @@ class _Site(NamedTuple):
     #: The prints' owner of *func*: ``file::main.FinisherThr.run``.
     owner: str
     statement: ast.stmt
+    #: The branch's line it stands for: :attr:`Branch.line` or one of :attr:`Branch.other_lines`.
+    line: int = 0
+
+
+class _Key(NamedTuple):
+    """A column of the row an arm writes, and the expression holding its value where the write counts."""
+
+    #: As :attr:`MustName.column` spells it: ``JobSpec.PandaID``.
+    column: str
+    expression: ast.expr
+    #: Where the value counts: the arm, or the statement an SQL arm's bind is run in.
+    at: ast.stmt
+    #: The statements filling an SQL arm's key bind, each of which must hold what *at* holds.
+    filled: tuple[ast.stmt, ...] = ()
 
 
 def attach(
@@ -95,22 +123,44 @@ def attach(
     function_prints: list[FunctionPrintsNode],
     modules: list[SourceModule],
     declarations: dict[str, set[str]],
+    key_froms: Sequence[KeyFrom] = (),
+    tables: Sequence[TableRecord] = (),
 ) -> int:
     """Read every branch's must prints and names into it.  Returns how many branches have a must print.
 
     A branch standing for several writes (:attr:`Branch.other_lines`) has the
     prints that come before every one of them, and the names every one of
-    them has.
+    them has.  With *key_froms* and *tables*, the names of the row's key too:
+    held in a hole of the logger's mark, or by a name bound to it, and an SQL
+    arm's (:func:`_key_names`).
     """
     trees = {module.rel_path: module.tree for module in modules}
     printed: dict[str, list[int]] = {}
     holes: dict[tuple[str, int], list[str]] = {}
+    marks: dict[tuple[str, int], list[str]] = {}
     for node in function_prints:
         for statement in node.statements:
             printed.setdefault(node.owner, []).append(statement.line)
             holes[(node.owner, statement.line)] = [
                 hole.expression for row in statement.rows for hole in row.holes
             ]
+            marks[(node.owner, statement.line)] = [
+                hole.expression for row in statement.rows for hole in row.prefix_holes
+            ]
+    identity: dict[str, set[str]] = {}
+    for table in tables:
+        if table.rows_of:
+            identity.setdefault(table.rows_of, set()).update(
+                attr.partition(".")[2] for attr in table.identity_attrs
+            )
+    writing: dict[tuple[str, int], list[KeyFrom]] = {}
+    for record in key_froms:
+        # A statement's own terms: not a read's, nor an object's flush through a method, whose terms are the method's.
+        if record.reads or record.object:
+            continue
+        for lines_written in record.writes.values():
+            for line_written in lines_written:
+                writing.setdefault((record.owner, line_written), []).append(record)
     located: list[tuple[JunctionNode, Branch, list[_Site]]] = []
     by_function: dict[int, tuple[ast.AST, str, dict[int, ast.stmt]]] = {}
     for junction in junctions:
@@ -163,25 +213,42 @@ def attach(
         ]
         branch.must_prints = lines
         found += bool(lines)
-        written = [
-            _written_object(site.statement, junction.subject) for site in reached
-        ]
-        if any(one is None for one in written):
-            branch.must_hole = NAMES_NOT_ATTRIBUTE
-            continue
-        each = [
-            _names(
+        each: list[list[MustName]] = []
+        for site in reached:
+            written = _written_object(site.statement, junction.subject)
+            if written is not None:
+                names = _names(
+                    site,
+                    written,
+                    lines,
+                    statements[id(site.func)],
+                    holes,
+                    junction.subject,
+                    declarations,
+                )
+                keys = _attribute_keys(site, written, junction.subject, identity)
+            else:
+                names = []
+                terms = writing.get((junction.owner, site.line))
+                if not terms:
+                    branch.must_hole = NAMES_NOT_ATTRIBUTE
+                    break
+                keys = _statement_keys(site, terms, junction.subject, declarations)
+                if not keys:
+                    branch.must_hole = NAMES_NO_KEY
+                    break
+            names += _key_names(
                 site,
-                one,  # type: ignore[arg-type]
+                keys,
+                written is not None,
                 lines,
                 statements[id(site.func)],
                 holes,
-                junction.subject,
-                declarations,
+                marks,
             )
-            for site, one in zip(reached, written, strict=True)
-        ]
-        branch.must_names = _agreed(each)
+            each.append(names)
+        else:
+            branch.must_names = _agreed(each)
     return found
 
 
@@ -209,7 +276,7 @@ def _sites(
         statement = _statement_at(func, line)
         if statement is None:
             return f"no statement of {nested} holds line {line}"
-        sites.append(_Site(func, f"{file}::{nested}", statement))
+        sites.append(_Site(func, f"{file}::{nested}", statement, line))
     return sites
 
 
@@ -218,9 +285,13 @@ def _agreed(each: list[list[MustName]]) -> list[MustName]:
     first, rest = each[0], each[1:]
     agreed: list[MustName] = []
     for name in first:
-        key = (name.line, name.expression)
+        key = (name.line, name.expression, name.column, name.part)
         others = [
-            [held for held in names if (held.line, held.expression) == key]
+            [
+                held
+                for held in names
+                if (held.line, held.expression, held.column, held.part) == key
+            ]
             for names in rest
         ]
         if not all(others):
@@ -284,8 +355,281 @@ def _attribute_of(expression: str, written: str) -> Optional[str]:
     return None
 
 
+def _attribute_keys(
+    site: _Site, written: ast.expr, subject: str, identity: dict[str, set[str]]
+) -> list[_Key]:
+    """The written object's identity attributes, as the arm spells the object: ``job.PandaID``."""
+    cls = subject.rpartition(".")[0]
+    spelled = ast.unparse(written)
+    return [
+        _Key(
+            f"{cls}.{attribute}",
+            ast.parse(f"{spelled}.{attribute}", mode="eval").body,
+            site.statement,
+        )
+        for attribute in sorted(identity.get(cls, ()))
+    ]
+
+
+_TERM = re.compile(r"^\s*(\w+)\s*=\s*(:\w+)\s*$")
+
+
+def _statement_keys(
+    site: _Site,
+    held: list[KeyFrom],
+    subject: str,
+    declarations: dict[str, set[str]],
+) -> list[_Key]:
+    """The terms naming the rows of the statement an SQL arm fills a bind of, each with the value its bind is
+    filled with: ``taskID=:jediTaskID`` and ``varMap[":jediTaskID"] = taskSpec.jediTaskID``.
+
+    A term is one where every place the bind is filled (:attr:`KeySource.line`) fills it with the same expression
+    -- a store into the bind map or its literal's entry -- and its column is one of the subject's class, or of its
+    table where the subject is a table's (``async_results.status``).  Its value counts where the statement runs.
+    """
+    cls = subject.rpartition(".")[0]
+    columns = {column.lower(): column for column in declarations.get(cls, ())}
+    keys: list[_Key] = []
+    for record in held:
+        term = _TERM.match(record.term)
+        column = columns.get(term.group(1).lower()) if term else None
+        if (
+            term
+            and not columns
+            and record.table.rpartition(".")[2].lower() == cls.lower()
+        ):
+            column = term.group(1)
+        ran = _statement_at(site.func, record.statement)
+        if term is None or column is None or ran is None or not record.sources:
+            continue
+        filled: list[ast.stmt] = []
+        values: list[ast.expr] = []
+        for source in record.sources:
+            statement = (
+                _statement_at(site.func, source.line)
+                if source.line is not None
+                else None
+            )
+            value = (
+                _bound_value(statement, term.group(2))
+                if statement is not None
+                else None
+            )
+            if value is None:
+                break
+            filled.append(statement)  # type: ignore[arg-type]
+            values.append(value)
+        else:
+            if len({ast.unparse(value) for value in values}) == 1:
+                keys.append(_Key(f"{cls}.{column}", values[0], ran, tuple(filled)))
+    return keys
+
+
+def _bound_value(statement: ast.stmt, bind: str) -> Optional[ast.expr]:
+    """What *statement* fills *bind* with: ``varMap[":jediTaskID"] = jediTaskID``, or the entry of a bind map's
+    literal ``varMap = {":jediTaskID": jediTaskID}``, annotated or not."""
+    if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+        target = statement.targets[0]
+    elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+        target = statement.target
+    else:
+        return None
+    if isinstance(target, ast.Subscript):
+        key = target.slice
+        if isinstance(key, ast.Constant) and key.value == bind:
+            return statement.value
+        return None
+    if isinstance(target, ast.Name) and isinstance(statement.value, ast.Dict):
+        for entry, value in zip(
+            statement.value.keys, statement.value.values, strict=True
+        ):
+            if isinstance(entry, ast.Constant) and entry.value == bind:
+                return value
+    return None
+
+
+def _key_names(
+    site: _Site,
+    keys: list[_Key],
+    by_attribute: bool,
+    lines: list[int],
+    statements: dict[int, Optional[ast.stmt]],
+    holes: dict[tuple[str, int], list[str]],
+    marks: dict[tuple[str, int], list[str]],
+) -> list[MustName]:
+    """The holes of the must prints holding a key of the written row (*keys*), each where the value is.
+
+    A hole of the message, as it spells the key -- :func:`_names` reads those of an attribute arm already --
+    or a name bound to it; a hole of the logger's mark the same, the mark being taken where the logger is made
+    (:func:`_logger_made`): ``tmp_log = self.create_tagged_logger(comment, f"PandaID={tmp_id}")`` after ``tmp_id
+    = job.PandaID``.  Each said only where it holds the value the key holds where the write counts
+    (:func:`_holds_key`).
+    """
+    names: list[MustName] = []
+    for line in lines:
+        printed = statements.get(line)
+        if printed is None:
+            continue
+        made = _logger_made(site.func, printed)
+        for key in keys:
+            spelled = ast.unparse(key.expression)
+            for expression in dict.fromkeys(holes.get((site.owner, line), ())):
+                if by_attribute and expression == spelled:
+                    continue
+                if _holds_key(site.func, key, printed, expression):
+                    names.append(
+                        MustName(
+                            line=line,
+                            expression=expression,
+                            column=key.column,
+                            row=MUST_ROW_WRITTEN,
+                        )
+                    )
+            if made is None:
+                continue
+            statement, call = made
+            for expression in dict.fromkeys(marks.get((site.owner, line), ())):
+                if not any(ast.unparse(node) == expression for node in walk(call)):
+                    continue
+                if _holds_key(site.func, key, statement, expression):
+                    names.append(
+                        MustName(
+                            line=line,
+                            expression=expression,
+                            column=key.column,
+                            row=MUST_ROW_WRITTEN,
+                            part=MUST_PART_MARK,
+                        )
+                    )
+    return names
+
+
+def _logger_made(
+    func: ast.AST, printed: ast.stmt
+) -> Optional[tuple[ast.stmt, ast.Call]]:
+    """Where the logger *printed* writes through is made, when it is a local this function binds once by a call:
+    the statement and the call, whose arguments hold the mark's holes."""
+    for node in walk(printed):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in LOG_METHODS
+            and isinstance(node.func.value, ast.Name)
+        ):
+            bound = pathcond.single_definition(func, node.func.value.id)  # type: ignore[arg-type]
+            statement = _statement_of(bound) if isinstance(bound, ast.Call) else None
+            if statement is not None:
+                return statement, bound  # type: ignore[return-value]
+    return None
+
+
+def _holds_key(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
+    """Whether *expression*, read at *at*, holds what *key*'s expression holds where the write counts -- and so
+    does every statement filling an SQL arm's bind with it: the key itself, or a name bound to it once
+    (:func:`_bound_to`)."""
+    try:
+        read = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        return False
+    if ast.unparse(read) == ast.unparse(key.expression):
+        held = _holds(func, key.at, at, key.expression)
+    elif isinstance(read, ast.Name):
+        held = _bound_to(func, key.at, at, read.id, key.expression)
+    else:
+        return False
+    return held and all(_holds(func, key.at, one, key.expression) for one in key.filled)
+
+
+def _holds(
+    func: ast.AST, reference: ast.stmt, at: ast.stmt, expression: ast.expr
+) -> bool:
+    """Whether, on every path into *reference*, *expression* holds there what it held at *at*: an attribute chain
+    as :func:`_unbound_since` reads one, a name where none of its bindings reaches *reference* without passing
+    *at*; anything else is not read."""
+    if isinstance(expression, ast.Attribute):
+        return _unbound_since(
+            func, reference, at, expression.value, expression.attr, entered=False
+        )
+    if isinstance(expression, ast.Name):
+        return not reaching(
+            reference, _rebindings(func, expression.id, reference, at), [at]
+        )
+    return False
+
+
+def _bound_to(
+    func: ast.AST, reference: ast.stmt, at: ast.stmt, name: str, expression: ast.expr
+) -> bool:
+    """Whether *name*, read at *at*, holds what *expression* holds at *reference*: bound to it once -- ``tmp_id =
+    job.PandaID`` -- that binding the only one reaching *at*, and the expression holding the same from it to
+    *reference*.  What *name* is bound to after *at* does not matter: the print, or the mark the logger was made
+    with, has taken the value."""
+    spelled = ast.unparse(expression)
+    sites = _rebindings(func, name, reference, entry=True)
+    made = [
+        site
+        for site in sites
+        if isinstance(site, ast.Assign)
+        and len(site.targets) == 1
+        and isinstance(site.targets[0], ast.Name)
+        and site.targets[0].id == name
+        and ast.unparse(site.value) == spelled
+    ]
+    if len(made) != 1:
+        return False
+    (bound,) = made
+    others = [site for site in sites if site is not bound]
+    return not reaching(at, others, [bound]) and _holds(
+        func, reference, bound, expression
+    )
+
+
+def _rebindings(
+    func: ast.AST,
+    name: str,
+    reference: ast.stmt,
+    at: Optional[ast.stmt] = None,
+    entry: bool = False,
+) -> list[ast.AST]:
+    """Where *name* is bound in *func* but at *at* -- with *entry*, its entry too for a parameter -- less a binding
+    that cannot be on one run with *reference* (:func:`pathcond.compatible`): ``tmp_id = None`` under ``if job is
+    None:``, before an arm the same test leaves at.  The entry binds before everything, so whether a value read at
+    *at* is still the one at *reference* asks only what is bound after it."""
+    arguments = func.args  # type: ignore[attr-defined]
+    parameters = {
+        one.arg
+        for one in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            *filter(None, (arguments.vararg, arguments.kwarg)),
+        )
+    }
+    sites: list[ast.AST] = [arguments] if entry and name in parameters else []
+    for binding in pathcond.bindings(func, name):
+        if binding.nested or isinstance(binding.site, ast.arg):
+            continue
+        site = (
+            binding.site
+            if isinstance(binding.site, (ast.stmt, ast.ExceptHandler))
+            else _statement_of(binding.site)
+        )
+        if (
+            site is not None
+            and site is not at
+            and pathcond.compatible(site, reference, current=True)
+        ):
+            sites.append(site)
+    return sites
+
+
 def _unbound_since(
-    func: ast.AST, arm: ast.stmt, printed: ast.stmt, written: ast.expr, attribute: str
+    func: ast.AST,
+    arm: ast.stmt,
+    printed: ast.stmt,
+    written: ast.expr,
+    attribute: str,
+    entered: bool = True,
 ) -> bool:
     """Whether, on every path into *arm*, *printed* ran after *written* and its *attribute* were last bound.
 
@@ -297,7 +641,8 @@ def _unbound_since(
     may rebind ``self.job`` -- and the call's own binding of the parameters;
     the print kills them.  None of them reaching the arm means the print saw
     what the arm sees.  A store through another name for the object (``j =
-    job; j.PandaID = 3``) is not seen.
+    job; j.PandaID = 3``) is not seen.  Without *entered*, *printed* need not
+    be on every path: only whether, where it ran, the value lasts to the arm.
     """
     chain = [ast.unparse(written) + "." + attribute]
     root: ast.expr = written
@@ -306,7 +651,7 @@ def _unbound_since(
         root = root.value
     if not isinstance(root, ast.Name):
         return False
-    sites: list[ast.AST] = [func.args]  # type: ignore[attr-defined]
+    sites: list[ast.AST] = [func.args] if entered else []  # type: ignore[attr-defined]
     for binding in pathcond.bindings(func, root.id):
         if not binding.nested:
             site = binding.site
