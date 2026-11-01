@@ -1052,24 +1052,26 @@ def _called_name(call: ast.Call) -> str:
 def _holes_of(
     message: ast.expr, groups: Sequence[int] = (), func: Optional[ast.AST] = None, at: Optional[ast.stmt] = None
 ) -> list[SkeletonHole]:
-    """Every hole of a rendered message, with the expression that fills it and the group of the message's capture
-    holding its value (:func:`line_capture`), 0 where there is none; a hole printing a map whole, with the entries
-    it may hold where *func* writes it out (:func:`mapentries.entries`), at *at* where the source does not say."""
+    """Every hole of a rendered message, with the expression that fills it, the line writing it out -- *at*'s where
+    the source does not say -- and the group of the message's capture holding its value (:func:`line_capture`), 0
+    where there is none; a hole printing a map whole, with the entries it may hold where *func* writes it out
+    (:func:`mapentries.entries`)."""
     if not isinstance(message, ast.JoinedStr):
         return []
     parts = [part for part in message.values if isinstance(part, ast.FormattedValue)]
     holes = []
     for number, part in enumerate(parts):
+        site = pathcond.site_of(part.value)
+        written = site if isinstance(site, ast.stmt) else at
         hole = SkeletonHole(
             expression=_text(part.value),
             prints=_hole_prints(part) or "token",
             appended=bool(getattr(part, "appended", False)),
             group=groups[number] if number < len(groups) else 0,
+            line=getattr(written, "lineno", 0),
         )
         name = mapentries.printed_map(part.value)
-        if name and func is not None and at is not None:
-            site = pathcond.site_of(part.value)
-            written = site if isinstance(site, ast.stmt) else at
+        if name and func is not None and written is not None:
             read = mapentries.entries(pathcond.enclosing_function(written) or func, name, written)
             if read is not None:
                 hole.entries, hole.entries_open = read

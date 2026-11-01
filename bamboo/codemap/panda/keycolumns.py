@@ -72,7 +72,7 @@ class Reader:
         calls: C.Calls,
         names: reach._Names,
         funcs: dict[str, tuple[str, ast.AST]],
-        follow: Callable[[str, str], objects.ObjectReach],
+        follow: Callable[[str, str, int], objects.ObjectReach],
     ):
         self.types = calls.types
         self.names = names
@@ -89,16 +89,25 @@ class Reader:
         }
         self.paths = panda_objects.Paths()
         self._executions: dict[int, list[sql.Execution]] = {}
+        #: (statement, bind) -> the paths of its function the bind is filled with (:meth:`_filled`).
+        self._binds: dict[tuple[int, str], frozenset[str]] = {}
+        #: The states each follow of the reading in progress reads (:meth:`read`'s *states*).
+        self._states = objects.MAX_STATES
 
     def holds_rows(self, column: str) -> bool:
         """Whether ``Class.attribute`` *column* is a column of a class a table holds."""
         return column.partition(".")[0] in self.holding
 
     def read(
-        self, file: str, func: ast.AST, node: ast.expr
+        self,
+        file: str,
+        func: ast.AST,
+        node: ast.expr,
+        states: int = objects.MAX_STATES,
     ) -> tuple[list[str], list[KeyStop]]:
         """``(columns, stops)`` of the value *node* holds in *func*: the columns sorted; the stops where each reading
-        ended without a row's column, what the value is bound to first, then its uses.
+        ended without a row's column, what the value is bound to first, then its uses, each follow of them reading
+        at most *states* states.
 
         An attribute of a name declared as a class holding rows is that column
         and nothing else is read: the declaration says it.
@@ -109,6 +118,7 @@ class Reader:
         seen: set[tuple[str, str]] = set()
         owner = self.names.of(func) or ""
         node = callfacts.unconverted(self.types, file, func, node)
+        self._states = states
         try:
             self._backward(file, func, owner, node, found, bound, seen)
             if isinstance(node, ast.Attribute) and any(
@@ -137,7 +147,7 @@ class Reader:
         Read again where a field's reading has read it (:meth:`_field`): the stops go to the list asked for.
         """
         for path in sorted(held):
-            reach = self.follow(owner, path)
+            reach = self.follow(owner, path, self._states)
             for at, paths in reach.held.items():
                 if at in self.funcs:
                     self._used(at, *self.funcs[at], set(paths), found, stops)
@@ -145,7 +155,8 @@ class Reader:
                 kind = "spread" if site.how == objects.NO_PARAMETER else "hole"
                 stops.append(_stop(kind, at=f"{_short(site.owner)}:{site.line}"))
             if reach.cut:
-                stops.append(_stop("cut", what=_CUT[reach.cut], at=_short(owner)))
+                what = "paths" if reach.cut == objects.HELD_SPENT else "states"
+                stops.append(_stop("cut", what=what, at=_short(owner)))
             for site in reach.capped:
                 stops.append(
                     _stop(
@@ -207,22 +218,23 @@ class Reader:
     def _filled(
         self, file: str, func: ast.AST, run: sql.Execution, key: str, held: set[str]
     ) -> bool:
-        """Whether *run* fills its bind *key* with the value *held* names in *func*."""
-        binds = sql.bound_values(
-            func, run.varmap or "", key, run.window, across=True, at=run
-        )  # type: ignore[arg-type]
-        if not run.varmap:
-            binds = binds + sql.inline_binds(run.call, key)
-        return any(
-            pathcond.enclosing_function(bind.value) is func
-            and any(
-                objects._holds(held, path)
+        """Whether *run* fills its bind *key* with the value *held* names in *func*: the binds read once per
+        statement and bind, as every value read meets the same statements."""
+        if (id(run), key) not in self._binds:
+            binds = sql.bound_values(
+                func, run.varmap or "", key, run.window, across=True, at=run
+            )  # type: ignore[arg-type]
+            if not run.varmap:
+                binds = binds + sql.inline_binds(run.call, key)
+            self._binds[(id(run), key)] = frozenset(
+                path
+                for bind in binds
+                if pathcond.enclosing_function(bind.value) is func
                 for path in self.paths.of(
                     func, callfacts.unconverted(self.types, file, func, bind.value)
                 )
             )
-            for bind in binds
-        )
+        return any(objects._holds(held, path) for path in self._binds[(id(run), key)])
 
     def _column(
         self, table: str, column: str, at: str, found: set[str], stops: list[KeyStop]
@@ -418,8 +430,6 @@ class Reader:
         return self._executions[id(func)]
 
 
-#: Which of follow's caps cut the walk short, as a stop's ``what`` says it (:data:`KEY_STOPS`).
-_CUT = {objects.STATES_SPENT: "states", objects.HELD_SPENT: "paths"}
 #: What :attr:`objects.ObjectReach.capped` says before the path not followed.
 _CAPPED = objects.PARTS_SPENT.format(path="")
 

@@ -5019,6 +5019,28 @@ class SkeletonHole(BaseModel):
             "parameter.  Empty: *entries* are every entry it may hold."
         ),
     )
+    line: int = Field(
+        default=0,
+        description=(
+            "The line of the statement writing the hole out: the print's, or the binding's of a message built before "
+            "it (``tmpMsg = f\"...{prodUserName}...\"``).  0 where the source does not say."
+        ),
+    )
+    columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For a hole of the message, ``Class.attribute`` for each column the value is read to be, as "
+            ":attr:`RunKey.columns` reads a mark's, at :attr:`line`: what a reader asks a log by when the line names "
+            "a row by other values than its key (``doForPriorityMassage``'s ``prodUserName``)."
+        ),
+    )
+    stops: list[KeyStop] = Field(
+        default_factory=list,
+        description=(
+            "Where *columns* names no column of a class holding rows, where each reading stopped, as "
+            ":attr:`RunKey.stops` says it."
+        ),
+    )
 
 
 class SkeletonLine(BaseModel):
@@ -5293,6 +5315,7 @@ KEY_STOPS: dict[str, str] = {
     "not_declared": "keys {name}, which {what} does not declare, at {at}",
     "no_use": "no use of it in {at} or the calls it is handed to names a column",
     "failed": "reading its uses failed: {what}",
+    "not_found": "{name} is not spelled in the statement at {at}",
 }
 
 
