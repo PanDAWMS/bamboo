@@ -156,6 +156,12 @@ _BUILTIN, _OUTSIDE, _QUEUE, _UNKNOWN = "builtin", "outside", "queue", "unknown"
 #: A builtin's detail for a value ``json.loads`` makes (:data:`callfacts.JSON_MAKERS`): a builtin, and every value
 #: inside it, and every method's result, a builtin too.
 _JSON = "a value json makes"
+#: A mapping's methods that hand back the value at a key, or a default: read as ``d[k]`` is.
+_KEYED_GETS = frozenset({"get", "pop", "setdefault"})
+#: A builtin container's methods that change what it holds.
+_CHANGING = frozenset(
+    {"update", "setdefault", "pop", "popitem", "clear", "append", "extend", "insert", "remove", "add", "discard"}
+)
 #: What a binding read inside its own reading adds: nothing.  ``diag =
 #: re.sub(..., diag)`` beside ``diag: str`` is a str; the second binding
 #: says no more than the first.  Never an answer: a reading that finds
@@ -285,6 +291,7 @@ class _Receivers:
         self._scopes: dict[int, _Scope] = {}
         self._as_values: Optional[set[str]] = None
         self._keys: dict[tuple[int, str], Optional[frozenset[str]]] = {}
+        self._changed: Optional[frozenset[str]] = None
 
     def of(
         self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
@@ -523,7 +530,7 @@ class _Receivers:
             if isinstance(called, ast.Attribute):
                 receiver = self.of(file, func, called.value, depth + 1)
                 if receiver[0] in (_BUILTIN, _QUEUE):
-                    return self._method_result(receiver, called.attr)
+                    return self._got(file, func, call, receiver, depth) or self._method_result(receiver, called.attr)
             handed = self._handed_only_outside(file, func, call, depth)
             return (
                 (_UNKNOWN, handed) if handed else (_OUTSIDE, "built outside the corpus")
@@ -546,9 +553,77 @@ class _Receivers:
                 handed = self._handed_only_outside(file, func, call, depth)
                 return (_UNKNOWN, handed) if handed else (_OUTSIDE, receiver[1])
             if receiver[0] in (_BUILTIN, _QUEUE):
-                return self._method_result(receiver, called.attr)
+                return self._got(file, func, call, receiver, depth) or self._method_result(receiver, called.attr)
             return receiver
         return _UNKNOWN, placed.unplaced or "placed nowhere"
+
+    def _got(
+        self, file: str, func: ast.AST, call: ast.Call, receiver: tuple[str, str], depth: int
+    ) -> Optional[tuple[str, str]]:
+        """What ``d.get(k, default)`` -- or ``pop``, ``setdefault`` -- on a builtin mapping is: what ``d[k]`` is
+        (:meth:`_filled_at`) or the default; ``None`` where that is not read."""
+        called = call.func
+        if (
+            receiver[0] != _BUILTIN
+            or receiver[1] in _SCALARS
+            or not isinstance(called, ast.Attribute)
+            or called.attr not in _KEYED_GETS
+            or not isinstance(called.value, ast.Name)
+            or not call.args
+            or isinstance(func, ast.Module)
+        ):
+            return None
+        filled = self._filled_at(file, func, called.value, [call.args[0]], depth)
+        if filled is None:
+            return None
+        default = self.of(file, func, call.args[1], depth + 1) if len(call.args) > 1 else (_BUILTIN, "NoneType")
+        return _joined([filled, default])
+
+    def _constant_dict(self, module: ast.Module, func: ast.AST, name: str) -> Optional[ast.Dict]:
+        """The literal a name of the *module* is bound to once, where the name is not bound in *func* and no code of
+        the corpus changes what it holds, nor hands it to a call -- ``task_split_rules``' ``split_rule_value_dict``, its
+        values the module's other dicts; ``None`` otherwise.  Read by the name alone across the corpus: a store into
+        anything so named, a changing method on it, ``global`` of it, or a call handed it, anywhere, and it is not one.
+        """
+        if name in _parameters(func) or any(not one.nested for one in pathcond.bindings(func, name)):
+            return None
+        if name in self._changed_names():
+            return None
+        bound = [one for one in pathcond.bindings(module, name) if not one.nested]
+        if len(bound) != 1 or not isinstance(bound[0].value, ast.Dict) or bound[0].slot is not None:
+            return None
+        literal = bound[0].value
+        return literal if all(key is not None for key in literal.keys) else None
+
+    def _changed_names(self) -> frozenset[str]:
+        """Every name the corpus may change what it holds, or hands on: stored into, deleted from, a changing method
+        called on it, ``+=``-ed, declared ``global``, an argument of a call -- by its last part (``x`` and ``m.x``)."""
+        if self._changed is None:
+            found: set[str] = set()
+
+            def last(node: ast.AST) -> Optional[str]:
+                if isinstance(node, ast.Name):
+                    return node.id
+                if isinstance(node, ast.Attribute):
+                    return node.attr
+                return None
+
+            for file in self.types.corpus_files():
+                tree = self.types.tree(file)
+                for node in walk(tree) if tree is not None else ():
+                    if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                        found.add(last(node.value) or "")
+                    elif isinstance(node, ast.AugAssign):
+                        found.add(last(node.target) or "")
+                    elif isinstance(node, ast.Global):
+                        found.update(node.names)
+                    elif isinstance(node, ast.Call):
+                        if isinstance(node.func, ast.Attribute) and node.func.attr in _CHANGING:
+                            found.add(last(node.func.value) or "")
+                        for one in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                            found.add(last(one.value if isinstance(one, ast.Starred) else one) or "")
+            self._changed = frozenset(found)
+        return self._changed
 
     @staticmethod
     def _method_result(receiver: tuple[str, str], method: str) -> tuple[str, str]:
@@ -586,6 +661,17 @@ class _Receivers:
         root, keys = _subscripted(expression)
         if root is None or isinstance(func, ast.Module):
             return None
+        return self._filled_at(file, func, root, keys, depth)
+
+    def _filled_at(
+        self, file: str, func: ast.AST, root: ast.Name, keys: list[ast.expr], depth: int
+    ) -> Optional[tuple[str, str]]:
+        """:meth:`_filled` for ``root[keys[0]]...``; a module's dict no code changes (:meth:`_constant_dict`) is what
+        its literal holds."""
+        module = self.types.tree(file)
+        literal = self._constant_dict(module, func, root.id) if module is not None and len(keys) == 1 else None
+        if module is not None and literal is not None:
+            return _joined([self.of(file, module, value, depth + 1) for value in literal.values])
         container = self.of(file, func, root, depth + 1)
         if container[0] in (_OUTSIDE, _QUEUE) or (
             container[0] == _BUILTIN and container[1] in _SCALARS

@@ -350,6 +350,38 @@ def test_what_json_makes_of_a_value_handed_it_is_a_builtin_inside_and_out(tmp_pa
     assert [hole.line for hole in record.rows["pkg/mod.py::read"].holes] == [13]
 
 
+def test_what_a_dict_holds_at_a_key_is_read_from_what_is_put_there(tmp_path):
+    """``split_rule_value_dict.get(tag, {}).get(value, value)``: the module's dict holds its other dicts, and nothing
+    changes it, so the second ``get`` is a dict's.  A local dict holds what is put into it.  A module's dict some
+    function stores into holds whatever that is."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "SPLIT = {'US': ENUM_A, 'LS': ENUM_B}\n"
+            "ENUM_A = {'1': 'only'}\n"
+            "ENUM_B = {'2': 'all'}\n"
+            "CHANGED = {'k': {}}\n\n"
+            "class Cache:\n"
+            "    def get(self, key, default=None):\n"
+            "        pass\n\n"
+            "def decode(tag, value):\n"
+            "    return SPLIT.get(tag, {}).get(value, value)\n\n"
+            "def local():\n"
+            "    held = {}\n"
+            "    held['a'] = {'b': 1}\n"
+            "    return held.get('a', {}).get('b')\n\n"
+            "def change(x):\n"
+            "    CHANGED['k'] = x\n\n"
+            "def reads(k):\n"
+            "    return CHANGED.get(k, {}).get('z')\n"
+        ),
+    )
+
+    holes = {owner.rpartition("::")[2]: [hole.line for hole in row.holes] for owner, row in record.rows.items()}
+
+    assert (holes["decode"], holes["local"], holes["reads"]) == ([], [], [22])
+
+
 
 def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):
     """``base_module``'s ``self.jedi_mb_proxy_dict: "PassiveProxies | None"``, assigned from a callable field's call no
