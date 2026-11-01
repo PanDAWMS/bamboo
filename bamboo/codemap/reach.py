@@ -93,6 +93,10 @@ ASSUMPTIONS: dict[str, str] = {
         "run it, and nothing of the corpus."
     ),
     "driver_talks_only_to_db": "A call on the database driver -- a cursor, a connection -- goes only to the database.",
+    "select_reads_only": (
+        "A statement every text of which begins SELECT reads rows and writes none: the call running it is the "
+        "database, though the rest of its text is not read."
+    ),
     "closed_by_name": (
         "A call left open lands, if anywhere in the corpus, at a function of the corpus of its name: where none of "
         "those, nor anything they reach, writes the destination, the call writes none of it (MV 4, O1)."

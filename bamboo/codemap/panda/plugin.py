@@ -47,6 +47,7 @@ from bamboo.codemap.panda import (
     mustprints,
     objects,
     offrow,
+    pathcond,
     promotion,
     runs,
     sql,
@@ -681,7 +682,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     self._calls,
                     self.map_id,
                     self._version,
-                    _DatabaseLeaves(),
+                    _DatabaseLeaves(self._calls),
                     {module.rel_path: module.blob_sha for module in self._modules},
                 )
             )
@@ -1200,8 +1201,12 @@ class _DatabaseLeaves:
     statement nobody read is no leaf, because what it runs is read nowhere.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, calls: Optional[calls_mod.Calls] = None) -> None:
         self._read: dict[int, tuple[ast.AST, set[int], dict[int, str]]] = {}
+        #: The corpus's calls, for the texts a statement not rendered can begin with (:meth:`_selects`); none, and a
+        #: runner call whose statement does not render is a hole, as before.
+        self.calls = calls
+        self._built: dict[int, tuple[ast.ClassDef, list[tuple[str, ast.AST, ast.Call]]]] = {}
 
     def __call__(self, file: str, func: ast.AST, call: ast.Call, placed) -> Optional[tuple[str, str]]:
         called = call.func
@@ -1217,6 +1222,9 @@ class _DatabaseLeaves:
                     # ``JediTaskBuffer.queryTasksToPreassign_JEDI`` hands its caller's statement on to the proxy's,
                     # which updates the tasks it picks: followed, as a run of it is.
                     return None if runners[called.attr].own else ("database", "runner_runs_callers_sql")
+                unrendered = skipped[call.lineno] == sql.SKIP_UNRENDERED and not runners[called.attr].own
+                if unrendered and self._selects(file, func, call):
+                    return "database", "select_reads_only"
                 return "hole", f"{reach.HOLE_STATEMENT_NOT_READ}: {skipped[call.lineno]}"
             if _on_driver(call, placed):
                 return "hole", "the statement this runs is read nowhere"
@@ -1224,6 +1232,99 @@ class _DatabaseLeaves:
         if _on_driver(call, placed):
             return "database", "driver_talks_only_to_db"
         return None
+
+    def _selects(self, file: str, func: ast.AST, call: ast.Call) -> bool:
+        """Whether every text the statement *call* runs can be begins ``SELECT``, though the rest does not render.
+
+        ``_Batch.answer`` runs ``statement.sql``, a field of compose's ``Statement``: every construction of it in
+        the corpus hands it ``sql + STATEMENT_COMMENT``, ``sql`` an f-string ``"SELECT ..."`` that ``+=`` adds clauses
+        to.  The text's beginning is read through a name's outright bindings (``+=`` keeps it), an ``+`` (its left),
+        an f-string (its first piece, written out), and a field of an object declared as a dataclass of the corpus
+        (each construction's value for it)."""
+        if self.calls is None or not call.args:
+            return False
+        texts = self._leading(file, func, call.args[0], 0)
+        return bool(texts) and all(text.lstrip().upper().startswith("SELECT ") for text in texts or ())
+
+    def _leading(self, file: str, func: ast.AST, value: ast.expr, depth: int) -> Optional[set[str]]:
+        """The texts *value* can begin with, each as far as it is written out; ``None`` where one is not read."""
+        if depth > 6 or self.calls is None:
+            return None
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return {value.value}
+        if isinstance(value, ast.JoinedStr):
+            first = value.values[0] if value.values else None
+            return {first.value} if isinstance(first, ast.Constant) and isinstance(first.value, str) else None
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            return self._leading(file, func, value.left, depth + 1)
+        if isinstance(value, ast.Name) and not isinstance(func, ast.Module):
+            bound = [one for one in pathcond.bindings(func, value.id) if not one.nested]
+            if not bound:
+                return None
+            found: set[str] = set()
+            for one in bound:
+                if one.kind == pathcond.BIND_AUGMENTED:
+                    continue  # ``sql += " WHERE ..."`` keeps how it begins
+                if one.kind not in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED) or one.slot is not None:
+                    return None
+                held = self._leading(file, func, one.value, depth + 1) if one.value is not None else None
+                if held is None:
+                    return None
+                found |= held
+            return found or None
+        if isinstance(value, ast.Attribute):
+            return self._field_leading(file, func, value, depth)
+        return None
+
+    def _field_leading(self, file: str, func: ast.AST, value: ast.Attribute, depth: int) -> Optional[set[str]]:
+        """The texts a field of an object declared as dataclasses of the corpus can begin with: every construction's
+        value for it, positional by the fields' order or by its keyword."""
+        assert self.calls is not None
+        try:
+            classes = self.calls.types.declared(file, func, value.value)
+        except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+            return None
+        if not classes:
+            return None
+        found: set[str] = set()
+        for where, cls in classes:
+            fields = _dataclass_fields(cls)
+            if fields is None or value.attr not in fields:
+                return None
+            index = fields.index(value.attr)
+            built = self._constructions(where, cls)
+            if not built:
+                return None
+            for at, scope, made in built:
+                keyword = next((one.value for one in made.keywords if one.arg == value.attr), None)
+                handed = keyword if keyword is not None else made.args[index] if index < len(made.args) else None
+                if handed is None or any(isinstance(one, ast.Starred) for one in made.args):
+                    return None
+                held = self._leading(at, scope, handed, depth + 1)
+                if held is None:
+                    return None
+                found |= held
+        return found or None
+
+    def _constructions(self, where: str, cls: ast.ClassDef) -> list[tuple[str, ast.AST, ast.Call]]:
+        """Every call in the corpus naming *cls*: ``(file, the function or module it is in, the call)``."""
+        held = self._built.get(id(cls))
+        if held is None or held[0] is not cls:
+            assert self.calls is not None
+            types = self.calls.types
+            found: list[tuple[str, ast.AST, ast.Call]] = []
+            for file in types.corpus_files():
+                tree = types.tree(file)
+                for node in walk(tree) if tree is not None else ():
+                    if not isinstance(node, ast.Call) or not isinstance(node.func, (ast.Name, ast.Attribute)):
+                        continue
+                    if getattr(node.func, "id", getattr(node.func, "attr", "")) != cls.name:
+                        continue
+                    named = types.class_named(file, node.func)
+                    if named is not None and named[1] is cls:
+                        found.append((file, pathcond.enclosing_function(node) or tree, node))  # type: ignore[arg-type]
+            held = self._built[id(cls)] = (cls, found)
+        return held[1]
 
     def _of(self, func: ast.AST) -> tuple[set[int], dict[int, str]]:
         held = self._read.get(id(func))
@@ -1238,6 +1339,21 @@ class _DatabaseLeaves:
             held = (func, executed, {skip.line: skip.reason for skip in skipped})
             self._read[id(func)] = held
         return held[1], held[2]
+
+
+def _dataclass_fields(cls: ast.ClassDef) -> Optional[list[str]]:
+    """The fields of a dataclass, in their order; ``None`` for a class not decorated ``@dataclass``."""
+    named = [one.func if isinstance(one, ast.Call) else one for one in cls.decorator_list]
+    decorated = any(getattr(one, "id", getattr(one, "attr", "")) == "dataclass" for one in named)
+    if not decorated:
+        return None
+    return [
+        node.target.id
+        for node in cls.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and "ClassVar" not in ast.unparse(node.annotation)
+    ]
 
 
 def _on_driver(call: ast.Call, placed) -> bool:

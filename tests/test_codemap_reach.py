@@ -494,6 +494,45 @@ def test_a_container_a_callee_returns_is_read_in_the_callee(tmp_path):
     assert (holes["get_result"], holes["elsewhere"]) == (0, 1)
 
 
+def test_a_statement_every_text_of_which_begins_select_is_the_database_unrendered(tmp_path):
+    """``_Batch.answer`` runs ``statement.sql``, a field of a dataclass every construction of which hands it an
+    f-string beginning ``SELECT`` that ``+=`` adds clauses to: a read, whatever the rest is.  A field built
+    ``UPDATE ...`` is still a hole."""
+    record = _database(
+        tmp_path,
+        "from dataclasses import dataclass\n\n"
+        "@dataclass(frozen=True)\n"
+        "class Statement:\n"
+        "    sql: str\n"
+        "    binds: dict\n\n"
+        "@dataclass(frozen=True)\n"
+        "class Change:\n"
+        "    sql: str\n"
+        "    binds: dict\n\n"
+        "def compose(cols, table) -> Statement:\n"
+        "    sql = f'SELECT {cols} FROM {table}'\n"
+        "    sql += ' WHERE a=:a'\n"
+        "    return Statement(sql + ' /* read */', {})\n\n"
+        "def compose_change(table) -> Change:\n"
+        "    return Change(sql=f'UPDATE {table} SET a=1', binds={})\n\n"
+        "class Batch:\n"
+        "    def round_trip(self, sql, binds):\n"
+        "        self.cur.execute(sql, binds)\n"
+        "        return self.cur.fetchall()\n\n"
+        "    def answer(self, cols, table):\n"
+        "        statement = compose(cols, table)\n"
+        "        return self.round_trip(statement.sql, statement.binds)\n\n"
+        "    def change(self, table):\n"
+        "        statement = compose_change(table)\n"
+        "        return self.round_trip(statement.sql, statement.binds)\n",
+    )
+
+    answer, change = (record.rows[f"pkg/db.py::Batch.{one}"] for one in ("answer", "change"))
+
+    assert (answer.holes, answer.settled) == ([], {"select_reads_only": 1})
+    assert [hole.why.partition(":")[0] for hole in change.holes] == [reach.HOLE_STATEMENT_NOT_READ]
+
+
 
 def test_a_field_declared_as_an_outside_class_is_that_class_s_object_whatever_its_assignments_read_as(tmp_path):
     """``base_module``'s ``self.jedi_mb_proxy_dict: "PassiveProxies | None"``, assigned from a callable field's call no
@@ -974,7 +1013,7 @@ def _database(tmp_path, text: str) -> reach.ReachGraph:
     )
     calls = sqlwrite.corpus_calls([module], roots)
     with sql.across_calls(calls):
-        return reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
+        return reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves(calls)))
 
 
 def test_a_statement_the_map_reads_is_the_database_and_one_it_cannot_read_is_a_hole(
