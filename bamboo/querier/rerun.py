@@ -128,7 +128,14 @@ from bamboo.querier.records import (
     keyed,
     runs_for,
 )
-from bamboo.querier.which_ran import Candidate, Verdict, class_of, judge, stable_holes
+from bamboo.querier.which_ran import (
+    Candidate,
+    Verdict,
+    class_of,
+    judge,
+    once_loops_of,
+    stable_holes,
+)
 from bamboo.scripts.derive_strategy import _investigate
 
 BAMBOO = Path(R.BAMBOO_TREE)
@@ -138,6 +145,9 @@ BAMBOO = Path(R.BAMBOO_TREE)
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
 #: the tables that assumption is about: a job sits in one of them until it reaches FINAL_STATES -- PanDA's too
 ACTIVE_TABLES = ("jobsDefined4", "jobsActive4")
+#: ``RERUN_S3_ROWS=0``: S3 settles a pass's guards by the exit it left by alone, not also by the rows it printed on
+#: the way (``Rerun._ways_printed``, KNOWN_ISSUES.md K46)
+S3_ROWS = os.environ.get("RERUN_S3_ROWS", "1") != "0"
 
 
 def handed_to(func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call) -> dict[str, ast.expr]:
@@ -3610,9 +3620,15 @@ class Rerun:
         self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
         per_pass = []
-        for env in q.envs:
+        for run, env in zip(q.passes, q.envs, strict=True):
             fixed: dict[str, bool] = {}
             for g in path:
+                sol = E.solve(g, True, env)
+                fixed.update(sol.known)
+                fixed.update(sol.settled)
+            by_exit = dict(fixed)
+            ways = self._ways_printed(fn, run)
+            for g in sorted({g for _, conds in ways for g in conds}):
                 sol = E.solve(g, True, env)
                 fixed.update(sol.known)
                 fixed.update(sol.settled)
@@ -3623,10 +3639,13 @@ class Rerun:
                     if not E.read_elsewhere(g)
                     and E._truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
                 ]
-            per_pass.append((fixed, blocking))
-        fixed, blocking = per_pass[0]
-        self.need("the same guards against the arms in every pass", all(b == blocking for _, b in per_pass))
-        self.say(f"settled by the exit taken: {fixed}")
+            per_pass.append((by_exit, fixed, ways, blocking))
+        by_exit, fixed, ways, blocking = per_pass[0]
+        self.need("the same guards against the arms in every pass", all(b == blocking for *_, b in per_pass))
+        self.say(f"settled by the exit taken: {by_exit}")
+        if fixed != by_exit:
+            self.say(f"settled by the rows the pass printed on the way {[line for line, _ in ways]}: "
+                     f"{ {k: v for k, v in fixed.items() if k not in by_exit} }")
         for arm in q.arms:
             guards, handlers = read[arm.line]
             inside = "".join(f"; in an except handler at {u.line} ({u.detail})" for u in handlers)
@@ -3647,6 +3666,22 @@ class Rerun:
         where = guard_if(arm_stmt, guard) or early_exit_if(fn.node, arm_stmt, guard)
         where = self.need(f"the if whose test is {guard!r}", where)
         return Input(fn, guard, where.lineno, q.passes, q.envs, sorted({o for a in nearest for o in a.outcomes}))
+
+    def _ways_printed(self, fn: R.Function, run) -> list[tuple[int, list[str]]]:
+        """``(row line, its path condition)`` of each row one call's pass *run* printed (unambiguous), outside any loop
+        the pass may have gone round more than once (``which_ran.once_loops_of``): the tests of the ``if``s around it
+        held when it printed -- activateJob's 111, in the else of 70, says ``not (len(res) == 0 or allOK)``, though
+        the exit the pass left by (153, ``return True``) is reached either way (KNOWN_ISSUES.md K46).  None of a run of
+        several calls, nor where no run is handed."""
+        if not S3_ROWS or run is None or not getattr(fn, "rows", None):
+            return []
+        sn = R.claim([R.seen(fn, run, self.mode)])[0]
+        if not sn.single_call():
+            return []
+        once = once_loops_of(fn, sn, run, self.mode)
+        return [(row.line, conds) for row in fn.rows
+                if sn.unambiguous.get(row.line) and R.loops_over(row.stmt, fn.node) <= set(once)
+                and (conds := pathcond.path_condition(row.stmt))]
 
     def _arm_taken(self, q: Blocked, arm: Arm) -> None:
         """S3 where every pass left by an arm that writes the subject: no guard kept the passes off it, so what kept the

@@ -6,7 +6,8 @@ Every candidate comes out as one of four, with the rule that put it there:
   a row every path through the site prints is missing from the run (rule 4;
   only when the run printed something at that level, rule 8);
   a row that path can no longer reach after its ``return`` is in the run;
-  a printed row's ``arms`` leave the site out (outside a shared loop);
+  a printed row's ``arms`` leave the site out (outside a shared loop, or in one
+  the pass went round once, ``rows.once_loops``);
   the site sits after the record that already showed the observed value, or
   before the one that still showed the old value (rule 3) -- for a run of
   another log that ran inside a call the question's run made, where that
@@ -60,6 +61,19 @@ JOIN_CALLS = os.environ.get("WHICH_RUN_JOIN_CALLS", "1") != "0"
 #: ``WHICH_RUN_ROWS_AROUND=0``: a line is proven only by a row on a path through it (implying rows, P), not by two
 #: rows printed in a row that only a path through it prints (:func:`rows_around`)
 ROWS_AROUND = os.environ.get("WHICH_RUN_ROWS_AROUND", "1") != "0"
+#: ``WHICH_RUN_ONCE_LOOPS=0``: every loop a row and a site share may have gone round between them, the DB proxy's
+#: retry too (``rows.once_loops``): activateJob's else row 111 then leaves arm 71 standing
+ONCE_LOOPS = os.environ.get("WHICH_RUN_ONCE_LOOPS", "1") != "0"
+
+
+def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
+    """``rows.once_loops`` of *fn* in one call's run *run*: a row is not printed where rule 4 would read it as
+    missing -- at a level the run prints, its absence trusted."""
+    def absent(stmt: ast.stmt) -> bool:
+        row = fn.row_at(stmt)
+        return (row is not None and not sn.present(row) and R.absence_trusted(row, run.log, mode)[0]
+                and run.would_print(row.level, row.func))
+    return R.once_loops(fn.node, absent) if ONCE_LOOPS and sn.single_call() else {}
 
 
 def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
@@ -543,6 +557,7 @@ def judge(
         present_once = sn.single_call()
         callee = callee_values(fn, run, mode)
         named, raised = R.raised_in(fn, run)
+        once = once_loops_of(fn, sn, run, mode)
         for line in c.lines:
             stmt = R.statement_at(fn.node, line)
             v = Verdict(c, line, "kept")
@@ -597,18 +612,20 @@ def judge(
                         row.map_arms is not None
                         and line not in row.map_arms
                         and sn.unambiguous.get(row.line)
-                        and not R.share_loop(row.stmt, stmt, fn.node)
+                        and not R.share_loop(row.stmt, stmt, fn.node, once)
                     ):
                         v.kind = "excluded"
-                        v.reasons.append(f"row {row.line} printed and its arms {sorted(row.map_arms)} leave {line} out")
+                        went = R.loops_over(row.stmt, fn.node) & R.loops_over(stmt, fn.node)
+                        v.reasons.append(f"row {row.line} printed and its arms {sorted(row.map_arms)} leave {line} out"
+                                         + "".join(f" ({once[i]})" for i in went))
                         break
                 if bracket is not None and run is question_run:
                     lo = max(
-                        (i for r in fn.rows if r.line < line and not R.share_loop(r.stmt, stmt, fn.node) for i in sn.unambiguous.get(r.line, ())),
+                        (i for r in fn.rows if r.line < line and not R.share_loop(r.stmt, stmt, fn.node, once) for i in sn.unambiguous.get(r.line, ())),
                         default=None,
                     )
                     hi = min(
-                        (i for r in fn.rows if r.line > line and not R.share_loop(r.stmt, stmt, fn.node) for i in sn.unambiguous.get(r.line, ())),
+                        (i for r in fn.rows if r.line > line and not R.share_loop(r.stmt, stmt, fn.node, once) for i in sn.unambiguous.get(r.line, ())),
                         default=None,
                     )
                     if lo is not None and lo >= bracket[1]:
