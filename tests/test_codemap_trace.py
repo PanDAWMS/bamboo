@@ -3529,6 +3529,139 @@ class Proxy(Base):
     assert [(hole.expression, hole.prints) for hole in row.prefix_holes] == [("jediTaskID", "token")]
 
 
+def test_a_row_reads_its_holes_values_back_the_ends_and_the_mark_too(tmp_path):
+    """The pattern leaves out the holes at either end -- an unanchored search asks nothing more with them -- so it
+    cannot read their values: ``capture`` keeps them, every hole a group closed as the pattern closes it and the
+    last running to the end of the text, and ``prefix_capture`` reads the mark's.  An SQL print's ``str(varMap)``
+    is the map the statement ran with.  Holes side by side cannot say where one ends: they share a group."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, job, varMap, a, b):
+    tmp_log = LogWrapper(self.logger, f"<jediTaskID={job.jediTaskID}>")
+    tmp_log.debug(f"{job.name} UPDATE T_TASK SET status=:status WHERE taskID=:id {str(varMap)}")
+    tmp_log.debug(f"pair {a}{b} n={job.nFiles} done")
+    job.status = "done"
+''',
+    )
+
+    sql, pair = _printed(roots, file="m", owner="f", lines=[5])
+
+    assert sql.pattern == r"\ UPDATE\ T_TASK\ SET\ status=:status\ WHERE\ taskID=:id\ "
+    assert sql.capture == r"([^\ ]*)\ UPDATE\ T_TASK\ SET\ status=:status\ WHERE\ taskID=:id\ (.*)"
+    assert [(hole.expression, hole.group) for hole in sql.holes] == [("job.name", 1), ("str(varMap)", 2)]
+    assert sql.prefix_capture == r"(.*?)<jediTaskID=(.*?)>"
+    assert [(hole.expression, hole.group) for hole in sql.prefix_holes] == [("self.logger", 1), ("job.jediTaskID", 2)]
+    record = "j7 UPDATE T_TASK SET status=:status WHERE taskID=:id {':status': 'done', ':id': 7}\nnext line"
+    assert trace_mod.hole_values(sql, record, " <jediTaskID=7> ") == (
+        ["j7", "{':status': 'done', ':id': 7}\nnext line"],
+        ["", "7"],
+    )
+    assert trace_mod.hole_values(sql, "nothing of it") is None
+    assert trace_mod.hole_values(sql, record, "<PandaID=7>") is None
+
+    assert [(hole.expression, hole.group) for hole in pair.holes] == [("a", 1), ("b", 1), ("job.nFiles", 2)]
+    assert trace_mod.hole_values(pair, "pair xy n=4 done") == (["xy", "xy", "4"], [])
+
+
+def test_a_printed_map_says_the_entries_it_may_hold_where_it_is_printed(tmp_path):
+    """A record prints ``str(varMap)`` as ``{':status': 'done', ...}``; the hole says what fills each entry, on the
+    binding that reaches the print: a literal's entry, a key the source computes by its spelling, a spec's
+    ``valuesMap()`` copied entry by entry as its row, and each way an entry is filled.  Where the map may get an
+    entry no key spells -- ``update`` -- the line; the cursor's ``execute`` only reads it.  A map bound again holds
+    only what is filled after, and a hole that is not a map is not read as one."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, taskSpec, criteria, comment, tmp_log):
+    varMap = {":jediTaskID": taskSpec.jediTaskID}
+    for tmpKey, tmpVal in criteria.items():
+        varMap[f":cr_{tmpKey}"] = tmpVal
+    self.cur.execute("SELECT status FROM JEDI_Tasks WHERE jediTaskID=:jediTaskID " + comment, varMap)
+    varMap.update(more(criteria))
+    for tmpKey, tmpVal in taskSpec.valuesMap(onlyChanged=True).items():
+        varMap[tmpKey] = tmpVal
+    tmp_log.debug("UPDATE JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID " + comment + str(varMap))
+    varMap = {}
+    varMap[":status"] = "finished"
+    if taskSpec.x:
+        varMap[":status"] = "done"
+    tmp_log.debug("UPDATE T_TASK SET status=:status " + comment + str(varMap))
+    taskSpec.status = "done"
+''',
+    )
+
+    first, second = _printed(roots, file="m", owner="f", lines=[15])
+
+    comment, printed = first.holes
+    assert (comment.entries, comment.entries_open) == (None, [])
+    assert [(e.key, e.expression, e.line, e.computed, e.row) for e in printed.entries] == [
+        (":jediTaskID", "taskSpec.jediTaskID", 2, False, ""),
+        ("f':cr_{tmpKey}'", "tmpVal", 4, True, ""),
+        ("tmpKey", "tmpVal", 8, True, "taskSpec"),
+    ]
+    assert printed.entries_open == [6]
+    assert [(e.key, e.expression, e.line) for e in second.holes[-1].entries] == [
+        (":status", "'finished'", 11),
+        (":status", "'done'", 13),
+    ]
+    assert second.holes[-1].entries_open == []
+
+
+def test_a_row_reads_a_record_whole_only_where_its_mark_and_message_run_end_to_end(tmp_path):
+    """A search finds ``start`` in another row's line, ``start 7 jediTaskID=12``; ``reads_whole`` tells the row's own
+    line from it.  The record comes as a reader splits it after the level -- the mark, or the first word where none
+    is written -- and the two are read again as one, the row's mark then its message, anchored at both ends.  A
+    ``LogWrapper``'s prefix is read wherever the split left it, and a logger whose mark is not read cannot say."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def f(job, n, commandStr):
+    _logger.debug("start")
+    _logger.debug(f"start {n} jediTaskID={job.jediTaskID}")
+    _logger.debug(f"start for {commandStr}")
+    job.status = "done"
+
+
+def g(job, n):
+    tmp_log = LogWrapper(_logger, "<setup_destination>")
+    tmp_log.debug(f"idx:{n} n:{job.nFiles}")
+    job.status = "done"
+
+
+def h(self, job):
+    self.logger.debug("start")
+    job.status = "done"
+''',
+    )
+
+    start, counted, command = _printed(roots, file="m", owner="f", lines=[10])
+    (wrapped,) = _printed(roots, file="m", owner="g", lines=[16])
+    (unread,) = _printed(roots, file="m", owner="h", lines=[21])
+
+    assert trace_mod.reads_whole(start, "start", "")
+    assert trace_mod.hole_values(start, "start 7 jediTaskID=12") == ([], [])
+    assert trace_mod.reads_whole(start, "start", "7 jediTaskID=12") is False
+    assert trace_mod.reads_whole(counted, "start", "7 jediTaskID=12")
+    assert command.pattern == r"start\ for\ "
+    assert trace_mod.reads_whole(command, "start", "for retry")
+    assert trace_mod.hole_values(command, "for retry", "start", whole=True) == (["retry"], [])
+
+    assert wrapped.prefix == r"<setup_destination>\ "
+    assert trace_mod.reads_whole(wrapped, "<setup_destination>", "idx:3 n:4")
+    assert trace_mod.reads_whole(wrapped, None, "<setup_destination> idx:3 n:4")
+    assert trace_mod.reads_whole(wrapped, None, "idx:3 n:4") is False
+    assert trace_mod.hole_values(wrapped, "idx:3 n:4", "<setup_destination>", whole=True) == (["3", "4"], [])
+
+    assert unread.prefix == "" and unread.prefix_hole
+    assert trace_mod.reads_whole(unread, "start", "") is None
+
+
 def test_a_logger_built_here_says_its_prefix(tmp_path):
     """The wrapper's own mark, after what the logger it wraps writes: here ``self.logger``, which nothing here
     makes, so that part is one hole spelled as the wrapped logger."""

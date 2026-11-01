@@ -509,7 +509,11 @@ TASK = {
     "splitRule": "useScout=will_update_requirements,scoutSuccessRate=5",
     "split_rule_raw": "US=2,SS=5",
     "nFiles": 2,
-    "raw_task_params": "{}",
+    "raw_task_params": {
+        "taskName": "user.a.t1",
+        "reqID": 7,
+        "jobParameters": [{"type": "constant", "value": "-i"}],
+    },
 }
 
 
@@ -597,9 +601,9 @@ async def test_a_task_not_answered_bounds_the_archive_from_100_days_before_it_wa
         ">=",
         "2026-07-05T10:00:05",
     ]
-    assert "rows" not in out
+    assert "rows" not in out and "task_params" not in out
     assert (
-        f"rows.task: jediTaskID={TID}: Task not found or error retrieving task info"
+        f"rows.task, task_params: jediTaskID={TID}: Task not found or error retrieving task info"
         in out["about"]
     )
     # the task's jobs do not depend on its row
@@ -677,9 +681,34 @@ async def test_a_tasks_rows_file_holds_its_jobs_their_histories_and_counts():
     assert "split_rule_raw" not in task and "nFiles" not in task
     assert "after" not in out
     assert (
-        "2 key(s) of the answers that are not columns of their class, left out: ['nFiles', 'raw_task_params']"
+        "1 key(s) of the answers that are not columns of their class, left out: ['nFiles']"
         in out["about"]
     )
+    # the task's parameters as the server decoded them, read when the row was
+    assert out["task_params"] == {
+        "jediTaskID": TID,
+        "value": TASK["raw_task_params"],
+        "as_of": "2026-10-13 10:00:05",
+        "clock": "client",
+        "source": "task/get_detailed_info, asked at 2026-10-13 10:00:05 on this machine's clock (UTC), "
+        "as raw_task_params: JEDI_TaskParams.taskParams decoded by the server, not the text as stored",
+    }
+    assert "raw_task_params" not in task
+
+
+async def test_a_tasks_parameters_the_server_did_not_give_are_left_out_and_said():
+    # get_task_details_json leaves the key out when it cannot read or decode the column
+    task = {k: v for k, v in TASK.items() if k != "raw_task_params"}
+    out = RB.build(await _fetch(_task_panda(task=task), TASK_Q), SPELLINGS, TABLES)
+    assert "task_params" not in out and "rows" in out
+    assert "task_params: raw_task_params is absent" in out["about"]
+    out = RB.build(
+        await _fetch(_task_panda(task=TASK | {"raw_task_params": "{}"}), TASK_Q),
+        SPELLINGS,
+        TABLES,
+    )
+    assert "task_params" not in out
+    assert "task_params: raw_task_params is str" in out["about"]
 
 
 # ------------------------------------------------------------------ spelling

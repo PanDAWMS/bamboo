@@ -10,13 +10,20 @@ from bamboo.codemap.gates import must_prints_resolve
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
     LOG_FILES_OF_MODULE,
+    MUST_PART_BIND,
+    MUST_PART_MARK,
+    MUST_PART_MESSAGE,
     MUST_ROW_WRITTEN,
     Anchor,
     Branch,
     FunctionPrintsNode,
     JunctionNode,
+    KeyFrom,
+    KeySource,
     MapFragment,
+    MustName,
     SourceModule,
+    TableRecord,
 )
 from bamboo.codemap.panda import mustprints
 from bamboo.codemap.panda.plugin import _merge_junctions
@@ -24,6 +31,16 @@ from bamboo.codemap.panda.plugin import _merge_junctions
 PACKAGE = "pkg"
 FILE = f"{PACKAGE}/m"
 DECLARED = {"JobSpec": {"PandaID", "jobStatus", "computingSite"}}
+TABLES = (
+    TableRecord(
+        name="jobsactive4", rows_of="JobSpec", identity_attrs=["JobSpec.PandaID"]
+    ),
+    TableRecord(
+        name="jedi_tasks",
+        rows_of="JediTaskSpec",
+        identity_attrs=["JediTaskSpec.jediTaskID"],
+    ),
+)
 
 
 def _line(text: str, marker: str) -> int:
@@ -41,6 +58,8 @@ def _build(
     *arms: tuple[str, str],
     subject: str = "JobSpec.jobStatus",
     others: tuple[str, ...] = (),
+    key_froms: tuple[KeyFrom, ...] = (),
+    declared: dict[str, set[str]] = DECLARED,
 ) -> MapFragment:
     """Read *text* as the build does and attach must prints to one junction per (owner, marker) of *arms*.
 
@@ -99,7 +118,7 @@ def _build(
     module = SourceModule(
         package=PACKAGE, rel_path=FILE, tree=ast.parse(text), source=text, blob_sha="0"
     )
-    mustprints.attach(junctions, nodes, [module], DECLARED)
+    mustprints.attach(junctions, nodes, [module], declared, key_froms, TABLES)
     return MapFragment(
         map_id="m", derived_from="v", junctions=junctions, function_prints=nodes
     )
@@ -412,3 +431,288 @@ def test_merged_junctions_keep_the_line_of_the_write_they_drop() -> None:
 
     (merged,) = _merge_junctions([junction(5, []), junction(9, [12]), junction(5, [])])
     assert [(b.line, b.other_lines) for b in merged.branches] == [(5, [9, 12])]
+
+
+MARKED = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def f(job):
+    if job is None:
+        tmp_id = None
+    else:
+        tmp_id = job.PandaID
+    tmp_log = LogWrapper(_logger, f"PandaID={tmp_id}")
+    if job is None:
+        return
+    tmp_log.debug("start")  # P
+    job.jobStatus = "activated"  # A
+
+
+def g(job, other):
+    tmp_id = job.PandaID
+    tmp_log = LogWrapper(_logger, f"PandaID={tmp_id}")
+    tmp_log.debug("start")  # Q
+    job = other
+    job.jobStatus = "activated"  # B
+"""
+
+
+def test_a_mark_names_the_written_row_where_the_logger_is_made_after_its_key(
+    tmp_path: Path,
+) -> None:
+    """``activateJob`` makes its logger with ``f"PandaID={tmp_id}"`` after ``tmp_id = job.PandaID``, and every
+    line it prints carries that mark: the mark names the job the arm writes.  ``tmp_id = None`` is on no run
+    that reaches the arm, which the same ``if job is None`` leaves.  Where ``job`` is bound again before the arm,
+    the mark names another job: the hole is said, not held, with why, so that no name means no hole reads the key."""
+    fragment = _build(tmp_path, MARKED, ("f", "A"), ("g", "B"))
+
+    assert _branch(fragment, "A").must_names == [
+        MustName(
+            line=_line(MARKED, "P"),
+            expression="tmp_id",
+            column="JobSpec.PandaID",
+            row=MUST_ROW_WRITTEN,
+            part=MUST_PART_MARK,
+        )
+    ]
+    assert _branch(fragment, "B").must_names == [
+        MustName(
+            line=_line(MARKED, "Q"),
+            expression="tmp_id",
+            column="JobSpec.PandaID",
+            why=mustprints.WHY_KEY_UNSHOWN,
+            part=MUST_PART_MARK,
+        )
+    ]
+
+
+SQL_ARM = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def h(self, jediTaskID, status):
+    tmp_log = LogWrapper(_logger, f"<jediTaskID={jediTaskID}>")
+    tmp_log.debug(f"set {status} for {jediTaskID}")  # S
+    varMap = {}
+    varMap[":jediTaskID"] = jediTaskID  # K
+    varMap[":status"] = status  # W
+    self.cur.execute(SQL, varMap)  # X
+
+
+def k(self, jediTaskID, status):
+    tmp_log = LogWrapper(_logger, f"<jediTaskID={jediTaskID}>")
+    tmp_log.debug(f"set {status} for {jediTaskID}")  # T
+    jediTaskID = int(jediTaskID)
+    varMap = {":jediTaskID": jediTaskID}  # L
+    varMap[":status"] = status  # V
+    self.cur.execute(SQL, varMap)  # Y
+"""
+
+
+def _term(
+    owner: str, ran: str, writes: str, filled: str, text: str = SQL_ARM
+) -> KeyFrom:
+    """``jediTaskID=:jediTaskID`` of the UPDATE *owner* runs at *ran*, writing the status at *writes*."""
+    return KeyFrom(
+        owner=f"{FILE}::{owner}",
+        file=FILE,
+        statement=_line(text, ran),
+        table="JEDI_Tasks",
+        term="jediTaskID=:jediTaskID",
+        writes={"JediTaskSpec.status": [_line(text, writes)]},
+        sources=[
+            KeySource(
+                kind="parameter",
+                line=_line(text, filled),
+                name="jediTaskID",
+                paths=["()"],
+            )
+        ],
+    )
+
+
+def test_an_sql_arm_is_named_by_what_its_statement_s_key_bind_is_filled_with(
+    tmp_path: Path,
+) -> None:
+    """An SQL arm fills a bind of a statement whose ``WHERE jediTaskID=:jediTaskID`` names the rows it writes: a
+    must print holding what that bind is filled with -- the message's hole, the mark's -- names them, where the
+    print and the fill hold one value.  Bound again between the print and the fill, it names another task: the
+    holes are said, not held, with why."""
+    fragment = _build(
+        tmp_path,
+        SQL_ARM,
+        ("h", "W"),
+        ("k", "V"),
+        subject="JediTaskSpec.status",
+        key_froms=(_term("h", "X", "W", "K"), _term("k", "Y", "V", "L")),
+        declared={**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}},
+    )
+
+    named = _branch(fragment, "W").must_names
+    assert named is not None
+    assert sorted((one.expression, one.column, one.row, one.part) for one in named) == [
+        ("jediTaskID", "JediTaskSpec.jediTaskID", MUST_ROW_WRITTEN, MUST_PART_MARK),
+        ("jediTaskID", "JediTaskSpec.jediTaskID", MUST_ROW_WRITTEN, MUST_PART_MESSAGE),
+    ]
+    unshown = _branch(fragment, "V").must_names
+    assert unshown is not None
+    assert sorted((one.expression, one.row, one.why, one.part) for one in unshown) == [
+        ("jediTaskID", "", mustprints.WHY_KEY_UNSHOWN, MUST_PART_MARK),
+        ("jediTaskID", "", mustprints.WHY_KEY_UNSHOWN, MUST_PART_MESSAGE),
+    ]
+
+
+BIND_MAP = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def p(self, jediTaskID, status):
+    tmp_log = LogWrapper(_logger, "<p>")
+    varMap = {}
+    varMap[":jediTaskID"] = jediTaskID  # K
+    varMap[":status"] = status  # W
+    tmp_log.debug(f"UPDATE T SET status=:status WHERE jediTaskID=:jediTaskID {str(varMap)}")  # P
+    self.cur.execute(SQL, varMap)  # X
+
+
+def q(self, jediTaskID, status):
+    tmp_log = LogWrapper(_logger, "<q>")
+    varMap = {}
+    tmp_log.debug(f"UPDATE T SET status=:status WHERE jediTaskID=:jediTaskID {str(varMap)}")  # Q
+    varMap[":jediTaskID"] = jediTaskID  # L
+    varMap[":status"] = status  # V
+    self.cur.execute(SQL, varMap)  # Y
+"""
+
+
+def test_a_printed_bind_map_names_the_rows_where_it_holds_the_key_bind_the_statement_runs_with(
+    tmp_path: Path,
+) -> None:
+    """``tmp_log.debug(sql + str(varMap))`` prints the map the statement runs with, after the arm's line fills the
+    status bind and before the statement writes the row: a must print.  Where its ``:jediTaskID`` entry
+    is filled before the print and not again before the run, the printed map names the task (part ``bind``).
+    Printed before the entry is filled, it does not hold it: said, not held, with why."""
+    fragment = _build(
+        tmp_path,
+        BIND_MAP,
+        ("p", "W"),
+        ("q", "V"),
+        subject="JediTaskSpec.status",
+        key_froms=(
+            _term("p", "X", "W", "K", BIND_MAP),
+            _term("q", "Y", "V", "L", BIND_MAP),
+        ),
+        declared={**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}},
+    )
+
+    # The print comes after the line filling the status bind, and before the statement runs: on the way to the write.
+    assert _branch(fragment, "W").must_prints == [_line(BIND_MAP, "P")]
+    assert _branch(fragment, "W").must_names == [
+        MustName(
+            line=_line(BIND_MAP, "P"),
+            expression="str(varMap)",
+            column="JediTaskSpec.jediTaskID",
+            row=MUST_ROW_WRITTEN,
+            part=MUST_PART_BIND,
+            bind=":jediTaskID",
+        )
+    ]
+    assert _branch(fragment, "V").must_names == [
+        MustName(
+            line=_line(BIND_MAP, "Q"),
+            expression="str(varMap)",
+            column="JediTaskSpec.jediTaskID",
+            why=mustprints.WHY_KEY_UNSHOWN,
+            part=MUST_PART_BIND,
+            bind=":jediTaskID",
+        )
+    ]
+
+
+UNREAD_MARK = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def u(self, job, varMap):
+    tmp_log = LogWrapper(_logger, f"PandaID={job.PandaID}")
+    self.logger.debug(f"start {job.jobStatus}")  # U
+    tmp_log.debug(f"map {str(varMap)}")  # M
+    job.jobStatus = "activated"  # C
+
+
+def w(self, job):
+    tmp_log = LogWrapper(_logger, f"PandaID={job.PandaID}")
+    tmp_log.debug("start")  # R
+    job.jobStatus = "activated"  # D
+"""
+
+
+def test_names_are_read_whole_where_every_must_print_s_message_mark_and_bind_map_is_read(
+    tmp_path: Path,
+) -> None:
+    """With names read whole, ``[]`` says no must print reads the key; a must print through a logger whose mark this
+    reading cannot follow -- ``self.logger``, made elsewhere -- or printing a bind map no statement of the arm runs
+    with leaves the names short of whole."""
+    fragment = _build(tmp_path, UNREAD_MARK, ("u", "C"), ("w", "D"))
+    marked = _build(tmp_path / "marked", MARKED, ("f", "A"), ("g", "B"))
+
+    assert _branch(fragment, "C").must_names_whole is False
+    assert _branch(fragment, "D").must_names_whole is True
+    assert [one.part for one in _branch(fragment, "D").must_names or []] == [
+        MUST_PART_MARK
+    ]
+    assert _branch(marked, "A").must_names_whole is True
+    assert _branch(marked, "B").must_names_whole is True
+
+
+REVERSED = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def r(self, taskSpec, status):
+    tmp_log = LogWrapper(_logger, f"<jediTaskID={taskSpec.jediTaskID}>")
+    taskID = taskSpec.jediTaskID
+    tmp_log.debug("start")  # S
+    varMap = {}
+    varMap[":jediTaskID"] = taskID  # K
+    varMap[":status"] = status  # W
+    self.cur.execute(SQL, varMap)  # X
+"""
+
+
+def test_a_hole_reading_what_the_key_s_name_is_bound_to_names_the_rows(
+    tmp_path: Path,
+) -> None:
+    """``taskID = taskSpec.jediTaskID`` fills ``:jediTaskID``, and the mark reads ``taskSpec.jediTaskID``: one
+    value through the one binding, as ``ppEventServiceJob``'s ``pandaID = job.PandaID`` under its
+    ``PandaID={job.PandaID}`` mark."""
+    fragment = _build(
+        tmp_path,
+        REVERSED,
+        ("r", "W"),
+        subject="JediTaskSpec.status",
+        key_froms=(_term("r", "X", "W", "K", REVERSED),),
+        declared={**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}},
+    )
+
+    assert _branch(fragment, "W").must_names == [
+        MustName(
+            line=_line(REVERSED, "S"),
+            expression="taskSpec.jediTaskID",
+            column="JediTaskSpec.jediTaskID",
+            row=MUST_ROW_WRITTEN,
+            part=MUST_PART_MARK,
+        )
+    ]
+    assert _branch(fragment, "W").must_names_whole is True

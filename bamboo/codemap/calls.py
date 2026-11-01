@@ -3693,7 +3693,7 @@ class Types:
             recorded = self._recorded_at(file, func, expression)
             if recorded is not None:
                 return recorded
-        if instances and (builtin := self._builtin_instance(file, func, expression)):
+        if instances and (builtin := self._builtin_instance(file, func, expression, depth, seen)):
             return frozenset({(BUILTIN, builtin)}), False
         if isinstance(expression, ast.Call):
             hook = self._copy_hook(file, expression.func) if instances else None
@@ -3797,12 +3797,18 @@ class Types:
             return frozenset(found), opened
         return frozenset(), True
 
-    def _builtin_instance(self, file: str, func: ast.AST, expression: ast.expr) -> str:
+    def _builtin_instance(
+        self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0, seen: frozenset = frozenset()
+    ) -> str:
         """The builtin type *expression* builds an instance of -- ``"list"`` for ``[]`` or ``sorted(x)`` -- or ``""``.
 
         A literal, a comprehension, a string constant; a call of a builtin
         type's name the module and the function leave unbound; a container
-        class of the standard library, imported.  ``tmp_list.append(x)`` on
+        class of the standard library, imported; a builtin's method on a value
+        of a builtin type, where :mod:`callfacts` says what it hands back -- the
+        receiver's own kind for ``update_msg_dict.copy()``
+        (:data:`callfacts.BUILTIN_METHODS`), a text or its parts for a ``str``'s
+        (:data:`callfacts.TEXT_METHODS`).  ``tmp_list.append(x)`` on
         such a value is a builtin's method, not a call to a corpus function
         named ``append`` -- ``ListWithLock.append`` had a thousand calls by
         its name that could not be told from it.
@@ -3832,6 +3838,19 @@ class Types:
             held = self.imports(file).get(called.value.id)
             if held is not None and not held[1] and (held[0], called.attr) in _LIBRARY_CONTAINERS:
                 return called.attr
+        if isinstance(called, ast.Attribute):
+            kinds, opened = self._values(file, func, called.value, depth + 1, instances=True, seen=seen)
+            if opened or len(kinds) != 1 or next(iter(kinds))[0] != BUILTIN:
+                return ""
+            kind = next(iter(kinds))[1]
+            method = callfacts.BUILTIN_METHODS.get((kind, called.attr))
+            if method is not None and method.gives is not None and method.gives.part == callfacts.SELF:
+                return kind
+            text = callfacts.TEXT_METHODS.get(called.attr) if kind == "str" else None
+            if text is not None and text.gives in (callfacts.TEXT, callfacts.JOINED):
+                return "str"
+            if text is not None and text.gives == callfacts.PARTS:
+                return "list" if called.attr in ("split", "rsplit", "splitlines") else "tuple"
         return ""
 
     def _copy_hook(self, file: str, called: ast.expr) -> Optional[str]:

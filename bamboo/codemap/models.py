@@ -393,6 +393,10 @@ class ConditionalGuard(BaseModel):
 
 #: :attr:`MustName.row` for a hole holding a column of the row the arm writes.
 MUST_ROW_WRITTEN = "written"
+#: :attr:`MustName.part`: a hole of the message, of the logger's mark, or an entry of a printed bind map.
+MUST_PART_MESSAGE = "message"
+MUST_PART_MARK = "mark"
+MUST_PART_BIND = "bind"
 
 
 class MustName(BaseModel):
@@ -424,6 +428,18 @@ class MustName(BaseModel):
         ),
     )
     why: str = Field(default="", description="Why the hole is not known to hold the written row's column.")
+    part: str = Field(
+        default=MUST_PART_MESSAGE,
+        description=(
+            f"Where the print holds the value: {MUST_PART_MESSAGE!r}, a hole of the message (read with "
+            f":attr:`PrintRow.capture`); {MUST_PART_MARK!r}, a hole of the logger's mark, taken where the logger is "
+            f"made (:attr:`PrintRow.prefix_capture`) -- ``create_tagged_logger(comment, f\"PandaID={{tmp_id}}\")``; "
+            f"{MUST_PART_BIND!r}, the entry *bind* of a printed bind map."
+        ),
+    )
+    bind: str = Field(
+        default="", description=f"The bind map's key, ``:jediTaskID``, where *part* is {MUST_PART_BIND!r}."
+    )
 
 
 #: :attr:`HistoryPair.row` where the history row is the arm's row: the writer
@@ -794,7 +810,11 @@ class Branch(BaseModel):
             "The lines of the owner's print statements that run before the "
             "statement at ``line`` on every path from the function's entry, "
             "exceptions included -- see :mod:`bamboo.codemap.panda.mustprints`.  "
-            "A run without one of these lines did not reach the arm.  The "
+            "For an SQL arm, whose row is written where its statement runs, "
+            "also those on every path from the arm to the run: "
+            "``tmp_log.debug(sql + comment + str(varMap))`` before "
+            "``self.cur.execute(sql + comment, varMap)``.  "
+            "A run without one of these lines did not write through the arm.  The "
             "level, files and rows are the owner's :class:`FunctionPrintsNode` "
             "statement at the line.  ``None`` when not read, with "
             "``must_hole``; ``[]`` when read and none is."
@@ -805,9 +825,21 @@ class Branch(BaseModel):
         description=(
             "The holes of the must prints that read an attribute of the object "
             "the arm writes, each saying whether it holds the written row's "
-            "column.  ``None`` when not read, with ``must_hole``: the names of "
-            "an arm that does not write the subject as an object's attribute "
-            "-- an SQL statement's binds -- are not read yet."
+            "column, and those holding a key of the written row, in the message "
+            "or the logger's mark (:attr:`MustName.part`) -- for an SQL arm, the "
+            "values its statement's row-naming binds are filled with.  ``None`` "
+            "when not read, with ``must_hole``: an arm writing the subject "
+            "neither as an object's attribute nor by a statement's bind."
+        ),
+    )
+    must_names_whole: bool = Field(
+        default=False,
+        description=(
+            "Whether ``must_names`` was read over every must print whole: its message (no row refused), its logger's "
+            "mark (made in the function, a mark with no hole, or a logger marking nothing) and, for an SQL arm, the "
+            "bind map its statement runs with.  Then ``[]`` says no must print's hole reads the written row's key; "
+            "``False`` leaves ``[]`` unknown.  A hole printing a whole object (``str(job)``) is not read for the key "
+            "inside it."
         ),
     )
     must_hole: str = Field(
@@ -4911,6 +4943,32 @@ SKELETON_PRINT = "print"
 SKELETON_ARM = "arm"
 
 
+class MapEntry(BaseModel):
+    """An entry a printed map may hold where it is printed, and what fills it.
+
+    ``varMap[":status"] = taskSpec.status`` before ``tmpLog.debug(sql + comment + str(varMap))``: the record prints
+    ``':status': 'running'``, and this says the value is ``taskSpec.status``.
+    """
+
+    key: str = Field(
+        description=(
+            "The key: its value where the source spells it (``:status``); where it is computed, the source's "
+            "spelling of it (``crKey``, ``f':old_{i}'``); empty for a map bound to a spec's ``valuesMap()``."
+        )
+    )
+    expression: str = Field(description="What fills the entry, as the source spells it.")
+    line: int = Field(description="The line filling it: the store, or the binding whose literal holds it.")
+    computed: bool = Field(default=False, description="Whether the key is computed at run time.")
+    row: str = Field(
+        default="",
+        description=(
+            "Where the entries are a spec's ``valuesMap()`` copied -- ``for k, v in taskSpec.valuesMap().items(): "
+            "varMap[k] = v``, or the map bound to it -- the spec, ``taskSpec``: each key is ``:`` and an attribute "
+            "of it, holding that attribute."
+        ),
+    )
+
+
 class SkeletonHole(BaseModel):
     """One hole of a printed line, and the expression the source fills it with.
 
@@ -4934,6 +4992,31 @@ class SkeletonHole(BaseModel):
             "every turn; where they are, each way's parts are joined in order "
             "and are holes or text like any other.  Always the last hole, and "
             "left out of the pattern."
+        ),
+    )
+    group: int = Field(
+        default=0,
+        description=(
+            "The group of the row's ``capture`` -- of ``prefix_capture`` for a hole of the mark -- that holds what "
+            "this hole printed, counted from 1.  Holes side by side share one, whose text is theirs joined: "
+            "``f\"{a}{b}\"`` cannot say where ``a`` ends.  0 where the row has no capture."
+        ),
+    )
+    entries: Optional[list[MapEntry]] = Field(
+        default=None,
+        description=(
+            "Where the hole prints a map whole (``str(varMap)``), the entries it may hold there, on the binding "
+            "that reaches the print: each filled after it on a path to the print and not filled again before it "
+            "(:func:`mapentries.entries`).  ``None`` where the hole is not read as a map; ``[]``, a map with no "
+            "entry known."
+        ),
+    )
+    entries_open: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where *entries* is read, the lines on a path to the print where the map may get entries the source "
+            "does not spell: ``varMap.update(other)``, a call it is handed to, ``varMap = f()``; 0 for a "
+            "parameter.  Empty: *entries* are every entry it may hold."
         ),
     )
 
@@ -4989,6 +5072,19 @@ class SkeletonLine(BaseModel):
         default_factory=list,
         description="Every hole of the pattern, in order, with what fills it.",
     )
+    capture: str = Field(
+        default="",
+        description=(
+            "The line as a pattern that reads its holes' values back: every hole a group (:attr:`SkeletonHole.group`), "
+            "closed as ``pattern`` closes it, the leading ones kept and the last running to the end of the text.  "
+            "Searched in a record's message with ``re.S``, so a last hole takes the record's continuation lines too "
+            "-- ``str(varMap)`` after an SQL text, a traceback after ``f\"execute() : {e}\"``; or, after "
+            "``prefix_capture``, matched against the record whole (:func:`bamboo.codemap.trace.reads_whole`), which "
+            "tells the row's own line from another row's holding its text.  Apart from "
+            "``pattern``, the text a search sends, which leaves out the holes at either end because an unanchored "
+            "search asks nothing more with them.  Empty when refused."
+        ),
+    )
     prefix: str = Field(
         default="",
         description=(
@@ -5039,6 +5135,14 @@ class SkeletonLine(BaseModel):
             "filling it spells them."
         ),
     )
+    prefix_capture: str = Field(
+        default="",
+        description=(
+            "The mark as a pattern that reads ``prefix_holes``' values back: each a group, in order, the literal at "
+            "its ends without blanks.  Matched whole against the mark a record carries between its level and its "
+            "message, its blanks stripped -- ``get_result < async_id=(.*?) >``.  Empty where ``prefix`` is."
+        ),
+    )
     arms: list[int] = Field(
         default_factory=list,
         description=(
@@ -5073,11 +5177,13 @@ class PrintRow(BaseModel):
     holes: list[SkeletonHole] = Field(
         default_factory=list, description="As :attr:`SkeletonLine.holes`."
     )
+    capture: str = Field(default="", description="As :attr:`SkeletonLine.capture`.")
     prefix: str = Field(default="", description="As :attr:`SkeletonLine.prefix`.")
     prefix_hole: str = Field(default="", description="As :attr:`SkeletonLine.prefix_hole`.")
     prefix_holes: list[SkeletonHole] = Field(
         default_factory=list, description="As :attr:`SkeletonLine.prefix_holes`."
     )
+    prefix_capture: str = Field(default="", description="As :attr:`SkeletonLine.prefix_capture`.")
 
 
 #: How a print statement's ``log_files`` was found -- see

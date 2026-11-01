@@ -90,7 +90,7 @@ from bamboo.codemap.models import (
     SkeletonLine,
     TraceStep,
 )
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap.panda import mapentries, pathcond
 
 # ``logging_arguments`` is the build's own spelling of which calls are log
 # calls, reused rather than restated: the map's question and the trace's
@@ -724,6 +724,122 @@ def line_pattern(message: ast.JoinedStr) -> str:
     return _pattern(message, None, "")
 
 
+def line_capture(message: ast.JoinedStr) -> tuple[str, list[int]]:
+    """The line as :attr:`SkeletonLine.capture` writes it, and the group holding each hole's value, in order.
+
+    Every hole is a group, closed as :func:`_pattern` closes it (:func:`_bound`), so the two cannot drift apart.
+    What the pattern leaves out is kept: the holes at either end, where a reader reads a value, the last running to
+    the end of the text.  Holes side by side are one group, the text they print together -- ``f"{a}{b}"`` cannot
+    say where ``a`` ends.  ``("", [])`` where the line has no pattern.
+    """
+    if literal_length(message) == 0:
+        return "", []
+    out: list[str] = []
+    groups: list[int] = []
+    run: list[int] = []
+
+    def close() -> None:
+        if not run:
+            return
+        if len(run) == 1:
+            bound = _bound(message, run[0])
+        else:
+            after = run[-1] + 1
+            following = _literal_text(message.values[after]) if after < len(message.values) else ""
+            bound = ".*?" if following else ".*"
+        out.append(f"({bound})")
+        groups.extend([(groups[-1] if groups else 0) + 1] * len(run))
+        run.clear()
+
+    for position, part in enumerate(message.values):
+        if isinstance(part, ast.FormattedValue):
+            run.append(position)
+            continue
+        literal = _literal_text(part)
+        if literal:
+            close()
+            out.append(re.escape(literal))
+    close()
+    return "".join(out), groups
+
+
+def hole_values(
+    row: PrintRow | SkeletonLine, message: str, token: Optional[str] = None, whole: bool = False
+) -> Optional[tuple[list[str], list[str]]]:
+    """What *row*'s holes printed in a record whose message is *message*, and -- given the record's mark *token* --
+    what its prefix holes printed: ``(by hole, by prefix hole)``, in their order, a hole sharing its group with its
+    neighbours given their text joined.  ``None`` where the row does not read the record: no capture, the message
+    not found, or a mark it does not match.  The reading every reader of a row's values shares.
+
+    With *whole*, read where the record is the row's line from end to end (:func:`reads_whole`), the mark and the
+    message as one match: a text hole then runs to the literal the rest of the line needs, not to the first."""
+    if whole:
+        matched = _whole_match(row, token, message)
+        if matched is None:
+            return None
+        line, before = matched
+        read = [line.group(before + hole.group) for hole in row.holes]
+        return read, [line.group(hole.group) for hole in row.prefix_holes] if row.prefix_capture else []
+    if not row.capture:
+        return None
+    found = re.search(row.capture, message, re.S)
+    if found is None:
+        return None
+    values = [found.group(hole.group) for hole in row.holes]
+    marks: list[str] = []
+    if token is not None and row.prefix_holes:
+        mark = re.fullmatch(row.prefix_capture, token.strip(), re.S) if row.prefix_capture else None
+        if mark is None:
+            return None
+        marks = [mark.group(hole.group) for hole in row.prefix_holes]
+    return values, marks
+
+
+def reads_whole(row: PrintRow | SkeletonLine, token: Optional[str], message: str) -> Optional[bool]:
+    """Whether a record is *row*'s line whole, not only a line holding its text.
+
+    *token* and *message* are the record after its level as a reader split it -- the mark it cuts off first, or the
+    first word where there is none -- and *message* holds the continuation lines too.  They are joined again and read
+    by the row's mark (``prefix_capture``) and then its message (``capture``), anchored at both ends; the blanks at
+    the ends and between the two are not counted, since a reader's split drops one and a ``MsgWrapper``'s token starts
+    with one a padded level hides.  ``"start"`` does not read ``start jediTaskID=12 status=ready`` whole, while
+    ``f"start for {commandStr}"`` reads ``start for retry``, though its pattern ends at ``for``.  A ``LogWrapper``'s
+    prefix is read wherever the split left it.  ``None`` where the row cannot say: it has no capture, or its logger
+    may write a mark this reading did not read (``prefix_hole``)."""
+    if not _reads_whole_at_all(row):
+        return None
+    return _whole_match(row, token, message) is not None
+
+
+def _reads_whole_at_all(row: PrintRow | SkeletonLine) -> bool:
+    """Whether *row* says its whole line: a capture, and a mark read or none written."""
+    return bool(row.capture) and (bool(row.prefix) or not row.prefix_hole)
+
+
+def _whole_match(
+    row: PrintRow | SkeletonLine, token: Optional[str], message: str
+) -> Optional[tuple[re.Match[str], int]]:
+    """The match reading the record whole (:func:`reads_whole`), and how many of its groups are the mark's."""
+    if not _reads_whole_at_all(row):
+        return None
+    head, before = "", 0
+    if row.prefix_capture:
+        # The logger writes a blank after a mark whose pattern ends with one.
+        head = row.prefix_capture + (r"\s+" if row.prefix.endswith("\\ ") and row.capture else r"\s*")
+        before = re.compile(row.prefix_capture).groups
+    pattern = re.compile(r"\s*" + head + row.capture + r"\s*", re.S)
+    # A record with no message after its mark is the mark alone: no blank after it for a last hole to take.
+    lines = [message] if not token else [f"{token} {message}" if message else token]
+    if token and token.endswith(">"):
+        # A bracketed mark may be followed by the message with no blank between.
+        lines.append(token + message)
+    for line in lines:
+        found = pattern.fullmatch(line)
+        if found is not None:
+            return found, before
+    return None
+
+
 def _enclosing_statement(node: ast.AST) -> Optional[ast.stmt]:
     """The statement *node* sits in, so a call is placed where the source puts it.
 
@@ -828,19 +944,32 @@ def _called_name(call: ast.Call) -> str:
     return called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
 
 
-def _holes_of(message: ast.expr) -> list[SkeletonHole]:
-    """Every hole of a rendered message, with the expression that fills it."""
+def _holes_of(
+    message: ast.expr, groups: Sequence[int] = (), func: Optional[ast.AST] = None, at: Optional[ast.stmt] = None
+) -> list[SkeletonHole]:
+    """Every hole of a rendered message, with the expression that fills it and the group of the message's capture
+    holding its value (:func:`line_capture`), 0 where there is none; a hole printing a map whole, with the entries
+    it may hold where *func* writes it out (:func:`mapentries.entries`), at *at* where the source does not say."""
     if not isinstance(message, ast.JoinedStr):
         return []
-    return [
-        SkeletonHole(
+    parts = [part for part in message.values if isinstance(part, ast.FormattedValue)]
+    holes = []
+    for number, part in enumerate(parts):
+        hole = SkeletonHole(
             expression=_text(part.value),
             prints=_hole_prints(part) or "token",
             appended=bool(getattr(part, "appended", False)),
+            group=groups[number] if number < len(groups) else 0,
         )
-        for part in message.values
-        if isinstance(part, ast.FormattedValue)
-    ]
+        name = mapentries.printed_map(part.value)
+        if name and func is not None and at is not None:
+            site = pathcond.site_of(part.value)
+            written = site if isinstance(site, ast.stmt) else at
+            read = mapentries.entries(pathcond.enclosing_function(written) or func, name, written)
+            if read is not None:
+                hole.entries, hole.entries_open = read
+        holes.append(hole)
+    return holes
 
 
 def keyed(message: ast.expr) -> bool:
@@ -1185,9 +1314,27 @@ def _prefix_holes(pieces: list) -> list[SkeletonHole]:
         SkeletonHole(
             expression=" + ".join(one.expression for one in held),
             prints=held[0].prints if len(held) == 1 else "text",
+            group=number,
         )
-        for held in holes
+        for number, held in enumerate(holes, 1)
     ]
+
+
+def _folded_capture(pieces: list) -> str:
+    """A folded mark as :attr:`SkeletonLine.prefix_capture` writes it: literal escaped, each hole lazy and a group,
+    holes side by side one, as :func:`_prefix_holes` counts them; the blanks at its ends left out."""
+    parts: list[Optional[str]] = []
+    for piece in pieces:
+        if isinstance(piece, _Unknown):
+            if not (parts and parts[-1] is None):
+                parts.append(None)
+        elif piece:
+            parts.append(piece)
+    if parts and parts[0] is not None:
+        parts[0] = parts[0].lstrip()
+    if parts and parts[-1] is not None:
+        parts[-1] = parts[-1].rstrip()
+    return "".join("(.*?)" if part is None else re.escape(part) for part in parts)
 
 
 def _is_none(given: ast.expr, nones: frozenset[str]) -> bool:
@@ -2258,7 +2405,7 @@ class _Walk:
         #: hundred logging calls asks for the same local a hundred times.
         self._sites: dict[tuple[int, str], tuple] = {}
         self._asked: dict[tuple[str, str], str] = {}
-        self._prefixes: dict[tuple[str, int], list[tuple[str, str, list[SkeletonHole]]]] = {}
+        self._prefixes: dict[tuple[str, int], list[tuple[str, str, list[SkeletonHole], str]]] = {}
         #: The walk back from a logging call to the calls making its logger (:meth:`_makers`), made on first use.
         self._loggers = None
         #: The role the name being explained was asked in -- see
@@ -3076,7 +3223,7 @@ class _Walk:
             return [[_hole(expr)]], []
         return ways, refused
 
-    def prefixes_of(self, frame: _Frame, argument: ast.expr) -> list[tuple[str, str, list[SkeletonHole]]]:
+    def prefixes_of(self, frame: _Frame, argument: ast.expr) -> list[tuple[str, str, list[SkeletonHole], str]]:
         """The pattern a logging call's logger writes before *argument*, why it is ``""`` if it may not be, and its
         holes with what fills them -- one each per mark its paths make it with.
 
@@ -3094,24 +3241,29 @@ class _Walk:
         """
         call = getattr(argument, "parent", None)
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
-            return [("", PREFIX_NOT_A_NAME.format(logger=_text(call) if call is not None else ""), [])]
+            return [("", PREFIX_NOT_A_NAME.format(logger=_text(call) if call is not None else ""), [], "")]
         receiver = call.func.value
         key = (frame.file, id(call))
         if key in self._prefixes:
             return self._prefixes[key]
         makers, stopped = self._makers().makers_of(frame.file, frame.func, call)
         marks = [self._mark_of(maker) for maker in makers] if makers and not stopped else []
-        said: list[tuple[str, str, list[SkeletonHole]]]
+        said: list[tuple[str, str, list[SkeletonHole], str]]
         if not marks:
             said = [self._bound_prefix(frame, receiver)]
         elif any(pieces is None for pieces, _why in marks):
             why = next(why for pieces, why in marks if pieces is None)
-            said = [("", why.replace("{logger}", _text(receiver)), [])]
+            said = [("", why.replace("{logger}", _text(receiver)), [], "")]
         else:
             distinct = {_spelled(pieces): pieces for pieces, _why in marks}
             said = sorted(
                 (
-                    (_folded_pattern(pieces) + r"\ " if pieces else "", "", _prefix_holes(pieces))
+                    (
+                        _folded_pattern(pieces) + r"\ " if pieces else "",
+                        "",
+                        _prefix_holes(pieces),
+                        _folded_capture(pieces) if pieces else "",
+                    )
                     for pieces in distinct.values()
                 ),
                 key=lambda one: (one[0], [hole.expression for hole in one[2]]),
@@ -3119,18 +3271,23 @@ class _Walk:
         self._prefixes[key] = said
         return said
 
-    def _bound_prefix(self, frame: _Frame, receiver: ast.expr) -> tuple[str, str, list[SkeletonHole]]:
+    def _bound_prefix(self, frame: _Frame, receiver: ast.expr) -> tuple[str, str, list[SkeletonHole], str]:
         """The prefix of a logger that is a local this function binds once by a call, or why there is none: read
         where the walk back to its makers stops short (:meth:`prefixes_of`)."""
         if not isinstance(receiver, ast.Name):
-            return "", PREFIX_NOT_A_NAME.format(logger=_text(receiver)), []
+            return "", PREFIX_NOT_A_NAME.format(logger=_text(receiver)), [], ""
         bound = pathcond.single_definition(frame.func, receiver.id)
         if not isinstance(bound, ast.Call):
-            return "", _unbuilt(frame.func, receiver.id, bound), []
+            return "", _unbuilt(frame.func, receiver.id, bound), [], ""
         pieces, why = self._logger_prefix(frame, bound)
         if pieces is None:
-            return "", why.replace("{logger}", receiver.id), []
-        return (_folded_pattern(pieces) + r"\ " if pieces else ""), "", _prefix_holes(pieces)
+            return "", why.replace("{logger}", receiver.id), [], ""
+        return (
+            (_folded_pattern(pieces) + r"\ " if pieces else ""),
+            "",
+            _prefix_holes(pieces),
+            _folded_capture(pieces),
+        )
 
     def _makers(self):
         """The walk from a logging call back to the calls making its logger: the log files' (:mod:`logfile`)."""
@@ -3451,16 +3608,18 @@ class _Walk:
             for message in self._expanded(frame, written.expr, argument):
                 if isinstance(message, ast.JoinedStr):
                     pattern = line_pattern(message)
+                    capture, groups = line_capture(message)
                     value, hole, because = self._value_hole(
                         frame, message, [self.armed[arm] for arm in arms]
                     )
                 else:
-                    pattern = _constant_pattern(message)
+                    pattern = capture = _constant_pattern(message)
+                    groups = []
                     value, hole, because = "", "", ""
                 refused = "" if pattern else _refusal(message)
                 # A row per mark the logger is made with on its paths: the line carries one of them.
-                for prefix, prefix_hole, prefix_holes in (
-                    self.prefixes_of(frame, argument) if pattern else [("", PREFIX_REFUSED, [])]
+                for prefix, prefix_hole, prefix_holes, prefix_capture in (
+                    self.prefixes_of(frame, argument) if pattern else [("", PREFIX_REFUSED, [], "")]
                 ):
                     # Deduped on what the row would *say*, refusals included: one
                     # call can resolve to several messages that render the same,
@@ -3482,10 +3641,12 @@ class _Walk:
                             pattern=pattern,
                             refused=refused,
                             keyed=bool(pattern) and keyed(message),
-                            holes=_holes_of(message),
+                            holes=_holes_of(message, groups, frame.func, statement),
+                            capture=capture,
                             prefix=prefix,
                             prefix_hole=prefix_hole,
                             prefix_holes=prefix_holes,
+                            prefix_capture=prefix_capture,
                             arms=sorted(arms),
                             value=value,
                             hole=hole,
@@ -5857,9 +6018,11 @@ def function_prints(
                         refused=row.refused,
                         keyed=row.keyed,
                         holes=row.holes,
+                        capture=row.capture,
                         prefix=row.prefix,
                         prefix_hole=row.prefix_hole,
                         prefix_holes=row.prefix_holes,
+                        prefix_capture=row.prefix_capture,
                     )
                 )
             cls = pathcond.class_of(tree, func)
