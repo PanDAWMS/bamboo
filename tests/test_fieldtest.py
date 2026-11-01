@@ -397,7 +397,7 @@ FAKE_QUERIER = textwrap.dedent(
     if not os.environ.get("FAKE_NO_RESULT"):
         outcome = (
             {"kind": "stop", "step": "S1", "text": "STOP S1: 1 ask(s)", "code": "asks"}
-            if asking
+            if asking and not os.environ.get("FAKE_END_ASKING")
             else {"kind": "end", "step": "S1", "text": "END a legitimate wait", "code": None}
         )
         result = {
@@ -570,6 +570,20 @@ def test_a_recorded_run_answers_the_asks_and_runs_the_querier_again(
         rec["score"]["terminal"] == "END" and rec["read"]["ok"] and first["read"]["ok"]
     )
     assert "rounds 2: the querier asks nothing more" in F.line(rec)
+
+
+def test_a_recorded_run_answers_the_asks_of_an_end_too(
+    tmp_path, recording, monkeypatch
+):
+    monkeypatch.setenv("FAKE_RECORD", "write")
+    monkeypatch.setenv("FAKE_END_ASKING", "1")
+    rec = F.run_case(
+        recording, _records_case(tmp_path), tmp_path / "batch", record=True
+    )
+    first, second = rec["rounds"]
+    assert first["score"]["terminal"] == "END" and first["score"]["asks"]["count"] == 1
+    assert first["record"]["exit"] == 0 and "record" not in second
+    assert rec["ended"] == "the querier asks nothing more"
 
 
 def test_a_recorded_run_stops_where_the_recording_step_does_not_settle(

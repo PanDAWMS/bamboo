@@ -11,25 +11,24 @@ logs, and, for a replayed case, the output it must reproduce.  Nothing here
 knows a case: every step reads its arguments from the case file.
 
 **Rounds.**  A run is one round of the querier in ``<case>/r1/``.  With
-``--record``, a round that stops on asks (``code`` ``asks``) is followed by the
-recording step, which answers them from production into the case's records
-directory, and the querier runs again in ``r<n+1>/``, until it asks nothing,
-the recording step exits other than 0 (3: a day file still being compressed;
-4: every ask deferred, a grep or a list having failed), or ``--rounds`` are
-done.  An ask the recording step defers is asked again by the next round.  The
-recording step runs from the tree this module is in, where PanDA's credentials
-load (the home's ``cwd``).  Each case runs into ``<batch>/<name>/``, so the
-cases of a batch have distinct names.
+``--record``, a round that asks (result.json's ``asks``), whatever its outcome
+-- an END may ask too -- is followed by the recording step, which answers them
+from production into the case's records directory, and the querier runs again in
+``r<n+1>/``, until it asks nothing, the recording step exits other than 0 (3: a
+day file still being compressed; 4: every ask deferred, a grep or a list having
+failed), or ``--rounds`` are done.  An ask the recording step defers is asked
+again by the next round.  The recording step runs from the tree this module is
+in, where PanDA's credentials load (the home's ``cwd``).  Each case runs into
+``<batch>/<name>/``, so the cases of a batch have distinct names.
 
 **Rows asks.**  A querier whose run tree takes ``--rows-asks`` (querier-ra) is
-handed ``rows-asks.jsonl`` beside its out.txt, and result.json's
-``rows_asks`` counts what it wrote.  With ``--record``, a round with rows asks
--- coded ``rows`` when they are all it stops for, ``asks`` when it asks the
-logs too -- is followed by the rows step (:mod:`rowsask`), which answers them
-from production into the records directory (``rows-r<n>.json``), and a case
-whose rows file is built from its answers is built again with every round of
-them (``r<n+1>/rows.json``; :func:`rows.answered`).  An sql ask no call reads
-is listed for a hand; a hand's answers in the records directory
+handed ``rows-asks.jsonl`` beside its out.txt, and result.json's ``rows_asks``
+counts what it wrote.  With ``--record``, a round with rows asks, whatever its
+outcome, is followed by the rows step (:mod:`rowsask`), which answers them from
+production into the records directory (``rows-r<n>.json``), and a case whose
+rows file is built from its answers is built again with every round of them
+(``r<n+1>/rows.json``; :func:`rows.answered`).  An sql ask no call reads is
+listed for a hand; a hand's answers in the records directory
 (``hand-r<n>.json``) are laid into the rows file's ``answers``
 (:func:`rows.hand_answers`).
 
@@ -660,10 +659,9 @@ def run_case(
         if not record:
             break
         s = one["score"]
-        logs = s["code"] == "asks"
-        rows_asked = s["code"] in ("asks", "rows") and bool(
-            (s["rows_asks"] or {}).get("count")
-        )
+        # what the round asked, whatever its outcome: an END may ask too
+        logs = bool((s["asks"] or {}).get("count"))
+        rows_asked = bool((s["rows_asks"] or {}).get("count"))
         hand = rows_asked and built is None
         if hand:
             # no answer can be laid over a hand's rows file: the rows asks stay unanswered
