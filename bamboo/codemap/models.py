@@ -810,7 +810,11 @@ class Branch(BaseModel):
             "The lines of the owner's print statements that run before the "
             "statement at ``line`` on every path from the function's entry, "
             "exceptions included -- see :mod:`bamboo.codemap.panda.mustprints`.  "
-            "A run without one of these lines did not reach the arm.  The "
+            "For an SQL arm, whose row is written where its statement runs, "
+            "also those on every path from the arm to the run: "
+            "``tmp_log.debug(sql + comment + str(varMap))`` before "
+            "``self.cur.execute(sql + comment, varMap)``.  "
+            "A run without one of these lines did not write through the arm.  The "
             "level, files and rows are the owner's :class:`FunctionPrintsNode` "
             "statement at the line.  ``None`` when not read, with "
             "``must_hole``; ``[]`` when read and none is."
@@ -826,6 +830,16 @@ class Branch(BaseModel):
             "values its statement's row-naming binds are filled with.  ``None`` "
             "when not read, with ``must_hole``: an arm writing the subject "
             "neither as an object's attribute nor by a statement's bind."
+        ),
+    )
+    must_names_whole: bool = Field(
+        default=False,
+        description=(
+            "Whether ``must_names`` was read over every must print whole: its message (no row refused), its logger's "
+            "mark (made in the function, a mark with no hole, or a logger marking nothing) and, for an SQL arm, the "
+            "bind map its statement runs with.  Then ``[]`` says no must print's hole reads the written row's key; "
+            "``False`` leaves ``[]`` unknown.  A hole printing a whole object (``str(job)``) is not read for the key "
+            "inside it."
         ),
     )
     must_hole: str = Field(
