@@ -4908,7 +4908,10 @@ class SkeletonHole(BaseModel):
         default=False,
         description=(
             "Whether this hole is what ``+=`` adds after the message was first "
-            "written.  Always the last hole, and left out of the pattern."
+            "written, where the ways it is added are not told -- a loop adds on "
+            "every turn; where they are, each way's parts are joined in order "
+            "and are holes or text like any other.  Always the last hole, and "
+            "left out of the pattern."
         ),
     )
 

@@ -1950,7 +1950,7 @@ def f(spec, log):
     kept = [row.pattern for row in _rows_at(roots, 6)]
     replaced = [row.pattern for row in _rows_at(roots, 8)]
 
-    assert r"head" in kept and any("for\\ the\\ tail" in one for one in kept), kept
+    assert kept == [r"head\ for\ the\ tail"]
     assert replaced == [r"replaced\ outright"]
 
 
@@ -2764,11 +2764,12 @@ def f(job, log):
     (row,) = _rows_at(roots, 8)
 
     assert row.pattern == r"execute\(\)\ :\ [^\ ]*\ "
-    assert row.holes[-1].appended is True
+    assert row.holes[-1].expression == "traceback.format_exc()"
+    assert row.holes[-1].appended is False
 
 
-def test_what_plus_equals_adds_with_text_of_its_own_is_a_row_too(tmp_path):
-    """``for merge`` and ``for retry`` are what say which branch ran."""
+def test_what_plus_equals_adds_under_each_arm_of_an_if_is_a_line_with_the_text_before_it(tmp_path):
+    """``for merge`` and ``for retry`` are what say which branch ran, each after the ``sent ...`` written before."""
     roots = _tree(
         tmp_path,
         m='''\
@@ -2785,7 +2786,128 @@ def f(job, log, merging):
 
     patterns = {row.pattern for row in _rows_at(roots, 8)}
 
-    assert patterns == {r"sent\ [^\ ]*\ ", r"for\ merge", r"for\ retry"}
+    assert patterns == {r"sent\ [^\ ]*\ for\ merge", r"sent\ [^\ ]*\ for\ retry"}
+
+
+def test_a_statement_written_in_parts_with_plus_equals_is_one_line(tmp_path):
+    """``setDeftStatus_JEDI`` writes its UPDATE in three parts and prints it once.  A row per part, with a hole
+    before and after, reads lines another statement's rows read better, and a reader giving a line to the rows
+    with the most text of it gave this one away."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(task, log, varMap, comment):
+    task.status = "done"
+    sqlD = "UPDATE T_TASK "
+    sqlD += "SET status=:status "
+    sqlD += "WHERE taskID=:jediTaskID "
+    log.debug(sqlD + comment + str(varMap))
+""",
+    )
+
+    (row,) = _rows_at(roots, 7)
+
+    assert row.pattern == re.escape("UPDATE T_TASK SET status=:status WHERE taskID=:jediTaskID ")
+    assert [hole.expression for hole in row.holes] == ["comment", "str(varMap)"]
+
+
+def test_what_a_loop_adds_on_every_turn_is_a_hole_after_the_binding(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(job, log, ids):
+    job.status = "sent"
+    msg = "ids:"
+    for one in ids:
+        msg += f" {one}"
+    log.debug(msg)
+""",
+    )
+
+    (row,) = _rows_at(roots, 7)
+
+    assert row.pattern == r"ids:"
+    assert row.holes[-1].appended is True
+
+
+def test_what_a_way_adds_before_it_returns_is_not_on_the_line(tmp_path):
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(job, log, bad):
+    job.status = "sent"
+    msg = "sent "
+    if bad:
+        msg += "badly"
+        return
+    msg += "well"
+    log.debug(msg)
+""",
+    )
+
+    assert [row.pattern for row in _rows_at(roots, 9)] == [r"sent\ well"]
+
+
+def test_each_outright_binding_is_joined_with_what_is_added_after_it(tmp_path):
+    """Two bindings, each a line with the ``+=`` after them -- and a binding one way makes is that way's line."""
+    both = _tree(
+        tmp_path / "both",
+        m="""
+def f(job, log, retry):
+    job.status = "sent"
+    if retry:
+        msg = "retry "
+    else:
+        msg = "first "
+    msg += "of the job"
+    log.debug(msg)
+""",
+    )
+    one = _tree(
+        tmp_path / "one",
+        m="""
+def f(job, log, fresh):
+    job.status = "sent"
+    msg = "old "
+    if fresh:
+        msg = "new "
+    msg += "line"
+    log.debug(msg)
+""",
+    )
+
+    assert {row.pattern for row in _rows_at(both, 9)} == {r"retry\ of\ the\ job", r"first\ of\ the\ job"}
+    assert {row.pattern for row in _rows_at(one, 8)} == {r"old\ line", r"new\ line"}
+
+
+def test_a_message_added_to_in_more_ways_than_are_joined_is_read_as_before(tmp_path):
+    """Five ``if``s are 32 ways: the binding, then a hole, and each ``+=`` a row of its own."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(job, log, a, b, c, d, e):
+    job.status = "sent"
+    msg = "start"
+    if a:
+        msg += " alpha"
+    if b:
+        msg += " beta"
+    if c:
+        msg += " gamma"
+    if d:
+        msg += " delta"
+    if e:
+        msg += " epsilon"
+    log.debug(msg)
+""",
+    )
+
+    rows = _rows_at(roots, 15)
+
+    assert [row.pattern for row in rows] == [r"start"] + [
+        re.escape(" " + word) for word in ("alpha", "beta", "gamma", "delta", "epsilon")
+    ]
+    assert rows[0].holes[-1].appended is True
 
 
 def test_an_f_string_of_a_local_prints_the_rows_the_local_does(tmp_path):
@@ -2811,7 +2933,7 @@ def f(job, log):
     said = [{(row.pattern, row.refused) for row in _rows_at(roots, 11)} for roots in (bare, fstring)]
 
     assert said[0] == said[1]
-    assert (r"\ :\ [^\ ]*\ in\ ", "") in said[0]
+    assert ("\\ :\\ [^\\ ]*\\ in\\ [^\\\n]*\\\n", "") in said[0]
     assert ("", "no literal text to ask with") in said[0]
 
 
