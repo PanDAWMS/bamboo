@@ -157,9 +157,10 @@ Where a step stops for rows the rows file does not have, it says them as an ask 
 row by its class and the key the dump's tables name its identity by, and the attribute; the element's class is
 `null`, not known here), S5's call whose rows, history or counts the file lacks (`statement`: the proxy's statements
 the call runs as `<file>:<line>`, the tables it reads, each argument's value in each pass -- `"unknown"` where the
-run's is not known -- and the passes' times), L3's answers the file lacks (`sql`: the question's name and SQL, a
-GroupsNow's `db_read` form -- table, WHERE, the columns grouped by, the key it takes the least of -- and none for the
-window over the history), and a statement S1 or L2 compares with a class the file has no row of (`Rerun.ask_linked`,
+run's is not known -- and the passes' times), L3's answers the file lacks (`sql`: the question's name, its SQL and
+its structure, `question` (`parts.asked`): the part, the moment or the window, the terms read then and those read
+now, the columns grouped by, the key and how it ranks, the columns an answer holds -- and no `db_read` form, both
+being windows over the history: K48), and a statement S1 or L2 compares with a class the file has no row of (`Rerun.ask_linked`,
 the 4th place, the harness's to-querier-57: `collection` with the attribute `null` and the class named, `where`,
 the class's columns the statement's joins compare with the row's, with the row's values -- the task's datasets by
 jediTaskID -- and `via`, each pair by name as the rows file's `linked` names one (`from` the row's class, `to` the
@@ -177,26 +178,10 @@ them is the harness's (stage 2); until it reads them the file keeps its sections
 names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
 walk does not read as a row's attribute asks nothing.
 
-L3's `db_read` form gives the WHERE as db_read's conditions, `[column, op]` or `[column, op, value]`, all of which
-hold (the harness's ask 4, 10-29: a WHERE in text is not passed to db_read), where every term is one column tested
-against a value: each term read as the map reads a WHERE (`sqltext.row_tests`), a bind's value the run's as its
-print holds it, a quoted constant a text and another a number (`parts.condition`).  db_read takes `=`, `!=`, `<`,
-`<=`, `>`, `>=`, `in`, `is null`, `is not null`.  A term that is none -- an OR, `NOT IN`, an expression of columns,
-the database's clock, another column, a value that is no number or text -- keeps the form's WHERE text, and L3 says
-each such term under the SQL ("db_read takes no ..."): a term is said whole or not at all, since dropping one
-counts rows the call did not pass.  db_read refuses a value whose type is not its column's (`bad_value`); the
-querier gives the run's, not knowing the column's type.  On pin m one statement reaches L3, getJobs@2404, and only
-D and D-rec of the querier's and the harness's cases reach it, with three terms, all said.  The harness's records
-hold 293 of getJobs' prints: 291 of that shape; 2 (the unified pilot's, in N-rec and A-rec) with
-`(minRamCount<=:minRamCount OR minRamCount=0)` and `(maxDiskCount<=:maxDiskCount OR maxDiskCount=0)`, which keep
-the text (out/dw/dw-predictions.txt).
-
-*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`; "-- db_read takes no ..." under L3's SQL.
+*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
 *Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
 place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
-a comparison that takes the row where some joined row holds the terms, which is not built.  When a case reaches L3
-with an OR: db_read could still answer it, the OR's columns grouped by and the groups that fail the OR dropped by the
-querier, or the OR's branches asked apart where no row can pass two; neither is built.
+a comparison that takes the row where some joined row holds the terms, which is not built.
 
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 
@@ -574,6 +559,50 @@ MT-defined-late's stay is the 65th of 71).  `--since` names the stay by the time
 *Shows:* a stop at L1 that names the stays (how many; the first, the last, the longest) where the value has more than
 one and no stay is named.  The cases carry it once the harness writes `question.since` and fieldtest hands it on.
 *Revisit:* when a question means every stay, or the longest, rather than one the case names.
+
+### K48. L3 counts the rows held ahead at the move, some of their terms as they are now
+
+L3 (`Rerun.ordered`) reads a value that moved on late because the statement that took the row returns only the first
+rows of one of its orders.  It counted the rows that pass the call's WHERE now (GroupsNow), grouped by the other
+order's columns with the key left out, so a late case got today's rows, not the ones it lost to, and an order of the
+key alone ('pandaid asc', MJ-activated-late) left no column and stopped.  Now (tmaeno: "OK", 11-01):
+- the order, one rule: its items before the key group the rows, the key ranks them within a group, and the items
+  after it decide nothing (the key is unique).  The key alone is one group.  An order without the key leaves its
+  ties in an order the database picks: its own group is said, not counted ahead;
+- late asks the rows that held the value at the move, the window's end: those whose last history row before it is
+  the value (`parts.HeldAt`).  The call's terms on the subject go (the history's value stands for them); a term
+  reading the subject with another column stops.  Terms on columns the history holds are read on that row; the
+  others on the row as it is now (A1), and the END names them;
+- the window's moves (`parts.MovedOn`) count, per group, those with a key ahead of the row's, under the same terms:
+  the ones the history holds on the history row each left, the others on the row as it is now.  Before, the terms
+  on columns the history does not hold were dropped there (MJ-activated-late's resource_type and RAM and disk
+  terms), and the held ones were read on any row in the window;
+- checks: the row itself is counted once, in its own group, or the run stops naming the terms read as now; an
+  earliest entry within an hour of the lookback says the count is "at least";
+- the ask carries the question's structure beside its SQL (K36).  Neither question has a db_read form:
+  jobs_StatusLog is not on db_read's allowlist (panda-server asyncprocess/db_read/tables.py), and
+  job/get_status_history takes keys, not a value and a site.  So the answers are a hand's SQL, or a fetch by the
+  parts, until PanDA answers the structure.
+
+What stays:
+- the order's columns are read as they are now (currentpriority, gshare); a term read as now that changed since
+  the move (a time column) counts other rows than the call did;
+- the window's moves are asked of the keys with a history row in the window under the held terms: a key whose rows
+  there all differ from the row it left (its site changed at the move) is not counted;
+- the lookback: 8 days before the move (`L3_LOOKBACK`: copyArchive.py:509-512 kills an activated job created more than
+  7 days before; D's group waited up to 169.1 h).  A row that entered the value earlier is not counted;
+- only the call that took the row is read: its WHERE and binds, and the other order counted.  The calls that passed
+  it over -- each picks its order by a draw (entity_module getSortingCriteria: by age about one in nine, else by
+  gshare) and its binds from the pilot's request -- are not read;
+- stuck does not reach L3: no call of a stuck row's statement is read (S1 asks the logs for the key, which a call that
+  passed the row over does not print), and M2's "takes it" reads no first-rows statement in the five sets.  Its way
+  in, and its count now from the row tables, are a design of their own (part B).
+
+*Shows:* L3's two questions under their names "... held V at the move, by the order's items before the key" and
+"... left V in the window, by the value it went to and the key"; "at the move (T): N row(s) ahead of it (G in groups
+ahead, K of its own group's M with a key ahead)"; the END's "read as now: ..." and "-- at least: ...".
+*Revisit:* when a stuck case's first-rows statement is read (part B); when the calls that passed the row over are
+read; when PanDA answers a history held at a moment.
 
 ## Row values at a step's time (`held.py`)
 

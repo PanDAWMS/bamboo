@@ -4743,7 +4743,7 @@ def test_a_collection_the_rows_file_lacks_is_asked_by_its_rows_class_key_and_att
             import json
             from types import SimpleNamespace as N
             from bamboo.querier import evaluate as E
-            from bamboo.querier import mapdump, parts as PT, rerun
+            from bamboo.querier import mapdump, rerun
 
             # the dump's tables name a class's identity
             mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="FileSpec", identity_attrs=["FileSpec.row_ID"]),
@@ -4757,71 +4757,154 @@ def test_a_collection_the_rows_file_lacks_is_asked_by_its_rows_class_key_and_att
             step = N(line=7, owner="pandaserver/a.py::f")
             for iterable in ("<job>.Files", "<job>.Files", "tmp_list"):
                 r.ask_collection(iterable, step, env)
-            # a GroupsNow carries its db_read form; a MovedOn, a window over the history, its SQL only
-            now = PT.GroupsNow("getJobs@2404", "ATLAS_PANDA.jobsActive4", "jobStatus='activated'", [("gshare", "asc")], "pandaid", [])
-            print(json.dumps([list(r.rows_asks.values()), PT.db_read(now)]))
+            print(json.dumps(list(r.rows_asks.values())))
             """,
         )
     )
-    asked, form = json.loads(out.splitlines()[-1])
+    asked = json.loads(out.splitlines()[-1])
     # once, by the job's key the dump names; a local name is no row to ask of
     assert asked == [{"rows": {"kind": "collection", "row": {"entity": "JobSpec", "key": {"PandaID": 7}}, "attr": "Files", "entity": None},
                       "step": "R2", "why": "@7 f loops over <job>.Files, which the rows file does not have"}]
-    assert form == {"table": "ATLAS_PANDA.jobsActive4", "where": "jobStatus='activated'", "group_by": ["gshare"], "least": "pandaid"}
 
 
-def test_l3s_db_read_form_takes_the_where_as_conditions_where_each_term_is_one_column_tested_against_the_runs_values(tmp_path):
+def test_l3_counts_the_rows_held_ahead_at_the_move_by_the_orders_items_before_the_key_and_the_key_within(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import rows as R
+
+    r.opened, r.ends = [], []
+    r.args.patterns, r.args.key = "outside", "7"
+    sql = ("SELECT * FROM (SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab WHERE {} ORDER BY {}) WHERE ROWNUM<=:njobs")
+    plain = "jobStatus=:s AND computingSite=:site AND resource_type=:rt"
+    # the call's print, cut into its text and binds as the map's printed_by says
+    R.function = lambda rel, func, within=(): N(rows=[N(line=12, matches=lambda rec, mode: (1, ""))])
+    rerun.sqltext.cut = lambda text, lead, gap: (text, {":s": "activated", ":site": "pic", ":rt": "SCORE"})
+    rerun.Rerun._row_of = lambda self, cls: {"PandaID": {"value": 7}, "currentPriority": {"value": 100}}
+    held = "q@10 held 'activated' at the move, by the order's items before the key"
+    left = "q@10 left 'activated' in the window, by the value it went to and the key"
+
+    def run(took, other, answers=None, where=plain):
+        r.lines, r.ends, r.rows_asks = [], [], {}
+        r.data["answers"] = answers or {}
+        st = N(owner="pandaserver/a.py::q", line=10, limits=["<= :njobs"], order_by=[took, other],
+               printed_by=[N(line=12, lead="", gap="")], order_holes=[])
+        record = N(text=sql.format(where, took), span="a.log@1", stamp="2026-01-05 00:00:00,000")
+        try:
+            r.ordered(rerun.Ordered(st, N(records=[record]), q))
+            return ["END", r.ends[-1][1]]
+        except rerun.Stop as e:
+            return ["STOP", str(e), [a["rows"]["question"] | {"name": a["rows"]["name"]} for a in r.rows_asks.values()],
+                    next((x for x in r.lines if "the row sorts by" in x), None)]
+
+    def at(*groups, first="2026-01-02 00:00:00"):
+        return {"source": "the hand's SQL", "rows": [
+            {"CURRENTPRIORITY": p, "N": n, "N_KEY_AHEAD": k, "N_SELF": me, "FIRST_ENTERED": first} for p, n, k, me in groups]}
+
+    window = {"source": "the hand's SQL", "rows": [
+        {"next_value": "sent", "currentpriority": 100, "n": 3, "n_key_ahead": 1, "min_h": 1, "median_h": 1.5, "max_h": 2}]}
+    groups = [(200, 5, 3, 0), (100, 4, 2, 1), (50, 9, 9, 0)]
+    alone = run("currentpriority desc, pandaid asc", "pandaid asc")
+    # the items after the key decide nothing: modificationtime is no group
+    grouped = run("pandaid asc", "currentpriority desc, pandaid asc, modificationtime asc", {held: at(*groups), left: window})
+    keyless = run("pandaid asc", "currentpriority desc", {held: at(*groups), left: window})
+    print(json.dumps({
+        "alone": alone,
+        "grouped": grouped,
+        "keyless": keyless,
+        "least": run("pandaid asc", "currentpriority desc, pandaid asc", {held: at(*groups, first="2025-12-28 00:30:00"), left: window}),
+        "not self": run("pandaid asc", "currentpriority desc, pandaid asc", {held: at((100, 4, 2, 0), (50, 1, 1, 1)), left: window}),
+        "lacking": run("pandaid asc", "currentpriority desc, pandaid asc",
+                       {held: {"source": "s", "rows": [{"currentpriority": 100, "n": 4}]}, left: window}),
+        "mixed": run("pandaid asc", "currentpriority desc, pandaid asc",
+                     where="(jobStatus=:s OR computingSite=:site) AND resource_type=:rt"),
+    }))
+    """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # an order of the key alone is one group: the two questions asked, by their structure beside the SQL; the terms on
+    # the subject go (the history's value stands for them), those on a column the history holds are read at the move,
+    # the others on the row as it is now
+    kind, why, asks, sorts = got["alone"]
+    assert kind == "STOP" and why.startswith("L3: the answers to")
+    assert sorts.startswith("  under 'pandaid asc' the row sorts by its key alone, pandaid asc -> ")
+    at_ask, left_ask = asks
+    assert at_ask["name"] == "q@10 held 'activated' at the move, by the order's items before the key"
+    assert at_ask["part"] == "H held at" and at_ask["group_by"] == [] and at_ask["key_order"] == "asc"
+    assert at_ask["at"] == "2026-01-05 00:00:00" and at_ask["lookback"] == "2025-12-28 00:00:00"
+    assert at_ask["terms_at"] == ["computingSite='pic'"] and at_ask["terms_now"] == ["resource_type='SCORE'"]
+    assert at_ask["columns"] == ["n", "n_key_ahead", "n_self", "first_entered"]
+    assert left_ask["part"] == "H moved on" and left_ask["columns"] == ["next_value", "n", "n_key_ahead", "min_h", "median_h", "max_h"]
+    assert left_ask["terms_at"] == ["computingSite='pic'"] and left_ask["terms_now"] == ["resource_type='SCORE'"]
+    # grouped by the items before the key, the key ranking within its own group: 5 in the group ahead, 2 of its own
+    kind, end = got["grouped"]
+    assert kind == "END" and end == (
+        "END lost on order: q@10 returns the first rows of 'currentpriority desc, pandaid asc, modificationtime asc' or of "
+        "'pandaid asc'; under the "
+        "first, at the move (2026-01-05 00:00:00) 7 row(s) at the call's WHERE held 'activated' ahead of it (5 in groups "
+        "ahead, 2 of its own group's 4 with a key ahead); its group left 'activated': 3 to sent after 1-2 h (1 with a key "
+        "ahead) (this row to 'sent'); read as now: resource_type='SCORE', the order's currentpriority; the calls that "
+        "passed it over are not read (their orders and binds); the call that took it used 'pandaid asc'")
+    # an order without the key: its ties are in an order the database picks, and none of its own group is counted ahead
+    assert "(5 in groups ahead, its own group's 4, their order among them not known)" in got["keyless"][1]
+    # an earliest entry within an hour of the lookback: "at least"
+    assert "-- at least: the earliest entry counted, 2025-12-28 00:30:00, is within an hour of the lookback" in got["least"][1]
+    # the row itself not in its own group: a term read as now fails for it
+    assert got["not self"][:2] == ["STOP", "L3: the row itself, once, in its own group of those that held 'activated' at "
+                                   "the move under the call's WHERE (the answer counts it 0 time(s) there, 1 in all; the "
+                                   "terms read on the row as it is now: [\"resource_type='SCORE'\"])"]
+    assert got["lacking"][1].startswith("L3: the answer to \"q@10 held 'activated' at the move, by the order's items before "
+                                        "the key\" holding the column(s) ['n_key_ahead', 'n_self', 'first_entered']")
+    # a term reading the subject with another column: neither the moment nor now reads it alone
+    assert got["mixed"][1] == ("L3: a term of the call's WHERE on JobSpec.jobStatus alone, which the history's value stands "
+                               "for ((jobStatus='activated' OR computingSite='pic') reads ['computingsite'] too)")
+
+
+def test_l3s_questions_read_the_history_at_the_move_and_the_row_as_it_is_now(tmp_path):
     out = _ok(
         _run(
             tmp_path,
             """
+            import datetime as dt
             import json
-            from bamboo.codemap.panda import sqltext
-            from bamboo.querier import parts as PT, rerun
+            from bamboo.querier import parts as PT
 
-            def where(terms, binds):
-                sql = f"SELECT * FROM (SELECT PandaID FROM ATLAS_PANDA.jobsActive4 tab WHERE {terms} ORDER BY PandaID) WHERE ROWNUM<=:njobs"
-                query = sqltext.printed(sql).queries[-1]
-                said, unsaid = rerun._db_read_where(query, binds)
-                now = PT.GroupsNow("getJobs@2404", query.spelled[0], "<the text>", [("gshare", "asc")], "pandaid", [], [],
-                                   None if unsaid else said)
-                return [said, unsaid, PT.db_read(now)["where"]]
-
-            got = {
-                # D's call, its binds as the print holds them
-                "D": where("jobStatus=:oldJobStatus AND computingSite=:computingSite AND prodSourceLabel IN (:p1,:p2)",
-                           {":oldJobStatus": "activated", ":computingSite": "BOINC_MCORE", ":p1": "managed", ":p2": "test"}),
-                # each op db_read takes; a constant a number or a text; a bind keyed without its colon; BETWEEN as two
-                "ops": where("jobExecutionID=1 AND x<>'a' AND lockedby IS NULL AND lockedtime IS NOT NULL"
-                             " AND currentPriority BETWEEN :lo AND 5.5 AND 3<attemptNr AND maxCpuCount>=:c",
-                             {"lo": 10, ":c": 2}),
-                # a term db_read takes none of keeps the WHERE text
-                "unsaid": where("jobStatus=:s AND (minRamCount<=:m OR minRamCount=0) AND jediTaskID NOT IN (:e1)"
-                                " AND minramcount / NVL(corecount, 1)<=:a AND modificationTime<CURRENT_DATE-1"
-                                " AND maxDiskCount<=minRamCount AND cloud=:none AND gshare=:flag",
-                                {":s": "activated", ":m": 2000, ":e1": 5, ":a": 2.5, ":none": None, ":flag": True}),
-            }
-            print(json.dumps(got))
+            h = PT.history("JobSpec.jobStatus")
+            at = dt.datetime(2026, 1, 5)
+            def held(cols, order):
+                return PT.HeldAt(h, "activated", at, at - dt.timedelta(days=8), ["computingSite='pic'"], ["resource_type='SCORE'"],
+                                 cols, "pandaid", 7, order)
+            def moved(now):
+                return PT.MovedOn(h, "activated", dt.datetime(2026, 1, 1), at, ["computingSite='pic'"], now, [], "pandaid", 7, "desc")
+            print(json.dumps([PT.draw(held([], "asc")), PT.draw(held([("currentpriority", "desc")], None)), PT.draw(moved([])),
+                              PT.draw(moved(["resource_type='SCORE'"]))]))
             """,
         )
     )
-    got = json.loads(out.splitlines()[-1])
-    d = [["jobStatus", "=", "activated"], ["computingSite", "=", "BOINC_MCORE"], ["prodSourceLabel", "in", ["managed", "test"]]]
-    assert got["D"] == [d, [], d]
-    ops = [["jobExecutionID", "=", 1], ["x", "!=", "a"], ["lockedby", "is null"], ["lockedtime", "is not null"],
-           ["currentPriority", ">=", 10], ["currentPriority", "<=", 5.5], ["attemptNr", ">", 3], ["maxCpuCount", ">=", 2]]
-    assert got["ops"] == [ops, [], ops]
-    assert got["unsaid"] == [
-        [["jobStatus", "=", "activated"]],
-        [["(minRamCount<=:m OR minRamCount=0)", "an OR, or no one column's test"],
-         ["jediTaskID NOT IN (:e1)", "NOT IN, which db_read does not take"],
-         ["minramcount / NVL(corecount, 1)<=:a", "not a column tested against a value"],
-         ["modificationTime<CURRENT_DATE-1", "compared with CURRENT_DATE - 1, a clock"],
-         ["maxDiskCount<=minRamCount", "compared with minRamCount, a column"],
-         ["cloud=:none", ":none is None, not a number or a text"],
-         ["gshare=:flag", ":flag is True, not a number or a text"]],
-        "<the text>",
-    ]
+    alone, keyless, moved, moved_now = json.loads(out.splitlines()[-1])
+    lines = alone.splitlines()
+    entries, latest = next(x for x in lines if "modificationTime >= " in x), next(x for x in lines if "WHERE rn = 1" in x)
+    # the terms the history holds, read on each key's last row before the move; the others on the row as it is now
+    assert "jobStatus = 'activated'" in entries and "computingSite='pic'" in entries
+    assert "modificationTime < TO_DATE('2026-01-05 00:00:00'" in entries and "TO_DATE('2025-12-28 00:00:00'" in entries
+    assert latest == "  WHERE rn = 1 AND jobStatus = 'activated' AND computingSite='pic'),"
+    assert "ORDER BY l.modificationTime DESC, l.modiftime_extended DESC) AS rn" in alone
+    assert all("resource_type='SCORE'" in x for x in lines if x.startswith("    SELECT pandaid FROM ATLAS_PANDA"))
+    # the key alone: one group, the rows ahead those with a smaller key, the row itself counted
+    assert ("SELECT COUNT(*) AS n, COUNT(CASE WHEN h.pandaid < 7 THEN 1 END) AS n_key_ahead, COUNT(CASE WHEN h.pandaid = 7 "
+            "THEN 1 END) AS n_self, MIN(h.entered) AS first_entered") in alone and "GROUP BY j." not in alone
+    # an order without the key counts none ahead by it; grouped by the order's items
+    assert "n_key_ahead" not in keyless and "GROUP BY j.currentpriority" in keyless
+    # the window's moves: the key's rank by its order, and no join to the rows when nothing groups or filters them
+    assert "COUNT(CASE WHEN s.pandaid > 7 THEN 1 END) AS n_key_ahead" in moved and "JOIN j" not in moved
+    # the terms the history holds, read on the row each left; the others on the row as it is now
+    left = moved_now.splitlines()
+    assert "         LAG(l.computingsite) OVER (PARTITION BY l.pandaid ORDER BY l.modificationTime, l.modiftime_extended) AS computingsite," in left
+    assert next(x for x in left if "WHERE before_value" in x).endswith("AND computingSite='pic'),")
+    assert all("resource_type='SCORE'" in x for x in left if x.startswith("    SELECT pandaid FROM ATLAS_PANDA"))
+    assert "FROM s JOIN j ON j.pandaid = s.pandaid" in moved_now and "resource_type" not in moved
 
 
 def test_the_writers_the_map_hands_lose_the_arms_it_says_write_no_row(tmp_path):

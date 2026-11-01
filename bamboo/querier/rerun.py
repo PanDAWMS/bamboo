@@ -1480,6 +1480,10 @@ UTC_CLOCKS = {"naive_utcnow", "datetime.utcnow", "datetime.now(utc)", "CURRENT_D
 #: why a term on a column the row holds NULL fails (SQL's NULL; ``_leaf``, ``_pair_fails``)
 #: movers_of's word for a mover the map's guarded_by gives (a writer whose write requires the value)
 GUARDED = "its write requires the value"
+#: how far back L3 asks a row's entry into the value it held at the move (``parts.HeldAt``): copyArchive.py:509-512
+#: kills an activated job created more than 7 days before, and D's group waited up to 169.1 h (its W2 answer).  A row
+#: that entered earlier is not counted; an earliest entry within an hour of the bound says the count is "at least"
+L3_LOOKBACK = datetime.timedelta(days=8)
 
 
 def _identity_attrs(cls: str) -> list[str]:
@@ -1761,23 +1765,6 @@ def _same_order(mine: tuple, ran: tuple) -> bool:
     return len(mine) == len(ran) and all(
         a.blanked or (a.expression, a.descending) == (b.expression, b.descending) for a, b in zip(mine, ran, strict=True)
     )
-
-
-def _db_read_where(query, binds: dict) -> tuple[list[list], list[tuple[str, str]]]:
-    """The WHERE of *query*, a printed query of one table, as db_read's conditions with the run's *binds*
-    (:func:`parts.condition`), and each term none says, with why.  Each term is read as the map reads a WHERE
-    (``sqltext.row_tests``) and said whole or not at all: an OR is no one test, and dropping a term would count rows
-    the call did not pass."""
-    said, unsaid = [], []
-    for term in query.where:
-        tests = sqltext.row_tests(f"SELECT * FROM {query.spelled[0]} WHERE {term.text}")
-        got = [PT.condition(test, binds) for test in tests]
-        why = next((c for c in got if isinstance(c, str)), "" if tests else "an OR, or no one column's test")
-        if why:
-            unsaid.append((term.text, why))
-        else:
-            said += got
-    return said, unsaid
 
 
 def _intersect(a: list, b: list) -> list:
@@ -4850,43 +4837,59 @@ class Rerun:
         cls = self.args.subject.split(".")[0]
         row = {k.lower(): v["value"] for k, v in self._row_of(cls).items()}
         key_col = next((k for k, v in row.items() if str(v) == self.args.key), None)
-        # the table, the WHERE and the binds of the query that sorted
-        table = query.spelled[0] if len(query.spelled) == 1 else None
+        # the WHERE and the binds of the query that sorted
         unfilled = sorted({b for t in query.where for b in sqltext.unfilled(t.text, binds)})
         self.need(f"the run's value of every bind of the call's WHERE (not written in: {unfilled})", not unfilled)
         filled = [sqltext.filled(t.text, binds) for t in query.where]
         cut = " AND ".join(filled) if filled else None
-        self.need("the table, WHERE and binds of the call that moved it on"
-                  + (f" ({read.failure})" if read.failure else ""), table and cut and key_col)
+        self.need("the WHERE and binds of the call that moved it on" + (f" ({read.failure})" if read.failure else ""),
+                  cut and key_col)
         self.say(f"  the call's WHERE: {cut}")
-        conditions, unsaid = _db_read_where(query, binds)
-        # a blanked item the map's order_holes says ranks by a column of the row (getJobs' (CASE ...) by gshare):
-        # grouped by, its ranking computed at run time -- a row of another value is neither ahead nor behind here
+        # the order, one rule: its items before the key group the rows, the key ranks them within a group, and the
+        # items after it decide nothing (the key is unique); an order of the key alone is one group.  A blanked item
+        # the map's order_holes says ranks by a column of the row (getJobs' (CASE ...) by gshare) is grouped by, its
+        # ranking computed at run time -- a row of another value is neither ahead nor behind here
         holes = {h.item: h for h in getattr(st, "order_holes", None) or [] if h.order == other}
-        spelled, blank, ranked = [], [], []
+        cols, blank, ranked, key_order = [], [], [], None
         for i, item in enumerate(sqltext.order_items(other)):
             hole = holes.get(i)
-            if not item.blanked and item.columns == (item.expression,):
-                spelled.append((item.expression.split(".")[-1].lower(), "desc" if item.descending else "asc"))
+            column = item.expression.split(".")[-1].lower() if not item.blanked and item.columns == (item.expression,) else None
+            if column is not None and column == key_col:
+                key_order = "desc" if item.descending else "asc"
+                break
+            if column is not None:
+                cols.append((column, "desc" if item.descending else "asc"))
             elif hole and hole.subjects and all(x.partition(".")[0] == cls for x in hole.subjects):
                 ranked += [(item.expression, x.partition(".")[2].lower(), hole.computed_at) for x in hole.subjects]
+                cols += [(x.partition(".")[2].lower(), "ranked") for x in hole.subjects]
             else:
                 blank.append(item.expression)
-        sorts = [(c, "ranked") for _, c, _ in ranked] + spelled
-        cols = [(c, d) for c, d in sorts if c != key_col]
         self.say(f"  under {other!r} the row sorts by "
-                 + "; ".join(f"{c} {'(ranked at run time)' if d == 'ranked' else d} -> {row.get(c, '?')}" for c, d in sorts)
+                 + "".join(f"{c} {'(ranked at run time)' if d == 'ranked' else d} -> {row.get(c, '?')}; " for c, d in cols)
+                 + (f"{'then its key' if cols else 'its key alone,'} {key_col} {key_order} -> {row.get(key_col)}" if key_order else
+                    f"the order does not hold its key {key_col}: its ties are in an order the database picks")
                  + (f"; the map leaves {blank} blank" if blank else ""))
-        self.need("a column of the other order to group the rows by", cols)
         history = self.need(f"a history of {self.args.subject} to ask the window of", PT.history(self.args.subject))
-        # the call's terms the history can filter on, by the columns it says it holds
-        terms = [f for t, f in zip(query.where, filled, strict=True)
-                 if t.columns and all(c.split(".")[-1].lower() in history.held for c in t.columns)]
+        # the call's terms: on the subject, the history's value stands for them; on the columns the history holds, read
+        # at the moment (the move, or the row each left); the others on the row as it is now
+        attr = self.args.subject.split(".")[1].lower()
+        held, now = [], []
+        for t, f in zip(query.where, filled, strict=True):
+            named = {c.split(".")[-1].lower() for c in t.columns}
+            if attr in named:
+                self.need(f"a term of the call's WHERE on {self.args.subject} alone, which the history's value stands for "
+                          f"({f} reads {sorted(named - {attr})} too)", named == {attr})
+                continue
+            (held if named and named <= history.held else now).append(f)
         miss = q.q
+        mine = row.get(key_col)
+        lookback = miss.moved - L3_LOOKBACK
         questions = {
-            f"{where} groups now": PT.GroupsNow(where, table, cut, cols, key_col, blank, ranked, None if unsaid else conditions),
-            f"{where} left {miss.observed!r} in the window, by the value it went to": PT.MovedOn(
-                history, miss.observed, miss.since, miss.moved, terms, cols, key_col
+            f"{where} held {miss.observed!r} at the move, by the order's items before the key": PT.HeldAt(
+                history, miss.observed, miss.moved, lookback, held, now, cols, key_col, mine, key_order
+            ),
+            f"{where} left {miss.observed!r} in the window, by the value it went to and the key": PT.MovedOn(
+                history, miss.observed, miss.since, miss.moved, held, now, cols, key_col, mine, key_order
             ),
         }
         asks = {ask: PT.draw(pq) for ask, pq in questions.items()}
@@ -4896,19 +4899,18 @@ class Rerun:
             for line in sql.splitlines():
                 self.say(f"   {line}")
             if ask not in answers:
-                form = PT.db_read(questions[ask])
-                for text, why in unsaid if form else []:
-                    self.say(f"   -- db_read takes no {text!r} ({why}): its form keeps the WHERE as text")
-                self.ask_rows({"kind": "sql", "name": ask, "sql": sql, "binds": {}} | ({"db_read": form} if form else {}),
+                # no db_read form: both are windows over the history; the structure lets a fetch answer by the parts
+                self.ask_rows({"kind": "sql", "name": ask, "sql": sql, "binds": {}, "question": PT.asked(questions[ask])},
                               f"L3's answer {ask!r}, not in the rows file")
         self.need(f"the answers to {list(asks)} in the rows file", all(ask in answers for ask in asks))
-        now_ask, window_ask = asks
-        now, window = answers[now_ask], answers[window_ask]
+        at_ask, window_ask = asks
+        moment, window = answers[at_ask], answers[window_ask]
 
         def holding(ask: str, answer: dict) -> None:
-            """An answer does not carry the SQL it answers: it must at least hold every column L3 groups by."""
+            """An answer does not carry the SQL it answers: it must at least hold every column the question's SQL
+            names."""
             held = {k.lower() for r in answer["rows"] for k in r}
-            lacking = [c for c, _ in cols if c not in held]
+            lacking = [c for c in PT.columns(questions[ask]) if c not in held]
             self.need(f"the answer to {ask!r} holding the column(s) {lacking} (it holds {sorted(held)}; "
                       f"run the SQL above)", not lacking)
 
@@ -4934,16 +4936,30 @@ class Rerun:
         def same(r: dict) -> bool:
             return all(number(r.get(c)) == number(row.get(c)) for c, _ in cols)
 
-        holding(now_ask, now)
-        rows_now = [{k.lower(): v for k, v in r.items()} for r in now["rows"]]
-        n_ahead = sum(int(r["n"]) for r in rows_now if ahead(r))
-        n_same = sum(int(r["n"]) for r in rows_now if same(r))
-        n_other = sum(int(r["n"]) for r in rows_now if other_rank(r))
+        def count(rs: list, column: str) -> int:
+            return sum(int(r.get(column) or 0) for r in rs)
+
+        holding(at_ask, moment)
+        rows_at = [{k.lower(): v for k, v in r.items()} for r in moment["rows"]]
+        own = [r for r in rows_at if same(r)]
+        self.need(f"the row itself, once, in its own group of those that held {miss.observed!r} at the move under the "
+                  f"call's WHERE (the answer counts it {count(own, 'n_self')} time(s) there, {count(rows_at, 'n_self')} in "
+                  f"all; the terms read on the row as it is now: {now or 'none'})", count(own, "n_self") == 1)
+        n_groups, n_own = count([r for r in rows_at if ahead(r)], "n"), count(own, "n")
+        n_key = count(own, "n_key_ahead") if key_order else 0
+        n_other = count([r for r in rows_at if other_rank(r)], "n")
+        firsts = sorted(str(r["first_entered"])[:19] for r in rows_at if r.get("first_entered"))
+        at_least = bool(firsts) and _when(firsts[0]) - lookback < datetime.timedelta(hours=1)
         names = [c for c, d in cols if d == "ranked"]
-        mine = f" of its {', '.join(f'{c} {row.get(c)!r}' for c in names)}" if names else ""
+        mine_rank = f" of its {', '.join(f'{c} {row.get(c)!r}' for c in names)}" if names else ""
         others = (f", {n_other} of another {'/'.join(names)}, placed by the ranking computed at run time"
                   f" ({'; '.join(at for *_, at in ranked)})") if names else ""
-        self.say(f"  now: {n_ahead} row(s){mine} sort ahead of it, {n_same} in its own group{others} ({now['source']})")
+        how = ((f"{n_groups} in groups ahead, " if cols else "")
+               + (f"{n_key} of its own group's {n_own} with a key ahead" if key_order else
+                  f"its own group's {n_own}, their order among them not known"))
+        total = n_groups + n_key
+        self.say(f"  at the move ({miss.moved}): {total} row(s){mine_rank} ahead of it ({how}){others}; the earliest "
+                 f"entry counted {firsts[0] if firsts else 'none'}, the lookback {lookback} ({moment['source']})")
         holding(window_ask, window)
         rows_win = [{k.lower(): v for k, v in r.items()} for r in window["rows"]]
         self.say(f"  left {miss.observed!r} in the window, by the value it went to ({window['source']}):")
@@ -4955,14 +4971,20 @@ class Rerun:
             for r in sorted((r for r in rows_win if str(r.get("next_value")) == nxt), key=place, reverse=True):
                 mark = "its group" if same(r) else "other" if other_rank(r) else "ahead" if ahead(r) else "behind"
                 self.say(f"    {mark:9} {' '.join(f'{k}={v}' for k, v in r.items())}")
-        own = [r for r in rows_win if same(r)]
-        self.need(f"its own group among the rows that left {miss.observed!r} in the window", own)
-        left = "; ".join(f"{r.get('n')} to {r.get('next_value')!s} after {r.get('min_h')}-{r.get('max_h')} h" for r in own)
-        self.end(f"lost on order: {where} returns the first rows of {other!r} or of {took!r}; under the first, "
-                 f"{n_ahead} row(s){mine} at the call's WHERE sort ahead of it now; its group left {miss.observed!r}: {left} "
-                 f"(this row to {miss.next_value!r}); the call that took it used {took!r}")
+        mine_left = [r for r in rows_win if same(r)]
+        self.need(f"its own group among the rows that left {miss.observed!r} in the window", mine_left)
+        left = "; ".join(f"{r.get('n')} to {r.get('next_value')!s} after {r.get('min_h')}-{r.get('max_h')} h"
+                         + (f" ({r.get('n_key_ahead')} with a key ahead)" if key_order else "") for r in mine_left)
+        as_now = [*now, *(f"the order's {c}" for c, _ in cols)]
+        self.end(f"lost on order: {where} returns the first rows of {other!r} or of {took!r}; under the first, at the "
+                 f"move ({miss.moved}) {total} row(s){mine_rank} at the call's WHERE held {miss.observed!r} ahead of it "
+                 f"({how})"
+                 + (f" -- at least: the earliest entry counted, {firsts[0]}, is within an hour of the lookback {lookback}"
+                    if at_least else "")
+                 + f"; its group left {miss.observed!r}: {left} (this row to {miss.next_value!r})"
+                 + (f"; read as now: {', '.join(as_now)}" if as_now else "")
+                 + f"; the calls that passed it over are not read (their orders and binds); the call that took it used {took!r}")
         return None
-
 
 def main() -> None:
     ap = argparse.ArgumentParser()
