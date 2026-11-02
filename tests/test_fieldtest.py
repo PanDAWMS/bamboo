@@ -72,9 +72,9 @@ def test_score_reads_an_end_and_counts_each_hand_used():
 def test_a_run_without_a_result_of_this_version_is_not_scored():
     assert F.score(None)["terminal"] == "NONE"
     assert "did not finish" in F.score(None)["why"]
-    s = F.score(STOPPED | {"version": 3})
+    s = F.score(STOPPED | {"version": 4})
     assert s["terminal"] == "NONE"
-    assert s["why"] == "result.json version 3, this reads 1 or 2"
+    assert s["why"] == "result.json version 4, this reads 1 or 2 or 3"
     assert s["steps"] == [] and s["hand"] is None
 
 
@@ -134,6 +134,29 @@ def test_a_version_2_end_with_no_end_line_says_so():
     s = F.score(ENDED_2)
     assert s["terminal"] == "END" and s["record"] is None and s["hand"] == 2
     assert "END S5 (no END line)" in _line_of(s)
+
+
+def test_a_version_3_run_is_scored_as_version_2():
+    premise = {
+        "kind": "its-condition-not-read",
+        "facts": {"line": 1407},
+        "premise_kind": "not read",
+    }
+    branch = {
+        "label": None,
+        "premises": [premise],
+        "row": {"kind": "row-statuslog", "facts": {"time": "t"}},
+    }
+    v3 = STOPPED_2 | {"version": 3}
+    v3["outcome"] = v3["outcome"] | {"branches": [branch]}
+    s = F.score(v3)
+    assert (s["terminal"], s["step"], s["code"], s["record"]) == (
+        "STOP",
+        "H2",
+        "asks",
+        F.score(STOPPED_2)["record"],
+    )
+    assert "STOP H2 at-step: asks-left  [asks]" in _line_of(s)
 
 
 def test_the_line_of_a_version_1_run_is_its_last_line():
