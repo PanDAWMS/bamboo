@@ -24,6 +24,8 @@ needs a window (``Logs.needs_window``), so the cases run on files go on as befor
   :data:`STUCK_SPAN`, to ``as_of``, when the statuslog was read.  A mover retries every few hours (tmaeno,
   2026-10-13), so the last six hours are asked first; but no pass in six hours is not no pass in the window, so S1
   asks the rest of it (``rest``) for a mover with no run of its own there (build order 2a; tmaeno, 2026-10-16).
+* L2, late (``last_part``, ``rest_of``): judgement 3's asks of the movers in the window, by the same rule with the
+  move for ``as_of`` -- only the window's end differs.
 
 SLACK is the margin the server's statuslog rows were measured to need against their runs' log times (a second;
 e1, to-querier-3), widened; JEDI's clocks were measured on five machines of nine (to-querier-13).
@@ -33,6 +35,7 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 
+from bamboo.querier import render as T
 from bamboo.querier.records import Window
 
 SLACK = datetime.timedelta(minutes=10)
@@ -46,9 +49,12 @@ class Asking:
 
     window: Window | None
     machine: str | None
-    why: str
+    why: T.Said | str
     #: the strings to ask for, where not the key alone: F3's writers' marks holding the key (``rerun.key_marks``)
     strings: tuple[str, ...] = ()
+    #: the window holds the write itself: the value is the time its writer ran (:func:`value_now`), so a writer left
+    #: alone by elimination wrote there, whether a pass of it is read or not (KNOWN_ISSUES.md K47)
+    holds_write: bool = False
 
 
 def when(text: str) -> datetime.datetime:
@@ -64,8 +70,8 @@ def at_transition(state: dict) -> Asking:
     """H2: the statuslog row's own time, on the machine that wrote it (none named: every machine)."""
     t = state["time"]
     host = state.get("host") or None
-    where = f"on {host}, the row's host" if host else "on every machine (the row names no host)"
-    return Asking((t, t), host, f"the statuslog's {state['status']!r} at {t}, {where}")
+    where = T.Said("on-the-rows-host", {"host": host}) if host else T.Said("on-every-machine-no-host")
+    return Asking((t, t), host, T.Said("window-at-transition", {"status": state["status"], "time": t, "where": where}))
 
 
 def value_held(states: list[dict], column: str, value: str, created: str | None) -> Asking:
@@ -75,11 +81,11 @@ def value_held(states: list[dict], column: str, value: str, created: str | None)
     No machine.  No window where no row carries the column, where the last row holds another value (written after it:
     no row closes the window), or where the stretch starts at the first row and *created* is not known."""
     if not any(column in s for s in states):
-        return Asking(None, None, f"the statuslog rows carry no {column}")
+        return Asking(None, None, T.Said("rows-carry-no", {"column": column}))
     if states[-1].get(column) != value:
         last = states[-1]
-        return Asking(None, None, f"the last statuslog row ({last['status']!r} at {last['time']}) holds {column}="
-                                  f"{last.get(column)!r}: written after it, and no row closes the window")
+        return Asking(None, None, T.Said("last-row-holds-another", {"status": last["status"], "time": last["time"],
+                                                                     "column": column, "value": last.get(column)}))
     k = len(states) - 1
     while k > 0 and states[k - 1].get(column) == value:
         k -= 1
@@ -87,15 +93,16 @@ def value_held(states: list[dict], column: str, value: str, created: str | None)
     if k:
         before = states[k - 1]
         lo = _down(when(before["time"]) + datetime.timedelta(seconds=1))
-        since = f"after the statuslog's {before['status']!r} at {before['time']} ({column}={before.get(column)!r})"
+        since = T.Said("after-the-row-holding", {"status": before["status"], "time": before["time"], "column": column,
+                                                 "value": before.get(column)})
     elif created:
         lo = min(_down(when(created)), first["time"])
-        since = f"from the row's creation at {created}"
+        since = T.Said("from-the-creation", {"created": created})
     else:
-        return Asking(None, None, f"the first statuslog row ({first['status']!r} at {first['time']}) holds {column}="
-                                  f"{value!r} and the row's creation time is not known")
-    return Asking((lo, first["time"]), None, f"{column}={value!r} {since} to the statuslog's {first['status']!r} at "
-                                             f"{first['time']}, on every machine (no row says which run wrote it)")
+        return Asking(None, None, T.Said("first-row-no-creation", {"status": first["status"], "time": first["time"],
+                                                                    "column": column, "value": value}))
+    return Asking((lo, first["time"]), None, T.Said("value-held", {"column": column, "value": value, "since": since,
+                                                                    "status": first["status"], "time": first["time"]}))
 
 
 def value_now(column: str, value: str) -> Asking:
@@ -105,9 +112,8 @@ def value_now(column: str, value: str) -> Asking:
     try:
         t = _down(when(value))
     except ValueError:
-        return Asking(None, None, f"{column}={value!r}, which its writers set to the time they run, is not a time")
-    return Asking((t, t), None, f"{column}={value!r}, the time its writer ran: every writer of it writes the time it "
-                                f"runs (the last write), on every machine")
+        return Asking(None, None, T.Said("value-not-a-time", {"column": column, "value": value}))
+    return Asking((t, t), None, T.Said("value-now", {"column": column, "value": value}), holds_write=True)
 
 
 def lifetime(made: str | None, read: str | None, strings: tuple[str, ...]) -> Asking:
@@ -117,12 +123,11 @@ def lifetime(made: str | None, read: str | None, strings: tuple[str, ...]) -> As
     key, not the key alone: a task's ID is on every line of the calls listing it.  No window where either end is not
     known."""
     if not made:
-        return Asking(None, None, "the row's creation time is not known")
+        return Asking(None, None, T.Said("creation-not-known"))
     if not read:
-        return Asking(None, None, "when the value was read is not known")
+        return Asking(None, None, T.Said("read-time-not-known"))
     lo, hi = _down(when(made)), _down(when(read))
-    return Asking((lo, hi), None, f"the object's life, from the row's creation at {lo} to when the value was read at {hi}, "
-                                  f"on every machine, for {', '.join(repr(s) for s in strings)}", strings)
+    return Asking((lo, hi), None, T.Said("lifetime", {"lo": lo, "hi": hi, "strings": list(strings)}), strings)
 
 
 def rows_until(states: list[dict], until: str) -> list[tuple[dict, Asking]]:
@@ -135,18 +140,24 @@ def stuck(statuslog: dict, observed: str) -> Asking:
     """S1, S2: from the observed value's row less SLACK, no earlier than as_of less STUCK_SPAN, to as_of."""
     as_of = statuslog.get("as_of")
     if not as_of:
-        return Asking(None, None, "the statuslog says no as_of (when it was read)")
+        return Asking(None, None, T.Said("no-as-of"))
     rows = [s for s in statuslog.get("states", []) if s["status"] == observed]
     if not rows:
-        return Asking(None, None, f"the statuslog has no row for {observed!r}")
-    since, upto = when(rows[-1]["time"]), when(as_of)
-    start = max(since - SLACK, upto - STUCK_SPAN)
-    bound = "its row less" if start == since - SLACK else "as_of less"
+        return Asking(None, None, T.Said("no-row-for", {"observed": observed}))
+    return last_part(observed, rows[-1]["time"], as_of, "as-of-less", T.Said("the-statuslogs-as-of", {"as_of": as_of}))
+
+
+def last_part(observed: str, since: str, end: str, end_less: str, end_said: T.Said) -> Asking:
+    """The part of a window asked first, S1's and L2's alike: from the observed value's row *since* less SLACK, no
+    earlier than *end* less STUCK_SPAN, to *end* -- stuck's as_of, late's move; only the window's end differs.
+    *end_less* is the kind that says "*end* less", *end_said* says *end*."""
+    start = max(when(since) - SLACK, when(end) - STUCK_SPAN)
+    from_row = start == when(since) - SLACK
     return Asking(
-        (_down(start), _down(upto)),
+        (_down(start), _down(when(end))),
         None,
-        f"{observed!r} since {rows[-1]['time']}; from {bound} {_minutes(SLACK if bound == 'its row less' else STUCK_SPAN)} "
-        f"to the statuslog's as_of {as_of}",
+        T.Said("last-part", {"observed": observed, "since": since, "bound": T.Said("its-row-less" if from_row else end_less),
+                             "span": _minutes(SLACK if from_row else STUCK_SPAN), "end": end_said}),
     )
 
 
@@ -157,17 +168,22 @@ def rest(statuslog: dict, observed: str) -> Asking | None:
     if first.window is None:
         return None
     since = [s for s in statuslog["states"] if s["status"] == observed][-1]["time"]
+    return rest_of(observed, since, statuslog["as_of"], first)
+
+
+def rest_of(observed: str, since: str, end: str, first: Asking) -> Asking | None:
+    """The window before *first* (:func:`last_part`'s), from the row *since* less SLACK to *end* less STUCK_SPAN; None
+    where *first* has no window or already starts at the row."""
     start = when(since) - SLACK
-    if start >= when(statuslog["as_of"]) - STUCK_SPAN:
+    if first.window is None or start >= when(end) - STUCK_SPAN:
         return None
     return Asking(
         (_down(start), first.window[0]),
         None,
-        f"{observed!r} since {since}; the rest of the window, from its row less {_minutes(SLACK)} to the last "
-        f"{_minutes(STUCK_SPAN)}, for a mover with no run of its own in those",
+        T.Said("rest-of", {"observed": observed, "since": since, "slack": _minutes(SLACK), "span": _minutes(STUCK_SPAN)}),
     )
 
 
-def _minutes(span: datetime.timedelta) -> str:
+def _minutes(span: datetime.timedelta) -> T.Said:
     m = int(span.total_seconds() // 60)
-    return f"{m // 60} h" if m % 60 == 0 else f"{m} min"
+    return T.Said("hours", {"h": m // 60}) if m % 60 == 0 else T.Said("minutes", {"m": m})

@@ -127,10 +127,19 @@ shapes read as a leading hole (an f-string's expression, a conditional) leaves t
 rows start with `job.PandaID`.  A narrowed ask is not read from a record of the whole mark cut at 1 MB over its window
 (`recorded._cut_over`): it is asked anew, so the next round reads what the cut left unread -- where the record says what
 was read for each cut string (fieldtest ca43fb9's `read`), only if a string the ask needs is cut, and an ask that
-drops the string that filled the stopped second is read from it whole (`recorded._read_for`).  H2 still asks every mark
-whole (it reads a candidate's rows in any run of the key, and a writer handed its caller's logger prints under the
-caller's mark); by the harness's count over rounds 1-5 (to-querier-64), only getTasksToBeProcessed_JEDI's marks come
-near a page's stop, and a round that stops on one is left to the recorder's split of the stopped second.
+drops the string that filled the stopped second is read from it whole (`recorded._read_for`).  H2 and F1 name their
+candidates to the door as S1 does (2026-11-02): they judge a candidate on its passes alone, and a run whose mark names
+another method is none of them (`which_ran.passes_at`, `of_mover`, K47), so a mark of a method that is no candidate is
+not asked.  Before, they asked every mark whole, for a writer handed its caller's logger, whose rows under the caller's
+mark no judge read: 6 of the harness's round 16's 7 asks were `push_job_status_message < ... >`, a mark of no
+candidate, whose run is one line already held, each a grep of a whole DBProxy log of 3.0-3.2 GB, 3 of them timed out
+(to-querier-107).  A candidate's mark they still ask whole (`Logs.log`'s *whole*): neither read as cut for the calls
+sharing it nor asked for its own rows alone, which S1 needs over a stay's hours.  At a row's moment a shared mark's run
+is one call, and read as cut it lost the must rows MT-exhausted-late's choice of getTasksToExecCommand_JEDI:4442 was
+shown by (13 records at 11:14:22-23, whole in the record); counting only its pieces near the window instead asked the
+mark over hours once the run was widened, and S1 then asked getTasksToBeProcessed_JEDI's marks over a stuck window's 6
+hours (both measured, the analyzer handover's out/k13).  A candidate's rows under a caller's method mark (a logger
+handed in) are read by neither H2 nor S1; how many such rows the map holds is not counted yet.
 
 ### K40. A truncated file with no `searched` is read up to its last record, whichever string's
 
@@ -157,9 +166,10 @@ Where a step stops for rows the rows file does not have, it says them as an ask 
 row by its class and the key the dump's tables name its identity by, and the attribute; the element's class is
 `null`, not known here), S5's call whose rows, history or counts the file lacks (`statement`: the proxy's statements
 the call runs as `<file>:<line>`, the tables it reads, each argument's value in each pass -- `"unknown"` where the
-run's is not known -- and the passes' times), L3's answers the file lacks (`sql`: the question's name and SQL, a
-GroupsNow's `db_read` form -- table, WHERE, the columns grouped by, the key it takes the least of -- and none for the
-window over the history), and a statement S1 or L2 compares with a class the file has no row of (`Rerun.ask_linked`,
+run's is not known -- and the passes' times), L3's answers the file lacks (`sql`: the question's name, its SQL and
+its structure, `question` (`parts.asked`): the part, the moment or the window, the terms read then and those read
+now, the columns grouped by, the key and how it ranks, the columns an answer holds -- and no `db_read` form, both
+being windows over the history: K48), and a statement S1 or L2 compares with a class the file has no row of (`Rerun.ask_linked`,
 the 4th place, the harness's to-querier-57: `collection` with the attribute `null` and the class named, `where`,
 the class's columns the statement's joins compare with the row's, with the row's values -- the task's datasets by
 jediTaskID -- and `via`, each pair by name as the rows file's `linked` names one (`from` the row's class, `to` the
@@ -177,26 +187,10 @@ them is the harness's (stage 2); until it reads them the file keeps its sections
 names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
 walk does not read as a row's attribute asks nothing.
 
-L3's `db_read` form gives the WHERE as db_read's conditions, `[column, op]` or `[column, op, value]`, all of which
-hold (the harness's ask 4, 10-29: a WHERE in text is not passed to db_read), where every term is one column tested
-against a value: each term read as the map reads a WHERE (`sqltext.row_tests`), a bind's value the run's as its
-print holds it, a quoted constant a text and another a number (`parts.condition`).  db_read takes `=`, `!=`, `<`,
-`<=`, `>`, `>=`, `in`, `is null`, `is not null`.  A term that is none -- an OR, `NOT IN`, an expression of columns,
-the database's clock, another column, a value that is no number or text -- keeps the form's WHERE text, and L3 says
-each such term under the SQL ("db_read takes no ..."): a term is said whole or not at all, since dropping one
-counts rows the call did not pass.  db_read refuses a value whose type is not its column's (`bad_value`); the
-querier gives the run's, not knowing the column's type.  On pin m one statement reaches L3, getJobs@2404, and only
-D and D-rec of the querier's and the harness's cases reach it, with three terms, all said.  The harness's records
-hold 293 of getJobs' prints: 291 of that shape; 2 (the unified pilot's, in N-rec and A-rec) with
-`(minRamCount<=:minRamCount OR minRamCount=0)` and `(maxDiskCount<=:maxDiskCount OR maxDiskCount=0)`, which keep
-the text (out/dw/dw-predictions.txt).
-
-*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`; "-- db_read takes no ..." under L3's SQL.
+*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
 *Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
 place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
-a comparison that takes the row where some joined row holds the terms, which is not built.  When a case reaches L3
-with an OR: db_read could still answer it, the OR's columns grouped by and the groups that fail the OR dropped by the
-querier, or the OR's branches asked apart where no row can pass two; neither is built.
+a comparison that takes the row where some joined row holds the terms, which is not built.
 
 ## S1, S2 -- the movers of a stuck value (`Rerun.stuck`, `Rerun.passes`)
 
@@ -468,15 +462,28 @@ runImpl sets modificationtime on each pass, so at G's as_of the row is refused, 
 
 ### K19. S1 does not follow a mover with no run of its own found
 
-S1 follows a mover only where a log asked for it holds a run of the key in the window asked (`_of_mover`).  One whose
+S1 follows a mover only where a log asked for it holds a run of the key in the window asked (`of_mover`).  One whose
 every ask was answered and none held such a run is not followed -- but not ruled out either: absence needs the rule
 of K15 (the whole window searched, every log its process writes to, and every run that reaches the arm bound to
 print a string the asks search by).  Since build order 2a S1 searches the whole window for such a mover (K5).  The
 third premise (`prints_naming`) holds where, before every arm, a line the map says runs on every path
 (`Branch.must_prints`) has a hole it says holds the written row's key (`must_names`, the row's key being the rows
-file's column holding the key asked).  The map reads such names off an attribute write's message only: it pairs
-neither a run's mark (`PandaID={}`) nor an SQL arm's key bind with the written row (`mustprints`), so an arm with must
-prints and no such name leaves the premise unknown.  On pin k (dce1e07's dump, out/p3 of the analyzer handover) the
+file's column holding the key asked).  Since xviii the map reads such names in the message, the run's mark and an
+SQL arm's bind map (`MustName.part`), and says whether it read them over every must print whole
+(`Branch.must_names_whole`).  Where it did and none names the key, the premise does not hold (False): a run need not
+print what the asks search by.  Where it did not, an arm with must prints and no such name leaves the premise
+unknown (None).  On xviii's dump (out/j3l of the analyzer handover, l3e's runs), 411 of the 1114 S1 movers with
+premises move from None to False so (True 311, False 271, None 121 stay); no verdict moves, since `did-not-run`
+needs True.  The False errs one way only: a print holding the key where the map does not see it (TaskCommando.py:155's
+mark holding the value the key is assigned from; a hole printing a whole object, `str(job)`) keeps a mover from
+being ruled out, never rules one out.
+
+Judgement 3 is one part, S1's and L2's (`Rerun._absence`): its asks over the window's last part, the part before it
+for a mover not reached by its key, and its premises.  The window is one rule with its end a parameter
+(`windows.last_part`, `rest_of`): stuck's as_of, late's move.  L2's use is K15's.
+
+Before xviii, on pin k (dce1e07's dump, out/p3 of the analyzer handover), with the names read off an attribute
+write's message only, the
 premise can hold for 2 of the 22 arms of the movers S1 keeps for `JobSpec.jobStatus` (datasetManager's run 735,
 retryJob 4016) and none of the 57 for `JediTaskSpec.status`; a mark holds a key column of the class on 7 and 39, the
 written row's or not -- retryChildTasks_JEDI's is the parent's, its arm writes the children.  And most of the owners
@@ -488,13 +495,14 @@ says, for each mover with no run found, which of the three hold (`premises`: `wi
 `TaskBuffer.killJobs`, `analy_pmerge_jobs_wait_time` and `get_site_strr_stats`.
 
 *Shows:* said ("no run of its own found in [...] over the whole window: not followed, though not ruled out", or "...:
-it did not run (judgement 3)"); result.json's verdict `no-run-found` or `did-not-run`, with its `premises`.
-*Revisit:* when the map pairs a run's mark and an SQL statement's key bind with the written row.
+it did not run (judgement 3)"); result.json's verdict `no-run-found` or `did-not-run`, with its `premises` (prints:
+"the lines before the arm(s) at [...] were read whole and none names the written row's [...]").
+*Revisit:* when the map sees a key a print holds through another value (a key chain, a whole object printed).
 
 ### K25. S1 does not follow a function that prints nothing of its own, and H2 stops where no writer has a log
 
 A function the map has no prints of its own for (`prints_nothing`) has no run of its own in a log, so S1 does not
-follow it.  Before, a run found in its logs was read as its own wherever the run's mark named no method (`_of_mover`),
+follow it.  Before, a run found in its logs was read as its own wherever the run's mark named no method (`of_mover`),
 and S2 then took the function's one arm by elimination with nothing read: `JediTaskSpec.setOnHold`, no logs of its own,
 was looked for in the selecting statements' -- TaskCommando's, which never calls it -- and Fo's TaskCommando run became
 "every pass left by setOnHold:807".  Where such a function's write moves the value, the map places it at each call as
@@ -507,7 +515,7 @@ value of `JobSpec.jobStatus`).
 H2 reads such a writer, where the map's history pair places its arm (`attr_time.arms`), at the pair's caller: the
 call on the way to it (`HistoryPair.point`) is the candidate, judged on the caller's run (`Rerun._h2_candidates`,
 `StandIn`; attr-time-shape.md 5).  The call is shown run by a row on every path through it, or by two of the caller's
-rows printed in a row that only a path through it prints (`which_ran.rows_around`, `rows.passes_through`:
+rows printed in a row that only a path through it prints (`which_ran.rows_around`, the map's `flow.passes_through`:
 TaskRefinerThread.runImpl's 205 and 563 around 211, extractCommon).  That says the writer was called, not that its arm
 wrote: the arm's own path condition is read in the row's values, and what is not read -- or, above level 1, the
 functions between the call and the writer -- is left open, a premise of "may have written" (K38).  Counted on the
@@ -542,17 +550,32 @@ value"; else stopped, with what is not read.
 
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
-### K15. A writer that takes a row by its key is not ruled out
+### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is not read
 
-Every writer with an arm that can move the value (`arms_of`) is listed `by key`: whether it ran on the key in the
-window is read from its runs there, which L2 does not ask.  Ruling one out needs more than finding no run: the whole
-window searched in every log its process writes to (a DB proxy method writes `panda-DBProxy.log` or
-`panda-JediDBProxy.log` by the process that called it), and its runs bound to name the key.
+Every writer with an arm that can move the value (`arms_of`) gets judgement 3, S1's part (K19), over the stay
+(`Rerun._late_absence`; tmaeno, 2026-11-01).  The window is S1's rule with the move for as_of: from the stay's row
+less SLACK, no earlier than the move less STUCK_SPAN, to the move, and the part before it for a writer not reached
+by its key.  Ruling one out needs more than finding no run: the whole window searched in every log its process
+writes to (a DB proxy method writes `panda-DBProxy.log` or `panda-JediDBProxy.log` by the process that called it), and
+its runs bound to name the key.
+- Its logs are asked only where the two premises the map decides hold (every log to hand, every run printing the
+  key); otherwise a run not found would rule nothing out, so it stays `by key` (or `could have`) with the premise
+  said.
+- On today's cases (l3e's results, xviii's dump, out/j3l): 63 of the 360 (case, mover) pairs L2 leaves are asked (66 hold both
+  premises on the records door; D runs on the file door with two logs).  A
+  stay longer than six hours (D 152.6 h, Fr1 93.2 h) is asked over its last six for a writer reached by its key, so
+  nothing is ruled out there.
+- An ask no record answers is kept for the asks file and the walk goes on: L2's movers are the answer's context, so a
+  late case ENDs with asks.
+- A writer that ran on the key in the stay is said, not followed: which way its passes went -- why it passed the row
+  over -- is not read for late.
 
-*Shows:* said (`by key`, counted among "not ruled out").
-*Revisit:* build order 2: the absence rule, the logs narrowed by the callers' processes (the map's upward union; two
-hops of `called_from` until then), the window's asks, and S2-S4 over the window for a writer that ran.  The writer
-that moved a late value on is read so (judgement 4, K45); the others are not.
+*Shows:* said ("by key -- ...; its logs are not asked: a run not found would not rule it out (...)", "ran -- ...; ran: a
+run of the key in [...] between ... and ..., and L1 names another mover", "asks unanswered -- ...; N ask(s) of its logs
+not in the records (...)", "did not run", "no run found", "not searched", "prints nothing"); result.json's movers'
+`verdict` and `premises`; "did not run" is not counted among "not ruled out".
+*Revisit:* S2-S4 over the stay for a writer that ran (the writer that moved a late value on is read so, judgement 4,
+K45); a stay longer than six hours asked whole; the logs narrowed by the callers' processes.
 
 ### K18. "Could have" needs every term known true
 
@@ -574,6 +597,50 @@ MT-defined-late's stay is the 65th of 71).  `--since` names the stay by the time
 *Shows:* a stop at L1 that names the stays (how many; the first, the last, the longest) where the value has more than
 one and no stay is named.  The cases carry it once the harness writes `question.since` and fieldtest hands it on.
 *Revisit:* when a question means every stay, or the longest, rather than one the case names.
+
+### K48. L3 counts the rows held ahead at the move, some of their terms as they are now
+
+L3 (`Rerun.ordered`) reads a value that moved on late because the statement that took the row returns only the first
+rows of one of its orders.  It counted the rows that pass the call's WHERE now (GroupsNow), grouped by the other
+order's columns with the key left out, so a late case got today's rows, not the ones it lost to, and an order of the
+key alone ('pandaid asc', MJ-activated-late) left no column and stopped.  Now (tmaeno: "OK", 11-01):
+- the order, one rule: its items before the key group the rows, the key ranks them within a group, and the items
+  after it decide nothing (the key is unique).  The key alone is one group.  An order without the key leaves its
+  ties in an order the database picks: its own group is said, not counted ahead;
+- late asks the rows that held the value at the move, the window's end: those whose last history row before it is
+  the value (`parts.HeldAt`).  The call's terms on the subject go (the history's value stands for them); a term
+  reading the subject with another column stops.  Terms on columns the history holds are read on that row; the
+  others on the row as it is now (A1), and the END names them;
+- the window's moves (`parts.MovedOn`) count, per group, those with a key ahead of the row's, under the same terms:
+  the ones the history holds on the history row each left, the others on the row as it is now.  Before, the terms
+  on columns the history does not hold were dropped there (MJ-activated-late's resource_type and RAM and disk
+  terms), and the held ones were read on any row in the window;
+- checks: the row itself is counted once, in its own group, or the run stops naming the terms read as now; an
+  earliest entry within an hour of the lookback says the count is "at least";
+- the ask carries the question's structure beside its SQL (K36).  Neither question has a db_read form:
+  jobs_StatusLog is not on db_read's allowlist (panda-server asyncprocess/db_read/tables.py), and
+  job/get_status_history takes keys, not a value and a site.  So the answers are a hand's SQL, or a fetch by the
+  parts, until PanDA answers the structure.
+
+What stays:
+- the order's columns are read as they are now (currentpriority, gshare); a term read as now that changed since
+  the move (a time column) counts other rows than the call did;
+- the window's moves are asked of the keys with a history row in the window under the held terms: a key whose rows
+  there all differ from the row it left (its site changed at the move) is not counted;
+- the lookback: 8 days before the move (`L3_LOOKBACK`: copyArchive.py:509-512 kills an activated job created more than
+  7 days before; D's group waited up to 169.1 h).  A row that entered the value earlier is not counted;
+- only the call that took the row is read: its WHERE and binds, and the other order counted.  The calls that passed
+  it over -- each picks its order by a draw (entity_module getSortingCriteria: by age about one in nine, else by
+  gshare) and its binds from the pilot's request -- are not read;
+- stuck does not reach L3: no call of a stuck row's statement is read (S1 asks the logs for the key, which a call that
+  passed the row over does not print), and M2's "takes it" reads no first-rows statement in the five sets.  Its way
+  in, and its count now from the row tables, are a design of their own (part B).
+
+*Shows:* L3's two questions under their names "... held V at the move, by the order's items before the key" and
+"... left V in the window, by the value it went to and the key"; "at the move (T): N row(s) ahead of it (G in groups
+ahead, K of its own group's M with a key ahead)"; the END's "read as now: ..." and "-- at least: ...".
+*Revisit:* when a stuck case's first-rows statement is read (part B); when the calls that passed the row over are
+read; when PanDA answers a history held at a moment.
 
 ## Row values at a step's time (`held.py`)
 
@@ -712,7 +779,7 @@ that shows <arm> ran, to read its guards in (by elimination; its conditions: ...
 marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
 row into its spec (getTasksToRefine_JEDI and the like) is told apart.
 
-### K38. H2's scan of the rows names the arms that wrote last or may have, and goes on from none of them but one
+### K38. H2's scan of the rows names the arms that wrote last or may have, and each walks on where none is the one
 
 Over the statuslog rows a writer's pass can write (K37), newest first, each row's pass is read three ways
 (`Rerun._scan`, `_row_at`, attr-time-shape.md 5; tmaeno: "a Fork over the possibilities, I'd say", 10-29): an arm shown to
@@ -731,9 +798,22 @@ P2; tmaeno: "the order does not matter much, so let's keep clearing the second s
 own guards, on the caller's run, whose passes and record after the call stand for it (`Wrote.via`).  One writer
 that prints nothing can be called twice in one pass, once shown and once not (setSuperStatus_JEDI from
 updateTask_JEDI and from getTasksToBeFinished_JEDI): the arm and the row are one, so the answer stands and the
-other calls are said; which of them was last is not read.  The steps after H2 run for no arm of several: the
-second stage's fork, whose branches are the arms and whose undecided branches end open rather than stopping the
-run, is not built.
+other calls are said; which of them was last is not read.
+
+Where H2 decides nothing, each arm left walks on from H3 (`Rerun.arms_left`, the second stage's first half): at the
+newest row it may have written at, and where an attribute's guard reads false there, at its next; with none left it is
+excluded.  A branch ends (END), stops (open), or is excluded.  What is open in it has kinds, given where it is found,
+not read off its text (`Premise`): not in the data (its run, in logs searched whole, does not show the line ran), not
+read (its runs not shown to name the key, a condition, the functions between a call and the arm, a birth's run, and a
+stop's own, unless coded asks or rows), not recorded (logs not searched whole, a stop on asks or rows).  The arms not
+excluded are the answer: one that ended is the END, with what it rests on and the older rows it may have written at
+instead; else END "written last by one of the N arm(s) left, which the data does not decide", result.json's
+`outcome.code` `one-of` and each arm in `branches` (its row, premises, kind, kinds, text, and what it put in
+result.json, such as H3's `wrote`).  None left: a stop, no arm could have.  An arm stopped on asks or rows stops the
+run on them once every arm is walked, so that one round records them.  L1 (`--late`) does not walk the arms it is left
+with: its stop names them as before.  H2's single window, where the judge chooses no candidate ("which candidate
+ran"), does not fork either: most of its arms are unexamined (no pass of the key at the window, K47), and are dropped
+only where the logs are searched whole and every way that takes the row prints the key (the map's K19).
 
 No run of the key at a row is no write only for a writer whose log some row's records show naming the key -- a run of
 it there, on any machine (`Rerun._named`).  JobGenerator's pass marks its lines `<jediTaskID=... datasetID=...>` and
@@ -748,9 +828,14 @@ loop over tasks) says it only where no loop inside the pass holds both, so it wa
 *Shows:* "-- row n of m", "wrote: <arm>" / "may have written: <arm> (<premises>)" per row, "no run of <key> at
 <time>: no writer's pass of a log that names it" where a writer's log is not shown naming it; "<arm> wrote, read at
 <call>; in the same pass also <calls>, the same arm: which call was last is not read"; a stop "one arm that
-wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)".
-*Revisit:* with the second stage (the arms' fork, and H2's single window's "which candidate ran" with it); when the
-map says what fills a print's prefix (then ask a writer's log by its mark's key).
+wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)"
+(L1's); "k arm(s) left: each walks on from H3", "==== n of k: <arm> (<rows>)" and "==== n: reached the end | STOP ... |
+excluded ..." per arm, "<arm>'s guard <g> read false in the rows' values at <row>: it did not write there; its next
+row, <row>"; an END "written last by one of the k arm(s) left, which the data does not decide: 1 <arm>: ended; 2 <arm>:
+open (<kinds>); ... (KNOWN_ISSUES.md K38)", or the one arm's END "...; it rests on: <premises>; or at an older row it may
+have written at: <rows>"; a stop "an arm that could have written ...: each of the k left is excluded".
+*Revisit:* with the second stage's second half (H2's single window's "which candidate ran", after the map's K19) and
+L1's arms; when the map says what fills a print's prefix (then ask a writer's log by its mark's key).
 
 ### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
 
@@ -860,8 +945,8 @@ each whose pass holds the inner run is named.  A call with no print every path r
 before the next statement that can leave the block (`must_rows` stops there: the next statement calls too, or the
 prints after it are in arms), is placed by the run instead (`which_ran._between_records`): the outer function's two
 records in a row around the inner run, none of its rows read between them, and c on a path from the one's print to
-the other's that prints nothing else (`rows.runs_between`, the function's own statements: blocks, arms, loops, a
-call raising to its handlers).  Other calls can run between the two records, as between c and its print before
+the other's that prints nothing else (the map's `flow.runs_between`: one flow, whose ways include a statement raising
+to its handlers).  Other calls can run between the two records, as between c and its print before
 already; only those the map's reach takes to the inner's function are named, so the join rests on the reach for the
 rest.  On x13vi1k such calls are half of what the join tries between two logs of a status's writers, and 9 of
 JediTaskSpec.status's 33 values had no other; a path holds 129 of the 132 lines with no print after, 1 of the 21 with
@@ -1006,7 +1091,7 @@ DB proxy logs).  Since xvi the map gives a print row per mark (PFX), and those t
 writer there: MJ-assigned-late and MJ-defined-late go past H2 (the analyzer handover's out/xvit).
 
 A DB proxy method's mark is the name its `comment` gives (`create_tagged_logger`).  On the pin, 12 of the 474 methods
-that call it pass a comment naming another method.  S1 reads a run as a mover's by that name (`_of_mover`), so their
+that call it pass a comment naming another method.  S1 reads a run as a mover's by that name (`of_mover`), so their
 runs are not read as their own, and updateTaskModTimeJEDI's (`updateTaskErrorDialogJEDI < <jediTaskID=N> >`) are read
 as updateTaskErrorDialogJEDI's.  The rows are not misled: the map's prefixes tell those two tags apart, and
 configurator_read_panda_sites's mark, the same as configurator_read_sites's, makes both its writers.  panda-server
@@ -1031,7 +1116,7 @@ the passes that end before the second the statuslog shows it moving on, and S3 w
   of it, the mover moved the value on its first pass of the key in the window, and the delay is in what calls it on
   the row: not followed (the callers' runs, by their keys).  Elsewhere none found is said, with why it may still have
   run.
-- The other writers L2 lists by key stay as K15 says: "a run in the window, did not move it" is not read.
+- The other writers L2 lists get judgement 3 (K15); one that ran in the window and did not move it is said, not read.
 
 *Shows:* "STOP S2: a pass of <func> before the one that moved it on at <t>: none from <since>, asked <how> -- the
 delay is in what calls <func> on the row, not followed here", or "...: none found from <since>, asked <how>, and not
@@ -1064,6 +1149,75 @@ What is still read as a loop that may go round:
 [R], not in the run)"; "settled by the rows the pass printed on the way [N]: {...}".  `WHICH_RUN_ONCE_LOOPS=0` and
 `RERUN_S3_ROWS=0` read as before.
 *Revisit:* a way back that runs off the body's end and still must print (a handler that prints "retry" and ends).
+
+### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
+
+H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one
+with the most rows proven (`run_holding`).  A mark that names no key spans every pass of a worker.
+rescueUnLockedTasksWithPicked_JEDI's `< vo=atlas label=user >` run on aipanda081 held 155 passes, with the key in
+one at 19:11.  It was read for the write at 13:09:14 that aipanda082's pass made.  A run found alone was taken as it
+was, another method's included (insertNewJob read on updateWorkers').  On m-cut2, 11 of 93 choices were such runs
+(the analyzer handover's out/wr2).
+
+Now `which_ran.passes_at` reads the runs that span the window in four steps:
+- it drops a run whose mark names another method (`of_mover`, S1's rule);
+- it cuts a run into the function's passes at the records the map reads as its entry row whole (`rows.entries`,
+  `trace.reads_whole`: the row's mark, then its message, anchored at both ends), the records before the first a pass
+  of their own.  The row's pattern is searched, and `start` finds a loop's `start 3/10 jediTaskID=...`
+  (prepareTasksToBeFinished_JEDI:3854, getTasksToExecCommand_JEDI:4346) and a callee's `start taskType=anal` through
+  the same logger (doRefine under TaskRefiner's runImpl).  Cut there, the pass at the window lacked the rows before
+  it, and rule 4 excluded runImpl:211 (MR-T-53351389-transUses).  The querier's own patterns, read whole, lost real
+  entries: Fm's map pattern for TaskCommando runImpl:129 `start for {commandStr}` drops the trailing hole, and a
+  LogWrapper's `<setup_destination> ` mark stands inside the message.  A record the map cannot read whole -- its row
+  has no capture, or its logger is not bound in the function -- does not cut: the passes it may begin stay one, and
+  the word on the cut counts them.  The rule-20 warning and S2's passes of a mover read the same entries;
+- it keeps a pass whose span holds the window;
+- of these it keeps one that holds the key: in one of its records, or in a run of the key inside one of its calls
+  (`inside_call`, with a callee the map's rows say printed that run's key records:
+  reactivatePendingTasks_JEDI's `< vo=atlas ... >` pass, inside which release_task_on_hold's
+  `< jediTaskID=... >` ran).
+
+A candidate with none left is unexamined, with what each run lacked.  With the list complete and one candidate left,
+the judge chooses it by elimination even when it is unexamined, but only in a window that holds the write itself
+(`windows.Asking.holds_write`): the value is the time its writer ran (`value_now`).  A statuslog row asked is a
+guess at when the value was written, and with no pass there the next row is asked, as before.
+MR-T-53354352-actionTime had stood only because its one candidate was read as kept on insertTaskParamsPanda's run.
+An attribute's END then names no run; a status, or the move of a late value, stops for want of the pass.
+
+S2 (`Rerun.passes`, which way each pass of a mover went) reads a pass by the same test (`which_ran.holds_key`).
+A mover's run of the key under a mark with no key is a poller's whole day.  On m-cut2 S2 had read
+getTasksToExecCommand_JEDI's 1149 passes in MT-scouting-stuck, none of them holding the key; 234 with 1 holding it in
+MT-exhausted-stuck, 188 with 1 in MT-paused-stuck, and 258 with none in Tr.  A pass of prepareTasksToBeFinished_JEDI
+there was read positive at 3994 and 4095 on the lines of tasks 49758808 and 53354973.  The passes without the key are
+counted and not read; with none left S2 stops for a pass that holds it.
+
+What stays:
+- A log line names no process.  A run inside the pass's call may be a concurrent thread's in the same seconds, as
+  for `inside_call` everywhere.
+- A function with no entry row is read whole, and so are the passes of one whose entry the map cannot read whole.
+- An entry the map reads as not whole where it is does not cut.  The map's capture reads a hole up to the first
+  character of the literal after it, so a value holding that character fails: killJob:840's `user=([^\ ]*)\ wg=`
+  against a DN with blanks (MJ-pending-late; one pass either way there).  In the xviii dump 3169 of the 7662 capture
+  hole groups stop at a blank.  The map's to decide (told 2026-11-01, w1e).
+- The prefix proof of a record below MIN_PROOF (`Seen`, K44) still reads the row's own patterns whole, not the map's.
+- A pass that prints no record of the key may still have taken the row without printing it.  Whether every way that
+  takes the row prints the key is the map's (K19's must_names_whole); until it is read, "not among the rows it took"
+  is not said.
+- A pass that holds the key is read whole, the other rows' turns of its loop included (getTasksToExecCommand_JEDI
+  goes round the tasks it selected).  Reading the key's turn alone needs the loop over the rows and its body's first
+  row, the shared flow part S1: for H2 and S2 together, after S1.
+- The question's run (`_question_run`, one run of one log at the window) is still taken by its span.  On m-cut2 no
+  such run is off the window (out/wr1).
+
+*Shows:* "no pass of the key at (...): <run>: another method's mark; <run>: none of its N pass(es) of f is at the
+window; <run>: its pass at the window holds no record of the key, nor a run of it inside a call"; and "no run: no pass
+of f at T shows it ran".  In S2: "N pass(es) of f in the window print no record of the key, nor run it inside a call:
+not read", and "STOP S2: a pass of f in the window that holds the key: none of its N there prints it".  On the cut:
+"cut at entry row L of f: N pass(es)", or "entry row L of f is read whole at none of its N record(s) in the run (M
+the map cannot read whole): the run is not split" -- whether the map can read the row whole is the row's, so M is N
+or the parenthesis is not there.
+*Revisit:* a function with no entry row whose runs span hours, or whose entry the map cannot read whole; the
+question's run of a mark with no key; the prefix proof (K44) on the map's whole reading.
 
 ## The walks (`asked.py`)
 

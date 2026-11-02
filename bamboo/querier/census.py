@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import render as T
 from . import rows as R
 from .records import CORPUS, Run
 
@@ -82,7 +83,7 @@ class Census:
     sites: list[Site] = field(default_factory=list)
     dispatch: str = ""
     printed: tuple[str, str, str] | None = None  # (attribute, value, where)
-    stop: str = ""
+    stop: T.Said | str = ""
 
     def kept(self) -> list[Site]:
         return [s for s in self.sites if s.kept]
@@ -124,7 +125,7 @@ def census(method: str) -> Census:
             ):
                 owners.append((rel, node))
     if len(owners) != 1:
-        out.stop = f"{len(owners)} classes define {method}: {[f'{r}:{c.name}' for r, c in owners]}"
+        out.stop = T.Said("classes-define", {"n": len(owners), "method": method, "owners": [f"{r}:{c.name}" for r, c in owners]})
         return out
     rel, cls = owners[0]
     out.cls, out.cls_file = cls.name, rel

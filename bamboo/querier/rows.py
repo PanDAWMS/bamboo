@@ -73,10 +73,6 @@ OWN_FILES = os.environ.get("ROWS_OWN_FILES", "1") != "0"
 #: ...``, ``not found``) is shared by many writers.  The prefix narrows which records count; it adds no literal.
 PREFIX = os.environ.get("ROWS_PREFIX", "1") != "0"
 PATTERN_MODES = ("map", "outside")
-#: ``ROWS_OLD_EXITS=1`` reads the call's exit after a statement the earlier way:
-#: a ``raise`` some ``try`` of the function catches taken as the exit, and a call on the way that a ``try`` catches
-#: passed over -- its handler runs, and what lies below it may too
-OLD_EXITS = os.environ.get("ROWS_OLD_EXITS", "0") == "1"
 #: ``ROWS_KEEP_SHORT_MAP=1`` finds lines with a map pattern of fewer than ``MIN_SHAPE`` non-blank literal characters,
 #: the earlier behaviour.  By default such a pattern is refused, as a shape built
 #: here that is not ``usable`` is: ``to\ `` (ppEventServiceJob 5667, an append's text drawn alone) is in any line
@@ -310,36 +306,6 @@ def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] | None = frozen
 TRYS = (ast.Try, *((ast.TryStar,) if hasattr(ast, "TryStar") else ()))
 
 
-def _goes_on(node: ast.AST, func: ast.AST) -> list[ast.stmt]:
-    """Where control goes when *node* -- a statement, or an arm of a ``try`` or ``match`` -- is done and falls
-    through: the next statement of its block, or as its holder goes on (a loop's body back to the loop, a try's body
-    to its ``else`` or ``finally``); ``[]`` at the function's end."""
-    while node is not func:
-        parent = node.parent  # type: ignore[attr-defined]
-        if isinstance(node, (ast.ExceptHandler, ast.match_case)):
-            if isinstance(parent, TRYS) and parent.finalbody:
-                return [parent.finalbody[0]]
-            node = parent
-            continue
-        placed = block_of(parent, node)
-        if placed is None:
-            node = parent
-            continue
-        name, block = placed
-        index = block.index(node)
-        if index + 1 < len(block):
-            return [block[index + 1]]
-        if isinstance(parent, LOOPS) and name == "body":
-            return [parent]
-        if isinstance(parent, TRYS):
-            if name == "body" and parent.orelse:
-                return [parent.orelse[0]]
-            if name in ("body", "orelse") and parent.finalbody:
-                return [parent.finalbody[0]]
-        node = parent
-    return []
-
-
 def _loop_of(stmt: ast.AST, func: ast.AST) -> ast.AST | None:
     """The loop a ``break`` or ``continue`` leaves or goes back to: the nearest one whose body holds it."""
     node = stmt
@@ -349,99 +315,6 @@ def _loop_of(stmt: ast.AST, func: ast.AST) -> ast.AST | None:
             return parent
         node = parent
     return None
-
-
-def _header(stmt: ast.stmt) -> list[ast.AST]:
-    """What runs when control reaches *stmt* itself: a compound statement's test, iterable or items, else the whole."""
-    if isinstance(stmt, (ast.If, ast.While)):
-        return [stmt.test]
-    if isinstance(stmt, (ast.For, ast.AsyncFor)):
-        return [stmt.iter]
-    if isinstance(stmt, (ast.With, ast.AsyncWith)):
-        return list(stmt.items)
-    if isinstance(stmt, ast.Match):
-        return [stmt.subject]
-    if isinstance(stmt, TRYS):
-        return []
-    return [stmt]
-
-
-def _caught(stmt: ast.stmt, func: ast.AST) -> list[ast.stmt]:
-    """Where *stmt* goes if it raises: the first statement of each handler, and the ``finally``, of every try whose
-    body holds it."""
-    out: list[ast.stmt] = []
-    node: ast.AST = stmt
-    while node is not func:
-        parent = node.parent  # type: ignore[attr-defined]
-        if isinstance(parent, TRYS) and node in parent.body:
-            out += [h.body[0] for h in parent.handlers if h.body]
-            out += parent.finalbody[:1]
-        node = parent
-    return out
-
-
-def _next(stmt: ast.stmt, func: ast.AST) -> list[ast.stmt]:
-    """The statements that can run next once control reaches *stmt*, raising included where its header calls."""
-    if isinstance(stmt, ast.Return):
-        out = []
-    elif isinstance(stmt, ast.Raise):
-        out = _caught(stmt, func)
-    elif isinstance(stmt, (ast.Break, ast.Continue)):
-        loop = _loop_of(stmt, func)
-        out = [] if loop is None else [loop] if isinstance(stmt, ast.Continue) else _goes_on(loop, func)
-    elif isinstance(stmt, (ast.If, *LOOPS)):
-        out = stmt.body[:1] + (stmt.orelse[:1] if stmt.orelse else _goes_on(stmt, func))
-    elif isinstance(stmt, (ast.With, ast.AsyncWith, *TRYS)):
-        out = stmt.body[:1]
-    elif isinstance(stmt, ast.Match):
-        out = [c.body[0] for c in stmt.cases if c.body] + _goes_on(stmt, func)
-    else:
-        out = _goes_on(stmt, func)
-    calls = any(isinstance(n, ast.Call) and not is_log_call(n) for part in _header(stmt) for n in own_nodes(part))
-    if calls and not isinstance(stmt, ast.Raise):
-        out = out + _caught(stmt, func)
-    return out
-
-
-def _reached(func: ast.AST, sources: list[ast.stmt], stops: set[int]) -> set[int]:
-    """The statements control can reach from *sources*, a statement in *stops* reached but not passed (by id)."""
-    seen: set[int] = set()
-    todo = list(sources)
-    while todo:
-        stmt = todo.pop()
-        if id(stmt) in seen:
-            continue
-        seen.add(id(stmt))
-        if id(stmt) not in stops:
-            todo += _next(stmt, func)
-    return seen
-
-
-def runs_between(func: ast.AST, first: ast.stmt, last: ast.stmt, site: ast.stmt, prints: set[int]) -> bool:
-    """Whether *site* can run after the print *first* and before the print *last* with no other print of *prints*
-    (statements, by id) between: on a path of *func* from *first* on to *last* that passes none of them.
-
-    For a run's two records in a row of a function's prints, so a call with no print every path runs after it --
-    the next statement calls too (must_rows stops there), or the prints after it are in arms -- is still placed between
-    the two its pass printed: ``updateTaskStatusByContFeeder_JEDI`` at the end of an arm, the next print in another.
-    The paths are the statements' own: blocks in order, both arms of an ``if``, a loop's body and back, ``break`` and
-    ``continue``, and a call that raises to each handler and ``finally`` of the trys around it.
-    """
-    if id(site) in prints:
-        return False
-    if id(site) not in _reached(func, _next(first, func), prints):
-        return False
-    return id(last) in _reached(func, _next(site, func), prints)
-
-
-def passes_through(func: ast.AST, first: ast.stmt, last: ast.stmt, site: ast.stmt, prints: set[int]) -> bool:
-    """Whether every path from the print *first* on to the print *last* that passes no other print of *prints* runs
-    *site* (:func:`runs_between`, and *last* not reached from *first* with *site* a stop): two records in a row of a
-    function's prints then say its pass ran *site*.
-
-    ``TaskRefinerThread.runImpl`` prints "extracting common" at 205 and calls ``extractCommon``, which prints nothing,
-    at 211: a run printing 205 and then 563 with no row of it between passed 211."""
-    return runs_between(func, first, last, site, prints) and id(last) not in _reached(func, _next(first, func), prints | {id(site)})
 
 
 def implying_rows(func: ast.AST, site: ast.stmt) -> list[ast.stmt]:
@@ -481,112 +354,6 @@ def iterables_over(func: ast.AST, site: ast.stmt) -> list[ast.expr]:
             found.append(ancestor.iter)
         previous = ancestor
     return found
-
-
-def exit_after(func: ast.AST, site: ast.stmt) -> ast.stmt | None:
-    """The ``return``/``raise`` every path from *site* ends at, if there is one in reach.
-
-    A ``raise`` some ``try`` around it in the function catches is none: the
-    handler runs, and may go on below (8 prints of the corpus end at one).
-    """
-    end, _ = _exit_path(func, site)
-    if isinstance(end, ast.Raise) and not OLD_EXITS and _catcher(func, end) is not None:
-        return None
-    return end
-
-
-def _catcher(func: ast.AST, node: ast.AST, within: ast.AST | None = None) -> ast.Try | None:
-    """The innermost ``try`` with handlers whose body holds *node*, inside *func* -- and outside *within*, when
-    given: a ``try`` inside that statement catches what it raises before it is done."""
-    previous: ast.AST = node
-    for ancestor in pathcond.ancestors(node):
-        if ancestor is func:
-            return None
-        if isinstance(ancestor, ast.Try) and ancestor.handlers and previous in ancestor.body:
-            if within is not None and (ancestor is within or pathcond._within(ancestor, within)):
-                return None
-            return ancestor
-        previous = ancestor
-    return None
-
-
-def _exit_path(func: ast.AST, site: ast.stmt) -> tuple[ast.stmt | None, list[ast.stmt]]:
-    """``(the exit, the statements run on the way to it)`` -- a ``try``'s ``else`` among them."""
-    node: ast.AST = site
-    between: list[ast.stmt] = []
-    while node is not func:
-        parent = node.parent  # type: ignore[attr-defined]
-        if isinstance(parent, ast.ExceptHandler):
-            placed = ("body", parent.body)
-        else:
-            placed = block_of(parent, node)
-        if placed is None:
-            node = parent
-            continue
-        name, block = placed
-        for s in block[block.index(node) + 1 :]:
-            if isinstance(s, EXITS):
-                return s, between
-            if isinstance(s, (ast.Continue, ast.Break)) or contains(s, (ast.Continue, ast.Break)):
-                return None, between
-            between.append(s)
-        if isinstance(parent, LOOPS):
-            return None, between
-        if isinstance(parent, ast.Try) and name == "body":
-            between += parent.orelse
-        if isinstance(parent, ast.ExceptHandler):
-            node = parent.parent
-            continue
-        node = parent
-    return None, between
-
-
-def _caught_on_the_way(func: ast.AST, site: ast.stmt, end: ast.stmt) -> list[ast.Try]:
-    """The ``try``s of the function that catch a call made after *site* on the way to *end*, *end*'s own included."""
-    _, between = _exit_path(func, site)
-    found: list[ast.Try] = []
-    for s in [*between, end]:
-        for n in own_nodes(s):
-            if isinstance(n, ast.Call) and not is_log_call(n):
-                t = _catcher(func, n, within=s if s is not end else None)
-                if t is not None and t not in found:
-                    found.append(t)
-    return found
-
-
-def beyond_exit(func: ast.AST, first: ast.stmt, other: ast.AST) -> ast.stmt | None:
-    """The exit every path from *first* ends at, when *other* lies below it -- so one call that ran *first* did not
-    run *other* afterwards, nor before (no loop holds both).
-
-    A ``finally`` around *first* still runs.  So does the handler of a ``try``
-    that catches a call on the way, and when a handler does not end the call
-    (a ``return``, or a ``raise`` nothing in the function catches), what lies
-    below it too -- then there is no exit to speak of.
-    """
-    end = exit_after(func, first)
-    if end is None or other.lineno <= (end.end_lineno or end.lineno):  # type: ignore[attr-defined]
-        return None
-    for a in pathcond.ancestors(first):
-        if a is func:
-            break
-        if isinstance(a, ast.Try) and any(other is s or pathcond._within(other, s) for s in a.finalbody):
-            return None
-    if share_loop(other, first, func):
-        return None
-    if not OLD_EXITS:
-        for t in _caught_on_the_way(func, first, end):
-            for h in t.handlers:
-                if pathcond._within(other, h):
-                    return None
-                last = h.body[-1]
-                if not (isinstance(last, ast.Return) or (isinstance(last, ast.Raise) and _catcher(func, t) is None)):
-                    return None
-    return end
-
-
-def cannot_rows(func: ast.AST, site: ast.stmt) -> list[ast.stmt]:
-    """The prints a call that ran *site* cannot show: below the exit the path from *site* ends at."""
-    return [s for s in own_nodes(func) if is_print(s) and beyond_exit(func, site, s) is not None]
 
 
 # ---------------------------------------------------------------- patterns
@@ -804,7 +571,6 @@ class Row:
     text: str
     map_patterns: list[str] = field(default_factory=list)
     map_refused: list[str] = field(default_factory=list)
-    map_arms: set[int] | None = None
     #: the map's word that its pattern is a question only together with the entity's
     #: key; every record read here was found by the key, so it is carried, not acted on
     map_keyed: bool = False
@@ -815,6 +581,9 @@ class Row:
     #: the files the map places this statement's lines in (``PrintStatement.log_files``, its logger followed); None
     #: where it does not place them (another ``log_files_basis``, no statement, ``ROWS_OWN_FILES=0``)
     log_files: list[str] | None = None
+    #: the map's rows of this statement (``PrintRow``, or the walk's ``SkeletonLine``), for what only the map reads:
+    #: a record read whole (:meth:`reads_whole`)
+    map_rows: list = field(default_factory=list, repr=False, compare=False)
     #: :meth:`patterns` per mode, made on the first ask: a row is built once per function (``_function``) and its
     #: patterns and shapes are not changed after, while ``matches`` asks for them once per record
     compiled: dict[str, list[tuple[re.Pattern[str], int, str]]] = field(default_factory=dict, repr=False, compare=False)
@@ -886,6 +655,14 @@ class Row:
                 best = (literal, source)
         return best
 
+    def reads_whole(self, record: Record) -> bool | None:
+        """Whether the map reads *record* as this row's line whole (``trace.reads_whole``: its mark, then its
+        message, anchored at both ends), not only a line holding its text: ``start`` finds ``start 3/10
+        jediTaskID=...`` too, which is another row's line.  None where none of the map's rows of it can say: no
+        capture, or a mark its logger may write that the map did not read."""
+        said = {trace.reads_whole(m, record.token, record.text) for m in self.map_rows}
+        return True if True in said else False if False in said else None
+
     def capture(self, record: Record) -> dict[str, str]:
         """Hole values in *record*, keyed by the expression each hole prints; none from a record the search cut."""
         if record.cut:
@@ -931,6 +708,13 @@ def _function_prints(owner: str):
     found = _GRAPH["loop"].run_until_complete(_GRAPH["map"].function_prints([owner]))
     _GRAPH[owner] = found.get(owner)
     return _GRAPH[owner]
+
+
+def print_lines(owner: str) -> list[int]:
+    """The lines of the print statements the map's ``FunctionPrintsNode`` of *owner* (``rel::Class.method``) holds,
+    in order: a line inside the function, for a reader holding only its owner (``line_writers``' answer)."""
+    found = _function_prints(owner)
+    return sorted(s.line for s in found.statements) if found is not None else []
 
 
 def _prints_of(owner: str, lines: Iterable[int] = ()):
@@ -1024,14 +808,9 @@ def check_blobs(answer: object, what: str) -> None:
         )
 
 
-def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[int, list], dict[int, list[int]], dict[int, list[str]]]:
-    """``(line -> the node's rows, line -> arms, line -> files)``: the arms as ``trace._Walk._rows_for`` gives them,
-    the files where the map places a statement's lines by its logger (``log_files_basis`` ``logger``).
-
-    An asked line is armed with the statement ``trace._statement_at`` finds for
-    it, and is an arm of a print when ``pathcond.compatible(that statement, the
-    call's message, current=True)``.
-    """
+def _graph_rows(rel: str, node: ast.AST) -> tuple[dict[int, list], dict[int, list[str]]]:
+    """``(line -> the node's rows, line -> files)``: the files where the map places a statement's lines by its logger
+    (``log_files_basis`` ``logger``)."""
     found = _function_prints(f"{rel}::{pathcond.qualified_name(node)}")
     if found is not None and found.anchor.blob_sha != _blob_sha(rel):
         # the map read another version of the file: its rows sit at other lines
@@ -1041,17 +820,7 @@ def _graph_rows(rel: str, node: ast.AST, arms: tuple[int, ...]) -> tuple[dict[in
         )
     by_line = {s.line: list(s.rows) for s in found.statements} if found is not None else {}
     files_of = {s.line: list(s.log_files) for s in found.statements if s.log_files_basis == "logger"} if found is not None else {}
-    armed = {}
-    for line in list(arms) or [node.lineno]:
-        held = trace._statement_at(node, line)
-        if held is not None:
-            armed[line] = held
-    arms_of = {}
-    for stmt in own_nodes(node):
-        if is_print(stmt):
-            message = stmt.value.args[0]
-            arms_of[stmt.lineno] = sorted(a for a, held in armed.items() if pathcond.compatible(held, message, current=True))
-    return by_line, arms_of, files_of
+    return by_line, files_of
 
 
 @functools.cache
@@ -1137,10 +906,9 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
         raise LookupError(f"no function {name} in {rel}")
     node = _holding(found, arms or within)
     by_line: dict[int, list] = {}
-    arms_of: dict[int, list[int]] = {}
     files_of: dict[int, list[str]] = {}
     if ROWS_FROM == "graph":
-        by_line, arms_of, files_of = _graph_rows(rel, node, arms)
+        by_line, files_of = _graph_rows(rel, node)
     else:
         from .asked import _types  # asked imports this module
 
@@ -1155,10 +923,6 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
             continue
         call = stmt.value
         mapped = by_line.get(stmt.lineno, [])
-        if ROWS_FROM == "graph":
-            map_arms = set(arms_of.get(stmt.lineno, ())) if mapped else None
-        else:
-            map_arms = set().union(*[set(m.arms) for m in mapped]) if mapped else None
         short = [f"map pattern too short: {m.pattern}" for m in mapped if m.pattern and not _map_usable(m.pattern)]
         rows.append(
             Row(
@@ -1169,12 +933,12 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
                 ast.unparse(call.args[0]),
                 [m.pattern for m in mapped if m.pattern and _map_usable(m.pattern)],
                 [m.refused for m in mapped if not m.pattern] + short or ([] if mapped else ["the map has no row here"]),
-                map_arms,
                 any(m.keyed for m in mapped if m.pattern),
                 _alternatives(call.args[0], node, stmt),
                 _capture_shapes(call.args[0], node, stmt),
                 _prefixes(mapped),
                 files_of.get(stmt.lineno) if OWN_FILES else None,
+                mapped,
             )
         )
     rows.sort(key=lambda r: r.line)
@@ -1390,11 +1154,21 @@ def entry_row(fn: Function) -> Row | None:
 
 
 def entries(fn: Function, run: Run, mode: str) -> list[int]:
-    """Indexes of the records in *run* that *fn*'s entry row reads: one per pass of *fn*."""
+    """Indexes of the records in *run* that the map reads as *fn*'s entry row whole (:meth:`Row.reads_whole`): one
+    per pass of *fn*.  The row's pattern finds more: the ``start`` of prepareTasksToBeFinished_JEDI finds its loop's
+    ``start 3/10 jediTaskID=...``, and TaskRefiner's runImpl's finds doRefine's ``start taskType=anal`` through the
+    same logger -- not a pass begun.  A record the map cannot read whole does not cut either: the passes it may begin
+    stay one (KNOWN_ISSUES.md K47)."""
+    return sorted(i for i, whole in _entry_reads(fn, run, mode) if whole)
+
+
+def _entry_reads(fn: Function, run: Run, mode: str) -> list[tuple[int, bool | None]]:
+    """Each record of *run* *fn*'s entry row finds, with whether the map reads it as the row's line whole."""
     entry = entry_row(fn)
     if entry is None:
         return []
-    return sorted(i for i, _, _ in seen(fn, run, mode).hits.get(entry.line, ()))
+    hits = seen(fn, run, mode).hits.get(entry.line, ())
+    return [(i, entry.reads_whole(run.records[i])) for i, _, _ in hits]
 
 
 def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
@@ -1402,14 +1176,22 @@ def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
 
     Records before the first entry are not a pass of *fn*: another function
     that shares the mark printed them, or the log starts inside a pass.  They
-    are counted in the word, not returned.
+    are counted in the word, not returned.  Whether the map can read the entry
+    row whole is the row's, not a record's (:meth:`Row.reads_whole` is None only
+    where none of its map rows has a capture and a mark read), so a run with a
+    record the map cannot read whole has no entry read whole: it is not split,
+    and the word counts those records.
     """
     entry = entry_row(fn)
     if entry is None:
         return [run], f"{fn.name} has no entry row: the run is not split"
-    starts = entries(fn, run, mode)
+    read = _entry_reads(fn, run, mode)
+    starts = sorted(i for i, whole in read if whole)
     if not starts:
-        return [run], f"entry row {entry.line} of {fn.name} is not in the run: the run is not split"
+        unread = sum(1 for _, whole in read if whole is None)
+        found = (f"is read whole at none of its {len(read)} record(s) in the run"
+                 + (f" ({unread} the map cannot read whole)" if unread else "")) if read else "is not in the run"
+        return [run], f"entry row {entry.line} of {fn.name} {found}: the run is not split"
     cuts = starts + [len(run.records)]
     parts = [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
     before = f"; {starts[0]} record(s) before the first are not a pass of it" if starts[0] else ""

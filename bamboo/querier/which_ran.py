@@ -5,11 +5,13 @@ Every candidate comes out as one of four, with the rule that put it there:
 * **excluded** --
   a row every path through the site prints is missing from the run (rule 4;
   only when the run printed something at that level, rule 8);
-  a row that path can no longer reach after its ``return`` is in the run;
-  a printed row's ``arms`` leave the site out (outside a shared loop, or in one
-  the pass went round once, ``rows.once_loops``);
+  a row is in the run that one call cannot print and run the site with (the
+  map's ``flow.together``: below the return every way from the print ends at,
+  in another arm no loop holds with it, in another arm of a pass of a loop the
+  run went round once, ``rows.once_loops``);
   the site sits after the record that already showed the observed value, or
-  before the one that still showed the old value (rule 3) -- for a run of
+  before the one that still showed the old value, where the flow lets the
+  two go one way only (rule 3, ``flow.runs_after``) -- for a run of
   another log that ran inside a call the question's run made, where that
   call sits (:func:`inside_call`);
   the site is reached only when the value is already the observed one
@@ -20,12 +22,14 @@ Every candidate comes out as one of four, with the rule that put it there:
   other way through (P, :mod:`bamboo.querier.printed`) -- read once more after
   every other verdict, where a call changes the subject to the observed value
   only through a writer of it not excluded (``printed.Reaching``);
-* **unexamined** -- no run to read it against: no log to hand, or the log does
-  not cover the time the question is about;
+* **unexamined** -- no run to read it against: no log to hand, the log does
+  not cover the time the question is about, or no pass of the candidate's
+  function at the window holds the key (:func:`passes_at`);
 * **kept** -- read, and nothing above decided it.
 
 The choice: one positive candidate; otherwise, when the list is complete and
-every other one is excluded, the one left (elimination).  ``--decide strict``
+every other one is excluded, the one left (elimination) -- unexamined too, in
+a window that holds the write itself (*holds_write*).  ``--decide strict``
 takes neither while anything is unexamined.
 
 P is read for every candidate, whatever else decided it: a candidate another
@@ -41,7 +45,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bamboo.codemap.panda import pathcond  # noqa: E402
+from bamboo.codemap.panda import flow, pathcond  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
@@ -51,10 +55,6 @@ from bamboo.querier.records import Run  # noqa: E402
 #: function it is.  With several runs there -- a DB proxy log, whose token is the method --
 #: that is another function's run, and its rows read as missing
 RUN_BY_ROWS = os.environ.get("WHICH_RUN_BY_ROWS", "1") != "0"
-#: ``WHICH_RUN_ROW_EXIT=0``: no rule from a printed row the call leaves right after.
-#: On, a row printed once whose path ends at a return/raise rules out
-#: every site below that exit -- the arms (path conditions) do not read the jump
-ROW_EXIT = os.environ.get("WHICH_RUN_ROW_EXIT", "1") != "0"
 #: ``WHICH_RUN_JOIN_CALLS=0``: runs of the key in several logs stay several runs, and none is the question's
 #: (2026-10-14), even where one ran inside a call the other made (the adder's updateJobs and DBProxy's archiveJob)
 JOIN_CALLS = os.environ.get("WHICH_RUN_JOIN_CALLS", "1") != "0"
@@ -85,6 +85,95 @@ def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
     counts = [sum(1 for row in fn.rows if sn.proven(row)) for sn in (R.seen(fn, r, mode) for r in found)]
     best = max(counts)
     return found[counts.index(best)] if best else None
+
+
+def of_mover(run: Run, owner: str) -> bool:
+    """Whether *run* can be a run of the mover *owner*: a mark that names a method (a DB proxy's tagged logger,
+    ``getJobs < SITE 2026-01-01T00:00:00 >``) is one call of that method, so it is the mover's only when the method is
+    the mover's function -- a DB proxy's log holds every method's calls of the key (S1's rule, tmaeno 2026-10-13).  A
+    mark that names none (``< jediTaskID=1 >``, the adder's PandaID) may be any function's of the worker.  The name is
+    the tag's, which the method writes in its own comment: a comment copied from another method hides its runs."""
+    m = re.match(r"([A-Za-z_]\w*) <", run.token)
+    return m is None or m[1] == owner.split("::")[-1]
+
+
+def _at(run: Run, window: tuple[str, str]) -> bool:
+    return run.first[:19] <= window[1] and run.last[:19] >= window[0]
+
+
+def _key_through_call(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
+                      called_at: Callable[[R.Function, Candidate], list[str]] | None) -> str:
+    """A run of the key that ran inside one of *part*'s calls, said as where it is; '' for none.  *part* is a pass of
+    *fn* whose mark and records hold no key (``reactivatePendingTasks_JEDI < vo=atlas label=user ... >``), and the
+    inner run's mark does (``release_task_on_hold < jediTaskID=... >``): its function is the one the map's rows say
+    printed its key records (``rows.line_writers``), and *fn* must call on into it at a call the pass was inside
+    (:func:`inside_call`, on the machine both name: a log line names no process, so a concurrent thread's run in the
+    same seconds reads the same)."""
+    if called_at is None:
+        return ""
+    caller: R.Seen | None = None
+    for inner in (r for runs in logs.values() for r in runs):
+        if (inner.token == part.token or inner.machine != part.machine or not inner.found_by
+                or not (part.first <= inner.first and inner.last <= part.last)):
+            continue
+        owners = set.intersection(*(set(R.line_writers(r, inner.log.name)) for r in inner.found_by))
+        lines = R.print_lines(next(iter(owners))) if len(owners) == 1 else []
+        if not lines:
+            continue
+        owner = next(iter(owners))
+        callee = Candidate(owner.partition("::")[0], owner.rpartition("::")[2].rpartition(".")[2], lines[:1])
+        caller = caller or R.seen(fn, part, mode)
+        for site in called_at(fn, callee):
+            if inside_call(caller, inner, site) is not None:
+                return f"{inner.describe()}, inside the call at {site}"
+    return ""
+
+
+def holds_key(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
+              called_at: Callable[[R.Function, Candidate], list[str]] | None = None) -> bool:
+    """Whether *part*, a pass of *fn*, holds the key: in one of its records, or in a run of the key inside one of its
+    calls (:func:`_key_through_call`).  H2 judges a candidate (:func:`passes_at`) and S2 a mover's way
+    (``Rerun.passes``) only on such a pass: a poller's pass that never touched the row went its way for other rows
+    (KNOWN_ISSUES.md K47)."""
+    return bool(part.found_by) or bool(_key_through_call(fn, part, logs, mode, called_at))
+
+
+def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dict[str, list[Run]], mode: str,
+              called_at: Callable[[R.Function, Candidate], list[str]] | None = None) -> tuple[list[Run], list[str]]:
+    """``(passes, why the rest went)``: of the key's runs whose span holds *window*, the passes of *c*'s function the
+    window is in and that hold the key -- what *c* is judged on (KNOWN_ISSUES.md K47).
+
+    A run whose mark names another method is not *c*'s (:func:`of_mover`).  A run is cut into passes at the
+    function's entry row (``rows.entries``), the records before the first entry a pass of their own -- the log can
+    start inside one; a function with no entry row, or one pass, keeps the run whole.  A pass is at the window where
+    its span holds it, and it holds the key where one of its records does, or where a run of the key ran inside one
+    of its calls (:func:`_key_through_call`).  A mark that names no key spans every pass of a worker:
+    rescueUnLockedTasksWithPicked_JEDI's ``< vo=atlas label=user >`` on aipanda081 held 155 passes, the key in one at
+    19:11, and was read for a write at 13:09:14 that aipanda082's pass made."""
+    fn = R.function(c.rel, c.func, c.lines)
+    kept: list[Run] = []
+    why: list[str] = []
+    others: dict[str, int] = {}
+    for run in found:
+        where = f"{run.machine.split('.')[0] or run.log.name} {run.token!r}"
+        if not of_mover(run, c.owner):
+            method = run.token.partition(" <")[0]
+            others[method] = others.get(method, 0) + 1
+            continue
+        cuts = sorted({0, *R.entries(fn, run, mode), len(run.records)})
+        parts = [run] if len(cuts) == 2 else [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
+        at = [p for p in parts if _at(p, window)]
+        if not at:
+            why.append(f"{where}: none of its {len(parts)} pass(es) of {fn.name} is at the window")
+            continue
+        keyed = [p for p in at if holds_key(fn, p, logs, mode, called_at)]
+        if not keyed:
+            why.append(f"{where}: its pass at the window holds no record of the key, nor a run of it inside a call")
+            continue
+        kept += keyed
+    if others:
+        why.append(f"{sum(others.values())} run(s) under another method's mark ({', '.join(sorted(others))})")
+    return kept, why
 
 
 @dataclass
@@ -249,8 +338,8 @@ def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None
 def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, int] | None:
     """``(i, j)`` for a call with no print every path runs on one side of it: the caller's records just before and
     just after *inner*, two in a row of the function's (none of its rows read between them), where the call's
-    statement is on a path from the one's print to the other's that prints nothing else (``rows.runs_between``), or
-    None.
+    statement is on a path from the one's print to the other's that prints nothing else (the map's
+    ``flow.runs_between``), or None.
 
     ``updateTaskStatusByContFeeder_JEDI`` ends an arm of feed_contents_to_tasks and the next print is in another arm,
     so no print every path runs follows it; the run's "set task_status=..." before it and its next record after hold
@@ -265,30 +354,47 @@ def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, i
     # a row of the function read between the two: it printed there, so the two are not a pass's
     if any(i < x < j for found in getattr(caller, "hits", {}).values() for x, *_ in found):
         return None
-    prints = {id(s) for s in R.own_nodes(node) if isinstance(s, ast.stmt) and R.is_print(s) and caller.fn.row_at(s) is not None}
+    prints = _row_prints(caller.fn)
     first, last = R.statement_at(node, first_line), R.statement_at(node, last_line)
-    if first is None or last is None or id(first) not in prints or id(last) not in prints:
+    if first is None or last is None or not {id(first), id(last)} <= {id(s) for s in prints}:
         return None
-    return (i, j) if R.runs_between(node, first, last, stmt, prints) else None
+    return (i, j) if flow.runs_between(first, last, stmt, prints) else None
+
+
+def _row_prints(fn: R.Function) -> list[ast.stmt]:
+    """*fn*'s prints that are rows: what a run's records can show."""
+    return [s for s in R.own_nodes(fn.node) if isinstance(s, ast.stmt) and R.is_print(s) and fn.row_at(s) is not None]
+
+
+def _order(printed: ast.stmt, site: ast.stmt, once: list[ast.AST]) -> str | None:
+    """``"before"`` or ``"after"``: where one call that printed *printed* and ran *site* printed it, when the map's flow
+    lets it go one way only; None where it goes both (a loop between them goes round) or neither (one call cannot run
+    both: ``flow.together`` excludes the site instead)."""
+    site_after = flow.runs_after(printed, site, once=once, printed=True)
+    print_after = flow.runs_after(site, printed, once=once)
+    if site_after == print_after:
+        return None
+    return "before" if site_after else "after"
 
 
 def rows_around(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> tuple[int, int] | None:
     """``(first, last)``: two of *fn*'s rows the run printed in a row -- no row of it read between them -- that only a
-    path through *stmt* prints so (``rows.passes_through``), or None.  A line no row is on every path through (a call
+    path through *stmt* prints so (the map's ``flow.passes_through``), or None.  A line no row is on every path through (a call
     of a function that prints nothing) is shown run by the rows around it: ``TaskRefinerThread.runImpl``'s 205 and 563
     around 211, ``extractCommon``.  A row read but not placed (``Seen.hits`` beyond ``unambiguous``) between the two
     breaks the pair, as in :func:`_between_records`."""
     node = fn.node
     placed = sorted((x, line) for line, xs in sn.unambiguous.items() for x in xs)
     read = sorted(x for found in getattr(sn, "hits", {}).values() for x, *_ in found)
-    prints = {id(s) for s in R.own_nodes(node) if isinstance(s, ast.stmt) and R.is_print(s) and fn.row_at(s) is not None}
+    prints = _row_prints(fn)
+    ids = {id(s) for s in prints}
     for (i, a), (j, b) in zip(placed, placed[1:], strict=False):
         if any(i < x < j for x in read):
             continue
         first, last = R.statement_at(node, a), R.statement_at(node, b)
-        if first is None or last is None or id(first) not in prints or id(last) not in prints:
+        if first is None or last is None or id(first) not in ids or id(last) not in ids:
             continue
-        if R.passes_through(node, first, last, stmt, prints):
+        if flow.passes_through(first, last, stmt, prints):
             return a, b
     return None
 
@@ -440,7 +546,7 @@ def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.En
     guards = [(g, f"{fn.name}:{stmt.lineno}") for g in pathcond.path_condition(stmt)] + callers_guards(fn)
     for guard, where in guards:
         asked = set(re.findall(rf"(?<![\w.])[\w.]+\.{re.escape(attr)}(?!\w)", guard))
-        hidden = E.Env(dict(env.values), dict(env.rows), env.table, {**env.stale, **{s: ASKED for x in asked for s in (x, env.canonical(x))}},
+        hidden = E.Env(values=dict(env.values), rows=dict(env.rows), table=env.table, stale={**env.stale, **{s: ASKED for x in asked for s in (x, env.canonical(x))}},
                        unread=env.unread, at=env.at)
         try:
             solved = E.solve(guard, True, hidden)
@@ -467,6 +573,7 @@ def judge(
     env: E.Env | None = None,
     complete: bool = True,
     called_at: Callable[[R.Function, Candidate], list[str]] | None = None,
+    holds_write: bool = False,
 ) -> Judgement:
     """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of every
     call from which it goes on there.  Given it, and no *question_run*, runs of the key in several logs are read as
@@ -490,7 +597,12 @@ def judge(
             # every log handed says why it holds no run of the candidate, in the candidate's order of its logs
             reasons: list[str] = []
             for name in to_hand:
-                found = [r for r in logs[name] if window is None or (r.first[:19] <= window[1] and r.last[:19] >= window[0])]
+                found = [r for r in logs[name] if window is None or _at(r, window)]
+                if found and window is not None:
+                    found, dropped = passes_at(c, found, window, logs, mode, called_at)
+                    if not found:
+                        reasons.append(f"{name}: no pass of the key at {window}: {'; '.join(dropped)}")
+                        continue
                 if found:
                     run = run_holding(c, found, mode)
                     if run is not None:
@@ -597,37 +709,22 @@ def judge(
                 v.reasons.append(f"rule 4: must row(s) {absent} not in the run")
                 v.reasons.extend(per_element)
             if present_once:
-                for s in R.cannot_rows(fn.node, stmt):
-                    if sn.unambiguous.get(s.lineno):
-                        v.kind = "excluded"
-                        v.reasons.append(f"row {s.lineno} printed after the return this path takes")
-                        break
-                for row in fn.rows if ROW_EXIT else ():
-                    if sn.unambiguous.get(row.line) and (end := R.beyond_exit(fn.node, row.stmt, stmt)) is not None:
-                        v.kind = "excluded"
-                        v.reasons.append(f"row {row.line} printed and the call leaves at {end.lineno} before {line}")
-                        break
-                for row in fn.rows:
-                    if (
-                        row.map_arms is not None
-                        and line not in row.map_arms
-                        and sn.unambiguous.get(row.line)
-                        and not R.share_loop(row.stmt, stmt, fn.node, once)
-                    ):
+                # the map's flow: a printed row and the site that one call cannot both run -- below the return every
+                # way from the print ends at, in another arm no loop holds with it, in another arm of a pass of a loop
+                # the run went round once
+                loops = [n for n in ast.walk(fn.node) if id(n) in once]
+                shown_rows = [row for row in fn.rows if sn.unambiguous.get(row.line)]
+                for row in shown_rows:
+                    if not flow.together(row.stmt, stmt, once=loops):
                         v.kind = "excluded"
                         went = R.loops_over(row.stmt, fn.node) & R.loops_over(stmt, fn.node)
-                        v.reasons.append(f"row {row.line} printed and its arms {sorted(row.map_arms)} leave {line} out"
-                                         + "".join(f" ({once[i]})" for i in went))
+                        v.reasons.append(f"row {row.line} printed, and one call cannot print it and run {line}"
+                                         + "".join(f" ({once[i]})" for i in went if i in once))
                         break
                 if bracket is not None and run is question_run:
-                    lo = max(
-                        (i for r in fn.rows if r.line < line and not R.share_loop(r.stmt, stmt, fn.node, once) for i in sn.unambiguous.get(r.line, ())),
-                        default=None,
-                    )
-                    hi = min(
-                        (i for r in fn.rows if r.line > line and not R.share_loop(r.stmt, stmt, fn.node, once) for i in sn.unambiguous.get(r.line, ())),
-                        default=None,
-                    )
+                    order = {r.line: _order(r.stmt, stmt, loops) for r in shown_rows}
+                    lo = max((i for r in shown_rows if order[r.line] == "before" for i in sn.unambiguous[r.line]), default=None)
+                    hi = min((i for r in shown_rows if order[r.line] == "after" for i in sn.unambiguous[r.line]), default=None)
                     if lo is not None and lo >= bracket[1]:
                         v.kind = "excluded"
                         v.reasons.append(f"rule 3: runs after {run.records[lo].span}, when {subject} already showed {observed!r}")
@@ -644,7 +741,9 @@ def judge(
                     v.kind = "excluded"
                     v.reasons.append(f"rule 3: runs inside the call at {site}, before {outer.records[hi].span}, when {subject} still showed another value")
             if subject and observed and env is not None:
-                own = E.Env(dict(env.values), dict(env.rows), env.table, dict(env.stale), unread=env.unread, at=env.at)
+                own = E.Env(
+                    values=dict(env.values), rows=dict(env.rows), table=env.table, stale=dict(env.stale), unread=env.unread, at=env.at
+                )
                 stable_holes([x for x in seens.values() if x.run is run], own, class_of(fn))
                 why = rewriter(fn, stmt, subject, observed, own)
                 if why:
@@ -729,7 +828,9 @@ def judge(
         chosen, how = positives[0], "positive evidence"
     elif len(positives) > 1:
         how = f"{len(positives)} positive"
-    elif complete and len(left) == 1 and not unexamined:
+    elif complete and len(left) == 1 and (not unexamined or (holds_write and decide != "strict")):
+        # the one left wrote it: where it is unexamined, only in a window that holds the write itself (K47) -- a
+        # statuslog row asked is a guess at when it was written, and its next row is asked instead
         chosen, how = left[0], "elimination over a complete list"
     elif decide == "strict" and unexamined:
         how = f"strict: {len(unexamined)} unexamined"
@@ -738,7 +839,8 @@ def judge(
         chosen = in_run[0]
         how = f"elimination within the run the value changed in; {others} function(s) never placed in it are not excluded"
     elif left:
-        how = f"{len(left)} left: " + ", ".join(sorted({f"{v.candidate.func}:{v.line}" for v in left if v.kind != 'unexamined'}))
+        read = sorted({f"{v.candidate.func}:{v.line}" for v in left if v.kind != "unexamined"})
+        how = f"{len(left)} left: " + ", ".join(read) if read else f"{len(left)} left, all unexamined"
     notes = join_notes + [f"MAP: {m}" for m in sorted(map_findings)] + p_notes
     return Judgement(verdicts, chosen, how, bracket, notes, runs_of, question_run if joined else None)
 

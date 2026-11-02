@@ -579,48 +579,25 @@ def target_of(stmt: ast.stmt) -> str:
     return ast.unparse(t) if isinstance(t, (ast.Name, ast.Attribute, ast.Subscript)) else ""
 
 
-def _params(func: ast.AST) -> set[str]:
-    a = func.args  # type: ignore[attr-defined]
-    return {x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg] if x is not None}
-
-
 def unbound_before(func: ast.AST, s_star: ast.stmt, name: str) -> bool:
-    """Whether a bare local can hold nothing at S*: no binding before it, none in a loop around it."""
-    if not name.isidentifier() or name in _params(func):
-        return False
-    loops = loops_around(s_star, func)
-    for n in R.own_nodes(func):
-        if not any(t == name for t, _ in binds(n)):
-            continue
-        if getattr(n, "lineno", 10**9) < s_star.lineno:
-            return False
-        if any(lp in pathcond.ancestors(n) for lp in loops):
-            return False
-    return True
+    """Whether a bare local can hold nothing at S*: only the function's entry reaches it, and the name is no
+    parameter (the map's ``pathcond.held_at``)."""
+    return name.isidentifier() and pathcond.held_at(func, name, s_star).kind == pathcond.HELD_UNBOUND  # type: ignore[arg-type]
 
 
 def entry_state(func: ast.AST, s_star: ast.stmt, names: set[str]) -> dict[str, Any]:
-    """Constants bare locals hold at S*: the binding every path to it passes last, in the same iteration.
+    """Constants bare locals hold at S*: the one literal every way to it binds last (the map's ``pathcond.held_at``).
 
     ``isOK = True`` four lines above ``if not toSkip: if isOK:`` holds at the
-    inner ``if`` whatever ran before.  A binding before a loop around S* does
-    not: another iteration may have changed it.
+    inner ``if`` whatever ran before, and a binding before a loop around S*
+    holds as long as nothing in the loop binds the name again.
     """
     out: dict[str, Any] = {}
-    loops = loops_around(s_star, func)
     for name in names:
-        if not name.isidentifier():
-            continue
-        b = R._dominating_binding(func, s_star, name)
-        if not (
-            isinstance(b, ast.Assign) and len(b.targets) == 1 and isinstance(b.targets[0], ast.Name)
-            and isinstance(b.value, ast.Constant)
-        ):
-            continue
-        around_b = loops_around(b, func)
-        if any(lp not in around_b for lp in loops) or R._maybe_appended(func, b, s_star, name, []):
-            continue
-        out[name] = b.value.value
+        if name.isidentifier():
+            held = pathcond.held_at(func, name, s_star)  # type: ignore[arg-type]
+            if held.kind == pathcond.HELD_CONSTANT:
+                out[name] = held.value
     return out
 
 
@@ -1145,7 +1122,7 @@ class Walker:
     def truth(self, test: ast.expr, p: Path, env: E.Env) -> Any:
         """The test's value from the path's facts and *env*; E.UNKNOWN when they do not decide it."""
         try:
-            return E._truth(test, p.facts, env)
+            return E.truth(test, p.facts, env)
         except Exception:
             return E.UNKNOWN
 
@@ -1364,27 +1341,13 @@ def decide_run(w: Walker, s: ast.If, p: Path) -> list[bool]:
 
 
 def covered(node: ast.AST, avail: set[str], state: dict[str, Any]) -> bool:
-    """Whether printed holes (by name only) and the path's own constants decide *node*."""
-    text = ast.unparse(node)
-    if text in avail or (text in state and state[text] is not E.UNKNOWN and not isinstance(state[text], Shape)):
-        return True
-    if isinstance(node, ast.Constant):
-        return True
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        return all(covered(e, avail, state) for e in node.elts)
-    if isinstance(node, ast.BoolOp):
-        return all(covered(v, avail, state) for v in node.values)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return covered(node.operand, avail, state)
-    if isinstance(node, ast.Compare) and len(node.ops) == 1:
-        return covered(node.left, avail, state) and covered(node.comparators[0], avail, state)
-    if isinstance(node, ast.Call):
-        if not E.PURE:
-            E.PURE.update(E._pure())
-        return ast.unparse(node.func) in E.PURE and all(
-            covered(a, avail, state) for a in [*node.args, *(k.value for k in node.keywords)]
-        )
-    return False
+    """Whether printed holes (by name only) and the path's own constants decide *node*: the map's
+    ``evaluate.decidable``, so a test said covered is one the evaluator decides once the holes' values come."""
+    env = E.Env()
+    for text, value in state.items():
+        if value is not E.UNKNOWN and not isinstance(value, Shape):
+            env.put(text, value, "bound on the path")
+    return E.decidable(node, avail, env)
 
 
 # ---------------------------------------------------------------- against a run
