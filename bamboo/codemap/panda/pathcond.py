@@ -57,10 +57,19 @@ def qualified_name(func: ast.AST) -> str:
     return ".".join(reversed(names))
 
 
+#: The nodes CPython's parser hands one object of to every tree: an expression's context (``Load``, ``Store``,
+#: ``Del``) and its operator (``Add``, ``And``, ``Not``, ``Eq``) -- no field, no line.  A parent or a line written on
+#: one is on every tree's, so none is: order read the ``Load`` a bind's copy was given line 66 as a node of each
+#: function at 66, its statement another file's at 1041.
+SHARED_NODES = (ast.expr_context, ast.boolop, ast.operator, ast.unaryop, ast.cmpop)
+
+
 def attach_parents(tree: ast.AST) -> None:
+    """Each node's ``parent``, but a shared one's (:data:`SHARED_NODES`)."""
     for parent in walk(tree):
         for child in ast.iter_child_nodes(parent):
-            child.parent = parent  # type: ignore[attr-defined]
+            if not isinstance(child, SHARED_NODES):
+                child.parent = parent  # type: ignore[attr-defined]
 
 
 def ancestors(node: ast.AST) -> Iterator[ast.AST]:
