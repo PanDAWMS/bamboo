@@ -127,10 +127,19 @@ shapes read as a leading hole (an f-string's expression, a conditional) leaves t
 rows start with `job.PandaID`.  A narrowed ask is not read from a record of the whole mark cut at 1 MB over its window
 (`recorded._cut_over`): it is asked anew, so the next round reads what the cut left unread -- where the record says what
 was read for each cut string (fieldtest ca43fb9's `read`), only if a string the ask needs is cut, and an ask that
-drops the string that filled the stopped second is read from it whole (`recorded._read_for`).  H2 still asks every mark
-whole (it reads a candidate's rows in any run of the key, and a writer handed its caller's logger prints under the
-caller's mark); by the harness's count over rounds 1-5 (to-querier-64), only getTasksToBeProcessed_JEDI's marks come
-near a page's stop, and a round that stops on one is left to the recorder's split of the stopped second.
+drops the string that filled the stopped second is read from it whole (`recorded._read_for`).  H2 and F1 name their
+candidates to the door as S1 does (2026-11-02): they judge a candidate on its passes alone, and a run whose mark names
+another method is none of them (`which_ran.passes_at`, `of_mover`, K47), so a mark of a method that is no candidate is
+not asked.  Before, they asked every mark whole, for a writer handed its caller's logger, whose rows under the caller's
+mark no judge read: 6 of the harness's round 16's 7 asks were `push_job_status_message < ... >`, a mark of no
+candidate, whose run is one line already held, each a grep of a whole DBProxy log of 3.0-3.2 GB, 3 of them timed out
+(to-querier-107).  A candidate's mark they still ask whole (`Logs.log`'s *whole*): neither read as cut for the calls
+sharing it nor asked for its own rows alone, which S1 needs over a stay's hours.  At a row's moment a shared mark's run
+is one call, and read as cut it lost the must rows MT-exhausted-late's choice of getTasksToExecCommand_JEDI:4442 was
+shown by (13 records at 11:14:22-23, whole in the record); counting only its pieces near the window instead asked the
+mark over hours once the run was widened, and S1 then asked getTasksToBeProcessed_JEDI's marks over a stuck window's 6
+hours (both measured, the analyzer handover's out/k13).  A candidate's rows under a caller's method mark (a logger
+handed in) are read by neither H2 nor S1; how many such rows the map holds is not counted yet.
 
 ### K40. A truncated file with no `searched` is read up to its last record, whichever string's
 

@@ -2005,14 +2005,15 @@ class Rerun:
         self._stop_unanswered(unanswered)
         return out
 
-    def _ask(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None) -> tuple[dict[str, list], list, dict[str, list[str]]]:
+    def _ask(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None,
+             whole: bool = False) -> tuple[dict[str, list], list, dict[str, list[str]]]:
         """``runs()`` without the stop: the runs found, the asks the door had no answer for, and what of the window each
-        log was not searched for (``Log.holes``)."""
+        log was not searched for (``Log.holes``).  *owners* and *whole* as ``Logs.log`` takes them."""
         window = self.window(asking)
         out, unanswered, holes = {}, [], {}
         for name in self.logs.names(names):
             try:
-                log = self.logs.log(name, key, window, machine=asking.machine, owners=owners, strings=asking.strings)
+                log = self.logs.log(name, key, window, machine=asking.machine, owners=owners, strings=asking.strings, whole=whole)
             except Unrecorded as e:
                 # the asks file keeps the why as text (its form is O4's)
                 unanswered += [(ask, why or T.text(asking.why)) for ask, why in e.asks]
@@ -2486,13 +2487,21 @@ class Rerun:
                     state = {"status": value, "time": state}
             tries = [(state, W.at_transition(state), None)]
         self._stand_ins: dict[tuple[str, int], list[StandIn]] = {}
-        names = self._writer_logs(subject, readings, self._h2_candidates(subject, readings) if readings else [])
+        cands = self._h2_candidates(subject, readings) if readings else []
+        names = self._writer_logs(subject, readings, cands)
         if len(tries) > 1 or any(_f3(state) for state, _, _ in tries):
             # every row's asks in one round, for the recording step to answer together, each of the logs of the
-            # writers that can write it; the rows are then read newest first, and the first whose pass a writer is
-            # shown to write in ends the scan.  A birth's row (no asking) asks nothing
-            self._stop_unanswered([u for _, asking, own in tries if asking is not None for u in self._ask(
-                key, names if own is None else self._writer_logs(subject, own, self._h2_candidates(subject, own)), asking)[1]])
+            # writers that can write it, for the candidates' marks alone, each whole (KNOWN_ISSUES.md K13); the rows
+            # are then read newest first, and the first whose pass a writer is shown to write in ends the scan.  A
+            # birth's row (no asking) asks nothing
+            unanswered = []
+            for _, asking, own in tries:
+                if asking is None:
+                    continue
+                mine = cands if own is None else self._h2_candidates(subject, own)
+                logs = names if own is None else self._writer_logs(subject, own, mine)
+                unanswered += self._ask(key, logs, asking, owners_of([c.owner for c in mine]), whole=True)[1]
+            self._stop_unanswered(unanswered)
             return self._scan(subject, attr, value, key, readings, tries)
         state, asking, own = tries[0]
         return self._stood(subject, value, self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking, True), state)
@@ -2634,7 +2643,8 @@ class Rerun:
                 out.append((state, asking, own))
                 continue
             cands = self._h2_candidates(subject, own)
-            runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+            runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
+                                       owners_of([c.owner for c in cands]), whole=True)
             lo, hi = asking.window
             found = sorted({(r.first[:19], r.last[:19]) for rs in runs.values() for r in rs
                             if pattern.search(r.token or "") and r.first[:19] <= hi and r.last[:19] >= lo}, reverse=True)
@@ -2658,9 +2668,11 @@ class Rerun:
             if asking is None:  # a birth's row: nothing asked
                 continue
             cands = self._h2_candidates(subject, readings if own is None else own)
+            owners = owners_of([c.owner for c in cands])
             for name in self.logs.names(list(dict.fromkeys(f for c in cands for f in c.log_files))):
                 try:
-                    log = self.logs.log(name, key, self.window(asking), machine=asking.machine, strings=asking.strings)
+                    log = self.logs.log(name, key, self.window(asking), machine=asking.machine, owners=owners,
+                                        strings=asking.strings, whole=True)
                 except Unrecorded:
                     continue
                 if runs_for(log, key):
@@ -2701,7 +2713,8 @@ class Rerun:
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._h2_candidates(subject, readings)
-        runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+        runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
+                                   owners_of([c.owner for c in cands]), whole=True)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
         env = self.base_env(at=state["time"])
         maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
@@ -2840,7 +2853,8 @@ class Rerun:
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._h2_candidates(subject, readings)
-        runs, unanswered, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking)
+        runs, unanswered, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
+                                            owners_of([c.owner for c in cands]), whole=True)
         self._stop_unanswered(unanswered)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
         if not at and not last:
@@ -2952,7 +2966,7 @@ class Rerun:
             cands = self._candidates(readings)
             asking = W.at_transition(state)
             names = list(dict.fromkeys(f for c in cands for f in c.log_files))
-            runs, missed, holes = self._ask(key, names, asking)
+            runs, missed, holes = self._ask(key, names, asking, owners_of([c.owner for c in cands]), whole=True)
             unanswered += missed
             asked.append((state, readings, cands, asking, names, runs, holes, said))
         self._stop_unanswered(unanswered)

@@ -363,10 +363,13 @@ class Logs(Protocol):
 
     def log(
         self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
-        strings: tuple[str, ...] = (),
+        strings: tuple[str, ...] = (), whole: bool = False,
     ) -> Log:
         """*owners*: the functions the asker reads runs of, as ``which_ran.of_mover`` names them, or None for any.
-        *strings*: what to ask for, where not the key alone (F3's marks holding the key)."""
+        *strings*: what to ask for, where not the key alone (F3's marks holding the key).  *whole*: the owners' marks
+        are asked whole, none read as cut for the calls sharing it nor asked for the method's own rows alone -- for an
+        asker that reads a run at a row's moment (H2, F1), whose must rows those would leave unread (KNOWN_ISSUES.md
+        K13)."""
         ...
 
 
@@ -393,7 +396,7 @@ class FileLogs:
 
     def log(
         self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
-        strings: tuple[str, ...] = (),
+        strings: tuple[str, ...] = (), whole: bool = False,
     ) -> Log:
         return self._logs[name]
 

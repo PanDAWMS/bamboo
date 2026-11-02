@@ -1140,9 +1140,10 @@ def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared
             key_rec = record(Ask("panda-x.log", (K,), W), {M1: answered({**TODAY, "records": hits})})
             Path("k.jsonl").write_text(json.dumps(key_rec) + "\\n")
             asked = {}
-            for label, owners in (("s1", {"getX": (), "upd": ()}), ("any", None)):
+            for label, owners, whole in (("s1", {"getX": (), "upd": ()}, False), ("any", None, False),
+                                         ("h2", {"getX": ("start",), "upd": ()}, True)):
                 try:
-                    RecordedLogs(["k.jsonl"]).log("panda-x.log", K, W, owners=owners)
+                    RecordedLogs(["k.jsonl"]).log("panda-x.log", K, W, owners=owners, whole=whole)
                 except Unrecorded as e:
                     asked[label] = [a.canonical()["strings"] for a, _ in e.asks]
             tok_ask = Ask("panda-x.log", tuple(sorted([OWN, WORKER])), W, M1)
@@ -1161,6 +1162,9 @@ def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared
     assert asked["s1"] == [["STAMP1", "upd < 2026-09-28/08:31:10.1 >"]]
     # without owners, every mark that does not hold the key, as before
     assert asked["any"] == [["STAMP1", "getX < vo=None label=None >", "push < 2026-09-28/08:33:00.0 >", "upd < 2026-09-28/08:31:10.1 >"]]
+    # H2 at a row's moment: no mark of a method none of its candidates is, and each candidate's whole -- getX's though
+    # its calls share it, and not for its own rows' heads
+    assert asked["h2"] == [["STAMP1", "getX < vo=None label=None >", "upd < 2026-09-28/08:31:10.1 >"]]
     assert runs["upd < 2026-09-28/08:31:10.1 >"][:2] == [2, True] and runs["STAMP1"][:2] == [2, True]
     assert runs["chk <  < jediTaskID=52977211 > >"][:2] == [1, True]
     # a mark not asked whole: its key records alone, read as cut -- no row missing from it is read as not printed
@@ -3553,9 +3557,10 @@ def test_f1_asks_for_every_row_after_the_run_before_one_stop_and_then_reads_each
     r._writers = lambda subject, value, key: asked.append((subject, value)) or [
         N(file=f"{value}.py", owner=f"{value}.py::C.write", lines=[1], log_files=[f"{value}.log"])]
     r.files_of = lambda owner, today, lines: list(today)
+    rerun.owners_of = lambda ids: {}
     answered = False
 
-    def ask(key, names, asking, owners=None):
+    def ask(key, names, asking, owners=None, whole=False):
         if answered:
             return {}, [], {}
         return {}, [(N(key=f"{names[0]}@{asking.machine}"), asking.why)], {}
@@ -5611,9 +5616,10 @@ def test_h2_asks_and_reads_each_row_of_an_attribute_on_the_logs_of_the_writers_t
                 r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result, r.data = [], [], "", {}, [], {}, {}
                 r._writers = lambda subject, value, key: [a, b]
                 r._attribute_tries = lambda subject, attr, value, readings: tries
-                r._h2_candidates = lambda subject, readings: [N(log_files=x.log_files) for x in readings]
+                r._h2_candidates = lambda subject, readings: [N(owner=x.owner, log_files=x.log_files) for x in readings]
                 seen = {"asked": [], "read": None}
-                r._ask = lambda key, names, asking: (None, [f"{asking.why} {n}" for n in names], None)
+                rerun.owners_of = lambda ids: [i.split("::")[-1] for i in ids]
+                r._ask = lambda key, names, asking, owners, whole: (None, [f"{asking.why} {n} {','.join(owners)} {whole}" for n in names], None)
                 r._stop_unanswered = lambda asks: seen["asked"].extend(asks)
                 r._scan = lambda *args: "scanned"
                 def wrote_at(subject, attr, value, key, readings, state, asking, last):
@@ -5631,8 +5637,8 @@ def test_h2_asks_and_reads_each_row_of_an_attribute_on_the_logs_of_the_writers_t
         )
     )
     got = json.loads(out.splitlines()[-1])
-    # every row's asks in one round, each of the logs of the writers that can write it
-    assert got["rows"]["asked"] == ["running a.log", "defined a.log", "defined b.log"]
+    # every row's asks in one round, each of the logs of the writers that can write it, for their marks alone, each whole
+    assert got["rows"]["asked"] == ["running a.log refine True", "defined a.log refine,scout True", "defined b.log refine,scout True"]
     # a single window is read on its own writers
     assert got["one row"]["read"] == ["p/b.py::scout"]
 
@@ -5787,8 +5793,9 @@ def test_h2_reads_f3s_life_run_by_run_among_the_rows_and_a_births_row_last_as_on
             def rerun_with(runs, holes, at_rows=None):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result, r.question = [], [], "H2", {}, [], {}, None
-                r._h2_candidates = lambda subject, readings: [N(log_files=[log])]
-                r._ask = lambda key, names, asking: (runs, [], holes)
+                r._h2_candidates = lambda subject, readings: [N(owner=init[0].owner, log_files=[log])]
+                rerun.owners_of = lambda ids: {}
+                r._ask = lambda key, names, asking, owners, whole: (runs, [], holes)
                 r._named = lambda subject, key, readings, tries: {log}
                 r.read = []
                 r._row_at = lambda subject, attr, value, key, readings, state, asking, named: (
@@ -5884,12 +5891,13 @@ def test_h2_reads_no_run_of_the_key_at_a_row_as_no_pass_only_of_a_log_some_recor
             # try naming its own writers is read on theirs
             held = {("panda-TaskRefiner.log", "m91"): ["a run"], ("panda-TaskBuffer.log", "m86"): ["a run"]}
 
-            def log(name, key, window, machine=None, strings=()):
+            def log(name, key, window, machine=None, owners=None, strings=(), whole=False):
                 if name == "panda-DataService.log":
                     raise rerun.Unrecorded([])
                 return N(runs=held.get((name, machine), []))
 
             r.logs = N(names=lambda wanted: wanted + ["panda-DataService.log"], log=log)
+            rerun.owners_of = lambda ids: {}
             rerun.runs_for = lambda log, key: log.runs
             tries = [({"status": "pending"}, rerun.W.Asking(("10:05", "10:05"), "m86", "the row"), None),
                      ({"status": "defined"}, rerun.W.Asking(("04:10", "04:10"), "m91", "the row"), None)]
@@ -5908,7 +5916,7 @@ def test_h2_reads_no_run_of_the_key_at_a_row_as_no_pass_only_of_a_log_some_recor
             def row_at(named, holes={}):
                 r.lines = []
                 r._unborn = lambda readings, subject, state: (readings, "")
-                r._ask = lambda key, names, asking: ({}, [], holes)
+                r._ask = lambda key, names, asking, owners, whole: ({}, [], holes)
                 r.base_env = lambda at: env
                 got = r._row_at("JobSpec.nucleus", "nucleus", "MPPMU", "7", ["every writer"], row, N(window=("10:05", "10:05")), named)
                 return [said(got), r.lines]
