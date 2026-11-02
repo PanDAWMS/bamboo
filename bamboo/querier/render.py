@@ -3,11 +3,12 @@ and its facts -- and its English is made here when it is read: out.txt as the ru
 reader of result.json.  result.json keeps the records, not the sentences (the map's rule for its whys, RK1; the
 analyzer handover's out/odata/odata-design.md), so a rewording is an edit here and no run again.
 
-A fact is JSON (a string, a number, a list, None), another :class:`Said`, or a value JSON does not hold, kept as a
-:class:`Lit` (its ``repr`` and ``str``) so a template's ``!r`` and plain field render it as the walk wrote it.  A fact
-may still be a sentence a part makes whose own step comes later (a premise, a window's why): a string, rendered as it
-is.  A template is :meth:`str.format`'s, with two more specs: ``{x:join=SEP}`` joins a list's items' ``str``,
-``{x:rjoin=SEP}`` their ``repr``.
+A fact is JSON (a string, a number, a list, an object, None), another :class:`Said`, or a value JSON does not hold,
+kept as a :class:`Lit` (its ``repr`` and ``str``) so a template's ``!r`` and plain field render it as the walk wrote
+it.  A fact may still be a sentence a part makes whose own step comes later: a string, rendered as it is.  A template
+is :meth:`str.format`'s, with three more specs: ``{x:join=SEP}`` joins a list's items' ``str``, ``{x:rjoin=SEP}``
+their ``repr`` (a record's, its sentence's), and ``{x:gap_texts}`` says a list of the map's gap records
+(``ReaderGap``) in the map's words.
 """
 
 from __future__ import annotations
@@ -60,8 +61,18 @@ class _Formatter(string.Formatter):
         if format_spec.startswith("join="):
             return format_spec[len("join=") :].join(str(v) for v in value)
         if format_spec.startswith("rjoin="):
-            return format_spec[len("rjoin=") :].join(repr(v) for v in value)
+            return format_spec[len("rjoin=") :].join(repr(text(v) if isinstance(v, Said) else v) for v in value)
+        if format_spec == "gap_texts":
+            return "; ".join(_gap_texts(value))
         return format(value, format_spec)
+
+
+def _gap_texts(gaps: list[dict]) -> list[str]:
+    """The map's words for a function's gaps (``strategy.gap_texts``), from their records as result.json keeps them."""
+    from bamboo.codemap import strategy
+    from bamboo.codemap.models import ReaderGap
+
+    return strategy.gap_texts([ReaderGap.model_validate(g) for g in gaps])
 
 
 _FORMAT = _Formatter()
@@ -91,6 +102,8 @@ def _taken(v: Any) -> Any:
         return v
     if type(v) is list:
         return [_taken(x) for x in v]
+    if type(v) is dict and all(isinstance(k, str) for k in v):
+        return {k: _taken(x) for k, x in v.items()}
     return Lit(repr(v), str(v))
 
 
@@ -101,6 +114,8 @@ def _json(v: Any) -> Any:
         return [_json(x) for x in v]
     if isinstance(v, Lit):
         return {"lit": [v.r, v.s]}
+    if isinstance(v, dict):
+        return {"obj": {k: _json(x) for k, x in v.items()}}
     return v
 
 
@@ -113,6 +128,8 @@ def from_json(d: Any) -> Said | str:
 
 def _value(v: Any) -> Any:
     if isinstance(v, dict):
+        if "obj" in v:
+            return {k: _value(x) for k, x in v["obj"].items()}
         return from_json(v["said"]) if "said" in v else Lit(*v["lit"])
     if isinstance(v, list):
         return [_value(x) for x in v]
@@ -364,4 +381,79 @@ TEMPLATES: dict[str, str] = {
     "which-way-pass-went": "which way pass {n} went",
     "why-took-it-only-at-and-it": "why {name} took it only at {q_moved}: {where} {held}, and it returns no first rows of an order (not read)",
     "written-last-by-which-the-data-does": "{subject}={value!r} written last by {who}, which the data does not decide: {listed:join=; }{others} (KNOWN_ISSUES.md K38)",
+    # a mover's premises (judgement 3): prints_naming, every_log_asked, _searched_whole
+    "prints-no-key-column": "the rows file says no column of the row holds the key",
+    "prints-no-arm-of-its-own": "no arm of its own: what it calls prints, if anything",
+    "prints-no-line-before": "no line runs before the arm(s) at {lines} on every path",
+    "prints-read-whole-none-names": "the lines before the arm(s) at {lines} were read whole and none names the written row's {columns}: a search by the key cannot show a run absent",
+    "prints-not-read-before": "the map did not read the lines before [{unread:rjoin=, }]",
+    "line-hole": "{line}: {hole}",
+    "prints-not-known-named": "no line before the arm(s) at {lines} is known to name the written row's {columns}: the map did not read their names whole (KNOWN_ISSUES.md K19)",
+    "prints-name-the-key": "a line before every arm at {lines} names the written row's {columns}",
+    "logs-the-maps-reading": "the logs are the map's reading's, not where it places the prints (ROWS_OWN_FILES, ROWS_FROM)",
+    "logs-no-prints-of-its-own": "the map has no prints of its own for it",
+    "logs-placed-by": "the map places some of its prints by {bases}, not by their logger: where they land is not known whole",
+    "logs-in-no-file": "the map places its prints in no file",
+    "logs-not-asked": "not asked: {missing}",
+    "logs-every-file-asked": "every file the map places its prints in was asked: {files}",
+    "window-no-log-asked": "no log was asked",
+    "window-door-over-files": "the door over files does not say what of the window a file holds",
+    "window-not-searched-all": "{logs:join=, } not searched all the window",
+    "window-asks-not-answered": "{n} ask(s) not answered yet",
+    "window-searched-from-only": "searched from {start} only",
+    "window-searched": "{start} .. {end} searched in {to_hand}, none of it unsearched",
+    "window-not-asked": "not asked",
+    # a mover's gaps, in the map's words
+    "map-could-not-read-all": "the map could not read all of it ({gaps:gap_texts})",
+    # a mover's reasons (S1 / L2)
+    "births": "{births:join=, }",
+    "birth-by-at": "{by} at {at}",
+    "birth-by": "{by}",
+    "births-not-arms": "its writes at {made} make the row (births: {births}): not arms (KNOWN_ISSUES.md K29)",
+    "kept-def-not-found": "its def is not found",
+    "kept-calls-into": "it calls into {reached}",
+    "kept-may-call-into": "it may call into {cut}, whose callers the map lists only in part",
+    "kept-hands-rows-on": "it hands its rows on",
+    "kept-rows-hidden": "the map could not read where all its rows go",
+    "kept-nothing-reached": "no call it makes reaches a writer of another value within the two hops the map lists, and a write further down is not seen (KNOWN_ISSUES.md K14)",
+    "no-arm-kept": "no arm of its own, kept: {kept:join=; }",
+    "reach-own-arms": "reach: its def holds an arm moving it off by the map's junctions {own_arms}, though S1 counts none: kept",
+    "reach-reaches-writers": "reach: reaches {n} writer(s) of another value: {names}",
+    "reach-left-open": "reach: reaches no write of another value, but {holes} call(s) on the way are left open, e.g. {first_holes}",
+    "reach-rows-hidden": "reach: reaches no write of another value and leaves nothing open, but the map could not read where all its rows go: kept",
+    "reach-closed-by-name": "; {n} call(s) closed by name, e.g. {first_closed}",
+    "reach-dropped": "no arm of its own, and reaches no write of another value with nothing left open (closure {closure}; assuming {assumptions}{closed}): dropped",
+    "its-waker": "not a mover, but it writes {writes:join=; } for rows selected at the value, which {movers:join=, } asks: its waker (the map's wakers; KNOWN_ISSUES.md K39)",
+    "writes-at": "{writes} at {line}",
+    "rows-select-reach-none": "the rows {selects:join=, } select(s) reach none of its arms {arms}: the map names each one's row by a key they do not fill",
+    "reach-writes-no-other-by-key": "{whose}, and the reach from it, those arms left out, writes no other value with nothing left open (closure {closure}; assuming {assumptions}): a writer that takes a row by its key (KNOWN_ISSUES.md K16)",
+    "kept-by-reach": "{whose}; kept: {said}",
+    "the-reach-was-not-asked": "the reach was not asked",
+    "refused-at-the-moment-read": "refused at the moment read, one moment of the window: not dropped",
+    "prints-nothing-not-followed": "{n} arm(s) that write another value {arms}; the map has no prints of its own for it, so no run in a log is its own: not followed (KNOWN_ISSUES.md K25)",
+    "over-the-whole-window": " over the whole window",
+    "from-the-last-part-by-key": " from {start}, the window's last part, which alone is asked of a writer that takes a row by its key (KNOWN_ISSUES.md K16)",
+    "did-not-run-judgement-3": "no run of its own found in {to_hand}{over}: it did not run (judgement 3)",
+    "no-run-found-not-ruled-out": "no run of its own found in {to_hand}{over}: not followed, though not ruled out (KNOWN_ISSUES.md K19)",
+    # a mover's reasons (MT, L2)
+    "statement-kind": "{where} {kind}{holds}",
+    "holds-for-the-row": ", holds for the row {spans}",
+    "all-the-window": "all the window",
+    "spans-from-to": "{spans:join=, }",
+    "from-to": "from {a} to {b}",
+    "writes-refuse-a-row": "its writes of another value refuse a row holding {observed!r}: {arms:join=; }",
+    "writes-only-on-a-row-holding": "{line} writes {outcome} only on a row holding {column} in {values}",
+    "statements-refused": "{said:join=; }",
+    "no-arm-through-calls": "no arm of its own: it writes, if at all, through what it calls (KNOWN_ISSUES.md K14)",
+    "taken-by-its-key": "its write requires the value: taken by its key (KNOWN_ISSUES.md K15)",
+    "asks-rows-by-run-time-value": "{where} asks rows by a value known at run time ({keys:join=, }): never surely true",
+    "not-compared": "{where}: {subject} not compared ({why})",
+    "after-only-why": "written at the move or later; its row here holds only the value after",
+    "rows-no-column-why": "its row here holds no {attr}",
+    "rows-no-row-why": "no row of {owner}",
+    "history-no-column-why": "its status history here holds no {attr}",
+    "logs-not-asked-not-ruled-out": "its logs are not asked: a run not found would not rule it out ({failing:join=; }) (KNOWN_ISSUES.md K15)",
+    "premise-why": "{premise}: {why}",
+    "ran-not-read-for-late": "ran: a run of the key in {logs} between {window:join= and }, and L1 names another mover: which way its passes went is not read for late (KNOWN_ISSUES.md K15)",
+    "asks-of-its-logs-not-recorded": "{n} ask(s) of its logs not in the records ({why}): whether it ran is not known yet",
 }

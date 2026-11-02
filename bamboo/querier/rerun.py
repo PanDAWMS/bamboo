@@ -329,32 +329,32 @@ def map_gaps(follow) -> dict[str, list]:
 def hides_where(gaps: list) -> bool:
     """Whether a mover's gaps can hide where its rows go, and so a write its reach has no junction for: any gap but a
     statement read only in part, which hides which rows it takes (``ReaderGap.hides_where``).  Only such a gap keeps a
-    mover with no arm of its own; every gap is said (``gap_said``)."""
+    mover with no arm of its own; every gap is kept (``_gaps_json``)."""
     return any(gap.hides_where for gap in gaps)
 
 
-def gap_said(gaps: list) -> str:
-    """A mover's gaps in the map's words (``strategy.gap_texts``): a text per kind, with every line of the kind."""
-    return "; ".join(strategy_mod.gap_texts(gaps))
+def _gaps_json(gaps: list) -> list[dict]:
+    """A mover's gaps as the map keeps them (``ReaderGap``), for result.json's ``gaps`` and the map-gap reason's record,
+    which says them in the map's words (render's ``gap_texts``)."""
+    return [g.model_dump(mode="json") for g in gaps]
 
 
-def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bool, hidden: bool) -> list[str]:
+def kept_without_arms(found: bool, reached: list[str], cut: list[str], hands: bool, hidden: bool) -> list[T.Said]:
     """Why S1 keeps a mover with no arm of its own: it moves the value, if at all, through what it calls or the rows it
     hands on.  None is dropped: ``called_from`` holds two hops, so a write further down is not seen, and "not listed"
     is not "does not reach" (bamboo-85; tmaeno, 2026-10-14).  Dropping one is the map's reach's to say, with its holes
     (``reach_said``); these are the reasons of a mover it keeps, or where the dump has no reach (KNOWN_ISSUES.md K14).
     *hidden*: a gap of the map's may hide where its rows go (``hides_where``)."""
     return [why for why, holds in (
-        ("its def is not found", not found),
-        (f"it calls into {reached}", reached),
-        (f"it may call into {cut}, whose callers the map lists only in part", cut),
-        ("it hands its rows on", hands),
-        ("the map could not read where all its rows go", hidden),
-    ) if holds] or ["no call it makes reaches a writer of another value within the two hops the map lists, "
-                    "and a write further down is not seen (KNOWN_ISSUES.md K14)"]
+        (T.Said("kept-def-not-found"), not found),
+        (T.Said("kept-calls-into", {"reached": reached}), reached),
+        (T.Said("kept-may-call-into", {"cut": cut}), cut),
+        (T.Said("kept-hands-rows-on"), hands),
+        (T.Said("kept-rows-hidden"), hidden),
+    ) if holds] or [T.Said("kept-nothing-reached")]
 
 
-def reach_said(reach: dict | None, hidden: bool) -> tuple[bool, str | None]:
+def reach_said(reach: dict | None, hidden: bool) -> tuple[bool, T.Said | None]:
     """``(dropped, line)``: whether S1 drops a mover with no arm of its own by what the map's reach says of it
     (``Rerun._reach_of``), and the line saying so.  Dropped only where it reaches no write of another value and leaves
     no call on the way open (the map's ``[]``, never its ``None``), its own defs hold no arm the junctions place there,
@@ -364,21 +364,17 @@ def reach_said(reach: dict | None, hidden: bool) -> tuple[bool, str | None]:
     if reach is None:
         return False, None
     if reach["own_arms"]:
-        return False, (f"reach: its def holds an arm moving it off by the map's junctions {reach['own_arms']}, though S1 "
-                       "counts none: kept")
+        return False, T.Said("reach-own-arms", {"own_arms": reach["own_arms"]})
     writes = reach["writes"]
     if writes:
         names = sorted({w["function"].split("::")[-1].split(".")[-1] for w in writes})
-        return False, f"reach: reaches {len(writes)} writer(s) of another value: {names}"
+        return False, T.Said("reach-reaches-writers", {"n": len(writes), "names": names})
     if writes is None:
-        return False, (f"reach: reaches no write of another value, but {reach['holes']} call(s) on the way are left "
-                       f"open, e.g. {reach['first_holes']}")
+        return False, T.Said("reach-left-open", {"holes": reach["holes"], "first_holes": reach["first_holes"]})
     if hidden:
-        return False, ("reach: reaches no write of another value and leaves nothing open, but the map could not read "
-                       "where all its rows go: kept")
-    closed = f"; {reach['closed']} call(s) closed by name, e.g. {reach['first_closed']}" if reach.get("closed") else ""
-    return True, (f"no arm of its own, and reaches no write of another value with nothing left open (closure "
-                  f"{reach['closure']}; assuming {sorted(reach['assumptions'])}{closed}): dropped")
+        return False, T.Said("reach-rows-hidden")
+    closed = T.Said("reach-closed-by-name", {"n": reach["closed"], "first_closed": reach["first_closed"]}) if reach.get("closed") else ""
+    return True, T.Said("reach-dropped", {"closure": reach["closure"], "assumptions": sorted(reach["assumptions"]), "closed": closed})
 
 
 def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
@@ -390,14 +386,14 @@ def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
     known either way.  One with no must prints: no run need print anything before it.  ``{"held": True | False |
     None, "why": ...}``, False where any arm says so, None where any is not known, as ``every_log_asked``."""
     if not columns:
-        return {"held": None, "why": "the rows file says no column of the row holds the key"}
+        return {"held": None, "why": T.Said("prints-no-key-column")}
     if not lines:
-        return {"held": None, "why": "no arm of its own: what it calls prints, if anything"}
+        return {"held": None, "why": T.Said("prints-no-arm-of-its-own")}
     unread, bare, whole, unnamed = [], [], [], []
     for line in sorted(lines):
         for b in (b for j in writers if j.owner == owner for b in j.branches if b.line == line):
             if b.must_prints is None:
-                unread.append(f"{line}: {b.must_hole or 'not read'}")
+                unread.append(T.Said("line-hole", {"line": line, "hole": b.must_hole or "not read"}))
             elif not b.must_prints:
                 bare.append(line)
             elif not any(n.row == MUST_ROW_WRITTEN and n.column in columns for n in b.must_names or []):
@@ -406,16 +402,15 @@ def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
                 else:
                     unnamed.append(line)
     if bare:
-        return {"held": False, "why": f"no line runs before the arm(s) at {sorted(set(bare))} on every path"}
+        return {"held": False, "why": T.Said("prints-no-line-before", {"lines": sorted(set(bare))})}
     if whole:
-        return {"held": False, "why": f"the lines before the arm(s) at {sorted(set(whole))} were read whole and none names the "
-                                      f"written row's {sorted(columns)}: a search by the key cannot show a run absent"}
+        return {"held": False, "why": T.Said("prints-read-whole-none-names", {"lines": sorted(set(whole)),
+                                                                              "columns": sorted(columns)})}
     if unread:
-        return {"held": None, "why": f"the map did not read the lines before {unread}"}
+        return {"held": None, "why": T.Said("prints-not-read-before", {"unread": unread})}
     if unnamed:
-        return {"held": None, "why": f"no line before the arm(s) at {sorted(set(unnamed))} is known to name the written row's "
-                                     f"{sorted(columns)}: the map did not read their names whole (KNOWN_ISSUES.md K19)"}
-    return {"held": True, "why": f"a line before every arm at {sorted(lines)} names the written row's {sorted(columns)}"}
+        return {"held": None, "why": T.Said("prints-not-known-named", {"lines": sorted(set(unnamed)), "columns": sorted(columns)})}
+    return {"held": True, "why": T.Said("prints-name-the-key", {"lines": sorted(lines), "columns": sorted(columns)})}
 
 
 def prints_nothing(owner: str, lines) -> bool:
@@ -434,18 +429,18 @@ def every_log_asked(owner: str, lines, asked: list[str]) -> dict:
     JEDI's both, as the process that called it chooses).  ``{"held": True | False | None, "why": ...}``, None where the
     files are the map's reading's, not where it places the prints (``rows.own_log_files``)."""
     if not R.OWN_FILES or R.ROWS_FROM != "graph":
-        return {"held": None, "why": "the logs are the map's reading's, not where it places the prints (ROWS_OWN_FILES, ROWS_FROM)"}
+        return {"held": None, "why": T.Said("logs-the-maps-reading")}
     found = R._prints_of(owner, lines)
     if found is None or not found.statements:
-        return {"held": False, "why": "the map has no prints of its own for it"}
+        return {"held": False, "why": T.Said("logs-no-prints-of-its-own")}
     if bases := sorted({s.log_files_basis for s in found.statements} - {"logger"}):
-        return {"held": False, "why": f"the map places some of its prints by {bases}, not by their logger: where they land is not known whole"}
+        return {"held": False, "why": T.Said("logs-placed-by", {"bases": bases})}
     files = sorted({f for s in found.statements for f in s.log_files})
     if not files:
-        return {"held": False, "why": "the map places its prints in no file"}
+        return {"held": False, "why": T.Said("logs-in-no-file")}
     if missing := [f for f in files if f not in asked]:
-        return {"held": False, "why": f"not asked: {missing}"}
-    return {"held": True, "why": f"every file the map places its prints in was asked: {files}"}
+        return {"held": False, "why": T.Said("logs-not-asked", {"missing": missing})}
+    return {"held": True, "why": T.Said("logs-every-file-asked", {"files": files})}
 
 
 def owners_of(ids: list[str]) -> dict[str, tuple]:
@@ -595,13 +590,14 @@ def born(branch, marks: dict[int, list]) -> bool:
     return all(marks.get(line) and all(is_birth(kf) for kf in marks[line]) for line in lines)
 
 
-def birth_why(owner: str, subject: str, lines: list[int]) -> str:
+def birth_why(owner: str, subject: str, lines: list[int]) -> T.Said:
     """Why the map calls *owner*'s writes of *subject* at *lines* births: each statement's ``new_row_by`` and the line
     that decided it (``new_row_line``), e.g. "sequence at 623"."""
     marks = birth_marks(owner, subject)
     said = {(getattr(kf, "new_row_by", "") or "new", getattr(kf, "new_row_line", None))
             for line in lines for kf in marks.get(line, ())}
-    return ", ".join(f"{by} at {at}" if at else by for by, at in sorted(said, key=str))
+    return T.Said("births", {"births": [T.Said("birth-by-at", {"by": by, "at": at}) if at else T.Said("birth-by", {"by": by})
+                                        for by, at in sorted(said, key=str)]})
 
 
 def births_of(writers: list, owner: str, subject: str, observed: str) -> list[int]:
@@ -1069,15 +1065,13 @@ def woken_of(entries: list[dict], wakes: dict[str, list[Wake]]) -> dict[str, lis
     return found
 
 
-def woken_said(woken: list[Wake]) -> str:
+def woken_said(woken: list[Wake]) -> T.Said:
     """A mover dropped as one that reaches no write, said as the waker it is of the movers kept."""
-    writes = "; ".join(f"{w.writes} at {w.line}" for w in woken)
-    movers = sorted({f"{w.mover.split('::')[-1]} ({w.reader})" for w in woken})
-    return (f"not a mover, but it writes {writes} for rows selected at the value, which {', '.join(movers)} asks: "
-            "its waker (the map's wakers; KNOWN_ISSUES.md K39)")
+    return T.Said("its-waker", {"writes": [T.Said("writes-at", {"writes": w.writes, "line": w.line}) for w in woken],
+                                "movers": sorted({f"{w.mover.split('::')[-1]} ({w.reader})" for w in woken})})
 
 
-def refused_arms(writers: list, owner: str, subject: str, observed: str) -> list[str]:
+def refused_arms(writers: list, owner: str, subject: str, observed: str) -> list[T.Said]:
     """*owner*'s writes of another value that ``arms_of`` drops because each requires the row to hold other values of
     the subject's column: ``line writes outcome only on a row holding column in [values]``."""
     column = subject.partition(".")[2].lower()
@@ -1092,7 +1086,8 @@ def refused_arms(writers: list, owner: str, subject: str, observed: str) -> list
             for term in b.row_precondition or []:
                 rv = required_values(term)
                 if rv and rv[0] == column and observed not in rv[1]:
-                    out.append(f"{b.line} writes {b.outcome} only on a row holding {column} in {rv[1]}")
+                    out.append(T.Said("writes-only-on-a-row-holding", {"line": b.line, "outcome": b.outcome, "column": column,
+                                                                       "values": rv[1]}))
                     break
     return out
 
@@ -1590,6 +1585,30 @@ def _records_json(outcome: dict) -> dict:
     return o
 
 
+
+def _kept_said(said: T.Said | str, what: str):
+    """*said* as result.json keeps it (render.to_json), or the run fails here: it reads back to what the run said."""
+    if not T.same_read_back(said):
+        raise AssertionError(f"result.json's {what} does not read back as said: {T.text(said)!r}")
+    return T.to_json(said)
+
+
+def _movers_json(movers: list | None) -> list | None:
+    """*movers* as result.json keeps them: each premise's why and each reason's record as records (render.to_json),
+    each reading back to the sentence the run said (:func:`_kept_said`)."""
+    if not movers:
+        return movers
+    out = []
+    for m in movers:
+        m = dict(m)
+        if m.get("premises"):
+            m["premises"] = {k: {**p, "why": _kept_said(p["why"], f"premise {k}'s why")} for k, p in m["premises"].items()}
+        if m.get("reasons"):
+            m["reasons"] = [{**r, "record": _kept_said(r["record"], f"reason {r['code']}")} if "record" in r else r
+                            for r in m["reasons"]]
+        out.append(m)
+    return out
+
 def _ends(ends: list) -> T.Said | None:
     """A run's or a branch's END lines (``(hop, said)``) as one record, result.json's ``record``; None where it said none."""
     return T.Said("ends", {"ends": [said for _, said in ends]}) if ends else None
@@ -1835,9 +1854,10 @@ def _intersect(a: list, b: list) -> list:
     return [(max(x0, y0), min(x1, y1)) for x0, x1 in a for y0, y1 in b if max(x0, y0) <= min(x1, y1)]
 
 
-def _spans_words(spans: list, whole: tuple) -> str:
+def _spans_words(spans: list, whole: tuple) -> T.Said:
     """``all the window``, or each span ``from .. to ..``."""
-    return "all the window" if spans == [whole] else ", ".join(f"from {a} to {b}" for a, b in spans)
+    return T.Said("all-the-window") if spans == [whole] else T.Said("spans-from-to", {"spans": [
+        T.Said("from-to", {"a": a, "b": b}) for a, b in spans]})
 
 
 def _union(spans: list) -> list:
@@ -2111,10 +2131,11 @@ class Rerun:
             self.say("# the bamboo tree is dirty (another session may be editing it): this run does not measure a commit")
 
     def result_of(self, outcome: dict, asks: dict) -> dict:
-        """result.json, version 3 (version 1 agreed with the live-case harness, 2026-10-15; 2 keeps the outcome's and
+        """result.json, version 4 (version 1 agreed with the live-case harness, 2026-10-15; 2 keeps the outcome's and
         the branches' sentences as records, ``record`` and ``label``, render.py's; 3 keeps what an arm rests on as
         records too, the branches' ``premises``, ``row`` and ``older`` and the possibilities' premises, each premise with
-        its ``premise_kind``): the outcome, the question, the steps
+        its ``premise_kind``; 4 keeps the movers' too, each premise's ``why``, each reason's ``record`` (its text
+        dropped), each reading's ``verdict`` as a token, and the map's ``gaps`` of every mover that has any): the outcome, the question, the steps
         opened in order, every input with its sha256, the asks file, and what the steps found -- the window, the arm
         that wrote an attribute's value last (``wrote``), the mover that moved the value (late), every mover with its
         verdict and, in S1, judgement 3's premises (``_premises``, added in build order 2a) -- with times in UTC, ISO 8601
@@ -2122,7 +2143,7 @@ class Rerun:
         a = self.args
         dump = mapdump.installed()
         return {
-            "version": 3,
+            "version": 4,
             "outcome": _records_json(outcome),
             "question": {"mode": "late" if a.late else "stuck" if a.stuck else "asked", "subject": a.subject,
                          "observed": a.observed, "key": a.key, **({"since": a.since} if a.since else {})},
@@ -2150,7 +2171,7 @@ class Rerun:
             "possibilities": self.result.get("possibilities"),
             "wrote": self.result.get("wrote"),
             "moved_by": self.result.get("moved_by"),
-            "movers": self.result.get("movers"),
+            "movers": _movers_json(self.result.get("movers")),
         }
 
     def looked_up_with(self, side: V.Side, step, depth: int = 2, seen: set[str] | None = None) -> list[str]:
@@ -3461,23 +3482,23 @@ class Rerun:
             files = [f for j in writers if j.owner == owner for f in j.log_files]
             mine = [(s, v) for o, s, v in readings if o == owner]
             way = "key" if owner in keyed else "guard" if movers[owner] == GUARDED else "select"
-            entry = {"owner": owner, "reached": way,
-                     "statements": [s for s, _ in mine if s], "verdict": None, "reasons": [],
-                     "readings": [{"statement": s or None, "verdict": v} for s, v in mine], "premises": None}
+            entry: dict = {"owner": owner, "reached": way,
+                           "statements": [s for s, _ in mine if s], "verdict": None, "reasons": [],
+                           "readings": [{"statement": s or None, "verdict": v.replace(" ", "-") if v else v} for s, v in mine],
+                           "premises": None, **({"gaps": _gaps_json(gaps[owner])} if gaps.get(owner) else {})}
             entries.append(entry)
             if owner in elsewhere:
                 to_key, said, reach = elsewhere[owner]
-                entry["reasons"].append({"code": "K16" if to_key else "K14", "text": said})
+                entry["reasons"].append({"code": "K16" if to_key else "K14", "record": said})
                 if reach is not None:
                     entry["reach"] = reach
             if any(v == "refused" for _, v in mine):
-                entry["reasons"].append({"code": "K17", "text": "refused at the moment read, one moment of the window: not dropped"})
+                entry["reasons"].append({"code": "K17", "record": T.Said("refused-at-the-moment-read")})
             if made := births_of(writers, owner, q.subject, q.observed):
-                told = (f"its writes at {made} make the row (births: {birth_why(owner, q.subject, made)}): not arms"
-                        " (KNOWN_ISSUES.md K29)")
+                told = T.Said("births-not-arms", {"made": made, "births": birth_why(owner, q.subject, made)})
                 self.say(f"  {owner.split('::')[-1]}: {told}")
                 entry["births"] = made
-                entry["reasons"].append({"code": "K29", "text": told})
+                entry["reasons"].append({"code": "K29", "record": told})
             if not arms:
                 # with no arm of its own, a mover moves the value, if at all, through what it calls or the rows it hands
                 # on: kept, and said why
@@ -3489,24 +3510,25 @@ class Rerun:
                 kept = kept_without_arms(bool(defs), reached, cut, owner in handers, hidden)
                 # the map's reach decides, where it can say for certain that nothing it goes on into moves the value
                 reach = self._reach_of(q, owner, lines) if defs else None
-                dropped, said = reach_said(reach, hidden)
+                dropped, reach_line = reach_said(reach, hidden)
                 if reach is not None:
                     entry["reach"] = reach
                 if dropped:
-                    self.say(f"  {func}: {said}")
+                    self.say(f"  {func}: {reach_line}")
                     entry["verdict"] = "reaches-no-write"
-                    entry["reasons"].append({"code": "reach", "text": said})
+                    entry["reasons"].append({"code": "reach", "record": reach_line})
                     continue
-                self.say(f"  {func}: no arm of its own, kept: {'; '.join(kept)}")
-                entry["reasons"].append({"code": "K14", "text": f"no arm of its own, kept: {'; '.join(kept)}"})
-                if said:
-                    self.say(f"  {func}: {said}")
+                kept_said = T.Said("no-arm-kept", {"kept": kept})
+                self.say(f"  {func}: {kept_said}")
+                entry["reasons"].append({"code": "K14", "record": kept_said})
+                if reach_line:
+                    self.say(f"  {func}: {reach_line}")
             for w in wakes.get(owner, []):
                 self.say(f"  {owner.split('::')[-1]}: {wake_said(w)}")
                 entry.setdefault("wakers", []).append({"waker": w.owner, "line": w.line, "writes": w.writes,
                                                        "reader": w.reader, "term": w.term, "candidate": list(w.candidate)})
             if gaps.get(owner):
-                entry["reasons"].append({"code": "map-gap", "text": f"the map could not read all of it ({gap_said(gaps[owner])})"})
+                entry["reasons"].append({"code": "map-gap", "record": T.Said("map-could-not-read-all", {"gaps": entry["gaps"]})})
             passes, missed = self._absence(owner, arms, files or follow.reader_log_files, entry, writers, q.subject, q.key,
                                            asking, rest, way, owners)
             unanswered += missed
@@ -3518,9 +3540,9 @@ class Rerun:
         woken = woken_of(entries, wakes)
         for entry in entries:
             if entry["owner"] in woken:
-                said = woken_said(woken[entry["owner"]])
-                self.say(f"  {entry['owner'].split('::')[-1]}: {said}")
-                entry["reasons"].append({"code": "K39", "text": said})
+                woken_line = woken_said(woken[entry["owner"]])
+                self.say(f"  {entry['owner'].split('::')[-1]}: {woken_line}")
+                entry["reasons"].append({"code": "K39", "record": woken_line})
         self.result["movers"] = entries
         self._stop_unanswered(unanswered)
         # every mover that ran and left the value is part of the answer: each goes on alone (tmaeno, 2026-10-13)
@@ -3581,14 +3603,14 @@ class Rerun:
             self._calls_into[(start, end)] = [f"{file}:{line}" for line in sorted(lines)]
         return self._calls_into[(start, end)]
 
-    def _rows_elsewhere(self, q: Stuck, follow, writers: list, movers: dict, gaps: dict) -> dict[str, tuple[bool, str, dict | None]]:
+    def _rows_elsewhere(self, q: Stuck, follow, writers: list, movers: dict, gaps: dict) -> dict[str, tuple[bool, T.Said, dict | None]]:
         """For each mover whose statements' rows reach none of its arms (``elsewhere_of``), what the map's reach says of
         it as of a mover with no arm of its own, those arms left out of where it ends (``_reach_of``'s *without*).
         Where it reaches no write of another value with nothing left open, and no gap of the map's may hide where its
         rows go (``reach_said``), the rows it selects stay with it unwritten, and its arms are those of a writer that
         takes a row by its key (KNOWN_ISSUES.md K16): ``(True, the line saying so, the reach)``.  Else it stays a mover,
         its arms as before, said why: ``(False, ...)``."""
-        out: dict[str, tuple[bool, str, dict | None]] = {}
+        out: dict[str, tuple[bool, T.Said, dict | None]] = {}
         asked = f"{q.subject}={q.observed}"
         for owner, arms in elsewhere_of(follow, writers, q.subject, q.observed).items():
             if owner not in movers:
@@ -3598,14 +3620,13 @@ class Rerun:
             rel, func = owner.split("::", 1)
             reach = self._reach_of(q, owner, lines, without=arms) if defs_holding(rel, func, lines) else None
             dropped, said = reach_said(reach, hides_where(gaps.get(owner, [])))
-            whose = (f"the rows {', '.join(f'{func}@{n}' for n in lines)} select(s) reach none of its arms {arms}: the map names "
-                     f"each one's row by a key they do not fill")
+            whose = T.Said("rows-select-reach-none", {"selects": [f"{func}@{n}" for n in lines], "arms": arms})
             if dropped:
-                out[owner] = (True, f"{whose}, and the reach from it, those arms left out, writes no other value with nothing "
-                                    f"left open (closure {reach['closure']}; assuming {sorted(reach['assumptions'])}): a writer "
-                                    f"that takes a row by its key (KNOWN_ISSUES.md K16)", reach)
+                assert reach is not None  # reach_said drops only on the reach's answer
+                out[owner] = (True, T.Said("reach-writes-no-other-by-key", {"whose": whose, "closure": reach["closure"],
+                                                                            "assumptions": sorted(reach["assumptions"])}), reach)
             else:
-                out[owner] = (False, f"{whose}; kept: {said or 'the reach was not asked'}", reach)
+                out[owner] = (False, T.Said("kept-by-reach", {"whose": whose, "said": said or T.Said("the-reach-was-not-asked")}), reach)
         return out
 
     def _reach_of(self, q: Stuck, owner: str, lines: list[int], without: list[int] | tuple = ()) -> dict | None:
@@ -3666,11 +3687,10 @@ class Rerun:
         found, or None, and the asks no record answered."""
         name, lines = owner.split("::")[-1], list(arms)
         if prints_nothing(owner, lines):
-            said = (f"{len(arms)} arm(s) that write another value {[(a.line, a.outcomes) for a in arms.values()]}; the map "
-                    f"has no prints of its own for it, so no run in a log is its own: not followed (KNOWN_ISSUES.md K25)")
+            said = T.Said("prints-nothing-not-followed", {"n": len(arms), "arms": [(a.line, a.outcomes) for a in arms.values()]})
             self.say(f"  {name}: {said}")
             entry["verdict"] = "prints-nothing"
-            entry["reasons"].append({"code": "K25", "text": said})
+            entry["reasons"].append({"code": "K25", "record": said})
             return None, []
         files = self.files_of(owner, list(dict.fromkeys(today)), lines)
         to_hand = self.logs.names(files)
@@ -3696,18 +3716,17 @@ class Rerun:
             entry["verdict"] = "asks-unanswered"
         else:
             # not followed; ruled out only where judgement 3's premises all hold (build order 2)
-            over = " over the whole window" if searched is not asking else ""
+            over: T.Said | str = T.Said("over-the-whole-window") if searched is not asking else ""
             if way == "key" and self.logs.needs_window and rest is not None:
-                over = (f" from {asking.window[0]}, the window's last part, which alone is asked of a writer that "
-                        f"takes a row by its key (KNOWN_ISSUES.md K16)")
+                over = T.Said("from-the-last-part-by-key", {"start": asking.window[0]})
             if all(p["held"] for p in entry["premises"].values()):
-                said = f"no run of its own found in {to_hand}{over}: it did not run (judgement 3)"
+                said = T.Said("did-not-run-judgement-3", {"to_hand": to_hand, "over": over})
                 entry["verdict"] = "did-not-run"
-                entry["reasons"].append({"code": "judgement-3", "text": said})
+                entry["reasons"].append({"code": "judgement-3", "record": said})
             else:
-                said = f"no run of its own found in {to_hand}{over}: not followed, though not ruled out (KNOWN_ISSUES.md K19)"
+                said = T.Said("no-run-found-not-ruled-out", {"to_hand": to_hand, "over": over})
                 entry["verdict"] = "no-run-found"
-                entry["reasons"].append({"code": "K19", "text": said})
+                entry["reasons"].append({"code": "K19", "record": said})
             self.say(f"  {name}: {said}")
         return None, missed
 
@@ -3759,17 +3778,17 @@ class Rerun:
         (``Log.holes``); *rest*, the part before the last, asked too where there is one.  Not known through the door
         over files: a file handed in does not say what of the window it holds."""
         if not to_hand:
-            return {"held": False, "why": "no log was asked"}
+            return {"held": False, "why": T.Said("window-no-log-asked")}
         if not self.logs.needs_window:
-            return {"held": None, "why": "the door over files does not say what of the window a file holds"}
+            return {"held": None, "why": T.Said("window-door-over-files")}
         # a hole first: asking again does not search better what a log's answer did not reach
         if holes:
-            return {"held": False, "why": f"{', '.join(holes)} not searched all the window"}
+            return {"held": False, "why": T.Said("window-not-searched-all", {"logs": list(holes)})}
         if missed:
-            return {"held": None, "why": f"{len(missed)} ask(s) not answered yet"}
+            return {"held": None, "why": T.Said("window-asks-not-answered", {"n": len(missed)})}
         if searched is asking and rest is not None:
-            return {"held": False, "why": f"searched from {asking.window[0]} only"}
-        return {"held": True, "why": f"{searched.window[0]} .. {asking.window[1]} searched in {to_hand}, none of it unsearched"}
+            return {"held": False, "why": T.Said("window-searched-from-only", {"start": asking.window[0]})}
+        return {"held": True, "why": T.Said("window-searched", {"start": searched.window[0], "end": asking.window[1], "to_hand": to_hand})}
 
     async def _writers_of(self, subject: str) -> list:
         writers = await mapdump.code_map("rerun").writers_of(subject)
@@ -4317,7 +4336,7 @@ class Rerun:
             name = f"{Path(rel).name}::{func}"
             armed = arms_of(q.writers, owner, q.subject, q.observed)
             paths = q.paths.get(owner, [])
-            said = []
+            said: list[T.Said | str] = []
             spans = {}
             for st in paths:
                 where = f"{st.owner.split('::')[-1]}@{st.line}"
@@ -4325,59 +4344,62 @@ class Rerun:
                 true = self._statement_true(st, q)
                 if true:
                     spans[where] = true
-                said.append(f"{where} {kind}" + (f", holds for the row {_spans_words(true, whole)}" if true else ""))
+                said.append(T.Said("statement-kind", {"where": where, "kind": kind, "holds": T.Said(
+                    "holds-for-the-row", {"spans": _spans_words(true, whole)}) if true else ""}))
             reasons = []
             premises = None
             if made := births_of(q.writers, owner, q.subject, q.observed):
-                said.append(f"its writes at {made} make the row (births: {birth_why(owner, q.subject, made)}): not arms"
-                            " (KNOWN_ISSUES.md K29)")
-                reasons.append({"code": "K29", "text": said[-1]})
+                said.append(T.Said("births-not-arms", {"made": made, "births": birth_why(owner, q.subject, made)}))
+                reasons.append({"code": "K29", "record": said[-1]})
             if owner == q.mover:
                 verdict = "moved it"
                 said.insert(0, f"at {q.moved} (L1)")
             elif owner in q.refusing:
                 verdict = "write refuses"
-                said = [f"its writes of another value refuse a row holding {q.observed!r}: "
-                        + "; ".join(refused_arms(q.writers, owner, q.subject, q.observed))]
-                reasons.append({"code": "write-refuses", "text": said[0]})
+                said = [T.Said("writes-refuse-a-row", {"observed": q.observed,
+                                                       "arms": refused_arms(q.writers, owner, q.subject, q.observed)})]
+                reasons.append({"code": "write-refuses", "record": said[0]})
             elif not armed and owner not in guarded:
                 if paths and all(kinds.get((st.owner, st.line)) == "refused" for st in paths):
                     verdict = "refused"
-                    reasons.append({"code": "refused", "text": "; ".join(said)})
+                    reasons.append({"code": "refused", "record": T.Said("statements-refused", {"said": list(said)})})
                 else:
                     verdict = "could have" if spans else "undecided"
-                    said.append("no arm of its own: it writes, if at all, through what it calls (KNOWN_ISSUES.md K14)")
-                    reasons.append({"code": "K14", "text": said[-1]})
+                    said.append(T.Said("no-arm-through-calls"))
+                    reasons.append({"code": "K14", "record": said[-1]})
             elif armed:
                 verdict, premises = self._late_absence(q, owner, armed, "could have" if spans else "by key", said, reasons,
                                                        asking, rest, owners)
             else:
                 verdict = "could have" if spans else "by key"
-                said.append("its write requires the value: taken by its key (KNOWN_ISSUES.md K15)")
-                reasons.append({"code": "K15", "text": said[-1]})
-            gaps = q.gaps.get(owner) or []
+                said.append(T.Said("taken-by-its-key"))
+                reasons.append({"code": "K15", "record": said[-1]})
+            gaps = _gaps_json(q.gaps.get(owner) or [])
             if gaps:
-                said.append(f"the map could not read all of it ({gap_said(gaps)})")
-                reasons.append({"code": "map-gap", "text": said[-1]})
+                gap = T.Said("map-could-not-read-all", {"gaps": gaps})
+                said.append(gap)
+                reasons.append({"code": "map-gap", "record": gap})
             if verdict not in ("moved it", "write refuses", "refused"):
                 # what keeps each statement from a verdict: a value the rows file does not hold, a run-time key
                 for st in paths:
                     where = f"{st.owner.split('::')[-1]}@{st.line}"
                     if st.keys:
-                        reasons.append({"code": "K18", "text": f"{where} asks rows by a value known at run time ({', '.join(st.keys)}): "
-                                                               "never surely true"})
+                        reasons.append({"code": "K18", "record": T.Said("asks-rows-by-run-time-value",
+                                                                        {"where": where, "keys": list(st.keys)})})
                     lacked = []
                     for subject in sorted(_statement_subjects(st)):
                         if why := self._unanswered_why(subject, q):
-                            reasons.append({"code": why[0], "text": f"{where}: {subject} not compared ({why[1]})"})
+                            reasons.append({"code": why[0], "record": T.Said("not-compared", {"where": where, "subject": subject,
+                                                                                              "why": why[1]})})
                             lacked += [subject] if why[0] == "rows-no-row" else []
                     if kinds.get((st.owner, st.line)) != "refused":
                         said += [f"{where}: {note}" for note in self.ask_linked(st, lacked, q)]
-            self.say(f"  {name}: {verdict} -- {'; '.join(said) if said else q.movers.get(owner, 'a writer of another value')}")
+            self.say(f"  {name}: {verdict} -- {'; '.join(map(T.text, said)) if said else q.movers.get(owner, 'a writer of another value')}")
             out.append((owner, verdict))
             entries.append({"owner": owner, "reached": "select" if paths else "guard" if owner in guarded else "key",
                             "statements": [f"{st.owner.split('::')[-1]}@{st.line}" for st in paths],
-                            "verdict": verdict.replace(" ", "-"), "reasons": reasons, "premises": premises})
+                            "verdict": verdict.replace(" ", "-"), "reasons": reasons, "premises": premises,
+                            **({"gaps": gaps} if gaps else {})})
         self.result["movers"] = entries
         left = [o for o, v in out if v not in ("moved it", "write refuses", "refused", "did not run")]
         self.say(f"not ruled out: {len(left)} mover(s)")
@@ -4401,22 +4423,20 @@ class Rerun:
             static = {"logs": every_log_asked(owner, lines, to_hand),
                       "prints": prints_naming(q.writers, owner, lines, self._key_columns(q.subject, key))}
             if failing := {k: p for k, p in static.items() if not p["held"]}:
-                said.append("its logs are not asked: a run not found would not rule it out ("
-                            + "; ".join(f"{k}: {p['why']}" for k, p in failing.items()) + ") (KNOWN_ISSUES.md K15)")
-                reasons.append({"code": "K15", "text": said[-1]})
-                return verdict, {"window": {"held": None, "why": "not asked"}, **static}
+                said.append(T.Said("logs-not-asked-not-ruled-out", {"failing": [
+                    T.Said("premise-why", {"premise": k, "why": p["why"]}) for k, p in failing.items()]}))
+                reasons.append({"code": "K15", "record": said[-1]})
+                return verdict, {"window": {"held": None, "why": T.Said("window-not-asked")}, **static}
         entry: dict = {"verdict": None, "reasons": [], "premises": None}
         passes, missed = self._absence(owner, arms, today, entry, q.writers, q.subject, key, asking, rest, way, owners())
         self._keep_unanswered(missed)
         reasons += entry["reasons"]
         if passes:
-            said.append(f"ran: a run of the key in {passes.logs} between {' and '.join(passes.asking.window or ())}, "
-                        f"and L1 names another mover: which way its passes went is not read for late (KNOWN_ISSUES.md K15)")
-            reasons.append({"code": "K15", "text": said[-1]})
+            said.append(T.Said("ran-not-read-for-late", {"logs": passes.logs, "window": list(passes.asking.window or ())}))
+            reasons.append({"code": "K15", "record": said[-1]})
         elif entry["verdict"] == "asks-unanswered":
-            said.append(f"{len({ask.key for ask, _ in missed})} ask(s) of its logs not in the records "
-                        f"({asking.why}): whether it ran is not known yet")
-            reasons.append({"code": "asks", "text": said[-1]})
+            said.append(T.Said("asks-of-its-logs-not-recorded", {"n": len({ask.key for ask, _ in missed}), "why": asking.why}))
+            reasons.append({"code": "asks", "record": said[-1]})
         return entry["verdict"].replace("-", " "), entry["premises"]
 
     def _late_passes(self, q: Missed) -> Passes:
@@ -4563,12 +4583,12 @@ class Rerun:
                 out.append((value, at))
         return out
 
-    def _unanswered(self, subject: str, q: Missed) -> str | None:
+    def _unanswered(self, subject: str, q: Missed) -> T.Said | None:
         """``_unanswered_why``'s words."""
         why = self._unanswered_why(subject, q)
         return why[1] if why else None
 
-    def _unanswered_why(self, subject: str, q: Missed) -> tuple[str, str] | None:
+    def _unanswered_why(self, subject: str, q: Missed) -> tuple[str, T.Said] | None:
         """Why the row's values cannot answer *subject*: no row of its owner in the rows file and no history it reads,
         a log column the history by key does not carry, or a column the owner's row lacks -- kept under the rows
         file's ``after`` (the moved row's columns written at the move or later, so not what the statement read before
@@ -4582,12 +4602,12 @@ class Rerun:
             if attr in row or self._after(subject, q)[0]:
                 return None
             if owner == q.subject.partition(".")[0] and attr in self._read()[1]:
-                return "after-only", "written at the move or later; its row here holds only the value after"
-            return "rows-no-column", f"its row here holds no {attr}"
+                return "after-only", T.Said("after-only-why")
+            return "rows-no-column", T.Said("rows-no-column-why", {"attr": attr})
         found = PT.history_by_table(owner)
         if found is None or found.subject.partition(".")[0] != q.subject.partition(".")[0]:
-            return "rows-no-row", f"no row of {owner}"
-        return None if PT.history_column(found, attr) else ("history-no-column", f"its status history here holds no {attr}")
+            return "rows-no-row", T.Said("rows-no-row-why", {"owner": owner})
+        return None if PT.history_column(found, attr) else ("history-no-column", T.Said("history-no-column-why", {"attr": attr}))
 
     def _history_leaf(self, t, rows: list, q: Missed) -> str | None:
         """A term on a joined log, false all the window: no row of the history satisfies it at any moment it exists in
@@ -4916,7 +4936,7 @@ class Rerun:
             fails(self._tree_words(entry, leaves), "conditions", [entry], entry in st.conditions)
         # what neither the row nor its history answers is said, not skipped; the rows of a class the file has none of
         # are asked where they could change the verdict
-        unanswered = {x: why for x in sorted(_statement_subjects(st)) if (why := self._unanswered_why(x, q))}
+        unanswered = {x: found for x in sorted(_statement_subjects(st)) if (found := self._unanswered_why(x, q))}
         if unanswered:
             said.append("not compared: " + "; ".join(f"{x} ({why})" for x, (_, why) in unanswered.items()))
         if kind == "refused":

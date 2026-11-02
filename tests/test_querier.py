@@ -767,7 +767,7 @@ def test_s1_says_which_premises_of_absence_hold_for_a_mover_with_no_run_found(tm
     r.logs = N(needs_window=True)
     premises = r._premises("JobSpec.jobStatus", "1", "x.py::logger", [], ["a.log", "b.log"], short, short, [], {}, [], None)
     keys = [sorted(r._key_columns("JobSpec.jobStatus", "1")), sorted(r._key_columns("JobSpec.jobStatus", "2"))]
-    print(json.dumps([got, logs, premises, keys]))
+    print(json.dumps([got, logs, premises, keys], default=str))
     """,
         )
     )
@@ -2093,7 +2093,7 @@ def test_s1_keeps_a_mover_with_no_arm_of_its_own_and_says_why(tmp_path):
             print(json.dumps([
                 kept_without_arms(True, [], [], False, False),
                 kept_without_arms(False, ["killJob"], ["archiveJob"], True, True),
-            ]))
+            ], default=str))
             """,
         )
     )
@@ -2114,7 +2114,8 @@ def test_s1_keeps_a_mover_for_a_gap_only_where_it_may_hide_where_the_rows_go_and
             import json
             from types import SimpleNamespace
             from bamboo.codemap.models import ReaderGap
-            from bamboo.querier.rerun import gap_said, hides_where, map_gaps
+            from bamboo.querier import render as T
+            from bamboo.querier.rerun import _gaps_json, hides_where, map_gaps
 
             part = ReaderGap(kind="partial", file="p/m.py", line=472)
             unnoded = ReaderGap(kind="unnoded", file="p/m.py", line=222, stops=[("unreached", "dry_sql_query")])
@@ -2123,7 +2124,7 @@ def test_s1_keeps_a_mover_for_a_gap_only_where_it_may_hide_where_the_rows_go_and
                                                  SimpleNamespace(owner="p/m.py::k", gaps=[])])
             gaps = map_gaps(follow)
             print(json.dumps([sorted(gaps), [hides_where(gaps[o]) for o in sorted(gaps)], hides_where([]),
-                              gap_said(gaps["p/m.py::g"])]))
+                              T.text(T.Said("map-could-not-read-all", {"gaps": _gaps_json(gaps["p/m.py::g"])}))], default=str))
             """,
         )
     )
@@ -2132,9 +2133,10 @@ def test_s1_keeps_a_mover_for_a_gap_only_where_it_may_hide_where_the_rows_go_and
     assert owners == ["p/m.py::f", "p/m.py::g", "p/m.py::h"]
     # a statement read in part hides which rows it takes, not where they go: it alone keeps no mover
     assert hidden == [False, True, True] and none is False
-    # every gap is said, a text per kind in the map's order, with its lines
-    assert said == ("@222 dry_sql_query -- a statement here that reads these rows stopped being read, and has no node; "
-                    "@472 -- a statement here that reads these rows was read only in part")
+    # every gap is said from its record, a text per kind in the map's order, with its lines
+    assert said == ("the map could not read all of it (@222 dry_sql_query -- a statement here that reads these rows "
+                    "stopped being read, and has no node; @472 -- a statement here that reads these rows was read only in "
+                    "part)")
 
 
 def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_nothing_open(tmp_path):
@@ -2154,7 +2156,7 @@ def test_s1_drops_a_mover_with_no_arm_only_where_the_reach_finds_no_write_and_no
             w = [{"function": "p/w.py::W.killJob", "arms": ["failed@3"], "chain": ["p/m.py:7"]}]
             print(json.dumps([reach_said(None, False), reach_said(reach([]), False), reach_said(reach(None, 1), False),
                               reach_said(reach(w), False), reach_said(reach([]), True), reach_said(reach([], own=["p/m.py::f"]), False),
-                              reach_said(reach([], closed=1), False)]))
+                              reach_said(reach([], closed=1), False)], default=str))
             """,
         )
     )
@@ -2331,7 +2333,7 @@ def test_judgement_3s_prints_premise_holds_only_where_a_line_before_every_arm_na
                       "sql": held([22]), "none before": held([10, 30, 20]), "unread": held([10, 40]),
                       "no key column": held([10], set()), "no arm": held([]), "named whole": held([10, 12]),
                       "whole, another column": held([10, 23]), "whole, none": held([24]), "whole before unread": held([40, 24]),
-                      "none before whole": held([23, 30]), "whole and not": held([20, 23])}))
+                      "none before whole": held([23, 30]), "whole and not": held([20, 23])}, default=str))
     """,
         )
     )
@@ -2829,7 +2831,7 @@ def test_a_mover_whose_rows_reach_none_of_its_arms_is_one_by_key_where_the_reach
                                           N(owner=insert, line=20, selects=["JobSpec.jobStatus=waiting"], result="rows")])
             said = r._rows_elsewhere(q, follow, [], {status: "", insert: ""}, {})
             print(json.dumps([{o: [to_key, text, reach["own_arms"], reach["writes"]] for o, (to_key, text, reach) in said.items()},
-                              r._reach_of(q, status, [294])["own_arms"]]))
+                              r._reach_of(q, status, [294])["own_arms"]], default=str))
             """,
         )
     )
@@ -2947,8 +2949,8 @@ def test_a_write_that_makes_the_row_is_no_arm_where_every_key_from_writing_it_th
     ])]
     arms = {o.split("::")[-1]: sorted(arms_of(writers, o, S, "running")) for o in (files, archive, mix, unread, make)}
     print(json.dumps([arms, births_of(writers, files, S, "running"), births_of(writers, make, S, "running"),
-                      refused_arms(writers, make, S, "running"), birth_why(files, S, [455, 887])]))
-    print(json.dumps(before + [movers_of(follow(), writers, S, "running"), make in by_key_of(writers, {}, S, "running")]))
+                      refused_arms(writers, make, S, "running"), birth_why(files, S, [455, 887])], default=str))
+    print(json.dumps(before + [movers_of(follow(), writers, S, "running"), make in by_key_of(writers, {}, S, "running")], default=str))
     """,
         )
     )
@@ -3238,7 +3240,7 @@ def test_l2_says_each_movers_verdict(tmp_path):
     r.logs = N(names=lambda files: list(files), needs_window=True)
     verdicts = r._movers_in_window(q, {("d/a.py::main", 10): "refused", ("d/a.py::main", 20): "not settled",
                                       ("d/a.py::main", 30): "not settled"})
-    print(json.dumps([verdicts, r.lines[-1], r.result["movers"]]))
+    print(json.dumps([verdicts, r.lines[-1], r.result["movers"]], default=str))
     """,
         )
     )
@@ -3257,7 +3259,7 @@ def test_l2_says_each_movers_verdict(tmp_path):
         "p/w.py::keyed": ["K15"],
         "p/w.py::refusing": ["write-refuses"],
     }
-    assert by_owner["d/a.py::dark"]["reasons"][1]["text"].startswith("main@30: JobSpec.modificationTime not compared (written at")
+    assert by_owner["d/a.py::dark"]["reasons"][1]["record"].startswith("main@30: JobSpec.modificationTime not compared (written at")
     assert [(m["reached"], m["statements"]) for m in movers[:5]] == [
         ("select", ["main@10"]), ("select", ["main@20"]), ("select", ["main@30"]), ("select", ["main@10"]), ("guard", [])]
     assert dict(map(tuple, verdicts)) == {
@@ -3271,7 +3273,7 @@ def test_l2_says_each_movers_verdict(tmp_path):
     }
     assert last == "not ruled out: 4 mover(s)"
     assert by_owner["p/w.py::armed"]["premises"]["window"] == {"held": None, "why": "not asked"}
-    assert by_owner["p/w.py::armed"]["reasons"][0]["text"] == (
+    assert by_owner["p/w.py::armed"]["reasons"][0]["record"] == (
         "its logs are not asked: a run not found would not rule it out (prints: not known) (KNOWN_ISSUES.md K15)")
 
 
@@ -3317,7 +3319,7 @@ def test_l2_asks_a_movers_logs_only_where_judgement_3_could_rule_it_out_and_goes
     long = dict(map(tuple, r._movers_in_window(q, {})))
     silent = next(m for m in r.result["movers"] if m["owner"].endswith("silent"))
     print(json.dumps([verdicts, {n: [m["premises"], [x["code"] for x in m["reasons"]]] for n, m in movers.items()},
-                      asked, kept, lines, long, silent["premises"]["window"], r.lines]))
+                      asked, kept, lines, long, silent["premises"]["window"], r.lines], default=str))
     """,
         )
     )
@@ -3455,7 +3457,7 @@ def test_the_window_end_reads_after_only_at_as_of(tmp_path):
     stuck = rerun.Missed("JobSpec.jobStatus", "activated", "", at, at, [], "", None, at_end=True)
     print(json.dumps([r._held("JobSpec.modificationTime", q), r._held("JobSpec.modificationTime", stuck),
                       r._held("JobSpec.source", stuck), r._unanswered("JobSpec.modificationTime", q),
-                      r._unanswered("JobSpec.modificationTime", stuck)]))
+                      r._unanswered("JobSpec.modificationTime", stuck)], default=str))
     """,
         )
     )
@@ -3520,7 +3522,7 @@ def test_a_step_says_why_a_row_value_it_needs_is_not_its_runs(tmp_path):
             r._held("JobSpec.gshare", q), r._unanswered("JobSpec.gshare", q)]
     env.put("job.gshare", "Express", "printed by the run")
     said += [E.evaluate(test, env), env.unread_in(test)]
-    print(json.dumps(said))
+    print(json.dumps(said, default=str))
     """,
         )
     )
@@ -5329,7 +5331,7 @@ def test_s1_names_the_writes_a_movers_rows_wait_on_that_the_map_states_and_keys_
                                for m, ws in got.items()},
                               [rerun.wake_said(w) for ws in got.values() for w in ws],
                               rerun.woken_said(got["f.py::feed_contents_to_tasks"]),
-                              {o: [w.line for w in ws] for o, ws in rerun.woken_of(entries, wakes).items()}]))
+                              {o: [w.line for w in ws] for o, ws in rerun.woken_of(entries, wakes).items()}], default=str))
             """,
         )
     )
