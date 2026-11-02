@@ -108,8 +108,10 @@ MAP_CODE = ("bamboo/codemap", "bamboo/scripts/build_map.py")
 
 DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
 
-#: the shape of result.json read here (agreed with the querier, 2026-10-15)
-RESULT_VERSION = 1
+#: the shapes of result.json read here, agreed with the querier: 1 (2026-10-15) holds the outcome's English as
+#: ``text``; 2 (querier odata O1, 2026-11-02) holds a ``record`` in its place, the English rendered at read time.
+#: 1 is read while a pair runs a querier that writes it (pin k's)
+RESULT_VERSIONS = (1, 2)
 #: the files a run writes beside its out.txt
 RESULT, ASKS, ROWS_ASKS = "result.json", "asks.jsonl", "rows-asks.jsonl"
 #: what a run tree's querier says where it takes the rows asks' file
@@ -379,10 +381,11 @@ def score(result: dict | None) -> dict:
     needs (``asks``, a KNOWN_ISSUES number, or None where none is named yet), and
     an end's is ``one-of`` where it rests on the arms a step left (querier-k37),
     else None;
-    ``text`` is the ``STOP`` line or the ``END`` lines; ``possibilities`` is
-    result.json's, each arm a step left open with its rows (code ``one-of``,
-    querier-ab), None otherwise.  A run with no result, or one of another
-    version, is ``NONE`` and ``why`` says which.
+    ``text`` is the ``STOP`` line or the ``END`` lines (version 1), ``record``
+    the same as data (version 2: {kind, facts}, None where the run said no END
+    line); ``possibilities`` is result.json's, each arm a step left open with its
+    rows (code ``one-of``, querier-ab), None otherwise.  A run with no result, or
+    one of a version not read here, is ``NONE`` and ``why`` says which.
     """
     got: dict = {
         "terminal": "NONE",
@@ -390,6 +393,7 @@ def score(result: dict | None) -> dict:
         "step": None,
         "code": None,
         "text": None,
+        "record": None,
         "steps": [],
         "hand": None,
         "hand_used": None,
@@ -399,16 +403,18 @@ def score(result: dict | None) -> dict:
     }
     if result is None:
         return got | {"why": "no result.json: the run did not finish"}
-    if result.get("version") != RESULT_VERSION:
+    if result.get("version") not in RESULT_VERSIONS:
         return got | {
-            "why": f"result.json version {result.get('version')}, this reads {RESULT_VERSION}"
+            "why": f"result.json version {result.get('version')}, this reads "
+            + " or ".join(map(str, RESULT_VERSIONS))
         }
     o = result["outcome"]
     return got | {
         "terminal": o["kind"].upper(),
         "step": o["step"],
         "code": o["code"],
-        "text": o["text"],
+        "text": o.get("text"),
+        "record": o.get("record"),
         "steps": result["steps"],
         "hand": len(o["hand_used"]),
         "hand_used": o["hand_used"],
@@ -434,7 +440,7 @@ def read_as_handed(result: dict | None, pair: dict, handed: dict) -> dict:
     """Whether the run read what it was handed, by its result.json: the pair's dump (path and whole sha256), run tree
     and ``QUERIER`` label, and *handed*'s rows, logs and record files (path and sha256 each).  ``differ`` names each
     that does not match."""
-    if result is None or result.get("version") != RESULT_VERSION:
+    if result is None or result.get("version") not in RESULT_VERSIONS:
         return {"ok": False, "differ": [RESULT], "bamboo_py_sha256": None}
     i, q = result["inputs"], result["inputs"]["querier"]
     dump = i["map_dump"]
@@ -741,6 +747,20 @@ def run_case(
     return run
 
 
+def record_kinds(record: dict) -> str:
+    """A record's kind and, after a colon, the kinds of the records its facts hold, bare or as ``{"said": record}``,
+    a kind held n times as "kind xn" (result version 2): the terminal line's words, the English being out.txt's."""
+    inner: dict[str, int] = {}
+    for value in record.get("facts", {}).values():
+        for x in value if isinstance(value, list) else [value]:
+            x = x.get("said", x) if isinstance(x, dict) else x
+            if isinstance(x, dict) and "kind" in x:
+                inner[x["kind"]] = inner.get(x["kind"], 0) + 1
+    said = [k if n == 1 else f"{k} x{n}" for k, n in inner.items()]
+    kind: str = record["kind"]
+    return kind + (": " + ", ".join(said) if said else "")
+
+
 def line(r: dict) -> str:
     """One line per run, for the terminal."""
     if "read" not in r:
@@ -749,8 +769,13 @@ def line(r: dict) -> str:
     if s["terminal"] == "NONE":
         where = s["why"]
     else:
-        said = s["text"] or f"{s['terminal']} {s['step']} (no END line)"
-        where = said.splitlines()[-1][:80] + (f"  [{s['code']}]" if s["code"] else "")
+        if s["text"]:
+            said = s["text"].splitlines()[-1]
+        elif s.get("record"):
+            said = f"{s['terminal']} {s['step']} {record_kinds(s['record'])}"
+        else:
+            said = f"{s['terminal']} {s['step']} (no END line)"
+        where = said[:80] + (f"  [{s['code']}]" if s["code"] else "")
     extra = f"  asks {s['asks']['count']}" if s["asks"] else ""
     if "baseline" in r:
         extra += f"  baseline diff {r['baseline']['lines_differ']}"

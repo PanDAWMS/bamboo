@@ -72,9 +72,72 @@ def test_score_reads_an_end_and_counts_each_hand_used():
 def test_a_run_without_a_result_of_this_version_is_not_scored():
     assert F.score(None)["terminal"] == "NONE"
     assert "did not finish" in F.score(None)["why"]
-    s = F.score(STOPPED | {"version": 2})
-    assert s["terminal"] == "NONE" and s["why"] == "result.json version 2, this reads 1"
+    s = F.score(STOPPED | {"version": 3})
+    assert s["terminal"] == "NONE"
+    assert s["why"] == "result.json version 3, this reads 1 or 2"
     assert s["steps"] == [] and s["hand"] is None
+
+
+def _without_text(outcome: object, record: object) -> dict:
+    assert isinstance(outcome, dict)
+    return {k: v for k, v in outcome.items() if k != "text"} | {"record": record}
+
+
+#: the same stop and end as the querier writes them from version 2 (odata O1): the English as a record
+STOPPED_2 = STOPPED | {
+    "version": 2,
+    "outcome": _without_text(
+        STOPPED["outcome"],
+        {
+            "kind": "at-step",
+            "facts": {
+                "step": "H2",
+                "what": {"said": {"kind": "asks-left", "facts": {"count": 2}}},
+            },
+        },
+    ),
+}
+ENDED_2 = ENDED | {"version": 2, "outcome": _without_text(ENDED["outcome"], None)}
+
+
+def _line_of(score: dict) -> str:
+    return F.line(
+        {
+            "name": "C1",
+            "pair": "p",
+            "read": {"ok": True, "differ": []},
+            "score": score,
+            "exit": 0,
+            "seconds": 1,
+        }
+    )
+
+
+def test_score_reads_a_version_2_record_and_the_line_names_its_kinds():
+    s = F.score(STOPPED_2)
+    assert s["terminal"] == "STOP" and s["step"] == "H2" and s["code"] == "asks"
+    assert s["text"] is None and s["record"]["kind"] == "at-step"
+    assert s["hand"] == 0 and s["asks"]["count"] == 2
+    assert "STOP H2 at-step: asks-left  [asks]" in _line_of(s)
+
+
+def test_the_line_counts_a_kind_its_record_holds_more_than_once():
+    fork = {
+        "kind": "of-branch-es-stopped",
+        "facts": {"branches": [{"said": {"kind": "numbered", "facts": {}}}] * 3},
+    }
+    assert F.record_kinds(fork) == "of-branch-es-stopped: numbered x3"
+    assert F.record_kinds({"kind": "ends", "facts": {"ends": []}}) == "ends"
+
+
+def test_a_version_2_end_with_no_end_line_says_so():
+    s = F.score(ENDED_2)
+    assert s["terminal"] == "END" and s["record"] is None and s["hand"] == 2
+    assert "END S5 (no END line)" in _line_of(s)
+
+
+def test_the_line_of_a_version_1_run_is_its_last_line():
+    assert "END a legitimate wait: emptied at 09:04:17" in _line_of(F.score(ENDED))
 
 
 def test_lines_differ_leaves_out_comment_lines():
@@ -1060,7 +1123,7 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
 
 def test_the_score_carries_an_arms_possibilities():
     result = {
-        "version": F.RESULT_VERSION,
+        "version": 1,
         "outcome": {
             "kind": "stop",
             "step": "H2",
