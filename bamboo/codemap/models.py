@@ -3687,6 +3687,7 @@ class MapFragment(BaseModel):
     key_froms: list[KeyFrom] = Field(default_factory=list)
     guard_froms: list["GuardFrom"] = Field(default_factory=list)
     parameter_froms: list["ParameterFrom"] = Field(default_factory=list)
+    runnables: list["Runnable"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5584,6 +5585,88 @@ class ParameterFrom(BaseModel):
     parameter: str
     sources: list[HeldSource] = Field(default_factory=list)
     stops: list[KeyStop] = Field(default_factory=list)
+
+
+#: Why a definition of the corpus may not be run by a reader with a run's values (:attr:`Runnable.stops`): it changes
+#: what it is handed, ``self``, a module's or a class's names; it reaches the database, or a file, a process, another
+#: system; it reads the clock, a draw or the machine, the configuration, a module's or a class's name that is not a
+#: constant; it calls a library's function the map does not say runs alike everywhere, a call not placed, a
+#: definition that is not runnable.
+RUN_CHANGES = "changes"
+RUN_DATABASE = "database"
+RUN_OUTSIDE = "outside"
+RUN_CLOCK = "clock"
+RUN_CONFIG = "config"
+RUN_GLOBAL = "global"
+RUN_LIBRARY = "library"
+RUN_UNPLACED = "unplaced"
+RUN_CALLEE = "callee"
+RUN_STOPS = (
+    RUN_CHANGES,
+    RUN_DATABASE,
+    RUN_OUTSIDE,
+    RUN_CLOCK,
+    RUN_CONFIG,
+    RUN_GLOBAL,
+    RUN_LIBRARY,
+    RUN_UNPLACED,
+    RUN_CALLEE,
+)
+#: Why a definition is asked of (:attr:`Runnable.asked`): a call in an arm's path condition can land at it, a JSON
+#: maker on a guard's way is handed it as a hook, a guard's way is the value it returns from a JSON maker.
+RUN_CONDITION = "condition"
+RUN_HOOK = "hook"
+RUN_DECODER = "decoder"
+
+
+class RunStop(BaseModel):
+    """One reason a :class:`Runnable` is not: *kind* one of :data:`RUN_STOPS`, where, and what."""
+
+    kind: str = Field(description=f"One of {', '.join(RUN_STOPS)}.")
+    at: str = Field(description="``file:line`` of the statement, the call or the read.")
+    what: str = Field(
+        default="",
+        description=(
+            "What it is: the name stored and how (``taskSpec store .errorDialog``), the library function "
+            "(``datetime.datetime.fromtimestamp``), the definition not runnable (``file::name``), the call not placed "
+            "and why."
+        ),
+    )
+
+
+class Runnable(BaseModel):
+    """Whether a reader may run one definition of the corpus with a run's values and get what the run got
+    (:mod:`bamboo.codemap.panda.runnable`): ``DataServiceUtils.is_sub_dataset`` in a test on the way to an arm,
+    ``RefinerUtils.unicodeConvert`` a JSON maker on a guard's way is handed as its hook.  Runnable where nothing it
+    runs changes anything, reaches the database or outside, or reads the clock, the configuration or a name that is
+    not a constant: its value is what it is handed alone.  Running it is the reader's."""
+
+    owner: str = Field(description="The definition's owner (``file::name``).")
+    line: int = Field(description="The line of its ``def``.")
+    bound: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For a method: each class ``self`` can be where it is asked of (``file::Class``), as the call places it; "
+            "the record is one per definition and these."
+        ),
+    )
+    asked: list[str] = Field(
+        default_factory=list, description=f"Why it is asked of: {RUN_CONDITION}, {RUN_HOOK}, {RUN_DECODER}."
+    )
+    asked_at: list[str] = Field(
+        default_factory=list,
+        description="``file:line`` of each call in a path condition, or of the JSON maker, it is asked of at.",
+    )
+    runnable: bool = Field(description="No stop: a reader may run it.")
+    reads: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What its own statements read of what it is handed -- ``job.specialHandling``, ``self.splitRule`` --: "
+            "the fields an object a reader builds from a run's row must hold; a class's constant is not one.  The "
+            "definitions it calls are read for whether they are runnable, not for these."
+        ),
+    )
+    stops: list[RunStop] = Field(default_factory=list, description="Why it is not runnable, each place.")
 
 
 class RunKey(BaseModel):

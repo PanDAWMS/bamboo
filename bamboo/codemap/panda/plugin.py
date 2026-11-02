@@ -51,6 +51,7 @@ from bamboo.codemap.panda import (
     offrow,
     pathcond,
     promotion,
+    runnable,
     runs,
     sql,
     sqltext,
@@ -748,6 +749,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             record,
         )
         lap("guard sources")
+        # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
+        # hooks and decoders the guards' ways go through.
+        fragment.runnables = runnable.runnables(
+            fragment.junctions,
+            {module.rel_path: module.tree for module in self._modules},
+            self._calls,
+            record,
+            fragment.guard_froms,
+            fragment.parameter_froms,
+        )
+        lap("runnables")
         # What the schema and the corpus say of each table named, for a reader asking rows: the write records all
         # made, read inside the calls and the schema as the read sites were.
         fragment.tables = tables.records(

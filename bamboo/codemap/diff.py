@@ -340,6 +340,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: what the calls of a function hand a parameter -- see ParameterFrom; "
         "a dump's section compare reads them"
     ),
+    "runnables": (
+        "records beside the nodes, not nodes: whether a reader may run a definition with a run's values -- see "
+        "Runnable; a dump's section compare reads them"
+    ),
     "print_calls": "the second reading prints-are-counted checks the stored rows against",
     "tables": (
         "records beside the nodes, not nodes: what the schema and the corpus say of each table named -- see "

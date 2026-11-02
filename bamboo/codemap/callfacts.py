@@ -701,6 +701,11 @@ ASSUMPTIONS: dict[str, str] = {
         "but for the builtin containers' methods that do (BUILTIN_METHODS): json.dumps, copy.deepcopy and str read "
         "it (bamboo.codemap.panda.changes.object_changes)."
     ),
+    "library_runs_alike": (
+        "A function or class of RUNS_ALIKE, and a method of VALUE_METHODS on what one makes, gives the same value for "
+        "the same arguments on any machine at any time and changes nothing it is handed: a reader may run it with a "
+        "run's values and get the run's (bamboo.codemap.panda.runnable)."
+    ),
     "logger_keeps_nothing": (
         "A method named as a logger's (debug, info, warning, error, ...) that no definition of the corpus answers for "
         "writes a line and keeps nothing it is handed."
@@ -904,6 +909,64 @@ def text_methods(*gives: str) -> frozenset[str]:
 #: The library functions whose value is a text, by their names: ``traceback.format_exc()``, the exception being
 #: handled, its traceback and message.
 LIBRARY_TEXTS = frozenset({"format_exc"})
+
+#: The functions and classes outside the corpus whose value is what they are handed alone -- the same arguments, the
+#: same value, on any machine at any time -- and that change nothing they are handed, spelled as the imports spell
+#: them (``re.search``, ``datetime.timedelta``); a name ending in ``.`` is each of that module's
+#: (:mod:`bamboo.codemap.panda.runnable`; ASSUMPTIONS ``library_runs_alike``).
+RUNS_ALIKE = frozenset(
+    {
+        *("re.", "math.", "itertools.", "operator.", "string.", "collections."),
+        *("json.loads", "json.dumps", "copy.copy", "copy.deepcopy", "functools.reduce", "functools.partial"),
+        *("datetime.timedelta", "datetime.datetime", "datetime.date", "datetime.time"),
+        *("datetime.datetime.strptime", "datetime.datetime.fromisoformat", "datetime.datetime.combine"),
+        "datetime.date.fromisoformat",
+    }
+)
+#: Those whose value is the clock's, a draw, or the machine's: what a reader running it gets is not what the run got.
+#: PanDA's own ``naive_utcnow`` is ``pandacommon``'s, outside the corpus.
+CLOCK = frozenset(
+    {
+        *("datetime.datetime.now", "datetime.datetime.utcnow", "datetime.datetime.today", "datetime.date.today"),
+        *("time.", "random.", "uuid.", "socket.", "getpass.", "os.environ", "os.getenv", "os.getpid"),
+        "pandacommon.pandautils.PandaUtils.naive_utcnow",
+    }
+)
+#: The deployment's configuration objects, as the imports spell them: a value read off one is the deployment's.
+CONFIGURATION = frozenset({"pandaserver.config.panda_config", "pandajedi.jediconfig.jedi_config"})
+#: The methods, by name, of the values a call of :data:`RUNS_ALIKE` makes -- a match, a pattern, a date, a time span
+#: -- and a text's ``encode`` and a bytes' ``decode`` (:data:`TEXT_METHODS` holds a text's that make texts): they
+#: change nothing, and their value is what the value and what they are handed say.
+VALUE_METHODS = frozenset(
+    {
+        "encode",
+        "decode",
+        *("group", "groups", "groupdict", "start", "end", "span"),
+        *("search", "match", "fullmatch", "findall", "finditer", "sub", "subn"),
+        *("strftime", "isoformat", "date", "time", "timestamp", "total_seconds", "weekday", "isoweekday"),
+    }
+)
+
+
+def spelled(types: "Types", file: str, called: ast.expr) -> Optional[str]:
+    """*called* spelled through *file*'s imports -- ``datetime.datetime.now`` under ``import datetime``, ``re.search``
+    under ``from re import search`` -- or ``None`` where its root is no import."""
+    parts: list[str] = []
+    while isinstance(called, ast.Attribute):
+        parts.append(called.attr)
+        called = called.value
+    if not isinstance(called, ast.Name):
+        return None
+    held = types.imports(file).get(called.id)
+    if held is None:
+        return None
+    module, name = held
+    return ".".join([module, *([name] if name else []), *reversed(parts)])
+
+
+def listed(name: str, table: frozenset[str]) -> bool:
+    """Whether *table* holds *name*, or a module ``x.`` it is a function of (``re.search`` in ``re.``)."""
+    return name in table or any(one.endswith(".") and name.startswith(one) for one in table)
 
 
 class Function(NamedTuple):
