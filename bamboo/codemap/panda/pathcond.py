@@ -21,7 +21,7 @@ import functools
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.panda import sqleval
+from bamboo.codemap.panda import evaluate, sqleval
 from bamboo.codemap.panda.reaching import reaching, reaching_exit
 
 
@@ -57,10 +57,19 @@ def qualified_name(func: ast.AST) -> str:
     return ".".join(reversed(names))
 
 
+#: The nodes CPython's parser hands one object of to every tree: an expression's context (``Load``, ``Store``,
+#: ``Del``) and its operator (``Add``, ``And``, ``Not``, ``Eq``) -- no field, no line.  A parent or a line written on
+#: one is on every tree's, so none is: order read the ``Load`` a bind's copy was given line 66 as a node of each
+#: function at 66, its statement another file's at 1041.
+SHARED_NODES = (ast.expr_context, ast.boolop, ast.operator, ast.unaryop, ast.cmpop)
+
+
 def attach_parents(tree: ast.AST) -> None:
+    """Each node's ``parent``, but a shared one's (:data:`SHARED_NODES`)."""
     for parent in walk(tree):
         for child in ast.iter_child_nodes(parent):
-            child.parent = parent  # type: ignore[attr-defined]
+            if not isinstance(child, SHARED_NODES):
+                child.parent = parent  # type: ignore[attr-defined]
 
 
 def ancestors(node: ast.AST) -> Iterator[ast.AST]:
@@ -782,46 +791,33 @@ UNDECIDED = object()
 def decided(test: ast.expr, values: dict[str, object]) -> object:
     """``True`` or ``False`` where *values* settle *test*, else :data:`UNDECIDED`.
 
-    A name's truth, ``not``, ``and``/``or``, and one comparison of a name
-    with a literal -- the shapes a flag parameter is tested in.
+    The test read by the one evaluator a run's reader reads it by
+    (:func:`bamboo.codemap.panda.evaluate.truth`), its names holding *values*
+    -- the constants a caller hands a flag parameter, by its bare name.
+
+    A test that reads none of those names is decided by its literals alone,
+    the same for any values, and that answer is kept on the test: a caller
+    asks of every test on a statement's way, most of them not on its flags.
     """
-    if isinstance(test, ast.Name):
-        return bool(values[test.id]) if test.id in values else UNDECIDED
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        inner = decided(test.operand, values)
-        return inner if inner is UNDECIDED else not inner
-    if isinstance(test, ast.BoolOp):
-        results = [decided(value, values) for value in test.values]
-        stop = isinstance(test.op, ast.Or)
-        if any(result is stop for result in results):
-            return stop
-        return (not stop) if all(result is (not stop) for result in results) else UNDECIDED
-    if (
-        isinstance(test, ast.Compare)
-        and len(test.ops) == 1
-        and isinstance(test.left, ast.Name)
-        and test.left.id in values
-    ):
-        left = values[test.left.id]
-        try:
-            right = ast.literal_eval(test.comparators[0])
-        except (ValueError, SyntaxError, TypeError):
-            return UNDECIDED
-        compare = {
-            ast.Is: lambda a, b: a is b,
-            ast.IsNot: lambda a, b: a is not b,
-            ast.Eq: lambda a, b: a == b,
-            ast.NotEq: lambda a, b: a != b,
-            ast.In: lambda a, b: a in b,
-            ast.NotIn: lambda a, b: a not in b,
-        }.get(type(test.ops[0]))
-        if compare is None:
-            return UNDECIDED
-        try:
-            return bool(compare(left, right))
-        except TypeError:
-            return UNDECIDED
-    return UNDECIDED
+    names = getattr(test, "_decided_names", None)
+    if names is None:
+        names = frozenset(node.id for node in walk(test) if isinstance(node, ast.Name))
+        test._decided_names = names  # type: ignore[attr-defined]
+    if not names.isdisjoint(values):
+        return _decided(test, values)
+    alone = getattr(test, "_decided_alone", None)
+    if alone is None:
+        alone = _decided(test, {})
+        test._decided_alone = alone  # type: ignore[attr-defined]
+    return alone
+
+
+def _decided(test: ast.expr, values: dict[str, object]) -> object:
+    env = evaluate.Env()
+    for name, value in values.items():
+        env.put(name, value, "handed")
+    result = evaluate.truth(test, {}, env)
+    return UNDECIDED if result is evaluate.UNKNOWN else result
 
 
 def ruled_out_by(node: ast.AST, func: ast.AST, values: dict[str, object]) -> bool:
@@ -1386,6 +1382,71 @@ def reaching_definitions(
         (value for value in bound if id(site_of(value)) in alive),
         key=lambda value: site_of(value).lineno,
     )
+
+
+#: :attr:`Held.kind`: one binding reaches the read, of a literal;
+HELD_CONSTANT = "constant"
+#: one binding reaches it, of anything else;
+HELD_COMPUTED = "computed"
+#: more than one reaches it -- the function's entry may be one of them;
+HELD_SEVERAL = "several"
+#: only the entry reaches it, and the name is no parameter: nothing is bound to it there;
+HELD_UNBOUND = "unbound"
+#: only the entry reaches it, and the name is a parameter: what the call handed.
+HELD_PARAMETER = "parameter"
+
+
+class Held(NamedTuple):
+    """What a local holds where a statement reads it (:func:`held_at`)."""
+
+    kind: str
+    #: the literal, where :attr:`kind` is :data:`HELD_CONSTANT`; else None
+    value: object
+    #: the bindings that reach the read, in source order; the function's ``args`` for its entry
+    sites: tuple[ast.AST, ...]
+
+
+#: The literals a local is held to be: values no call can change in place.
+_SCALARS = (str, bytes, int, float, complex, bool, type(None))
+
+
+def held_at(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST) -> Held:
+    """What the local *name* holds where *at* reads it -- an ``if`` or ``while`` at its test: the bindings of it
+    that can reach the read (:func:`bamboo.codemap.panda.reaching.reaching`, the function's entry among them).
+
+    One binding of a literal reaching it is the value whatever ran before: ``isOK = True`` four lines above
+    ``if not toSkip: if isOK:``.  A binding outside a loop around *at* is the value as long as nothing in the loop
+    binds the name again: then another pass cannot change it.  A tuple's or a ``for``'s target binds as an ``=``
+    does -- ``statusInDB, frozenTime = res`` under ``if res is not None:`` leaves ``frozenTime = None`` one of two
+    -- and so do a ``try`` body's bindings before its ``finally``; a ``toSkip = True`` followed by ``continue``
+    reaches nothing past the loop's body, so ``if not toSkip:`` there reads ``toSkip = False`` alone.  A ``+=``
+    is a binding of its own, of something computed.
+
+    Read off ``parent`` links, as :func:`reaching` places the read by them: without them every read looks reached
+    from the entry, so a tree without them is refused (:func:`attach_parents`).
+    """
+    target = at.test if isinstance(at, (ast.If, ast.While)) else at
+    if getattr(target, "parent", None) is None:
+        raise ValueError(f"held_at needs parent links on the tree holding line {getattr(at, 'lineno', '?')}")
+    arguments = func.args
+    parameters = {one.arg for one in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]}
+    parameters |= {one.arg for one in (arguments.vararg, arguments.kwarg) if one is not None}
+    sites = _unique([binding.site for binding in bindings(func, name) if not binding.nested])
+    reached = tuple(reaching(target, [arguments, *sites]))
+    if reached == (arguments,):
+        return Held(HELD_PARAMETER if name in parameters else HELD_UNBOUND, None, reached)
+    if len(reached) != 1:
+        return Held(HELD_SEVERAL, None, reached)
+    site = reached[0]
+    value = written_value(site) if isinstance(site, (ast.Assign, ast.AnnAssign)) else None
+    if value is not None and [one.id for one in targets_of(site) if isinstance(one, ast.Name)] == [name]:
+        try:
+            literal = ast.literal_eval(value)
+        except (ValueError, SyntaxError, TypeError):
+            literal = _SCALARS
+        if isinstance(literal, _SCALARS):
+            return Held(HELD_CONSTANT, literal, reached)
+    return Held(HELD_COMPUTED, None, reached)
 
 
 def surviving_writes(

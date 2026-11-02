@@ -805,10 +805,115 @@ def reads_whole(row: PrintRow | SkeletonLine, token: Optional[str], message: str
     with one a padded level hides.  ``"start"`` does not read ``start jediTaskID=12 status=ready`` whole, while
     ``f"start for {commandStr}"`` reads ``start for retry``, though its pattern ends at ``for``.  A ``LogWrapper``'s
     prefix is read wherever the split left it.  ``None`` where the row cannot say: it has no capture, or its logger
-    may write a mark this reading did not read (``prefix_hole``)."""
+    may write a mark this reading did not read (``prefix_hole``).
+
+    **A hole's class is a guess.**  The capture closes a hole at the first character of the literal after it, so
+    ``killJob``'s ``user={user} wg=`` takes no blank, and a DN holding one is not read.  The class is the only thing
+    telling ``Freezer.run``'s ``end {name} `` from 393's ``end JEDI closer for {name} ``, yet ``name`` could hold
+    ``JEDI closer for x``.  So a record read whole only with its holes taking any characters
+    (:func:`reads_literally`) is ``None`` too: this row's line or another's, which only the records around it can
+    tell.  ``False`` is a record whose literals are not the row's."""
     if not _reads_whole_at_all(row):
         return None
-    return _whole_match(row, token, message) is not None
+    if _whole_match(row, token, message) is not None:
+        return True
+    return None if reads_literally(row, token, message) else False
+
+
+def reads_literally(row: PrintRow | SkeletonLine, token: Optional[str], message: str) -> Optional[bool]:
+    """Whether a record is *row*'s line whole with every hole a class guessed from the literal after it taking any
+    characters: what :func:`reads_whole` cannot tell from another row's line, so a reader can list the rows a record
+    may be.  A number's hole keeps its class, which the syntax gives.  ``None`` where the row cannot say, as
+    :func:`reads_whole` is."""
+    if not _reads_whole_at_all(row):
+        return None
+    capture, prefix = _loosened(row.capture), _loosened(row.prefix_capture)
+    literals = _literals(prefix) + _literals(capture)
+    lines = [message, f"{token} {message}", f"{token}{message}"] if token else [message]
+    if not any(_in_order(line, literals) for line in lines):
+        return False
+    loose = row.model_copy(update={"capture": capture, "prefix_capture": prefix})
+    return _whole_match(loose, token, message) is not None
+
+
+#: A hole's group whose class is the literal after it: ``([^\ ]*)``, any character but that literal's first.
+_GUESSED = re.compile(r"\(\[\^(?:\\.|[^\]])+\]\*\??\)")
+
+
+def _groups(pattern: str) -> list[tuple[int, int]]:
+    """``(start, end)`` of each outermost group of *pattern*, escapes and classes read as such."""
+    found: list[tuple[int, int]] = []
+    depth, index, in_class, opened = 0, 0, False, 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            if depth == 0:
+                opened = index
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                found.append((opened, index + 1))
+        index += 1
+    return found
+
+
+def _loosened(pattern: str) -> str:
+    """*pattern* with each hole whose class is guessed from the literal after it taking any characters:
+    ``code=(.*?)\\ user=(.*?)`` for ``code=([^\\ ]*)\\ user=([^\\ ]*)``; every other group as it is."""
+    out: list[str] = []
+    at = 0
+    for start, end in _groups(pattern):
+        out.append(pattern[at:start])
+        group = pattern[start:end]
+        out.append("(.*?)" if _GUESSED.fullmatch(group) else group)
+        at = end
+    out.append(pattern[at:])
+    return "".join(out)
+
+
+def _literals(pattern: str) -> list[str]:
+    """The literal texts of *pattern* outside its groups, in order, their blanks at the ends left out: the pieces a
+    record must hold for the pattern to read it.  An escape of a letter or a digit (``\\n``) ends a piece."""
+    found: list[str] = []
+    at = 0
+    for start, end in [*_groups(pattern), (len(pattern), len(pattern))]:
+        piece: list[str] = []
+        index = at
+        while index < start:
+            char = pattern[index]
+            if char == "\\" and index + 1 < start:
+                following = pattern[index + 1]
+                if following.isalnum():
+                    found.append("".join(piece))
+                    piece = []
+                else:
+                    piece.append(following)
+                index += 2
+                continue
+            piece.append(char)
+            index += 1
+        found.append("".join(piece))
+        at = end
+    return [one.strip() for one in found if one.strip()]
+
+
+def _in_order(line: str, literals: list[str]) -> bool:
+    """Whether *line* holds each of *literals* after the one before it."""
+    at = 0
+    for one in literals:
+        at = line.find(one, at)
+        if at < 0:
+            return False
+        at += len(one)
+    return True
 
 
 def _reads_whole_at_all(row: PrintRow | SkeletonLine) -> bool:
@@ -947,24 +1052,26 @@ def _called_name(call: ast.Call) -> str:
 def _holes_of(
     message: ast.expr, groups: Sequence[int] = (), func: Optional[ast.AST] = None, at: Optional[ast.stmt] = None
 ) -> list[SkeletonHole]:
-    """Every hole of a rendered message, with the expression that fills it and the group of the message's capture
-    holding its value (:func:`line_capture`), 0 where there is none; a hole printing a map whole, with the entries
-    it may hold where *func* writes it out (:func:`mapentries.entries`), at *at* where the source does not say."""
+    """Every hole of a rendered message, with the expression that fills it, the line writing it out -- *at*'s where
+    the source does not say -- and the group of the message's capture holding its value (:func:`line_capture`), 0
+    where there is none; a hole printing a map whole, with the entries it may hold where *func* writes it out
+    (:func:`mapentries.entries`)."""
     if not isinstance(message, ast.JoinedStr):
         return []
     parts = [part for part in message.values if isinstance(part, ast.FormattedValue)]
     holes = []
     for number, part in enumerate(parts):
+        site = pathcond.site_of(part.value)
+        written = site if isinstance(site, ast.stmt) else at
         hole = SkeletonHole(
             expression=_text(part.value),
             prints=_hole_prints(part) or "token",
             appended=bool(getattr(part, "appended", False)),
             group=groups[number] if number < len(groups) else 0,
+            line=getattr(written, "lineno", 0),
         )
         name = mapentries.printed_map(part.value)
-        if name and func is not None and at is not None:
-            site = pathcond.site_of(part.value)
-            written = site if isinstance(site, ast.stmt) else at
+        if name and func is not None and written is not None:
             read = mapentries.entries(pathcond.enclosing_function(written) or func, name, written)
             if read is not None:
                 hole.entries, hole.entries_open = read

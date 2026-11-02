@@ -30,9 +30,21 @@ caps -- the stop says where.
 **Backward, in the function.**  A binding reaching the hole whose value is
 an attribute of a name declared as one class gives that attribute
 (``tmp_id = job.PandaID``); a name bound to a name is read again, as it
-runs (:func:`pathcond.surviving_writes`).  What the callers hand a
-parameter is not read: the callers are many and the value's own uses say
-more (on pin k, the walk up named 3 pair holes the uses did not).
+runs (:func:`pathcond.surviving_writes`).
+
+**Backward, up the callers.**  A parameter is what each call placed at the
+function hands it (:meth:`Calls.callers`, :meth:`Calls.handed`), read
+backward there in the same way, up to :data:`CALLERS_UP` calls; the columns
+are every caller's.  ``recordRetryHistoryJEDI``'s ``newPandaID`` is
+``JobSpec.PandaID`` and ``JobSpec.jobsetID``: ``insertNewJob`` hands it
+``job.PandaID`` at one call and ``job.jobsetID`` at another.  The uses are
+not followed at a caller: what the value is used as is read where the key
+is.  A parameter a call leaves to its default holds the default, read
+where the function's signature writes it.  Where no call is placed, a
+call's ``*args`` or ``**kwargs`` may fill it, or the callers go further up,
+the stop says so.  On pin k the uses alone had named
+all but 3 pair holes; on pin m 66 of the 382 run keys stopping at a
+parameter are named this way.
 
 **A field of a class holding no row.**  ``AdderGen.job_id``,
 ``Closer.panda_id``: the attribute of a class no table is held by is no
@@ -61,6 +73,9 @@ from bamboo.codemap.panda import pathcond, sql, sqltext
 from bamboo.codemap.panda.objects import is_parameter
 from bamboo.codemap.panda.recognizers import progress
 
+#: How many calls up a parameter is read at its callers.
+CALLERS_UP = 6
+
 
 class Reader:
     """The columns of values, read in the functions of *fragment*'s reach record."""
@@ -72,9 +87,11 @@ class Reader:
         calls: C.Calls,
         names: reach._Names,
         funcs: dict[str, tuple[str, ast.AST]],
-        follow: Callable[[str, str], objects.ObjectReach],
+        follow: Callable[[str, str, int], objects.ObjectReach],
     ):
+        self.calls = calls
         self.types = calls.types
+        self.trees = {module.rel_path: module.tree for module in modules}
         self.names = names
         self.funcs = funcs
         #: :func:`objects.follow` on the reach record, read once per state by its caller's cache.
@@ -89,16 +106,25 @@ class Reader:
         }
         self.paths = panda_objects.Paths()
         self._executions: dict[int, list[sql.Execution]] = {}
+        #: (statement, bind) -> the paths of its function the bind is filled with (:meth:`_filled`).
+        self._binds: dict[tuple[int, str], frozenset[str]] = {}
+        #: The states each follow of the reading in progress reads (:meth:`read`'s *states*).
+        self._states = objects.MAX_STATES
 
     def holds_rows(self, column: str) -> bool:
         """Whether ``Class.attribute`` *column* is a column of a class a table holds."""
         return column.partition(".")[0] in self.holding
 
     def read(
-        self, file: str, func: ast.AST, node: ast.expr
+        self,
+        file: str,
+        func: ast.AST,
+        node: ast.expr,
+        states: int = objects.MAX_STATES,
     ) -> tuple[list[str], list[KeyStop]]:
         """``(columns, stops)`` of the value *node* holds in *func*: the columns sorted; the stops where each reading
-        ended without a row's column, what the value is bound to first, then its uses.
+        ended without a row's column, what the value is bound to first, then its uses, each follow of them reading
+        at most *states* states.
 
         An attribute of a name declared as a class holding rows is that column
         and nothing else is read: the declaration says it.
@@ -109,16 +135,18 @@ class Reader:
         seen: set[tuple[str, str]] = set()
         owner = self.names.of(func) or ""
         node = callfacts.unconverted(self.types, file, func, node)
+        self._states = states
         try:
             self._backward(file, func, owner, node, found, bound, seen)
             if isinstance(node, ast.Attribute) and any(
                 self.holds_rows(one) for one in found
             ):
                 return sorted(found), []
-            before = {one for one in found if self.holds_rows(one)}
-            self._forward(owner, self.paths.of(func, node), found, uses)
-            if {one for one in found if self.holds_rows(one)} == before and not uses:
+            used: set[str] = set()
+            self._forward(owner, self.paths.of(func, node), used, uses)
+            if not any(self.holds_rows(one) for one in used) and not uses:
                 uses.append(_stop("no_use", at=_short(owner)))
+            found |= used
         except Exception as error:  # noqa: BLE001 -- a key unread, not the build's end
             uses.append(_stop("failed", what=type(error).__name__))
         return sorted(found), _merged([*bound, *uses])
@@ -137,7 +165,7 @@ class Reader:
         Read again where a field's reading has read it (:meth:`_field`): the stops go to the list asked for.
         """
         for path in sorted(held):
-            reach = self.follow(owner, path)
+            reach = self.follow(owner, path, self._states)
             for at, paths in reach.held.items():
                 if at in self.funcs:
                     self._used(at, *self.funcs[at], set(paths), found, stops)
@@ -145,7 +173,8 @@ class Reader:
                 kind = "spread" if site.how == objects.NO_PARAMETER else "hole"
                 stops.append(_stop(kind, at=f"{_short(site.owner)}:{site.line}"))
             if reach.cut:
-                stops.append(_stop("cut", what=_CUT[reach.cut], at=_short(owner)))
+                what = "paths" if reach.cut == objects.HELD_SPENT else "states"
+                stops.append(_stop("cut", what=what, at=_short(owner)))
             for site in reach.capped:
                 stops.append(
                     _stop(
@@ -207,22 +236,23 @@ class Reader:
     def _filled(
         self, file: str, func: ast.AST, run: sql.Execution, key: str, held: set[str]
     ) -> bool:
-        """Whether *run* fills its bind *key* with the value *held* names in *func*."""
-        binds = sql.bound_values(
-            func, run.varmap or "", key, run.window, across=True, at=run
-        )  # type: ignore[arg-type]
-        if not run.varmap:
-            binds = binds + sql.inline_binds(run.call, key)
-        return any(
-            pathcond.enclosing_function(bind.value) is func
-            and any(
-                objects._holds(held, path)
+        """Whether *run* fills its bind *key* with the value *held* names in *func*: the binds read once per
+        statement and bind, as every value read meets the same statements."""
+        if (id(run), key) not in self._binds:
+            binds = sql.bound_values(
+                func, run.varmap or "", key, run.window, across=True, at=run
+            )  # type: ignore[arg-type]
+            if not run.varmap:
+                binds = binds + sql.inline_binds(run.call, key)
+            self._binds[(id(run), key)] = frozenset(
+                path
+                for bind in binds
+                if pathcond.enclosing_function(bind.value) is func
                 for path in self.paths.of(
                     func, callfacts.unconverted(self.types, file, func, bind.value)
                 )
             )
-            for bind in binds
-        )
+        return any(objects._holds(held, path) for path in self._binds[(id(run), key)])
 
     def _column(
         self, table: str, column: str, at: str, found: set[str], stops: list[KeyStop]
@@ -248,8 +278,10 @@ class Reader:
         found: set[str],
         stops: list[KeyStop],
         seen: set[tuple[str, str]],
+        up: int = 0,
     ) -> None:
-        """What the bindings of *func* reaching *node* give it: an attribute of a declared name, read again through names."""
+        """What the bindings of *func* reaching *node* give it: an attribute of a declared name, read again through
+        names, and a parameter what its callers hand (:meth:`_handed`), *up* calls up already."""
         at = f"{_short(owner)}:{getattr(node, 'lineno', '?')}"
         if isinstance(node, ast.Attribute):
             root = node.value
@@ -279,14 +311,14 @@ class Reader:
                         self._field(where, cls, node.attr, found, stops, seen)
             return
         if not isinstance(node, ast.Name):
-            stops.append(_stop("value", what=_kind(node)))
+            stops.append(_stop("value", what=_kind(node), at=at))
             return
         if (owner, f"{node.id}@{id(node)}") in seen:
             return
         seen.add((owner, f"{node.id}@{id(node)}"))
         entry, bindings = self._reaching(func, node.id, node)
         if entry:
-            stops.append(_stop("parameter", name=node.id, at=_short(owner)))
+            self._handed(file, func, owner, node.id, found, stops, seen, up)
         elif not bindings:
             stops.append(_stop("outside", name=node.id, at=_short(owner)))
         for binding in bindings:
@@ -321,6 +353,7 @@ class Reader:
                         found,
                         stops,
                         seen,
+                        up,
                     )
                 else:
                     stops.append(
@@ -332,7 +365,59 @@ class Reader:
                         )
                     )
             else:
-                self._bound(file, func, owner, node.id, value, found, stops, seen)
+                self._bound(file, func, owner, node.id, value, found, stops, seen, up)
+
+    def _handed(
+        self,
+        file: str,
+        func: ast.AST,
+        owner: str,
+        name: str,
+        found: set[str],
+        stops: list[KeyStop],
+        seen: set[tuple[str, str]],
+        up: int,
+    ) -> None:
+        """What each call placed at *func* hands its parameter *name*, read backward at the caller (:meth:`_backward`),
+        up to :data:`CALLERS_UP` calls; where a call says nothing of it, the stop."""
+        if (owner, f"{name}@parameter") in seen:
+            return
+        seen.add((owner, f"{name}@parameter"))
+        if up >= CALLERS_UP:
+            stops.append(
+                _stop("callers_up", name=name, what=str(CALLERS_UP), at=_short(owner))
+            )
+            return
+        tree = self.trees.get(file)
+        target = C.Target(
+            file, func, pathcond.class_of(tree, func) if tree is not None else None
+        )
+        try:
+            sites = self.calls.callers(target)
+        except Exception as error:  # noqa: BLE001 -- the callers unread, not the build's end
+            stops.append(
+                _stop("callers_failed", what=type(error).__name__, at=_short(owner))
+            )
+            return
+        if not sites:
+            stops.append(_stop("no_caller", name=name, at=_short(owner)))
+        for site in sites:
+            handed = self.calls.handed(site, target).get(name)
+            caller = self.names.of(site.func) or ""
+            if handed is None:
+                at = f"{_short(caller) or site.file}:{site.call.lineno}"
+                stops.append(_stop("handed_spread", name=name, at=at))
+                continue
+            on_class = self.calls.callees(site.file, site.func, site.call).on_class
+            if name not in C.said(site.call, target, on_class):
+                # Left to its default: written in the function's own signature, not at the call.
+                at = f"{_short(owner)}:{getattr(handed, 'lineno', '?')}"
+                stops.append(_stop("value", what=_kind(handed), at=at))
+                continue
+            value = callfacts.unconverted(self.types, site.file, site.func, handed)
+            self._backward(
+                site.file, site.func, caller, value, found, stops, seen, up + 1
+            )
 
     def _bound(
         self,
@@ -344,11 +429,12 @@ class Reader:
         found: set[str],
         stops: list[KeyStop],
         seen: set[tuple[str, str]],
+        up: int = 0,
     ) -> None:
         """What *name* is given by *value*, bound to it in *func*: a name or an attribute read back, else the stop saying what it is."""
         value = callfacts.unconverted(self.types, file, func, value)
         if isinstance(value, (ast.Name, ast.Attribute)):
-            self._backward(file, func, owner, value, found, stops, seen)
+            self._backward(file, func, owner, value, found, stops, seen, up)
             return
         at = f"{_short(owner)}:{getattr(value, 'lineno', '?')}"
         stops.append(_stop("bound", name=name, what=_kind(value), at=at))
@@ -418,8 +504,6 @@ class Reader:
         return self._executions[id(func)]
 
 
-#: Which of follow's caps cut the walk short, as a stop's ``what`` says it (:data:`KEY_STOPS`).
-_CUT = {objects.STATES_SPENT: "states", objects.HELD_SPENT: "paths"}
 #: What :attr:`objects.ObjectReach.capped` says before the path not followed.
 _CAPPED = objects.PARTS_SPENT.format(path="")
 

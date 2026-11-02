@@ -37,6 +37,7 @@ from bamboo.codemap.models import (
     FunctionPrintsNode,
     JunctionNode,
     MapFragment,
+    SetFrom,
     SourceModule,
     SubjectNode,
     pooled_cuts,
@@ -44,11 +45,14 @@ from bamboo.codemap.models import (
 )
 from bamboo.codemap.panda import (
     endpoints,
+    flow,
+    heldfrom,
     mustprints,
     objects,
     offrow,
     pathcond,
     promotion,
+    runnable,
     runs,
     sql,
     sqltext,
@@ -479,6 +483,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(returned_coverage)
 
         lap("the alias slices")
+        # What each write gives each column it writes; the ways of the ones a guard's way ends at are read with the
+        # guards'.
+        writes: list[SetFrom] = []
         (
             sql_subjects,
             sql_junctions,
@@ -494,6 +501,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             attributor,
             row_keys=fragment.row_key_sources,
             key_froms=fragment.key_froms,
+            set_froms=writes,
         )
         # On the fragment rather than on the plugin, because a gate reads the
         # fragment: "which junctions guard on a value nothing selects on" is a
@@ -668,6 +676,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # name, and the only route from an arm to the aggregate it decided on.
         self._consults = trigger.attach_calls(fragment.junctions, self._modules)
         lap("the trigger slice")
+        # The flow's premise, over the corpus: no with goes on past a raise in its body.
+        fragment.managers_read, fragment.swallowing_managers = flow.swallowing_managers(
+            (module.rel_path, module.tree) for module in self._modules
+        )
         # Who calls each owner, by what the receiver is declared to be -- the
         # other direction from ``calls``, and the one a transition's movers
         # are answered from.
@@ -732,6 +744,28 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # The routes of calls on which each write never runs, its records all made (the objects' last).
         sqlwrite.attach_routes(fragment.key_froms, self._calls)
         lap("key sources")
+        # What each name an arm's tests read holds, way by way across calls: placed as the key sources' carry
+        # places calls, ending at the read sites' rows as theirs do.
+        fragment.guard_froms, fragment.parameter_froms, fragment.set_froms = heldfrom.guard_froms(
+            fragment.junctions,
+            fragment.read_sites,
+            {module.rel_path: module.tree for module in self._modules},
+            self._calls,
+            record,
+            writes,
+        )
+        lap("guard sources")
+        # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
+        # hooks and decoders the guards' ways go through.
+        fragment.runnables = runnable.runnables(
+            fragment.junctions,
+            {module.rel_path: module.tree for module in self._modules},
+            self._calls,
+            record,
+            fragment.guard_froms,
+            fragment.parameter_froms,
+        )
+        lap("runnables")
         # What the schema and the corpus say of each table named, for a reader asking rows: the write records all
         # made, read inside the calls and the schema as the read sites were.
         fragment.tables = tables.records(
@@ -814,12 +848,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             # can record, and the calls that write a history row in the same pass
             # as an arm: what gives a value the map sees set a time, and the log
             # lines of the run it was set in.
-            started, recorded, paired = runs.attach(fragment, self._modules, self._calls)
+            started, recorded, paired, columned = runs.attach(fragment, self._modules, self._calls)
             logger.info(
-                "PandaCodeMapPlugin: %d function(s) start a run, %d history call(s), %d branch(es) with a history pair",
+                "PandaCodeMapPlugin: %d function(s) start a run, %d history call(s), %d branch(es) with a history pair, "
+                "%d message hole(s) naming a column",
                 started,
                 recorded,
                 paired,
+                columned,
             )
             # The arms whose object no row is written from, read on the same records: what a reader of a row's
             # value skips.

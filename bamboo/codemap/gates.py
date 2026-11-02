@@ -36,6 +36,8 @@ from bamboo.codemap.models import (
     GAP_UNNODED,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
+    KEY_PARAMETER,
+    KEY_ROWS,
     RUN_KEY_TIME,
     FunctionPrintsNode,
     HistoryPair,
@@ -1490,9 +1492,10 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     written beside.  A ``can`` row names the caller's path holding the arm's
     object and a way to one of the pair's writes through calls of reach rows:
     a reader asks the run of that path, and checks the way.  A run's key
-    names a column of a class a table holds (:attr:`EntityNode.spec_class`)
-    or says where each reading stopped (:attr:`RunKey.stops`), never both: a
-    reader matches a history row by it.
+    that names no column of a class a table holds
+    (:attr:`EntityNode.spec_class`) says where each reading stopped
+    (:attr:`RunKey.stops`); one that names one may say where others stopped,
+    and a time stamp says none: a reader matches a history row by it.
     """
     rows = {row.owner: row for row in fragment.reach_graph}
     prints = {node.owner: node for node in fragment.function_prints}
@@ -1505,11 +1508,12 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
             failures.append(f"{node.owner}: two runs start on one line, so a line names neither")
         for run in node.runs:
             for key in run.key:
-                named = key.columns == [RUN_KEY_TIME] or any(one.partition(".")[0] in holding for one in key.columns)
-                if named == bool(key.stops):
+                stamped = key.columns == [RUN_KEY_TIME]
+                named = stamped or any(one.partition(".")[0] in holding for one in key.columns)
+                if (stamped and key.stops) or (not named and not key.stops):
                     failures.append(
                         f"{node.owner}: run {run.line}'s key {key.expression!r} "
-                        + ("names a row's column and stops" if named else "names no row's column and no stop")
+                        + ("is a time stamp and stops" if stamped else "names no row's column and no stop")
                     )
         for statement in node.statements:
             for line in statement.runs:
@@ -1806,6 +1810,86 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
             f"{undecided} of them have a hole in their closure and are not known either way; "
             f"{asked} more have edges into them and are asked as any function is."
         ),
+    )
+
+
+def with_exits_are_read(fragment: MapFragment) -> GateResult:
+    """(i) No context manager of the corpus swallows what its ``with`` body raised.
+
+    The premise of the map's flow (:mod:`bamboo.codemap.panda.flow`, :mod:`~bamboo.codemap.panda.reaching`): a
+    raise in a ``with`` body goes to the handlers around the ``with``, never on past it.  A manager that swallows
+    -- a ``contextmanager`` handler around its ``yield`` that does not raise again, an ``__exit__`` that may
+    return true, ``contextlib.suppress`` -- opens that way, and a reader asking whether one call can run two
+    statements would rule out one that ran.  None in PanDA when it was written (pin m: ``DBProxyPool.get``'s 420
+    ``with`` statements run a ``try`` / ``finally``, the transactions raise again).
+    """
+    failures = [f"{one.file}:{one.line} {one.name} ({one.kind})" for one in fragment.swallowing_managers]
+    return GateResult(
+        gate="with-exits-are-read",
+        passed=not failures,
+        checked=fragment.managers_read,
+        unit="context managers",
+        question="does a context manager of the corpus swallow what its with body raised?",
+        finding="a with can go on past a raise in its body, which the map's flow does not read",
+        failures=failures,
+    )
+
+
+def _held_ways(fragment: MapFragment):
+    """Every way of the guards' and parameters' records, and of what each change on a way stores."""
+
+    def each(where: str, sources):
+        for source in sources:
+            yield where, source
+            for change in source.changes:
+                yield from each(f"{where} {change.at}", change.value)
+
+    for guard in fragment.guard_froms:
+        yield from each(f"{guard.owner}:{guard.test_line} {guard.name}", guard.sources)
+    for parameter in fragment.parameter_froms:
+        yield from each(f"{parameter.owner}:{parameter.line} {parameter.parameter}", parameter.sources)
+
+
+def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
+    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a statement's rows names a read
+    site of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
+    names = {site.name for site in fragment.read_sites}
+    checked, failures = 0, []
+    for where, source in _held_ways(fragment):
+        if source.kind == KEY_ROWS:
+            checked += 1
+            if source.name not in names:
+                failures.append(f"{where}: {source.name}")
+    return GateResult(
+        gate="guard-rows-are-read-sites",
+        passed=not failures,
+        checked=checked,
+        unit="ways ending at rows",
+        question="does a way a guard's name holds end at the rows of a statement the map has no read site of?",
+        finding="a guard's name is said to hold a column of rows no read site records",
+        failures=failures,
+    )
+
+
+def guard_parameters_are_read(fragment: MapFragment) -> GateResult:
+    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a parameter has the
+    ParameterFrom of that function and parameter: the reader reads on there, and a missing one would end the way
+    unsaid."""
+    read = {(one.owner, one.line, one.parameter) for one in fragment.parameter_froms}
+    checked, failures = 0, []
+    for where, source in _held_ways(fragment):
+        if source.kind == KEY_PARAMETER:
+            checked += 1
+            if (source.site_owner, source.site_line, source.name) not in read:
+                failures.append(f"{where}: {source.site_owner}:{source.site_line} {source.name}")
+    return GateResult(
+        gate="guard-parameters-are-read",
+        passed=not failures,
+        checked=checked,
+        unit="ways ending at a parameter",
+        question="does a way a guard's name holds end at a parameter whose callers are not read?",
+        finding="a guard's way ends at a parameter with no record of what its callers hand it",
+        failures=failures,
     )
 
 
@@ -2828,6 +2912,11 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(implicit_dunders_reach_no_write(fragment))
     if any(row.assigns or row.bindings or row.call_bindings or row.writes for row in fragment.reach_graph):
         results.append(object_records_resolve(fragment))
+    if fragment.managers_read:
+        results.append(with_exits_are_read(fragment))
+    if fragment.guard_froms or fragment.parameter_froms:
+        results.append(guard_rows_are_read_sites(fragment))
+        results.append(guard_parameters_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

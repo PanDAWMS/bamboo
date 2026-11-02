@@ -68,7 +68,10 @@ normal, raised, returned, broken -- and each continues where it was going.
 ``except ... as e`` unbinds ``e`` at the handler's end, as Python does.
 
 Not modelled: a ``with`` that swallows an exception, a call that never
-returns, a generator's suspension, ``global``/``nonlocal``.
+returns, a generator's suspension, ``global``/``nonlocal``.  The first is
+watched: the build lists each context manager of the corpus that may
+swallow (:func:`bamboo.codemap.panda.flow.swallowing_managers`), and the
+``with-exits-are-read`` gate fails on one.
 """
 
 from __future__ import annotations
@@ -111,6 +114,9 @@ def reaching(
     sites: Sequence[ast.AST],
     killers: Sequence[ast.AST] = (),
     rereads: Sequence[ast.AST] = (),
+    *,
+    entered: Sequence[ast.AST] = (),
+    once: Sequence[ast.AST] = (),
 ) -> list[ast.AST]:
     """Of *sites*, the writes that can be what *target* reads, in the order given.
 
@@ -132,8 +138,15 @@ def reaching(
     to another variable and reaches nothing here.  If no write is in this
     scope, the name is one an enclosing scope binds, read whenever this one
     runs, and every enclosing write comes back.
+
+    Two readers of where control goes rather than what a statement wrote
+    (:mod:`bamboo.codemap.panda.flow`) hand two more.  *entered* are writes
+    among *sites* and *killers* that happen as their statement is entered:
+    before it can raise, and a loop's before its first pass.  *once* are
+    loops a run went round exactly once, read as a ``for`` over ``range(1)``
+    is.
     """
-    return reaching_each([target], sites, killers, rereads)[0]
+    return reaching_each([target], sites, killers, rereads, entered=entered, once=once)[0]
 
 
 def reaching_each(
@@ -141,6 +154,9 @@ def reaching_each(
     sites: Sequence[ast.AST],
     killers: Sequence[ast.AST] = (),
     rereads: Sequence[ast.AST] = (),
+    *,
+    entered: Sequence[ast.AST] = (),
+    once: Sequence[ast.AST] = (),
 ) -> list[list[ast.AST]]:
     """:func:`reaching` for each of *targets*, the writes read once per scope: what a reader asking of many
     statements with the same writes asks."""
@@ -160,7 +176,7 @@ def reaching_each(
             found.append(list(sites))
             continue
         if id(scope) not in read:
-            read[id(scope)] = _writes(scope, sites, killers, rereads)
+            read[id(scope)] = _writes(scope, sites, killers, rereads, entered, once)
         held = read[id(scope)]
         if held is None:
             found.append([site for site in sites if _encloses(_scope_of(site), scope)])
@@ -178,6 +194,8 @@ def _writes(
     sites: Sequence[ast.AST],
     killers: Sequence[ast.AST],
     rereads: Sequence[ast.AST],
+    entered: Sequence[ast.AST] = (),
+    once: Sequence[ast.AST] = (),
 ) -> Optional[tuple[_Flow, dict[int, int]]]:
     """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own."""
     own = [node for node in (*sites, *killers) if _scope_of(node) is scope]
@@ -196,7 +214,8 @@ def _writes(
             keeps |= bits[id(node)]
     for key in again:
         keeps |= bits[key]
-    return _flow(scope, bits, keeps), bits
+    on_entry = frozenset(id(node) for node in entered if id(node) in bits)
+    return _flow(scope, bits, keeps, on_entry, frozenset(id(node) for node in once)), bits
 
 
 def reaching_exit(
@@ -245,25 +264,31 @@ def _statement_of(node: ast.AST) -> Optional[ast.AST]:
     return current
 
 
-def _flow(scope: ast.AST, bits: dict[int, int], keeps: int) -> _Flow:
+def _flow(
+    scope: ast.AST,
+    bits: dict[int, int],
+    keeps: int,
+    entered: frozenset[int] = frozenset(),
+    once: frozenset[int] = frozenset(),
+) -> _Flow:
     """The flow for this set of writes, kept on the scope.
 
     The walk asks about one name from every statement that reads it, the SQL
     slice about one key from every run, so the same writes come back with a
     new target many times.
     """
-    held: Optional[dict[tuple[tuple[int, ...], int], _Flow]] = getattr(
+    held: Optional[dict[tuple[tuple[int, ...], int, frozenset[int], frozenset[int]], _Flow]] = getattr(
         scope, "_reaching_flows", None
     )
     if held is None:
         held = {}
         scope._reaching_flows = held  # type: ignore[attr-defined]
-    key = (tuple(bits), keeps)
+    key = (tuple(bits), keeps, entered, once)
     flow = held.get(key)
     if flow is None:
         if len(held) >= _KEPT:
             del held[next(iter(held))]
-        flow = held[key] = _Flow(scope, bits, keeps)
+        flow = held[key] = _Flow(scope, bits, keeps, entered, once)
     return flow
 
 
@@ -474,9 +499,20 @@ class _Flow:
     a statement in a loop holds what any pass brings to it.
     """
 
-    def __init__(self, scope: ast.AST, bits: dict[int, int], keeps: int) -> None:
+    def __init__(
+        self,
+        scope: ast.AST,
+        bits: dict[int, int],
+        keeps: int,
+        entered: frozenset[int] = frozenset(),
+        once: frozenset[int] = frozenset(),
+    ) -> None:
         self.bits = bits
         self.keeps = keeps
+        #: writes made as their statement is entered (:func:`reaching`'s *entered*)
+        self.entered = entered
+        #: loops a run went round exactly once
+        self.once = once
         self.entry: dict[int, int] = {}
         #: The state where the scope returns normally: each ``return`` that leaves it, and off its end.
         self.exit: Optional[int] = None
@@ -542,6 +578,8 @@ class _Flow:
 
     def _statement(self, node: ast.stmt, state: Optional[int]) -> Optional[int]:
         self._record(node, state)
+        if id(node) in self.entered:
+            state = self._gen(state, node)
         if _raises(node):
             self._raise(state)
         method = getattr(self, "_" + type(node).__name__, None)
@@ -599,7 +637,7 @@ class _Flow:
     def _For(self, node: ast.For | ast.AsyncFor, state: Optional[int]) -> Optional[int]:
         if state is None:
             return None
-        once = _runs_exactly_once(node)
+        once = id(node) in self.once or _runs_exactly_once(node)
         head, breaks, passed = self._loop(node, state, rounds=not once)
         self._raise(head)  # ``next()`` on the iterator, every time round
         # Over a literal with an element, or range(1), the loop ends after a pass, never before the first.
@@ -611,13 +649,16 @@ class _Flow:
     def _While(self, node: ast.While, state: Optional[int]) -> Optional[int]:
         if state is None:
             return None
-        head, breaks, _passed = self._loop(node, state)
-        self._record(node, head)  # the test is read at the head, every time round
+        once = id(node) in self.once
+        head, breaks, passed = self._loop(node, state, rounds=not once)
+        # The test is read at the head, every time round; gone round once, again after the pass, and false then.
+        tested = _join(head, passed) if once else head
+        self._record(node, tested)
         if _raises(node):
-            self._raise(head)
+            self._raise(tested)
         if isinstance(node.test, ast.Constant) and node.test.value:
             return breaks
-        return _join(self._block(node.orelse, self._gen(head, node)), breaks)
+        return _join(self._block(node.orelse, self._gen(passed if once else head, node)), breaks)
 
     def _Try(self, node: ast.Try, state: Optional[int]) -> Optional[int]:
         guard = _Finally() if node.finalbody else None

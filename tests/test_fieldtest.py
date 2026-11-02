@@ -72,9 +72,115 @@ def test_score_reads_an_end_and_counts_each_hand_used():
 def test_a_run_without_a_result_of_this_version_is_not_scored():
     assert F.score(None)["terminal"] == "NONE"
     assert "did not finish" in F.score(None)["why"]
-    s = F.score(STOPPED | {"version": 2})
-    assert s["terminal"] == "NONE" and s["why"] == "result.json version 2, this reads 1"
+    s = F.score(STOPPED | {"version": 5})
+    assert s["terminal"] == "NONE"
+    assert s["why"] == "result.json version 5, this reads 1 or 2 or 3 or 4"
     assert s["steps"] == [] and s["hand"] is None
+
+
+def _without_text(outcome: object, record: object) -> dict:
+    assert isinstance(outcome, dict)
+    return {k: v for k, v in outcome.items() if k != "text"} | {"record": record}
+
+
+#: the same stop and end as the querier writes them from version 2 (odata O1): the English as a record
+STOPPED_2 = STOPPED | {
+    "version": 2,
+    "outcome": _without_text(
+        STOPPED["outcome"],
+        {
+            "kind": "at-step",
+            "facts": {
+                "step": "H2",
+                "what": {"said": {"kind": "asks-left", "facts": {"count": 2}}},
+            },
+        },
+    ),
+}
+ENDED_2 = ENDED | {"version": 2, "outcome": _without_text(ENDED["outcome"], None)}
+
+
+def _line_of(score: dict) -> str:
+    return F.line(
+        {
+            "name": "C1",
+            "pair": "p",
+            "read": {"ok": True, "differ": []},
+            "score": score,
+            "exit": 0,
+            "seconds": 1,
+        }
+    )
+
+
+def test_score_reads_a_version_2_record_and_the_line_names_its_kinds():
+    s = F.score(STOPPED_2)
+    assert s["terminal"] == "STOP" and s["step"] == "H2" and s["code"] == "asks"
+    assert s["text"] is None and s["record"]["kind"] == "at-step"
+    assert s["hand"] == 0 and s["asks"]["count"] == 2
+    assert "STOP H2 at-step: asks-left  [asks]" in _line_of(s)
+
+
+def test_the_line_counts_a_kind_its_record_holds_more_than_once():
+    fork = {
+        "kind": "of-branch-es-stopped",
+        "facts": {"branches": [{"said": {"kind": "numbered", "facts": {}}}] * 3},
+    }
+    assert F.record_kinds(fork) == "of-branch-es-stopped: numbered x3"
+    assert F.record_kinds({"kind": "ends", "facts": {"ends": []}}) == "ends"
+
+
+def test_a_version_2_end_with_no_end_line_says_so():
+    s = F.score(ENDED_2)
+    assert s["terminal"] == "END" and s["record"] is None and s["hand"] == 2
+    assert "END S5 (no END line)" in _line_of(s)
+
+
+def test_a_version_3_run_is_scored_as_version_2():
+    premise = {
+        "kind": "its-condition-not-read",
+        "facts": {"line": 1407},
+        "premise_kind": "not read",
+    }
+    branch = {
+        "label": None,
+        "premises": [premise],
+        "row": {"kind": "row-statuslog", "facts": {"time": "t"}},
+    }
+    v3 = STOPPED_2 | {"version": 3}
+    v3["outcome"] = v3["outcome"] | {"branches": [branch]}
+    s = F.score(v3)
+    assert (s["terminal"], s["step"], s["code"], s["record"]) == (
+        "STOP",
+        "H2",
+        "asks",
+        F.score(STOPPED_2)["record"],
+    )
+    assert "STOP H2 at-step: asks-left  [asks]" in _line_of(s)
+
+
+def test_a_version_4_run_is_scored_as_version_2():
+    mover = {
+        "owner": "m.py::f",
+        "premises": {
+            "window": {"held": True, "why": {"kind": "a-window", "facts": {}}}
+        },
+        "reasons": [{"code": "map-gap", "record": {"kind": "a-gap", "facts": {}}}],
+        "readings": [{"verdict": "by-key"}],
+        "gaps": [{"kind": "reader-gap", "file": "m.py", "line": 1}],
+    }
+    s = F.score(STOPPED_2 | {"version": 4, "movers": [mover]})
+    assert (s["terminal"], s["step"], s["code"], s["record"]) == (
+        "STOP",
+        "H2",
+        "asks",
+        F.score(STOPPED_2)["record"],
+    )
+    assert "STOP H2 at-step: asks-left  [asks]" in _line_of(s)
+
+
+def test_the_line_of_a_version_1_run_is_its_last_line():
+    assert "END a legitimate wait: emptied at 09:04:17" in _line_of(F.score(ENDED))
 
 
 def test_lines_differ_leaves_out_comment_lines():
@@ -397,7 +503,7 @@ FAKE_QUERIER = textwrap.dedent(
     if not os.environ.get("FAKE_NO_RESULT"):
         outcome = (
             {"kind": "stop", "step": "S1", "text": "STOP S1: 1 ask(s)", "code": "asks"}
-            if asking
+            if asking and not os.environ.get("FAKE_END_ASKING")
             else {"kind": "end", "step": "S1", "text": "END a legitimate wait", "code": None}
         )
         result = {
@@ -570,6 +676,20 @@ def test_a_recorded_run_answers_the_asks_and_runs_the_querier_again(
         rec["score"]["terminal"] == "END" and rec["read"]["ok"] and first["read"]["ok"]
     )
     assert "rounds 2: the querier asks nothing more" in F.line(rec)
+
+
+def test_a_recorded_run_answers_the_asks_of_an_end_too(
+    tmp_path, recording, monkeypatch
+):
+    monkeypatch.setenv("FAKE_RECORD", "write")
+    monkeypatch.setenv("FAKE_END_ASKING", "1")
+    rec = F.run_case(
+        recording, _records_case(tmp_path), tmp_path / "batch", record=True
+    )
+    first, second = rec["rounds"]
+    assert first["score"]["terminal"] == "END" and first["score"]["asks"]["count"] == 1
+    assert first["record"]["exit"] == 0 and "record" not in second
+    assert rec["ended"] == "the querier asks nothing more"
 
 
 def test_a_recorded_run_stops_where_the_recording_step_does_not_settle(
@@ -968,13 +1088,6 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
             "response": {"success": True, "data": data},
         }
 
-    def sql(name: str, rows: list[dict]) -> dict:
-        return {
-            "ask": {"rows": {"kind": "sql", "name": name}},
-            "why": "",
-            "steps": [read("sql", "jobsActive4", rows)],
-        }
-
     via = {"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.jediTaskID"}
     datasets = {
         "ask": {
@@ -993,18 +1106,33 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
 
     window = {
         "ask": {"rows": {"kind": "sql", "name": "w"}},
-        "why": "no db_read form",
+        "why": "listed for a hand",
         "steps": [],
     }
+    _write(records, "rows-r1.json", {"answers": [window]})
+    _write(records, "rows-r2.json", {"answers": [datasets]})
+    # a hand's answers to the sql asks, a later round's over an earlier's; as_of and clock only where it says when
     _write(
         records,
-        "rows-r1.json",
-        {"answers": [sql("g", [{"gshare": "a", "count(*)": 1}]), window]},
+        "hand-r1.json",
+        {
+            "source": "s1",
+            "answers": {
+                "w": {"sql": "WITH ...", "rows": [{"N": 1}]},
+                "v": {"sql": "WITH ...", "rows": [{"N": 5}]},
+            },
+        },
     )
     _write(
         records,
-        "rows-r2.json",
-        {"answers": [sql("g", [{"gshare": "a", "count(*)": 2}]), datasets]},
+        "hand-r2.json",
+        {
+            "source": "s2",
+            "as_of": "2026-11-01 20:58:00",
+            "answers": {
+                "w": {"sql": "WITH ...", "rows": [{"N": 2, "NEXT_VALUE": "sent"}]}
+            },
+        },
     )
     pair = {"MAP_DUMP": "dump.json", "PANDA_PIN": "pin"}
 
@@ -1012,16 +1140,19 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
         F.build_rows(answers, pair, tmp_path / "rows.json", records).read_text()
     )
     assert built["answers"] == {
-        "g": {
-            "source": "R as of 2026-10-13 10:00:00, by db_read's form of the ask",
-            "as_of": "2026-10-13 10:00:00",
+        "w": {
+            "source": "s2",
+            "rows": [{"N": 2, "NEXT_VALUE": "sent"}],
+            "as_of": "2026-11-01 20:58:00",
             "clock": "database",
-            "rows": [{"gshare": "a", "n": 2}],
-        }
+        },
+        "v": {"source": "s1", "rows": [{"N": 5}]},
     }
     assert (
         "rows-r1.json" in built["about"]
-        and "Left out of them: sql w: no db_read form" in built["about"]
+        and "Left out of them: sql w: listed for a hand" in built["about"]
+        and "a hand's answers" in built["about"]
+        and "hand-r2.json" in built["about"]
     )
     # the joined rows go to linked, spelled as their class -- asked of the pin with the fetch's classes
     assert [(e["class"], e["via"], e["asked"], e["rows"]) for e in built["linked"]] == [
@@ -1035,7 +1166,7 @@ def test_rows_built_from_answers_lay_the_rows_steps_rounds_over_them(
 
 def test_the_score_carries_an_arms_possibilities():
     result = {
-        "version": F.RESULT_VERSION,
+        "version": 1,
         "outcome": {
             "kind": "stop",
             "step": "H2",

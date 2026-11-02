@@ -1,21 +1,16 @@
-"""Evaluate a guard for one instance, pick the binding that took effect, and solve a guard backwards.
+"""What one run knows at a decision, for the map's evaluator; the binding that took effect; values written after it.
 
-The stand-in for the evaluation API the design settled on: a guard is evaluated with PanDA's own code where it calls a helper,
-and only simple predicates are computed here.  Every value carries where it
-came from.
+The evaluator is the map's (:mod:`bamboo.codemap.panda.evaluate`): three values, literals folded, a call the
+reader's, solving backwards.  The querier reads it as ``E.ev``, ``E.solve`` and the like, and hands it what a run
+says:
 
-* **three values** -- ``True``, ``False`` and :data:`UNKNOWN`, with ``and``/``or``
-  short-circuiting the way Python does and unknown only where it has to be;
+* **the rows a run read**, under the names its question binds (:class:`Env`): ``self.job`` in the adder and
+  ``job`` in the task buffer are one row, and a field the rows file holds answers a guard that reads it;
 * **helpers** are called from the local panda-server tree only when they are on
   :data:`PURE`, a list of functions read one by one and found to have no
   effect (``getSerialNumber`` looks like a read and advances a sequence);
 * **the binding that took effect** is the one whose guards are not false,
   when exactly one is;
-* **solving backwards** -- a guard whose outcome is known (the exit ran)
-  with some atoms unknown: every assignment of the unknown atoms is tried,
-  and an atom that comes out the same in every assignment that reproduces
-  the outcome is settled.  A settled ``a == b`` hands the known side's value
-  to the other;
 * **a value written after the decision** -- a row field that the same
   function writes further down is not what the guard saw, so it is unknown
   here however the row reads now (setupper writes ``file.destinationDBlock``
@@ -24,11 +19,26 @@ came from.
 from __future__ import annotations
 
 import ast
-import itertools
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from bamboo.codemap.panda import evaluate as shared
+from bamboo.codemap.panda.evaluate import (  # noqa: F401 -- the evaluator, read here as E.<name>
+    UNKNOWN,
+    Solved,
+    Value,
+    atoms,
+    decidable,
+    ev,
+    evaluate,
+    read_elsewhere,
+    solve,
+    strip_annotation,
+    truth,
+)
 
 from .records import CORPUS
 
@@ -36,17 +46,6 @@ from .records import CORPUS
 # is how the corpus is checked not to have moved
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(CORPUS))
-
-
-class _Unknown:
-    def __repr__(self) -> str:
-        return "UNKNOWN"
-
-    def __bool__(self) -> bool:
-        raise TypeError("an unknown value has no truth value")
-
-
-UNKNOWN: Any = _Unknown()
 
 
 def _pure() -> dict[str, Any]:
@@ -64,28 +63,27 @@ def _pure() -> dict[str, Any]:
 PURE: dict[str, Any] = {}
 
 
-@dataclass
-class Value:
-    value: Any
-    source: str
+def pure(name: str) -> Callable[..., Any] | None:
+    """The helper of :data:`PURE` a call names, or None: what :class:`Env` hands the evaluator to run."""
+    if not PURE:
+        PURE.update(_pure())
+    return PURE.get(name)
 
 
 @dataclass
-class Env:
-    """What is known about one instance at one decision, each value with its source."""
+class Env(shared.Env):
+    """What is known about one instance at one decision, each value with its source: the map's, with the rows the
+    run read."""
 
-    values: dict[str, Value] = field(default_factory=dict)
     #: variable spelling -> entity row name, e.g. "self.job" -> "job"
     rows: dict[str, str] = field(default_factory=dict)
     table: dict[str, dict[str, Value]] = field(default_factory=dict)
-    #: expressions known not to hold what the guard saw, with the reason
-    stale: dict[str, str] = field(default_factory=dict)
-    used: dict[str, str] = field(default_factory=dict)
     #: row fields the rows file holds as read at another time than the step's, so not in ``table``, with why
     #: (``held.at_run``): "<job>.destinationSE" -> why
     unread: dict[str, str] = field(default_factory=dict)
     #: when the run the values are read for began (``Rerun.base_env``); None where no run is named
     at: str | None = None
+    call: Callable[[str], Callable[..., Any] | None] | None = pure
 
     def canonical(self, text: str) -> str:
         """*text* with every spelling of a row variable replaced by the row's name.
@@ -100,40 +98,23 @@ class Env:
         spellings = "|".join(re.escape(s) for s in sorted(self.rows, key=len, reverse=True))
         return re.sub(rf"(?<![\w.<])({spellings})(?!\w)", lambda m: f"<{self.rows[m[1]]}>", text)
 
-    def put(self, text: str, value: Any, source: str) -> None:
-        self.values[self.canonical(text)] = Value(value, source)
-
-    def put_printed(self, text: str, printed: str, source: str) -> None:
-        """A value read out of a log line, as Python reads its repr where it can.
-
-        A hole ``{str(x)}`` that reads back as a literal other than a string
-        says what ``x`` was, too (``str(self.job.altStgOutFileList())``).
-        """
-        try:
-            value = ast.literal_eval(printed)
-        except (ValueError, SyntaxError):
-            value = printed
-        self.put(text, value, source)
-        m = re.fullmatch(r"str\((.+)\)", text)
-        if m and not isinstance(value, str) and self.canonical(m[1]) not in self.values:
-            self.put(m[1], value, f"{source}, printed as str()")
+    def _field(self, text: str) -> Value | None:
+        """The row field *text* reads, where nothing put and nothing stale says otherwise."""
+        key = self.canonical(text)
+        if key in self.values or text in self.stale or key in self.stale:
+            return None
+        m = re.fullmatch(r"<(\w+)>\.(\w+)", key)
+        return self.table.get(m[1], {}).get(m[2]) if m else None
 
     def lookup(self, text: str) -> Any:
-        key = self.canonical(text)
-        for stale in (text, key):
-            if stale in self.stale:
-                self.used[text] = f"unknown: {self.stale[stale]}"
-                return UNKNOWN
-        if key in self.values:
-            self.used[text] = self.values[key].source
-            return self.values[key].value
-        m = re.fullmatch(r"<(\w+)>\.(\w+)", key)
-        if m:
-            row = self.table.get(m[1], {})
-            if m[2] in row:
-                self.used[text] = row[m[2]].source
-                return row[m[2]].value
-        return UNKNOWN
+        held = self._field(text)
+        if held is None:
+            return super().lookup(text)
+        self.used[text] = held.source
+        return held.value
+
+    def knows(self, text: str) -> bool:
+        return super().knows(text) or self._field(text) is not None
 
     def unread_in(self, text: str) -> dict[str, str]:
         """The row fields *text* reads that nothing here holds and the rows file holds at another time, with why."""
@@ -146,85 +127,6 @@ class Env:
             if m[2] not in self.table.get(m[1], {}):
                 out[term] = self.unread[key]
         return out
-
-
-def strip_annotation(text: str) -> str:
-    """Drop the ``  [name := expr]`` a path condition carries for a bare local."""
-    return re.sub(r"\s+\[\w+ := .*\]$", "", text)
-
-
-def read_elsewhere(text: str) -> bool:
-    """Whether the map marks a path condition as read where the function's passes cannot say it.  ``  [in f()]``
-    (``alias._produced``): tested in a method the function calls, its names the callee's.  ``  [at N]`` (the map's
-    PC): a later write's test, its names as they are when line N's test runs, after the branch's write; a pass holds
-    one value per name for the whole pass, which may have been printed before that write (KNOWN_ISSUES.md K24)."""
-    return re.search(r"\s+\[(in \w+\(\)|at \d+)\]$", text) is not None
-
-
-def _call(node: ast.Call, env: Env) -> Any:
-    if not PURE:
-        PURE.update(_pure())
-    name = ast.unparse(node.func)
-    fn = PURE.get(name)
-    if fn is None:
-        return env.lookup(ast.unparse(node))
-    args = [ev(a, env) for a in node.args]
-    kwargs = {k.arg: ev(k.value, env) for k in node.keywords if k.arg}
-    if any(a is UNKNOWN for a in [*args, *kwargs.values()]):
-        return UNKNOWN
-    result = fn(*args, **kwargs)
-    env.used[ast.unparse(node)] = f"called {name} from panda-server"
-    return result
-
-
-def ev(node: ast.AST, env: Env) -> Any:
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        items = [ev(e, env) for e in node.elts]
-        return UNKNOWN if any(i is UNKNOWN for i in items) else items
-    if isinstance(node, ast.BoolOp):
-        is_and = isinstance(node.op, ast.And)
-        pending = False
-        for value in node.values:
-            v = ev(value, env)
-            if v is UNKNOWN:
-                pending = True
-                continue
-            if is_and and not v:
-                return v
-            if not is_and and v:
-                return v
-        return UNKNOWN if pending else (True if is_and else False)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        v = ev(node.operand, env)
-        return UNKNOWN if v is UNKNOWN else (not v)
-    if isinstance(node, ast.Compare) and len(node.ops) == 1:
-        left, right = ev(node.left, env), ev(node.comparators[0], env)
-        op = node.ops[0]
-        # "x is None" needs only x; everything else needs both sides
-        if left is UNKNOWN or right is UNKNOWN:
-            return UNKNOWN
-        table = {
-            ast.Eq: lambda: left == right,
-            ast.NotEq: lambda: left != right,
-            ast.In: lambda: left in right,
-            ast.NotIn: lambda: left not in right,
-            ast.Is: lambda: left is right,
-            ast.IsNot: lambda: left is not right,
-        }
-        if type(op) in table:
-            return table[type(op)]()
-        return UNKNOWN
-    if isinstance(node, ast.Call):
-        return _call(node, env)
-    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
-        return env.lookup(ast.unparse(node))
-    return UNKNOWN
-
-
-def evaluate(text: str, env: Env) -> Any:
-    return ev(ast.parse(strip_annotation(text), mode="eval").body, env)
 
 
 # ---------------------------------------------------------------- which binding took effect
@@ -342,91 +244,6 @@ def _value_of(text: str, env: Env) -> Any:
         return evaluate(text, env)
     except SyntaxError:
         return UNKNOWN
-
-
-# ---------------------------------------------------------------- solving backwards
-
-
-def atoms(node: ast.AST) -> list[ast.AST]:
-    if isinstance(node, ast.BoolOp):
-        return [a for v in node.values for a in atoms(v)]
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return atoms(node.operand)
-    return [node]
-
-
-def _truth(node: ast.AST, fixed: dict[str, bool], env: Env) -> Any:
-    text = ast.unparse(node)
-    if text in fixed:
-        return fixed[text]
-    if isinstance(node, ast.BoolOp):
-        vals = [_truth(v, fixed, env) for v in node.values]
-        if isinstance(node.op, ast.And):
-            if any(v is False for v in vals):
-                return False
-            return UNKNOWN if any(v is UNKNOWN for v in vals) else True
-        if any(v is True for v in vals):
-            return True
-        return UNKNOWN if any(v is UNKNOWN for v in vals) else False
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        v = _truth(node.operand, fixed, env)
-        return UNKNOWN if v is UNKNOWN else (not v)
-    v = ev(node, env)
-    return UNKNOWN if v is UNKNOWN else bool(v)
-
-
-@dataclass
-class Solved:
-    test: str
-    outcome: bool
-    known: dict[str, bool]
-    settled: dict[str, bool]
-    open: list[str]
-    derived: dict[str, tuple[Any, str]]  # expression -> (value, why)
-    consistent: bool
-
-
-def solve(test: str, outcome: bool, env: Env) -> Solved:
-    tree = ast.parse(strip_annotation(test), mode="eval").body
-    found: dict[str, ast.AST] = {}
-    for atom in atoms(tree):
-        found.setdefault(ast.unparse(atom), atom)
-    known: dict[str, bool] = {}
-    unknown: list[str] = []
-    for text, atom in found.items():
-        v = ev(atom, env)
-        if v is UNKNOWN:
-            unknown.append(text)
-        else:
-            known[text] = bool(v)
-    fits = []
-    for values in itertools.product((True, False), repeat=len(unknown)):
-        fixed = {**known, **dict(zip(unknown, values, strict=False))}
-        if _truth(tree, fixed, env) is outcome:
-            fits.append(dict(zip(unknown, values, strict=False)))
-    settled = {u: fits[0][u] for u in unknown if fits and all(f[u] == fits[0][u] for f in fits)}
-    derived: dict[str, tuple[Any, str]] = {}
-    for text, truth in settled.items():
-        atom = found[text]
-        if isinstance(atom, ast.Compare) and len(atom.ops) == 1:
-            op = atom.ops[0]
-            equal = (isinstance(op, ast.Eq) and truth) or (isinstance(op, ast.NotEq) and not truth)
-            if equal:
-                left, right = atom.left, atom.comparators[0]
-                lv, rv = ev(left, env), ev(right, env)
-                if lv is UNKNOWN and rv is not UNKNOWN:
-                    derived[ast.unparse(left)] = (rv, f"{text} is {truth} and {ast.unparse(right)} = {rv!r}")
-                elif rv is UNKNOWN and lv is not UNKNOWN:
-                    derived[ast.unparse(right)] = (lv, f"{text} is {truth} and {ast.unparse(left)} = {lv!r}")
-    return Solved(
-        test,
-        outcome,
-        known,
-        settled,
-        [u for u in unknown if u not in settled],
-        derived,
-        bool(fits),
-    )
 
 
 # ---------------------------------------------------------------- values written after the decision

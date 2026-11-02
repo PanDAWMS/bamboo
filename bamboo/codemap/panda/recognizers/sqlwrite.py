@@ -113,6 +113,9 @@ from bamboo.codemap.models import (
     RESULT_AGGREGATE,
     RESULT_ROWS,
     RESULT_VARIES,
+    SET_BIND,
+    SET_EXPRESSION,
+    SET_OBJECT,
     AddedTerm,
     Anchor,
     Branch,
@@ -135,6 +138,7 @@ from bamboo.codemap.models import (
     ReadingStop,
     ReadSiteNode,
     RowKeySource,
+    SetFrom,
     SourceModule,
     SubjectNode,
     TermGuard,
@@ -1001,6 +1005,124 @@ def _unspelled_froms(
             put(term, _Insert(value="object", binds=values, **common), binds)
 
 
+def _set_from(
+    wrote: dict[tuple[str, int, str, str, str], SetFrom],
+    set_froms: list[SetFrom],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    rel_path: str,
+    run: sql.Execution,
+    table: str,
+    column: str,
+    value: str,
+    text: str,
+    new_row: Optional[bool],
+    read: Callable[[], list[sql.Bind]],
+) -> None:
+    owner = f"{rel_path}::{func.name}"
+    name = (owner, run.call.lineno, table, column.lower(), text)
+    record = wrote.get(name)
+    if record is None:
+        record = wrote[name] = SetFrom(
+            owner=owner,
+            statement=run.call.lineno,
+            table=table,
+            column=f"{table}.{column}".lower(),
+            value=value,
+            text=text,
+            new_row=new_row,
+        )
+        set_froms.append(record)
+    record._reads.append((rel_path, func, read))
+
+
+def _set_froms(
+    wrote: dict[tuple[str, int, str, str, str], SetFrom],
+    set_froms: list[SetFrom],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: sql.Execution,
+    statement: sqltext.SqlWrite,
+    rel_path: str,
+    new_row: Optional[bool],
+) -> None:
+    """What *run* gives each column *statement*'s text writes (:class:`SetFrom`): a bind's values, and the values of
+    each bind an expression holds, read only where a guard's way ends at the column (:func:`heldfrom.guard_froms`)."""
+    for column, supplied in statement.columns.items():
+        if supplied.kind == SET_BIND:
+            keys: tuple[str, ...] = (supplied.text,)
+        elif supplied.kind == SET_EXPRESSION:
+            keys = sqltext.bind_keys(supplied.text)
+        else:
+            keys = ()
+
+        def read(keys: tuple[str, ...] = keys) -> list[sql.Bind]:
+            return [
+                bind
+                for key in keys
+                for bind in (
+                    sql.bound_values(func, run.varmap, key, run.window, at=run)
+                    if run.varmap is not None
+                    else sql.inline_binds(run.call, key)
+                )
+            ]
+
+        _set_from(
+            wrote, set_froms, func, rel_path, run, statement.table, column, supplied.kind, supplied.text, new_row, read
+        )
+
+
+def _object_set_froms(
+    wrote: dict[tuple[str, int, str, str, str], SetFrom],
+    set_froms: list[SetFrom],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner_class: Optional[str],
+    run: sql.Execution,
+    found: list[tuple[ast.expr, ast.Call]],
+    table: str,
+    spelled: Iterable[str],
+    rel_path: str,
+    attributor: SpecAttributor,
+    new_row: bool,
+) -> None:
+    """What *run* gives each column of an object's class where it writes the object's map (:class:`SetFrom`, value
+    ``object``): the field as the function assigns it before the map is made (:func:`_fields_at`), else as the
+    object holds it at the write, read only where a guard's way ends at the column.  A column the text spells
+    (*spelled*) is the text's; a table the text names by a variable (*table* empty) is each of the class's."""
+    obj, _made = found[0]
+    obj_class = attributor.class_of(obj, func, owner_class)
+    if obj_class is None:
+        return
+    mades = _maps_of(found)
+    shown = ast.unparse(obj)
+    texts = {column.lower() for column in spelled}
+    tables = [table] if table else sorted(attributor.tables_of(obj_class))
+    for attribute in sorted(attributor.declared_attributes(obj_class)):
+        if attribute.lower() in texts:
+            continue
+
+        def read(attribute: str = attribute) -> list[sql.Bind]:
+            assigned = _fields_at(func, obj, attribute, mades, obj_class)
+            if assigned:
+                return [
+                    sql.Bind(node.value, site_of(node.value))  # type: ignore[attr-defined,arg-type]
+                    for node in assigned
+                ]
+            field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
+            field.parent = getattr(obj, "parent", None)  # type: ignore[attr-defined]
+            return [sql.Bind(field, site_of(run.call))]  # type: ignore[arg-type]
+
+        for one in tables:
+            _set_from(
+                wrote, set_froms, func, rel_path, run, one, attribute, SET_OBJECT, f"{shown}.{attribute}", new_row, read
+            )
+
+
+def _inserted_table(run: sql.Execution) -> str:
+    """The table an ``INSERT``'s text names, schema stripped; empty where the text names it by a variable."""
+    matched = _INSERT_INTO.match(run.sql or "")
+    named = matched.group(1).split(".")[-1] if matched else ""
+    return "" if "{" in named or "$" in named else named
+
+
 def _mark_object(
     keyed: dict[tuple[str, int, str, str], KeyFrom],
     func: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -1043,6 +1165,7 @@ def extract(
     attributor: SpecAttributor,
     row_keys: Optional[list[RowKeySource]] = None,
     key_froms: Optional[list[KeyFrom]] = None,
+    set_froms: Optional[list[SetFrom]] = None,
 ) -> tuple[
     list[SubjectNode],
     list[JunctionNode],
@@ -1082,11 +1205,15 @@ def extract(
     asks for it, and the seven above are unpacked in many places.  *key_froms*
     likewise, with each write's row-naming terms (:class:`KeyFrom`), one per
     term of a statement however many texts it runs with; who filled them is
-    read after the reach record (:func:`attach_key_sources`).
+    read after the reach record (:func:`attach_key_sources`).  *set_froms*
+    likewise, with what each write gives each column it writes
+    (:class:`SetFrom`), with *key_froms* only; the values are read for the
+    columns guards' ways end at (:func:`heldfrom.guard_froms`).
     """
     junctions: dict[str, JunctionNode] = {}
     carriers: dict[int, tuple[Branch, list[_Carrier]]] = {}
     keyed: dict[tuple[str, int, str, str], KeyFrom] = {}
+    wrote: dict[tuple[str, int, str, str, str], SetFrom] = {}
     sequenced = _sequenced_attributes(modules) if key_froms is not None else {}
     stopped: list[ReadingStop] = []
     coverage: list[CoverageStat] = []
@@ -1134,6 +1261,11 @@ def extract(
                     _unspelled_froms(
                         keyed, key_froms, func, _owner, run, made_of, module.rel_path, attributor, writing, sequenced
                     )
+                    if set_froms is not None and made_of:
+                        _object_set_froms(
+                            wrote, set_froms, func, _owner, run, made_of, _inserted_table(run), (),
+                            module.rel_path, attributor, True,
+                        )
                 # A SET item ``{}=:{}`` read for each key of the mapping its loop walks is a column.  Its stop stays:
                 # the text names the column through an interpolation, and derive-strategy, reading one file, says so
                 # too (statement_stops; plugin._stops_read_again compares the two).
@@ -1281,6 +1413,14 @@ def extract(
                         # A record per call: each place runs the text with the binds that reach it.
                         for one, lines in _each_call(attributor, func, run, statement, spec_class, settle, written):
                             _key_froms(keyed, key_froms, func, one, statement, module.rel_path, lines)
+                            if set_froms is not None:
+                                # An insert's row is new but where the statement may update it instead.
+                                new_row = (
+                                    (None if writing is None or writing.upserts(one, statement.table) else True)
+                                    if statement.kind == "insert"
+                                    else False
+                                )
+                                _set_froms(wrote, set_froms, func, one, statement, module.rel_path, new_row)
                             if inserts:
                                 _insert_froms(
                                     keyed, key_froms, func, _owner, one, statement, module.rel_path, lines,
@@ -1289,6 +1429,11 @@ def extract(
                                 )
                         if not inserts and made_of:
                             _mark_object(keyed, func, _owner, run, statement, module.rel_path, made_of, attributor)
+                            if set_froms is not None:
+                                _object_set_froms(
+                                    wrote, set_froms, func, _owner, run, made_of, statement.table, statement.columns,
+                                    module.rel_path, attributor, False,
+                                )
             # The executions nothing was read out of, last: they have no run
             # to hang on, and saying them is what tells "read in full" from
             # "never read".

@@ -13,18 +13,19 @@ of the row it holds besides the key, the value and the time.  The querier
 matches a call's WHERE against that shape; a querier that needed a branch
 per class would have turned the glue between parts into a per-case table.
 
-* H, status history: by key (the rows file's ``statuslog`` for now) and by
-  transition and window (:class:`MovedOn`).
+* H, status history: by key (the rows file's ``statuslog`` for now), by
+  transition and window (:class:`MovedOn`), and held at a moment
+  (:class:`HeldAt`).
 * A1, a row by key wherever it lives now (live, archived, the archive
-  schema), for the set of keys inside :class:`MovedOn`.
-* A2, a statement's rows counted now (:class:`GroupsNow`).  The API takes the
-  map's statement and the call's binds; the stand-in takes the table and the
-  WHERE the call printed.
+  schema), for the set of keys inside :class:`MovedOn` and :class:`HeldAt`.
+
+Each question is asked with its structure beside its SQL (:func:`asked`), so a
+fetch can answer it by these parts rather than by the SQL.
 """
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 ORACLE_TIME = "'YYYY-MM-DD HH24:MI:SS'"
 
@@ -111,26 +112,34 @@ def history_column(found: History, attr: str) -> str | None:
 
 
 @dataclass
-class GroupsNow:
-    """A2: the rows that pass a call's WHERE now, counted by columns, with the least key of each group."""
+class HeldAt:
+    """H and A1: the rows whose subject held a value at a moment -- their last history row before it is the value --
+    under a call's WHERE, counted by an order's items before the key, with how many in each group rank ahead of the
+    row by the key, the row itself, and the earliest entry counted.  The WHERE's terms on columns the history holds
+    are read on that last row; the others on the row as it is now, wherever it lives (A1).  An entry before
+    *lookback* is not asked: a row that held the value from earlier is not counted."""
 
-    statement: str  # ``owner@line``, what the API takes
-    table: str  # the stand-in's: the table the call printed
-    where: str  # the call's WHERE, its binds put in
-    cols: list[tuple[str, str]]  # (column, asc|desc|ranked)
+    history: History
+    observed: str
+    at: datetime.datetime  # the moment: the rows that held the value just before it
+    lookback: datetime.datetime
+    held: list[str]  # the call's WHERE terms on columns the history holds, read at the moment
+    now: list[str]  # its other terms, read on the row as it is now
+    cols: list[tuple[str, str]]  # (column, asc|desc|ranked): the order's items before the key
     key: str
-    blank: list[str]  # order terms the map leaves blank, said and left out
-    #: a blank order term the map says ranks by a column (its ``order_holes``): (term, column, where the ranking is
-    #: computed at run time) -- grouped by, its ranking not known here
-    ranked: list[tuple[str, str, str]] = field(default_factory=list)
-    #: the WHERE as db_read's conditions (:func:`condition`), all of which hold; None where a term is none
-    conditions: list[list] | None = None
+    mine: object  # the row's key
+    #: how the key ranks within a group (asc|desc); None for an order without the key, whose ties the database orders
+    key_order: str | None
 
 
 @dataclass
 class MovedOn:
-    """H and A1: the rows whose subject left the observed value in a window, under terms the history holds, by
-    the value each went to, with how long each had held it, counted by columns of the row as it is now.
+    """H and A1: the rows whose subject left the observed value in a window, under a call's WHERE, by the value
+    each went to, with how long each had held it, counted by columns of the row as it is now, and how many of them had
+    a key ranking ahead of the row's.  As :class:`HeldAt` reads them: the terms on columns the history holds on the
+    history row each left, the others on the row as it is now (A1).  The keys asked are those with a history row in
+    the window under the held terms: one whose rows there all differ from the row it left (a site changed at the move)
+    is not counted.
 
     Every next value, not only the one this row went to: a group starved of one way out leaves by another (a
     7-day kill), and only the two side by side say so.  Counts are moves, not keys."""
@@ -139,9 +148,12 @@ class MovedOn:
     observed: str
     since: datetime.datetime
     moved: datetime.datetime
-    terms: list[str]  # the call's WHERE terms on columns the history holds
+    held: list[str]  # the call's WHERE terms on columns the history holds, read on the row each left
+    now: list[str]  # its other terms, read on the row as it is now
     cols: list[tuple[str, str]]  # (column, asc|desc|ranked)
     key: str
+    mine: object = None
+    key_order: str | None = None
 
 
 def sql_literal(value) -> str:
@@ -154,56 +166,29 @@ def _oracle_time(t: datetime.datetime) -> str:
     return f"TO_DATE('{t:%Y-%m-%d %H:%M:%S}', {ORACLE_TIME})"
 
 
-def draw(q: GroupsNow | MovedOn) -> str:
+def draw(q: HeldAt | MovedOn) -> str:
     """The question as the SQL that answers it."""
-    return _groups_now_sql(q) if isinstance(q, GroupsNow) else _moved_on_sql(q)
+    return _held_at_sql(q) if isinstance(q, HeldAt) else _moved_on_sql(q)
 
 
-def db_read(q: GroupsNow | MovedOn) -> dict | None:
-    """The question as a reader of one table by a WHERE, counting by columns, takes it: a GroupsNow's table, WHERE,
-    the columns it groups by and the key it takes the least of.  The WHERE is its conditions where every term is one,
-    else its text.  None for a MovedOn, a window over the history (LAG), which only its SQL says."""
-    if not isinstance(q, GroupsNow):
-        return None
-    where = q.where if q.conditions is None else q.conditions
-    return {"table": q.table, "where": where, "group_by": [c for c, _ in q.cols], "least": q.key}
+def columns(q: HeldAt | MovedOn) -> list[str]:
+    """The columns an answer to *q* holds, as its SQL names them: an answer does not carry the SQL it answers."""
+    ahead = ["n_key_ahead"] if q.key_order else []
+    if isinstance(q, HeldAt):
+        return [c for c, _ in q.cols] + ["n", *ahead, "n_self", "first_entered"]
+    return ["next_value", *(c for c, _ in q.cols), "n", *ahead, "min_h", "median_h", "max_h"]
 
 
-#: a test's operator as db_read takes it (panda-server's async_process/submit_db_read_request); it takes no NOT IN
-_DB_READ_OPS = {"=": "=", "<>": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">=", "IN": "in"}
-
-
-def condition(test, binds: dict) -> list | str:
-    """*test*, one test the map reads off a term of a WHERE (``sqltext.Test``), as a db_read condition --
-    ``[column, op]`` or ``[column, op, value]`` -- or why it is none.  A bind's value is the run's, as its print
-    holds it (*binds*, keyed ``:name`` or ``name``); a quoted constant is a text, another a number."""
-    if test.kind in ("null", "not_null"):
-        return [test.column, "is null" if test.kind == "null" else "is not null"]
-    op = _DB_READ_OPS.get(test.op)
-    if op is None:
-        return f"{test.op}, which db_read does not take" if test.op else "not a column tested against a value"
-    values = []
-    for side in test.sides:
-        if side.kind == "bind" and len(side.binds) == 1:
-            key = side.binds[0]
-            value = binds[key] if key in binds else binds.get(key[1:])
-        elif side.kind == "constant":
-            value = side.constant if side.text.startswith("'") else _number(side.text)
-        else:
-            return f"compared with {side.text}, a {side.kind}"
-        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-            return f"{side.text} is {value!r}, not a number or a text"
-        values.append(value)
-    return [test.column, op, values if op == "in" else values[0]]
-
-
-def _number(text: str) -> int | float | None:
-    for kind in (int, float):
-        try:
-            return kind(text)
-        except ValueError:
-            pass
-    return None
+def asked(q: HeldAt | MovedOn) -> dict:
+    """*q* as a structure, beside its SQL: what parts H and A1 take, for a fetch that answers it by them (the history
+    by key, the rows by key) rather than by the SQL."""
+    out = {"subject": q.history.subject, "observed": q.observed, "group_by": [[c, d] for c, d in q.cols], "key": q.key,
+           "key_value": q.mine, "key_order": q.key_order, "columns": columns(q)}
+    if isinstance(q, HeldAt):
+        return {"part": "H held at", "at": f"{q.at:%Y-%m-%d %H:%M:%S}", "lookback": f"{q.lookback:%Y-%m-%d %H:%M:%S}",
+                "terms_at": q.held, "terms_now": q.now} | out
+    return {"part": "H moved on", "since": f"{q.since:%Y-%m-%d %H:%M:%S}", "moved": f"{q.moved:%Y-%m-%d %H:%M:%S}",
+            "terms_at": q.held, "terms_now": q.now} | out
 
 
 def _sorted(c: str, d: str, alias: str = "") -> str:
@@ -211,56 +196,108 @@ def _sorted(c: str, d: str, alias: str = "") -> str:
     return f"{alias}{c}" if d == "ranked" else f"{alias}{c} {d}"
 
 
-def _groups_now_sql(q: GroupsNow) -> str:
-    names = ", ".join(c for c, _ in q.cols)
-    return "\n".join([
-        "-- the rows that pass the call's WHERE now, by the order's columns"
-        + "".join(f"; {c} for {t!r}, ranked at run time ({at})" for t, c, at in q.ranked)
-        + (f"; left out, blank in the map: {q.blank}" if q.blank else ""),
-        f"SELECT {names}, COUNT(*) AS n, MIN({q.key}) AS min_{q.key}",
-        f"FROM {q.table}",
-        f"WHERE {q.where}",
-        f"GROUP BY {names}",
-        f"ORDER BY {', '.join(_sorted(c, d) for c, d in q.cols)};",
-    ])
+def _key_counts(q: HeldAt | MovedOn, alias: str) -> list[str]:
+    """How many of a group rank ahead of the row by the key, and, for :class:`HeldAt`, the row itself."""
+    out = []
+    if q.key_order:
+        op = "<" if q.key_order == "asc" else ">"
+        out.append(f"COUNT(CASE WHEN {alias}{q.key} {op} {sql_literal(q.mine)} THEN 1 END) AS n_key_ahead")
+    if isinstance(q, HeldAt):
+        out.append(f"COUNT(CASE WHEN {alias}{q.key} = {sql_literal(q.mine)} THEN 1 END) AS n_self")
+    return out
+
+
+def _rows_now(q: HeldAt | MovedOn, keys: str, start: str, terms: list[str]) -> list[str]:
+    """A1: the keys of *keys* as their rows are now, in whichever table holds them, with the order's columns, under
+    *terms* read on that row."""
+    cls = q.history.subject.partition(".")[0]
+    names = "".join(f", {c}" for c, _ in q.cols)
+    where = "".join(f" AND {t}" for t in terms)
+    tables = [
+        f"    SELECT {q.key}{names} FROM {t} WHERE {q.key} IN (SELECT {q.key} FROM {keys}){where}"
+        + (f" AND {bound.format(start=start)}" if bound else "")
+        for t, bound in _ROW_TABLES[cls]
+    ]
+    return [
+        "j AS (",
+        f"  SELECT {q.key}" + "".join(f", MAX({c}) AS {c}" for c, _ in q.cols) + " FROM (",
+        "\n    UNION ALL\n".join(tables),
+        f"  ) GROUP BY {q.key})",
+    ]
+
+
+def _held_at_sql(q: HeldAt) -> str:
+    _, log, ordered_by = _HISTORIES[q.history.subject]
+    _, _, value = q.history.subject.partition(".")
+    key = q.key
+    at, start = _oracle_time(q.at), _oracle_time(q.lookback)
+    held = "".join(f" AND {t}" for t in q.held)
+    latest = ", ".join(f"l.{c.strip()} DESC" for c in ordered_by.split(","))
+    ranked = "".join(f"; {c} ranked at run time" for c, d in q.cols if d == "ranked")
+    lines = [
+        f"-- the rows that held {q.observed!r} just before {q.at:%Y-%m-%d %H:%M:%S} (their last status-log row before it),"
+        f" under the call's terms the status log holds read there and the others on the row as it is now; by the order's"
+        f" items before the key{ranked}, with how many of each group rank ahead of the row by the key"
+        + (f" ({key} {q.key_order})" if q.key_order else " (not in the order: not counted)")
+        + f", the row itself, and the earliest entry counted (entries from {q.lookback:%Y-%m-%d %H:%M:%S} on)",
+        "WITH e AS (",
+        f"  SELECT DISTINCT {key} FROM {log}",
+        f"  WHERE {value} = {sql_literal(q.observed)} AND modificationTime >= {start} AND modificationTime < {at}{held}),",
+        "r AS (",
+        f"  SELECT l.*, ROW_NUMBER() OVER (PARTITION BY l.{key} ORDER BY {latest}) AS rn",
+        f"  FROM {log} l WHERE l.{key} IN (SELECT {key} FROM e) AND l.modificationTime < {at}),",
+        "h AS (",
+        f"  SELECT {key}, modificationTime AS entered FROM r",
+        f"  WHERE rn = 1 AND {value} = {sql_literal(q.observed)}{held}),",
+        *_rows_now(q, "h", start, q.now),
+        f"SELECT {''.join(f'j.{c}, ' for c, _ in q.cols)}COUNT(*) AS n, "
+        + "".join(f"{c}, " for c in _key_counts(q, "h."))
+        + "MIN(h.entered) AS first_entered",
+        f"FROM h JOIN j ON j.{key} = h.{key}",
+    ]
+    if q.cols:
+        lines += [f"GROUP BY {', '.join(f'j.{c}' for c, _ in q.cols)}", f"ORDER BY {', '.join(_sorted(c, d, 'j.') for c, d in q.cols)};"]
+    else:
+        lines[-1] += ";"
+    return "\n".join(lines)
 
 
 def _moved_on_sql(q: MovedOn) -> str:
     _, log, ordered_by = _HISTORIES[q.history.subject]
-    cls, _, value = q.history.subject.partition(".")
+    _, _, value = q.history.subject.partition(".")
     key = q.key
-    names = ", ".join(c for c, _ in q.cols)
     start, end = _oracle_time(q.since), _oracle_time(q.moved)
-    tables = [
-        f"    SELECT {key}, {names} FROM {t} WHERE {key} IN (SELECT {key} FROM s)"
-        + (f" AND {bound.format(start=start)}" if bound else "")
-        for t, bound in _ROW_TABLES[cls]
-    ]
     took = "s.moved_at - s.since_at"
     order = "ORDER BY " + ", ".join(f"l.{c.strip()}" for c in ordered_by.split(","))
-    return "\n".join([
-        f"-- the rows that left {q.observed!r} in the row's window under the call's terms the status log holds, by the"
-        f" value each went to; hours each had held it, by the order's columns as they are now (moves, not keys)",
+    held = "".join(f" AND {t}" for t in q.held)
+    joined = bool(q.cols or q.now)
+    lines = [
+        f"-- the rows that left {q.observed!r} in the row's window under the call's terms the status log holds, read on the"
+        f" row each left, and the others on the row as it is now; by the value each went to; hours each had held it"
+        + (", by the order's columns as they are now" if q.cols else "") + " (moves, not keys)"
+        + (f", and how many had a key ranking ahead of the row's ({key} {q.key_order})" if q.key_order else ""),
         "WITH n AS (",
         f"  SELECT DISTINCT {key} FROM {log}",
-        f"  WHERE modificationTime >= {start} AND modificationTime <= {end}" + "".join(f" AND {t}" for t in q.terms) + "),",
+        f"  WHERE modificationTime >= {start} AND modificationTime <= {end}{held}),",
         "p AS (",
         f"  SELECT l.{key}, l.{value} AS next_value, l.modificationTime AS moved_at,",
         f"         LAG(l.{value}) OVER (PARTITION BY l.{key} {order}) AS before_value,",
+        # the row it left holds the columns the held terms read
+        *(f"         LAG(l.{c}) OVER (PARTITION BY l.{key} {order}) AS {c}," for c in sorted(q.history.held)),
         f"         LAG(l.modificationTime) OVER (PARTITION BY l.{key} {order}) AS since_at",
         # LAG looks back only: rows after the window are not needed; rows before it are (a wait can start long before)
         f"  FROM {log} l WHERE l.{key} IN (SELECT {key} FROM n) AND l.modificationTime <= {end}),",
         "s AS (",
         f"  SELECT {key}, next_value, moved_at, since_at FROM p",
-        f"  WHERE before_value = {sql_literal(q.observed)} AND moved_at >= {start} AND moved_at <= {end}),",
-        "j AS (",
-        f"  SELECT {key}, " + ", ".join(f"MAX({c}) AS {c}" for c, _ in q.cols) + " FROM (",
-        "\n    UNION ALL\n".join(tables),
-        f"  ) GROUP BY {key})",
-        f"SELECT s.next_value, {', '.join(f'j.{c}' for c, _ in q.cols)}, COUNT(*) AS n,"
-        f" ROUND(MIN({took}) * 24, 1) AS min_h,",
+        f"  WHERE before_value = {sql_literal(q.observed)} AND moved_at >= {start} AND moved_at <= {end}{held})"
+        + ("," if joined else ""),
+        *(_rows_now(q, "s", start, q.now) if joined else []),
+        f"SELECT s.next_value, {''.join(f'j.{c}, ' for c, _ in q.cols)}COUNT(*) AS n, "
+        + "".join(f"{c}, " for c in _key_counts(q, "s."))
+        + f"ROUND(MIN({took}) * 24, 1) AS min_h,",
         f"       ROUND(MEDIAN({took}) * 24, 1) AS median_h, ROUND(MAX({took}) * 24, 1) AS max_h",
-        f"FROM s JOIN j ON j.{key} = s.{key}",
-        f"GROUP BY s.next_value, {', '.join(f'j.{c}' for c, _ in q.cols)}",
-        f"ORDER BY s.next_value, {', '.join(_sorted(c, d, 'j.') for c, d in q.cols)};",
-    ])
+        f"FROM s JOIN j ON j.{key} = s.{key}" if joined else "FROM s",
+        f"GROUP BY s.next_value{''.join(f', j.{c}' for c, _ in q.cols)}",
+        f"ORDER BY s.next_value{''.join(', ' + _sorted(c, d, 'j.') for c, d in q.cols)};",
+    ]
+    return "\n".join(lines)

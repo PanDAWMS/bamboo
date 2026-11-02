@@ -196,3 +196,243 @@ def test_an_object_lost_is_read_by_the_attribute_s_name_and_a_spec_s_setattr_wri
     assert found["job.valuesMap()"] is None
     assert found["self.copy_status(job, self.other)"] is None
     assert found["self.keep(job)"] is None
+
+
+MAPS = """\
+import copy
+import json
+
+
+class Cache:
+    def get(self, key):
+        self.hits[key] = 1
+
+
+class Spec:
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        self._changed[name] = value
+
+
+class Refiner:
+    def fill(self, params):
+        params["filled"] = True
+
+    def keeps(self, params):
+        return params
+
+    def touch(self):
+        self.saved["touched"] = 3
+
+    def read(self, params):
+        params.pop("old", None)
+        params.update({"merged": 1}, extra=2)
+        params["inner"]["deep"] = 4
+        self.fill(params)
+        alias = self.keeps(params)
+        alias["aliased"] = 5
+        text = json.dumps(params)
+        clone = copy.deepcopy(params)
+        clone["copied"] = text
+        self.saved = params
+        self.log.debug(params)
+        if "filled" in params:
+            params["late"] = 6
+        for _ in range(2):
+            if "again" in params:
+                pass
+            params["again"] = 7
+        self.queue.append(params)
+
+    def other(self, params, tasks):
+        params.get("x")
+        object.__setattr__(self, "saved", params)
+        for task in tasks:
+            params = json.loads(task)
+            if "seen" in params:
+                pass
+            self.fill(params)
+
+    def holders(self, params, other):
+        varMap = {}
+        varMap[":p"] = params
+        self.cur.execute("SELECT 1", varMap)
+        part = getattr(params, "x", None)
+        part["k"] = 1
+        best = max(params, other)
+        best["b"] = 2
+        ret = {}
+        ret["p"] = params
+        if "x" in params:
+            pass
+        return ret
+"""
+
+
+def _object_changes(
+    tmp_path: Path, test: str, name: str = "read", bound_by_loop: bool = False
+) -> list[tuple]:
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "maps.py").write_text(MAPS)
+    tree = ast.parse(MAPS)
+    pathcond.attach_parents(tree)
+    module = SourceModule(
+        package=PACKAGE,
+        rel_path=f"{PACKAGE}/maps.py",
+        tree=tree,
+        source=MAPS,
+        blob_sha=blob_sha(MAPS),
+    )
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    read = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    (last,) = [
+        node
+        for node in ast.walk(read)
+        if (isinstance(node, ast.If) and ast.unparse(node.test) == test)
+        or (isinstance(node, ast.For) and ast.unparse(node.iter) == test)
+    ]
+    line = {text.strip(): number for number, text in enumerate(MAPS.splitlines(), 1)}
+    file = f"{PACKAGE}/maps.py"
+    first: ast.AST = read.args
+    if bound_by_loop:
+        (first,) = [
+            node
+            for node in ast.walk(read)
+            if isinstance(node, ast.Assign)
+            and ast.unparse(node) == "params = json.loads(task)"
+        ]
+    return [
+        (
+            change.kind,
+            change.key,
+            change.what,
+            [one.removeprefix(f"{file}:") for one in change.via],
+            None if change.value is None else ast.unparse(change.value),
+            next(text for text, number in line.items() if number == change.line),
+        )
+        for change in changes.object_changes(calls, file, read, "params", first, last)
+    ]
+
+
+def test_every_change_of_an_object_between_its_binding_and_a_read_is_said_by_its_key(
+    tmp_path,
+):
+    """Before ``"filled" in params``: a builtin container's methods by the keys they name, a store inside an item,
+    what ``fill`` the map is handed to stores, a store through a name a call hands it back as, and through the
+    attribute it is put in, by the attribute's name (``touch``).  A library's function changes nothing it is handed
+    -- what ``copy.deepcopy`` hands back is read as the map, ``json.dumps``'s too, and neither is stored on -- nor
+    does a logger.  The store under the test and what follows it are after the read."""
+    found = _object_changes(tmp_path, "'filled' in params")
+
+    def at(text: str) -> str:
+        return str(
+            next(
+                n for n, held in enumerate(MAPS.splitlines(), 1) if held.strip() == text
+            )
+        )
+
+    assert found == [
+        ("method", "'old'", "pop", [], None, 'params.pop("old", None)'),
+        (
+            "method",
+            "'merged'",
+            "update",
+            [],
+            "1",
+            'params.update({"merged": 1}, extra=2)',
+        ),
+        (
+            "method",
+            "'extra'",
+            "update",
+            [],
+            "2",
+            'params.update({"merged": 1}, extra=2)',
+        ),
+        (
+            "inner",
+            "'inner'",
+            "params['inner']['deep']",
+            [],
+            None,
+            'params["inner"]["deep"] = 4',
+        ),
+        (
+            "store",
+            "'filled'",
+            "",
+            [at("self.fill(params)")],
+            "True",
+            'params["filled"] = True',
+        ),
+        ("store", "'aliased'", "", [], "5", 'alias["aliased"] = 5'),
+        ("store", "'copied'", "", [], "text", 'clone["copied"] = text'),
+        (
+            "store",
+            "'touched'",
+            "",
+            [at("self.saved = params")],
+            "3",
+            'self.saved["touched"] = 3',
+        ),
+    ]
+
+
+def test_a_store_a_loop_runs_after_the_read_is_before_its_next_pass(tmp_path):
+    """``params["again"] = 7`` follows ``"again" in params`` in the loop's body, and runs before the test's next
+    pass; the store under the earlier test runs before the loop.  What follows the loop does not."""
+    found = _object_changes(tmp_path, "'again' in params")
+
+    assert [(kind, key) for kind, key, *_rest in found][-2:] == [
+        ("store", "'late'"),
+        ("store", "'again'"),
+    ]
+    assert "escaped" not in {kind for kind, *_rest in found}
+
+
+def test_a_method_of_no_known_class_is_the_builtin_s_and_one_set_by_name_is_read_by_the_name(
+    tmp_path,
+):
+    """``params.get("x")`` is the dict's, not every ``get`` of the corpus (``Cache.get`` stores on its own object);
+    ``object.__setattr__(self, "saved", params)`` puts the map in ``saved``, through which ``touch`` stores, and no
+    ``__setattr__`` of the corpus is followed -- all before the loop, which reads ``tasks``.  In the loop, a call
+    after the read, before the name is bound again, changes an object the next pass does not read."""
+    found = _object_changes(tmp_path, "tasks", "other")
+
+    assert [(kind, key, via) for kind, key, _what, via, _value, _text in found] == [
+        (
+            "store",
+            "'touched'",
+            [
+                str(
+                    MAPS.splitlines().index(
+                        '        object.__setattr__(self, "saved", params)'
+                    )
+                    + 1
+                )
+            ],
+        ),
+    ]
+    assert (
+        _object_changes(tmp_path, "'seen' in params", "other", bound_by_loop=True) == []
+    )
+
+
+def test_a_local_container_handing_nothing_out_keeps_no_change_and_a_builtin_hands_back_an_argument_only(
+    tmp_path,
+):
+    """``varMap`` only takes the map and goes to the driver: nothing changes it through there.  ``ret``, handed
+    back, may.  ``getattr`` hands back an attribute of the map, not the map; ``max`` one of its arguments."""
+    found = _object_changes(tmp_path, "'x' in params", "holders")
+
+    assert [(kind, key, what) for kind, key, what, *_rest in found] == [
+        ("store", "'b'", ""),
+        ("escaped", "*", "ret['p']"),
+    ]

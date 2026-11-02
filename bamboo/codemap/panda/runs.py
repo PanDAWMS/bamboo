@@ -163,6 +163,7 @@ from bamboo.codemap.models import (
     HistoryPair,
     HistoryRekey,
     JunctionNode,
+    KeyStop,
     MapFragment,
     PrintStatement,
     ReachCall,
@@ -195,6 +196,10 @@ BUILDERS: dict[str, callfacts.Mark] = {
 
 MAX_DEPTH = 6
 MAX_FUNCTIONS = 400
+#: The states each follow of a message hole's value reads (:func:`objects.follow`), below a mark's: a follow's
+#: time grows faster than its states (``toBeThrottledBase``'s ``cloud_name``: 6.6 s at 1000, 190 s at 5000), and
+#: on pin m 500 lost no column 5000 names that the printed value holds, where 250 lost two.
+HOLE_STATES = 500
 
 HISTORY_NOT_RECORDED = "not read: no history table records {cls}"
 HISTORY_NO_FUNCTION = "the arm's function is not a row of the reach record"
@@ -314,14 +319,20 @@ class _Bound(NamedTuple):
 
 def attach(
     fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
-) -> tuple[int, int, int]:
-    """Read the runs, the history calls and the pairs into *fragment*'s nodes and branches.
+) -> tuple[int, int, int, int]:
+    """Read the runs, the history calls, the pairs and the columns of the messages' holes into *fragment*'s nodes and
+    branches.
 
     Returns how many functions have a run, how many history calls there are,
-    and how many branches have a pair.
+    how many branches have a pair, and how many holes name a column.
     """
     reader = _Reader(fragment, modules, calls)
-    return reader.attach_runs(), reader.attach_history_calls(), reader.attach_pairs()
+    return (
+        reader.attach_runs(),
+        reader.attach_history_calls(),
+        reader.attach_pairs(),
+        reader.attach_hole_columns(),
+    )
 
 
 def history_writers(functions: list[tuple[str, ast.AST, str]]) -> dict[str, str]:
@@ -351,7 +362,7 @@ class _Reader:
         self.rows = {row.owner: row for row in fragment.reach_graph}
         self.prints = {node.owner: node for node in fragment.function_prints}
         self.writers = history_writers(self.names.functions)
-        self._follows: dict[tuple[str, str], objects.ObjectReach] = {}
+        self._follows: dict[tuple[str, str, int], objects.ObjectReach] = {}
         self.keys = keycolumns.Reader(
             fragment, modules, calls, self.names, self.funcs, self._follow
         )
@@ -539,13 +550,65 @@ class _Reader:
         ]
         return RunStart(**common, mark=mark, key=key)
 
-    def _key(self, expression: ast.expr, file: str, func: ast.AST) -> RunKey:
+    def _key(
+        self,
+        expression: ast.expr,
+        file: str,
+        func: ast.AST,
+        states: int = objects.MAX_STATES,
+    ) -> RunKey:
         """The columns one hole of a mark holds: ``JediTaskSpec.jediTaskID`` for ``taskSpec.jediTaskID`` declared so,
-        else what the value's uses and bindings say (:mod:`bamboo.codemap.panda.keycolumns`)."""
-        columns, stops = self.keys.read(file, func, expression)
-        if any(self.keys.holds_rows(one) for one in columns):
-            return RunKey(expression=ast.unparse(expression), columns=columns)
+        else what the value's uses and bindings say (:mod:`bamboo.codemap.panda.keycolumns`), its uses followed
+        through at most *states* states; and where each reading stopped, whether a column is named or not."""
+        columns, stops = self.keys.read(file, func, expression, states)
         return RunKey(expression=ast.unparse(expression), columns=columns, stops=stops)
+
+    # -- the columns of the messages' holes -------------------------------------- #
+
+    def attach_hole_columns(self) -> int:
+        """The columns each hole of a printed message is (:attr:`SkeletonHole.columns`), read as a mark's hole is
+        (:meth:`_key`) at the statement writing it out: what a reader asks a log by when a line names a row by other
+        values than its key.  Returns how many holes name a column of a class holding rows."""
+        named = 0
+        for node in self.fragment.function_prints:
+            held = self.funcs.get(node.owner)
+            if held is None:
+                continue
+            file, func = held
+            read: dict[tuple[int, str], RunKey] = {}
+            for statement in node.statements:
+                for row in statement.rows:
+                    for hole in row.holes:
+                        at = (hole.line or statement.line, hole.expression)
+                        if at not in read:
+                            read[at] = self._hole_key(node.owner, file, func, *at)
+                        hole.columns = list(read[at].columns)
+                        hole.stops = list(read[at].stops)
+                        named += any(self.keys.holds_rows(one) for one in hole.columns)
+        return named
+
+    def _hole_key(
+        self, owner: str, file: str, func: ast.AST, line: int, expression: str
+    ) -> RunKey:
+        """:meth:`_key` of the expression spelled *expression* in a statement of *func* starting at *line*."""
+        for site in walk(func):
+            if isinstance(site, ast.stmt) and site.lineno == line:
+                found = next(
+                    (
+                        one
+                        for one in walk(site)
+                        if isinstance(one, ast.expr) and ast.unparse(one) == expression
+                    ),
+                    None,
+                )
+                if found is not None:
+                    return self._key(found, file, func, HOLE_STATES)
+        stop = KeyStop(
+            kind="not_found",
+            name=expression,
+            at=[f"{owner.rpartition('::')[2]}:{line}"],
+        )
+        return RunKey(expression=expression, stops=[stop])
 
     def _printed_through(
         self, file: str, func: ast.AST, site: ast.stmt, level: str, runs: list[RunStart]
@@ -1131,10 +1194,14 @@ class _Reader:
                 return True
         return False
 
-    def _follow(self, owner: str, path: str) -> objects.ObjectReach:
-        if (owner, path) not in self._follows:
-            self._follows[(owner, path)] = objects.follow(self.rows, owner, path)
-        return self._follows[(owner, path)]
+    def _follow(
+        self, owner: str, path: str, states: int = objects.MAX_STATES
+    ) -> objects.ObjectReach:
+        if (owner, path, states) not in self._follows:
+            self._follows[(owner, path, states)] = objects.follow(
+                self.rows, owner, path, states
+            )
+        return self._follows[(owner, path, states)]
 
     def _key_parameter(self, writer: str) -> str:
         """The parameter a history writer takes its row's key as: its first after ``self``."""

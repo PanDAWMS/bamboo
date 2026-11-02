@@ -325,10 +325,28 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "call_stops": "the calls the build could not place -- see CallStop",
     "open_calls": "the calls the build placed open -- see MapFragment.open_calls",
     "calls_considered": _REPORT,
+    "swallowing_managers": "a check of the flow's premise over the corpus -- see SwallowingManager",
+    "managers_read": _REPORT,
     "row_key_sources": _REPORT,
     "key_froms": (
         "records beside the nodes, not nodes: where each row-naming bind of a write was filled from -- see KeyFrom; "
         "a dump's section compare reads them"
+    ),
+    "guard_froms": (
+        "records beside the nodes, not nodes: what each name an arm's tests read holds, way by way -- see "
+        "GuardFrom; a dump's section compare reads them"
+    ),
+    "parameter_froms": (
+        "records beside the nodes, not nodes: what the calls of a function hand a parameter -- see ParameterFrom; "
+        "a dump's section compare reads them"
+    ),
+    "set_froms": (
+        "records beside the nodes, not nodes: what each write gives a column a guard's way ends at, way by way -- see "
+        "SetFrom; a dump's section compare reads them"
+    ),
+    "runnables": (
+        "records beside the nodes, not nodes: whether a reader may run a definition with a run's values -- see "
+        "Runnable; a dump's section compare reads them"
     ),
     "print_calls": "the second reading prints-are-counted checks the stored rows against",
     "tables": (

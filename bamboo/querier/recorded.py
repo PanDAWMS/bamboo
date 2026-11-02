@@ -40,7 +40,10 @@ run whose mark holds the key; a mark that does not (the setupper's stamp) is ask
 near the window (its records split where they stop for :data:`EDGE` or more, the pieces that reach the window +- EDGE)
 begins or ends within EDGE of an end of what was searched on its machine may go on past it: the window is widened past
 that end, once -- not past an end inside the window (a gap a new ask does not fill) nor past today's file's end (asking
-again only reads it later).  A run, or a pass of one (``Run.part``), still that near an end is read as cut there
+again only reads it later).  A second past the end is enough because the recording step is the other half of the
+rule: a file whose covers meet the window is read whole, and a string cut at 1 MB is asked again EDGE past each end of
+the window (``bamboo.scripts.panda.fieldtest.record.CONTINUE_SLACK``, a copy of EDGE a test holds equal), so the run
+is searched EDGE past the end it lay near.  A run, or a pass of one (``Run.part``), still that near an end is read as cut there
 (:attr:`Log.whole`; rule 8 reads no row missing from it): each by its own first and last record, so the passes inside
 a mark that spans days are whole.  Once, because a mark such as a task's ``jediTaskID`` spans days, and widening at
 every end would end only at the oldest file kept.  EDGE is the windows' slack, not a measured gap: a run whose records stop for longer
@@ -376,13 +379,13 @@ class RecordedLogs:
 
     def log(
         self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
-        strings: tuple[str, ...] = (),
+        strings: tuple[str, ...] = (), whole: bool = False,
     ) -> Log:
         if window is None:
             raise ValueError(f"{name}: the recorded logs are asked over a window")
-        at = (name, key, window, machine, None if owners is None else tuple(sorted(owners.items())), tuple(sorted(strings)))
+        at = (name, key, window, machine, None if owners is None else tuple(sorted(owners.items())), tuple(sorted(strings)), whole)
         if at not in self._logs:
-            self._logs[at] = self._read(name, key, window, machine, owners, strings)
+            self._logs[at] = self._read(name, key, window, machine, owners, strings, whole)
         return self._logs[at]
 
     def _get(self, asks: list[tuple[Ask, str]], notes: list[str]) -> list[dict]:
@@ -422,7 +425,7 @@ class RecordedLogs:
                 "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')}{strings})"}
 
     def _read(self, name: str, key: str, window: Window, machine: str | None, owners: Owners | None = None,
-              strings: tuple[str, ...] = ()) -> Log:
+              strings: tuple[str, ...] = (), whole: bool = False) -> Log:
         notes: list[str] = []
         # the key, or what the asker names in its place: marks holding it (F3), whose lines are all a run's
         asked = tuple(strings) or (key,)
@@ -436,15 +439,16 @@ class RecordedLogs:
         # the marks that do not hold the key: their records need not -- every such mark, near the window or not
         # (KNOWN_ISSUES.md K13); for an asker that reads some functions' runs alone, a DB proxy method's mark is asked
         # only where it is one of theirs and its run can be made whole by it (_partial), and for the method's own rows
-        # and every line at WARNING and above where its rows below WARNING all start with fixed text (_narrowed)
+        # and every line at WARNING and above where its rows below WARNING all start with fixed text (_narrowed); for
+        # one that reads a run at a row's moment (*whole*), each of theirs whole
         pattern = keyed(key)
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
             if r.token and pattern.search(r.message) and not pattern.search(r.token):
                 marks.setdefault(r.machine, set()).add(r.token)
-        partial = _partial(got, marks, owners)
+        partial = _partial(got, marks, owners, whole)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
-        narrowed = _narrowed(marks, owners)
+        narrowed = {} if whole else _narrowed(marks, owners)
         why = "the records of the key's runs whose mark does not hold the key"
         asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners))), window, m), why) for m, t in sorted(marks.items())]
         for record in self._get(asks, notes):
@@ -487,17 +491,19 @@ class RecordedLogs:
         return log
 
 
-#: a DB proxy method's mark: the method's name, then its tag (``records.PREFIX``), as ``rerun._of_mover`` reads it
+#: a DB proxy method's mark: the method's name, then its tag (``records.PREFIX``), as ``which_ran.of_mover`` reads it
 _METHOD_MARK = re.compile(r"([A-Za-z_]\w*) <")
 
 
-def _partial(got: _Gathered, marks: dict[str, set[str]], owners: Owners | None) -> dict[tuple[str, str], str]:
+def _partial(got: _Gathered, marks: dict[str, set[str]], owners: Owners | None, whole: bool = False) -> dict[tuple[str, str], str]:
     """The marks among *marks* (``machine -> the marks not holding the key``) not asked for whole, each with why, for
     an asker that reads the runs of *owners* alone (None: every mark is asked).  A mark naming no method is a worker's,
-    any function's of it, and is asked.  A DB proxy method's mark of no owner is not: no run of it is read.  Nor is an
-    owner's whose key records come in pieces EDGE or more apart: the calls share it (``getTasksToExecCommand_JEDI <
-    vo=None label=None >``), so its run is every call in the window, which no ask makes whole -- more than 1 MB a file
-    and cut (bamboo-e1's round of 2026-10-26).  Such a mark's key records are read as a run cut at both ends."""
+    any function's of it, and is asked.  A DB proxy method's mark of no owner is not: no run of it is read.  Nor, but
+    for an asker that reads a run at a row's moment (*whole*), is an owner's whose key records come in pieces EDGE or
+    more apart: the calls share it (``getTasksToExecCommand_JEDI < vo=None label=None >``), so its run is every call in
+    the window, which no ask makes whole -- more than 1 MB a file and cut (bamboo-e1's round of 2026-10-26).  Such a
+    mark's key records are read as a run cut at both ends.  H2's run of that mark at a row's second is one call, 13
+    records in MT-exhausted-late, whose must rows its choice was shown by (2026-11-02)."""
     if owners is None:
         return {}
     out = {}
@@ -508,6 +514,8 @@ def _partial(got: _Gathered, marks: dict[str, set[str]], owners: Owners | None) 
                 continue
             if method[1] not in owners:
                 out[(machine, token)] = "a method no step asked reads"
+                continue
+            if whole:
                 continue
             stamps = sorted(_t(r.stamp) for r in got.records.values() if (r.machine, r.token) == (machine, token))
             if any(b - a >= EDGE for a, b in zip(stamps, stamps[1:], strict=False)):

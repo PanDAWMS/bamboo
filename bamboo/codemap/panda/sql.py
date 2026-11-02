@@ -57,6 +57,7 @@ from bamboo.codemap.panda.pathcond import (
     BIND_ANNOTATED,
     BIND_ASSIGN,
     BIND_FOR,
+    SHARED_NODES,
     Replacement,
     ancestors,
     attach_parents,
@@ -1472,7 +1473,8 @@ def _tests_inside(node: ast.AST, loop: ast.For) -> list[ast.expr]:
 def at_key(value: ast.expr, name: str, key: str) -> ast.expr:
     """*value* as a pass of the loop puts it, the loop's key *name* read as *key*: ``param[key]`` is
     ``param['transExitCode']``.  *value* itself where it does not read the key.  The new nodes hang where *value*
-    does, on its line, so a reader asking where they sit finds the put."""
+    does, on its line, so a reader asking where they sit finds the put -- but the nodes every parsed tree shares
+    (:data:`pathcond.SHARED_NODES`), which keep no line or parent."""
     if not any(isinstance(one, ast.Name) and one.id == name for one in walk(value)):
         return value
     copied = ast.parse(ast.unparse(value), mode="eval").body
@@ -1490,10 +1492,13 @@ def at_key(value: ast.expr, name: str, key: str) -> ast.expr:
     if isinstance(copied, ast.Name) and copied.id == name:
         copied = ast.Constant(value=key)
     for one in walk(copied):
+        if isinstance(one, SHARED_NODES):
+            continue
         for attribute in ("lineno", "col_offset", "end_lineno", "end_col_offset"):
             setattr(one, attribute, getattr(value, attribute, None))
         for child in ast.iter_child_nodes(one):
-            child.parent = one  # type: ignore[attr-defined]
+            if not isinstance(child, SHARED_NODES):
+                child.parent = one  # type: ignore[attr-defined]
     copied.parent = getattr(value, "parent", None)  # type: ignore[attr-defined]
     return copied
 

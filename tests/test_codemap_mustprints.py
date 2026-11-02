@@ -716,3 +716,68 @@ def test_a_hole_reading_what_the_key_s_name_is_bound_to_names_the_rows(
         )
     ]
     assert _branch(fragment, "W").must_names_whole is True
+
+
+STORED = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def c(self, taskList):
+    for jediTaskID, command in taskList:
+        tmp_log = LogWrapper(_logger, f" < jediTaskID={jediTaskID} >")
+        tmp_log.info("start")  # S
+        spec = JediTaskSpec()
+        spec.jediTaskID = jediTaskID
+        spec.status = "finished"  # A
+        self.update(spec)
+
+
+def d(self, taskList, other):
+    for jediTaskID, command in taskList:
+        tmp_log = LogWrapper(_logger, f" < jediTaskID={jediTaskID} >")
+        tmp_log.info("start")  # T
+        jediTaskID = other
+        spec = JediTaskSpec()
+        spec.jediTaskID = jediTaskID
+        spec.status = "finished"  # B
+        self.update(spec)
+"""
+
+
+def test_a_mark_holding_what_the_written_key_is_stored_from_names_the_row(
+    tmp_path: Path,
+) -> None:
+    """``TaskCommando.runImpl`` makes a spec, stores ``tmpTaskSpec.jediTaskID = jediTaskID`` and writes its status,
+    under the mark ``< jediTaskID={jediTaskID} >``.  The one store of the key's chain takes the mark's value, so the
+    mark names the row.  The loop binds ``jediTaskID`` before the mark, and the mark runs before the store: the value
+    is the same from the one that runs first to the other, though not the other way round.  Bound again between the
+    two, the mark is said with why."""
+    fragment = _build(
+        tmp_path,
+        STORED,
+        ("c", "A"),
+        ("d", "B"),
+        subject="JediTaskSpec.status",
+        declared={**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}},
+    )
+
+    assert _branch(fragment, "A").must_names == [
+        MustName(
+            line=_line(STORED, "S"),
+            expression="jediTaskID",
+            column="JediTaskSpec.jediTaskID",
+            row=MUST_ROW_WRITTEN,
+            part=MUST_PART_MARK,
+        )
+    ]
+    assert _branch(fragment, "B").must_names == [
+        MustName(
+            line=_line(STORED, "T"),
+            expression="jediTaskID",
+            column="JediTaskSpec.jediTaskID",
+            why=mustprints.WHY_KEY_UNSHOWN,
+            part=MUST_PART_MARK,
+        )
+    ]

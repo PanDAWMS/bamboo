@@ -2677,6 +2677,27 @@ class CallStop(BaseModel):
     callee: str = Field(default="", description="The called expression as written, cut to 80 characters.")
 
 
+class SwallowingManager(BaseModel):
+    """A context manager of the corpus that may swallow what its ``with`` body raised.
+
+    The map's flow (:mod:`bamboo.codemap.panda.reaching`, :mod:`~bamboo.codemap.panda.flow`) does not read that
+    way on: a raise in a ``with`` body goes to the handlers around the ``with``, never past it.  So one such
+    manager makes the flow's "no way" answers unsafe -- a reader would rule out a statement that ran -- and the
+    ``with-exits-are-read`` gate fails on each.  Not a node: a check of the flow's premise over the corpus.
+    """
+
+    file: str
+    line: int
+    name: str = Field(description="The manager: its function or class, or the ``suppress`` call as written.")
+    kind: str = Field(
+        description=(
+            "``contextmanager``: a handler around its ``yield`` that may end without raising, or a ``return`` in a "
+            "``finally`` around it; ``exit``: an ``__exit__`` / ``__aexit__`` that may return what is not None or "
+            "False; ``suppress``: ``contextlib.suppress`` named in a ``with``."
+        )
+    )
+
+
 class ReadingStop(BaseModel):
     """One place the reading of one statement stopped, and what it stopped on.
 
@@ -2801,6 +2822,39 @@ KEY_CONSTANT = "constant"
 KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
 KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
+#: And where a way of a :class:`GuardFrom` or :class:`ParameterFrom`, read across calls, can end besides: an object
+#: a call builds of a corpus class (``JobSpec()``), a module's name, a call neither placed nor gone through, a fetch
+#: whose rows no statement of the function reads.
+KEY_OBJECT = "object"
+KEY_GLOBAL = "global"
+KEY_CALL = "call"
+KEY_DATABASE = "database"
+HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE)
+#: How a :class:`HeldChange` changes the object a way holds in place: an item or attribute stored or deleted, one
+#: changed inside (``m["a"]["b"] = v`` changes the item ``"a"``), a method of a builtin container changing it, the
+#: object put where the reading does not follow it, a call the reading cannot follow.
+CHANGE_STORE = "store"
+CHANGE_DELETE = "delete"
+CHANGE_INNER = "inner"
+CHANGE_METHOD = "method"
+CHANGE_ESCAPED = "escaped"
+CHANGE_UNREAD = "unread"
+HELD_CHANGES = (CHANGE_STORE, CHANGE_DELETE, CHANGE_INNER, CHANGE_METHOD, CHANGE_ESCAPED, CHANGE_UNREAD)
+#: What a call outside the corpus a way goes through makes of the value it is handed (:attr:`HeldThrough.gives`),
+#: as :mod:`bamboo.codemap.callfacts` says it: the value read again out of a text (``json.loads``), a copy of it
+#: (``copy.copy``, ``list``), the same value as another type (``int``, ``str``), a text of all of it
+#: (``json.dumps``), a value computed from it that holds none of it (``len``, ``math.ceil``), one of its elements
+#: (``max``), what tells only its class or identity (``type``), not said (``random.choice``).  A builtin
+#: :class:`~bamboo.codemap.callfacts.Function` says another word of is said with that word (``enumerate``'s
+#: ``numbered``).
+THROUGH_DECODED = "decoded"
+THROUGH_COPY = "copy"
+THROUGH_CONVERTED = "converted"
+THROUGH_TEXT = "text"
+THROUGH_COMPUTED = "computed"
+THROUGH_ONE = "one"
+THROUGH_TELLS = "tells"
+THROUGH_UNKNOWN = "unknown"
 #: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`); the last, a flush call's term the method
 #: fills with values no argument of the call brings -- its own rows, a field of its own ``self``.
 KEY_NO_MAP = "no bind map"
@@ -2951,6 +3005,152 @@ class KeySource(BaseModel):
     )
     #: The walk's way to the bind, ``(kind, file, func, call)`` per step, for *reaches* (``sqlwrite._Landing``).
     _way: Optional[tuple] = PrivateAttr(default=None)
+
+
+class HeldThrough(BaseModel):
+    """One call outside the corpus a :class:`HeldSource`'s way goes through, handed the value as its one positional
+    argument: ``json.loads`` in ``RefinerUtils.decodeJSON``, the value read again out of the column's text, with the
+    corpus's ``unicodeConvert`` as its ``object_hook``."""
+
+    call: str = Field(
+        description=(
+            "The function, as its module and name spell it where it is imported (``json.loads``, under ``import json "
+            "as js`` too), else as the call names it (``int``)."
+        )
+    )
+    at: str = Field(description="``file:line`` of the call.")
+    gives: str = Field(
+        description=(
+            f"What its value is of the value: {THROUGH_DECODED}, {THROUGH_COPY}, {THROUGH_CONVERTED}, {THROUGH_TEXT}, "
+            f"{THROUGH_COMPUTED}, {THROUGH_ONE}, {THROUGH_TELLS}, a builtin's other word, {THROUGH_UNKNOWN}."
+        )
+    )
+    hooks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions a JSON maker is handed to make the values with (``object_hook=`` and the others of "
+            ":data:`bamboo.codemap.callfacts.JSON_HOOKS`): each definition of the corpus a keyword names, "
+            "``file::name``; the keyword's value as written where it names none.  The value is what they make."
+        ),
+    )
+    after_steps: int = Field(
+        default=0,
+        description=(
+            "How many of the way's *steps* are taken before the call: it is handed the end with "
+            "``steps[:after_steps]`` -- ``json.loads(text['a'])`` 1, ``json.loads(text)['a']`` 0."
+        ),
+    )
+
+
+class HeldSource(KeySource):
+    """Where one way a :class:`GuardFrom` or :class:`ParameterFrom` reads ends: a :class:`KeySource`, its *kind* one
+    of :data:`HELD_KINDS` and its *line* where the way ends, with what the way went through on the way to the read."""
+
+    steps: list[str] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: the part of what the way ends at that the value is, each step "
+            "as applied -- ``['tgtNumEventsPerJob']`` of the decoded task parameters, ``.taskSpec``, ``[*]`` an "
+            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value.  "
+            "Where each call of *through* comes among them is its *after_steps*."
+        ),
+    )
+    through: list[HeldThrough] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: each call outside the corpus the value went through as its one "
+            "positional argument, in the order run (``json.loads`` at ``pandajedi/jedirefine/RefinerUtils.py:34``), "
+            "with what its value is of the value.  A literal that one of the standard functions the map runs raises "
+            "on (:data:`bamboo.codemap.panda.evaluate.RUNS`: ``json.loads('')``, ``int(None)``) goes no further: "
+            "not a way, a stop (``raises``)."
+        ),
+    )
+    route: list[str] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: each call of the corpus on it, ``file:line``, in the order the "
+            "value went -- one whose return the value is, and on a ParameterFrom's way last the caller's call that "
+            "hands it in."
+        ),
+    )
+    changes: list["HeldChange"] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: each place the object the value is may be changed in place on "
+            "the way -- in each function the way passes, after the value is bound there and before it is read or "
+            "handed on -- in the order run.  The end says what the value was; these, what may have been done to it."
+        ),
+    )
+    after: list["AfterChange"] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's way ending at a statement's rows that a :class:`SetFrom` of the same column writes "
+            "back: each place the object may be changed in place after the guard's read and before the write -- in "
+            "the guard's function and each caller down from the one the read and the write meet in, from the read or "
+            "the call on to the function's end; in that one, between its two calls -- each with the writes it can "
+            "run before.  The object is the way's: in the guard's function the parameter the way ends at, and the "
+            "guard's name where its value is the object or a part of it reached by items and attributes; none where "
+            "no way decodes the column, a value not changed in place.  What the write gives back is the end's value "
+            "with *changes* and these."
+        ),
+    )
+    after_stops: list["KeyStop"] = Field(
+        default_factory=list,
+        description="Each such write the changes after the read were not read for, and why: :data:`KEY_STOPS`.",
+    )
+
+
+class HeldChange(BaseModel):
+    """One place the object a :class:`HeldSource`'s way holds may be changed in place before the read
+    (:func:`bamboo.codemap.panda.changes.object_changes`): ``taskParamMap["transPath"] = ...`` at
+    ``AtlasAnalTaskRefiner.extractCommon`` 60, before its call of the base's ``extractCommon``, whose guard reads
+    ``'transPath' in taskParamMap``.  Whether it ran is the reader's to decide, by the tests it sits under."""
+
+    at: str = Field(description="``file:line`` of the change.")
+    kind: str = Field(description=f"How: one of {', '.join(HELD_CHANGES)}.")
+    key: str = Field(
+        description="The item (``'transPath'``) or attribute (``.status``) it changes; ``*`` where it is not said."
+    )
+    what: str = Field(default="", description="The method, where the object went, or the call not followed.")
+    via: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The calls from the way's function to the change, ``file:line``, in the order run: empty where the way's "
+            "function makes it; first the call handing the object on, or the statement putting it in an attribute "
+            "another function changes it through."
+        ),
+    )
+    value: list[HeldSource] = Field(
+        default_factory=list,
+        description="What a store stores, read as a way is; empty for the other kinds and a computed store (``+=``).",
+    )
+    value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
+
+
+class AfterChange(HeldChange):
+    """A :class:`HeldChange` after a guard's read (:attr:`HeldSource.after`): ``taskParamMap["transPath"] = ...``
+    in ``TaskRefinerBase.extractCommon`` after its guard ``'transPath' in taskParamMap``, before
+    ``registerTaskInOneShot_JEDI`` writes the task's parameters back.  Whether it ran is the reader's."""
+
+    name: str = Field(
+        default="",
+        description=(
+            "The name holding the object where the change is read -- in the function of its first *via*, or of "
+            "*at* where *via* is empty: the guard's own, and *key* is of the guard's value; another, of the object "
+            "the write gives back there, the way's *steps* leading from it to the guard's value."
+        ),
+    )
+    before: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The writes (:class:`SetFrom`, ``owner:statement:column``) it can run after the read and before, on one "
+            "pass of the function the two meet in."
+        ),
+    )
+    either: list[str] = Field(
+        default_factory=list,
+        description="Those of *before* it can also run after: a loop's later pass, with no new value of the name.",
+    )
 
 
 class KeyFrom(BaseModel):
@@ -3512,8 +3712,26 @@ class MapFragment(BaseModel):
             "function or class this corpus defines, a logger's methods left out."
         ),
     )
+    swallowing_managers: list[SwallowingManager] = Field(
+        default_factory=list,
+        description=(
+            "The corpus's context managers that may swallow what a ``with`` body raised, which the map's flow does "
+            "not read (:class:`SwallowingManager`); none is the flow's premise."
+        ),
+    )
+    managers_read: int = Field(
+        default=0,
+        description=(
+            "How many context managers :attr:`swallowing_managers` was drawn from: the corpus's ``contextmanager`` "
+            "functions and ``__exit__`` / ``__aexit__`` methods, and each ``suppress`` a ``with`` names."
+        ),
+    )
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
     key_froms: list[KeyFrom] = Field(default_factory=list)
+    guard_froms: list["GuardFrom"] = Field(default_factory=list)
+    parameter_froms: list["ParameterFrom"] = Field(default_factory=list)
+    set_froms: list["SetFrom"] = Field(default_factory=list)
+    runnables: list["Runnable"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5019,6 +5237,28 @@ class SkeletonHole(BaseModel):
             "parameter.  Empty: *entries* are every entry it may hold."
         ),
     )
+    line: int = Field(
+        default=0,
+        description=(
+            "The line of the statement writing the hole out: the print's, or the binding's of a message built before "
+            "it (``tmpMsg = f\"...{prodUserName}...\"``).  0 where the source does not say."
+        ),
+    )
+    columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For a hole of the message, ``Class.attribute`` for each column the value is read to be, as "
+            ":attr:`RunKey.columns` reads a mark's, at :attr:`line`: what a reader asks a log by when the line names "
+            "a row by other values than its key (``doForPriorityMassage``'s ``prodUserName``)."
+        ),
+    )
+    stops: list[KeyStop] = Field(
+        default_factory=list,
+        description=(
+            "Where each reading of the value stopped, as :attr:`RunKey.stops` says it, whether *columns* names a "
+            "column of a class holding rows or not."
+        ),
+    )
 
 
 class SkeletonLine(BaseModel):
@@ -5080,7 +5320,9 @@ class SkeletonLine(BaseModel):
             "Searched in a record's message with ``re.S``, so a last hole takes the record's continuation lines too "
             "-- ``str(varMap)`` after an SQL text, a traceback after ``f\"execute() : {e}\"``; or, after "
             "``prefix_capture``, matched against the record whole (:func:`bamboo.codemap.trace.reads_whole`), which "
-            "tells the row's own line from another row's holding its text.  Apart from "
+            "tells the row's own line from another row's holding its text as far as the holes' classes can: each a "
+            "guess from the literal after it, so a record only its literals read is neither "
+            "(:func:`bamboo.codemap.trace.reads_literally`).  Apart from "
             "``pattern``, the text a search sends, which leaves out the holes at either end because an unanchored "
             "search asks nothing more with them.  Empty when refused."
         ),
@@ -5274,11 +5516,14 @@ RUN_KEY_TIME = "time"
 #: wording is here rather than in the dump: a reader gets this module's, and
 #: rewording it rebuilds no map.
 KEY_STOPS: dict[str, str] = {
-    "parameter": "{name} is a parameter of {at}: what the callers hand is not read",
+    "no_caller": "{name} is a parameter of {at}, and no call of it is placed",
+    "callers_up": "{name} is a parameter of {at}, {what} calls up: the calls further up are not read",
+    "handed_spread": "{name} is a parameter a call's *args or **kwargs may fill at {at}",
+    "callers_failed": "reading the calls of {at} failed: {what}",
     "outside": "{name} is bound outside {at}",
     "bound": "{name} is {what} at {at}",
     "element": "{name} is an element of {what} at {at}",
-    "value": "it is {what}",
+    "value": "it is {what} at {at}",
     "undeclared": "the class of {name} is not declared at {at}",
     "several": "{name} is declared as several classes at {at}: {what}",
     "declaration_failed": "reading the declaration of {name} failed: {what}",
@@ -5291,14 +5536,24 @@ KEY_STOPS: dict[str, str] = {
     "not_declared": "keys {name}, which {what} does not declare, at {at}",
     "no_use": "no use of it in {at} or the calls it is handed to names a column",
     "failed": "reading its uses failed: {what}",
+    "not_found": "{name} is not spelled in the statement at {at}",
+    "missed": "a call of {name} may not be placed: {what}",
+    "unbound": "{name} is read at {at} before a binding of it",
+    "cycle": "{name} is reached again on its own way at {at}",
+    "open": "the call at {at} may also land somewhere not read: {what}",
+    "raises": "{name} goes no further than {at}: {what} on it",
+    "no_meeting": "{name} and the read run in no one function's call: no function is on both ways",
+    "unnamed": "between the read and {name}, {at} holds the object by no name: {what}",
+    "write_first": "{name} runs only before the read in {at}",
+    "no_bind": "{name} is filled by no assignment of the bind map the write at {at} runs with",
 }
 
 
 class KeyStop(BaseModel):
     """Where one reading of a run key's value ended without a column of a class holding rows (:attr:`RunKey.stops`).
 
-    ``pandaID`` handed to ``Watcher.__init__`` is a parameter there, and what
-    the callers hand is not read: ``KeyStop(kind="parameter", name="pandaID",
+    ``pandaID`` handed to ``Watcher.__init__`` is a parameter there, and no
+    call of it is placed: ``KeyStop(kind="no_caller", name="pandaID",
     at=["Watcher.__init__"])``.  One stop said at several sites is one, with
     each site.
     """
@@ -5329,6 +5584,192 @@ class KeyStop(BaseModel):
         return KEY_STOPS[self.kind].format(name=self.name, what=self.what, at=", ".join(self.at))
 
 
+class GuardFrom(BaseModel):
+    """What a name one test of a function reads holds, way by way, read back across calls -- for a reader deciding
+    the test with a run's values: the querier's H3 reading an arm's guards in the rows' values.
+
+    One per test on the way to a junction's arm (:func:`pathcond.tests_on`) and name it reads that is a parameter
+    or a local of the function; *arms* are the branches it is on the way to.  ``'reqID' in taskParamMap`` at
+    ``TaskRefinerBase.extractCommon`` 156 reads ``taskParamMap``, a parameter: its one source is kind ``parameter``,
+    and its :class:`ParameterFrom` says what the callers hand it.  Read by :mod:`bamboo.codemap.panda.heldfrom`:
+
+    - a local, each binding of it that can reach the read (:func:`pathcond.held_at`) a way of its own;
+    - a call's value, each return of each function the call is placed at, the callee's parameters read back at
+      the call (*route*); a call outside the corpus handed one positional argument, gone through (*through*);
+    - an item or attribute, its root's ways with the step (*steps*);
+    - ends where the function's own statement's rows hold it (``rows``, with the column), at a literal, a field of
+      ``self``, an object a corpus class builds, a module's name, a call not read, or a value not followed;
+      where a way could not be read, a stop.
+
+    So ``taskParamMap`` reaches three ways through ``runImpl`` 211: ``JEDI_TaskParams.taskParams`` read at
+    ``getTaskParamsWithID_JEDI`` 1407, ``''`` where no row came, ``None`` where it raised, each through
+    ``json.loads``.  Which way a run took, and whether the decoder kept the value, are the reader's.
+    """
+
+    owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
+    test_line: int = Field(description="The line of the test.")
+    test: str = Field(description="The test, as written (``'reqID' in taskParamMap``).")
+    name: str = Field(description="The name the test reads.")
+    arms: list[int] = Field(
+        default_factory=list, description="The lines of the junction branches the test is on the way to."
+    )
+    sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
+    stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
+
+
+class ParameterFrom(BaseModel):
+    """What each call placed at a function hands one of its parameters, read in the caller as :class:`GuardFrom`
+    reads a name -- once per function and parameter, so a way of a GuardFrom or another ParameterFrom ending at the
+    parameter (kind ``parameter``, *site_owner* and *site_line* the function's) points here.
+
+    Each source's *route* ends with the caller's call (``setSplitRule`` is handed ``None`` at
+    ``AtlasAnalTaskRefiner.py:249`` and the task's parameters at ``TaskRefinerBase.py:302``); a caller's parameter
+    is its own ParameterFrom, read on by the reader -- a chain of them, which the map does not cut.  A parameter no
+    call is placed at, a call that may not be placed, one a ``*`` or ``**`` fills: stops.
+    """
+
+    owner: str = Field(description="The function's owner (``file::name``).")
+    line: int = Field(description="The line of its ``def``.")
+    parameter: str
+    sources: list[HeldSource] = Field(default_factory=list)
+    stops: list[KeyStop] = Field(default_factory=list)
+
+
+#: How a write gives a column its value (:attr:`SetFrom.value`): as the statement's text says it -- the kinds
+#: ``sqltext.ColumnValue`` reads -- or an object's field, where the statement writes the object's map.
+SET_BIND = "bind"
+SET_LITERAL = "literal"
+SET_COLUMN = "column"
+SET_EXPRESSION = "expression"
+SET_OBJECT = "object"
+SET_VALUES = (SET_BIND, SET_LITERAL, SET_COLUMN, SET_EXPRESSION, SET_OBJECT)
+
+
+class SetFrom(BaseModel):
+    """What one write gives a column a guard's way ends at, way by way, read back as :class:`GuardFrom` reads a name
+    -- for a reader asking whether the rows it fetches after a run hold what the guard read.
+
+    ``TaskRefinerBase.extractCommon``'s guards read the task's parameters, a way ending at
+    ``jedi_taskparams.taskparams``; ``registerTaskInOneShot_JEDI`` 5979 sets that column to ``:taskParams``, a way
+    back to the refiner's ``updatedTaskParams``, stored from the map the guards read.  A SetFrom whose way ends at
+    the statement and column a guard's way ends at, and whose statement's :class:`KeyFrom` term is filled from that
+    statement's key column, writes back what the guard read; whether the write ran, and in the same pass, is the
+    run's.
+
+    One per write of such a column and value as written:
+
+    - a column a statement's text sets or inserts (``SET taskParams=:taskParams``, a ``SET`` item a loop makes for
+      each key of a mapping): *value* the text's kind; a bind, and each bind an expression holds
+      (``maxAttempt+:increasedNr``), read as ways; a literal, a column, an expression of none (``attemptNr+1``,
+      ``CURRENT_DATE``), said as written;
+    - an object's field, where the statement writes the object's map (``SET {job.bindUpdateChangesExpression()}``
+      with ``job.valuesMap(onlyChanged=True)``, ``INSERT INTO jobsArchived4 ({JobSpec.columnNames()})``): *value*
+      ``object``, the field as the function assigns it before the map is made, else as the object holds it at the
+      write, read as a way.  Which fields an update writes -- the ones changed on the object -- is the run's.
+    """
+
+    owner: str = Field(description="The function running the write (``file::name``).")
+    statement: int = Field(description="The line the write runs on.")
+    table: str = Field(description="The table written, as the statement names it.")
+    column: str = Field(description="``table.column`` lowered, as :attr:`KeySource.column` names a read's.")
+    value: str = Field(description=f"How the write gives it: one of {', '.join(SET_VALUES)}.")
+    text: str = Field(
+        description=(
+            "As ``sqltext.ColumnValue`` reads it: the bind ``:taskParams``, the expression ``attemptNr+1``, the "
+            "column ``status``, a literal's value ``ready``; an object's field, ``job.computingSite``."
+        )
+    )
+    new_row: Optional[bool] = Field(
+        default=None, description="True an insert's, False an update's; None where the statement may do either."
+    )
+    sources: list[HeldSource] = Field(default_factory=list, description="Each way's end, as a GuardFrom's.")
+    stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
+    #: ``(file, function, read)``: *read* gives the binds whose values are the ways, asked only of a guarded column.
+    _reads: list = PrivateAttr(default_factory=list)
+
+
+#: Why a definition of the corpus may not be run by a reader with a run's values (:attr:`Runnable.stops`): it changes
+#: what it is handed, ``self``, a module's or a class's names; it reaches the database, or a file, a process, another
+#: system; it reads the clock, a draw or the machine, the configuration, a module's or a class's name that is not a
+#: constant; it calls a library's function the map does not say runs alike everywhere, a call not placed, a
+#: definition that is not runnable.
+RUN_CHANGES = "changes"
+RUN_DATABASE = "database"
+RUN_OUTSIDE = "outside"
+RUN_CLOCK = "clock"
+RUN_CONFIG = "config"
+RUN_GLOBAL = "global"
+RUN_LIBRARY = "library"
+RUN_UNPLACED = "unplaced"
+RUN_CALLEE = "callee"
+RUN_STOPS = (
+    RUN_CHANGES,
+    RUN_DATABASE,
+    RUN_OUTSIDE,
+    RUN_CLOCK,
+    RUN_CONFIG,
+    RUN_GLOBAL,
+    RUN_LIBRARY,
+    RUN_UNPLACED,
+    RUN_CALLEE,
+)
+#: Why a definition is asked of (:attr:`Runnable.asked`): a call in an arm's path condition can land at it, a JSON
+#: maker on a guard's way is handed it as a hook, a guard's way is the value it returns from a JSON maker.
+RUN_CONDITION = "condition"
+RUN_HOOK = "hook"
+RUN_DECODER = "decoder"
+
+
+class RunStop(BaseModel):
+    """One reason a :class:`Runnable` is not: *kind* one of :data:`RUN_STOPS`, where, and what."""
+
+    kind: str = Field(description=f"One of {', '.join(RUN_STOPS)}.")
+    at: str = Field(description="``file:line`` of the statement, the call or the read.")
+    what: str = Field(
+        default="",
+        description=(
+            "What it is: the name stored and how (``taskSpec store .errorDialog``), the library function "
+            "(``datetime.datetime.fromtimestamp``), the definition not runnable (``file::name``), the call not placed "
+            "and why."
+        ),
+    )
+
+
+class Runnable(BaseModel):
+    """Whether a reader may run one definition of the corpus with a run's values and get what the run got
+    (:mod:`bamboo.codemap.panda.runnable`): ``DataServiceUtils.is_sub_dataset`` in a test on the way to an arm,
+    ``RefinerUtils.unicodeConvert`` a JSON maker on a guard's way is handed as its hook.  Runnable where nothing it
+    runs changes anything, reaches the database or outside, or reads the clock, the configuration or a name that is
+    not a constant: its value is what it is handed alone.  Running it is the reader's."""
+
+    owner: str = Field(description="The definition's owner (``file::name``).")
+    line: int = Field(description="The line of its ``def``.")
+    bound: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For a method: each class ``self`` can be where it is asked of (``file::Class``), as the call places it; "
+            "the record is one per definition and these."
+        ),
+    )
+    asked: list[str] = Field(
+        default_factory=list, description=f"Why it is asked of: {RUN_CONDITION}, {RUN_HOOK}, {RUN_DECODER}."
+    )
+    asked_at: list[str] = Field(
+        default_factory=list,
+        description="``file:line`` of each call in a path condition, or of the JSON maker, it is asked of at.",
+    )
+    runnable: bool = Field(description="No stop: a reader may run it.")
+    reads: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What its own statements read of what it is handed -- ``job.specialHandling``, ``self.splitRule`` --: "
+            "the fields an object a reader builds from a run's row must hold; a class's constant is not one.  The "
+            "definitions it calls are read for whether they are runnable, not for these."
+        ),
+    )
+    stops: list[RunStop] = Field(default_factory=list, description="Why it is not runnable, each place.")
+
+
 class RunKey(BaseModel):
     """One hole of a run's mark, and the columns the value it holds is.
 
@@ -5348,8 +5789,13 @@ class RunKey(BaseModel):
     is at the use it was read at, so the columns can name two attributes of
     one class -- ``retryTask_JEDI``'s ``jediTaskID`` keys the task and picks
     its children by ``parent_tid`` -- and a value used nowhere the reading
-    goes may be a column it does not name.  What the callers hand is not
-    read.
+    goes may be a column it does not name.  A parameter is what the calls
+    placed at its function hand it, read up to six calls up.  Where a reading
+    stops short -- of a use, or at a caller -- ``stops`` says so whether a
+    column is named or not, so a key named by one caller and unread at
+    another says both: ``isSuperUser``'s ``userName`` is
+    ``JobSpec.workingGroup`` from ``storeJobs``, and an item of
+    ``taskParamMap`` from ``AtlasAnalTaskRefiner``.
     """
 
     expression: str = Field(description="What fills the hole, as source; empty for a time stamp.")
@@ -5365,15 +5811,17 @@ class RunKey(BaseModel):
     stops: list[KeyStop] = Field(
         default_factory=list,
         description=(
-            "Where ``columns`` names no column of a class holding rows, where "
-            "each reading stopped: what the value is bound to first, then its "
-            "uses.  Empty wherever one is named, and for a time stamp."
+            "Where each reading of the value stopped short of a column of a "
+            "class holding rows: what the value is bound to first, then its "
+            "uses.  Said whether ``columns`` names one or not.  Empty for a time "
+            "stamp, and for an attribute of a name declared as a class holding "
+            "rows: the declaration says it."
         ),
     )
 
     @property
     def why(self) -> str:
-        """Why ``columns`` names no column of a class holding rows: ``stops``, said (:data:`KEY_STOPS`)."""
+        """Where each reading of the value stopped: ``stops``, said (:data:`KEY_STOPS`); empty where none did."""
         return "; ".join(stop.said() for stop in self.stops)
 
 

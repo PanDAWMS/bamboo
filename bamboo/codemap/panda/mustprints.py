@@ -172,6 +172,7 @@ def attach(
     finally:
         _ACROSS = None
         _ASSIGNMENTS.clear()
+        _SINGLES.clear()
 
 
 def _attach(
@@ -766,8 +767,9 @@ def _map_holds_key(func: ast.AST, key: _Key, printed: ast.stmt) -> bool:
 
 def _spells_key(func: ast.AST, key: _Key, expression: str) -> bool:
     """Whether a hole *expression* reads *key*'s expression: spelled so, a name bound to it somewhere in *func*
-    (``tmp_id = job.PandaID``), or what the key, a name, is bound to (``pandaID = job.PandaID`` filling
-    ``:pandaID``, the hole ``job.PandaID``)."""
+    (``tmp_id = job.PandaID``), or what the key, a name or an attribute chain, is bound to (``pandaID = job.PandaID``
+    filling ``:pandaID``, the hole ``job.PandaID``; ``tmpTaskSpec.jediTaskID = jediTaskID``, the hole
+    ``jediTaskID``)."""
     try:
         read = ast.parse(expression, mode="eval").body
     except SyntaxError:
@@ -777,8 +779,8 @@ def _spells_key(func: ast.AST, key: _Key, expression: str) -> bool:
         return True
     if isinstance(read, ast.Name) and _single_bindings(func, read.id, spelled):
         return True
-    return isinstance(key.expression, ast.Name) and bool(
-        _single_bindings(func, key.expression.id, ast.unparse(read))
+    return isinstance(key.expression, (ast.Name, ast.Attribute)) and bool(
+        _single_bindings(func, ast.unparse(key.expression), ast.unparse(read))
     )
 
 
@@ -801,17 +803,28 @@ def _assignments(func: ast.AST) -> list[ast.stmt]:
     return _ASSIGNMENTS[id(func)][1]
 
 
-def _single_bindings(func: ast.AST, name: str, spelled: str) -> list[ast.Assign]:
-    """The statements binding *name* alone to an expression spelled *spelled*: ``tmp_id = job.PandaID``."""
-    return [
-        node
-        for node in _assignments(func)
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == name
-        and ast.unparse(node.value) == spelled
-    ]
+#: Each function's assignments of one name or attribute chain, by the target and the value as spelled, read while
+#: :func:`attach` runs; kept with the function as :data:`_ASSIGNMENTS` is.
+_SINGLES: dict[int, tuple[ast.AST, dict[tuple[str, str], list[ast.Assign]]]] = {}
+
+
+def _single_bindings(func: ast.AST, target: str, spelled: str) -> list[ast.Assign]:
+    """The statements binding *target*, a name or an attribute chain, alone to an expression spelled *spelled*:
+    ``tmp_id = job.PandaID``, ``tmpTaskSpec.jediTaskID = jediTaskID``.  A hole is asked of every key, so each
+    function's are spelled once."""
+    if id(func) not in _SINGLES:
+        found: dict[tuple[str, str], list[ast.Assign]] = {}
+        for node in _assignments(func):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], (ast.Name, ast.Attribute))
+            ):
+                found.setdefault(
+                    (ast.unparse(node.targets[0]), ast.unparse(node.value)), []
+                ).append(node)
+        _SINGLES[id(func)] = (func, found)
+    return list(_SINGLES[id(func)][1].get((target, spelled), ()))
 
 
 def _logger_made(
@@ -836,7 +849,7 @@ def _logger_made(
 def _holds_key(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
     """Whether *expression*, read at *at*, holds what *key*'s expression holds where the write counts -- and so
     does every statement filling an SQL arm's bind with it: the key itself, a name bound to it once
-    (:func:`_bound_to`), or what the key, a name, is bound to once (:func:`_bound_from`)."""
+    (:func:`_bound_to`), or what the key, a name or an attribute chain, is bound to once (:func:`_bound_from`)."""
     try:
         read = ast.parse(expression, mode="eval").body
     except SyntaxError:
@@ -847,7 +860,7 @@ def _holds_key(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
         func, read.id, ast.unparse(key.expression)
     ):
         held = _bound_to(func, key.at, at, read.id, key.expression)
-    elif isinstance(key.expression, ast.Name):
+    elif isinstance(key.expression, (ast.Name, ast.Attribute)):
         held = _bound_from(func, key, at, read)
     else:
         return False
@@ -899,24 +912,26 @@ def _bound_to(
 
 
 def _bound_from(func: ast.AST, key: _Key, at: ast.stmt, read: ast.expr) -> bool:
-    """Whether *read*, at *at*, holds what *key*'s name holds where the write counts, the name bound to *read* once
-    -- ``pandaID = job.PandaID``, the mark reading ``job.PandaID`` -- that binding the only one reaching the write,
-    and *read* holding the same at the binding and at *at*, whichever runs first."""
-    name = key.expression.id  # type: ignore[attr-defined]
-    made = _single_bindings(func, name, ast.unparse(read))
+    """Whether *read*, at *at*, holds what *key*'s expression holds where the write counts, the expression bound to
+    *read* once -- ``pandaID = job.PandaID`` under the mark reading ``job.PandaID``; ``tmpTaskSpec.jediTaskID =
+    jediTaskID`` under ``< jediTaskID={jediTaskID} >`` -- that binding the only one reaching the write (for a chain,
+    the chain unchanged from it to the write), and *read* holding the same at the binding and at *at*: from whichever
+    of the two runs first to the other, nothing binds it.  Both ways would ask the impossible of a loop that binds
+    *read* and holds the binding and the mark, as ``TaskCommando.runImpl``'s ``for jediTaskID, ... in taskList``."""
+    made = _single_bindings(func, ast.unparse(key.expression), ast.unparse(read))
     if len(made) != 1:
         return False
     (bound,) = made
-    others = [
-        site
-        for site in _rebindings(func, name, key.at, entry=True)
-        if site is not bound
-    ]
-    return (
-        not reaching(key.at, others, [bound])
-        and _holds(func, bound, at, read)
-        and _holds(func, at, bound, read)
-    )
+    if not (_holds(func, bound, at, read) or _holds(func, at, bound, read)):
+        return False
+    if isinstance(key.expression, ast.Name):
+        others = [
+            site
+            for site in _rebindings(func, key.expression.id, key.at, entry=True)
+            if site is not bound
+        ]
+        return not reaching(key.at, others, [bound])
+    return _holds(func, key.at, bound, key.expression)
 
 
 def _rebindings(

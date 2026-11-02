@@ -76,7 +76,8 @@ from bamboo.codemap.models import (
     WrittenValue,
 )
 
-#: How many (function, path) states one answer reads before it stops and says so.
+#: How many (function, path) states one answer reads before it stops and says so, unless its reader caps it
+#: lower (:func:`follow`'s *states*).
 MAX_STATES = 5000
 #: How many paths one function can hold the object by before the rest are dropped and said.
 MAX_HELD = 200
@@ -118,7 +119,7 @@ PREMISES: dict[str, str] = {
 
 #: Why a hole the record keeps no reason for is one.
 NO_PARAMETER = "the call does not say which parameter takes it (*args, **kwargs)"
-STATES_SPENT = f"stopped after {MAX_STATES} (function, path) states"
+STATES_SPENT = "stopped after {states} (function, path) states"
 HELD_SPENT = f"the object is held by more than {MAX_HELD} paths in one function; the rest are not followed"
 PARTS_SPENT = f"a path longer than {MAX_PARTS} parts is not followed: {{path}}"
 
@@ -157,7 +158,8 @@ class ObjectReach(NamedTuple):
     #: owner -> every path of that function the object is held by
     held: dict[str, list[str]]
     states: int
-    #: why the follow stopped short -- :data:`STATES_SPENT`, :data:`HELD_SPENT` --; empty where it did not
+    #: why the follow stopped short -- :data:`STATES_SPENT` with its cap, :data:`HELD_SPENT` --; empty where it
+    #: did not
     cut: str
     #: where a path longer than :data:`MAX_PARTS` is not followed: the line that would hold the object by it, and
     #: the path (:data:`PARTS_SPENT`)
@@ -182,8 +184,11 @@ class _Link(NamedTuple):
     handed: str = ""
 
 
-def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
-    """What is assigned on the object *owner* names *path*, and the holes it reaches; see the module docstring."""
+def follow(
+    rows: dict[str, ReachNode], owner: str, path: str, states: int = MAX_STATES
+) -> ObjectReach:
+    """What is assigned on the object *owner* names *path*, and the holes it reaches, reading at most *states*
+    (function, path) states; see the module docstring."""
     assigned: dict[str, dict[Site, None]] = defaultdict(dict)
     holes: dict[Site, None] = {}
     came_from: dict[Site, None] = {}
@@ -226,8 +231,8 @@ def follow(rows: dict[str, ReachNode], owner: str, path: str) -> ObjectReach:
         state = work.pop()
         if read_with.get(state) == len(extra[state]):
             continue
-        if len(read_with) >= MAX_STATES:
-            cut = STATES_SPENT
+        if len(read_with) >= states:
+            cut = STATES_SPENT.format(states=states)
             break
         read_with[state] = len(extra[state])
         at, start = state

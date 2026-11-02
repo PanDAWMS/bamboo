@@ -1,0 +1,33 @@
+name: english-only
+
+# The repository is English only: no Japanese in a commit message, an added line
+# or a file name. The local hooks in .githooks check each commit as it is made,
+# but `git commit --no-verify`, a rebase and an edit on GitHub skip them, so this
+# checks what a pull request or a push to master adds. Commits from before the
+# rule (up to 2026-10-30) hold Japanese messages and are left alone: only the
+# range a pull request or a push brings is read.
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  no-japanese:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Commit messages, added lines and file names
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.after }}
+        run: |
+          # a new branch's push has no before, and a force push's may be gone
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then BASE=$(git rev-parse "$HEAD~1"); fi
+          perl .githooks/no-japanese range "$BASE" "$HEAD"
