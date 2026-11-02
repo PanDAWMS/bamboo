@@ -56,6 +56,19 @@ def test_a_call_is_looked_up_by_its_text_unless_the_reader_hands_the_function() 
     assert evaluate.evaluate("twice(m) == 6", run) is UNKNOWN
 
 
+def test_a_standard_function_is_run_on_a_known_value_and_says_what_it_raises() -> None:
+    """Whether ``json.loads('')`` or ``int(None)`` raises is Python's to say; a function not run, or a value not
+    known, is unknown."""
+    assert evaluate.run("json.loads", "") == evaluate.Raised("JSONDecodeError")
+    assert evaluate.run("json.loads", None) == evaluate.Raised("TypeError")
+    assert evaluate.run("json.loads", '{"a": 1}') == {"a": 1}
+    assert evaluate.run("int", None) == evaluate.Raised("TypeError")
+    assert evaluate.run("int", "7") == 7
+    assert evaluate.run("math.ceil", None) == evaluate.Raised("TypeError")
+    assert evaluate.run("str", None) is UNKNOWN
+    assert evaluate.run("int", UNKNOWN) is UNKNOWN
+
+
 def test_a_test_is_decidable_where_the_evaluator_decides_it_once_the_named_values_come() -> (
     None
 ):

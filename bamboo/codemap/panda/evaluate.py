@@ -22,6 +22,10 @@ the values are the caller's, and each carries where it came from.
   for its name (:attr:`Env.call`): a reader that has read a helper as pure
   -- the querier's ``DataServiceUtils.getDestinationSE`` -- runs it there.
   A ``**`` spread is not read, so such a call is unknown.
+* **A standard function on a literal** (:func:`run`).  A few functions of
+  Python's own, whose value depends on what they are handed alone and which
+  change nothing, are run on a known value: whether ``json.loads('')`` or
+  ``int(None)`` raises is Python's to say, not a run's.
 * **Decidable before the values** (:func:`decidable`).  Whether the test
   will be decided once named expressions get their values -- a printed hole
   is known by its text before its value is read -- on the evaluator's own
@@ -37,9 +41,11 @@ from __future__ import annotations
 
 import ast
 import itertools
+import json
+import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 
 class _Unknown:
@@ -393,3 +399,34 @@ def solve(test: str, outcome: bool, env: Env) -> Solved:
         derived,
         bool(fits),
     )
+
+
+#: The standard functions :func:`run` runs, by the name a reader spells them
+#: with.  ``json.loads`` is run as it parses, without a hook it is handed
+#: (``object_hook=``): a text it cannot parse raises before a hook runs.
+RUNS: dict[str, Callable[[Any], Any]] = {
+    "json.loads": json.loads,
+    "int": int,
+    "float": float,
+    "math.ceil": math.ceil,
+    "math.floor": math.floor,
+}
+
+
+class Raised(NamedTuple):
+    """What a run of a standard function raised: the exception's class name."""
+
+    error: str
+
+
+def run(name: str, value: Any) -> Any:
+    """What the standard function *name* (:data:`RUNS`) makes of the known
+    *value*: its value, or :class:`Raised` where it raises; :data:`UNKNOWN`
+    for a function not there or an unknown value."""
+    function = RUNS.get(name)
+    if function is None or value is UNKNOWN:
+        return UNKNOWN
+    try:
+        return function(value)
+    except Exception as error:  # noqa: BLE001 -- whatever it raises, the value goes no further
+        return Raised(type(error).__name__)

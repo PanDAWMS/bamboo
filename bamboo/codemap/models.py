@@ -2840,6 +2840,21 @@ CHANGE_METHOD = "method"
 CHANGE_ESCAPED = "escaped"
 CHANGE_UNREAD = "unread"
 HELD_CHANGES = (CHANGE_STORE, CHANGE_DELETE, CHANGE_INNER, CHANGE_METHOD, CHANGE_ESCAPED, CHANGE_UNREAD)
+#: What a call outside the corpus a way goes through makes of the value it is handed (:attr:`HeldThrough.gives`),
+#: as :mod:`bamboo.codemap.callfacts` says it: the value read again out of a text (``json.loads``), a copy of it
+#: (``copy.copy``, ``list``), the same value as another type (``int``, ``str``), a text of all of it
+#: (``json.dumps``), a value computed from it that holds none of it (``len``, ``math.ceil``), one of its elements
+#: (``max``), what tells only its class or identity (``type``), not said (``random.choice``).  A builtin
+#: :class:`~bamboo.codemap.callfacts.Function` says another word of is said with that word (``enumerate``'s
+#: ``numbered``).
+THROUGH_DECODED = "decoded"
+THROUGH_COPY = "copy"
+THROUGH_CONVERTED = "converted"
+THROUGH_TEXT = "text"
+THROUGH_COMPUTED = "computed"
+THROUGH_ONE = "one"
+THROUGH_TELLS = "tells"
+THROUGH_UNKNOWN = "unknown"
 #: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`); the last, a flush call's term the method
 #: fills with values no argument of the call brings -- its own rows, a field of its own ``self``.
 KEY_NO_MAP = "no bind map"
@@ -2992,6 +3007,41 @@ class KeySource(BaseModel):
     _way: Optional[tuple] = PrivateAttr(default=None)
 
 
+class HeldThrough(BaseModel):
+    """One call outside the corpus a :class:`HeldSource`'s way goes through, handed the value as its one positional
+    argument: ``json.loads`` in ``RefinerUtils.decodeJSON``, the value read again out of the column's text, with the
+    corpus's ``unicodeConvert`` as its ``object_hook``."""
+
+    call: str = Field(
+        description=(
+            "The function, as its module and name spell it where it is imported (``json.loads``, under ``import json "
+            "as js`` too), else as the call names it (``int``)."
+        )
+    )
+    at: str = Field(description="``file:line`` of the call.")
+    gives: str = Field(
+        description=(
+            f"What its value is of the value: {THROUGH_DECODED}, {THROUGH_COPY}, {THROUGH_CONVERTED}, {THROUGH_TEXT}, "
+            f"{THROUGH_COMPUTED}, {THROUGH_ONE}, {THROUGH_TELLS}, a builtin's other word, {THROUGH_UNKNOWN}."
+        )
+    )
+    hooks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions a JSON maker is handed to make the values with (``object_hook=`` and the others of "
+            ":data:`bamboo.codemap.callfacts.JSON_HOOKS`): each definition of the corpus a keyword names, "
+            "``file::name``; the keyword's value as written where it names none.  The value is what they make."
+        ),
+    )
+    after_steps: int = Field(
+        default=0,
+        description=(
+            "How many of the way's *steps* are taken before the call: it is handed the end with "
+            "``steps[:after_steps]`` -- ``json.loads(text['a'])`` 1, ``json.loads(text)['a']`` 0."
+        ),
+    )
+
+
 class HeldSource(KeySource):
     """Where one way a :class:`GuardFrom` or :class:`ParameterFrom` reads ends: a :class:`KeySource`, its *kind* one
     of :data:`HELD_KINDS` and its *line* where the way ends, with what the way went through on the way to the read."""
@@ -3001,15 +3051,18 @@ class HeldSource(KeySource):
         description=(
             "On a GuardFrom's or ParameterFrom's way: the part of what the way ends at that the value is, each step "
             "as applied -- ``['tgtNumEventsPerJob']`` of the decoded task parameters, ``.taskSpec``, ``[*]`` an "
-            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value."
+            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value.  "
+            "Where each call of *through* comes among them is its *after_steps*."
         ),
     )
-    through: list[str] = Field(
+    through: list[HeldThrough] = Field(
         default_factory=list,
         description=(
             "On a GuardFrom's or ParameterFrom's way: each call outside the corpus the value went through as its one "
-            "positional argument, ``name file:line`` in the order run (``json.loads "
-            "pandajedi/jedirefine/RefinerUtils.py:34``).  Named, not read: whether it keeps the value is not said."
+            "positional argument, in the order run (``json.loads`` at ``pandajedi/jedirefine/RefinerUtils.py:34``), "
+            "with what its value is of the value.  A literal that one of the standard functions the map runs raises "
+            "on (:data:`bamboo.codemap.panda.evaluate.RUNS`: ``json.loads('')``, ``int(None)``) goes no further: "
+            "not a way, a stop (``raises``)."
         ),
     )
     route: list[str] = Field(
@@ -5443,6 +5496,7 @@ KEY_STOPS: dict[str, str] = {
     "unbound": "{name} is read at {at} before a binding of it",
     "cycle": "{name} is reached again on its own way at {at}",
     "open": "the call at {at} may also land somewhere not read: {what}",
+    "raises": "{name} goes no further than {at}: {what} on it",
 }
 
 

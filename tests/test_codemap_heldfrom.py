@@ -19,6 +19,7 @@ from bamboo.codemap.models import (
     GuardFrom,
     HeldSource,
     JunctionNode,
+    KeyStop,
     MapFragment,
     ParameterFrom,
     SourceModule,
@@ -235,7 +236,10 @@ def _ways(sources: list[HeldSource]) -> set[tuple]:
             one.name,
             one.column,
             tuple(one.steps),
-            tuple(one.through),
+            tuple(
+                (call.call, call.at, call.gives, tuple(call.hooks))
+                for call in one.through
+            ),
             tuple(one.route),
         )
         for one in sources
@@ -246,8 +250,9 @@ def test_a_guard_s_parameter_is_read_at_its_callers_back_to_the_rows_a_fetch_ret
     built: MapFragment,
 ) -> None:
     """``'reqID' in taskParamMap``: the parameter, and what ``runImpl`` hands it -- the proxy's column where a row
-    came, ``""`` where none did, ``None`` where it raised -- each returned through the task buffer and
-    ``runImpl``'s two calls, gone through ``json.loads``, handed in at ``extractCommon``'s call."""
+    came, returned through the task buffer and ``runImpl``'s two calls, read again by ``json.loads`` with the
+    corpus's ``unicodeConvert`` as its hook, handed in at ``extractCommon``'s call.  ``""`` where no row came and
+    ``None`` where the read raised go no further than ``json.loads``, which raises on both."""
     guard = _guard(built, "extractCommon", "T1", "taskParamMap")
     assert guard.arms == [_line(BASE, "R1"), _line(BASE, "R2")]
     ((source,),) = [guard.sources]
@@ -262,11 +267,13 @@ def test_a_guard_s_parameter_is_read_at_its_callers_back_to_the_rows_a_fetch_ret
         _at(REFINER, "C2"),
         _at(REFINER, "C3"),
     )
-    through = (f"json.loads {UTILS}:{_line_of(UTILS, 'return json.loads')}",)
+    loads = f"{UTILS}:{_line_of(UTILS, 'return json.loads')}"
+    through = (("json.loads", loads, "decoded", (f"{UTILS}::unicodeConvert",)),)
     site = (
         f"panda:{PROXY}::getTaskParamsWithID_JEDI@{_line_of(PROXY, 'self.cur.execute')}"
     )
-    assert _ways(_parameter(built, "extractCommon", "taskParamMap").sources) == {
+    parameter = _parameter(built, "extractCommon", "taskParamMap")
+    assert _ways(parameter.sources) == {
         (
             "rows",
             site.replace("panda:", "m:"),
@@ -275,9 +282,16 @@ def test_a_guard_s_parameter_is_read_at_its_callers_back_to_the_rows_a_fetch_ret
             through,
             route,
         ),
-        ("constant", "''", "", (), through, route),
-        ("constant", "None", "", (), through, route),
     }
+    assert sorted(parameter.stops, key=lambda one: one.name) == [
+        KeyStop(
+            kind="raises",
+            name=name,
+            what=f"json.loads raises {error}",
+            at=[*route, loads],
+        )
+        for name, error in (("''", "JSONDecodeError"), ("None", "TypeError"))
+    ]
 
 
 def _line_of(rel: str, text: str) -> int:
@@ -501,3 +515,143 @@ def test_a_value_no_change_in_place_can_touch_is_asked_of_none(
         ("store", "':id'"),
         ("store", "':map'"),
     ]
+
+
+LITERALS = "pandajedi/jedirefine/LiteralRefiner.py"
+
+THROUGH = {
+    LITERALS: """\
+        import copy
+        import json
+        import math as m
+
+        def hook(pairs):
+            return pairs
+
+        class LiteralRefiner:
+            def refine(self, flag):
+                text = ""
+                count = None
+                if flag:
+                    text = '{"a": 1}'
+                    count = "3"
+                params = json.loads(text, object_hook=hook)  # L1
+                limit = int(count)  # I1
+                nested = int(json.loads("null"))  # N1
+                kept = copy.copy(params)  # K1
+                cores = m.ceil(None)  # M1
+                size = len(params)  # S1
+                custom = json.loads("", cls=hook)  # J1
+                item = json.loads(text)["a"]  # A1
+                pair = None
+                first = int(pair[0])  # P1
+                if limit and "a" in kept and nested and cores and size and custom and item and first:  # T1
+                    self.ok = True  # R1
+        """,
+}
+
+
+@pytest.fixture(scope="module")
+def through(tmp_path_factory: pytest.TempPathFactory) -> MapFragment:
+    return _build(
+        tmp_path_factory.mktemp("heldthrough"), THROUGH, (("refine", "R1"),), LITERALS
+    )
+
+
+def test_a_call_gone_through_says_what_its_value_is_and_a_literal_it_raises_on_stops(
+    through: MapFragment,
+) -> None:
+    """Each call outside the corpus a way goes through says what its value is of what it is handed, as callfacts
+    says it, ``math.ceil`` by its module's name under ``import math as m``.  A literal goes no further than the call
+    that raises on it, run in turn on what the one before made -- ``int(json.loads("null"))`` raises at ``int`` --
+    while each is one evaluate runs and is handed the literal itself: ``json.loads`` handed a hook makes what the
+    hook makes, one handed ``cls`` parses its own way, and ``int(pair[0])`` is handed an item, not the literal; an
+    item taken after the call (``json.loads(text)["a"]``) does not save a literal the call raises on."""
+
+    def at(marker: str) -> str:
+        return f"{LITERALS}:{_line(LITERALS, marker, THROUGH)}"
+
+    guards = {
+        one.name: one
+        for one in through.guard_froms
+        if one.test_line == _line(LITERALS, "T1", THROUGH)
+    }
+    loads = ("json.loads", at("L1"), "decoded", (f"{LITERALS}::hook",))
+
+    def said(name: str) -> tuple[set[tuple], list[tuple]]:
+        guard = guards[name]
+        return _ways(guard.sources), [
+            (one.kind, one.name, one.what, one.at) for one in guard.stops
+        ]
+
+    assert said("limit") == (
+        {("constant", "'3'", "", (), (("int", at("I1"), "converted", ()),), ())},
+        [("raises", "None", "int raises TypeError", [at("I1")])],
+    )
+    assert said("nested") == (
+        set(),
+        [("raises", "'null'", "int raises TypeError", [at("N1")])],
+    )
+    assert said("kept") == (
+        {
+            (
+                "constant",
+                """'{"a": 1}'""",
+                "",
+                (),
+                (loads, ("copy.copy", at("K1"), "copy", ())),
+                (),
+            )
+        },
+        [("raises", "''", "json.loads raises JSONDecodeError", [at("L1")])],
+    )
+    assert said("cores") == (
+        set(),
+        [("raises", "None", "math.ceil raises TypeError", [at("M1")])],
+    )
+    assert said("size")[0] == {
+        (
+            "constant",
+            """'{"a": 1}'""",
+            "",
+            (),
+            (loads, ("len", at("S1"), "computed", ())),
+            (),
+        )
+    }
+    assert said("custom") == (
+        {
+            (
+                "constant",
+                "''",
+                "",
+                (),
+                (("json.loads", at("J1"), "decoded", (f"{LITERALS}::hook",)),),
+                (),
+            )
+        },
+        [],
+    )
+    assert said("item") == (
+        {
+            (
+                "constant",
+                """'{"a": 1}'""",
+                "",
+                ("['a']",),
+                (("json.loads", at("A1"), "decoded", ()),),
+                (),
+            )
+        },
+        [("raises", "''", "json.loads raises JSONDecodeError", [at("A1")])],
+    )
+    assert said("first") == (
+        {("constant", "None", "", ("[0]",), (("int", at("P1"), "converted", ()),), ())},
+        [],
+    )
+    # Where each call comes among the steps: ``int`` is handed ``pair[0]``, ``json.loads`` the text itself.
+    assert [
+        [call.after_steps for call in source.through]
+        for name in ("first", "item")
+        for source in guards[name].sources
+    ] == [[1], [0]]

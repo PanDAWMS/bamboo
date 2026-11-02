@@ -11,7 +11,10 @@ the parts the map already has put together:
 - **a call's value**: each return of each function :meth:`Calls.callees` places the call at, the callee's
   parameters read back at the call -- not at every caller of the callee -- and the call on the way (*route*);
 - **a call outside the corpus** handed one positional argument (``json.loads(inputStr, object_hook=...)``) is gone
-  through and named (*through*): whether it keeps the value is not read here;
+  through and named (*through*), with what its value is of the argument as :mod:`callfacts` says it (decoded, a
+  copy, the same value as another type ...) and the corpus's functions a JSON maker is handed to make it with; a
+  literal one of the standard functions :func:`evaluate.run` runs raises on there (``json.loads('')``,
+  ``int(None)``) goes no further: a stop (``raises``), not a way;
 - **an item or attribute**: its root's ways, with the step (*steps*): ``taskParamMap["tgtNumEventsPerJob"]`` is an
   item of the decoded task parameters, not the parameters;
 - the ends: the function's own statement's rows (:class:`sqlwrite._Filled`, with the column), asked first of any
@@ -35,6 +38,7 @@ from __future__ import annotations
 import ast
 from typing import Iterable, NamedTuple, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import Calls, CallSite, Target, bind, returns
 from bamboo.codemap.models import (
@@ -50,19 +54,29 @@ from bamboo.codemap.models import (
     KEY_SELF_FIELD,
     KEY_SEQUENCE,
     KEY_UNKNOWN,
+    THROUGH_COMPUTED,
+    THROUGH_CONVERTED,
+    THROUGH_COPY,
+    THROUGH_DECODED,
+    THROUGH_TEXT,
+    THROUGH_UNKNOWN,
     GuardFrom,
     HeldChange,
     HeldSource,
+    HeldThrough,
     JunctionNode,
     KeyStop,
     ParameterFrom,
     ReadSiteNode,
 )
 from bamboo.codemap.panda import changes as changes_mod
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap.panda import evaluate, pathcond
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _STOP = "stop"
+#: The hooks a JSON maker hands what it parsed: a text the parse cannot read raises with them as without them --
+#: ``cls`` parses itself.
+_PARSE_HOOKS = callfacts.JSON_HOOKS - {"cls"}
 
 
 class _Way(NamedTuple):
@@ -84,10 +98,22 @@ class _Way(NamedTuple):
     #: As applied to the end: the value is the end's ``steps[0]``, then ``steps[1]``.
     steps: tuple[str, ...] = ()
     #: In the order met going back from the read.
-    through: tuple[str, ...] = ()
+    through: tuple["_Through", ...] = ()
     route: tuple[str, ...] = ()
     #: In the order run.
     changes: tuple["_Change", ...] = ()
+
+
+class _Through(NamedTuple):
+    """One :class:`HeldThrough` while it is read, and whether :func:`evaluate.run` runs it as it is called."""
+
+    call: str
+    at: str
+    gives: str
+    hooks: tuple[str, ...] = ()
+    runs: bool = False
+    #: How many of the way's steps were applied before the call: it is handed the end with ``steps[:steps]``.
+    steps: int = 0
 
 
 class _Change(NamedTuple):
@@ -461,7 +487,13 @@ class _Reader:
                             found.append(
                                 outer._replace(
                                     steps=outer.steps + inner.steps,
-                                    through=inner.through + outer.through,
+                                    through=tuple(
+                                        call._replace(
+                                            steps=call.steps + len(outer.steps)
+                                        )
+                                        for call in inner.through
+                                    )
+                                    + outer.through,
                                     route=(here,) + inner.route + outer.route,
                                     changes=outer.changes + inner.changes,
                                 )
@@ -474,36 +506,61 @@ class _Reader:
                 )
             return found
         named = self._through(call, file, func)
-        if named:
+        if named is not None:
             return [
-                one._replace(through=(f"{named} {here}",) + one.through)
+                one._replace(
+                    through=(named._replace(steps=len(one.steps)),) + one.through
+                )
                 for one in self.read(call.args[0], call, file, func)
             ]
         return [
             _Way(KEY_CALL, ast.unparse(call.func), call.lineno, what=placed.unplaced)
         ]
 
-    def _through(self, call: ast.Call, file: str, func: ast.AST) -> str:
-        """The name of a call outside the corpus that is handed one positional argument -- a function or a module's
-        (``json.loads``), not a method of a value -- else ``""``."""
+    def _through(self, call: ast.Call, file: str, func: ast.AST) -> Optional[_Through]:
+        """A call outside the corpus that is handed one positional argument -- a function or a module's
+        (``json.loads``), not a method of a value --, with what its value is of the argument; else ``None``."""
         if (
             len(call.args) != 1
             or isinstance(call.args[0], ast.Starred)
             or any(one.arg is None for one in call.keywords)
         ):
-            return ""
-        if isinstance(call.func, ast.Name):
-            local = call.func.id in _parameters(func) or _bound_here(func, call.func.id)
-            return "" if local else call.func.id
-        if isinstance(call.func, ast.Attribute) and isinstance(
-            call.func.value, ast.Name
+            return None
+        types = self.calls.types
+        called = call.func
+        if isinstance(called, ast.Name):
+            if called.id in _parameters(func) or _bound_here(func, called.id):
+                return None
+        elif not (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Name)
+            and called.value.id in types.imports(file)
+            and not _bound_here(func, called.value.id)
         ):
-            module = call.func.value.id
-            if module in self.calls.types.imports(file) and not _bound_here(
-                func, module
-            ):
-                return f"{module}.{call.func.attr}"
-        return ""
+            return None
+        library = types.library_class(file, called)
+        named = ".".join(library) if library is not None else ast.unparse(called)
+        hooks: list[str] = []
+        if library in callfacts.JSON_MAKERS:
+            for one in call.keywords:
+                if one.arg in callfacts.JSON_HOOKS:
+                    hooks += [
+                        owner_of(target.file, target.func)
+                        for target in self.calls.named_callables(file, func, one.value)
+                    ] or [ast.unparse(one.value)]
+        handed = {one.arg for one in call.keywords}
+        runs = (
+            named in evaluate.RUNS
+            and (library is not None or types.is_builtin(file, func, named))
+            and handed <= (_PARSE_HOOKS if library in callfacts.JSON_MAKERS else set())
+        )
+        return _Through(
+            named,
+            f"{file}:{call.lineno}",
+            _gives(types, file, func, call, library),
+            tuple(hooks),
+            runs,
+        )
 
     def _returned(self, target: Target) -> list[_Way]:
         held = self._returns.get(id(target.func))
@@ -597,12 +654,63 @@ class _Reader:
         )
 
 
+def _gives(
+    types, file: str, func: ast.AST, call: ast.Call, library: Optional[tuple[str, str]]
+) -> str:
+    """What the value of *call*, outside the corpus, is of its one argument, as :mod:`callfacts` says: a function
+    of an imported module's (*library*), else a builtin's."""
+    if library is None:
+        function = callfacts.builtin_function(types, file, func, call)
+        if function is None or function.gives is None:
+            return THROUGH_UNKNOWN
+        if function.gives in callfacts.CONVERTING:
+            return THROUGH_CONVERTED
+        return function.gives
+    module, name = library
+    if library in callfacts.JSON_MAKERS or name in callfacts.READ_AGAIN:
+        return THROUGH_DECODED
+    if library in callfacts.COPIES:
+        return THROUGH_COPY
+    if name == callfacts.SERIALIZING:
+        return THROUGH_TEXT
+    if module.split(".")[0] in callfacts.COMPUTING_MODULES:
+        return THROUGH_COMPUTED
+    return THROUGH_UNKNOWN
+
+
+def _raised(literal: str, through: list[_Through]) -> Optional[tuple[_Through, str]]:
+    """The call of *through*, in the order run, that raises on the literal *literal* (its repr) and the exception's
+    name: each run on what the one before made while :func:`evaluate.run` runs it and no step comes between, a JSON
+    maker handed hooks the last (they make its value); ``None`` where none is known to raise."""
+    try:
+        value = ast.literal_eval(literal)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return None
+    for call in through:
+        if not call.runs or call.steps:
+            return None
+        made = evaluate.run(call.call, value)
+        if isinstance(made, evaluate.Raised):
+            return call, made.error
+        if made is evaluate.UNKNOWN or call.hooks:
+            return None
+        value = made
+    return None
+
+
 def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
-    """*ways* as the record keeps them, each once; *route* and *through* in the order the value went."""
+    """*ways* as the record keeps them, each once; *route* and *through* in the order the value went.  A literal a
+    call on the way raises on is a stop there."""
     sources: dict[tuple, HeldSource] = {}
     stops: dict[tuple, KeyStop] = {}
     for one in ways:
         route, through = list(reversed(one.route)), list(reversed(one.through))
+        raised = (
+            _raised(one.name, through) if one.kind == KEY_CONSTANT and through else None
+        )
+        if raised is not None:
+            call, error = raised
+            one = _stop("raises", one.name, f"{call.call} raises {error}", call.at)
         if one.kind == _STOP:
             at = [*route, one.at] if one.at else route
             stops.setdefault(
@@ -624,7 +732,16 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 attr=one.attr,
                 column_unread=one.column_unread,
                 steps=list(one.steps),
-                through=through,
+                through=[
+                    HeldThrough(
+                        call=call.call,
+                        at=call.at,
+                        gives=call.gives,
+                        hooks=list(call.hooks),
+                        after_steps=call.steps,
+                    )
+                    for call in through
+                ],
                 route=route,
                 changes=[_change_said(change) for change in one.changes],
             ),
