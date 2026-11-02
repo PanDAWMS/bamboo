@@ -11,24 +11,26 @@ logs, and, for a replayed case, the output it must reproduce.  Nothing here
 knows a case: every step reads its arguments from the case file.
 
 **Rounds.**  A run is one round of the querier in ``<case>/r1/``.  With
-``--record``, a round that stops on asks (``code`` ``asks``) is followed by the
-recording step, which answers them from production into the case's records
-directory, and the querier runs again in ``r<n+1>/``, until it asks nothing,
-the recording step exits other than 0 (3: a day file still being compressed;
-4: every ask deferred, a grep or a list having failed), or ``--rounds`` are
-done.  An ask the recording step defers is asked again by the next round.  The
-recording step runs from the tree this module is in, where PanDA's credentials
-load (the home's ``cwd``).  Each case runs into ``<batch>/<name>/``, so the
-cases of a batch have distinct names.
+``--record``, a round that asks (result.json's ``asks``), whatever its outcome
+-- an END may ask too -- is followed by the recording step, which answers them
+from production into the case's records directory, and the querier runs again in
+``r<n+1>/``, until it asks nothing, the recording step exits other than 0 (3: a
+day file still being compressed; 4: every ask deferred, a grep or a list having
+failed), or ``--rounds`` are done.  An ask the recording step defers is asked
+again by the next round.  The recording step runs from the tree this module is
+in, where PanDA's credentials load (the home's ``cwd``).  Each case runs into
+``<batch>/<name>/``, so the cases of a batch have distinct names.
 
 **Rows asks.**  A querier whose run tree takes ``--rows-asks`` (querier-ra) is
-handed ``rows-asks.jsonl`` beside its out.txt, and result.json's
-``rows_asks`` counts what it wrote.  With ``--record``, a round with rows asks
--- coded ``rows`` when they are all it stops for, ``asks`` when it asks the
-logs too -- is followed by the rows step (:mod:`rowsask`), which answers them
-from production into the records directory (``rows-r<n>.json``), and a case
-whose rows file is built from its answers is built again with every round of
-them (``r<n+1>/rows.json``; :func:`rows.answered`).
+handed ``rows-asks.jsonl`` beside its out.txt, and result.json's ``rows_asks``
+counts what it wrote.  With ``--record``, a round with rows asks, whatever its
+outcome, is followed by the rows step (:mod:`rowsask`), which answers them from
+production into the records directory (``rows-r<n>.json``), and a case whose
+rows file is built from its answers is built again with every round of them
+(``r<n+1>/rows.json``; :func:`rows.answered`).  An sql ask no call reads is
+listed for a hand; a hand's answers in the records directory
+(``hand-r<n>.json``) are laid into the rows file's ``answers``
+(:func:`rows.hand_answers`).
 
 **A stay.**  A ``late`` question may name the stay it asks about: ``since``,
 the time_extended of the statuslog row that begins it (the case set's SQL
@@ -97,6 +99,8 @@ ROUNDS = 3
 RECORDS_GLOB = "records-r*.jsonl"
 #: the rows step's answers in a case's records directory
 ROWS_GLOB = "rows-r*.json"
+#: a hand's answers to the sql asks there (:func:`rows.hand_answers`)
+HAND_GLOB = "hand-r*.json"
 
 #: the code that builds a dump and reads it: a dump goes with a run tree whose commit holds this code as the
 #: dump's own commit does
@@ -104,8 +108,13 @@ MAP_CODE = ("bamboo/codemap", "bamboo/scripts/build_map.py")
 
 DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
 
-#: the shape of result.json read here (agreed with the querier, 2026-10-15)
-RESULT_VERSION = 1
+#: the shapes of result.json read here, agreed with the querier: 1 (2026-10-15) holds the outcome's English as
+#: ``text``; 2 (querier odata O1, 2026-11-02) holds a ``record`` in its place, the English rendered at read time;
+#: 3 (O2) holds the branches' and possibilities' premises, row and older as records too, which nothing here reads;
+#: 4 (O3a) holds the movers' premises' whys and reasons as records, their readings' verdicts as tokens and the map's
+#: gaps, which nothing here reads either.
+#: 1 is read while a pair runs a querier that writes it (pin k's)
+RESULT_VERSIONS = (1, 2, 3, 4)
 #: the files a run writes beside its out.txt
 RESULT, ASKS, ROWS_ASKS = "result.json", "asks.jsonl", "rows-asks.jsonl"
 #: what a run tree's querier says where it takes the rows asks' file
@@ -262,7 +271,8 @@ def build_rows(
     answers: Path, pair: dict, out: Path, records: Path | None = None
 ) -> Path:
     """Lay the fetch record *answers* out as a rows file at *out*, spelled and keyed by the pair's pin and dump, with
-    the rows step's answers in *records* (``rows-r<n>.json``, round by round) laid over it."""
+    the rows step's answers in *records* (``rows-r<n>.json``, round by round) and a hand's (``hand-r<n>.json``)
+    laid over it."""
     # here, not at the top: rows imports fetch, which imports this module
     from bamboo.scripts.panda.fieldtest import rows, rowsask  # noqa: PLC0415
 
@@ -285,6 +295,11 @@ def build_rows(
     )
     spellings = rows.column_spellings(Path(pair["PANDA_PIN"]), dump, classes)
     tables = rows.Tables.read(dump)
+    hands = sorted(
+        (int(m.group(1)), f)
+        for f in (records.glob(HAND_GLOB) if records else [])
+        if (m := rows.HAND_ROUND.match(f.name))
+    )
     record = json.loads(answers.read_text())
     built = rows.build(record, spellings, tables)
     if rounds:
@@ -292,7 +307,6 @@ def build_rows(
         sections, left_out = rows.answered(
             docs, record["key_class"], q["key"], spellings
         )
-        built.setdefault("answers", {}).update(sections.pop("answers", {}))
         built["linked"] = rows.lay_linked(
             built.get("linked", []), sections.pop("linked", [])
         )
@@ -302,8 +316,13 @@ def build_rows(
         )
         if left_out:
             built["about"] += "  Left out of them: " + "; ".join(left_out) + "."
-        if not built["answers"]:
-            del built["answers"]
+    if hands:
+        built["answers"] = rows.hand_answers(
+            [json.loads(f.read_text()) for _, f in hands]
+        )
+        built["about"] += (
+            f"  Laid over it: a hand's answers {[str(f) for _, f in hands]}."
+        )
     out.write_text(json.dumps(built, indent=1) + "\n")
     return out
 
@@ -362,11 +381,14 @@ def score(result: dict | None) -> dict:
     """How far a run got, from its result.json: the steps it opened, how it ended, and the hands it used.
 
     ``terminal`` is ``STOP`` or ``END``; ``code`` names the class of what a stop
-    needs (``asks``, a KNOWN_ISSUES number, or None where none is named yet);
-    ``text`` is the ``STOP`` line or the ``END`` lines; ``possibilities`` is
-    result.json's, each arm a step left open with its rows (code ``one-of``,
-    querier-ab), None otherwise.  A run with no result, or one of another
-    version, is ``NONE`` and ``why`` says which.
+    needs (``asks``, a KNOWN_ISSUES number, or None where none is named yet), and
+    an end's is ``one-of`` where it rests on the arms a step left (querier-k37),
+    else None;
+    ``text`` is the ``STOP`` line or the ``END`` lines (version 1), ``record``
+    the same as data (version 2: {kind, facts}, None where the run said no END
+    line); ``possibilities`` is result.json's, each arm a step left open with its
+    rows (code ``one-of``, querier-ab), None otherwise.  A run with no result, or
+    one of a version not read here, is ``NONE`` and ``why`` says which.
     """
     got: dict = {
         "terminal": "NONE",
@@ -374,6 +396,7 @@ def score(result: dict | None) -> dict:
         "step": None,
         "code": None,
         "text": None,
+        "record": None,
         "steps": [],
         "hand": None,
         "hand_used": None,
@@ -383,16 +406,18 @@ def score(result: dict | None) -> dict:
     }
     if result is None:
         return got | {"why": "no result.json: the run did not finish"}
-    if result.get("version") != RESULT_VERSION:
+    if result.get("version") not in RESULT_VERSIONS:
         return got | {
-            "why": f"result.json version {result.get('version')}, this reads {RESULT_VERSION}"
+            "why": f"result.json version {result.get('version')}, this reads "
+            + " or ".join(map(str, RESULT_VERSIONS))
         }
     o = result["outcome"]
     return got | {
         "terminal": o["kind"].upper(),
         "step": o["step"],
         "code": o["code"],
-        "text": o["text"],
+        "text": o.get("text"),
+        "record": o.get("record"),
         "steps": result["steps"],
         "hand": len(o["hand_used"]),
         "hand_used": o["hand_used"],
@@ -418,7 +443,7 @@ def read_as_handed(result: dict | None, pair: dict, handed: dict) -> dict:
     """Whether the run read what it was handed, by its result.json: the pair's dump (path and whole sha256), run tree
     and ``QUERIER`` label, and *handed*'s rows, logs and record files (path and sha256 each).  ``differ`` names each
     that does not match."""
-    if result is None or result.get("version") != RESULT_VERSION:
+    if result is None or result.get("version") not in RESULT_VERSIONS:
         return {"ok": False, "differ": [RESULT], "bamboo_py_sha256": None}
     i, q = result["inputs"], result["inputs"]["querier"]
     dump = i["map_dump"]
@@ -643,10 +668,9 @@ def run_case(
         if not record:
             break
         s = one["score"]
-        logs = s["code"] == "asks"
-        rows_asked = s["code"] in ("asks", "rows") and bool(
-            (s["rows_asks"] or {}).get("count")
-        )
+        # what the round asked, whatever its outcome: an END may ask too
+        logs = bool((s["asks"] or {}).get("count"))
+        rows_asked = bool((s["rows_asks"] or {}).get("count"))
         hand = rows_asked and built is None
         if hand:
             # no answer can be laid over a hand's rows file: the rows asks stay unanswered
@@ -726,6 +750,20 @@ def run_case(
     return run
 
 
+def record_kinds(record: dict) -> str:
+    """A record's kind and, after a colon, the kinds of the records its facts hold, bare or as ``{"said": record}``,
+    a kind held n times as "kind xn" (result version 2): the terminal line's words, the English being out.txt's."""
+    inner: dict[str, int] = {}
+    for value in record.get("facts", {}).values():
+        for x in value if isinstance(value, list) else [value]:
+            x = x.get("said", x) if isinstance(x, dict) else x
+            if isinstance(x, dict) and "kind" in x:
+                inner[x["kind"]] = inner.get(x["kind"], 0) + 1
+    said = [k if n == 1 else f"{k} x{n}" for k, n in inner.items()]
+    kind: str = record["kind"]
+    return kind + (": " + ", ".join(said) if said else "")
+
+
 def line(r: dict) -> str:
     """One line per run, for the terminal."""
     if "read" not in r:
@@ -734,8 +772,13 @@ def line(r: dict) -> str:
     if s["terminal"] == "NONE":
         where = s["why"]
     else:
-        said = s["text"] or f"{s['terminal']} {s['step']} (no END line)"
-        where = said.splitlines()[-1][:80] + (f"  [{s['code']}]" if s["code"] else "")
+        if s["text"]:
+            said = s["text"].splitlines()[-1]
+        elif s.get("record"):
+            said = f"{s['terminal']} {s['step']} {record_kinds(s['record'])}"
+        else:
+            said = f"{s['terminal']} {s['step']} (no END line)"
+        where = said[:80] + (f"  [{s['code']}]" if s["code"] else "")
     extra = f"  asks {s['asks']['count']}" if s["asks"] else ""
     if "baseline" in r:
         extra += f"  baseline diff {r['baseline']['lines_differ']}"

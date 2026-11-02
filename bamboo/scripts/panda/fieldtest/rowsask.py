@@ -26,9 +26,9 @@ writes the round's answers to ``rows-r<n>.json`` there, ``n`` one past the direc
   follow once the rows are in.  An archive table is bounded by the read site's own clock term on the
   partition column (``modificationTime>(CURRENT_DATE-30)``) before the first pass, else by
   :data:`~bamboo.scripts.panda.fieldtest.fetch.NO_CREATION`.
-- ``sql`` -- an answer L3 lacks (``{"name", "sql", "binds", "db_read"?}``).  Read by ``db_read`` where the ask
-  carries a ``db_read`` form whose ``where`` is ``[column, op, value]`` terms: the groups and, for each, its
-  number and its least ``least``.  Else the SQL is listed for a hand.
+- ``sql`` -- an answer L3 lacks (``{"name", "sql", "binds", "question"}``), a window over the history no call
+  reads: listed for a hand, whose answer goes in the records directory as ``hand-r<n>.json``
+  (:func:`~bamboo.scripts.panda.fieldtest.rows.hand_answers`).
 
 An ask no rule answers says why (``why``); stage 2's record keeps it, so the asks no API answers are counted
 from the runs.
@@ -271,22 +271,10 @@ def _compares(trees) -> list[dict]:
 
 
 def _sql(ask: dict) -> Plan:
-    form = ask.get("db_read")
-    if form is None:
-        return Plan(ask, why="no db_read form (a window question): listed for a hand")
-    if not isinstance(form.get("where"), list):
-        return Plan(
-            ask,
-            why="the db_read form's where is SQL text, not [column, op, value] terms: listed for a hand",
-        )
-    aggregates = [["count", "*"]] + (
-        [["min", form["least"]]] if form.get("least") else []
+    return Plan(
+        ask,
+        why="a window over the history no call reads: listed for a hand (hand-r<n>.json in the records directory)",
     )
-    table = form["table"].rpartition(".")[2]
-    request = query(
-        (table,), form["where"], group_by=list(form["group_by"]), aggregates=aggregates
-    )
-    return Plan(ask, [Call("db_read", "sql", request)])
 
 
 async def answer(line: dict, p: Plan, parts: Parts, tables: Tables) -> dict:
