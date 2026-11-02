@@ -506,7 +506,7 @@ value of `JobSpec.jobStatus`).
 H2 reads such a writer, where the map's history pair places its arm (`attr_time.arms`), at the pair's caller: the
 call on the way to it (`HistoryPair.point`) is the candidate, judged on the caller's run (`Rerun._h2_candidates`,
 `StandIn`; attr-time-shape.md 5).  The call is shown run by a row on every path through it, or by two of the caller's
-rows printed in a row that only a path through it prints (`which_ran.rows_around`, `rows.passes_through`:
+rows printed in a row that only a path through it prints (`which_ran.rows_around`, the map's `flow.passes_through`:
 TaskRefinerThread.runImpl's 205 and 563 around 211, extractCommon).  That says the writer was called, not that its arm
 wrote: the arm's own path condition is read in the row's values, and what is not read -- or, above level 1, the
 functions between the call and the writer -- is left open, a premise of "may have written" (K38).  Counted on the
@@ -936,8 +936,8 @@ each whose pass holds the inner run is named.  A call with no print every path r
 before the next statement that can leave the block (`must_rows` stops there: the next statement calls too, or the
 prints after it are in arms), is placed by the run instead (`which_ran._between_records`): the outer function's two
 records in a row around the inner run, none of its rows read between them, and c on a path from the one's print to
-the other's that prints nothing else (`rows.runs_between`, the function's own statements: blocks, arms, loops, a
-call raising to its handlers).  Other calls can run between the two records, as between c and its print before
+the other's that prints nothing else (the map's `flow.runs_between`: one flow, whose ways include a statement raising
+to its handlers).  Other calls can run between the two records, as between c and its print before
 already; only those the map's reach takes to the inner's function are named, so the join rests on the reach for the
 rest.  On x13vi1k such calls are half of what the join tries between two logs of a status's writers, and 9 of
 JediTaskSpec.status's 33 values had no other; a path holds 129 of the 132 lines with no print after, 1 of the 21 with

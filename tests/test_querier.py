@@ -1626,12 +1626,13 @@ def test_a_statement_runs_between_two_prints_on_a_path_that_prints_nothing_else(
             tmp_path,
             """
             import json
+            from bamboo.codemap.panda import flow
             from bamboo.querier import rows as R
 
             node = R.functions("pandaserver/a.py", "f")[0]
             at = lambda line: R.statement_at(node, line)
-            prints = {id(s) for s in R.own_nodes(node) if R.is_print(s)}
-            between = lambda a, b, s: R.runs_between(node, at(a), at(b), at(s), prints)
+            prints = [s for s in R.own_nodes(node) if R.is_print(s)]
+            between = lambda a, b, s: flow.runs_between(at(a), at(b), at(s), prints)
             print(json.dumps({
                 "the next statement calls": [between(3, 7, 4), between(3, 9, 5)],
                 "not after the first": between(7, 11, 4),
@@ -1738,13 +1739,14 @@ def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_thei
             """
             import json
             from types import SimpleNamespace as N
+            from bamboo.codemap.panda import flow
             from bamboo.querier import rows as R
             from bamboo.querier.which_ran import rows_around
 
             node = R.functions("pandajedi/r.py", "run")[0]
             at = lambda line: R.statement_at(node, line)
-            prints = {id(s) for s in R.own_nodes(node) if R.is_print(s)}
-            through = lambda a, b, s: R.passes_through(node, at(a), at(b), at(s), prints)
+            prints = [s for s in R.own_nodes(node) if R.is_print(s)]
+            through = lambda a, b, s: flow.passes_through(at(a), at(b), at(s), prints)
             fn = N(node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
             # record 1 is another function's (the callee's, say)
             placed = {3: [0], 11: [2]}
@@ -1771,6 +1773,51 @@ def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_thei
     # no two rows in a row: nothing shown; "failed" matched the record between, though not alone: not a pass's two
     assert got["only the first"] is None
     assert got["a row read between"] is None
+
+
+def test_rule_3_places_a_printed_row_before_or_after_the_site_only_where_the_flow_lets_it_go_one_way(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "o.py").write_text(
+        textwrap.dedent(
+            """
+            def f(self, x):
+                self.logger.debug("first")
+                if x:
+                    self.logger.debug("arm")
+                    return
+                for y in x:
+                    self.logger.debug("loop")
+                    self.tb.update(y)
+                self.tb.write(x)
+                self.logger.debug("last")
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+            from bamboo.querier.which_ran import _order
+
+            node = R.functions("pandaserver/o.py", "f")[0]
+            at = lambda line: R.statement_at(node, line)
+            loop = at(7)
+            print(json.dumps([
+                _order(at(3), at(10), []), _order(at(11), at(10), []), _order(at(5), at(10), []),
+                _order(at(8), at(9), []), _order(at(8), at(9), [loop]),
+            ]))
+            """,
+        )
+    )
+    first, last, arm, looped, once = json.loads(out.splitlines()[-1])
+    assert (first, last) == ("before", "after")
+    # the arm returns: one call cannot print it and run the write, so it places nothing (its line order said before)
+    assert arm is None
+    # round a loop the print comes both before and after the update; a loop gone round once has no way back
+    assert looped is None
+    assert once == "before"
 
 
 def test_every_call_that_goes_on_into_the_candidate_is_tried_at_each_of_its_lines(tmp_path):
@@ -3999,10 +4046,10 @@ def test_a_loop_whose_way_back_prints_a_row_the_run_lacks_went_round_once_for_s2
     assert shape["blocks"] == [True, False, True, False, False]
     once, verdicts, s3, settled = got["once"]
     assert once == shape["all"]
-    # no "retry": the else's row leaves the arm out, the loop gone round once
+    # no "retry": the else's row leaves the arm out, the loop gone round once (the map's flow.together, once)
     assert verdicts["8"][0] == "excluded"
-    assert ("row 11 printed and its arms [12] leave 8 out (the loop at 4 went round once: its way back prints row(s) "
-            "[17], not in the run)") in verdicts["8"][1]
+    assert ("row 11 printed, and one call cannot print it and run 8 (the loop at 4 went round once: its way back prints "
+            "row(s) [17], not in the run)") in verdicts["8"][1]
     # S3 reads the else's path condition off its row, though the exit (the return at 14) is reached either way
     assert settled == ["settled by the exit taken: {}", "settled by the rows the pass printed on the way [11]: {'len(res) == 0': False}"]
     assert s3 == ["len(res) == 0", 7]
