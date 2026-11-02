@@ -1141,15 +1141,30 @@ NOT_IN_DATA, NOT_READ, NOT_RECORDED = "not in the data", "not read", "not record
 
 
 class Premise(str):
-    """What an arm H2 left rests on (``Possible.premises``): its text, said as it is, and its kind (``NOT_READ`` ...),
-    given where it is found, not read off the text."""
+    """What an arm H2 left rests on (``Possible.premises``): its record (*said*), and its kind (``NOT_READ`` ...),
+    given where it is found, not read off the text.  As a string it is the record rendered, as out.txt and which_ran's
+    reasons read it; result.json and the records keep the record (:func:`_premise_json`, :func:`_said`)."""
 
     kind: str
+    said: T.Said | str
 
-    def __new__(cls, text: str, kind: str) -> Premise:
-        premise = super().__new__(cls, text)
+    def __new__(cls, said: T.Said | str, kind: str) -> Premise:
+        premise = super().__new__(cls, T.text(said))
         premise.kind = kind
+        premise.said = said
         return premise
+
+
+def _said(p: object) -> object:
+    """*p* as a record's fact: a premise's record, else *p*."""
+    return p.said if isinstance(p, Premise) else p
+
+
+def _premise_json(p: object) -> object:
+    """A premise as result.json keeps it: its record's JSON and its kind beside (``premise_kind``)."""
+    if isinstance(p, Premise) and isinstance(p.said, T.Said):
+        return {**T.to_json(p.said), "premise_kind": p.kind}
+    return p
 
 
 def tree_stamp(path: Path) -> str:
@@ -1404,9 +1419,9 @@ class StandIn:
             if got is False:
                 return None
             if got is not True:
-                out.append(Premise(f"its condition {g!r} not read", NOT_READ))
+                out.append(Premise(T.Said("its-condition-not-read", {"guard": g}), NOT_READ))
         if self.level > 1:
-            out.append(Premise(f"the {self.level - 1} function(s) between the call and it not read", NOT_READ))
+            out.append(Premise(T.Said("functions-between-not-read", {"n": self.level - 1}), NOT_READ))
         return out
 
 
@@ -1554,15 +1569,20 @@ def _row_said(row: dict) -> T.Said:
 
 
 def _records_json(outcome: dict) -> dict:
-    """*outcome* with its record, and its branches' labels and records, as result.json keeps them (render.to_json).
-    Each reads back to the sentence the run said, or the run fails here: what result.json keeps says what the run said."""
+    """*outcome* with its record, and its branches' labels, records, rows and premises, as result.json keeps them
+    (render.to_json, :func:`_premise_json`).  Each record reads back to the sentence the run said, or the run fails here:
+    what result.json keeps says what the run said."""
     def kept(d: dict) -> dict:
         out = dict(d)
-        for k in ("record", "label"):
+        for k in ("record", "label", "row"):
             if out.get(k) is not None:
                 if not T.same_read_back(out[k]):
                     raise AssertionError(f"result.json's {k} does not read back as said: {T.text(out[k])!r}")
                 out[k] = T.to_json(out[k])
+        if out.get("older"):
+            out["older"] = [T.to_json(r) for r in out["older"]]
+        if out.get("premises"):
+            out["premises"] = [_premise_json(p) for p in out["premises"]]
         return out
     o = kept(outcome)
     if o.get("branches"):
@@ -2091,8 +2111,10 @@ class Rerun:
             self.say("# the bamboo tree is dirty (another session may be editing it): this run does not measure a commit")
 
     def result_of(self, outcome: dict, asks: dict) -> dict:
-        """result.json, version 2 (version 1 agreed with the live-case harness, 2026-10-15; 2 keeps the outcome's and
-        the branches' sentences as records, ``record`` and ``label``, render.py's): the outcome, the question, the steps
+        """result.json, version 3 (version 1 agreed with the live-case harness, 2026-10-15; 2 keeps the outcome's and
+        the branches' sentences as records, ``record`` and ``label``, render.py's; 3 keeps what an arm rests on as
+        records too, the branches' ``premises``, ``row`` and ``older`` and the possibilities' premises, each premise with
+        its ``premise_kind``): the outcome, the question, the steps
         opened in order, every input with its sha256, the asks file, and what the steps found -- the window, the arm
         that wrote an attribute's value last (``wrote``), the mover that moved the value (late), every mover with its
         verdict and, in S1, judgement 3's premises (``_premises``, added in build order 2a) -- with times in UTC, ISO 8601
@@ -2100,7 +2122,7 @@ class Rerun:
         a = self.args
         dump = mapdump.installed()
         return {
-            "version": 2,
+            "version": 3,
             "outcome": _records_json(outcome),
             "question": {"mode": "late" if a.late else "stuck" if a.stuck else "asked", "subject": a.subject,
                          "observed": a.observed, "key": a.key, **({"since": a.since} if a.since else {})},
@@ -2230,10 +2252,9 @@ class Rerun:
             walked = self._walking
             premises = list(walked.premises) if walked is not None else []
             kinds = {p.kind for p in premises if isinstance(p, Premise)}
-            # the branch's row and older rows stay text in result.json until the branches' own keys are records (O3)
-            entry = {"label": label, "arm": arm, "row": T.text(_row_said(walked.wrote.row)) if walked and walked.wrote.row else None,
+            entry: dict = {"label": label, "arm": arm, "row": _row_said(walked.wrote.row) if walked and walked.wrote.row else None,
                      # the older rows it may have written at instead, not walked
-                     "older": [T.text(_row_said(p.row)) for p in walked.older if p.row] if walked is not None else [],
+                     "older": [_row_said(p.row) for p in walked.older if p.row] if walked is not None else [],
                      "premises": premises, "step": self.hop}
             if stop is None:
                 entry |= {"kind": "end", "record": _ends(self.ends[said:]), "code": None}
@@ -2266,7 +2287,7 @@ class Rerun:
             self.end_code = "one-of" if e["premises"] else None
             self.end(T.Said("one-arm-ended", {
                 "ends": e["record"].facts["ends"] if isinstance(e["record"], T.Said) else [],
-                "rests": T.Said("rests-on", {"premises": e["premises"]}) if e["premises"] else "",
+                "rests": T.Said("rests-on", {"premises": [_said(p) for p in e["premises"]]}) if e["premises"] else "",
                 "older": T.Said("or-older", {"older": e["older"]}) if e["older"] else "",
                 "others": others,
             }))
@@ -2320,7 +2341,7 @@ class Rerun:
         guards = pathcond.path_condition(site)
         self.say(f"guards of {site_fn.name}:{chosen.line}: {guards}")
         # an arm H2 left is one that may have written, not one left by elimination (K38)
-        left = (T.Said("left-by-elimination") if not branch else T.Said("it-may-have", {"premises": list(a.premises)}) if a.premises
+        left = (T.Said("left-by-elimination") if not branch else T.Said("it-may-have", {"premises": [_said(p) for p in a.premises]}) if a.premises
                 else T.Said("shown-to-write"))
         if question is None and not attribute:
             # a status goes on to why its writer's arm ran, which is read in its run
@@ -2505,7 +2526,7 @@ class Rerun:
         read it, on its run (None where no run of it is at hand): each arm carries it as the one a fork walks on, and
         one shown to write as its answer; a stand-in's with the writer's arm chosen, read at the caller's call
         (``Wrote.via``).  Its run not showing the line ran is not in the data, unless its logs were not searched whole."""
-        kept = [] if v.kind == "positive" else [Premise(f"its run does not show the line ran ({v.reasons[-1] if v.reasons else v.kind})",
+        kept = [] if v.kind == "positive" else [Premise(T.Said("its-run-does-not-show", {"reason": _said(v.reasons[-1]) if v.reasons else v.kind}),
                                                         NOT_RECORDED if on is not None and on.unsearched else NOT_IN_DATA)]
         answer = on if on is not None and on.question is not None and not kept else None
         stands = self._stand_ins.get((v.candidate.owner, v.line))
@@ -2554,8 +2575,8 @@ class Rerun:
         for n, (state, asking, own) in enumerate(tries, 1):
             kind = _f3(state)
             if kind in ("made", "open"):
-                why = (Premise(f"a birth: it wrote as the row was made, at {state['time']}; no run is read", NOT_READ) if kind == "made" else
-                       Premise(f"its logs were not searched whole over {asking.why}: it may have written in what was not", NOT_RECORDED))
+                why = (Premise(T.Said("a-birth-no-run", {"time": state["time"]}), NOT_READ) if kind == "made" else
+                       Premise(T.Said("logs-not-searched-whole-over", {"why": asking.why}), NOT_RECORDED))
                 self.say(f"-- row {n} of {len(tries)}: {_row_said(state)}")
                 # walked on, if a fork does, on no run: H3 reads its guards in the rows' values at the row
                 found = [Possible(f"{Path(r.owner.partition('::')[0]).name}::{r.owner.split('::')[-1]}:{line}", state, False, [why],
@@ -2632,7 +2653,7 @@ class Rerun:
         read false rules out.  Each is walked on, if a fork does, on no run: its runs are in the data, not read."""
         out = []
         for c in cands:
-            why = Premise(f"no line of {', '.join(c.log_files)} in the records holds {key}: its runs are not shown to name it", NOT_READ)
+            why = Premise(T.Said("no-line-holds-the-key", {"logs": list(c.log_files), "key": key}), NOT_READ)
             for line in c.lines:
                 v = Verdict(c, line, "unexamined", [why])
                 on = Wrote(readings, None, cands, env, v, row=state, window=window)
@@ -2704,7 +2725,7 @@ class Rerun:
             arms.setdefault(p.arm, []).append(p)
         self.result["possibilities"] = [
             {"arm": arm, "rows": [{"status": p.row["status"] if p.row else None, "time": p.row["time"] if p.row else None,
-                                   **({"f3": _f3(p.row)} if _f3(p.row) else {}), "wrote": p.wrote, "premises": p.premises}
+                                   **({"f3": _f3(p.row)} if _f3(p.row) else {}), "wrote": p.wrote, "premises": [_premise_json(x) for x in p.premises]}
                                   for p in ps]}
             for arm, ps in arms.items()
         ]

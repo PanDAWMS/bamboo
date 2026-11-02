@@ -5840,9 +5840,10 @@ def test_h2_reads_f3s_life_run_by_run_among_the_rows_and_a_births_row_last_as_on
     assert code == "one-of" and read == ["span", "running", "defined"]
     assert text == ("H2: one arm that wrote JediTaskSpec.taskName='n' last, of 1 left: s.py::getTasksToRefine_JEDI:1188 (may have at "
                     "the row's making 2026-10-29 04:10:00) (KNOWN_ISSUES.md K38)")
+    # result.json keeps the premise as a record and its kind (version 3)
     assert possibilities == [{"arm": "s.py::getTasksToRefine_JEDI:1188", "rows": [
         {"status": None, "time": "2026-10-29 04:10:00", "f3": "made", "wrote": False,
-         "premises": ["a birth: it wrote as the row was made, at 2026-10-29 04:10:00; no run is read"]}]}]
+         "premises": [{"kind": "a-birth-no-run", "facts": {"time": "2026-10-29 04:10:00"}, "premise_kind": "not read"}]}]}]
     # a writer shown at a row, F3's writer open over the life: both are named
     code, text, possibilities, read = got["shown, life open"]
     assert code == "one-of" and read == ["running"]
@@ -6605,7 +6606,9 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
                     said = None
                 except rerun.Stop as e:
                     said = ["STOP", str(e), e.code]
-                branches = [{k: e[k] for k in ("arm", "row", "kind", "step", "code", "kinds")} | {"wrote": bool(e["result"])}
+                # the row is a record (version 3); rendered, as the fork's label says it
+                branches = [{k: e[k] for k in ("arm", "kind", "step", "code", "kinds")} | {"wrote": bool(e["result"])}
+                            | {"row": rerun.T.text(e["row"]) if e["row"] is not None else None}
                             | {"text": rerun.T.text(e["record"]) if e["record"] else None}
                             for e in r.branches]
                 return {"said": said, "ends": [f"END {said}" for _, said in r.ends], "code": r.end_code, "branches": branches,

@@ -219,6 +219,13 @@ TEMPLATES: dict[str, str] = {
     "from-the-stays-start": "from the stay's start to the move, {how}",
     "for-marks": "for {marks:rjoin=, }",
     "for-the-key-alone": "for the key alone (its mark holds none)",
+    # what an arm H2 left rests on (rerun.Premise)
+    "its-condition-not-read": "its condition {guard!r} not read",
+    "functions-between-not-read": "the {n} function(s) between the call and it not read",
+    "its-run-does-not-show": "its run does not show the line ran ({reason})",
+    "a-birth-no-run": "a birth: it wrote as the row was made, at {time}; no run is read",
+    "logs-not-searched-whole-over": "its logs were not searched whole over {why}: it may have written in what was not",
+    "no-line-holds-the-key": "no line of {logs:join=, } in the records holds {key}: its runs are not shown to name it",
     # L1's stay (rerun._stay_of, _stays_said)
     "a-statuslog-row-for": "a statuslog row for {observed!r}",
     "a-stay-beginning-at": "a stay of {observed!r} beginning at {since} (--since)",
