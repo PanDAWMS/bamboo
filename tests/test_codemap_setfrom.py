@@ -49,6 +49,8 @@ SOURCES = {
                 return ret[:-1] + " "
         """,
     PROXY: """\
+        import json
+
         from pandaserver.taskbuffer.JobSpec import JobSpec
 
 
@@ -56,12 +58,13 @@ SOURCES = {
             def refineTask(self, jediTaskID):
                 sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
                 self.cur.execute(sql, {":jediTaskID": jediTaskID})  # R1
-                (taskParams,) = self.cur.fetchone()
+                (text,) = self.cur.fetchone()
+                taskParams = json.loads(text)
                 self.checkParams(taskParams)
                 taskParams["checked"] = True
                 varMap = {}
                 varMap[":jediTaskID"] = jediTaskID
-                varMap[":taskParams"] = taskParams
+                varMap[":taskParams"] = json.dumps(taskParams)
                 sql = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
                 self.cur.execute(sql, varMap)  # W1
                 taskParams["late"] = True
@@ -109,8 +112,8 @@ SOURCES = {
             def getParams(self, jediTaskID):
                 sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
                 self.cur.execute(sql, {":jediTaskID": jediTaskID})
-                (taskParams,) = self.cur.fetchone()
-                return taskParams
+                (text,) = self.cur.fetchone()
+                return json.loads(text)
 
             def guardParams(self, jediTaskID):
                 params = self.getParams(jediTaskID)
@@ -119,7 +122,7 @@ SOURCES = {
 
             def saveParams(self, jediTaskID):
                 params = self.getParams(jediTaskID)
-                varMap = {":jediTaskID": jediTaskID, ":taskParams": params}
+                varMap = {":jediTaskID": jediTaskID, ":taskParams": json.dumps(params)}
                 sql = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
                 self.cur.execute(sql, varMap)  # W5
 
@@ -128,7 +131,8 @@ SOURCES = {
                 write = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
                 for jediTaskID in ids:
                     self.cur.execute(sql, {":jediTaskID": jediTaskID})
-                    (taskParams,) = self.cur.fetchone()
+                    (text,) = self.cur.fetchone()
+                    taskParams = json.loads(text)
                     if "reqID" in taskParams:
                         self.e = 1  # G6
                     taskParams["seen"] = True
@@ -139,7 +143,8 @@ SOURCES = {
             def batchParams(self, jediTaskID, ids):
                 sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
                 self.cur.execute(sql, {":jediTaskID": jediTaskID})
-                (taskParams,) = self.cur.fetchone()
+                (text,) = self.cur.fetchone()
+                taskParams = json.loads(text)
                 if "reqID" in taskParams:
                     self.f = 1  # G7
                 write = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
@@ -147,6 +152,57 @@ SOURCES = {
                     taskParams["n"] = one
                     varMap = {":jediTaskID": one, ":taskParams": taskParams}
                     self.cur.execute(write, varMap)  # W7
+
+            def refineSpec(self, jediTaskID):
+                sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
+                self.cur.execute(sql, {":jediTaskID": jediTaskID})
+                (text,) = self.cur.fetchone()
+                taskParams = json.loads(text)
+                self.checkSpec(taskParams)
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":taskParams"] = json.dumps(taskParams)
+                sql = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
+                self.cur.execute(sql, varMap)  # W8
+
+            def checkSpec(self, taskParams):
+                spec = {"status": taskParams["status"]}
+                if spec["status"] == "running":
+                    self.g = 1  # G8
+                spec["status"] = "done"
+                taskParams["specChecked"] = True
+
+            def statusJob(self, pandaID):
+                sql = "SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+                self.cur.execute(sql, {":PandaID": pandaID})
+                (jobStatus,) = self.cur.fetchone()
+                self.checkStatus(pandaID, jobStatus)
+
+            def checkStatus(self, pandaID, jobStatus):
+                if jobStatus == "running":
+                    self.h = 1  # G9
+                varMap = {":PandaID": pandaID, ":jobStatus": jobStatus}
+                sql = "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID"
+                self.cur.execute(sql, varMap)  # W9
+
+            def refinePart(self, jediTaskID):
+                sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
+                self.cur.execute(sql, {":jediTaskID": jediTaskID})
+                (text,) = self.cur.fetchone()
+                taskParams = json.loads(text)
+                self.checkPart(taskParams)
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":taskParams"] = json.dumps(taskParams)
+                sql = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
+                self.cur.execute(sql, varMap)  # W10
+
+            def checkPart(self, taskParams):
+                job = taskParams["job"]
+                if job["type"] == "template":
+                    self.k = 1  # G10
+                job["type"] = "done"
+                taskParams["partChecked"] = True
         """,
 }
 
@@ -157,6 +213,9 @@ ARMS = (
     ("guardParams", "G5"),
     ("loopParams", "G6"),
     ("batchParams", "G7"),
+    ("checkSpec", "G8"),
+    ("checkStatus", "G9"),
+    ("checkPart", "G10"),
 )
 
 
@@ -325,11 +384,56 @@ def test_the_changes_after_the_read_are_the_ones_before_the_write(
     (guard,) = [one for one in built.guard_froms if one.owner.endswith("::checkParams")]
     (way,) = guard.sources
     ref = f"{PROXY}::refineTask:{_line('W1')}:jedi_taskparams.taskparams"
-    assert [(one.kind, one.key, one.before, one.either) for one in way.after] == [
-        ("store", "'reqID'", [ref], []),
-        ("store", "'checked'", [ref], []),
+    assert [
+        (one.kind, one.key, one.name, one.before, one.either) for one in way.after
+    ] == [
+        ("store", "'reqID'", "taskParams", [ref], []),
+        ("store", "'checked'", "taskParams", [ref], []),
     ]
     assert not way.after_stops
+
+
+def test_the_changes_after_the_read_are_of_the_object_the_write_gives_back(
+    built: MapFragment,
+) -> None:
+    """checkPart's guard reads an item of the task's parameters: its store on the item and its store on the
+    parameters, each with the name it is read on, the item's key the guard's value's.  checkSpec's guard reads a map
+    built of a part of the parameters: its store on that map is not one the write gives back, its store on the
+    parameters is.  checkStatus's and keepJob's guards read a job's status no way decodes: a value not changed in
+    place, nothing after it -- not the map it is put in."""
+    (guard,) = [one for one in built.guard_froms if one.owner.endswith("::checkPart")]
+    (way,) = guard.sources
+    assert (way.kind, way.name, way.steps, way.paths) == (
+        "parameter",
+        "taskParams",
+        ["['job']"],
+        [],
+    )
+    ref = f"{PROXY}::refinePart:{_line('W10')}:jedi_taskparams.taskparams"
+    assert [(one.kind, one.key, one.name, one.before) for one in way.after] == [
+        ("store", "'type'", "job", [ref]),
+        ("store", "'partChecked'", "taskParams", [ref]),
+    ]
+    (guard,) = [one for one in built.guard_froms if one.owner.endswith("::checkSpec")]
+    (way,) = guard.sources
+    assert (way.kind, way.name, way.paths) == (
+        "parameter",
+        "taskParams",
+        ["['status']"],
+    )
+    ref = f"{PROXY}::refineSpec:{_line('W8')}:jedi_taskparams.taskparams"
+    assert [
+        (one.kind, one.key, one.name, one.before, one.either) for one in way.after
+    ] == [
+        ("store", "'specChecked'", "taskParams", [ref], []),
+    ]
+    assert not way.after_stops
+    for owner in ("checkStatus", "keepJob"):
+        (guard,) = [
+            one for one in built.guard_froms if one.owner.endswith(f"::{owner}")
+        ]
+        (way,) = guard.sources
+        assert not way.after and not way.after_stops
 
 
 def test_a_write_in_another_call_of_the_reader_meets_the_guard_nowhere(

@@ -3088,7 +3088,10 @@ class HeldSource(KeySource):
             "back: each place the object may be changed in place after the guard's read and before the write -- in "
             "the guard's function and each caller down from the one the read and the write meet in, from the read or "
             "the call on to the function's end; in that one, between its two calls -- each with the writes it can "
-            "run before.  What the write gives back is the end's value with *changes* and these."
+            "run before.  The object is the way's: in the guard's function the parameter the way ends at, and the "
+            "guard's name where its value is the object or a part of it reached by items and attributes; none where "
+            "no way decodes the column, a value not changed in place.  What the write gives back is the end's value "
+            "with *changes* and these."
         ),
     )
     after_stops: list["KeyStop"] = Field(
@@ -3129,6 +3132,14 @@ class AfterChange(HeldChange):
     in ``TaskRefinerBase.extractCommon`` after its guard ``'transPath' in taskParamMap``, before
     ``registerTaskInOneShot_JEDI`` writes the task's parameters back.  Whether it ran is the reader's."""
 
+    name: str = Field(
+        default="",
+        description=(
+            "The name holding the object where the change is read -- in the function of its first *via*, or of "
+            "*at* where *via* is empty: the guard's own, and *key* is of the guard's value; another, of the object "
+            "the write gives back there, the way's *steps* leading from it to the guard's value."
+        ),
+    )
     before: list[str] = Field(
         default_factory=list,
         description=(
@@ -5532,7 +5543,7 @@ KEY_STOPS: dict[str, str] = {
     "open": "the call at {at} may also land somewhere not read: {what}",
     "raises": "{name} goes no further than {at}: {what} on it",
     "no_meeting": "{name} and the read run in no one function's call: no function is on both ways",
-    "unnamed": "the read and {name} meet in {at}, where no name holds the object: {what}",
+    "unnamed": "between the read and {name}, {at} holds the object by no name: {what}",
     "write_first": "{name} runs only before the read in {at}",
     "no_bind": "{name} is filled by no assignment of the bind map the write at {at} runs with",
 }

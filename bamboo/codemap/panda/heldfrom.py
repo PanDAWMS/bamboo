@@ -37,7 +37,10 @@ What a guard read may be written back: a :class:`SetFrom` is read the same way, 
 guard's way ends at.  Where the two ways end at one statement's rows and column, the guard's way says what may change
 the object after the read and before the write (:attr:`HeldSource.after`): each way's calls down from the function
 both are on, the deepest -- in the guard's function from the read and in each caller between from its call, to their
-ends; in that function between its two calls -- each change with the writes it can run before.
+ends; in that function between its two calls -- each change with the writes it can run before.  The object is the
+way's: in the guard's function the parameter the way ends at, and the guard's name where its value is the object or
+a part of it reached by items and attributes, not one built of its parts; a column's value no way decodes is not
+changed in place, and its changes are not read.
 """
 
 from __future__ import annotations
@@ -1143,15 +1146,18 @@ def _chains(
     end: tuple[str, int, str],
     ends: dict[tuple[str, int, str], frozenset],
     values: bool,
-) -> tuple[list[tuple[_Hop, ...]], bool]:
+) -> tuple[list[tuple[_Hop, ...]], bool, bool]:
     """The calls each way of *sources* ending at *end* goes down through to the record's function, outermost first,
     each once; a change's stored value's way (*values*) is the value's and adds none, so a store whose value reaches
-    *end* ends one there.  At most :data:`_CHAINS`; whether more were left."""
+    *end* ends one there.  At most :data:`_CHAINS`; whether more were left; whether a way, any, went through a
+    decoder (the column's text made a container)."""
     found: list[tuple[_Hop, ...]] = []
     more = False
+    decoded = False
 
-    def ends_here(hops: tuple[_Hop, ...]) -> None:
-        nonlocal more
+    def ends_here(hops: tuple[_Hop, ...], decodes: bool) -> None:
+        nonlocal more, decoded
+        decoded = decoded or decodes
         if hops in found:
             return
         if len(found) >= _CHAINS:
@@ -1160,11 +1166,17 @@ def _chains(
         found.append(hops)
 
     def down(
-        sources: Iterable[HeldSource], hops: tuple[_Hop, ...], active: frozenset
+        sources: Iterable[HeldSource],
+        hops: tuple[_Hop, ...],
+        active: frozenset,
+        decodes: bool,
     ) -> None:
         for source in sources:
+            decodes_here = decodes or any(
+                one.gives == THROUGH_DECODED for one in source.through
+            )
             if _rows_end(source) == end:
-                ends_here(hops)
+                ends_here(hops, decodes_here)
                 continue
             if source.kind == KEY_PARAMETER:
                 key = (source.site_owner, source.site_line or 0, source.name)
@@ -1173,15 +1185,15 @@ def _chains(
                     for one in made.sources:
                         hop = reader.hop(key, one.route[-1]) if one.route else None
                         if hop is not None:
-                            down([one], (hop, *hops), active | {key})
+                            down([one], (hop, *hops), active | {key}, decodes_here)
             if values and any(
                 end in _source_ends(change.value, ends, values)
                 for change in source.changes
             ):
-                ends_here(hops)
+                ends_here(hops, decodes_here)
 
-    down(sources, (), frozenset())
-    return found, more
+    down(sources, (), frozenset(), False)
+    return found, more, decoded
 
 
 def _statement_holding(func: ast.AST, line: int) -> Optional[ast.stmt]:
@@ -1202,6 +1214,21 @@ def _held_name(hop: _Hop) -> Optional[str]:
     return hop.handed.id if isinstance(hop.handed, ast.Name) else None
 
 
+def _own_names(guard: GuardFrom, source: HeldSource) -> list[str]:
+    """The names *guard*'s function holds the object of *source*'s way by: the guard's own where its value is the
+    object or a part of it reached by items and attributes -- not an object built of its parts (*paths*), as
+    ``AtlasAnalTaskRefiner.doRefine``'s ``datasetSpec`` of ``taskParamMap`` --, and the parameter the way ends at."""
+    names = [] if source.paths else [guard.name]
+    if (
+        source.kind == KEY_PARAMETER
+        and source.site_owner == guard.owner
+        and source.name
+        and source.name not in names
+    ):
+        names.append(source.name)
+    return names
+
+
 def _after_reads(
     reader: _Reader, guards: Iterable[GuardFrom], sets: list[SetFrom]
 ) -> None:
@@ -1217,7 +1244,7 @@ def _after_reads(
     for write in sets:
         for end in _source_ends(write.sources, stored, True):
             if end[2] == write.column:
-                chains, more = _chains(reader, write.sources, end, stored, True)
+                chains, more, _ = _chains(reader, write.sources, end, stored, True)
                 by_end.setdefault(end, []).append((write, chains, more))
     for guard in guards:
         file, _, name = guard.owner.partition("::")
@@ -1230,7 +1257,10 @@ def _after_reads(
             for end in sorted(_source_ends([source], plain, False)):
                 if end not in by_end:
                     continue
-                chains, more = _chains(reader, [source], end, plain, False)
+                chains, more, decoded = _chains(reader, [source], end, plain, False)
+                if not decoded:
+                    # A column's value no way decodes is not changed in place.
+                    continue
                 for write, written, also in by_end[end]:
                     _after_pair(
                         reader,
@@ -1265,6 +1295,7 @@ def _after_pair(
 
     if more:
         stop("cut", here, f"{_CHAINS} ways a side")
+    own = _own_names(guard, source)
     for down in chains:
         lstack: list[tuple[str, Optional[_Hop]]] = [
             *((hop.owner, hop) for hop in down),
@@ -1290,15 +1321,16 @@ def _after_pair(
             i, j = meet
             lhop, whop = lstack[i][1], wstack[j][1]
             first: Optional[ast.stmt]
-            held: Optional[str]
+            held: list[str]
             if lhop is None:
-                m_file, m_func, first, held = file, func, test, guard.name
+                m_file, m_func, first, held = file, func, test, own
             else:
+                handed = _held_name(lhop)
                 m_file, m_func, first, held = (
                     lhop.file,
                     lhop.func,
                     _statement_of(lhop.call),
-                    _held_name(lhop),
+                    [handed] if handed is not None else [],
                 )
             last = (
                 _statement_of(whop.call)
@@ -1320,67 +1352,84 @@ def _after_pair(
             # the order they return -- to their ends, before the meeting function runs on to the write.
             levels: list[tuple[str, ast.AST, str, ast.stmt]] = []
             if lhop is not None:
-                levels.append((file, func, guard.name, test))
+                levels += [(file, func, name, test) for name in own]
+                if not own:
+                    stop("unnamed", here, guard.name)
                 for _, hop in reversed(lstack[i + 1 : -1]):
                     called = _statement_of(hop.call) if hop is not None else None
                     name = _held_name(hop) if hop is not None else None
                     if hop is not None and called is not None and name is not None:
                         levels.append((hop.file, hop.func, name, called))
+                    elif hop is not None and called is not None:
+                        stop(
+                            "unnamed",
+                            f"{hop.file}:{called.lineno}",
+                            ast.unparse(hop.handed) if hop.handed is not None else "",
+                        )
             for level_file, level_func, name, level_first in levels:
                 for change in reader.after(
                     level_file, level_func, name, level_first, None
                 ):
-                    _put(reader, source, change, ref, False)
-            if held is None:
+                    _put(reader, source, change, name, ref, False)
+            if not held:
                 stop(
                     "unnamed",
                     at,
                     ast.unparse(lhop.handed)
                     if lhop is not None and lhop.handed is not None
-                    else "",
+                    else guard.name,
                 )
                 continue
             # Run again after the write on a later pass, the name given no new value on the way round: a statement
             # binding it (a parameter's is the entry, no stop on the way round).
-            killers = [
-                one.site
-                for one in pathcond.bindings(m_func, held)
-                if not one.nested and isinstance(one.site, ast.stmt)
-            ]
-            for change in reader.after(m_file, m_func, held, first, last):
-                placed = change.via[0] if change.via else change.at
-                statement = _statement_holding(
-                    m_func, int(placed.rpartition(":")[2] or 0)
-                )
-                try:
-                    either = statement is not None and flow.runs_after(
-                        last, statement, killers
+            for name in held:
+                killers = [
+                    one.site
+                    for one in pathcond.bindings(m_func, name)
+                    if not one.nested and isinstance(one.site, ast.stmt)
+                ]
+                for change in reader.after(m_file, m_func, name, first, last):
+                    placed = change.via[0] if change.via else change.at
+                    statement = _statement_holding(
+                        m_func, int(placed.rpartition(":")[2] or 0)
                     )
-                except Exception:  # noqa: BLE001 -- as above
-                    either = True
-                _put(reader, source, change, ref, either)
+                    try:
+                        either = statement is not None and flow.runs_after(
+                            last, statement, killers
+                        )
+                    except Exception:  # noqa: BLE001 -- as above
+                        either = True
+                    _put(reader, source, change, name, ref, either)
     source.after_stops += [
         one for one in stops.values() if one not in source.after_stops
     ]
 
 
 def _put(
-    reader: _Reader, source: HeldSource, change: _Change, ref: str, either: bool
+    reader: _Reader,
+    source: HeldSource,
+    change: _Change,
+    name: str,
+    ref: str,
+    either: bool,
 ) -> None:
-    """*change* on *source*'s :attr:`HeldSource.after`, once, with the write *ref* it can run before."""
+    """*change*, read on *name*, on *source*'s :attr:`HeldSource.after`, once, with the write *ref* it can run
+    before."""
     for one in source.after:
-        if (one.at, one.kind, one.key, one.what, tuple(one.via)) == (
+        if (one.at, one.kind, one.key, one.what, tuple(one.via), one.name) == (
             change.at,
             change.kind,
             change.key,
             change.what,
             change.via,
+            name,
         ):
             break
     else:
         said = _change_said(change)
         one = AfterChange(
-            **{field: getattr(said, field) for field in HeldChange.model_fields}
+            name=name,
+            **{field: getattr(said, field) for field in HeldChange.model_fields},
         )
         source.after.append(one)
         reader.queue(one.value)
