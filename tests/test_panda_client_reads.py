@@ -374,6 +374,53 @@ async def test_a_grep_by_pattern_sends_the_pattern_in_place_of_strings():
     )
 
 
+async def test_a_grep_of_a_window_sends_since_and_until_and_refuses_what_the_server_would():
+    def route(endpoint, data):
+        if endpoint == "async_process/submit_grep_request":
+            return {"success": True, "message": "", "data": {"async_id": "g-3"}}
+        return _per_machine_poll(
+            ["m1"], [_row("m1", result=json.dumps({"records": [], "window": None}))]
+        )
+
+    ctx, calls = _patched(route)
+    with ctx:
+        await PC.grep_log(
+            "panda-DBProxy.log",
+            ["7383377087"],
+            machine="m1",
+            since="2026-11-02 15:14:55",
+            until="2026-11-02 15:14:56",
+            poll_seconds=0,
+        )
+        for name, kwargs in (
+            ("panda-DBProxy.log", {"tail_bytes": 1000, "since": "2026-11-02 15:14:55"}),
+            ("panda-DBProxy.log-20261102.gz", {"since": "2026-11-02 15:14:55"}),
+            (
+                "panda-DBProxy.log",
+                {"until": "2026-11-02 15:14:56", "whole_records": False},
+            ),
+            (
+                "panda-DBProxy.log",
+                {"since": "2026-11-02 15:14:56", "until": "2026-11-02 15:14:56"},
+            ),
+        ):
+            with pytest.raises(ValueError):
+                await PC.grep_log(name, ["k"], machine="m1", **kwargs)
+    assert [c for c in calls if c[0] == "async_process/submit_grep_request"] == [
+        (
+            "async_process/submit_grep_request",
+            {
+                "log_filename": "panda-DBProxy.log",
+                "fixed_strings": ["7383377087"],
+                "whole_records": True,
+                "machine_name": "m1",
+                "since": "2026-11-02 15:14:55",
+                "until": "2026-11-02 15:14:56",
+            },
+        )
+    ]
+
+
 def test_per_machine_tells_a_silent_machine_from_a_missing_file():
     response = _per_machine_poll(
         ["m1", "m2", "m3"],

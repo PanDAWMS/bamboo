@@ -807,6 +807,8 @@ async def grep_log(
     machine: str | None = None,
     whole_records: bool = True,
     tail_bytes: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
     max_matches: int | None = None,
     poll_seconds: float = 15.0,
     timeout_seconds: float = 3600.0,
@@ -830,12 +832,34 @@ async def grep_log(
         service, machine: exactly one; a service means every machine alive in it.
         tail_bytes: search only the end of a plain file; the answer's
             ``window`` says where the search started.
+        since, until: search only the bytes of a plain file that hold the
+            records from *since* (inclusive) to *until* (exclusive), UTC as
+            ``YYYY-MM-DD HH:MM:SS`` (panda-server 90f7c208).  The server
+            finds them by the records' stamps and widens them by 60 s for
+            records written out of order, so a live file of any size is read
+            in seconds; either alone runs to the file's end or from its
+            start.  Only with *whole_records*, not with *tail_bytes*, not on a
+            ``.gz``.  The answer's ``window`` is ``{"offset", "first_stamp",
+            "end", "end_stamp", "cut"}``: every record starting at or after
+            ``offset`` and before ``end`` was searched (``end`` null: to the
+            file's end as it was read); ``cut`` says the window stopped at
+            1 GiB, to be asked again from ``end_stamp``.  A machine whose
+            processor predates them greps the whole file, its ``window`` null.
 
     Returns:
         As :func:`wait_per_machine`; a refused submit as it came.
     """
     if (fixed_strings is None) == (pattern is None):
         raise ValueError("give exactly one of fixed_strings and pattern")
+    if since is not None or until is not None:
+        if tail_bytes is not None:
+            raise ValueError("since and until cannot be given together with tail_bytes")
+        if log_filename.endswith(".gz"):
+            raise ValueError("since and until are only for a plain file, not a .gz")
+        if not whole_records:
+            raise ValueError("since and until need whole_records")
+        if since is not None and until is not None and since >= until:
+            raise ValueError(f"since {since} is not before until {until}")
     params: dict[str, Any] = {"log_filename": log_filename}
     if pattern is not None:
         if not pattern:
@@ -851,6 +875,10 @@ async def grep_log(
     params.update({"whole_records": whole_records, **_target(service, machine)})
     if tail_bytes is not None:
         params["tail_bytes"] = int(tail_bytes)
+    if since is not None:
+        params["since"] = since
+    if until is not None:
+        params["until"] = until
     if max_matches is not None:
         params["max_matches"] = int(max_matches)
     return await _per_machine_request(
