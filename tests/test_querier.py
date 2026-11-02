@@ -1200,6 +1200,22 @@ def test_the_record_door_widens_once_past_an_end_and_reads_a_run_still_there_as_
     assert unlisted[0][0]["machine"] is None and "not in list_logs" in unlisted[0][1]
 
 
+def test_the_record_door_widens_a_second_where_the_recording_step_reads_a_cut_string_edge_past_the_window(tmp_path):
+    # one rule in two halves, two modules (the recording step imports no querier module): the door asks a second past
+    # an end of what was searched, and the recording step asks a cut string again EDGE past each end of the window
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            from bamboo.querier import recorded
+            from bamboo.scripts.panda.fieldtest import record
+            print(record.CONTINUE_SLACK == recorded.EDGE, recorded.EDGE)
+            """,
+        )
+    )
+    assert out.split()[0] == "True"
+
+
 def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_near_and_why(tmp_path):
     out = _ok(
         _run(

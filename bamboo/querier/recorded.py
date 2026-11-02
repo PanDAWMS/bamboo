@@ -40,7 +40,10 @@ run whose mark holds the key; a mark that does not (the setupper's stamp) is ask
 near the window (its records split where they stop for :data:`EDGE` or more, the pieces that reach the window +- EDGE)
 begins or ends within EDGE of an end of what was searched on its machine may go on past it: the window is widened past
 that end, once -- not past an end inside the window (a gap a new ask does not fill) nor past today's file's end (asking
-again only reads it later).  A run, or a pass of one (``Run.part``), still that near an end is read as cut there
+again only reads it later).  A second past the end is enough because the recording step is the other half of the
+rule: a file whose covers meet the window is read whole, and a string cut at 1 MB is asked again EDGE past each end of
+the window (``bamboo.scripts.panda.fieldtest.record.CONTINUE_SLACK``, a copy of EDGE a test holds equal), so the run
+is searched EDGE past the end it lay near.  A run, or a pass of one (``Run.part``), still that near an end is read as cut there
 (:attr:`Log.whole`; rule 8 reads no row missing from it): each by its own first and last record, so the passes inside
 a mark that spans days are whole.  Once, because a mark such as a task's ``jediTaskID`` spans days, and widening at
 every end would end only at the oldest file kept.  EDGE is the windows' slack, not a measured gap: a run whose records stop for longer
