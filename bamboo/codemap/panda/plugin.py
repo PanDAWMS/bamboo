@@ -44,6 +44,7 @@ from bamboo.codemap.models import (
 )
 from bamboo.codemap.panda import (
     endpoints,
+    flow,
     mustprints,
     objects,
     offrow,
@@ -668,6 +669,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # name, and the only route from an arm to the aggregate it decided on.
         self._consults = trigger.attach_calls(fragment.junctions, self._modules)
         lap("the trigger slice")
+        # The flow's premise, over the corpus: no with goes on past a raise in its body.
+        fragment.managers_read, fragment.swallowing_managers = flow.swallowing_managers(
+            (module.rel_path, module.tree) for module in self._modules
+        )
         # Who calls each owner, by what the receiver is declared to be -- the
         # other direction from ``calls``, and the one a transition's movers
         # are answered from.

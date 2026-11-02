@@ -1811,6 +1811,28 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     )
 
 
+def with_exits_are_read(fragment: MapFragment) -> GateResult:
+    """(i) No context manager of the corpus swallows what its ``with`` body raised.
+
+    The premise of the map's flow (:mod:`bamboo.codemap.panda.flow`, :mod:`~bamboo.codemap.panda.reaching`): a
+    raise in a ``with`` body goes to the handlers around the ``with``, never on past it.  A manager that swallows
+    -- a ``contextmanager`` handler around its ``yield`` that does not raise again, an ``__exit__`` that may
+    return true, ``contextlib.suppress`` -- opens that way, and a reader asking whether one call can run two
+    statements would rule out one that ran.  None in PanDA when it was written (pin m: ``DBProxyPool.get``'s 420
+    ``with`` statements run a ``try`` / ``finally``, the transactions raise again).
+    """
+    failures = [f"{one.file}:{one.line} {one.name} ({one.kind})" for one in fragment.swallowing_managers]
+    return GateResult(
+        gate="with-exits-are-read",
+        passed=not failures,
+        checked=fragment.managers_read,
+        unit="context managers",
+        question="does a context manager of the corpus swallow what its with body raised?",
+        finding="a with can go on past a raise in its body, which the map's flow does not read",
+        failures=failures,
+    )
+
+
 def carried_from_outside(fragment: MapFragment) -> list[tuple[str, str]]:
     """Subjects whose value is copied from a field the map does not explain.
 
@@ -2830,6 +2852,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(implicit_dunders_reach_no_write(fragment))
     if any(row.assigns or row.bindings or row.call_bindings or row.writes for row in fragment.reach_graph):
         results.append(object_records_resolve(fragment))
+    if fragment.managers_read:
+        results.append(with_exits_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

@@ -325,6 +325,8 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "call_stops": "the calls the build could not place -- see CallStop",
     "open_calls": "the calls the build placed open -- see MapFragment.open_calls",
     "calls_considered": _REPORT,
+    "swallowing_managers": "a check of the flow's premise over the corpus -- see SwallowingManager",
+    "managers_read": _REPORT,
     "row_key_sources": _REPORT,
     "key_froms": (
         "records beside the nodes, not nodes: where each row-naming bind of a write was filled from -- see KeyFrom; "

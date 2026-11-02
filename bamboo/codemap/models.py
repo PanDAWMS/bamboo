@@ -2677,6 +2677,27 @@ class CallStop(BaseModel):
     callee: str = Field(default="", description="The called expression as written, cut to 80 characters.")
 
 
+class SwallowingManager(BaseModel):
+    """A context manager of the corpus that may swallow what its ``with`` body raised.
+
+    The map's flow (:mod:`bamboo.codemap.panda.reaching`, :mod:`~bamboo.codemap.panda.flow`) does not read that
+    way on: a raise in a ``with`` body goes to the handlers around the ``with``, never past it.  So one such
+    manager makes the flow's "no way" answers unsafe -- a reader would rule out a statement that ran -- and the
+    ``with-exits-are-read`` gate fails on each.  Not a node: a check of the flow's premise over the corpus.
+    """
+
+    file: str
+    line: int
+    name: str = Field(description="The manager: its function or class, or the ``suppress`` call as written.")
+    kind: str = Field(
+        description=(
+            "``contextmanager``: a handler around its ``yield`` that may end without raising, or a ``return`` in a "
+            "``finally`` around it; ``exit``: an ``__exit__`` / ``__aexit__`` that may return what is not None or "
+            "False; ``suppress``: ``contextlib.suppress`` named in a ``with``."
+        )
+    )
+
+
 class ReadingStop(BaseModel):
     """One place the reading of one statement stopped, and what it stopped on.
 
@@ -3510,6 +3531,20 @@ class MapFragment(BaseModel):
         description=(
             "How many calls :attr:`call_stops` was drawn from: those naming a "
             "function or class this corpus defines, a logger's methods left out."
+        ),
+    )
+    swallowing_managers: list[SwallowingManager] = Field(
+        default_factory=list,
+        description=(
+            "The corpus's context managers that may swallow what a ``with`` body raised, which the map's flow does "
+            "not read (:class:`SwallowingManager`); none is the flow's premise."
+        ),
+    )
+    managers_read: int = Field(
+        default=0,
+        description=(
+            "How many context managers :attr:`swallowing_managers` was drawn from: the corpus's ``contextmanager`` "
+            "functions and ``__exit__`` / ``__aexit__`` methods, and each ``suppress`` a ``with`` names."
         ),
     )
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
