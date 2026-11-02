@@ -246,19 +246,21 @@ def test_evaluate_knows_what_the_env_holds_and_nothing_else(tmp_path):
                 E.evaluate("x == 3", env),
                 E.evaluate("job.status == 'failed'", env),
                 E.evaluate("y == 1", env) is E.UNKNOWN,
-                E.evaluate("x > 2", env) is E.UNKNOWN,
+                E.evaluate("x > 2", env),
+                E.evaluate("x > y", env) is E.UNKNOWN,
                 env.used,
             ]))
             """,
         )
     )
-    equal, by_other_spelling, unbound, ordered, used = json.loads(out)
+    equal, by_other_spelling, unbound, ordered, ordered_unbound, used = json.loads(out)
     assert equal is True
     # ``self.job`` and ``job`` are one row once the question binds both spellings to it
     assert by_other_spelling is True
     assert unbound is True
-    # only what can be decided exactly is: an ordering comparison stays unknown
+    # an ordering is decided as an equality is, where both sides are held, and stays unknown where one is not
     assert ordered is True
+    assert ordered_unbound is True
     assert used == {"x": "test", "job.status": "row"}
 
 
@@ -382,9 +384,9 @@ def test_what_a_local_holds_at_s_star_and_what_holes_decide_are_the_maps_reading
     assert entry == {"limit": 20, "n": -1}
     # only the entry reaches later's read; a parameter holds what the call handed; a dotted name is not a local
     assert unbound == {"status": False, "limit": False, "n": False, "given": False, "later": True, "self.later": False}
-    # a printed hole or a path's constant decides an equality, a signed literal and a pure helper's value included;
-    # an ordering does not, nor a call whose ** spread is not read (the evaluator does not decide either)
-    assert covered == [True, True, True, False, False]
+    # a printed hole or a path's constant decides an equality, a signed literal, a pure helper's value and an
+    # ordering; not a call whose ** spread is not read (the evaluator does not decide it)
+    assert covered == [True, True, True, True, False]
 
 
 def test_runs_are_cut_by_the_instance_token_and_the_key_is_a_whole_token(tmp_path):
