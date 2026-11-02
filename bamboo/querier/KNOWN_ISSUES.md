@@ -644,6 +644,44 @@ read; when PanDA answers a history held at a moment.
 
 ## Row values at a step's time (`held.py`)
 
+### K49. A guard over a column the rows file holds is read in it, by the map's ways and the direction of their changes
+
+Where H3 reads an attribute arm's guards and the run's values decide one not, it is read in the rows file's decoded
+column where its name's ways end there (`heldcol`; the analyzer handover's out/tpm/q0/q0-step0.md; tmaeno: "D1",
+2026-11-02 23:1x): `task_params`, `jedi_taskparams.taskparams` as fieldtest 5b6d2e9 fetches it.  The map gives the ways
+(GuardFrom and ParameterFrom), the changes of the object on each before the read (HeldChange) and after it, before a
+write gives the column back (`HeldSource.after`).  A key's presence (`'K' in m`) is read by the direction of each
+change: a store, an inner change or a `*` store adds a key or needs it there; a delete, a method, an escape or a call
+not read may remove one.  The rows hold K: it was there at the read on a way, unless something may add K after the
+read or remove it before; the rows lack K: it was absent, unless something may add K before or remove it after.
+Whether the pass wrote the column back is not read: either way these hold.  A key's value (`m['K']`, a literal) is read
+as the rows hold it where nothing changes K before or after.  A change counts unless a test on its way reads false: the
+tests deciding each call of its `via` and its `at`, early returns included, each read by the map's GuardFrom of that
+test the same way, two deep -- TaskRefinerBase 915's `*` store runs only past doPreProRefine 927's
+`"preproSpec" not in taskParamMap: return`, and no task case's rows hold preproSpec.  Each way is a route; one the run
+shows by a line only its own functions print (the functions holding the calls not every route goes through) is read
+alone, else every route is read and a key is decided where they agree.  Every answer rests on the column being read
+as the pass left it: no later write of it is read (a later refine's write-back, updateTaskParams_JEDI 1749).  Before
+(querier-q), H3 stopped at these guards with "a method the guard reads through (its conditions: ... not read)": 10 of
+m-cut2's 13 attribute stops there were extractCommon's guards over the task's parameters.
+
+Not read:
+- a test of another form, a part of the value (a way with *steps*), a way ending elsewhere, or whose changes after the
+  read were not read (an after-stop other than `no_meeting`): not read on that route;
+- a change after the read is counted on every route, whichever route its *via* goes through (more counted, never
+  fewer);
+- the route by the run's "refining with <class>" (TaskRefiner 282), which every m-cut2 task case prints: it needs the
+  map's record of JEDI's factory dispatch (its JD); until then a route is shown in 1 of the 10 (AtlasAnal's "tweaked
+  architecture"), and coreCount 53345980 stays read on one route only.
+
+*Shows:* in H3, "'<guard>' read in the rows file's task_params as fetched at <as_of>: True | False | UNKNOWN[, on
+<route>, the route its run shows] (KNOWN_ISSUES.md K49)" and each key's reading per route ("'K' in m True on <routes>
+(held as fetched[; <change> did not run: <test> at <line> read <value>])", "... not read on <routes> (may be changed
+by <changes>)"); the END "its guards hold: '<guard>' read in the rows file's task_params as fetched at <as_of>...: the
+column as the pass left it, no later write of it read"; a stop's condition "'<guard>' not read (<each key per route>)".
+*Revisit:* when the map records JEDI's factory dispatch (JD); when another column is fetched decoded into the rows file
+(`HELD`).
+
 ### K22. A row value read at another time than the step's run is not read
 
 The rows file holds the row as it was read (`as_of`, days after the case), and a step reads the row as it was
@@ -773,8 +811,12 @@ the line ran; it has no guard | its guards hold in the rows' values), at <time>[
 object's life <t>" (result.json's possibility rows carry `f3`: made, run, span or open); a stop "every writer of
 <subject> on a history row of the object, a birth or marking its runs by the object's key ... (k of n not: K37)",
 "the object's life, to ask <arms> over: <why>", "when the row was made, for the birth <arm> ...", "a writer of
-<subject> in the map", or at H3 "a method the guard reads through (its conditions: '<condition>' not read)" or "a run
-that shows <arm> ran, to read its guards in (by elimination; its conditions: ...)".
+<subject> in the map", or at H3 "the values its guard reads at its run (its conditions: '<condition>' not read)" (a
+guard through no method; one over a column the rows file holds is read there, K49), "a method the guard reads through
+(...)" (one through a method, read on at H4) or "a run that shows <arm> ran, to read its guards in (by elimination; its
+conditions: ...)".  A status's H3 reads no guard's values: through no method it stops at "the values its guard reads at
+its run", and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'" (both "a method
+the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
 marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
 row into its spec (getTasksToRefine_JEDI and the like) is told apart.

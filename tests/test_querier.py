@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "asked", "attr_time", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
+    "asked", "attr_time", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "heldcol", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
 ]
 
@@ -1330,6 +1330,7 @@ def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_n
             TOK, LATE, EARLY = "PandaID=12345", ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), ("2026-09-28 06:30:00", "2026-09-28 06:45:00")
             run = [{**line("08:31:10", "start 12345", TOK), "offset": 10}, {**line("08:31:14", "end", TOK), "offset": 20}]
             early = [{**line("06:42:00", "start 12345", TOK), "offset": 10}, {**line("06:46:00", "end", TOK), "offset": 20}]
+            near = [{**line("08:40:10", "start 12345", TOK), "offset": 10}, {**line("08:50:50", "end", TOK), "offset": 20}]
             oldest = {**BEFORE, "covers": [None, "2026-09-28 06:50:00"], "records": []}
 
             def described(window, *files):
@@ -1349,11 +1350,21 @@ def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_n
                 described(EARLY, oldest, {**TODAY, "records": early}),
                 runs_for(log, "12345")[0].describe(),
                 described(LATE, {**TODAY, "records": run}),
+                # today's file read over the asks' windows (covers_to): a run near where the read stopped is asked
+                # past it; one near the time the file was asked is read as cut
+                described(LATE, {**TODAY, "margin_s": 0, "covers_to": "end_stamp", "covers": ["2026-09-28 06:40:00", "2026-09-28 08:51:00"],
+                                 "records": near}),
+                described(LATE, {**TODAY, "margin_s": 0, "covers_to": "asked", "covers": ["2026-09-28 06:40:00", "2026-09-28 08:51:00"],
+                                 "records": near}),
             ]))
             """),
         )
     )
-    cut, cut_searched, asked_then, oldest_first, nothing_before, whole = json.loads(out)
+    cut, cut_searched, asked_then, oldest_first, nothing_before, whole, stopped, asked_now = json.loads(out)
+    assert [[{k: a[k] for k in ("name", "machine", "strings", "window")}, why] for a, why in stopped] == [[
+        {"name": "panda-x.log", "machine": "aipanda093.cern.ch", "strings": ["12345"],
+         "window": ["2026-09-28 08:21:12", "2026-09-28 08:51:00"]}, "a run within 10 min of an end of what was searched"]]
+    assert asked_now.endswith("ends at 2026-09-28 08:50:59: panda-x.log-20260929.gz was read to the time it was asked)")
     assert cut.endswith("(key on 2; read as cut: what was searched on aipanda093 ends at 2026-09-28 08:31:14: the answer of "
                         "panda-x.log-20260929.gz was cut at 1 MB after its last record)")
     assert cut_searched.endswith("(key on 2; read as cut: what was searched on aipanda093 ends at 2026-09-28 08:31:20: the "
@@ -6483,6 +6494,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                       env=None, unsearched=None):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.ends, r.touched, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], "", {}, [], {}, "outside"
+                r.data = {}  # no rows file: no held column (heldcol, K49)
                 r.base_env = lambda at=None: E.Env({})
                 chosen = Verdict(arm.candidate, arm.line, kind)
                 r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}) if env is None else env, chosen, via=via, row=row,
@@ -6514,6 +6526,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 "not read": asked("JediTaskSpec.transUses", ["1 == 1", "task.x", "1 == 2"], row),
                 "through a method": asked("JediTaskSpec.transUses", ["task.useScout()"], row),
                 "a status": asked("JediTaskSpec.status", [], row),
+                "a status, a guard through no method": asked("JediTaskSpec.status", ["task.x < 3"], row),
             }))
             """,
         )
@@ -6555,14 +6568,133 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
         "END JediTaskSpec.rescueTime='A' written last by extract:5 (shown in its run; its guards hold in the run's values), "
         "at 2026-10-29 00:49:09: the run"]
     assert (stood["said"], stood["wrote"]["via"], stood["wrote"]["row"]) == (None, {"owner": "pandajedi/o.py::runImpl", "line": 211}, None)
-    # a condition not read, or read false, is named where H3 stops
-    assert got["not read"]["said"] == ["STOP", "H3: a method the guard reads through (its conditions: 'task.x' not read, "
+    # a condition not read, or read false, is named where H3 stops: the values the guard reads, through no method
+    assert got["not read"]["said"] == ["STOP", "H3: the values its guard reads at its run (its conditions: 'task.x' not read, "
                                                "'1 == 2' read false)"]
     assert (got["not read"]["ends"], got["not read"]["wrote"]["line"]) == ([], 5)
     # a guard read through a method goes on to H4 as for a status
     assert got["through a method"]["said"] == ["SetBy", "useScout"]
-    # a status: H3 as before, and no wrote
-    assert got["a status"] == {"said": ["STOP", "H3: a method the guard reads through"], "ends": [], "wrote": None}
+    # a status: no wrote; with no guard, what made the arm run is its callers'; a guard through no method is read in
+    # no run's values for a status
+    assert got["a status"] == {"said": ["STOP", "H3: extract:5 has no guard of its own to read: what made it run is its "
+                                                "callers'"], "ends": [], "wrote": None}
+    assert got["a status, a guard through no method"]["said"] == [
+        "STOP", "H3: the values its guard reads at its run (its conditions: 'task.x < 3' not read)"]
+
+
+def test_a_guard_over_a_column_the_rows_file_holds_is_read_in_it_by_the_ways_and_the_direction_of_their_changes(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "base.py").write_text(textwrap.dedent("""\
+        class Base:
+            def extract(self, m):
+                if 'k' in m:
+                    self.x = m['k']
+                if m['v'] == 3:
+                    self.y = 1
+
+            def prepro(self, m):
+                if 'pre' not in m:
+                    return None
+                for k, v in list(m.items()):
+                    m[k] = v
+        """))
+    (corpus / "pandajedi" / "anal.py").write_text(textwrap.dedent("""\
+        class Anal:
+            def extract(self, m):
+                self.log.debug("anal only")
+                m['k'] = 1
+                Base.extract(self, m)
+        """))
+    (corpus / "pandajedi" / "gen.py").write_text(textwrap.dedent("""\
+        class Gen:
+            def extract(self, m):
+                del m['k']
+                Base.extract(self, m)
+        """))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import heldcol, mapdump, render as T
+
+            B, A, G, RUN = "pandajedi/base.py", "pandajedi/anal.py", "pandajedi/gen.py", "pandajedi/run.py"
+
+            def change(at, kind, key, via=()):
+                return N(at=at, kind=kind, key=key, via=list(via))
+
+            def rows(*route, changes=()):
+                return N(kind="rows", name="panda:x@9", site_owner="", column="jedi_taskparams.taskparams", steps=[],
+                         route=list(route), changes=list(changes), after=[], after_stops=[])
+
+            def param(owner, route, changes=(), after=(), stops=()):
+                return N(kind="parameter", name="m", site_owner=owner, column="", steps=[], route=list(route),
+                         changes=list(changes), after=list(after), after_stops=[N(kind=k) for k in stops])
+
+            # the '*' store runs only past prepro's early return, read by prepro's own GuardFrom
+            star = change(f"{B}:12", "store", "*")
+            guard = lambda line, test, after: N(owner=f"{B}::extract", test_line=line, test=test, name="m", arms=[line + 1],
+                                                sources=[param(f"{B}::extract", [], after=after, stops=["no_meeting"])])
+            mapdump._FRAGMENT[:] = [N(
+                guard_froms=[guard(3, "'k' in m", [star]), guard(5, "m['v'] == 3", [star]),
+                             N(owner=f"{B}::prepro", test_line=9, test="'pre' not in m", name="m", arms=[10],
+                               sources=[param(f"{B}::prepro", [], after=[star])])],
+                parameter_froms=[
+                    # straight from run.py, through Anal's extract (a store of k before), through Gen's (a delete)
+                    N(owner=f"{B}::extract", parameter="m", stops=[N(kind="raises")], sources=[
+                        rows(f"{RUN}:20"), param(f"{A}::extract", [f"{A}:5"], changes=[change(f"{A}:4", "store", "'k'")]),
+                        param(f"{G}::extract", [f"{G}:4"], changes=[change(f"{G}:3", "delete", "'k'")])]),
+                    N(owner=f"{A}::extract", parameter="m", stops=[], sources=[rows(f"{RUN}:20")]),
+                    N(owner=f"{G}::extract", parameter="m", stops=[], sources=[rows(f"{RUN}:20")]),
+                    N(owner=f"{B}::prepro", parameter="m", stops=[], sources=[rows(f"{RUN}:30")]),
+                ])]
+
+            def read(guard, value, arm=4, shown=None):
+                data = {"task_params": {"value": value, "as_of": "2026-10-29 14:00:00"}}
+                if shown is not None:
+                    # the run prints a line of Anal's extract alone
+                    heldcol.R.functions = lambda rel, name: [1]
+                    heldcol.R.function = lambda rel, name: (rel, name)
+                    heldcol.R.seen = lambda fn, run, mode: N(hits={3: [(0, 9, "")]} if fn == (A, "extract") else {})
+                got = heldcol.read(f"{B}::extract", guard, arm, data, run=shown, mode="positive")
+                return None if got is None else [repr(got.value), [T.text(k) for k in got.keys], got.shown,
+                                                 T.text(got.premise([guard]))]
+
+            print(json.dumps({
+                "held": read("'k' in m", {"k": 2}),
+                "not held": read("not ('k' in m)", {}),
+                "held, the store's test held too": read("'k' in m", {"k": 2, "pre": 1}),
+                "held, shown": read("'k' in m", {"k": 2}, shown="run"),
+                "a value": read("m['v'] == 3", {"v": 3}, arm=6),
+                "no GuardFrom": read("'z' in m", {"z": 1}),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    gone = "store * at base.py:12 did not run: \"'pre' not in m\" at base.py:9 read True"
+    premise = "read in the rows file's task_params as fetched at 2026-10-29 14:00:00{}: the column as the pass left it, no " \
+              "later write of it read (KNOWN_ISSUES.md K49)"
+    # the rows hold k: there at the read unless something may add it after or remove it before -- Gen's delete; the
+    # '*' store is not counted where prepro's early return is taken, read by prepro's own GuardFrom
+    assert got["held"] == ["UNKNOWN", [f"'k' in m True on run.py:20, anal.py:5 (held as fetched; {gone})",
+                                       "'k' in m not read on gen.py:4 (may be changed by delete 'k' at gen.py:3)"],
+                           "", "\"'k' in m\" " + premise.format("")]
+    # the rows lack k: absent unless something may add it before or remove it after -- Anal's store
+    assert got["not held"][:2] == ["UNKNOWN", ["'k' in m False on run.py:20, gen.py:4 (not held as fetched)",
+                                               "'k' in m not read on anal.py:5 (may be changed by store 'k' at anal.py:4)"]]
+    # where the early return is not taken, the '*' store may add k after the read
+    assert got["held, the store's test held too"][:2] == ["UNKNOWN", [
+        "'k' in m not read on run.py:20, anal.py:5 (may be changed by store * at base.py:12)",
+        "'k' in m not read on gen.py:4 (may be changed by store * at base.py:12, delete 'k' at gen.py:3)"]]
+    # the run shows Anal's route by a line only its own function prints: read on it alone
+    assert got["held, shown"] == ["True", [f"'k' in m True on anal.py:5 (held as fetched; {gone})"], "anal.py:5",
+                                  "\"'k' in m\" " + premise.format(", on anal.py:5, the route its run shows")]
+    # a value is read as fetched where nothing changes it on the way
+    assert got["a value"][:2] == ["True", [f"m['v'] 3 on run.py:20, anal.py:5, gen.py:4 (held as fetched; {gone})"]]
+    # a test over no name whose ways reach a held column is not this reading's
+    assert got["no GuardFrom"] is None
 
 
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):
@@ -6599,6 +6731,7 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
             def walk(left):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.ends, r.touched, r.row_facts, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], {}, "H2", {}, [], {}, "outside"
+                r.data = {}  # no rows file: no held column (heldcol, K49)
                 r.question, r.branches, r.end_code, r._walking = None, [], None, None
                 r.base_env = lambda at=None: envs.get(at, E.Env({}))
                 r._which_wrote = lambda *x: rerun.OneOf(left, 2)

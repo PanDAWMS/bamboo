@@ -115,6 +115,7 @@ from bamboo.querier import census as C
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
 from bamboo.querier import held as HD
+from bamboo.querier import heldcol as HC
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
@@ -1370,7 +1371,7 @@ class Wrote:
     question: object  # the run
     cands: list
     env: object
-    chosen: object
+    chosen: Verdict
     #: the caller's verdict where *chosen* is the arm of a writer that prints nothing, read on that caller's run at its
     #: call (:class:`StandIn`): the run's marks and the guard's record are the call's, the guards the arm's
     via: object = None
@@ -2380,9 +2381,27 @@ class Rerun:
                 # the rows' values alone, and no run is named
                 env = self.base_env(at=w.row["time"] if w.row else None)
             read = {g: _guard_read(g, env) for g in guards}
+            # a guard over a column the rows file holds, read in it by the map's ways and their changes (K49)
+            held = {}
+            for g, got in read.items():
+                if got is True or got is False:
+                    continue
+                h = HC.read(chosen.candidate.owner, g, chosen.line, self.data, question if shown else None, self.mode, env)
+                if h is None:
+                    continue
+                held[g] = h
+                self.say(f"{g!r} read in the rows file's {h.section}" + (f" as fetched at {h.as_of}" if h.as_of else "")
+                         + f": {h.value!r}" + (f", on {h.shown}, the route its run shows" if h.shown else "") + " (KNOWN_ISSUES.md K49)")
+                for k in h.keys:
+                    self.say(f"  {T.text(k)}")
+                if h.value is True or h.value is False:
+                    read[g] = h.value
             if branch and (false := [g for g, got in read.items() if got is False]):
                 # it did not write at this row: an older one it may have written at, else it is not among the arms
-                where = f"{site_fn.name}:{chosen.line}'s guard {false[0]!r} read false in the {'run' if shown else 'rows'}' values"
+                h = held.get(false[0])
+                where = (f"{site_fn.name}:{chosen.line}'s guard " + T.text(T.Said("held-read-false", {"guard": false[0], "section": h.section, "as_of": h.as_of}))
+                         if h is not None else
+                         f"{site_fn.name}:{chosen.line}'s guard {false[0]!r} read false in the {'run' if shown else 'rows'}' values")
                 if a.older:
                     nxt = a.older[0]
                     self.say(f"{where}{f' at {_row_said(w.row)}' if w.row else ''}: it did not write there; its next row, {_row_said(nxt.row)}")
@@ -2395,6 +2414,10 @@ class Rerun:
                 via = T.Said("called-at", {"fn": at_fn.name, "line": w.via.line}) if w.via is not None else ""
                 how = (T.Said("its-guards-hold-in-the-run" if shown else "its-guards-hold-in-the-rows") if guards
                        else T.Said("it-has-no-guard"))
+                if used := [g for g in guards if g in held]:
+                    premise = held[used[0]].premise(used)
+                    how = (T.Said("its-guards-hold-held", {"held": premise}) if len(used) == len(guards)
+                           else T.Said("its-guards-hold-with-held", {"how": how, "held": premise}))
                 said = T.Said("written-last-by", {"subject": q.subject, "observed": q.observed, "fn": site_fn.name,
                                                   "line": chosen.line, "via": via})
                 if shown:
@@ -2407,7 +2430,8 @@ class Rerun:
                     "holes": T.Said("not-searched-there", {"holes": holes}) if holes else "",
                 }))
                 return None
-            unread = [T.Said("guard-read-false" if got is False else "guard-not-read", {"guard": g})
+            unread = [T.Said("guard-read-false" if got is False else "guard-not-read-held" if g in held else "guard-not-read",
+                             {"guard": g} | ({"keys": held[g].keys} if got is not False and g in held else {}))
                       for g, got in read.items() if got is not True]
             # an arm left by elimination is read in no run: H4 would read its guard's method in a run not its own
             self.need(T.Said("a-run-that-shows-ran-to-read", {"fn_name": site_fn.name, "chosen_line": chosen.line, "left": left, "unread": list(unread)}), shown)
@@ -2422,8 +2446,14 @@ class Rerun:
                     ):
                         methods.append((n.func.attr, ast.unparse(n)))
         self.say(f"read through a method: {methods}")
+        if not methods:
+            # what H3 lacks is then the values the guard reads at the run (a status's are not read here), not a method's
+            if not guards:
+                self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
+            unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
+            self.need(T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})}), None)
         method = self.need(T.Said("a-method-the-guard-reads-through", {"conditions": T.Said("its-conditions", {"unread": unread}) if unread else ""}),
-                           methods[0][0] if methods else None)
+                           methods[0][0])
         return SetBy(method, reading, question, guard_record, env)
 
     def _wrote_said(self, w: Wrote) -> dict:
