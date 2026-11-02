@@ -1453,17 +1453,22 @@ def test_a_fork_runs_each_branch_from_the_same_state_and_a_stop_of_any_is_the_ru
                 stopped = ""
             except rerun.Stop as e:
                 stopped = str(e)
-            print(json.dumps([seen, stopped, [x for x in r.lines if x.startswith("====")], r.branches, r.hop]))
+            kept = rerun._records_json({"branches": r.branches})["branches"]
+            said = [rerun.T.text(rerun.T.from_json(b["record"])) if b["record"] else None for b in kept]
+            print(json.dumps([seen, stopped, [x for x in r.lines if x.startswith("====")], kept, said, r.hop]))
             """,
         )
     )
     # say() prints each line as it goes: the answer is the last
-    seen, stopped, marks, branches, hop = json.loads(out.splitlines()[-1])
-    # result.json's outcome.branches: each branch's end; the fork's stop is the fork's step
+    seen, stopped, marks, branches, said, hop = json.loads(out.splitlines()[-1])
+    # result.json's outcome.branches: each branch's end as a record; the fork's stop is the fork's step
     assert branches == [
-        {"label": "mover a", "kind": "end", "step": "S2", "text": None},
-        {"label": "mover b", "kind": "stop", "step": "S2", "text": "STOP S2: something only the second lacks", "code": None},
+        {"label": "mover a", "kind": "end", "step": "S2", "record": None},
+        {"label": "mover b", "kind": "stop", "step": "S2", "code": None, "record": {"kind": "stop-line", "facts": {"stop": {"said": {
+            "kind": "at-step", "facts": {"step": "S2", "what": "something only the second lacks"}}}}}},
     ]
+    # and reads back as the run said it
+    assert said == [None, "STOP S2: something only the second lacks"]
     assert hop == "S1"
     # the second branch starts from the state the fork was reached in, not from what the first learned
     assert [names for names, _ in seen] == ["first", "second"]
@@ -1471,6 +1476,43 @@ def test_a_fork_runs_each_branch_from_the_same_state_and_a_stop_of_any_is_the_ru
     assert marks == ["==== 1 of 2: mover a", "==== 1: reached the end", "==== 2 of 2: mover b",
                      "==== 2: STOP S2: something only the second lacks"]
     assert stopped == "1 of 2 branch(es) stopped: 2 (S2: something only the second lacks)"
+
+
+def test_a_stop_is_kept_as_a_record_taken_when_said_and_result_json_reads_back_as_the_run_said(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import render as T, rerun
+
+            unread = ["'a' not read", "'b' read false"]
+            conditions = T.Said("its-conditions", {"unread": unread})
+            unread.append("'c' not read")
+            stop = rerun.Stop(T.at("H3", T.Said("a-method-the-guard-reads-through", {"conditions": conditions})), "K1")
+            odd = T.Said("in-parens", {"what": ("x", 1)})
+            kept = rerun._records_json({"kind": "stop", "record": stop.said,
+                                        "branches": [{"label": "l", "record": T.Said("stop-line", {"stop": stop.said})}]})
+            print(json.dumps([str(stop), stop.args[0], T.text(odd), T.same_read_back(odd), kept,
+                              T.outcome_text(kept | {"hand_used": ["H1"]}),
+                              T.outcome_text({"kind": "end", "record": T.to_json(rerun._ends([("H1", T.Said("by-elimination")), ("H2", "x")]))}),
+                              T.outcome_text({"kind": "end", "record": rerun._ends([])})]))
+            """,
+        )
+    )
+    said, arg, odd, back, kept, stop_line, end_lines, no_end = json.loads(out)
+    # the list is taken when the sentence is said, as the f-string it replaces took it
+    assert said == arg == "H3: a method the guard reads through (its conditions: 'a' not read, 'b' read false)"
+    # a value JSON does not hold keeps its repr and str
+    assert odd == " (('x', 1))" and back is True
+    # result.json keeps the records, nested, no sentence
+    assert kept["record"] == {"kind": "at-step", "facts": {"step": "H3", "what": {"said": {
+        "kind": "a-method-the-guard-reads-through", "facts": {"conditions": {"said": {
+            "kind": "its-conditions", "facts": {"unread": ["'a' not read", "'b' read false"]}}}}}}}}
+    assert kept["branches"][0]["record"]["kind"] == "stop-line" and kept["branches"][0]["label"] == "l"
+    # and they read back as the run's last lines said them
+    assert stop_line == f"STOP {said}; HAND used 1 time(s) ['H1']"
+    assert end_lines == "END by elimination: \nEND x" and no_end is None
 
 
 def test_a_db_proxy_run_is_a_movers_only_when_its_mark_names_the_movers_method(tmp_path):
@@ -4829,7 +4871,8 @@ def test_the_result_says_the_outcome_with_its_code_and_a_run_that_does_not_finis
     )
     opened, ends, stop, files, times, read_at, none = json.loads(out.splitlines()[-1])
     assert opened == ["L2"]
-    assert ends == [["L2", "END lost on order: here"]]
+    # each END as said at its step (result.json's outcome.record renders "END " before it)
+    assert ends == [["L2", "lost on order: here"]]
     assert stop == ["L2: why it moved it only then", "K15"]
     # written whole, through a file renamed over it
     assert "result.json" in files and "result.json.tmp" not in files
@@ -5065,7 +5108,7 @@ def test_l3_counts_the_rows_held_ahead_at_the_move_by_the_orders_items_before_th
         record = N(text=sql.format(where, took), span="a.log@1", stamp="2026-01-05 00:00:00,000")
         try:
             r.ordered(rerun.Ordered(st, N(records=[record]), q))
-            return ["END", r.ends[-1][1]]
+            return ["END", f"END {r.ends[-1][1]}"]
         except rerun.Stop as e:
             return ["STOP", str(e), [a["rows"]["question"] | {"name": a["rows"]["name"]} for a in r.rows_asks.values()],
                     next((x for x in r.lines if "the row sorts by" in x), None)]
@@ -6435,7 +6478,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                     said = None if got is None else ["SetBy", got.method]
                 except rerun.Stop as e:
                     said = ["STOP", str(e)]
-                return {"said": said, "ends": [line for _, line in r.ends], "wrote": r.result.get("wrote")}
+                return {"said": said, "ends": [f"END {said}" for _, said in r.ends], "wrote": r.result.get("wrote")}
 
             row = {"status": "defined", "time": "2026-10-29 04:10:00.123456"}
             second = ("2026-10-29 00:49:09", "2026-10-29 00:49:09")
@@ -6558,9 +6601,10 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
                     said = None
                 except rerun.Stop as e:
                     said = ["STOP", str(e), e.code]
-                branches = [{k: e[k] for k in ("arm", "row", "kind", "step", "text", "code", "kinds")} | {"wrote": bool(e["result"])}
+                branches = [{k: e[k] for k in ("arm", "row", "kind", "step", "code", "kinds")} | {"wrote": bool(e["result"])}
+                            | {"text": rerun.T.text(e["record"]) if e["record"] else None}
                             for e in r.branches]
-                return {"said": said, "ends": [line for _, line in r.ends], "code": r.end_code, "branches": branches,
+                return {"said": said, "ends": [f"END {said}" for _, said in r.ends], "code": r.end_code, "branches": branches,
                         "heads": [line for line in r.lines if line.startswith("====") or "its next row" in line],
                         "wrote": r.result.get("wrote") is not None, "possibilities": len(r.result.get("possibilities") or [])}
 
