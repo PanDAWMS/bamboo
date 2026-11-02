@@ -31,6 +31,18 @@ def test_a_test_is_decided_with_what_is_known_and_short_circuits_past_what_is_no
     assert evaluate.evaluate("one in limit", _env(one="a", limit=3)) is UNKNOWN
 
 
+def test_an_ordering_and_a_chain_are_decided_as_python_makes_them() -> None:
+    """``nRow > 0`` with the count known; a chain is false where any pair is, whatever the others are; a comparison
+    Python cannot make is unknown."""
+    assert evaluate.evaluate("nRow > 0", _env(nRow=1)) is True
+    assert evaluate.evaluate("parse_result < 2", _env(parse_result=2)) is False
+    assert evaluate.evaluate("0 < nRow <= limit", _env(nRow=3, limit=3)) is True
+    assert evaluate.evaluate("0 < nRow <= limit", _env(nRow=4, limit=3)) is False
+    assert evaluate.evaluate("0 < nRow <= limit", _env(limit=3)) is UNKNOWN
+    assert evaluate.evaluate("other < nRow <= limit", _env(nRow=4, limit=3)) is False
+    assert evaluate.evaluate("nRow > 0", _env(nRow=None)) is UNKNOWN
+
+
 def test_a_call_is_looked_up_by_its_text_unless_the_reader_hands_the_function() -> None:
     """The map runs no corpus code: a call is what a printed hole of it says, or what the reader's function
     returns for it, with its arguments known."""
@@ -48,7 +60,7 @@ def test_a_test_is_decidable_where_the_evaluator_decides_it_once_the_named_value
     None
 ):
     """The question a reader asks before a run's values are read, on ``ev``'s own shapes: a printed hole known by
-    its text, a value held, a literal, a call the reader runs; not an ordering comparison, nor a ``**`` spread."""
+    its text, a value held, a literal, an ordering, a call the reader runs; not a ``**`` spread."""
 
     def node(text: str) -> ast.expr:
         return ast.parse(text, mode="eval").body
@@ -60,7 +72,9 @@ def test_a_test_is_decidable_where_the_evaluator_decides_it_once_the_named_value
     env.put("job.status", "done", "printed")
     assert evaluate.evaluate(both, env) is False
     assert not evaluate.decidable(node("job.status == other"), set(), env)
-    assert not evaluate.decidable(node("nJobs < limit"), {"nJobs"}, env)
+    assert evaluate.decidable(node("nJobs < limit"), {"nJobs"}, env)
+    assert evaluate.decidable(node("0 < nJobs <= limit"), {"nJobs"}, env)
+    assert not evaluate.decidable(node("nJobs < other"), {"nJobs"}, env)
     assert evaluate.decidable(node("twice(n) in [2, 4]"), {"n"}, env)
     assert not evaluate.decidable(node("twice(**opts)"), {"opts"}, env)
     env.put("opts", {"value": 1}, "printed")

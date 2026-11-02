@@ -74,6 +74,10 @@ _COMPARE = {
     ast.NotIn: lambda a, b: a not in b,
     ast.Is: operator.is_,
     ast.IsNot: operator.is_not,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
 }
 
 #: A value :func:`_holds` cannot read.
@@ -519,15 +523,23 @@ def _holds(test: ast.expr, bound: dict[str, object]) -> Optional[bool]:
         if any(result is stop for result in results):
             return stop
         return (not stop) if all(result is (not stop) for result in results) else None
-    if isinstance(test, ast.Compare) and len(test.ops) == 1:
-        left, right = _known(test.left, bound), _known(test.comparators[0], bound)
-        compare = _COMPARE.get(type(test.ops[0]))
-        if compare is None or left is _UNKNOWN or right is _UNKNOWN:
-            return None
-        try:
-            return bool(compare(left, right))
-        except TypeError:
-            return None
+    if isinstance(test, ast.Compare):
+        # As evaluate.ev reads a comparison: a chain is each pair in turn, false where any pair is.
+        left = _known(test.left, bound)
+        pending = False
+        for op, comparator in zip(test.ops, test.comparators, strict=True):
+            right = _known(comparator, bound)
+            compare = _COMPARE.get(type(op))
+            if compare is None or left is _UNKNOWN or right is _UNKNOWN:
+                pending = True
+            else:
+                try:
+                    if not compare(left, right):
+                        return False
+                except TypeError:
+                    pending = True
+            left = right
+        return None if pending else True
     if (
         isinstance(test, ast.Call)
         and isinstance(test.func, ast.Attribute)

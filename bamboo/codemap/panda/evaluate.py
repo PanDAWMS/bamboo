@@ -12,8 +12,10 @@ the values are the caller's, and each carries where it came from.
   status alone.
 * **Literals fold.**  ``-1`` is a value, as :func:`ast.literal_eval` reads
   it; a list, tuple or set of known values is the list of them.
-* **A comparison Python cannot make is unknown**, not an error:
-  ``None in 3`` says nothing of the run.
+* **Comparisons are Python's.**  ``==``, ``in``, ``is``, the orderings and a
+  chain of them (``0 < nRow <= limit``, false where any pair is); one Python
+  cannot make is unknown, not an error: ``None in 3`` or ``None > 0`` says
+  nothing of the run.
 * **A call is the reader's.**  The map runs no code of the corpus.  A call is
   looked up by its text, as a printed hole of it would be put
   (``str(self.job.altStgOutFileList())``), unless the reader hands a function
@@ -59,6 +61,10 @@ _COMPARE: dict[type, Callable[[Any, Any], Any]] = {
     ast.NotIn: lambda a, b: a not in b,
     ast.Is: lambda a, b: a is b,
     ast.IsNot: lambda a, b: a is not b,
+    ast.Lt: lambda a, b: a < b,
+    ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b,
+    ast.GtE: lambda a, b: a >= b,
 }
 
 
@@ -201,15 +207,26 @@ def ev(node: ast.AST, env: Env) -> Any:
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         value = ev(node.operand, env)
         return UNKNOWN if value is UNKNOWN else (not value)
-    if isinstance(node, ast.Compare) and len(node.ops) == 1:
-        compare = _COMPARE.get(type(node.ops[0]))
-        left, right = ev(node.left, env), ev(node.comparators[0], env)
-        if compare is None or left is UNKNOWN or right is UNKNOWN:
-            return UNKNOWN
-        try:
-            return compare(left, right)
-        except TypeError:
-            return UNKNOWN
+    if isinstance(node, ast.Compare):
+        # A chain is each pair in turn, as Python makes it: false where any pair is.
+        left = ev(node.left, env)
+        pending = False
+        result: Any = True
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
+            compare = _COMPARE.get(type(op))
+            right = ev(comparator, env)
+            if compare is None or left is UNKNOWN or right is UNKNOWN:
+                pending = True
+            else:
+                try:
+                    result = compare(left, right)
+                except TypeError:
+                    pending = True
+                else:
+                    if not result:
+                        return result
+            left = right
+        return UNKNOWN if pending else result
     if isinstance(node, ast.Call):
         return _call(node, env)
     if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
@@ -223,7 +240,7 @@ def decidable(node: ast.AST, known: set[str], env: Env) -> bool:
 
     The shapes are :func:`ev`'s own, so a test said decidable here is one the evaluator decides once the values
     come: every part of a ``BoolOp`` (its short circuit hangs on values not yet read), a comparison :func:`ev`
-    makes (not an ordering one), a call the reader runs (:attr:`Env.call`) on decidable arguments.
+    makes, a chain's every part, a call the reader runs (:attr:`Env.call`) on decidable arguments.
     """
     text = text_of(node)
     if text in known or env.knows(text):
@@ -240,11 +257,8 @@ def decidable(node: ast.AST, known: set[str], env: Env) -> bool:
     if isinstance(node, ast.UnaryOp):
         return decidable(node.operand, known, env)
     if isinstance(node, ast.Compare):
-        return (
-            len(node.ops) == 1
-            and type(node.ops[0]) in _COMPARE
-            and decidable(node.left, known, env)
-            and decidable(node.comparators[0], known, env)
+        return all(type(op) in _COMPARE for op in node.ops) and all(
+            decidable(one, known, env) for one in (node.left, *node.comparators)
         )
     if isinstance(node, ast.Call):
         return (
