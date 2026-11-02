@@ -72,9 +72,9 @@ def test_score_reads_an_end_and_counts_each_hand_used():
 def test_a_run_without_a_result_of_this_version_is_not_scored():
     assert F.score(None)["terminal"] == "NONE"
     assert "did not finish" in F.score(None)["why"]
-    s = F.score(STOPPED | {"version": 4})
+    s = F.score(STOPPED | {"version": 5})
     assert s["terminal"] == "NONE"
-    assert s["why"] == "result.json version 4, this reads 1 or 2 or 3"
+    assert s["why"] == "result.json version 5, this reads 1 or 2 or 3 or 4"
     assert s["steps"] == [] and s["hand"] is None
 
 
@@ -150,6 +150,26 @@ def test_a_version_3_run_is_scored_as_version_2():
     v3 = STOPPED_2 | {"version": 3}
     v3["outcome"] = v3["outcome"] | {"branches": [branch]}
     s = F.score(v3)
+    assert (s["terminal"], s["step"], s["code"], s["record"]) == (
+        "STOP",
+        "H2",
+        "asks",
+        F.score(STOPPED_2)["record"],
+    )
+    assert "STOP H2 at-step: asks-left  [asks]" in _line_of(s)
+
+
+def test_a_version_4_run_is_scored_as_version_2():
+    mover = {
+        "owner": "m.py::f",
+        "premises": {
+            "window": {"held": True, "why": {"kind": "a-window", "facts": {}}}
+        },
+        "reasons": [{"code": "map-gap", "record": {"kind": "a-gap", "facts": {}}}],
+        "readings": [{"verdict": "by-key"}],
+        "gaps": [{"kind": "reader-gap", "file": "m.py", "line": 1}],
+    }
+    s = F.score(STOPPED_2 | {"version": 4, "movers": [mover]})
     assert (s["terminal"], s["step"], s["code"], s["record"]) == (
         "STOP",
         "H2",

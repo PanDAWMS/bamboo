@@ -110,9 +110,11 @@ DERIVED = re.compile(r'"derived_from":\s*"source-root:([^"]+)"')
 
 #: the shapes of result.json read here, agreed with the querier: 1 (2026-10-15) holds the outcome's English as
 #: ``text``; 2 (querier odata O1, 2026-11-02) holds a ``record`` in its place, the English rendered at read time;
-#: 3 (O2) holds the branches' and possibilities' premises, row and older as records too, which nothing here reads.
+#: 3 (O2) holds the branches' and possibilities' premises, row and older as records too, which nothing here reads;
+#: 4 (O3a) holds the movers' premises' whys and reasons as records, their readings' verdicts as tokens and the map's
+#: gaps, which nothing here reads either.
 #: 1 is read while a pair runs a querier that writes it (pin k's)
-RESULT_VERSIONS = (1, 2, 3)
+RESULT_VERSIONS = (1, 2, 3, 4)
 #: the files a run writes beside its out.txt
 RESULT, ASKS, ROWS_ASKS = "result.json", "asks.jsonl", "rows-asks.jsonl"
 #: what a run tree's querier says where it takes the rows asks' file
