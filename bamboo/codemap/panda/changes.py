@@ -237,13 +237,14 @@ def object_changes(
     func: ast.AST,
     name: str,
     first: ast.AST,
-    last: ast.stmt,
+    last: Optional[ast.stmt],
     bound: tuple = (),
 ) -> list[ObjectChange]:
     """Each place the object *name* holds in *func* of *file* may be changed in place after *first* -- the binding
-    giving it, ``func.args`` for a parameter's value -- and before the statement *last* reads it: a statement one
-    call can run between the two with no other binding of the name between (:func:`flow.runs_after`), or what it
-    runs.  *bound*: the classes ``self`` can be in *func* (:attr:`Target.bound`)."""
+    giving it, ``func.args`` for a parameter's value, a statement reading it -- and before the statement *last*
+    reads it, or to the function's end where *last* is None: a statement one call can run between the two with no
+    other binding of the name between (:func:`flow.runs_after`), or what it runs.  *bound*: the classes ``self``
+    can be in *func* (:attr:`Target.bound`)."""
     reading = _reading(calls)
     killers = [
         one.site
@@ -829,11 +830,12 @@ class _Reading:
         name: str,
         first: ast.AST,
         statement: Optional[ast.stmt],
-        last: ast.stmt,
+        last: Optional[ast.stmt],
         killers: list[ast.AST],
     ) -> bool:
-        """Whether one call can run *statement* after *first* and before *last*, no binding of *name* in *killers*
-        between; ``True`` where the flow cannot say (a tree without parent links, a binding it does not read)."""
+        """Whether one call can run *statement* after *first* and before *last* -- or at all after it, *last* None --
+        no binding of *name* in *killers* between; ``True`` where the flow cannot say (a tree without parent links, a
+        binding it does not read)."""
         if statement is None:
             return True
         key = (name, id(first), id(statement), id(last))
@@ -844,8 +846,8 @@ class _Reading:
                 start: ast.stmt = first  # type: ignore[assignment]
                 stops: list[ast.stmt] = killers  # type: ignore[assignment]
                 again = [*stops, start] if isinstance(start, ast.stmt) else stops
-                held = flow.runs_after(start, statement, stops) and flow.runs_after(
-                    statement, last, again
+                held = flow.runs_after(start, statement, stops) and (
+                    last is None or flow.runs_after(statement, last, again)
                 )
             except Exception:  # noqa: BLE001 -- a flow that cannot say keeps the change
                 held = True

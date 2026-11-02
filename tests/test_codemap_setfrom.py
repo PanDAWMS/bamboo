@@ -58,15 +58,18 @@ SOURCES = {
                 self.cur.execute(sql, {":jediTaskID": jediTaskID})  # R1
                 (taskParams,) = self.cur.fetchone()
                 self.checkParams(taskParams)
+                taskParams["checked"] = True
                 varMap = {}
                 varMap[":jediTaskID"] = jediTaskID
                 varMap[":taskParams"] = taskParams
                 sql = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
                 self.cur.execute(sql, varMap)  # W1
+                taskParams["late"] = True
 
             def checkParams(self, taskParams):
                 if "reqID" in taskParams:
                     self.a = 1  # G1
+                taskParams["reqID"] = 0
 
             def retryTask(self, jediTaskID, increase):
                 sql = "SELECT attemptNr,status,oldStatus FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID"
@@ -102,10 +105,59 @@ SOURCES = {
                 varMap[":jediTaskID"] = jediTaskID
                 sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID"
                 self.cur.execute(sql, varMap)  # W4
+
+            def getParams(self, jediTaskID):
+                sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
+                self.cur.execute(sql, {":jediTaskID": jediTaskID})
+                (taskParams,) = self.cur.fetchone()
+                return taskParams
+
+            def guardParams(self, jediTaskID):
+                params = self.getParams(jediTaskID)
+                if "prodSourceLabel" in params:
+                    self.d = 1  # G5
+
+            def saveParams(self, jediTaskID):
+                params = self.getParams(jediTaskID)
+                varMap = {":jediTaskID": jediTaskID, ":taskParams": params}
+                sql = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
+                self.cur.execute(sql, varMap)  # W5
+
+            def loopParams(self, ids):
+                sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
+                write = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
+                for jediTaskID in ids:
+                    self.cur.execute(sql, {":jediTaskID": jediTaskID})
+                    (taskParams,) = self.cur.fetchone()
+                    if "reqID" in taskParams:
+                        self.e = 1  # G6
+                    taskParams["seen"] = True
+                    varMap = {":jediTaskID": jediTaskID, ":taskParams": taskParams}
+                    self.cur.execute(write, varMap)  # W6
+                    taskParams["late"] = True
+
+            def batchParams(self, jediTaskID, ids):
+                sql = "SELECT taskParams FROM ATLAS_PANDA.JEDI_TaskParams WHERE jediTaskID=:jediTaskID"
+                self.cur.execute(sql, {":jediTaskID": jediTaskID})
+                (taskParams,) = self.cur.fetchone()
+                if "reqID" in taskParams:
+                    self.f = 1  # G7
+                write = "UPDATE ATLAS_PANDA.JEDI_TaskParams SET taskParams=:taskParams WHERE jediTaskID=:jediTaskID"
+                for one in ids:
+                    taskParams["n"] = one
+                    varMap = {":jediTaskID": one, ":taskParams": taskParams}
+                    self.cur.execute(write, varMap)  # W7
         """,
 }
 
-ARMS = (("checkParams", "G1"), ("retryTask", "G2"), ("keepJob", "G3"))
+ARMS = (
+    ("checkParams", "G1"),
+    ("retryTask", "G2"),
+    ("keepJob", "G3"),
+    ("guardParams", "G5"),
+    ("loopParams", "G6"),
+    ("batchParams", "G7"),
+)
 
 
 def _line(marker: str) -> int:
@@ -263,3 +315,52 @@ def test_a_bind_no_assignment_fills_is_a_stop(built: MapFragment) -> None:
     assert (written.column, written.value) == ("jedi_tasks.status", "bind")
     assert not written.sources
     assert [(one.kind, one.name) for one in written.stops] == [("no_bind", ":status")]
+
+
+def test_the_changes_after_the_read_are_the_ones_before_the_write(
+    built: MapFragment,
+) -> None:
+    """checkParams stores reqID after its guard reads the parameters; refineTask marks them checked before it writes
+    them back, and late after: the first two, each before the write, in the order they run."""
+    (guard,) = [one for one in built.guard_froms if one.owner.endswith("::checkParams")]
+    (way,) = guard.sources
+    ref = f"{PROXY}::refineTask:{_line('W1')}:jedi_taskparams.taskparams"
+    assert [(one.kind, one.key, one.before, one.either) for one in way.after] == [
+        ("store", "'reqID'", [ref], []),
+        ("store", "'checked'", [ref], []),
+    ]
+    assert not way.after_stops
+
+
+def test_a_write_in_another_call_of_the_reader_meets_the_guard_nowhere(
+    built: MapFragment,
+) -> None:
+    """guardParams and saveParams each call getParams: no one call reads for the guard and writes back."""
+    (guard,) = [one for one in built.guard_froms if one.owner.endswith("::guardParams")]
+    (way,) = guard.sources
+    assert not way.after
+    assert [(one.kind, one.name) for one in way.after_stops] == [
+        ("no_meeting", f"{PROXY}::saveParams:{_line('W5')}:jedi_taskparams.taskparams")
+    ]
+
+
+def test_a_change_runs_after_the_write_too_only_where_the_loop_keeps_the_object(
+    built: MapFragment,
+) -> None:
+    """loopParams reads each task's parameters anew on each pass: seen, and the map the write is handed (``*``, put
+    in ``varMap``), run before its write only, late after it only.  batchParams reads them once and writes them on
+    each pass, setting n and the map before: both also run after a write."""
+    (guard,) = [one for one in built.guard_froms if one.owner.endswith("::loopParams")]
+    (way,) = guard.sources
+    ref = f"{PROXY}::loopParams:{_line('W6')}:jedi_taskparams.taskparams"
+    assert [(one.kind, one.key, one.before, one.either) for one in way.after] == [
+        ("store", "'seen'", [ref], []),
+        ("escaped", "*", [ref], []),
+    ]
+    (guard,) = [one for one in built.guard_froms if one.owner.endswith("::batchParams")]
+    (way,) = guard.sources
+    ref = f"{PROXY}::batchParams:{_line('W7')}:jedi_taskparams.taskparams"
+    assert [(one.kind, one.key, one.before, one.either) for one in way.after] == [
+        ("store", "'n'", [ref], [ref]),
+        ("escaped", "*", [ref], [ref]),
+    ]

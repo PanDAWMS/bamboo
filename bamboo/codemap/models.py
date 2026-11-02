@@ -3081,6 +3081,20 @@ class HeldSource(KeySource):
             "handed on -- in the order run.  The end says what the value was; these, what may have been done to it."
         ),
     )
+    after: list["AfterChange"] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's way ending at a statement's rows that a :class:`SetFrom` of the same column writes "
+            "back: each place the object may be changed in place after the guard's read and before the write -- in "
+            "the guard's function and each caller down from the one the read and the write meet in, from the read or "
+            "the call on to the function's end; in that one, between its two calls -- each with the writes it can "
+            "run before.  What the write gives back is the end's value with *changes* and these."
+        ),
+    )
+    after_stops: list["KeyStop"] = Field(
+        default_factory=list,
+        description="Each such write the changes after the read were not read for, and why: :data:`KEY_STOPS`.",
+    )
 
 
 class HeldChange(BaseModel):
@@ -3108,6 +3122,24 @@ class HeldChange(BaseModel):
         description="What a store stores, read as a way is; empty for the other kinds and a computed store (``+=``).",
     )
     value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
+
+
+class AfterChange(HeldChange):
+    """A :class:`HeldChange` after a guard's read (:attr:`HeldSource.after`): ``taskParamMap["transPath"] = ...``
+    in ``TaskRefinerBase.extractCommon`` after its guard ``'transPath' in taskParamMap``, before
+    ``registerTaskInOneShot_JEDI`` writes the task's parameters back.  Whether it ran is the reader's."""
+
+    before: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The writes (:class:`SetFrom`, ``owner:statement:column``) it can run after the read and before, on one "
+            "pass of the function the two meet in."
+        ),
+    )
+    either: list[str] = Field(
+        default_factory=list,
+        description="Those of *before* it can also run after: a loop's later pass, with no new value of the name.",
+    )
 
 
 class KeyFrom(BaseModel):
@@ -5499,6 +5531,9 @@ KEY_STOPS: dict[str, str] = {
     "cycle": "{name} is reached again on its own way at {at}",
     "open": "the call at {at} may also land somewhere not read: {what}",
     "raises": "{name} goes no further than {at}: {what} on it",
+    "no_meeting": "{name} and the read run in no one function's call: no function is on both ways",
+    "unnamed": "the read and {name} meet in {at}, where no name holds the object: {what}",
+    "write_first": "{name} runs only before the read in {at}",
     "no_bind": "{name} is filled by no assignment of the bind map the write at {at} runs with",
 }
 
