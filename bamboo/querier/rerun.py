@@ -3845,7 +3845,7 @@ class Rerun:
                 blocking[arm.line] = [
                     g for g in read[arm.line][0]
                     if not E.read_elsewhere(g)
-                    and E._truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
+                    and E.truth(ast.parse(E.strip_annotation(g), mode="eval").body, fixed, env) is False
                 ]
             per_pass.append((by_exit, fixed, ways, blocking))
         by_exit, fixed, ways, blocking = per_pass[0]

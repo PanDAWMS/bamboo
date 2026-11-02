@@ -531,7 +531,7 @@ def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.En
     guards = [(g, f"{fn.name}:{stmt.lineno}") for g in pathcond.path_condition(stmt)] + callers_guards(fn)
     for guard, where in guards:
         asked = set(re.findall(rf"(?<![\w.])[\w.]+\.{re.escape(attr)}(?!\w)", guard))
-        hidden = E.Env(dict(env.values), dict(env.rows), env.table, {**env.stale, **{s: ASKED for x in asked for s in (x, env.canonical(x))}},
+        hidden = E.Env(values=dict(env.values), rows=dict(env.rows), table=env.table, stale={**env.stale, **{s: ASKED for x in asked for s in (x, env.canonical(x))}},
                        unread=env.unread, at=env.at)
         try:
             solved = E.solve(guard, True, hidden)
@@ -741,7 +741,9 @@ def judge(
                     v.kind = "excluded"
                     v.reasons.append(f"rule 3: runs inside the call at {site}, before {outer.records[hi].span}, when {subject} still showed another value")
             if subject and observed and env is not None:
-                own = E.Env(dict(env.values), dict(env.rows), env.table, dict(env.stale), unread=env.unread, at=env.at)
+                own = E.Env(
+                    values=dict(env.values), rows=dict(env.rows), table=env.table, stale=dict(env.stale), unread=env.unread, at=env.at
+                )
                 stable_holes([x for x in seens.values() if x.run is run], own, class_of(fn))
                 why = rewriter(fn, stmt, subject, observed, own)
                 if why:

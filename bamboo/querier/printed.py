@@ -1145,7 +1145,7 @@ class Walker:
     def truth(self, test: ast.expr, p: Path, env: E.Env) -> Any:
         """The test's value from the path's facts and *env*; E.UNKNOWN when they do not decide it."""
         try:
-            return E._truth(test, p.facts, env)
+            return E.truth(test, p.facts, env)
         except Exception:
             return E.UNKNOWN
 

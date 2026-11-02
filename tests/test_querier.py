@@ -290,6 +290,45 @@ def test_solve_settles_the_unknown_atom_the_outcome_forces(tmp_path):
     assert or_open == ["y == 1"]
 
 
+def test_the_evaluator_is_the_maps_and_the_querier_hands_it_the_rows_a_run_read(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast
+            import json
+            from bamboo.codemap.panda import evaluate as shared
+            from bamboo.querier import evaluate as E
+
+            E.PURE["twice"] = lambda x: 2 * x  # PURE not empty: no panda-server import
+            env = E.Env(rows={"self.job": "job", "job": "job"}, table={"job": {"maxAttempt": E.Value(3, "row")}})
+            copy = E.Env(values=dict(env.values), rows=dict(env.rows), table=env.table)
+            solved = E.solve("job.maxAttempt == -1", True, env)
+            print(json.dumps([
+                E.UNKNOWN is shared.UNKNOWN,
+                E.evaluate("self.job.maxAttempt == -1", env),
+                shared.decidable(ast.parse("job.maxAttempt == -1", mode="eval").body, set(), env),
+                E.evaluate("twice(self.job.maxAttempt) == 6", copy),
+                [solved.known, solved.consistent, solved.derived],
+            ], default=repr))
+            """,
+        )
+    )
+    same, signed, decidable, called, (known, consistent, derived) = json.loads(out)
+    assert same is True
+    # a signed literal is a value: the row's 3 is not -1 (the querier's own copy left the test unknown)
+    assert signed is False
+    # a row's field is known before its value is taken, as lookup will read it
+    assert decidable is True
+    # a copy made with keywords still runs the helpers read as pure
+    assert called is True
+    # and an outcome the row rules out is inconsistent, with nothing derived (the querier's own copy settled the
+    # test True and derived '-1' = 3)
+    assert known == {"job.maxAttempt == -1": False}
+    assert consistent is False
+    assert derived == {}
+
+
 def test_runs_are_cut_by_the_instance_token_and_the_key_is_a_whole_token(tmp_path):
     log = tmp_path / "panda-adder.log"
     log.write_text(
