@@ -74,18 +74,9 @@ def _is_value_call(node: ast.Call) -> bool:
 
 
 def _covered_with_calls(node: ast.AST, avail: set[str], state: dict) -> bool:
-    """printed.covered, and a call's value counts as known."""
-    if isinstance(node, ast.Call) and _is_value_call(node):
-        return True
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        return all(_covered_with_calls(e, avail, state) for e in node.elts)
-    if isinstance(node, ast.BoolOp):
-        return all(_covered_with_calls(v, avail, state) for v in node.values)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return _covered_with_calls(node.operand, avail, state)
-    if isinstance(node, ast.Compare) and len(node.ops) == 1:
-        return _covered_with_calls(node.left, avail, state) and _covered_with_calls(node.comparators[0], avail, state)
-    return _real_covered(node, avail, state)
+    """printed.covered, and a call's value counts as known: every value call in *node* is known by its text."""
+    calls = {ast.unparse(n) for n in ast.walk(node) if isinstance(n, ast.Call) and _is_value_call(n)}
+    return _real_covered(node, avail | calls, state)
 
 
 _real_covered = P.covered

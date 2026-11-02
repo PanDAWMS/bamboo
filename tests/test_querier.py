@@ -329,6 +329,64 @@ def test_the_evaluator_is_the_maps_and_the_querier_hands_it_the_rows_a_run_read(
     assert derived == {}
 
 
+def test_what_a_local_holds_at_s_star_and_what_holes_decide_are_the_maps_readings(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast
+            import json
+            import textwrap
+            from bamboo.codemap.panda import pathcond
+            from bamboo.querier import evaluate as E, printed as P
+
+            E.PURE["twice"] = lambda x: 2 * x  # PURE not empty: no panda-server import
+            tree = ast.parse(textwrap.dedent('''
+                def f(res, items, given):
+                    status = None
+                    if res:
+                        status, locked = res
+                    limit = 20
+                    n = -1
+                    for item in items:
+                        if status == "x" and limit > 3 and n == -1 and given and later:
+                            pass
+                    later = 1
+            '''))
+            pathcond.attach_parents(tree)
+            func = tree.body[0]
+            s_star = func.body[4].body[0]
+            names = ["status", "limit", "n", "given", "later", "self.later"]
+
+            def test(text):
+                return ast.parse(text, mode="eval").body
+
+            print(json.dumps([
+                P.entry_state(func, s_star, set(names)),
+                {name: P.unbound_before(func, s_star, name) for name in names},
+                [
+                    P.covered(test("n == -1"), {"n"}, {}),
+                    P.covered(test("status == 'x'"), set(), {"status": "x"}),
+                    P.covered(test("twice(n) == -2"), {"n"}, {}),
+                    P.covered(test("limit > 3"), {"limit"}, {}),
+                    P.covered(test("twice(**kw) == 2"), {"kw"}, {}),
+                ],
+            ]))
+            """,
+        )
+    )
+    entry, unbound, covered = json.loads(out)
+    # one literal every way binds last: 20 outside a loop that binds no limit, and a signed -1; the tuple under
+    # ``if res:`` binds status again, so None is one of two (the querier's own reading passed over the tuple, and
+    # dropped both literals)
+    assert entry == {"limit": 20, "n": -1}
+    # only the entry reaches later's read; a parameter holds what the call handed; a dotted name is not a local
+    assert unbound == {"status": False, "limit": False, "n": False, "given": False, "later": True, "self.later": False}
+    # a printed hole or a path's constant decides an equality, a signed literal and a pure helper's value included;
+    # an ordering does not, nor a call whose ** spread is not read (the evaluator does not decide either)
+    assert covered == [True, True, True, False, False]
+
+
 def test_runs_are_cut_by_the_instance_token_and_the_key_is_a_whole_token(tmp_path):
     log = tmp_path / "panda-adder.log"
     log.write_text(

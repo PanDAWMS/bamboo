@@ -31,6 +31,7 @@ from bamboo.codemap.panda.evaluate import (  # noqa: F401 -- the evaluator, read
     Solved,
     Value,
     atoms,
+    decidable,
     ev,
     evaluate,
     read_elsewhere,
