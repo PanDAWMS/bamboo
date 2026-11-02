@@ -44,6 +44,32 @@ def test_a_call_is_looked_up_by_its_text_unless_the_reader_hands_the_function() 
     assert evaluate.evaluate("twice(m) == 6", run) is UNKNOWN
 
 
+def test_a_test_is_decidable_where_the_evaluator_decides_it_once_the_named_values_come() -> (
+    None
+):
+    """The question a reader asks before a run's values are read, on ``ev``'s own shapes: a printed hole known by
+    its text, a value held, a literal, a call the reader runs; not an ordering comparison, nor a ``**`` spread."""
+
+    def node(text: str) -> ast.expr:
+        return ast.parse(text, mode="eval").body
+
+    env = Env(call={"twice": lambda value: value * 2}.get)
+    env.put("limit", 3, "given")
+    both = node('job.status == "running" and limit')
+    assert evaluate.decidable(both, {"job.status"}, env)
+    env.put("job.status", "done", "printed")
+    assert evaluate.evaluate(both, env) is False
+    assert not evaluate.decidable(node("job.status == other"), set(), env)
+    assert not evaluate.decidable(node("nJobs < limit"), {"nJobs"}, env)
+    assert evaluate.decidable(node("twice(n) in [2, 4]"), {"n"}, env)
+    assert not evaluate.decidable(node("twice(**opts)"), {"opts"}, env)
+    env.put("opts", {"value": 1}, "printed")
+    assert evaluate.evaluate("twice(**opts)", env) is UNKNOWN
+    assert not evaluate.decidable(node("other(n)"), {"n"}, env)
+    env.stale["limit"] = "bound again before the test"
+    assert not evaluate.decidable(node("limit"), set(), env)
+
+
 def test_a_printed_value_is_read_as_python_reads_its_repr_and_a_stale_one_is_unknown() -> (
     None
 ):

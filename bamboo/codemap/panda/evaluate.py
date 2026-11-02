@@ -19,6 +19,11 @@ the values are the caller's, and each carries where it came from.
   (``str(self.job.altStgOutFileList())``), unless the reader hands a function
   for its name (:attr:`Env.call`): a reader that has read a helper as pure
   -- the querier's ``DataServiceUtils.getDestinationSE`` -- runs it there.
+  A ``**`` spread is not read, so such a call is unknown.
+* **Decidable before the values** (:func:`decidable`).  Whether the test
+  will be decided once named expressions get their values -- a printed hole
+  is known by its text before its value is read -- on the evaluator's own
+  shapes, so the answer and the later evaluation cannot disagree.
 * **Solving backwards** (:func:`solve`).  A test whose outcome is known with
   some atoms unknown: every assignment of the unknown atoms is tried, and an
   atom that comes out the same in every assignment that reproduces the
@@ -118,6 +123,11 @@ class Env:
             return self.values[key].value
         return UNKNOWN
 
+    def knows(self, text: str) -> bool:
+        """Whether :meth:`lookup` gives *text* a value, without taking it; a reader extending one extends both."""
+        key = self.canonical(text)
+        return key in self.values and text not in self.stale and key not in self.stale
+
 
 def strip_annotation(text: str) -> str:
     """Drop the ``  [name := expr]`` a path condition carries for a bare local."""
@@ -146,6 +156,8 @@ def _call(node: ast.Call, env: Env) -> Any:
     run = env.call(name) if env.call is not None else None
     if run is None:
         return env.lookup(text_of(node))
+    if any(one.arg is None for one in node.keywords):
+        return UNKNOWN  # a ** spread: what it hands is not read
     args = [ev(one, env) for one in node.args]
     kwargs = {one.arg: ev(one.value, env) for one in node.keywords if one.arg}
     if any(one is UNKNOWN for one in [*args, *kwargs.values()]):
@@ -203,6 +215,48 @@ def ev(node: ast.AST, env: Env) -> Any:
     if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
         return env.lookup(text_of(node))
     return UNKNOWN
+
+
+def decidable(node: ast.AST, known: set[str], env: Env) -> bool:
+    """Whether :func:`ev` gives *node* a value whatever the expressions spelled in *known* hold, with what *env*
+    knows: the question a reader asks before the values are read -- a printed hole is known by its text first.
+
+    The shapes are :func:`ev`'s own, so a test said decidable here is one the evaluator decides once the values
+    come: every part of a ``BoolOp`` (its short circuit hangs on values not yet read), a comparison :func:`ev`
+    makes (not an ordering one), a call the reader runs (:attr:`Env.call`) on decidable arguments.
+    """
+    text = text_of(node)
+    if text in known or env.knows(text):
+        return True
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.UnaryOp) and not isinstance(node.op, ast.Not):
+        return _literal(node) is not UNKNOWN
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.BoolOp)):
+        return all(
+            decidable(one, known, env)
+            for one in (node.values if isinstance(node, ast.BoolOp) else node.elts)
+        )
+    if isinstance(node, ast.UnaryOp):
+        return decidable(node.operand, known, env)
+    if isinstance(node, ast.Compare):
+        return (
+            len(node.ops) == 1
+            and type(node.ops[0]) in _COMPARE
+            and decidable(node.left, known, env)
+            and decidable(node.comparators[0], known, env)
+        )
+    if isinstance(node, ast.Call):
+        return (
+            env.call is not None
+            and env.call(text_of(node.func)) is not None
+            and all(decidable(one, known, env) for one in node.args)
+            and all(
+                one.arg is not None and decidable(one.value, known, env)
+                for one in node.keywords
+            )
+        )
+    return False
 
 
 def evaluate(test: Union[str, ast.AST], env: Env) -> Any:
