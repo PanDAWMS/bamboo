@@ -221,6 +221,7 @@ async def test_a_rotated_file_covers_from_the_rotation_before_it_to_its_own_plus
     (f,) = r["machines"][SERVER[0]]["files"]
     # the machine rotated at 07:00:01 that day (its DBProxy's mtime), not at the adder's own 06:59:58
     assert f["covers"] == ["2026-10-13 07:11:35", "2026-10-14 07:10:01"]
+    assert f["covers_to"] == "rotation"
     assert f["margin_s"] == 600 and f["status"] == "answered"
     assert [x["offset"] for x in f["records"]] == [10]
 
@@ -318,7 +319,7 @@ async def test_an_empty_file_read_from_its_first_byte_covers_from_its_mtime(tmp_
     )
     (cur,) = r["machines"][SERVER[1]]["files"]
     assert cur["covers"] == ["2025-12-19 15:30:35", "2026-10-14 11:50:00"]
-    assert cur["covers_from"] == "unstamped"
+    assert cur["covers_from"] == "unstamped" and cur["covers_to"] == "asked"
     assert cur["status"] == "answered" and cur["error"] is None and cur["records"] == []
     # nothing more to read: asked once
     assert len([c for c in panda.calls if c[0] == "grep"]) == 1
@@ -357,7 +358,7 @@ async def test_the_current_file_is_read_over_its_asks_windows_and_covers_to_the_
     assert (
         fa["covers"] == fb["covers"] == ["2026-10-14 08:49:00", "2026-10-14 10:11:06"]
     )
-    assert fa["covers_from"] == "first_stamp"
+    assert fa["covers_from"] == "first_stamp" and fa["covers_to"] == "end_stamp"
     assert fa["since_until"] == ["2026-10-14 08:50:00", "2026-10-14 10:10:06"]
     assert [x["offset"] for x in fa["records"]] == [5]
     assert [x["offset"] for x in fb["records"]] == [6]
@@ -412,10 +413,10 @@ async def test_a_cut_past_the_asked_end_is_not_read_on(tmp_path):
     w = ("2026-10-14 10:00:00", "2026-10-14 10:00:00")
     _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])])
     assert len([c for c in panda.calls if c[0] == "grep"]) == 1
-    assert r["machines"][SERVER[0]]["files"][0]["covers"] == [
-        "2026-10-14 09:49:00",
-        "2026-10-14 10:10:30",
-    ]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    # the file goes on past the record the read stopped before
+    assert f["covers"] == ["2026-10-14 09:49:00", "2026-10-14 10:10:30"]
+    assert f["covers_to"] == "end_stamp"
 
 
 async def test_a_machine_whose_processor_predates_the_window_reads_the_whole_current_file(
@@ -434,6 +435,7 @@ async def test_a_machine_whose_processor_predates_the_window_reads_the_whole_cur
     (f,) = r["machines"][SERVER[0]]["files"]
     assert f["covers"] == ["2026-10-14 06:59:58", "2026-10-14 11:50:00"]
     assert f["covers_from"] == "rotation" and f["status"] == "answered"
+    assert f["covers_to"] == "asked"
     assert [x["offset"] for x in f["records"]] == [5]
 
 

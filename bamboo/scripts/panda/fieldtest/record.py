@@ -1178,23 +1178,25 @@ class Grepper:
 
 def window_covers(
     job: Job, listed_at: datetime.datetime
-) -> tuple[list[str | None] | None, str]:
-    """What the current file's reads covered, and from what: each chain's -- a read and those that went on from it
-    where it was cut at 1 GiB -- narrowed to what all of them read.
+) -> tuple[list[str | None] | None, str, str | None]:
+    """What the current file's reads covered, from what and to what: each chain's -- a read and those that went on
+    from it where it was cut at 1 GiB -- narrowed to what all of them read.
 
     A read that began at the file's first byte with a line older than the list is the file listed, whole: it covers
     from the rotation before it, as does a read with no window, which the machine's processor made of the whole
     file.  Reads that all began at the first byte and found no stamped line read a file that holds no record: it
     covers from its mtime, after which nothing was written to it (an empty file a machine's processes never log to,
     such as JediDBProxy's on a server machine).  Otherwise it covers from its first stamp; one with no stamp covers
-    nothing.  A chain covers to the record its last read stopped before, or to when that read was asked where it read
-    to the file's end."""
+    nothing.  A chain covers to the record its last read stopped before (``end_stamp``: the file goes on past it), or
+    to when that read was asked where it read to the file's end (``asked``: nothing more is there yet); at a tie the
+    first, which the querier's door widens past (its EDGE: a run near the end may go on, 2026-11-02)."""
     reads = job.reads
     if reads and all(r.offset == 0 and not r.first and not r.whole for r in reads):
-        return [
-            text(job.file.mtime),
-            text(min(r.asked for r in reads)),
-        ], "unstamped"
+        return (
+            [text(job.file.mtime), text(min(r.asked for r in reads))],
+            "unstamped",
+            "asked",
+        )
     starts: list[datetime.datetime | None] = []
     whole_all = True
     for r in reads:
@@ -1204,21 +1206,27 @@ def window_covers(
             starts.append(job.file.start)
             continue
         if not r.first:
-            return None, "first_stamp"
+            return None, "first_stamp", None
         t = stamp(r.first)
         whole = r.offset == 0 and t < listed_at
         whole_all = whole_all and whole
         starts.append(
             (job.file.start if job.file.start is not None else t) if whole else t
         )
-    ends = [stamp(r.end) if r.end else r.asked for r in reads if not r.cut]
+    ends = [
+        (stamp(r.end), "end_stamp") if r.end else (r.asked, "asked")
+        for r in reads
+        if not r.cut
+    ]
     if not starts or not ends:
-        return None, "first_stamp"
+        return None, "first_stamp", None
     known = [t for t in starts if t is not None]
-    return [
-        text(max(known)) if known else None,
-        text(min(ends)),
-    ], "rotation" if whole_all else "first_stamp"
+    end, covers_to = min(ends, key=lambda e: (e[0], e[1] != "end_stamp"))
+    return (
+        [text(max(known)) if known else None, text(end)],
+        "rotation" if whole_all else "first_stamp",
+        covers_to,
+    )
 
 
 async def run_jobs(grepper: Grepper, jobs: list[Job]) -> None:
@@ -1340,20 +1348,28 @@ def file_entry(
 ) -> dict:
     """One file of a record: what it covers and, read, the records of the ask's strings.
 
-    The current file not read covers from its rotation to when it was listed: not searched, so said."""
+    The current file not read covers from its rotation to when it was listed: not searched, so said.  ``covers_to``
+    says what its end is: a rotated file's rotation (with its margin), the record a read of the current file stopped
+    before (the file goes on past it), when it was asked (it read to the file's end), or the list."""
     covers_from = "mtime"
+    covers_to: str | None = "rotation"
     if f.kind != "current":
         covers = [text(f.start), text(f.end)]
     elif job and job.status == "answered":
-        covers, covers_from = window_covers(job, listed_at)
+        covers, covers_from, covers_to = window_covers(job, listed_at)
     else:
-        covers, covers_from = [text(f.start), text(listed_at)], "list"
+        covers, covers_from, covers_to = (
+            [text(f.start), text(listed_at)],
+            "list",
+            "list",
+        )
     # a grep that failed is the ask's when it held one of the ask's strings; the file's other greps answer the rest
     failed = sorted({job.failed[s] for s in strings & job.failed.keys()}) if job else []
     entry = {
         "file": f.name,
         "covers": covers,
         "covers_from": covers_from,
+        "covers_to": covers_to,
         # the window the current file was asked over (the API's since and until)
         "since_until": [text(t) for t in current_window(job)]
         if job and f.kind == "current"
