@@ -6,7 +6,8 @@ analyzer handover's out/odata/odata-design.md), so a rewording is an edit here a
 A fact is JSON (a string, a number, a list, None), another :class:`Said`, or a value JSON does not hold, kept as a
 :class:`Lit` (its ``repr`` and ``str``) so a template's ``!r`` and plain field render it as the walk wrote it.  A fact
 may still be a sentence a part makes whose own step comes later (a premise, a window's why): a string, rendered as it
-is.  A template is :meth:`str.format`'s, with one more spec: ``{x:join=SEP}`` joins a list's items' ``str``.
+is.  A template is :meth:`str.format`'s, with two more specs: ``{x:join=SEP}`` joins a list's items' ``str``,
+``{x:rjoin=SEP}`` their ``repr``.
 """
 
 from __future__ import annotations
@@ -58,6 +59,8 @@ class _Formatter(string.Formatter):
     def format_field(self, value: Any, format_spec: str) -> str:
         if format_spec.startswith("join="):
             return format_spec[len("join=") :].join(str(v) for v in value)
+        if format_spec.startswith("rjoin="):
+            return format_spec[len("rjoin=") :].join(repr(v) for v in value)
         return format(value, format_spec)
 
 
@@ -139,7 +142,7 @@ TEMPLATES: dict[str, str] = {
     "no-pass-at-the-window": "no pass of it at the window; {left}",
     "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}",
     "by-elimination": "by elimination: ",
-    "not-searched-there": "; not searched there: {holes}",
+    "not-searched-there": "; not searched there: {holes:join=; }",
     "a-method-the-guard-reads-through": "a method the guard reads through{conditions}",
     "its-conditions": " (its conditions: {unread:join=, })",
     "stops-at-a-terminal": "{label}:{line} stops at {terminal} ({detail}){loose}",
@@ -160,6 +163,76 @@ TEMPLATES: dict[str, str] = {
     "excluded-line": "excluded {stop}",
     "numbered": "{n} ({said})",
     "arm-label": "{arm} ({rows})",
+    # a try's row (rerun._row_said) and an arm's rows (rerun._at_rows)
+    "row-statuslog": "{status!r} {time}",
+    "row-made": "the row's making {time}",
+    "row-run": "a run of the key {time}",
+    "row-life": "the object's life {time}",
+    "at-rows": "{rows:join=, }",
+    "wrote-at": "wrote at {row}",
+    "may-have-at": "may have at {row}",
+    "wrote": "wrote",
+    "may-have": "may have",
+    # H3's end: what was written last, by which line, how and when
+    "written-last-by": "{subject}={observed!r} written last by {fn}:{line}{via}",
+    "called-at": ", called at {fn}:{line}",
+    "its-guards-hold-in-the-run": "its guards hold in the run's values",
+    "its-guards-hold-in-the-rows": "its guards hold in the rows' values",
+    "it-has-no-guard": "it has no guard",
+    "in-the-pass-of-the-row": "in the pass of the statuslog row {status!r} at {time}",
+    "at-time": "at {time}",
+    "in-window": "in {lo} .. {hi}",
+    "log-on": "{log} on {machines:join=, }",
+    "left-by-elimination": "by elimination",
+    "it-may-have": "it may have: {premises:join=; }",
+    "shown-to-write": "shown to write",
+    "guard-read-false": "{guard!r} read false",
+    "guard-not-read": "{guard!r} not read",
+    # a window's why (windows.Asking.why)
+    "window-at-transition": "the statuslog's {status!r} at {time}, {where}",
+    "on-the-rows-host": "on {host}, the row's host",
+    "on-every-machine-no-host": "on every machine (the row names no host)",
+    "rows-carry-no": "the statuslog rows carry no {column}",
+    "last-row-holds-another": "the last statuslog row ({status!r} at {time}) holds {column}={value!r}: written after it, and no row closes the window",
+    "first-row-no-creation": "the first statuslog row ({status!r} at {time}) holds {column}={value!r} and the row's creation time is not known",
+    "value-held": "{column}={value!r} {since} to the statuslog's {status!r} at {time}, on every machine (no row says which run wrote it)",
+    "after-the-row-holding": "after the statuslog's {status!r} at {time} ({column}={value!r})",
+    "from-the-creation": "from the row's creation at {created}",
+    "value-not-a-time": "{column}={value!r}, which its writers set to the time they run, is not a time",
+    "value-now": "{column}={value!r}, the time its writer ran: every writer of it writes the time it runs (the last write), on every machine",
+    "creation-not-known": "the row's creation time is not known",
+    "read-time-not-known": "when the value was read is not known",
+    "lifetime": "the object's life, from the row's creation at {lo} to when the value was read at {hi}, on every machine, for {strings:rjoin=, }",
+    "no-as-of": "the statuslog says no as_of (when it was read)",
+    "no-row-for": "the statuslog has no row for {observed!r}",
+    "last-part": "{observed!r} since {since}; from {bound} {span} to {end}",
+    "its-row-less": "its row less",
+    "as-of-less": "as_of less",
+    "the-move-less": "the move less",
+    "the-statuslogs-as-of": "the statuslog's as_of {as_of}",
+    "the-move-at": "the move {move}",
+    "rest-of": "{observed!r} since {since}; the rest of the window, from its row less {slack} to the last {span}, for a mover with no run of its own in those",
+    "hours": "{h} h",
+    "minutes": "{m} min",
+    "the-time-handed-for": "the time handed for {value}, on every machine",
+    "a-run-of-the-key-f3": "a run of {key} at {first}..{last} (F3), on every machine",
+    "from-the-stays-start": "from the stay's start to the move, {how}",
+    "for-marks": "for {marks:rjoin=, }",
+    "for-the-key-alone": "for the key alone (its mark holds none)",
+    # L1's stay (rerun._stay_of, _stays_said)
+    "a-statuslog-row-for": "a statuslog row for {observed!r}",
+    "a-stay-beginning-at": "a stay of {observed!r} beginning at {since} (--since)",
+    "one-stay-or-since": "one stay of {observed!r}, or --since naming the one asked: the statuslog holds {stays}",
+    "stays": "{n} stays: the first {first}, the last {last}, the longest that ended {longest}",
+    "stay-on": "{begins} (on)",
+    "stay-lasted": "{begins} ({hours:.2f} h)",
+    # census's stop (census.py)
+    "classes-define": "{n} classes define {method}: {owners!r}",
+    # a run's line (records.Run.said)
+    "run-line": "{where} token={token} {n} record(s) {first} .. {last} (key on {found}{cut}{asked})",
+    "log-at-machine": "{log}@{machine}",
+    "read-as-cut": "; read as cut: {cut}",
+    "asked-for-its-rows": "; asked for {method}'s rows and WARNING and above",
     "mover-label": "mover {owner}",
     "others-excluded": "; the other {n_excluded} arm(s) left excluded ({excluded:join=, })",
     "one-arm-ended": "{ends:join= / }{rests}{older}{others}",
@@ -183,7 +256,10 @@ TEMPLATES: dict[str, str] = {
     "a-make-call-whose-function-printed-the": "a make call whose function printed the object's name, in a run holding one of the job's rows and naming the job",
     "a-pass-of-at-the-move-to": "a pass of {owner}:{chosen_line} at the move, to read what moved it on in",
     "a-pass-of-before-the-one-that": "a pass of {func} before the one that moved it on at {q_before}: none from {since}, asked {asking_why} -- the delay is in what calls {func_2} on the row, not followed here (KNOWN_ISSUES.md K45)",
-    "a-pass-of-before-the-one-that-2": "a pass of {func} before the one that moved it on at {q_before}: none found from {since}, asked {asking_why}, and not ruled out: {q_unsure} (KNOWN_ISSUES.md K45)",
+    "a-pass-of-before-the-one-that-2": "a pass of {func} before the one that moved it on at {q_before}: none found from {since}, asked {asking_why}, and not ruled out: {q_unsure:join=; } (KNOWN_ISSUES.md K45)",
+    "a-pass-printing-no-key-not-found": "a pass printing no line with the key is not found",
+    "files-not-searched-all-the-window": "{files:join=, } not searched all the window",
+    "files-not-to-hand": "{files:join=, } not to hand",
     "a-pass-that-wrote-at-the-statuslog": "a pass that wrote {subject}={value!r} at the {of_rows} statuslog row(s) its writers' passes can write (none shows a writer's pass: KNOWN_ISSUES.md K38)",
     "a-print-of-s-text-and-binds": "a print of {where}'s text and binds in its function (the map's printed_by)",
     "a-run-of-at": "a run of {key} at {when}",
@@ -219,7 +295,7 @@ TEMPLATES: dict[str, str] = {
     "of-branch-es-stopped": "{n_stops} of {n_q_branches} branch(es) stopped: {stops:join=; }",
     "of-the-arm-s-left-stopped-on": "{n_unrecorded} of the {n_entries} arm(s) left stopped on what the records do not answer yet: {stopped:join=; }",
     "one-alternative-and-one-guard-against-it": "one alternative and one guard against it",
-    "one-arm-that-wrote-last-of-left": "one arm that wrote {subject}={value!r} last, of {n_arms} left: {said} (KNOWN_ISSUES.md K38)",
+    "one-arm-that-wrote-last-of-left": "one arm that wrote {subject}={value!r} last, of {n_arms} left: {said:join=; } (KNOWN_ISSUES.md K38)",
     "one-binding-of-in-every-pass": "one binding of {name} in every pass",
     "one-binding-of-the-key-for-the": "one binding of the key, for the same row, whose value is in the key set",
     "one-exit-every-pass-took": "one exit every pass took",

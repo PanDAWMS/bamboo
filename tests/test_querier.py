@@ -542,7 +542,8 @@ def test_the_windows_come_from_the_rows_or_say_why_not(tmp_path):
             from bamboo.querier import windows as W
 
             def w(a):
-                return [a.window, a.machine, a.why]
+                # the why is a record; rendered, as a stop says it
+                return [a.window, a.machine, str(a.why)]
 
             state = {"status": "failed", "time": "2026-09-28 19:41:08", "host": "aipanda093.cern.ch"}
             job = [{"status": "pending", "time": "2026-09-28 08:31:07", "host": "aipanda087.cern.ch"},
@@ -592,7 +593,8 @@ def test_h2_bounds_a_value_the_history_holds_by_the_rows_holding_it(tmp_path):
             from bamboo.querier import windows as W
 
             def w(a):
-                return [a.window, a.machine, a.why]
+                # the why is a record; rendered, as a stop says it
+                return [a.window, a.machine, str(a.why)]
 
             def rows(*sites):
                 times = ["2026-10-16 02:32:18", "2026-10-16 02:32:23", "2026-10-16 02:32:46"]
@@ -4319,13 +4321,15 @@ def test_a_late_question_asks_the_stay_it_names_and_stops_where_the_value_has_se
             states = [row("2026-10-19 04:01:59.100000", "toretry"), row("2026-10-19 04:01:59.200000", "exhausted"),
                       row("2026-10-29 04:02:22.726170", "finishing"), row("2026-10-29 09:33:01.581347", "toretry"),
                       row("2026-10-29 09:33:01.716796", "exhausted"), row("2026-10-29 11:14:23.613054", "toretry")]
+            # the requirement not met is a record; rendered, as the stop says it
+            said = lambda got: [got[0], str(got[1])]
             print(json.dumps([
                 _stay_of(states, "exhausted", "2026-10-29 09:33:01.716796")[0],
                 _stay_of(states, "exhausted", "2026-10-29 09:33:01.581347")[0],
-                _stay_of(states, "exhausted", None),
-                _stay_of(states, "finishing", None),
+                said(_stay_of(states, "exhausted", None)),
+                said(_stay_of(states, "finishing", None)),
                 _stay_of([row("2026-10-29 09:33:01.716796", "exhausted", ext=False)], "exhausted", "2026-10-29 09:33:01.716796")[0],
-                _stay_of(states, "running", None),
+                said(_stay_of(states, "running", None)),
             ]))
             """,
         )
@@ -6352,7 +6356,7 @@ def test_judgement_4_asks_a_late_movers_marks_over_its_stay_and_reads_its_passes
                 r.data, r.args = {"statuslog": {"states": []}}, N(observed="assigned", key="1", asks="asks.jsonl")
                 r.logs = N(needs_window=True, names=lambda files: [f for f in files if f in hand])
                 r.files_of = lambda owner, today, lines: today
-                run = N(token=mark, first="2026-10-29 09:00:00,000", last="2026-10-29 13:33:47,000", describe=lambda: "the run",
+                run = N(token=mark, first="2026-10-29 09:00:00,000", last="2026-10-29 13:33:47,000", describe=lambda: "the run", said=lambda: "the run",
                         machine="aipanda081", found_by=[0])
                 r.asked = []
                 r._ask = lambda key, names, asking, owners=None: (r.asked.append(asking) or ({"j.log": [run]}, list(missed), holes or {}))
@@ -6387,7 +6391,7 @@ def test_judgement_4_asks_a_late_movers_marks_over_its_stay_and_reads_its_passes
                     rerun.arms_of = lambda writers, owner, subject, observed: {}
                 try:
                     p = r._late_passes(q)
-                    said = [p.since, p.before, p.logs, r.asked[0].window, r.asked[0].strings, r.asked[0].why]
+                    said = [p.since, p.before, p.logs, r.asked[0].window, r.asked[0].strings, str(r.asked[0].why)]
                     try:
                         said.append(["exit", r.passes(p).exit_line])
                     except rerun.Stop as e:
@@ -6459,7 +6463,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
             # dev install (CI) has no pandaserver, and useScout is no pure function either way
             E.PURE.setdefault("<no pure function is read here>", None)
             run = N(log=N(name="panda-TaskRefiner.log"), machine="aipanda084.cern.ch", token="< jediTaskID=7 >", records=[0, 1],
-                    first="2026-10-29 04:10:00,100", last="2026-10-29 04:10:01,200", describe=lambda: "the run")
+                    first="2026-10-29 04:10:00,100", last="2026-10-29 04:10:01,200", describe=lambda: "the run", said=lambda: "the run")
             readings = [N(file="pandajedi/r.py", owner="pandajedi/r.py::extract")]
             arm = Verdict(Candidate("pandajedi/r.py", "extract", [5]), 5, "positive")
             call = Verdict(Candidate("pandajedi/o.py", "runImpl", [211]), 211, "positive")
@@ -6612,7 +6616,7 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
             x = [may("s", "put", 7, new, unshown), may("s", "put", 7, old, unshown)]
             # an arm shown to write, at a row an excluded one was newer than
             run = N(log=N(name="a.log"), machine="m", token="< jediTaskID=7 >", records=[0], first="2026-10-29 10:06:00,000",
-                    last="2026-10-29 10:06:01,000", describe=lambda: "the run")
+                    last="2026-10-29 10:06:01,000", describe=lambda: "the run", said=lambda: "the run")
             shown = rerun.Wrote(readings, run, [], E.Env({}), Verdict(Candidate("pandajedi/s.py", "put", [7]), 7, "positive"), row=old,
                                 window=(old["time"], old["time"]))
             y = [c, rerun.Possible("s.py::put:7", old, True, [], shown, branch=shown)]

@@ -30,6 +30,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
+from bamboo.querier import render as T
+
 #: the panda-server tree every reading here is taken from: ``PANDA_PIN``, a pinned copy (a ``git archive`` of the
 #: commit the logs were written by), so every run reads a tree no one edits.  Required: a default to a live tree
 #: would be read silently by a run that forgot the variable -- and once the stored map is of another commit than
@@ -485,18 +487,22 @@ class Run:
         kept = self.records[start:end]
         return Run(self.log, self.token, kept, [r for r in self.found_by if r in kept])
 
-    def describe(self) -> str:
-        """The run's line: where, its mark, its records' count and stamps; and, for a run a recorded search may have
-        cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
-        where = f"{self.log.name}@{self.machine.split('.')[0]}" if self.machine else self.log.name
+    def said(self) -> T.Said:
+        """The run's line as a record: where, its mark, its records' count and stamps; and, for a run a recorded search
+        may have cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
+        where = T.Said("log-at-machine", {"log": self.log.name, "machine": self.machine.split(".")[0]}) if self.machine else self.log.name
         cut = self.log.edges(self.machine, self.first, self.last) if self.log.edges is not None and self.machine else ""
         cut = self.log.partial.get((self.machine, self.token), cut)
         method = self.log.narrowed.get((self.machine, self.token))
-        asked = f"; asked for {method}'s rows and WARNING and above" if method else ""
-        return (
-            f"{where} token={self.token} {len(self.records)} record(s) "
-            f"{self.first} .. {self.last} (key on {len(self.found_by)}{'; read as cut: ' + cut if cut else ''}{asked})"
-        )
+        return T.Said("run-line", {
+            "where": where, "token": self.token, "n": len(self.records), "first": self.first, "last": self.last,
+            "found": len(self.found_by), "cut": T.Said("read-as-cut", {"cut": cut}) if cut else "",
+            "asked": T.Said("asked-for-its-rows", {"method": method}) if method else "",
+        })
+
+    def describe(self) -> str:
+        """:meth:`said`, rendered."""
+        return T.text(self.said())
 
 
 def runs_for(log: Log, key: str) -> list[Run]:
