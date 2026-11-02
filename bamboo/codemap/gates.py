@@ -36,6 +36,8 @@ from bamboo.codemap.models import (
     GAP_UNNODED,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
+    KEY_PARAMETER,
+    KEY_ROWS,
     RUN_KEY_TIME,
     FunctionPrintsNode,
     HistoryPair,
@@ -1833,6 +1835,58 @@ def with_exits_are_read(fragment: MapFragment) -> GateResult:
     )
 
 
+def _held_ways(fragment: MapFragment):
+    for guard in fragment.guard_froms:
+        for source in guard.sources:
+            yield f"{guard.owner}:{guard.test_line} {guard.name}", source
+    for parameter in fragment.parameter_froms:
+        for source in parameter.sources:
+            yield f"{parameter.owner}:{parameter.line} {parameter.parameter}", source
+
+
+def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
+    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a statement's rows names a read
+    site of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
+    names = {site.name for site in fragment.read_sites}
+    checked, failures = 0, []
+    for where, source in _held_ways(fragment):
+        if source.kind == KEY_ROWS:
+            checked += 1
+            if source.name not in names:
+                failures.append(f"{where}: {source.name}")
+    return GateResult(
+        gate="guard-rows-are-read-sites",
+        passed=not failures,
+        checked=checked,
+        unit="ways ending at rows",
+        question="does a way a guard's name holds end at the rows of a statement the map has no read site of?",
+        finding="a guard's name is said to hold a column of rows no read site records",
+        failures=failures,
+    )
+
+
+def guard_parameters_are_read(fragment: MapFragment) -> GateResult:
+    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a parameter has the
+    ParameterFrom of that function and parameter: the reader reads on there, and a missing one would end the way
+    unsaid."""
+    read = {(one.owner, one.line, one.parameter) for one in fragment.parameter_froms}
+    checked, failures = 0, []
+    for where, source in _held_ways(fragment):
+        if source.kind == KEY_PARAMETER:
+            checked += 1
+            if (source.site_owner, source.site_line, source.name) not in read:
+                failures.append(f"{where}: {source.site_owner}:{source.site_line} {source.name}")
+    return GateResult(
+        gate="guard-parameters-are-read",
+        passed=not failures,
+        checked=checked,
+        unit="ways ending at a parameter",
+        question="does a way a guard's name holds end at a parameter whose callers are not read?",
+        finding="a guard's way ends at a parameter with no record of what its callers hand it",
+        failures=failures,
+    )
+
+
 def carried_from_outside(fragment: MapFragment) -> list[tuple[str, str]]:
     """Subjects whose value is copied from a field the map does not explain.
 
@@ -2854,6 +2908,9 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(object_records_resolve(fragment))
     if fragment.managers_read:
         results.append(with_exits_are_read(fragment))
+    if fragment.guard_froms or fragment.parameter_froms:
+        results.append(guard_rows_are_read_sites(fragment))
+        results.append(guard_parameters_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

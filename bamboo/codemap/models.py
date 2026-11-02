@@ -2822,6 +2822,14 @@ KEY_CONSTANT = "constant"
 KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
 KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
+#: And where a way of a :class:`GuardFrom` or :class:`ParameterFrom`, read across calls, can end besides: an object
+#: a call builds of a corpus class (``JobSpec()``), a module's name, a call neither placed nor gone through, a fetch
+#: whose rows no statement of the function reads.
+KEY_OBJECT = "object"
+KEY_GLOBAL = "global"
+KEY_CALL = "call"
+KEY_DATABASE = "database"
+HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE)
 #: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`); the last, a flush call's term the method
 #: fills with values no argument of the call brings -- its own rows, a field of its own ``self``.
 KEY_NO_MAP = "no bind map"
@@ -2972,6 +2980,36 @@ class KeySource(BaseModel):
     )
     #: The walk's way to the bind, ``(kind, file, func, call)`` per step, for *reaches* (``sqlwrite._Landing``).
     _way: Optional[tuple] = PrivateAttr(default=None)
+
+
+class HeldSource(KeySource):
+    """Where one way a :class:`GuardFrom` or :class:`ParameterFrom` reads ends: a :class:`KeySource`, its *kind* one
+    of :data:`HELD_KINDS` and its *line* where the way ends, with what the way went through on the way to the read."""
+
+    steps: list[str] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: the part of what the way ends at that the value is, each step "
+            "as applied -- ``['tgtNumEventsPerJob']`` of the decoded task parameters, ``.taskSpec``, ``[*]`` an "
+            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value."
+        ),
+    )
+    through: list[str] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: each call outside the corpus the value went through as its one "
+            "positional argument, ``name file:line`` in the order run (``json.loads "
+            "pandajedi/jedirefine/RefinerUtils.py:34``).  Named, not read: whether it keeps the value is not said."
+        ),
+    )
+    route: list[str] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: each call of the corpus on it, ``file:line``, in the order the "
+            "value went -- one whose return the value is, and on a ParameterFrom's way last the caller's call that "
+            "hands it in."
+        ),
+    )
 
 
 class KeyFrom(BaseModel):
@@ -3549,6 +3587,8 @@ class MapFragment(BaseModel):
     )
     row_key_sources: list[RowKeySource] = Field(default_factory=list)
     key_froms: list[KeyFrom] = Field(default_factory=list)
+    guard_froms: list["GuardFrom"] = Field(default_factory=list)
+    parameter_froms: list["ParameterFrom"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5354,6 +5394,10 @@ KEY_STOPS: dict[str, str] = {
     "no_use": "no use of it in {at} or the calls it is handed to names a column",
     "failed": "reading its uses failed: {what}",
     "not_found": "{name} is not spelled in the statement at {at}",
+    "missed": "a call of {name} may not be placed: {what}",
+    "unbound": "{name} is read at {at} before a binding of it",
+    "cycle": "{name} is reached again on its own way at {at}",
+    "open": "the call at {at} may also land somewhere not read: {what}",
 }
 
 
@@ -5390,6 +5434,57 @@ class KeyStop(BaseModel):
 
     def said(self) -> str:
         return KEY_STOPS[self.kind].format(name=self.name, what=self.what, at=", ".join(self.at))
+
+
+class GuardFrom(BaseModel):
+    """What a name one test of a function reads holds, way by way, read back across calls -- for a reader deciding
+    the test with a run's values: the querier's H3 reading an arm's guards in the rows' values.
+
+    One per test on the way to a junction's arm (:func:`pathcond.tests_on`) and name it reads that is a parameter
+    or a local of the function; *arms* are the branches it is on the way to.  ``'reqID' in taskParamMap`` at
+    ``TaskRefinerBase.extractCommon`` 156 reads ``taskParamMap``, a parameter: its one source is kind ``parameter``,
+    and its :class:`ParameterFrom` says what the callers hand it.  Read by :mod:`bamboo.codemap.panda.heldfrom`:
+
+    - a local, each binding of it that can reach the read (:func:`pathcond.held_at`) a way of its own;
+    - a call's value, each return of each function the call is placed at, the callee's parameters read back at
+      the call (*route*); a call outside the corpus handed one positional argument, gone through (*through*);
+    - an item or attribute, its root's ways with the step (*steps*);
+    - ends where the function's own statement's rows hold it (``rows``, with the column), at a literal, a field of
+      ``self``, an object a corpus class builds, a module's name, a call not read, or a value not followed;
+      where a way could not be read, a stop.
+
+    So ``taskParamMap`` reaches three ways through ``runImpl`` 211: ``JEDI_TaskParams.taskParams`` read at
+    ``getTaskParamsWithID_JEDI`` 1407, ``''`` where no row came, ``None`` where it raised, each through
+    ``json.loads``.  Which way a run took, and whether the decoder kept the value, are the reader's.
+    """
+
+    owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
+    test_line: int = Field(description="The line of the test.")
+    test: str = Field(description="The test, as written (``'reqID' in taskParamMap``).")
+    name: str = Field(description="The name the test reads.")
+    arms: list[int] = Field(
+        default_factory=list, description="The lines of the junction branches the test is on the way to."
+    )
+    sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
+    stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
+
+
+class ParameterFrom(BaseModel):
+    """What each call placed at a function hands one of its parameters, read in the caller as :class:`GuardFrom`
+    reads a name -- once per function and parameter, so a way of a GuardFrom or another ParameterFrom ending at the
+    parameter (kind ``parameter``, *site_owner* and *site_line* the function's) points here.
+
+    Each source's *route* ends with the caller's call (``setSplitRule`` is handed ``None`` at
+    ``AtlasAnalTaskRefiner.py:249`` and the task's parameters at ``TaskRefinerBase.py:302``); a caller's parameter
+    is its own ParameterFrom, read on by the reader -- a chain of them, which the map does not cut.  A parameter no
+    call is placed at, a call that may not be placed, one a ``*`` or ``**`` fills: stops.
+    """
+
+    owner: str = Field(description="The function's owner (``file::name``).")
+    line: int = Field(description="The line of its ``def``.")
+    parameter: str
+    sources: list[HeldSource] = Field(default_factory=list)
+    stops: list[KeyStop] = Field(default_factory=list)
 
 
 class RunKey(BaseModel):

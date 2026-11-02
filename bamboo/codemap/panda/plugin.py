@@ -45,6 +45,7 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import (
     endpoints,
     flow,
+    heldfrom,
     mustprints,
     objects,
     offrow,
@@ -737,6 +738,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # The routes of calls on which each write never runs, its records all made (the objects' last).
         sqlwrite.attach_routes(fragment.key_froms, self._calls)
         lap("key sources")
+        # What each name an arm's tests read holds, way by way across calls: placed as the key sources' carry
+        # places calls, ending at the read sites' rows as theirs do.
+        fragment.guard_froms, fragment.parameter_froms = heldfrom.guard_froms(
+            fragment.junctions,
+            fragment.read_sites,
+            {module.rel_path: module.tree for module in self._modules},
+            self._calls,
+            record,
+        )
+        lap("guard sources")
         # What the schema and the corpus say of each table named, for a reader asking rows: the write records all
         # made, read inside the calls and the schema as the read sites were.
         fragment.tables = tables.records(

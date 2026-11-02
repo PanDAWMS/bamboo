@@ -332,6 +332,14 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: where each row-naming bind of a write was filled from -- see KeyFrom; "
         "a dump's section compare reads them"
     ),
+    "guard_froms": (
+        "records beside the nodes, not nodes: what each name an arm's tests read holds, way by way -- see "
+        "GuardFrom; a dump's section compare reads them"
+    ),
+    "parameter_froms": (
+        "records beside the nodes, not nodes: what the calls of a function hand a parameter -- see ParameterFrom; "
+        "a dump's section compare reads them"
+    ),
     "print_calls": "the second reading prints-are-counted checks the stored rows against",
     "tables": (
         "records beside the nodes, not nodes: what the schema and the corpus say of each table named -- see "
