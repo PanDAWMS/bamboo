@@ -696,6 +696,11 @@ ASSUMPTIONS: dict[str, str] = {
         "A function or method outside the corpus, and a builtin class built, stores no attribute of an object of the "
         "corpus it is handed: it may keep it, read it or call what it is handed (bamboo.codemap.panda.changes)."
     ),
+    "library_changes_no_item": (
+        "A function or method outside the corpus changes no item or attribute of a value it is handed or called on, "
+        "but for the builtin containers' methods that do (BUILTIN_METHODS): json.dumps, copy.deepcopy and str read "
+        "it (bamboo.codemap.panda.changes.object_changes)."
+    ),
     "logger_keeps_nothing": (
         "A method named as a logger's (debug, info, warning, error, ...) that no definition of the corpus answers for "
         "writes a line and keeps nothing it is handed."

@@ -114,10 +114,10 @@ SOURCES = {
 }
 
 
-def _line(rel: str, marker: str) -> int:
+def _line(rel: str, marker: str, sources: dict[str, str] = SOURCES) -> int:
     (found,) = [
         number
-        for number, held in enumerate(textwrap.dedent(SOURCES[rel]).splitlines(), 1)
+        for number, held in enumerate(textwrap.dedent(sources[rel]).splitlines(), 1)
         if held.rstrip().endswith(f"# {marker}")
     ]
     return found
@@ -127,10 +127,20 @@ def _at(rel: str, marker: str) -> str:
     return f"{rel}:{_line(rel, marker)}"
 
 
-def _build(tmp_path: Path) -> MapFragment:
+def _build(
+    tmp_path: Path,
+    sources: dict[str, str] = SOURCES,
+    arms: tuple[tuple[str, str], ...] = (
+        ("extractCommon", "R1"),
+        ("extractCommon", "R2"),
+        ("extractCommon", "R3"),
+        ("setSplitRule", "S1"),
+    ),
+    base: str = BASE,
+) -> MapFragment:
     """Read the sources as the build does, with a junction for each arm marked in the refiner's base."""
     modules = []
-    for rel, text in SOURCES.items():
+    for rel, text in sources.items():
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(text))
@@ -158,18 +168,15 @@ def _build(tmp_path: Path) -> MapFragment:
             map_id="m",
             derived_from="v",
             subject="JediTaskSpec.splitRule",
-            owner=f"{BASE}::{owner}",
+            owner=f"{base}::{owner}",
             anchor=Anchor(
-                package="pandajedi", file=BASE, line_start=_line(BASE, marker)
+                package="pandajedi",
+                file=base,
+                line_start=_line(base, marker, sources),
             ),
-            branches=[Branch(outcome=marker, line=_line(BASE, marker))],
+            branches=[Branch(outcome=marker, line=_line(base, marker, sources))],
         )
-        for owner, marker in (
-            ("extractCommon", "R1"),
-            ("extractCommon", "R2"),
-            ("extractCommon", "R3"),
-            ("setSplitRule", "S1"),
-        )
+        for owner, marker in arms
     ]
     with sql.across_calls(calls):
         attributor = attribution.SpecAttributor(
@@ -338,3 +345,159 @@ def test_the_ways_name_read_sites_and_recorded_parameters(built: MapFragment) ->
     assert not guard_parameters_are_read(
         built.model_copy(update={"parameter_froms": kept})
     ).passed
+
+
+CHANGING = "pandajedi/jedirefine/BaseRefiner.py"
+SUBCLASS = "pandajedi/jedirefine/AnalRefiner.py"
+DRIVER = "pandajedi/jediorder/Refiner.py"
+
+CHANGED = {
+    CHANGING: """\
+        class BaseRefiner:
+            def extractCommon(self, jediTaskID, taskParamMap):
+                self.fill(taskParamMap)  # P1
+                if "transPath" in taskParamMap:  # T1
+                    self.transPath = taskParamMap["transPath"]  # R1
+                    taskParamMap["late"] = 2  # L1
+                self.queue.append(taskParamMap)  # Q1
+                if "filled" in taskParamMap:  # T2
+                    self.filled = True  # R2
+
+            def fill(self, params):
+                params["filled"] = True  # F1
+
+            def touch(self):
+                self.saved["touched"] = 3  # H1
+
+            def count(self, jediTaskID: int, varMap):
+                varMap[":id"] = jediTaskID
+                varMap[":map"] = varMap.copy()
+                if jediTaskID > 0 and ":map" in varMap:  # T3
+                    self.counted = True  # R3
+        """,
+    SUBCLASS: """\
+        from pandajedi.jedirefine.BaseRefiner import BaseRefiner
+
+        class AnalRefiner(BaseRefiner):
+            def extractCommon(self, jediTaskID, taskParamMap):
+                if "transPath" not in taskParamMap:
+                    taskParamMap["transPath"] = "runGen"  # A1
+                self.saved = taskParamMap  # A2
+                BaseRefiner.extractCommon(self, jediTaskID, taskParamMap)  # A3
+        """,
+    DRIVER: """\
+        import json
+
+        from pandajedi.jedirefine.AnalRefiner import AnalRefiner
+
+        class Refiner:
+            def runImpl(self, impl: AnalRefiner, text):
+                taskParamMap = json.loads(text)  # C1
+                impl.extractCommon(1, taskParamMap)  # C2
+        """,
+}
+
+
+@pytest.fixture(scope="module")
+def changed(tmp_path_factory: pytest.TempPathFactory) -> MapFragment:
+    return _build(
+        tmp_path_factory.mktemp("heldchanges"),
+        CHANGED,
+        (("extractCommon", "R1"), ("extractCommon", "R2"), ("count", "R3")),
+        CHANGING,
+    )
+
+
+def _changes(source: HeldSource) -> list[tuple]:
+    return [
+        (
+            one.kind,
+            one.key,
+            one.at,
+            one.via,
+            [(way.kind, way.name) for way in one.value],
+        )
+        for one in source.changes
+    ]
+
+
+def test_a_way_names_each_change_of_the_object_in_the_functions_it_passes(
+    changed: MapFragment,
+) -> None:
+    """``'transPath' in taskParamMap`` in the base reads the map ``AnalRefiner.extractCommon`` hands it, after storing
+    ``transPath`` there -- and after putting it in ``self.saved``, through which ``touch`` stores ``touched`` -- and
+    what ``fill`` stored in the base before the test.  The base's own store under the test, and what follows, come
+    after it; before the second test, they are on the way: ``self.queue.append`` keeps the map where it is not
+    followed."""
+
+    def at(rel: str, marker: str) -> str:
+        return f"{rel}:{_line(rel, marker, CHANGED)}"
+
+    (guard,) = [
+        one
+        for one in changed.guard_froms
+        if one.test_line == _line(CHANGING, "T1", CHANGED)
+    ]
+    ((source,),) = [guard.sources]
+    filled = (
+        "store",
+        "'filled'",
+        at(CHANGING, "F1"),
+        [at(CHANGING, "P1")],
+        [("constant", "True")],
+    )
+    assert _changes(source) == [filled]
+    parameter = next(
+        one
+        for one in changed.parameter_froms
+        if one.owner == f"{CHANGING}::extractCommon"
+    )
+    ((handed,),) = [parameter.sources]
+    assert (handed.kind, handed.name, handed.route) == (
+        "parameter",
+        "taskParamMap",
+        [at(SUBCLASS, "A3")],
+    )
+    assert _changes(handed) == [
+        ("store", "'transPath'", at(SUBCLASS, "A1"), [], [("constant", "'runGen'")]),
+        (
+            "store",
+            "'touched'",
+            at(CHANGING, "H1"),
+            [at(SUBCLASS, "A2")],
+            [("constant", "3")],
+        ),
+    ]
+    (second,) = [
+        one
+        for one in changed.guard_froms
+        if one.test_line == _line(CHANGING, "T2", CHANGED)
+    ]
+    assert [(kind, key) for kind, key, *_rest in _changes(second.sources[0])] == [
+        ("store", "'filled'"),
+        ("store", "'late'"),
+        ("escaped", "*"),
+    ]
+    driven = next(
+        one
+        for one in changed.parameter_froms
+        if one.owner == f"{SUBCLASS}::extractCommon"
+    )
+    assert [_changes(one) for one in driven.sources] == [[]]
+
+
+def test_a_value_no_change_in_place_can_touch_is_asked_of_none(
+    changed: MapFragment,
+) -> None:
+    """``jediTaskID: int`` put in ``varMap`` is not changed through it; ``varMap`` itself is, before the test."""
+    by_name = {
+        one.name: one
+        for one in changed.guard_froms
+        if one.test_line == _line(CHANGING, "T3", CHANGED)
+    }
+    assert [source.changes for source in by_name["jediTaskID"].sources] == [[]]
+    ((source,),) = [by_name["varMap"].sources]
+    assert [(one.kind, one.key) for one in source.changes] == [
+        ("store", "':id'"),
+        ("store", "':map'"),
+    ]

@@ -1836,12 +1836,18 @@ def with_exits_are_read(fragment: MapFragment) -> GateResult:
 
 
 def _held_ways(fragment: MapFragment):
+    """Every way of the guards' and parameters' records, and of what each change on a way stores."""
+
+    def each(where: str, sources):
+        for source in sources:
+            yield where, source
+            for change in source.changes:
+                yield from each(f"{where} {change.at}", change.value)
+
     for guard in fragment.guard_froms:
-        for source in guard.sources:
-            yield f"{guard.owner}:{guard.test_line} {guard.name}", source
+        yield from each(f"{guard.owner}:{guard.test_line} {guard.name}", guard.sources)
     for parameter in fragment.parameter_froms:
-        for source in parameter.sources:
-            yield f"{parameter.owner}:{parameter.line} {parameter.parameter}", source
+        yield from each(f"{parameter.owner}:{parameter.line} {parameter.parameter}", parameter.sources)
 
 
 def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:

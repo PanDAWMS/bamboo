@@ -2830,6 +2830,16 @@ KEY_GLOBAL = "global"
 KEY_CALL = "call"
 KEY_DATABASE = "database"
 HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE)
+#: How a :class:`HeldChange` changes the object a way holds in place: an item or attribute stored or deleted, one
+#: changed inside (``m["a"]["b"] = v`` changes the item ``"a"``), a method of a builtin container changing it, the
+#: object put where the reading does not follow it, a call the reading cannot follow.
+CHANGE_STORE = "store"
+CHANGE_DELETE = "delete"
+CHANGE_INNER = "inner"
+CHANGE_METHOD = "method"
+CHANGE_ESCAPED = "escaped"
+CHANGE_UNREAD = "unread"
+HELD_CHANGES = (CHANGE_STORE, CHANGE_DELETE, CHANGE_INNER, CHANGE_METHOD, CHANGE_ESCAPED, CHANGE_UNREAD)
 #: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`); the last, a flush call's term the method
 #: fills with values no argument of the call brings -- its own rows, a field of its own ``self``.
 KEY_NO_MAP = "no bind map"
@@ -3010,6 +3020,41 @@ class HeldSource(KeySource):
             "hands it in."
         ),
     )
+    changes: list["HeldChange"] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way: each place the object the value is may be changed in place on "
+            "the way -- in each function the way passes, after the value is bound there and before it is read or "
+            "handed on -- in the order run.  The end says what the value was; these, what may have been done to it."
+        ),
+    )
+
+
+class HeldChange(BaseModel):
+    """One place the object a :class:`HeldSource`'s way holds may be changed in place before the read
+    (:func:`bamboo.codemap.panda.changes.object_changes`): ``taskParamMap["transPath"] = ...`` at
+    ``AtlasAnalTaskRefiner.extractCommon`` 60, before its call of the base's ``extractCommon``, whose guard reads
+    ``'transPath' in taskParamMap``.  Whether it ran is the reader's to decide, by the tests it sits under."""
+
+    at: str = Field(description="``file:line`` of the change.")
+    kind: str = Field(description=f"How: one of {', '.join(HELD_CHANGES)}.")
+    key: str = Field(
+        description="The item (``'transPath'``) or attribute (``.status``) it changes; ``*`` where it is not said."
+    )
+    what: str = Field(default="", description="The method, where the object went, or the call not followed.")
+    via: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The calls from the way's function to the change, ``file:line``, in the order run: empty where the way's "
+            "function makes it; first the call handing the object on, or the statement putting it in an attribute "
+            "another function changes it through."
+        ),
+    )
+    value: list[HeldSource] = Field(
+        default_factory=list,
+        description="What a store stores, read as a way is; empty for the other kinds and a computed store (``+=``).",
+    )
+    value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
 
 
 class KeyFrom(BaseModel):

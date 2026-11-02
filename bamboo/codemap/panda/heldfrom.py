@@ -20,8 +20,14 @@ the parts the map already has put together:
   ``self.cur`` gives the statement's rows; an object a corpus class builds; a module's name; a call not read; a
   value not followed.  Where a way cannot be read on, a stop (:class:`KeyStop`).
 
-A way is read in the order it is met going back from the read; *route* and *through* are kept in the order the
-value went, as :attr:`KeySource.via` is.
+A way's end says what the value was, not what was done to it on the way: ``AtlasAnalTaskRefiner.extractCommon``
+stores ``taskParamMap["transPath"]`` before it hands the map to the base's guard ``'transPath' in taskParamMap``.
+So each function a way passes is asked what may change the object in place there, after the name is bound and
+before it is read or handed on (:func:`changes.object_changes`), and the way names each such place (*changes*),
+what a store stores read as a way is.
+
+A way is read in the order it is met going back from the read; *route*, *through* and *changes* are kept in the
+order the value went, as :attr:`KeySource.via` is.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from typing import Iterable, NamedTuple, Optional
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import Calls, CallSite, Target, bind, returns
 from bamboo.codemap.models import (
+    CHANGE_UNREAD,
     KEY_ATTRIBUTE,
     KEY_CALL,
     KEY_CONSTANT,
@@ -44,12 +51,14 @@ from bamboo.codemap.models import (
     KEY_SEQUENCE,
     KEY_UNKNOWN,
     GuardFrom,
+    HeldChange,
     HeldSource,
     JunctionNode,
     KeyStop,
     ParameterFrom,
     ReadSiteNode,
 )
+from bamboo.codemap.panda import changes as changes_mod
 from bamboo.codemap.panda import pathcond
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -77,6 +86,19 @@ class _Way(NamedTuple):
     #: In the order met going back from the read.
     through: tuple[str, ...] = ()
     route: tuple[str, ...] = ()
+    #: In the order run.
+    changes: tuple["_Change", ...] = ()
+
+
+class _Change(NamedTuple):
+    """One :class:`HeldChange` while it is read: what a store stores, as ways."""
+
+    at: str
+    kind: str
+    key: str
+    what: str
+    via: tuple[str, ...]
+    value: tuple[_Way, ...]
 
 
 def _stop(stop: str, name: str = "", what: str = "", at: str = "") -> _Way:
@@ -136,6 +158,8 @@ class _Reader:
         self.parameters: dict[tuple[str, int, str], ParameterFrom] = {}
         self._pending: dict[tuple[str, int, str], tuple[str, ast.AST]] = {}
         self._functions: dict[tuple[str, int, str], tuple[str, ast.AST]] = {}
+        #: ``(function, name, binding, statement read at)`` -> the changes between, by ids of the build's trees.
+        self._hops: dict[tuple, tuple[_Change, ...]] = {}
 
     def filled(self, file: str, func: ast.AST):
         held = self._filled.get(id(func))
@@ -300,40 +324,113 @@ class _Reader:
         if expr.id not in _parameters(func) and not _bound_here(func, expr.id):
             return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
         point = expr if getattr(expr, "parent", None) is not None else at
+        last = _statement_of(point)
         found: list[_Way] = []
         for site in pathcond.held_at(func, expr.id, point).sites:  # type: ignore[arg-type]
-            if site is func.args:  # type: ignore[attr-defined]
-                if expr.id in _parameters(func):
-                    found.append(self._parameter(file, func, expr.id))
-                else:
-                    found.append(_stop("unbound", expr.id, at=f"{file}:{expr.lineno}"))
-                continue
-            targets = pathcond.targets_of(site)
-            value = getattr(site, "value", None)
-            if (
-                isinstance(site, (ast.Assign, ast.AnnAssign))
-                and len(targets) == 1
-                and isinstance(targets[0], ast.Name)
-                and targets[0].id == expr.id
-                and value is not None
-            ):
-                if (
-                    isinstance(value, ast.Call)
-                    and self.record is not None
-                    and self.record.is_database(file, value)
-                ):
-                    # A fetch: its rows are seeded after the statement, so they are asked where the name is read.
-                    found += self._rows(expr, point, file, func) or [
-                        _Way(KEY_DATABASE, ast.unparse(value.func), value.lineno)
-                    ]
-                else:
-                    found += self.read(value, site, file, func)
-                continue
-            # A loop's, a with's, a tuple's binding: what the carry says the name holds where it is read.
-            found += self._sources(expr, point, file, func) or [
-                _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
+            ways = self._bound(expr, point, site, file, func)
+            changed = (
+                ()
+                if _unchanging(func, expr.id, site, ways)
+                else self._changed(file, func, expr.id, site, last)
+            )
+            found += [
+                one._replace(changes=one.changes + changed)
+                if changed and one.kind != _STOP
+                else one
+                for one in ways
             ]
         return found
+
+    def _bound(
+        self, expr: ast.Name, point: ast.AST, site: ast.AST, file: str, func: ast.AST
+    ) -> list[_Way]:
+        """The ways of what *site*, a binding reaching the read, gives *expr*."""
+        if site is func.args:  # type: ignore[attr-defined]
+            if expr.id in _parameters(func):
+                return [self._parameter(file, func, expr.id)]
+            return [_stop("unbound", expr.id, at=f"{file}:{expr.lineno}")]
+        targets = pathcond.targets_of(site)
+        value = getattr(site, "value", None)
+        if (
+            isinstance(site, (ast.Assign, ast.AnnAssign))
+            and len(targets) == 1
+            and isinstance(targets[0], ast.Name)
+            and targets[0].id == expr.id
+            and value is not None
+        ):
+            if (
+                isinstance(value, ast.Call)
+                and self.record is not None
+                and self.record.is_database(file, value)
+            ):
+                # A fetch: its rows are seeded after the statement, so they are asked where the name is read.
+                return self._rows(expr, point, file, func) or [
+                    _Way(KEY_DATABASE, ast.unparse(value.func), value.lineno)
+                ]
+            return self.read(value, site, file, func)
+        # A loop's, a with's, a tuple's binding: what the carry says the name holds where it is read.
+        return self._sources(expr, point, file, func) or [
+            _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
+        ]
+
+    def _changed(
+        self,
+        file: str,
+        func: ast.AST,
+        name: str,
+        site: ast.AST,
+        last: Optional[ast.stmt],
+    ) -> tuple[_Change, ...]:
+        """What may change in place the object *site* binds *name* to, before *last* reads it or hands it on."""
+        if last is None:
+            return ()
+        key = (id(func), name, id(site), id(last))
+        held = self._hops.get(key)
+        if held is None:
+            # Reached again while its values are read, it adds nothing new.
+            self._hops[key] = ()
+            try:
+                raw = changes_mod.object_changes(
+                    self.calls, file, func, name, site, last
+                )
+            except Exception as error:  # noqa: BLE001 -- as _safely
+                raw = [
+                    changes_mod.ObjectChange(
+                        file,
+                        last.lineno,
+                        CHANGE_UNREAD,
+                        changes_mod.EVERY,
+                        f"{type(error).__name__}: {error}",
+                    )
+                ]
+            seen: set[tuple] = set()
+            made: list[_Change] = []
+            for one in raw:
+                mark = (one.file, one.line, one.kind, one.key, one.what, one.via)
+                if mark in seen:
+                    continue
+                seen.add(mark)
+                value: tuple[_Way, ...] = ()
+                if one.value is not None and isinstance(one.func, _FUNCTIONS):
+                    # Its own way's end, not what was done to the stored value before: a record of a record.
+                    value = tuple(
+                        way._replace(changes=())
+                        for way in self._safely(
+                            one.value, one.value, one.file, one.func
+                        )
+                    )
+                made.append(
+                    _Change(
+                        f"{one.file}:{one.line}",
+                        one.kind,
+                        one.key,
+                        one.what,
+                        one.via,
+                        value,
+                    )
+                )
+            held = self._hops[key] = tuple(made)
+        return held
 
     def _call(self, call: ast.Call, file: str, func: ast.AST) -> list[_Way]:
         placed = self.calls.callees(file, func, call)
@@ -366,6 +463,7 @@ class _Reader:
                                     steps=outer.steps + inner.steps,
                                     through=inner.through + outer.through,
                                     route=(here,) + inner.route + outer.route,
+                                    changes=outer.changes + inner.changes,
                                 )
                             )
                     else:
@@ -448,6 +546,8 @@ class _Reader:
             key = (source.site_owner, source.site_line or 0, source.name)
             if source.kind == KEY_PARAMETER and key not in self.parameters:
                 self._pending.setdefault(key, self._functions[key])
+            for change in source.changes:
+                self.queue(change.value)
 
     def settle(self) -> None:
         """Read every parameter a record's way ends at, and the ones those reach."""
@@ -526,9 +626,102 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 steps=list(one.steps),
                 through=through,
                 route=route,
+                changes=[_change_said(change) for change in one.changes],
             ),
         )
     return list(sources.values()), list(stops.values())
+
+
+#: The names an annotation spells a value no change in place can touch with: ``int``, ``str | None``,
+#: ``Optional[datetime.datetime]``.
+_IMMUTABLE = frozenset(
+    {
+        "int",
+        "str",
+        "float",
+        "bool",
+        "bytes",
+        "complex",
+        "None",
+        "Optional",
+        "Union",
+        "Literal",
+        "typing",
+        "datetime",
+        "date",
+        "time",
+        "timedelta",
+        "Decimal",
+        "decimal",
+    }
+)
+
+
+def _unchanging(func: ast.AST, name: str, site: ast.AST, ways: list[_Way]) -> bool:
+    """Whether nothing can change in place what *site* gives *name*: a parameter annotated with such types only, or
+    a value every way of which ends at a literal or a column's value, through no call."""
+    if site is getattr(func, "args", None):
+        return _immutable(_annotation(func, name))
+    ends = [one for one in ways if one.kind != _STOP]
+    return bool(ends) and all(
+        one.kind in (KEY_CONSTANT, KEY_ROWS, KEY_SEQUENCE)
+        and not one.through
+        and not one.steps
+        for one in ends
+    )
+
+
+def _annotation(func: ast.AST, name: str) -> Optional[ast.expr]:
+    arguments: Optional[ast.arguments] = getattr(func, "args", None)
+    if arguments is None:
+        return None
+    for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+        if one.arg == name:
+            return one.annotation
+    return None
+
+
+def _immutable(annotation: Optional[ast.expr]) -> bool:
+    if annotation is None:
+        return False
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return False
+    names: list[str] = []
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.append(node.attr)
+        elif isinstance(node, ast.Constant) and node.value is None:
+            names.append("None")
+        elif isinstance(node, ast.Constant) and not isinstance(
+            node.value, (str, int, float, bool)
+        ):
+            return False
+    return bool(names) and all(one in _IMMUTABLE for one in names)
+
+
+def _change_said(change: _Change) -> HeldChange:
+    value, stops = _said(list(change.value))
+    return HeldChange(
+        at=change.at,
+        kind=change.kind,
+        key=change.key,
+        what=change.what,
+        via=list(change.via),
+        value=value,
+        value_stops=stops,
+    )
+
+
+def _statement_of(node: ast.AST) -> Optional[ast.stmt]:
+    here: Optional[ast.AST] = node
+    while here is not None and not isinstance(here, ast.stmt):
+        here = getattr(here, "parent", None)
+    return here
 
 
 def _function_at(tree: ast.AST, name: str, line: int) -> Optional[ast.AST]:
