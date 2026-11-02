@@ -37,6 +37,7 @@ from bamboo.codemap.models import (
     FunctionPrintsNode,
     JunctionNode,
     MapFragment,
+    SetFrom,
     SourceModule,
     SubjectNode,
     pooled_cuts,
@@ -482,6 +483,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(returned_coverage)
 
         lap("the alias slices")
+        # What each write gives each column it writes; the ways of the ones a guard's way ends at are read with the
+        # guards'.
+        writes: list[SetFrom] = []
         (
             sql_subjects,
             sql_junctions,
@@ -497,6 +501,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             attributor,
             row_keys=fragment.row_key_sources,
             key_froms=fragment.key_froms,
+            set_froms=writes,
         )
         # On the fragment rather than on the plugin, because a gate reads the
         # fragment: "which junctions guard on a value nothing selects on" is a
@@ -741,12 +746,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         lap("key sources")
         # What each name an arm's tests read holds, way by way across calls: placed as the key sources' carry
         # places calls, ending at the read sites' rows as theirs do.
-        fragment.guard_froms, fragment.parameter_froms = heldfrom.guard_froms(
+        fragment.guard_froms, fragment.parameter_froms, fragment.set_froms = heldfrom.guard_froms(
             fragment.junctions,
             fragment.read_sites,
             {module.rel_path: module.tree for module in self._modules},
             self._calls,
             record,
+            writes,
         )
         lap("guard sources")
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the

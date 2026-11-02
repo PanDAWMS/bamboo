@@ -1262,6 +1262,12 @@ _BIND_KEY = re.compile(r":\w+")
 _QUOTED = re.compile(r"'([^']*)'")
 
 
+def bind_keys(text: str) -> tuple[str, ...]:
+    """The bind keys *text* names outside its quoted literals, each once, in the order written: ``(":increasedNr",)``
+    of ``maxAttempt+:increasedNr``."""
+    return tuple(dict.fromkeys(_BIND_KEY.findall(_QUOTED.sub("''", text))))
+
+
 #: Where the ``WHERE`` clause ends.  Everything after is about the rows that
 #: did come back, not about which ones do.
 _CLAUSE_END = re.compile(
@@ -3725,7 +3731,7 @@ def printed(sql: str) -> Printed:
                             text=text,
                             columns=_spelled_columns(own),
                             # A quoted value -- ``'12:30'`` -- holds no bind.
-                            binds=tuple(dict.fromkeys(_BIND_KEY.findall(_QUOTED.sub("''", text)))),
+                            binds=bind_keys(text),
                         )
                     )
         order = query.args.get("order")

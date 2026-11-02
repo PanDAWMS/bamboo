@@ -1,4 +1,5 @@
-"""What a name a guard reads holds, way by way, read back across calls: :class:`GuardFrom` and :class:`ParameterFrom`.
+"""What a name a guard reads holds, way by way, read back across calls: :class:`GuardFrom` and :class:`ParameterFrom`;
+and what each write gives a column a guard's way ends at, read the same way: :class:`SetFrom`.
 
 A reader deciding a junction's arm with a run's values -- the querier's H3, reading ``'reqID' in taskParamMap``
 in the rows it has -- needs to know what the name *is*: here the task's ``JEDI_TaskParams.taskParams``, decoded.
@@ -68,9 +69,10 @@ from bamboo.codemap.models import (
     KeyStop,
     ParameterFrom,
     ReadSiteNode,
+    SetFrom,
 )
 from bamboo.codemap.panda import changes as changes_mod
-from bamboo.codemap.panda import evaluate, pathcond
+from bamboo.codemap.panda import evaluate, pathcond, sqltext
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _STOP = "stop"
@@ -888,12 +890,14 @@ def guard_froms(
     trees: dict[str, ast.AST],
     calls: Optional[Calls],
     record,
-) -> tuple[list[GuardFrom], list[ParameterFrom]]:
-    """A :class:`GuardFrom` for each test on the way to each junction's arm and each name it reads, and a
-    :class:`ParameterFrom` for each parameter a way ends at, and the ones those reach.  Nothing without *calls* or
-    *record*: the reading places calls and reads fetches by them."""
+    writes: Iterable[SetFrom] = (),
+) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom]]:
+    """A :class:`GuardFrom` for each test on the way to each junction's arm and each name it reads; each of *writes*
+    (:func:`sqlwrite.extract`'s) whose column a guard's way ends at -- through the ParameterFroms -- its ways read as
+    the guards'; and a :class:`ParameterFrom` for each parameter a way of either ends at, and the ones those reach.
+    Nothing without *calls* or *record*: the reading places calls and reads fetches by them."""
     if calls is None or record is None:
-        return [], []
+        return [], [], []
     junctions = list(junctions)
     reader = _Reader(
         calls, record, read_sites, {junction.owner for junction in junctions}, trees
@@ -934,6 +938,31 @@ def guard_froms(
                     if line not in guard.arms:
                         guard.arms.append(line)
     reader.settle()
+    ended = _ended_columns(found.values(), reader.parameters)
+    sets = [one for one in writes if one.column in ended]
+    for one in sets:
+        ways: list[_Way] = []
+        for file, func, read in one._reads:
+            here = f"{file}:{one.statement}"
+            try:
+                binds = read()
+            except Exception as error:  # noqa: BLE001 -- as _safely
+                ways.append(
+                    _stop(
+                        "failed",
+                        one.text,
+                        what=f"{type(error).__name__}: {error}",
+                        at=here,
+                    )
+                )
+                continue
+            if not binds and sqltext.bind_keys(one.text):
+                ways.append(_stop("no_bind", one.text, at=here))
+            for filled in binds:
+                ways += reader._safely(filled.value, filled.site, file, func)
+        one.sources, one.stops = _said(ways)
+        reader.queue(one.sources)
+    reader.settle()
     for guard in found.values():
         guard.arms.sort()
     return (
@@ -942,4 +971,24 @@ def guard_froms(
             reader.parameters.values(),
             key=lambda one: (one.owner, one.line, one.parameter),
         ),
+        sorted(sets, key=lambda one: (one.owner, one.statement, one.column, one.text)),
     )
+
+
+def _ended_columns(
+    guards: Iterable[GuardFrom], parameters: dict[tuple[str, int, str], ParameterFrom]
+) -> set[str]:
+    """The columns the guards' ways end at (``rows``), on through the ParameterFroms of the parameters they end at."""
+    found: set[str] = set()
+    seen: set[tuple[str, int, str]] = set()
+    todo = [source for guard in guards for source in guard.sources]
+    while todo:
+        source = todo.pop()
+        if source.kind == KEY_ROWS and source.column:
+            found.add(source.column)
+        elif source.kind == KEY_PARAMETER:
+            key = (source.site_owner, source.site_line or 0, source.name)
+            if key in parameters and key not in seen:
+                seen.add(key)
+                todo += parameters[key].sources
+    return found

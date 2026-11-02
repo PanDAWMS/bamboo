@@ -3687,6 +3687,7 @@ class MapFragment(BaseModel):
     key_froms: list[KeyFrom] = Field(default_factory=list)
     guard_froms: list["GuardFrom"] = Field(default_factory=list)
     parameter_froms: list["ParameterFrom"] = Field(default_factory=list)
+    set_froms: list["SetFrom"] = Field(default_factory=list)
     runnables: list["Runnable"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
@@ -5498,6 +5499,7 @@ KEY_STOPS: dict[str, str] = {
     "cycle": "{name} is reached again on its own way at {at}",
     "open": "the call at {at} may also land somewhere not read: {what}",
     "raises": "{name} goes no further than {at}: {what} on it",
+    "no_bind": "{name} is filled by no assignment of the bind map the write at {at} runs with",
 }
 
 
@@ -5585,6 +5587,59 @@ class ParameterFrom(BaseModel):
     parameter: str
     sources: list[HeldSource] = Field(default_factory=list)
     stops: list[KeyStop] = Field(default_factory=list)
+
+
+#: How a write gives a column its value (:attr:`SetFrom.value`): as the statement's text says it -- the kinds
+#: ``sqltext.ColumnValue`` reads -- or an object's field, where the statement writes the object's map.
+SET_BIND = "bind"
+SET_LITERAL = "literal"
+SET_COLUMN = "column"
+SET_EXPRESSION = "expression"
+SET_OBJECT = "object"
+SET_VALUES = (SET_BIND, SET_LITERAL, SET_COLUMN, SET_EXPRESSION, SET_OBJECT)
+
+
+class SetFrom(BaseModel):
+    """What one write gives a column a guard's way ends at, way by way, read back as :class:`GuardFrom` reads a name
+    -- for a reader asking whether the rows it fetches after a run hold what the guard read.
+
+    ``TaskRefinerBase.extractCommon``'s guards read the task's parameters, a way ending at
+    ``jedi_taskparams.taskparams``; ``registerTaskInOneShot_JEDI`` 5979 sets that column to ``:taskParams``, a way
+    back to the refiner's ``updatedTaskParams``, stored from the map the guards read.  A SetFrom whose way ends at
+    the statement and column a guard's way ends at, and whose statement's :class:`KeyFrom` term is filled from that
+    statement's key column, writes back what the guard read; whether the write ran, and in the same pass, is the
+    run's.
+
+    One per write of such a column and value as written:
+
+    - a column a statement's text sets or inserts (``SET taskParams=:taskParams``, a ``SET`` item a loop makes for
+      each key of a mapping): *value* the text's kind; a bind, and each bind an expression holds
+      (``maxAttempt+:increasedNr``), read as ways; a literal, a column, an expression of none (``attemptNr+1``,
+      ``CURRENT_DATE``), said as written;
+    - an object's field, where the statement writes the object's map (``SET {job.bindUpdateChangesExpression()}``
+      with ``job.valuesMap(onlyChanged=True)``, ``INSERT INTO jobsArchived4 ({JobSpec.columnNames()})``): *value*
+      ``object``, the field as the function assigns it before the map is made, else as the object holds it at the
+      write, read as a way.  Which fields an update writes -- the ones changed on the object -- is the run's.
+    """
+
+    owner: str = Field(description="The function running the write (``file::name``).")
+    statement: int = Field(description="The line the write runs on.")
+    table: str = Field(description="The table written, as the statement names it.")
+    column: str = Field(description="``table.column`` lowered, as :attr:`KeySource.column` names a read's.")
+    value: str = Field(description=f"How the write gives it: one of {', '.join(SET_VALUES)}.")
+    text: str = Field(
+        description=(
+            "As ``sqltext.ColumnValue`` reads it: the bind ``:taskParams``, the expression ``attemptNr+1``, the "
+            "column ``status``, a literal's value ``ready``; an object's field, ``job.computingSite``."
+        )
+    )
+    new_row: Optional[bool] = Field(
+        default=None, description="True an insert's, False an update's; None where the statement may do either."
+    )
+    sources: list[HeldSource] = Field(default_factory=list, description="Each way's end, as a GuardFrom's.")
+    stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
+    #: ``(file, function, read)``: *read* gives the binds whose values are the ways, asked only of a guarded column.
+    _reads: list = PrivateAttr(default_factory=list)
 
 
 #: Why a definition of the corpus may not be run by a reader with a run's values (:attr:`Runnable.stops`): it changes
