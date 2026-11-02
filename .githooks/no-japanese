@@ -1,0 +1,88 @@
+#!/usr/bin/env perl
+# The repository is English only: no Japanese in a commit message, an added line or a file name.
+#
+#   no-japanese message FILE      a commit message as the commit-msg hook hands it ('#' lines are git's comments,
+#                                 and nothing below the scissors line of `git commit -v` is the message)
+#   no-japanese staged            the index against HEAD: added lines and added file names (the pre-commit hook)
+#   no-japanese range BASE HEAD   each commit message in BASE..HEAD and what BASE...HEAD adds (CI)
+#
+# Japanese here is CJK symbols and punctuation, kana, CJK ideographs and full- and half-width forms.  Other
+# non-ASCII (box drawing, dashes, arrows, check marks) is in the repository already and stays allowed; a test that
+# needs a Japanese character writes it as an escape ("\u3042").  Exit 1 lists every hit on stderr.
+#
+# The hooks run once core.hooksPath names this directory in the main checkout (every worktree shares that
+# config).  `git commit --no-verify`, a rebase and an edit on GitHub skip them, so CI runs the range check too
+# (.github/workflows/english-only.yml).
+use strict;
+use warnings;
+use Encode qw(decode);
+
+my $JAPANESE = qr/[\x{3000}-\x{30FF}\x{31F0}-\x{31FF}\x{3400}-\x{4DBF}\x{4E00}-\x{9FFF}\x{F900}-\x{FAFF}\x{FF00}-\x{FFEF}]/;
+binmode STDERR, ':encoding(UTF-8)';
+
+my @hits;
+
+# git's output as text: malformed UTF-8 becomes U+FFFD, which is not Japanese
+sub git {
+    open(my $fh, '-|', 'git', '-c', 'core.quotePath=false', @_) or die "git @_: $!\n";
+    local $/;
+    my $out = <$fh>;
+    close $fh or die "git @_ failed\n";
+    return decode('UTF-8', $out // '');
+}
+
+sub check_message {
+    my ($where, $text) = @_;
+    my $n = 0;
+    for my $line (split /\n/, $text) {
+        $n++;
+        last if $line =~ /^# -+ >8 -+$/;
+        next if $line =~ /^#/;
+        push @hits, "$where, line $n: $line" if $line =~ $JAPANESE;
+    }
+}
+
+sub check_added {
+    my @range = @_;
+    my ($file, $line, $header) = ('', 0, 0);
+    for my $l (split /\n/, git('diff', '--no-color', '--no-ext-diff', '-U0', @range)) {
+        if ($l =~ /^diff --git /) {
+            $header = 1;
+        } elsif ($header && $l =~ m{^\+\+\+ (?:b/)?(.*)$}) {
+            $file = $1;
+        } elsif ($l =~ /^@@ -\d+(?:,\d+)? \+(\d+)/) {
+            ($line, $header) = ($1, 0);
+        } elsif (!$header && $l =~ /^\+(.*)$/) {
+            my $added = $1;
+            push @hits, "$file:$line: $added" if $added =~ $JAPANESE;
+            $line++;
+        }
+    }
+    for my $name (split /\0/, git('diff', '--name-only', '-z', '--diff-filter=ACR', @range)) {
+        push @hits, "file name: $name" if $name =~ $JAPANESE;
+    }
+}
+
+my $mode = shift // '';
+if ($mode eq 'message' && @ARGV == 1) {
+    open(my $fh, '<:raw', $ARGV[0]) or die "$ARGV[0]: $!\n";
+    local $/;
+    check_message('the commit message', decode('UTF-8', <$fh> // ''));
+} elsif ($mode eq 'staged' && !@ARGV) {
+    check_added('--cached');
+} elsif ($mode eq 'range' && @ARGV == 2) {
+    my ($base, $head) = @ARGV;
+    for my $c (split /\n/, git('rev-list', "$base..$head")) {
+        check_message('commit ' . substr($c, 0, 10), git('log', '-1', '--format=%B', $c));
+    }
+    check_added("$base...$head");
+} else {
+    die "usage: no-japanese message FILE | staged | range BASE HEAD\n";
+}
+
+if (@hits) {
+    print STDERR "The repository is English only; Japanese found:\n";
+    print STDERR "  $_\n" for @hits;
+    exit 1;
+}
+exit 0;
