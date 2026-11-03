@@ -398,7 +398,9 @@ class _Receivers:
             filled = self._filled(file, func, expression, depth)
             if filled is not None:
                 return filled
-            return _element(self.of(file, func, expression.value, depth + 1))
+            return self._declared_element(file, func, expression.value) or _element(
+                self.of(file, func, expression.value, depth + 1)
+            )
         if isinstance(expression, ast.Call):
             return self._called(file, func, expression, depth)
         if isinstance(expression, ast.Name):
@@ -598,11 +600,36 @@ class _Receivers:
             or isinstance(func, ast.Module)
         ):
             return None
-        filled = self._filled_at(file, func, called.value, [call.args[0]], depth)
+        filled = self._filled_at(file, func, called.value, [call.args[0]], depth) or self._declared_element(
+            file, func, called.value
+        )
         if filled is None:
             return None
+        if (
+            filled == (_BUILTIN, _JSON)
+            and len(call.args) > 1
+            and _empty(call.args[1])
+            and not _filled_later(func, call)
+        ):
+            return filled  # an empty default adds no element: every one is json's
         default = self.of(file, func, call.args[1], depth + 1) if len(call.args) > 1 else (_BUILTIN, "NoneType")
         return _joined([filled, default])
+
+    def _declared_element(self, file: str, func: ast.AST, container: ast.expr) -> Optional[tuple[str, str]]:
+        """What one of what *container* holds is, as its declaration states -- ``setokens_output: dict[str, dict[str,
+        str]]`` holds dicts (:meth:`calls.Types._annotation_of`, ``declared_types_hold``) --; ``None`` where none
+        states it, or states a class of the corpus or ``Any``."""
+        if isinstance(func, ast.Module):
+            return None
+        try:
+            declared = self.types._annotation_of(file, func, container)
+        except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+            return None
+        element = C._element_annotation(declared[1]) if declared is not None else None
+        if declared is None or element is None:
+            return None
+        said = self.annotation(declared[0], element)
+        return said if said[0] in (_BUILTIN, _OUTSIDE, _QUEUE) else None
 
     def _constant_dict(self, module: ast.Module, func: ast.AST, name: str) -> Optional[ast.Dict]:
         """The literal a name of the *module* is bound to once, where the name is not bound in *func* and no code of
@@ -782,7 +809,9 @@ class _Receivers:
             kinds.append(self.annotation(file, parameters[name]))
         for source, entered in _loop_sources(func, name):
             held = self.of(file, func, source, depth + 1)
-            kinds.append(_entered(held) if entered else _element(held))
+            kinds.append(
+                _entered(held) if entered else self._declared_element(file, func, source) or _element(held)
+            )
         for value in self.types.bound(func).get(name, ()):
             kinds.append(self.of(file, func, value, depth + 1))
         for one in pathcond.bindings(func, name):
@@ -2338,6 +2367,57 @@ def _parameters(func: ast.AST) -> dict[str, Optional[ast.expr]]:
     every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
     every += [one for one in (arguments.vararg, arguments.kwarg) if one is not None]
     return {one.arg: one.annotation for one in every}
+
+
+def _empty(value: ast.expr) -> bool:
+    """Whether *value* is an empty literal -- ``[]``, ``{}``, ``()``, ``""``, ``set()`` --: it holds no element."""
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return not value.elts
+    if isinstance(value, ast.Dict):
+        return not value.keys
+    if isinstance(value, ast.Constant):
+        return value.value in ("", b"")
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in ("list", "dict", "set", "tuple")
+        and not value.args
+        and not value.keywords
+    )
+
+
+def _filled_later(func: ast.AST, call: ast.Call) -> bool:
+    """Whether what *call* hands back may be filled in *func*: bound to a name something is put into -- stored or
+    deleted at a key of, ``+=``-ed, a changing method called on, handed to a call --, or used anywhere but as a loop's
+    source or a name's whole value."""
+    statement = pathcond.site_of(call)
+    if isinstance(statement, (ast.For, ast.AsyncFor)) and statement.iter is call:
+        return False
+    if not (
+        isinstance(statement, ast.Assign)
+        and statement.value is call
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+    ):
+        return True
+    name = statement.targets[0].id
+    for node in walk(func):
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            held = node.value
+        elif isinstance(node, ast.AugAssign):
+            held = node.target
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _CHANGING:
+            held = node.func.value
+        else:
+            held = None
+        if isinstance(held, ast.Name) and held.id == name:
+            return True
+        if isinstance(node, ast.Call) and any(
+            isinstance(one, ast.Name) and one.id == name
+            for one in [*node.args, *(keyword.value for keyword in node.keywords)]
+        ):
+            return True
+    return False
 
 
 def _loop_sources(func: ast.AST, name: str) -> list[tuple[ast.expr, bool]]:

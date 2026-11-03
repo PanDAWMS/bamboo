@@ -3213,7 +3213,9 @@ class Types:
     def _annotation_of(
         self, file: str, func: ast.AST, expression: ast.expr, seen: frozenset = frozenset()
     ) -> Optional[tuple[str, ast.expr]]:
-        """The annotation *expression* was declared with: a field's, a parameter's or a local's."""
+        """The annotation *expression* was declared with: a field's -- of ``self``, or of an object declared a class of
+        the corpus where each class it may be declares the field alike (``site.setokens_output``) --, a parameter's
+        or a local's."""
         if (
             isinstance(expression, ast.Attribute)
             and isinstance(expression.value, ast.Name)
@@ -3221,6 +3223,16 @@ class Types:
         ):
             holder = self.method_class(file, func)
             return self._field_annotation(holder, expression.attr) if holder is not None else None
+        if isinstance(expression, ast.Attribute):
+            classes = self.declared(file, func, expression.value)
+            if not classes:
+                return None
+            fields = [
+                self._field_annotation(one, expression.attr)
+                for one in sorted(classes, key=lambda held: (held[0], held[1].lineno))
+            ]
+            texts = {ast.unparse(one[1]) for one in fields if one is not None}
+            return fields[0] if len(texts) == 1 and all(one is not None for one in fields) else None
         if isinstance(expression, ast.Name):
             args = getattr(func, "args", None)
             for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
