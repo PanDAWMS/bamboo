@@ -3876,6 +3876,181 @@ def test_a_row_proves_its_arm_only_by_a_record_no_other_row_of_its_function_prin
     assert got["g"] == ["positive", ["row(s) [17] print only on a path through it"]]
 
 
+_SIBLINGS = """
+class Anal:
+    def doRefine(self, tmpLog):
+        tmpLog.debug(f"start taskType={self.taskType}")
+        self.reqID = 1
+        tmpLog.debug("done")
+
+    def post(self, tmpLog, status):
+        self.endTime = 1
+        tmpLog.debug(f"post done with status={status}")
+
+
+class Prod:
+    def doRefine(self, tmpLog):
+        tmpLog.debug(f"start taskType={self.taskType}")
+        tmpLog.debug("done")
+"""
+
+
+def test_a_record_another_function_prints_whole_proves_neither_and_one_it_prints_a_part_of_still_does(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_SIBLINGS)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    < jediTaskID=1 > {}\n"
+    (tmp_path / "x.log").write_text(
+        "".join(stamp.format(i, m) for i, m in enumerate(("start taskType=prod", "done", "post done with status=finished")))
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap.models import PrintRow
+            from bamboo.querier import mapdump, rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import rows_around
+
+            R.ROWS_FROM = "walk"
+            run, = runs_for(read_log("x.log"), "1")
+            mark, cap = "<\\\\ jediTaskID=.*?\\\\ >\\\\ ", "<\\\\ jediTaskID=(.*?)\\\\ >"
+            row = lambda pattern, capture, prefix=mark, prefix_capture=cap, hole="": PrintRow(
+                text=pattern, pattern=pattern, capture=capture, prefix=prefix, prefix_capture=prefix_capture, prefix_hole=hole)
+            prints = lambda owner, *rs: N(
+                owner=owner, statements=[N(rows=[r], log_files=[run.log.name], log_files_basis="logger") for r in rs])
+            start = row("start\\\\ taskType=", "start\\\\ taskType=(.*)")
+            anal = prints("pandaserver/a.py::Anal.doRefine", start, row("done", "done"))
+            post = prints("pandaserver/a.py::Anal.post", row("post\\\\ done\\\\ with\\\\ status=", "post\\\\ done\\\\ with\\\\ status=(.*)"))
+            # AtlasProd's doRefine: the same two lines, under the same mark, in the same log
+            prod = prints("pandaserver/a.py::Prod.doRefine", start, row("done", "done"))
+            # PostProcessor's: "done" alone, which "post done with ..." holds but is not
+            exactly_done = prints("pandaserver/b.py::B.start", row("done", "done"))
+            # a logger whose mark the map cannot read: the row cannot say it reads a line whole
+            unread_mark = prints("pandaserver/b.py::B.dump", row("post\\\\ done", "post\\\\ done(.*)", "", "", "made with the time"))
+
+            def placed(func, arm, *others):
+                fragment = N(function_prints=[anal, post, *others])
+                mapdump.fragment = lambda: fragment
+                fn = R.function("pandaserver/a.py", func, [arm])
+                sn = R.seen(fn, run, "outside")
+                return [sorted(sn.unambiguous), rows_around(fn, sn, R.statement_at(fn.node, arm)) is not None]
+
+            print(json.dumps({
+                "its own": placed("doRefine", 5),
+                "a sibling prints both whole": placed("doRefine", 5, prod),
+                "another prints a part of it": placed("post", 9, exactly_done),
+                "another cannot say": placed("post", 9, unread_mark),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {
+        # the two records around the store are its function's alone: they show it ran
+        "its own": [[4, 6], True],
+        # AtlasAnal's doRefine:260 in MR-T-53344406-reqID, whose run printed "refining with AtlasProdTaskRefiner"
+        "a sibling prints both whole": [[], False],
+        "another prints a part of it": [[10], False],
+        "another cannot say": [[10], False],
+    }
+
+
+_FALLS_OUT = '''
+def adder(self, a):
+    if a:
+        try:
+            log.debug("will call")
+            call()
+            log.debug("is back")
+        except Exception:
+            log.error("excepted")
+    self.status = "failed"
+
+
+def top(self):
+    log.debug("at the top")
+    self.status = "failed"
+
+
+def loop(self, z):
+    for y in z:
+        log.debug("in a loop")
+    self.status = "failed"
+
+
+def final(self):
+    try:
+        log.debug("in a try")
+    finally:
+        log.debug("in a finally")
+    self.status = "failed"
+
+
+def a_call_after(self, a):
+    if a:
+        log.debug("before a call")
+        call()
+    self.status = "failed"
+
+
+def an_else(self):
+    try:
+        log.debug("before an else")
+    except Exception:
+        pass
+    else:
+        call()
+    self.status = "failed"
+
+
+def handled(self):
+    try:
+        call()
+    except Exception:
+        log.debug("handled")
+    finally:
+        cleanup()
+    self.status = "failed"
+
+
+def within(self):
+    with lock:
+        log.debug("in a with")
+    self.status = "failed"
+'''
+
+
+def test_a_print_nested_in_an_earlier_statement_implies_the_site_when_nothing_on_its_way_out_may_leave(tmp_path):
+    (tmp_path / "f.py").write_text(_FALLS_OUT)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from bamboo.codemap.panda import pathcond
+            from bamboo.querier import rows as R
+
+            tree = ast.parse(open("f.py").read())
+            pathcond.attach_parents(tree)
+            print(json.dumps({fn.name: sorted(s.value.args[0].value for s in R.implying_rows(fn, fn.body[-1])) for fn in tree.body}))
+            """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == {
+        # handle_failed_job 374: "... is back" and the handler's print fall out of the if; the call after "will call"
+        # may leave
+        "adder": ["excepted", "is back"],
+        "top": ["at the top"],
+        "loop": [],
+        "final": ["in a try"],
+        "a_call_after": [],
+        "an_else": [],
+        "handled": [],
+        "within": [],
+    }
+
+
 _NARROWED = """
 def f(self, job, ok):
     self.logger.debug("start f")

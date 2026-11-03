@@ -1093,7 +1093,7 @@ standing does not write it" for a positive of the second P.
 *Revisit:* when a pass's runs of a called function's log are read as the caller's (K21's join, inside the call); when
 the map holds a call's write conditions; when RD lands.
 
-### K42. A record two rows print alike proves neither, and rule 6 reads a caller's guard on any object of the class
+### K42. A record two rows print alike proves neither, of one function or of two, and rule 6 reads a caller's guard on any object of the class
 
 `rows.Seen.proven` counts a record only where the function reads it with that row alone (`Seen.unambiguous`, after
 `rows.claim`): activateJob prints its files' UPDATE alike at 92 (in the arm that activates) and 124 (in the one that
@@ -1103,16 +1103,33 @@ parse_job_output_report prints "parse_job_output_report end" at 750 (before the 
 records-cut (out/pv1) MJ-merging-stuck and MJ-transferring-stuck lose 967's positive, though 751 is excluded by rule 4
 and the record follows rows 869-873, which 750 cannot follow; those branches stop at S2.
 
+Nor does a record another function of the dump prints whole (`rows.whole_writers`: a row of its `function_prints`
+the map reads the record as, mark and message anchored at both ends, `trace.reads_whole`, in the run's log):
+`rows._seen` places it with no row.  `rows.claim` sets only the functions it is given against each other, and a
+sibling plugin that writes nothing the question asks is not among them.  AtlasProdTaskRefiner.doRefine prints
+"start taskType=..." and "done" (107, 174) under the mark AtlasAnalTaskRefiner.doRefine prints them with (205,
+280), and the two had made AtlasAnal's doRefine:260 positive by `rows_around` in MR-T-53344406-reqID, a run that
+printed "refining with AtlasProdTaskRefiner" (q1, 2026-11-03).  On r1 it is unexamined: no pass of it holds a
+record of the key.  Read on samples from the map's rows, it was the one of q1's 33 positives by rows (out/ra); the
+measure found a second, which samples cannot show: runImpl's "start" (138), found by search, had read AtlasAnal's
+"start taskType=anal" (doRefine 205, called at 284) as its own, and with 282 made runImpl:284 positive in
+MR-T-53351604-splitRule.  It is kept now: the callee's line that does show 284 ran is not read (K41).  A row the map cannot read whole (`reads_whole` None: no capture,
+or a mark its logger may write that the map did not read) does not count: PostProcessor.start's "done" and
+TaskRefiner.start's "start" have no prefix for that reason, and counted, they would take every "done" and
+"start" of their logs, "doBasicPostProcess done with taskStatus=..." (122) among them, which they cannot print.
+
 Rule 6 (`which_ran.rewriter`) solves the callers' guards too (`callers_guards`) and reads `<x>.<attr>` in them as the
 key's object whatever x is: archiveJob 1783's `job.jobStatus == 'finished'` tests the merge job, while
 updateUnmergedJobs 1236 writes the jobs it merged.  On records-cut before pv1 it excluded 1236 in MJ-merging-late (the
 key 7390523881, the merge job 7390910703).  With the row's second read run by run (pv1) the env no longer settles
 that guard there and 1236 is positive; the defect is not fixed.
 
-*Shows:* "row(s) [..] print only on a path through it" names only rows a record is read by alone; "rule 6: reached
-only when <x>.<attr> is already ..." with a caller's guard.
+*Shows:* "row(s) [..] print only on a path through it" names only rows a record is read by alone, and that no other
+function prints whole; "rule 6: reached only when <x>.<attr> is already ..." with a caller's guard.
 *Revisit:* when an ambiguous record can be given to the one row the run's order or another rule leaves (P's order
-check reads rows read alone too); rule 6, when the map says which object a caller's guard tests against the callee's
+check reads rows read alone too), or to the one function the run's other records leave (the map's JD: the
+factory's dispatch, read with "refining with <class>"); when the map reads a row whole where its mark is not read;
+rule 6, when the map says which object a caller's guard tests against the callee's
 argument.
 
 ### K44. A row shorter than MIN_PROOF proves only as its whole message no other function can print there
@@ -1260,6 +1277,25 @@ the map cannot read whole): the run is not split" -- whether the map can read th
 or the parenthesis is not there.
 *Revisit:* a function with no entry row whose runs span hours, or whose entry the map cannot read whole; the
 question's run of a mark with no key; the prefix proof (K44) on the map's whole reading.
+
+### K50. A row before the site implies it only where nothing on its way to the site may leave
+
+`rows.implying_rows` reads a row before the site as proof only where nothing on its way to the site can leave: no
+call but a logger's and no jump (`may_divert`).  An attribute or a subscript that raises is not counted, as it is
+not anywhere in the rule.  The row is at the top of the site's block, or nested in an earlier statement it falls
+out of (`rows._falls_out`, MF-7397944082 and MF-7396944927, the harness's finding, 2026-11-02): handle_failed_job
+prints 370 ("job_failure_postprocessing is back") last in a `try` of an `if`, and 374 follows that `if`.  363
+("AdderGen.run will call job_failure_postprocessing") does not: the call after it may leave.  Of q1's 108 kept
+candidates, 5 gain such a row (out/ra/d2_kept.out); on r1 374 is positive in 4 m-failed walks and no other moves.  In
+MF-7397695467 and MF-7398402231 it is positive next to parse_job_output_report:919, and H2 chooses neither ("2
+positive"): both wrote "failed", 374 later in the pass (process_job_report 421, then finalize_job_status at 446).
+On q1 919 was chosen alone with 374 kept and the walks went on to H4.  None falls out of a loop's body (it goes back
+to the loop), of a `finally` (a raise may be passing through), of a `with` (its exit is a call) or of a `match` (not
+read).
+
+*Shows:* "row(s) [..] print only on a path through it" with the nested row.
+*Revisit:* when the rule reads the map's flow (`flow.passes_through`'s ways, a raise anywhere) rather than its own;
+when H2 orders the positives of one pass by the flow.
 
 ## The walks (`asked.py`)
 
