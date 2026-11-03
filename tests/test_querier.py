@@ -4732,14 +4732,15 @@ def test_of_one_pass_s_writes_the_last_that_changed_the_value_is_the_answer_and_
         f"3 may have changed it last in the pass: c.py::process:{c['plugin']}, c.py::parse:{c['parse']}, c.py::process:{c['from_report']}"
     )
     # the report said finished: the assignment from it wrote 'finished' (the row's jobStatus), and the plugin's arm,
-    # which ran, is the last change -- handle_failed's, after it, a stay by the value it assigned
+    # which ran, is the last change -- handle_failed's, after it, a stay by the value it assigned and the row before
+    # finalize alike, said by the row
     plugin = got["c.py plugin"]
     assert plugin["kinds"] == {"from_report": "excluded", "plugin": "positive", "parse": "excluded", "handle": "excluded"}
     assert plugin["why"][f"process:{c['from_report']}"] == (
         f"rule R: it assigns 'finished' (self.job_status, printed at row process:{c['row']} at plugin.log:2), no write of 'failed'"
     )
     assert plugin["why"][f"handle_failed:{c['handle']}"].startswith(
-        f"rule R: a stay, self.job.jobStatus already held 'failed' before it (assigned by c.py::process:{c['plugin']}"
+        f"rule R: a stay, self.job.jobStatus already held 'failed' before it (row process:{c['row']} at plugin.log:2"
     )
     assert plugin["chosen"] == f"process:{c['plugin']}" and plugin["how"] == "the last change in the pass"
     # the job handed to a call on the way: handle_failed's may be the change, and it is the last

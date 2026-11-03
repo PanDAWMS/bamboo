@@ -249,7 +249,8 @@ def last_change(
             return None
         return next(iter(chains.values())), [v for v in in_pass if id(v) in chains or inside(v)]
 
-    anchor, chain, members = None, "", []
+    anchor, chain = None, ""
+    members: list[Any] = []
     for owner in owners:
         fn = seens[owner].fn
         if id(seens[owner].run) in joined or not seens[owner].single_call() or (found := scope(fn)) is None:
@@ -280,26 +281,27 @@ def last_change(
                 printed.append((Point(sn.fn, row.stmt, place, True), expr, value.strip(), f"row {sn.fn.name}:{row.line} at {record.span}"))
 
     def read(p: Point, wanted: str, later: bool) -> tuple[str, str] | None:
-        """*wanted*'s value at *p* from the rows before it (or, *later*, after it too), every one that holds agreeing."""
-        found = set()
+        """*wanted*'s value at *p* from the rows before it (or, *later*, after it too), every one that holds agreeing;
+        said by the first of them in the pass's rows."""
+        found: list[tuple[str, str]] = []
         for q, expr, value, where in printed:
             if expr != wanted:
                 continue
             if precedes(q, p, anchor) and holds(q, p, wanted, anchor):
-                found.add((value, where))
+                found.append((value, where))
             elif later and precedes(p, q, anchor) and holds(p, q, wanted, anchor):
-                found.add((value, where))
-        return next(iter(found)) if len({value for value, _ in found}) == 1 else None
+                found.append((value, where))
+        return found[0] if len({value for value, _ in found}) == 1 else None
 
     assigns: dict[int, tuple[str, str] | None] = {}
     for v in order:
         stmt = stmts[id(v)]
-        value = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            assigns[id(v)] = (value.value, "its constant")
-        elif isinstance(value, (ast.Name, ast.Attribute)) and not inside(v):
-            got = read(points[id(v)], ast.unparse(value), True)
-            assigns[id(v)] = (got[0], f"{ast.unparse(value)}, printed at {got[1]}") if got else None
+        rhs = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        if isinstance(rhs, ast.Constant) and isinstance(rhs.value, str):
+            assigns[id(v)] = (rhs.value, "its constant")
+        elif isinstance(rhs, (ast.Name, ast.Attribute)) and not inside(v):
+            got = read(points[id(v)], ast.unparse(rhs), True)
+            assigns[id(v)] = (got[0], f"{ast.unparse(rhs)}, printed at {got[1]}") if got else None
         else:
             assigns[id(v)] = None
 
@@ -314,20 +316,21 @@ def last_change(
                 before[id(v)] = None
                 continue
             p = Point(anchor, p.at[0], p.at)
-        held: set[tuple[str, str]] = set()
+        # said by a printed row where one holds, else by the first assignment
+        held: list[tuple[str, str]] = []
         if (shown := read(p, chain, False)) is not None:
-            held.add(shown)
+            held.append(shown)
         for e in order[:n]:
             if e.kind == "positive" and not inside(e) and (given := assigns[id(e)]) is not None \
                     and holds(points[id(e)], p, chain, anchor):
-                held.add((given[0], f"assigned by {_name(e)}"))
-        before[id(v)] = next(iter(held)) if len({value for value, _ in held}) == 1 else None
+                held.append((given[0], f"assigned by {_name(e)}"))
+        before[id(v)] = held[0] if len({value for value, _ in held}) == 1 else None
     for v in order:
         if (b := before[id(v)]) is not None and b[0] == observed:
             frames = "" if v.candidate.owner == anchor.owner else f"; the frames between {anchor.name} and {v.candidate.func} not read"
             if inside(v):
-                at = " or ".join(f"{Path(f).name}:{line}" for f, line in _sites(joined[id(seens[v.candidate.owner].run)]))
-                why = f"the pass writes {chain} as it is at the call at {at}, {observed!r} there"
+                calls = " or ".join(f"{Path(f).name}:{line}" for f, line in _sites(joined[id(seens[v.candidate.owner].run)]))
+                why = f"the pass writes {chain} as it is at the call at {calls}, {observed!r} there"
             else:
                 why = f"{chain} already held {observed!r} before it"
             change.dropped.append((v, f"rule R: a stay, {why} ({b[1]}, nothing on the way binding it{frames})"))
