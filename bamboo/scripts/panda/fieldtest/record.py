@@ -48,12 +48,20 @@ lists: a quiet log's mtime is its last write, hours before.  The lists hold
 only the logs asked, so a round asking only of quiet logs takes their own
 mtimes, and a line one writes while its process is being stopped may fall
 past the margin (none of the 169 files measured).  The oldest file's
-start is not known.  The current file is read by its tail and covers from
-where the read began (its first stamp; its rotation when the read began at
-its first byte and that line predates the list) to when the grep was asked,
-on this machine's clock, which ran 13-203 ms behind the database's.  One read
-from its first byte with no stamped line holds no record and covers from its
-mtime: server machines list an empty ``panda-JediDBProxy.log`` (2026-10-14).
+start is not known.  The current file is read over its asks' windows alone:
+from the earliest start to the latest end, each widened by
+:data:`CONTINUE_SLACK`, which the server finds by the records' stamps
+(panda-server 90f7c208; read by its tail, a live DBProxy past about 2 GB timed
+out at 240 s on a cold disk, and it grows to 14-15 GB before it rotates,
+2026-11-02).  It covers from where the read began (its first stamp; its
+rotation when the read began at its first byte and that line predates the
+list) to the record the read stopped before, or to when the grep was asked
+where it read to the file's end, on this machine's clock, which ran 13-203 ms
+behind the database's.  A window over 1 GiB is cut, and read on from where it
+stopped.  A machine whose processor predates the window greps the whole file
+and says no window: it covers from its rotation.  One read from its first byte
+with no stamped line holds no record and covers from its mtime: server
+machines list an empty ``panda-JediDBProxy.log`` (2026-10-14).
 
 **Greps.**  One request per machine and file, to that machine alone, with the
 strings of every ask reading it.  An answer of several strings cut at 1 MB is
@@ -170,12 +178,6 @@ from bamboo.utils import panda_client as PC
 
 #: how far past a rotation its file is still written to: a slack over the 146 s measured, not a bound
 MARGIN = datetime.timedelta(minutes=10)
-#: the current file is read to its first byte up to this size; past it, by the window's share
-WHOLE_UP_TO = 256 * 2**20
-#: the API's largest tail_bytes
-MAX_TAIL = 3 * 2**30
-#: how much more tail than the window's share of the file since its rotation
-TAIL_FACTOR = 1.5
 #: how often a day file being compressed is looked at again
 COMPRESS_POLL = datetime.timedelta(minutes=10)
 #: a grep of a rotated file still being compressed fails with this at the end of its error (panda-server bf5c9fe2)
@@ -419,12 +421,29 @@ class File:
 
 
 @dataclass
+class WindowRead:
+    """One grep of the current file over a window: the stamp and byte it began at (both None where the machine's
+    processor read the whole file and said no window), the stamp of the record it stopped before (None: it read to
+    the file's end), when it was asked, and whether it was cut at 1 GiB (*cut*) or went on from one that was
+    (*then*)."""
+
+    first: str | None
+    offset: int | None
+    end: str | None
+    asked: datetime.datetime
+    cut: bool = False
+    then: bool = False
+    whole: bool = False
+
+
+@dataclass
 class Job:
     """The greps of one file on one machine, for every ask reading it, and what they returned."""
 
     file: File
     strings: set[str]
     since: datetime.datetime  # the earliest window start of the asks reading it
+    until: datetime.datetime = LOW  # the latest window end of the asks reading it
     status: str = ""
     error: str | None = None
     records: dict[int, dict] = field(default_factory=dict)  # by offset: head records
@@ -441,10 +460,7 @@ class Job:
     failed: dict[str, str] = field(
         default_factory=dict
     )  # strings whose grep failed: why
-    tails: list[tuple[str | None, int | None, datetime.datetime]] = field(
-        default_factory=list
-    )  # first_stamp, offset, asked
-    tail_bytes: int | None = None
+    reads: list[WindowRead] = field(default_factory=list)  # the current file's greps
     requests: list[dict] = field(default_factory=list)
     listed_at: datetime.datetime = LOW  # when the list its file is from was asked
     seen: tuple[int, datetime.datetime] | None = (
@@ -555,7 +571,7 @@ def cut_asks(directory: Path) -> list[dict]:
 
 def searched_over(f: dict, window: list[str]) -> bool:
     """Whether a cut file's ``searched`` holds every second of its ``covers`` in *window* widened by
-    :data:`CONTINUE_SLACK`.  A file whose covers are not known (a tail holding no stamp) is not read better by asking
+    :data:`CONTINUE_SLACK`.  A file whose covers are not known (a window holding no stamp) is not read better by asking
     again."""
     if "searched" not in f:
         return False
@@ -716,14 +732,10 @@ def chain(machine: str, log: str, m: Machine) -> tuple[list[File], list[str]]:
     return files, notes
 
 
-def tail_for(f: File, since: datetime.datetime, now: datetime.datetime) -> int:
-    """How much of the current file's end to read for a window from *since*."""
-    if f.size <= WHOLE_UP_TO or f.start is None:
-        return min(MAX_TAIL, max(1, f.size * 2 + 64 * 2**20))
-    span = (now - f.start).total_seconds()
-    want = (now - max(since - MARGIN, f.start)).total_seconds()
-    share = min(1.0, max(want, 1.0) / max(span, 1.0))
-    return min(MAX_TAIL, int(f.size * share * TAIL_FACTOR) + 1)
+def current_window(job: Job) -> tuple[datetime.datetime, datetime.datetime]:
+    """The window the current file is read over for its asks: their earliest start to past their latest end (the
+    API's *until* is exclusive), each widened by :data:`CONTINUE_SLACK`."""
+    return job.since - CONTINUE_SLACK, job.until + CONTINUE_SLACK + SECOND
 
 
 # ---------------------------------------------------------------------------
@@ -838,8 +850,6 @@ class Grepper:
             job.status, job.error = "failed", next(iter(job.failed.values()))
         if f.kind == "rotated" and job.status == "answered":
             await self.continue_cut(job)
-        if f.kind == "current" and job.status == "answered":
-            self.settle_tail(job)
 
     async def continue_cut(self, job: Job) -> None:
         """Ask again, by pattern, for what of their asks' windows the cut strings were not read for."""
@@ -1006,14 +1016,11 @@ class Grepper:
         filled it (:func:`filled_by`), in halves where none did.  'compressing' when refused for it;
         'failed' when a grep failed, once every other grep was asked (:attr:`Job.failed` holds its strings)."""
         f = job.file
-        tail = None
-        if f.kind == "current":
-            tail = job.tail_bytes or tail_for(f, job.since, self.parts.now())
-            job.tail_bytes = tail
+        window = current_window(job) if f.kind == "current" else None
         outcomes = []
         for i in range(0, len(strings), PC.GREP_MAX_STRINGS):
             chunk = strings[i : i + PC.GREP_MAX_STRINGS]
-            outcome = await self.leaf(job, chunk, tail)
+            outcome = await self.leaf(job, chunk, window)
             if outcome == "compressing":
                 return outcome
             outcomes.append(outcome)
@@ -1023,13 +1030,16 @@ class Grepper:
         self,
         job: Job,
         strings: list[str],
-        tail: int | None,
+        window: tuple[datetime.datetime, datetime.datetime] | None,
         retries: int = TIMEOUT_RETRIES,
+        then: bool = False,
     ) -> str:
+        """One grep of *strings*, over *window* in the current file; *then*: it goes on from a read cut at 1 GiB."""
         f = job.file
         asked = self.parts.now()
+        bounds = {"since": text(window[0]), "until": text(window[1])} if window else {}
         response = await responded(
-            self.parts.grep_log, f.name, strings, machine=f.machine, tail_bytes=tail
+            self.parts.grep_log, f.name, strings, machine=f.machine, **bounds
         )
         answered = self.parts.now()
         kept = self.answers.keep(
@@ -1038,7 +1048,7 @@ class Grepper:
             {
                 "asked_at": text(asked),
                 "strings": strings,
-                "tail_bytes": tail,
+                **bounds,
                 "response": response,
             },
         )
@@ -1046,7 +1056,7 @@ class Grepper:
             "machine": f.machine,
             "file": f.name,
             "strings": len(strings),
-            "tail_bytes": tail,
+            **bounds,
             "submitted_at": text(asked),
             "answered_at": text(answered),
             "answer": kept,
@@ -1067,7 +1077,7 @@ class Grepper:
             if got.get("error") == TIMED_OUT and retries:
                 # the matcher left what it read in the page cache: asked again, it reads that from memory and
                 # goes on from where the disk stopped it
-                return await self.leaf(job, strings, tail, retries - 1)
+                return await self.leaf(job, strings, window, retries - 1, then)
             job.failed.update(
                 dict.fromkeys(strings, got.get("error") or got.get("status"))
             )
@@ -1075,25 +1085,30 @@ class Grepper:
         result = got.get("result") or {}
         records = result.get("records") or []
         rest: list[str] = []
+        searched = result.get("window") if window else None
         if got.get("truncated") and len(strings) > 1:
-            window = result.get("window") or {}
-            began = window.get("first_stamp") if tail else None
+            began = (searched or {}).get("first_stamp")
+            ended = (searched or {}).get("end_stamp")
             filled = filled_by(
-                records, strings, stamp(began) if began else f.start, f.end or asked
+                records,
+                strings,
+                stamp(began) if began else f.start,
+                stamp(ended) if ended else f.end or asked,
             )
             if not filled:
                 half = len(strings) // 2
-                outcomes = []
+                halves = []
                 for part in (strings[:half], strings[half:]):
-                    outcome = await self.leaf(job, part, tail)
+                    outcome = await self.leaf(job, part, window, then=then)
                     if outcome == "compressing":
                         return outcome
-                    outcomes.append(outcome)
-                return "failed" if "failed" in outcomes else "answered"
+                    halves.append(outcome)
+                return "failed" if "failed" in halves else "answered"
             # the answer is the cut answer of the strings that filled it; the others are asked again without them
             rest = [s for s in strings if s not in filled]
             strings = filled
             records = [r for r in records if holds_any(r, set(filled))]
+        outcomes: list[str] = []
         heads = [r for r in records if r.get("head")]
         fragments = [r for r in records if not r.get("head")]
         self.take(job, heads, fragments)
@@ -1105,8 +1120,33 @@ class Grepper:
                     job.read.get(s, []) + read_before(last_stamp(heads))
                 )
         if f.kind == "current":
-            window = result.get("window") or {}
-            job.tails.append((window.get("first_stamp"), window.get("offset"), asked))
+            w = searched or {}
+            # cut short of the window's end: read on from the record it stopped before, the same strings but those
+            # cut at 1 MB (a cut string of the current file is read once it has rotated)
+            go_on = bool(
+                window
+                and w.get("cut")
+                and w.get("end_stamp")
+                and stamp(w["end_stamp"]) < window[1]
+            )
+            job.reads.append(
+                WindowRead(
+                    w.get("first_stamp"),
+                    w.get("offset"),
+                    w.get("end_stamp"),
+                    asked,
+                    cut=go_on,
+                    then=then,
+                    whole=searched is None,
+                )
+            )
+            more = [s for s in strings if s not in job.truncated]
+            if go_on and window and more:
+                outcomes.append(
+                    await self.leaf(
+                        job, more, (stamp(w["end_stamp"]), window[1]), then=True
+                    )
+                )
         else:
             self.leaves.append(
                 {
@@ -1126,8 +1166,8 @@ class Grepper:
             )
         job.status = "answered"
         if rest:
-            return await self.leaf(job, rest, tail)
-        return "answered"
+            outcomes.append(await self.leaf(job, rest, window, then=then))
+        return "failed" if "failed" in outcomes else "answered"
 
     def take(self, job: Job, heads: list[dict], fragments: list[dict]) -> None:
         for r in heads:
@@ -1135,70 +1175,62 @@ class Grepper:
         for r in fragments:
             job.fragments.setdefault(r["offset"], r)
 
-    def settle_tail(self, job: Job) -> None:
-        """Note a tail that began after the window it was read for (read again once with twice the bytes).  A file
-        read from its first byte with no stamped line has no more to read."""
-        covers, covers_from = tail_covers(job, job.listed_at)
-        if covers is None or covers_from == "unstamped":
-            return
-        need = max(job.since, job.file.start) if job.file.start else job.since
-        if stamp(covers[0]) > need:
-            job.error = f"the tail of {job.tail_bytes} bytes began at {covers[0]}, after {text(need)}"
 
-
-def tail_covers(job: Job, listed_at: datetime.datetime) -> tuple[list[str] | None, str]:
-    """What the current file's reads covered, and from what: every leaf's, narrowed to what all of them read.
+def window_covers(
+    job: Job, listed_at: datetime.datetime
+) -> tuple[list[str | None] | None, str, str | None]:
+    """What the current file's reads covered, from what and to what: each chain's -- a read and those that went on
+    from it where it was cut at 1 GiB -- narrowed to what all of them read.
 
     A read that began at the file's first byte with a line older than the list is the file listed, whole: it covers
-    from the rotation before it.  Reads that all began at the first byte and found no stamped line read a file that
-    holds no record: it covers from its mtime, after which nothing was written to it (an empty file a machine's
-    processes never log to, such as JediDBProxy's on a server machine).  Otherwise it covers from its first stamp;
-    one with no stamp covers nothing."""
-    if job.tails and all(offset == 0 and not first for first, offset, _ in job.tails):
-        return [
-            text(job.file.mtime),
-            text(min(asked for _, _, asked in job.tails)),
-        ], "unstamped"
-    starts = []
+    from the rotation before it, as does a read with no window, which the machine's processor made of the whole
+    file.  Reads that all began at the first byte and found no stamped line read a file that holds no record: it
+    covers from its mtime, after which nothing was written to it (an empty file a machine's processes never log to,
+    such as JediDBProxy's on a server machine).  Otherwise it covers from its first stamp; one with no stamp covers
+    nothing.  A chain covers to the record its last read stopped before (``end_stamp``: the file goes on past it), or
+    to when that read was asked where it read to the file's end (``asked``: nothing more is there yet); at a tie the
+    first, which the querier's door widens past (its EDGE: a run near the end may go on, 2026-11-02)."""
+    reads = job.reads
+    if reads and all(r.offset == 0 and not r.first and not r.whole for r in reads):
+        return (
+            [text(job.file.mtime), text(min(r.asked for r in reads))],
+            "unstamped",
+            "asked",
+        )
+    starts: list[datetime.datetime | None] = []
     whole_all = True
-    for first, offset, _ in job.tails:
-        if not first:
-            return None, "first_stamp"
-        t = stamp(first)
-        whole = offset == 0 and t < listed_at
+    for r in reads:
+        if r.then:
+            continue
+        if r.whole:
+            starts.append(job.file.start)
+            continue
+        if not r.first:
+            return None, "first_stamp", None
+        t = stamp(r.first)
+        whole = r.offset == 0 and t < listed_at
         whole_all = whole_all and whole
         starts.append(
             (job.file.start if job.file.start is not None else t) if whole else t
         )
-    if not starts:
-        return None, "first_stamp"
-    return [
-        text(max(starts)),
-        text(min(asked for _, _, asked in job.tails)),
-    ], "rotation" if whole_all else "first_stamp"
+    ends = [
+        (stamp(r.end), "end_stamp") if r.end else (r.asked, "asked")
+        for r in reads
+        if not r.cut
+    ]
+    if not starts or not ends:
+        return None, "first_stamp", None
+    known = [t for t in starts if t is not None]
+    end, covers_to = min(ends, key=lambda e: (e[0], e[1] != "end_stamp"))
+    return (
+        [text(max(known)) if known else None, text(end)],
+        "rotation" if whole_all else "first_stamp",
+        covers_to,
+    )
 
 
 async def run_jobs(grepper: Grepper, jobs: list[Job]) -> None:
-    async def one(job: Job) -> None:
-        await grepper.run(job)
-        f = job.file
-        if (
-            f.kind == "current"
-            and job.status == "answered"
-            and job.error
-            and job.tail_bytes
-            and job.tail_bytes < MAX_TAIL
-        ):
-            job.tail_bytes = min(MAX_TAIL, job.tail_bytes * 2)
-            job.records.clear()
-            job.fragments.clear()
-            job.truncated.clear()
-            job.read.clear()
-            job.tails.clear()
-            job.error = None
-            await grepper.run(job)
-
-    await asyncio.gather(*(one(j) for j in jobs))
+    await asyncio.gather(*(grepper.run(j) for j in jobs))
 
 
 def dates_of(entries: list[dict], log: str) -> set[str]:
@@ -1270,12 +1302,15 @@ def place(
             for f in p["files"]:
                 key = (name, f.name)
                 if key not in jobs:
-                    jobs[key] = made[key] = Job(f, set(), lo, listed_at=at_time)
+                    jobs[key] = made[key] = Job(
+                        f, set(), lo, until=hi, listed_at=at_time
+                    )
                 job = made.get(key)
                 if job is None:  # read already, from a list that has not changed
                     continue
                 job.strings.update(ask["strings"])
                 job.since = min(job.since, lo)
+                job.until = max(job.until, hi)
                 for s in ask["strings"]:
                     job.windows.setdefault(s, []).append((lo, hi))
     return list(made.values())
@@ -1313,21 +1348,32 @@ def file_entry(
 ) -> dict:
     """One file of a record: what it covers and, read, the records of the ask's strings.
 
-    The current file not read covers from its rotation to when it was listed: not searched, so said."""
+    The current file not read covers from its rotation to when it was listed: not searched, so said.  ``covers_to``
+    says what its end is: a rotated file's rotation (with its margin), the record a read of the current file stopped
+    before (the file goes on past it), when it was asked (it read to the file's end), or the list."""
     covers_from = "mtime"
+    covers_to: str | None = "rotation"
     if f.kind != "current":
         covers = [text(f.start), text(f.end)]
     elif job and job.status == "answered":
-        covers, covers_from = tail_covers(job, listed_at)
+        covers, covers_from, covers_to = window_covers(job, listed_at)
     else:
-        covers, covers_from = [text(f.start), text(listed_at)], "list"
+        covers, covers_from, covers_to = (
+            [text(f.start), text(listed_at)],
+            "list",
+            "list",
+        )
     # a grep that failed is the ask's when it held one of the ask's strings; the file's other greps answer the rest
     failed = sorted({job.failed[s] for s in strings & job.failed.keys()}) if job else []
     entry = {
         "file": f.name,
         "covers": covers,
         "covers_from": covers_from,
-        "tail_bytes": job.tail_bytes if job else None,
+        "covers_to": covers_to,
+        # the window the current file was asked over (the API's since and until)
+        "since_until": [text(t) for t in current_window(job)]
+        if job and f.kind == "current"
+        else None,
         "status": "failed"
         if failed
         else job.status
@@ -1364,7 +1410,7 @@ def file_entry(
         and f.kind == "current"
         and entry["covers"] is None
     ):
-        entry["error"] = entry["error"] or "the tail held no stamp"
+        entry["error"] = entry["error"] or "the window held no stamp"
     return entry
 
 
