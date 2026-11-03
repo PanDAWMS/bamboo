@@ -1402,6 +1402,37 @@ map's reach, N call(s) closed by their name)".
   1813 rests on that frame unread;
 - when the map gives a write by a name made at run time (`JobSpec.pack`) as an arm, or says which object it writes.
 
+### K52. A writer that writes its loop's objects after the loop is read on its latest run before the row
+
+H2 (`_wrote_at`), its scan (`_row_at`) and F1 read a candidate on the key's runs at the row's second.  A batched
+writer assigns each object in a loop and writes them all by one call after it, so its run of the key ends before the
+row's second.  datasetManager's FinisherThr.run prints "<PandaID> Finisher : Kill" (730) and sets the job failed
+(735) in the loop at 662, then calls updateJobs (761).  In MF-7392812614 the run ended at 13:40:29, and the row was
+written at 13:40:42.  So the candidate had "no run of the key" and stayed unexamined.
+
+- *A batched writer* (`rerun.batched`) is one where the map's KeyFrom of the candidate's function says the object
+  assigned at its line is handed to a call (`KEY_HANDED`), and a loop of the function holds the line and not the call.
+- *Its run* (`Rerun._batched`) is the key's latest run in its logs between the row before and the row's second.  It
+  counts only where the records hold it and the log was searched with no hole.  It is handed to the judge as the
+  candidate's run, and judged as any run is.  It rests on no other pass of the writer printing the key between.
+  FinisherThr runs in a pool of 3, and another thread's pass that printed nothing of the key is not seen.
+- *None held*: the candidate stays as it was, and the walk says so.  Nothing is asked: the records' answers search
+  each log's whole current file, so in m-failed only MF-7392812614's setupper writers lack the span (2 days back to
+  10-31).  An ask back to the row before would stop that walk before H2 judges (tmaeno, W1a', 2026-11-03).
+
+Measured (dw2 against tk1, map x13xxB3m read with codemap-xx 5ccd571, out/d3/dw2-predictions.txt), every
+prediction held.  MF-7392812614 goes from STOP H2 to STOP H3: run:735 is handed its run, is positive by row 730, and
+is chosen by positive evidence.  H3 then stops on its guards (`not (nTokens <= nOkTokens)`, `endTime < timeOut`), whose
+values 707 and 727 print but H3 does not read yet.  Text only: a line per batched candidate held no run, in the other
+6 m-failed, MJ-sent-late (m-cut, m-cut2) and the 65's A-db, A-rec, K-db, K-rec, N-rec with their rounds.  attr and MT
+are the same.  The run is read only with K53: without it, 735's rows found nothing in it.
+
+*Shows:* "<func>:<line> writes in a batch (assigned in the loop at N, handed on to <call> at M): its run is the key's
+latest from the row before (...) to ..., ... in <log>, the log searched with no hole; it rests on ...", or "...: no
+run of the key held from the row before (...) to ...; not asked".
+*Revisit:* where H2 cannot choose without a batched writer's run that is not held: then ask back to the row before,
+by the writer's mark where it has one.
+
 ## The walks (`asked.py`)
 
 ### K32. The walks read the code alone, not the instance record the map was built with

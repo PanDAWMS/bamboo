@@ -132,6 +132,7 @@ from bamboo.querier.records import (
     FileLogs,
     Logs,
     Owners,
+    Run,
     Unrecorded,
     Window,
     keyed,
@@ -554,6 +555,33 @@ def key_froms() -> list:
     if _RUNS[0] is not kfs:
         _RUNS[:] = [kfs, [kf for kf in kfs if not never_runs(kf)]]
     return _RUNS[1]
+
+
+def batched(rel: str, func: str, lines: list[int], subject: str) -> tuple[int, Any, int] | None:
+    """``(line, KeyFrom, the loop's line)`` where *func* writes *subject* in a batch at one of *lines*: the map's
+    KeyFrom of it says the object assigned there is handed to a call (``KEY_HANDED``), and a loop of the function holds
+    the line and not the call.  A pass assigns each object in its loop and hands them all on after it, so its run of
+    the key can end before the row's second (datasetManager's FinisherThr.run: 735 in the loop at 662, updateJobs at
+    761; KNOWN_ISSUES.md K52)."""
+    for kf in key_froms():
+        if kf.owner != f"{rel}::{func}" or kf.unread != KEY_HANDED or not kf.object or kf.table:
+            continue
+        try:
+            node = R.def_at(rel, func, lines)
+        except LookupError:
+            continue
+        if (call := R.statement_at(node, kf.statement)) is None:
+            continue
+        around_call = {id(a) for a in pathcond.ancestors(call)}
+        for line in sorted(set(lines) & set((kf.writes or {}).get(subject, []))):
+            if (site := R.statement_at(node, line)) is None or line >= kf.statement:
+                continue
+            for a in pathcond.ancestors(site):
+                if a is node:
+                    break
+                if isinstance(a, (ast.For, ast.AsyncFor, ast.While)) and id(a) not in around_call:
+                    return line, kf, a.lineno
+    return None
 
 
 def is_birth(kf) -> bool:
@@ -2751,19 +2779,22 @@ class Rerun:
         runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                    owners_of([c.owner for c in cands]), whole=True)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+        handed = self._batched(cands, at, runs, holes, state, hi, subject)
         env = self.base_env(at=state["time"])
         maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
-        if not at and not holes:
+        if not at and not holes and not handed:
             self.say(f"  no run of {key} at {when}: no writer's pass" + (" of a log that names it" if maybe else ""))
             for p in maybe:
                 self.say(f"  may have written: {p.arm} ({'; '.join(p.premises)})")
             return maybe
+        # a batched writer's run ended before the row: a run of its own log, judged as the others are
+        at = {**at, **{r.log.name: [r] for r in handed.values()}}
         question = _question_run(at)
         if question is not None:
             self.say(f"the run: {question.describe()}")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
         for c in cands:
-            if any(name in c.log_files for name in at):
+            if any(name in c.log_files for name in at) and c.owner not in handed:
                 self.warn_split(c.owner, c.lines)
         stable_holes([R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
                       for c in cands for run in at_hand if run.log.name in c.log_files], env)
@@ -2892,10 +2923,13 @@ class Rerun:
                                             owners_of([c.owner for c in cands]), whole=True)
         self._stop_unanswered(unanswered)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
-        if not at and not last:
+        handed = self._batched(cands, at, runs, holes, state, hi, subject)
+        if not at and not handed and not last:
             self.say(f"  no run of {key} at {when}")
             return None
-        self.need(T.Said("a-run-of-at", {"key": key, "when": when}), at)
+        self.need(T.Said("a-run-of-at", {"key": key, "when": when}), at or handed)
+        # a batched writer's run ended before the row: a run of its own log, judged as the others are
+        at = {**at, **{r.log.name: [r] for r in handed.values()}}
         question = _question_run(at)
         if question is not None:
             self.say(f"the run: {question.describe()}")
@@ -2905,7 +2939,7 @@ class Rerun:
             self.say(f"{len(next(iter(at.values())))} runs of {key} at {when} in {next(iter(at))}: each candidate is judged on its own run")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
         for c in cands:
-            if any(name in c.log_files for name in at):
+            if any(name in c.log_files for name in at) and c.owner not in handed:
                 self.warn_split(c.owner, c.lines)
         env = self.base_env(at=state["time"] if state else None)
         seens = [R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
@@ -3012,10 +3046,13 @@ class Rerun:
             if said:
                 self.say(f"   {said}")
             at_row = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
-            if not at_row:
+            handed = self._batched(cands, at_row, runs, holes, state, hi, history.subject)
+            if not at_row and not handed:
                 unsearched = "".join(f"; {name} not searched: {'; '.join(h)}" for name, h in holes.items())
                 self.say(f"   no run of {key} at {hi} in {', '.join(runs) or 'no log asked'}{unsearched}: no writer chosen")
                 continue
+            # a batched writer's run ended before the row: a run of its own log, judged as the others are
+            at_row = {**at_row, **{r.log.name: [r] for r in handed.values()}}
             # as H2: runs in more than one log are each judged on their own; in one log, the first is the row's
             question = None if len(at_row) > 1 else next(iter(at_row.values()))[0]
             at_hand = [question] if question is not None else [r for rs in at_row.values() for r in rs]
@@ -3689,6 +3726,39 @@ class Rerun:
             return self._kept[start, first, last or first, subject, value]
 
         return keeps
+
+    def _batched(self, cands: list[Candidate], at: dict[str, list], runs: dict[str, list], holes: dict[str, list[str]],
+                 state: dict | None, hi: str, subject: str) -> dict[str, Run]:
+        """W1a' (D3, KNOWN_ISSUES.md K52): a candidate with no run of the key at the row's second (*at*) that writes in
+        a batch (:func:`batched`) is handed, as its run, the key's latest run in its logs held between the row before
+        *state*'s and the row, the log searched with no hole -- the pass whose batch the row's write ended, where no
+        other pass of it printed the key between.  None held: it stays as it is, said so, and nothing is asked.  The
+        candidates handed a run, by owner."""
+        out: dict[str, Run] = {}
+        if state is None:
+            return out
+        before = None
+        for c in cands:
+            if any(name in at for name in c.log_files) or (found := batched(c.rel, c.func, c.lines, subject)) is None:
+                continue
+            if before is None:
+                # the row before, read once a batched writer is a candidate: "" where none is
+                states = (self.data.get("statuslog") or {}).get("states") or []
+                before = max((s["time"][:19] for s in states if s["time"][:19] < state["time"][:19]), default="")
+            if not before:
+                break
+            line, kf, loop = found
+            facts = {"func": c.func, "line": line, "loop": loop, "statement": kf.statement,
+                     "call": ", ".join(h.split("::")[-1] for h in kf.handed_to) or "a call", "before": before, "when": hi}
+            held = [r for name in c.log_files if name in runs and name not in holes
+                    for r in runs[name] if before < r.first[:19] and r.last[:19] < hi[:19]]
+            if not held:
+                self.say(T.text(T.Said("writes-in-a-batch-no-run-held", facts)))
+                continue
+            c.run = out[c.owner] = max(held, key=lambda r: r.last)
+            self.say(T.text(T.Said("writes-in-a-batch-its-run", {**facts, "first": c.run.first, "last": c.run.last,
+                                                                "log": c.run.log.name})))
+        return out
 
     def _rows_elsewhere(self, q: Stuck, follow, writers: list, movers: dict, gaps: dict) -> dict[str, tuple[bool, T.Said, dict | None]]:
         """For each mover whose statements' rows reach none of its arms (``elsewhere_of``), what the map's reach says of

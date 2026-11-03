@@ -309,6 +309,12 @@ TEMPLATES: dict[str, str] = {
     "a-pass-that-wrote-at-the-statuslog": "a pass that wrote {subject}={value!r} at the {of_rows} statuslog row(s) its writers' passes can write (none shows a writer's pass: KNOWN_ISSUES.md K38)",
     "a-print-of-s-text-and-binds": "a print of {where}'s text and binds in its function (the map's printed_by)",
     "a-run-of-at": "a run of {key} at {when}",
+    "writes-in-a-batch-no-run-held": "  {func}:{line} writes in a batch (assigned in the loop at {loop}, handed on to {call} at "
+                                     "{statement}): no run of the key held from the row before ({before}) to {when}; not asked",
+    "writes-in-a-batch-its-run": "  {func}:{line} writes in a batch (assigned in the loop at {loop}, handed on to {call} at "
+                                 "{statement}): its run is the key's latest from the row before ({before}) to {when}, "
+                                 "{first}..{last} in {log}, the log searched with no hole; it rests on no other pass of it "
+                                 "printing the key between",
     "a-run-that-shows-ran-to-read": "a run that shows {fn_name}:{chosen_line} ran, to read its guards in ({left}; its conditions: {unread:join=, })",
     "a-settled-comparison-of-two-values": "a settled comparison of two values",
     "a-statuslog-row-after": "a statuslog row after {q_observed!r}",

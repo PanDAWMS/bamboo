@@ -4925,6 +4925,85 @@ def test_a_print_that_begins_with_a_hole_is_read_on_the_line_its_markless_logger
     assert update[3][0] is False and update[3][2] == 1
 
 
+# datasetManager's FinisherThr.run, cut down: each job set failed in the loop, all written by one call after it
+_BATCHED = """
+def run(jobs):
+    up_jobs = []
+    for job in jobs:
+        logger.debug(f"{job.PandaID} Finisher : Kill")
+        job.jobStatus = "failed"
+        up_jobs.append(job)
+    logger.debug("updating ...")
+    taskBuffer.updateJobs(up_jobs, False)
+
+
+def each(jobs):
+    for job in jobs:
+        job.jobStatus = "failed"
+        taskBuffer.updateJobs([job], False)
+"""
+
+
+def test_a_writer_that_writes_its_loop_s_objects_after_it_is_read_on_its_latest_run_before_the_row(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "w.py").write_text(_BATCHED)
+    lines = _BATCHED.splitlines()
+    arm, call, loop, call2 = (lines.index(s) + 1 for s in [
+        '        job.jobStatus = "failed"', "    taskBuffer.updateJobs(up_jobs, False)", "    for job in jobs:",
+        "        taskBuffer.updateJobs([job], False)"])
+    # each's assignment is the second of the same text
+    arm2 = len(lines) - lines[::-1].index('        job.jobStatus = "failed"')
+    stamp = "{} panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "w.log").write_text(stamp.format("2026-01-01 00:10:28,854", "Finisher : Kill"))
+    (tmp_path / "old.log").write_text(stamp.format("2025-12-31 23:59:00,000", "Finisher : Kill"))
+    code = """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.models import KEY_HANDED
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate
+
+        def kf(func, statement, line, unread=KEY_HANDED):
+            return N(owner=f"pandaserver/w.py::{func}", unread=unread, object="job", table="", statement=statement,
+                     writes={"JobSpec.jobStatus": [line]}, handed_to=["pandaserver/t.py::TaskBuffer.updateJobs"])
+
+        mapdump._FRAGMENT[:] = [N(key_froms=[kf("run", CALL, ARM), kf("each", CALL2, ARM2)])]
+        found = rerun.batched("pandaserver/w.py", "run", [ARM], "JobSpec.jobStatus")
+        got = {"batched": [found[0], found[2]] if found else None,
+               "inside": rerun.batched("pandaserver/w.py", "each", [ARM2], "JobSpec.jobStatus"),
+               "other": rerun.batched("pandaserver/w.py", "run", [ARM], "JobSpec.lockedBy")}
+        r = object.__new__(rerun.Rerun)
+        r.data = {"statuslog": {"states": [{"status": "transferring", "time": "2026-01-01 00:00:00"},
+                                           {"status": "failed", "time": "2026-01-01 00:10:42"}]}}
+        state = r.data["statuslog"]["states"][1]
+        for name, holes in [("w", {}), ("w holed", None), ("old", {}), ("w no row", {})]:
+            log = read_log(f"{name.split()[0]}.log")
+            c = Candidate("pandaserver/w.py", "run", [ARM], [log.name])
+            r.lines = []
+            handed = r._batched([c], {}, {log.name: runs_for(log, "1")}, {log.name: ["a part"]} if holes is None else holes,
+                                None if name.endswith("no row") else state, "2026-01-01 00:10:42", "JobSpec.jobStatus")
+            got[name] = [{k: [v.first, v.last] for k, v in handed.items()}, c.run is not None, r.lines]
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("CALL2", str(call2)).replace("ARM2", str(arm2)).replace("CALL", str(call)).replace("ARM", str(arm))))
+    got = json.loads(out.splitlines()[-1])
+    # the job assigned in the loop and handed on after it: a batch; handed on in the loop, or another subject: not
+    assert got["batched"] == [arm, loop] and got["inside"] is None and got["other"] is None
+    # the key's run between the row before and the row, its log searched whole: the candidate's run, said so
+    handed, set_run, said = got["w"]
+    assert handed == {"pandaserver/w.py::run": ["2026-01-01 00:10:28,854", "2026-01-01 00:10:28,854"]} and set_run
+    assert said == [f"  run:{arm} writes in a batch (assigned in the loop at {loop}, handed on to TaskBuffer.updateJobs at {call}): "
+                    "its run is the key's latest from the row before (2026-01-01 00:00:00) to 2026-01-01 00:10:42, "
+                    "2026-01-01 00:10:28,854..2026-01-01 00:10:28,854 in w.log, the log searched with no hole; it rests on no "
+                    "other pass of it printing the key between"]
+    # a part of the log not searched, or the run before the row before: none held, said, nothing asked
+    for name in ("w holed", "old"):
+        assert got[name][:2] == [{}, False]
+        assert got[name][2][0].endswith("no run of the key held from the row before (2026-01-01 00:00:00) to 2026-01-01 00:10:42; not asked")
+    # no row read: nothing
+    assert got["w no row"] == [{}, False, []]
+
+
 def test_a_call_leaves_the_path_knowing_nothing_of_what_it_changes(tmp_path):
     checker = (
         "\nclass Checker:\n    def __init__(self):\n        self.logger = logger\n        self.flag = None\n        self.result = None\n\n"
