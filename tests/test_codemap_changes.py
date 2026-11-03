@@ -214,6 +214,11 @@ class Spec:
         self._changed[name] = value
 
 
+class Task:
+    jediTaskID: int | None
+    inputs: dict
+
+
 class Refiner:
     def fill(self, params):
         params["filled"] = True
@@ -289,6 +294,22 @@ class Refiner:
     def unread(self, params, sql):
         self.cur.execute(sql, params)
         if ":a" in params:
+            pass
+
+    def parts(self, params):
+        self.fill_each([params["inner"]])
+        shown = json.dumps([params["shown"]])
+        if "x" in params:
+            pass
+
+    def fill_each(self, maps):
+        for one in maps:
+            one["filled"] = True
+
+    def declared_parts(self, params: Task):
+        self.fill_each([params.inputs], {"id": params.jediTaskID})
+        self.fill_each(params.jediTaskID)
+        if "x" in params.inputs:
             pass
 
 
@@ -492,6 +513,29 @@ def test_a_text_s_method_keeps_nothing_and_a_library_object_s_method_keeps_what_
 
     assert [(kind, key, what) for kind, key, what, *_rest in found] == [
         ("escaped", "*", "kept by self.sink.write"),
+    ]
+
+
+def test_a_part_of_the_object_put_inside_what_a_call_into_the_corpus_is_handed_may_change_inside(
+    tmp_path,
+):
+    """``self.fill_each([params["inner"]])`` hands a definition of the corpus a list holding a part of the map, and
+    this reading does not follow a container's elements: the part may change inside.  A library's function handed one,
+    ``json.dumps``, changes nothing of it."""
+    found = _object_changes(tmp_path, "'x' in params", "parts")
+
+    assert [(kind, key, what) for kind, key, what, *_rest in found] == [
+        ("inner", "'inner'", "handed inside to self.fill_each"),
+    ]
+
+
+def test_a_part_declared_a_value_no_change_can_touch_changes_nothing_inside(tmp_path):
+    """``Task.jediTaskID`` is declared ``int | None``: handed inside a map, or straight, to a definition that puts into
+    what it is handed, it changes nothing inside; ``Task.inputs``, declared a ``dict``, may."""
+    found = _object_changes(tmp_path, "'x' in params.inputs", "declared_parts")
+
+    assert [(kind, key, what) for kind, key, what, *_rest in found] == [
+        ("inner", ".inputs", "handed inside to self.fill_each"),
     ]
 
 

@@ -804,6 +804,37 @@ _TYPES = frozenset(one for one, _name in BUILTIN_METHODS)
 SCALARS = frozenset({"str", "int", "float", "bool", "bytes", "complex", "NoneType"})
 
 
+#: The names an annotation spells a value no change in place can touch with: ``int``, ``str | None``,
+#: ``Optional[datetime.datetime]`` (:func:`immutable_annotation`).
+IMMUTABLE_ANNOTATIONS = frozenset(
+    {"int", "str", "float", "bool", "bytes", "complex", "None", "Optional", "Union", "Literal", "typing", "datetime",
+     "date", "time", "timedelta", "Decimal", "decimal"}
+)
+
+
+def immutable_annotation(annotation: Optional[ast.expr]) -> bool:
+    """Whether *annotation* spells only values no change in place can touch (:data:`IMMUTABLE_ANNOTATIONS`); one
+    written as a string is read as what the string holds."""
+    if annotation is None:
+        return False
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return False
+    names: list[str] = []
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.append(node.attr)
+        elif isinstance(node, ast.Constant) and node.value is None:
+            names.append("None")
+        elif isinstance(node, ast.Constant) and not isinstance(node.value, (str, int, float, bool)):
+            return False
+    return bool(names) and all(one in IMMUTABLE_ANNOTATIONS for one in names)
+
+
 def builtin_method(type_name: str, name: str) -> Optional[Method]:
     """*type_name*'s method *name*, where a reader knows the builtin type of its receiver; by the name alone
     (:func:`by_name`) where the type is none the table holds."""

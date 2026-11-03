@@ -57,6 +57,10 @@ name between; in a definition the object is handed to, every statement.  A chang
   ``pop`` and ``setdefault`` of a literal key, ``update`` of a dict literal, said by the key;
 - what a definition of the corpus the object is handed to, or called on, does to it, to the end, by the rules
   above, the call on the way (*via*);
+- a part of the object put inside what an argument of a call into the corpus makes -- ``updateJobs([self.job])``,
+  whose elements this reading does not follow --: a change inside that part, as of a part handed -- save a part
+  declared a value no change in place can touch (``jediTaskID: int | None``, :func:`callfacts.immutable_annotation`),
+  on the premise that a declaration holds;
 - an object put into another object's attribute: what the corpus does through an attribute of that name, on any
   object, as :func:`may_change` reads a lost object by the attribute's name -- ``self.updatedTaskParams =
   taskParamMap`` is changed by nothing, since the one function reading the attribute only encodes it;
@@ -1080,7 +1084,10 @@ class _Reading:
         self, file: str, func: ast.AST, call: ast.Call, holds, bound: tuple
     ) -> list[ObjectChange]:
         """What *call* may do to the object: a builtin container's method on it, what a definition it is handed to
-        or called on does with it, or a change of any key where it is handed where it cannot be followed."""
+        or called on does with it, or a change of any key where it is handed where it cannot be followed.  A part of
+        it put inside what an argument makes -- ``updateJobs([self.job])`` -- reaches a definition of the corpus in
+        an element this reading does not follow, and may change inside.  A part declared a value no change in place
+        can touch changes nothing inside (:meth:`_unchanging`)."""
         called = call.func
         line, here = call.lineno, f"{file}:{call.lineno}"
         values = [*call.args, *(keyword.value for keyword in call.keywords)]
@@ -1093,11 +1100,13 @@ class _Reading:
             if _is_object(one.value if isinstance(one, ast.Starred) else one, holds)
         ]
         parts = [one for one in values if _part_of(one, holds)]
+        parts_inside = _parts_inside(values, holds)
         if not (
             on_object
             or within
             or handed
             or parts
+            or parts_inside
             or any(_inside(one, holds) for one in values)
         ):
             return []
@@ -1169,6 +1178,18 @@ class _Reading:
                 )
             else:
                 return unread(placed.unplaced or "not placed")
+        found += [
+            ObjectChange(
+                file,
+                line,
+                CHANGE_INNER,
+                _first_step(one, holds),
+                f"handed inside to {ast.unparse(called)}",
+                func=func,
+            )
+            for one in parts_inside
+            if not self._unchanging(file, func, one)
+        ]
         for target in targets:
             if not isinstance(target.func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 found += unread(f"run as {type(target.func).__name__}")
@@ -1205,7 +1226,9 @@ class _Reading:
                     for change in self.handed_changes(target, frozenset(whole))
                 ]
             for name, one in pieces:
-                if self.handed_changes(target, frozenset({name})):
+                if not self._unchanging(file, func, one) and self.handed_changes(
+                    target, frozenset({name})
+                ):
                     found.append(
                         ObjectChange(
                             file,
@@ -1217,6 +1240,15 @@ class _Reading:
                         )
                     )
         return _once(found)
+
+    def _unchanging(self, file: str, func: ast.AST, part: ast.AST) -> bool:
+        """Whether *part* is declared a value no change in place can touch -- ``jediTaskID: int | None``
+        (:func:`callfacts.immutable_annotation`) --, on the premise that a declaration holds: nothing a call does
+        changes inside it."""
+        if not isinstance(part, ast.expr):
+            return False
+        declared = self.types._annotation_of(file, func, part)
+        return declared is not None and callfacts.immutable_annotation(declared[1])
 
     def _driver_changes(
         self, file: str, func: ast.AST, call: ast.Call, handed: list, parts: list, holds
@@ -1611,6 +1643,16 @@ def _inside(value: ast.AST, holds) -> bool:
         holds(one) and isinstance(getattr(one, "parent", None), _HOLDERS)
         for one in ast.walk(value)
     )
+
+
+def _parts_inside(values: list[ast.expr], holds) -> list[ast.AST]:
+    """The parts of the object put inside what *values* make: ``self.job`` in ``[self.job]``."""
+    return [
+        one
+        for value in values
+        for one in ast.walk(value)
+        if isinstance(getattr(one, "parent", None), _HOLDERS) and _part_of(one, holds)
+    ]
 
 
 def _builtin_changes(
