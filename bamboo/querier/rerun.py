@@ -88,6 +88,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types
@@ -115,6 +116,7 @@ from bamboo.querier import census as C
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
 from bamboo.querier import held as HD
+from bamboo.querier import heldcol as HC
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
@@ -130,6 +132,7 @@ from bamboo.querier.records import (
     FileLogs,
     Logs,
     Owners,
+    Run,
     Unrecorded,
     Window,
     keyed,
@@ -552,6 +555,33 @@ def key_froms() -> list:
     if _RUNS[0] is not kfs:
         _RUNS[:] = [kfs, [kf for kf in kfs if not never_runs(kf)]]
     return _RUNS[1]
+
+
+def batched(rel: str, func: str, lines: list[int], subject: str) -> tuple[int, Any, int] | None:
+    """``(line, KeyFrom, the loop's line)`` where *func* writes *subject* in a batch at one of *lines*: the map's
+    KeyFrom of it says the object assigned there is handed to a call (``KEY_HANDED``), and a loop of the function holds
+    the line and not the call.  A pass assigns each object in its loop and hands them all on after it, so its run of
+    the key can end before the row's second (datasetManager's FinisherThr.run: 735 in the loop at 662, updateJobs at
+    761; KNOWN_ISSUES.md K52)."""
+    for kf in key_froms():
+        if kf.owner != f"{rel}::{func}" or kf.unread != KEY_HANDED or not kf.object or kf.table:
+            continue
+        try:
+            node = R.def_at(rel, func, lines)
+        except LookupError:
+            continue
+        if (call := R.statement_at(node, kf.statement)) is None:
+            continue
+        around_call = {id(a) for a in pathcond.ancestors(call)}
+        for line in sorted(set(lines) & set((kf.writes or {}).get(subject, []))):
+            if (site := R.statement_at(node, line)) is None or line >= kf.statement:
+                continue
+            for a in pathcond.ancestors(site):
+                if a is node:
+                    break
+                if isinstance(a, (ast.For, ast.AsyncFor, ast.While)) and id(a) not in around_call:
+                    return line, kf, a.lineno
+    return None
 
 
 def is_birth(kf) -> bool:
@@ -1370,7 +1400,7 @@ class Wrote:
     question: object  # the run
     cands: list
     env: object
-    chosen: object
+    chosen: Verdict
     #: the caller's verdict where *chosen* is the arm of a writer that prints nothing, read on that caller's run at its
     #: call (:class:`StandIn`): the run's marks and the guard's record are the call's, the guards the arm's
     via: object = None
@@ -1911,6 +1941,10 @@ class Rerun:
         self._graph_read = None
         #: ``_called_at``'s answers: (caller, callee) function -> the lines of the calls that go on into it
         self._calls_into: dict[tuple[str, str], list[str]] = {}
+        #: ``_keeps``' answers: (function, first line, last line, subject, value) -> calls closed by their name, or None;
+        #: and the in-memory destination per (subject, value)
+        self._kept: dict[tuple[str, int, int, str, str], int | None] = {}
+        self._in_memory: dict[tuple[str, str], Any] = {}
         #: H1's readings by (subject, value), read once (``_writers``); the runs F1 read the rows after (``rows_between``)
         self._readings: dict[tuple[str, str], list] = {}
         self._rows_read: set[str] = set()
@@ -2380,9 +2414,27 @@ class Rerun:
                 # the rows' values alone, and no run is named
                 env = self.base_env(at=w.row["time"] if w.row else None)
             read = {g: _guard_read(g, env) for g in guards}
+            # a guard over a column the rows file holds, read in it by the map's ways and their changes (K49)
+            held = {}
+            for g, got in read.items():
+                if got is True or got is False:
+                    continue
+                h = HC.read(chosen.candidate.owner, g, chosen.line, self.data, question if shown else None, self.mode, env)
+                if h is None:
+                    continue
+                held[g] = h
+                self.say(f"{g!r} read in the rows file's {h.section}" + (f" as fetched at {h.as_of}" if h.as_of else "")
+                         + f": {h.value!r}" + (f", on {h.shown}, the route its run shows" if h.shown else "") + " (KNOWN_ISSUES.md K49)")
+                for k in h.keys:
+                    self.say(f"  {T.text(k)}")
+                if h.value is True or h.value is False:
+                    read[g] = h.value
             if branch and (false := [g for g, got in read.items() if got is False]):
                 # it did not write at this row: an older one it may have written at, else it is not among the arms
-                where = f"{site_fn.name}:{chosen.line}'s guard {false[0]!r} read false in the {'run' if shown else 'rows'}' values"
+                h = held.get(false[0])
+                where = (f"{site_fn.name}:{chosen.line}'s guard " + T.text(T.Said("held-read-false", {"guard": false[0], "section": h.section, "as_of": h.as_of}))
+                         if h is not None else
+                         f"{site_fn.name}:{chosen.line}'s guard {false[0]!r} read false in the {'run' if shown else 'rows'}' values")
                 if a.older:
                     nxt = a.older[0]
                     self.say(f"{where}{f' at {_row_said(w.row)}' if w.row else ''}: it did not write there; its next row, {_row_said(nxt.row)}")
@@ -2395,6 +2447,10 @@ class Rerun:
                 via = T.Said("called-at", {"fn": at_fn.name, "line": w.via.line}) if w.via is not None else ""
                 how = (T.Said("its-guards-hold-in-the-run" if shown else "its-guards-hold-in-the-rows") if guards
                        else T.Said("it-has-no-guard"))
+                if used := [g for g in guards if g in held]:
+                    premise = held[used[0]].premise(used)
+                    how = (T.Said("its-guards-hold-held", {"held": premise}) if len(used) == len(guards)
+                           else T.Said("its-guards-hold-with-held", {"how": how, "held": premise}))
                 said = T.Said("written-last-by", {"subject": q.subject, "observed": q.observed, "fn": site_fn.name,
                                                   "line": chosen.line, "via": via})
                 if shown:
@@ -2407,7 +2463,8 @@ class Rerun:
                     "holes": T.Said("not-searched-there", {"holes": holes}) if holes else "",
                 }))
                 return None
-            unread = [T.Said("guard-read-false" if got is False else "guard-not-read", {"guard": g})
+            unread = [T.Said("guard-read-false" if got is False else "guard-not-read-held" if g in held else "guard-not-read",
+                             {"guard": g} | ({"keys": held[g].keys} if got is not False and g in held else {}))
                       for g, got in read.items() if got is not True]
             # an arm left by elimination is read in no run: H4 would read its guard's method in a run not its own
             self.need(T.Said("a-run-that-shows-ran-to-read", {"fn_name": site_fn.name, "chosen_line": chosen.line, "left": left, "unread": list(unread)}), shown)
@@ -2422,8 +2479,14 @@ class Rerun:
                     ):
                         methods.append((n.func.attr, ast.unparse(n)))
         self.say(f"read through a method: {methods}")
+        if not methods:
+            # what H3 lacks is then the values the guard reads at the run (a status's are not read here), not a method's
+            if not guards:
+                self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
+            unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
+            self.need(T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})}), None)
         method = self.need(T.Said("a-method-the-guard-reads-through", {"conditions": T.Said("its-conditions", {"unread": unread}) if unread else ""}),
-                           methods[0][0] if methods else None)
+                           methods[0][0])
         return SetBy(method, reading, question, guard_record, env)
 
     def _wrote_said(self, w: Wrote) -> dict:
@@ -2716,25 +2779,28 @@ class Rerun:
         runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                    owners_of([c.owner for c in cands]), whole=True)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+        handed = self._batched(cands, at, runs, holes, state, hi, subject)
         env = self.base_env(at=state["time"])
         maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
-        if not at and not holes:
+        if not at and not holes and not handed:
             self.say(f"  no run of {key} at {when}: no writer's pass" + (" of a log that names it" if maybe else ""))
             for p in maybe:
                 self.say(f"  may have written: {p.arm} ({'; '.join(p.premises)})")
             return maybe
+        # a batched writer's run ended before the row: a run of its own log, judged as the others are
+        at = {**at, **{r.log.name: [r] for r in handed.values()}}
         question = _question_run(at)
         if question is not None:
             self.say(f"the run: {question.describe()}")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
         for c in cands:
-            if any(name in c.log_files for name in at):
+            if any(name in c.log_files for name in at) and c.owner not in handed:
                 self.warn_split(c.owner, c.lines)
         stable_holes([R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
                       for c in cands for run in at_hand if run.log.name in c.log_files], env)
         j = judge(
             cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi), subject=attr, observed=value,
-            question_run=question, env=env, called_at=self._called_at,
+            question_run=question, env=env, called_at=self._called_at, keeps=self._keeps(subject),
         )
         self.say(j.report(question))
         out = []
@@ -2857,10 +2923,13 @@ class Rerun:
                                             owners_of([c.owner for c in cands]), whole=True)
         self._stop_unanswered(unanswered)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
-        if not at and not last:
+        handed = self._batched(cands, at, runs, holes, state, hi, subject)
+        if not at and not handed and not last:
             self.say(f"  no run of {key} at {when}")
             return None
-        self.need(T.Said("a-run-of-at", {"key": key, "when": when}), at)
+        self.need(T.Said("a-run-of-at", {"key": key, "when": when}), at or handed)
+        # a batched writer's run ended before the row: a run of its own log, judged as the others are
+        at = {**at, **{r.log.name: [r] for r in handed.values()}}
         question = _question_run(at)
         if question is not None:
             self.say(f"the run: {question.describe()}")
@@ -2870,7 +2939,7 @@ class Rerun:
             self.say(f"{len(next(iter(at.values())))} runs of {key} at {when} in {next(iter(at))}: each candidate is judged on its own run")
         at_hand = [question] if question is not None else [r for rs in at.values() for r in rs]
         for c in cands:
-            if any(name in c.log_files for name in at):
+            if any(name in c.log_files for name in at) and c.owner not in handed:
                 self.warn_split(c.owner, c.lines)
         env = self.base_env(at=state["time"] if state else None)
         seens = [R.seen(R.function(c.rel, c.func, c.lines), run, self.mode)
@@ -2879,7 +2948,7 @@ class Rerun:
         j = judge(
             cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi),
             subject=attr, observed=value, question_run=question, env=env, called_at=self._called_at,
-            holds_write=asking.holds_write,
+            holds_write=asking.holds_write, keeps=self._keeps(subject),
         )
         self.say(j.report(question))
         if j.chosen is None and not last and self.hop not in self.hand:
@@ -2977,10 +3046,13 @@ class Rerun:
             if said:
                 self.say(f"   {said}")
             at_row = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
-            if not at_row:
+            handed = self._batched(cands, at_row, runs, holes, state, hi, history.subject)
+            if not at_row and not handed:
                 unsearched = "".join(f"; {name} not searched: {'; '.join(h)}" for name, h in holes.items())
                 self.say(f"   no run of {key} at {hi} in {', '.join(runs) or 'no log asked'}{unsearched}: no writer chosen")
                 continue
+            # a batched writer's run ended before the row: a run of its own log, judged as the others are
+            at_row = {**at_row, **{r.log.name: [r] for r in handed.values()}}
             # as H2: runs in more than one log are each judged on their own; in one log, the first is the row's
             question = None if len(at_row) > 1 else next(iter(at_row.values()))[0]
             at_hand = [question] if question is not None else [r for rs in at_row.values() for r in rs]
@@ -2990,6 +3062,7 @@ class Rerun:
             j = judge(
                 cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi),
                 subject=attr, observed=state["status"], question_run=question, env=env, called_at=self._called_at,
+                keeps=self._keeps(history.subject),
             )
             self.say(j.report(question))
             chosen += j.chosen is not None
@@ -3616,6 +3689,76 @@ class Rerun:
                     lines.update(call.lines or [call.line])
             self._calls_into[(start, end)] = [f"{file}:{line}" for line in sorted(lines)]
         return self._calls_into[(start, end)]
+
+    def _keeps(self, subject: str) -> Callable[[R.Function, ast.AST, str], int | None]:
+        """Rule R's reading of a call on the way of a value it carries (``changed.breaks``), by the map's reach: whether
+        the calls in a statement's *node* of *fn* keep *subject*'s field at *value* in the object they change -- from
+        those calls alone, as ``_called_at`` asks a call (a copy of the row holding them, with its holes at their
+        lines), the reach goes on to no arm assigning the field another value in memory
+        (``reach.moving_off_in_memory``; births left out as ``unborn_junctions`` does) and leaves no hole.  The answer
+        is how many calls it closed by their name, or None, as where the dump has no reach_graph."""
+
+        def keeps(fn: R.Function, node: ast.AST, value: str) -> int | None:
+            graph = self._graph()
+            if graph is None:
+                return None
+            RE, record, rows = graph
+            if (subject, value) not in self._in_memory:
+                self._in_memory[subject, value] = RE.moving_off_in_memory(
+                    unborn_junctions(mapdump.fragment().junctions, subject), record, subject, value)
+            destination = self._in_memory[subject, value]
+            start = record.function_at(fn.rel, fn.node.body[0].lineno) if fn.node.body else None
+            first, last = getattr(node, "lineno", None), getattr(node, "end_lineno", None)
+            # a junction the reach cannot place may be the arm
+            if start is None or first is None or destination.unmatched:
+                return None
+            if (start, first, last or first, subject, value) not in self._kept:
+                lines = set(range(first, (last or first) + 1))
+                row = record.rows[start]
+                one = row.model_copy(update={
+                    "owner": f"{start}#keeps{first}",
+                    "calls": [c for c in row.calls if lines & set(c.lines or [c.line])],
+                    "holes": [h for h in row.holes if h.line in lines],
+                })
+                got = RE.ReachGraph([*rows, one]).reach([one.owner], destination)
+                self._kept[start, first, last or first, subject, value] = (
+                    len(got.closed) if got.writes == [] and not got.holes else None)
+            return self._kept[start, first, last or first, subject, value]
+
+        return keeps
+
+    def _batched(self, cands: list[Candidate], at: dict[str, list], runs: dict[str, list], holes: dict[str, list[str]],
+                 state: dict | None, hi: str, subject: str) -> dict[str, Run]:
+        """W1a' (D3, KNOWN_ISSUES.md K52): a candidate with no run of the key at the row's second (*at*) that writes in
+        a batch (:func:`batched`) is handed, as its run, the key's latest run in its logs held between the row before
+        *state*'s and the row, the log searched with no hole -- the pass whose batch the row's write ended, where no
+        other pass of it printed the key between.  None held: it stays as it is, said so, and nothing is asked.  The
+        candidates handed a run, by owner."""
+        out: dict[str, Run] = {}
+        if state is None:
+            return out
+        before = None
+        for c in cands:
+            if any(name in at for name in c.log_files) or (found := batched(c.rel, c.func, c.lines, subject)) is None:
+                continue
+            if before is None:
+                # the row before, read once a batched writer is a candidate: "" where none is
+                states = (self.data.get("statuslog") or {}).get("states") or []
+                before = max((s["time"][:19] for s in states if s["time"][:19] < state["time"][:19]), default="")
+            if not before:
+                break
+            line, kf, loop = found
+            facts = {"func": c.func, "line": line, "loop": loop, "statement": kf.statement,
+                     "call": ", ".join(h.split("::")[-1] for h in kf.handed_to) or "a call", "before": before, "when": hi}
+            held = [r for name in c.log_files if name in runs and name not in holes
+                    for r in runs[name] if before < r.first[:19] and r.last[:19] < hi[:19]]
+            if not held:
+                self.say(T.text(T.Said("writes-in-a-batch-no-run-held", facts)))
+                continue
+            c.run = out[c.owner] = max(held, key=lambda r: r.last)
+            self.say(T.text(T.Said("writes-in-a-batch-its-run", {**facts, "first": c.run.first, "last": c.run.last,
+                                                                "log": c.run.log.name})))
+        return out
 
     def _rows_elsewhere(self, q: Stuck, follow, writers: list, movers: dict, gaps: dict) -> dict[str, tuple[bool, T.Said, dict | None]]:
         """For each mover whose statements' rows reach none of its arms (``elsewhere_of``), what the map's reach says of

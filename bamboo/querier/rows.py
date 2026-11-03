@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Iterable
 
 from bamboo.codemap import trace
+from bamboo.codemap.models import PrintRow
 from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 from bamboo.codemap.panda.provenance import classify
@@ -323,9 +324,13 @@ def implying_rows(func: ast.AST, site: ast.stmt) -> list[ast.stmt]:
     Any print in a later statement of its block, nested or not: nothing enters
     a block below its top, so a printed row there proves the site ran (a call
     or a jump in between only means the row may be missing when it did).  Or a
-    row before it with nothing in between that could leave the block.  The
-    other must rows prove only that the function got that far: ``871`` prints
-    on every run of ``parse_job_output_report`` whichever arm follows it.
+    row before it with nothing on its way to the site that could leave: at the
+    block's top, or nested in an earlier statement it falls out of
+    (:func:`_falls_out`).  ``handle_failed_job`` prints 370 ("... is back")
+    last in a ``try`` of an ``if``, and 374 follows that ``if``; 363, before
+    the call 370 waits on, proves nothing: the call may leave.  The other must
+    rows prove only that the function got that far: ``871`` prints on every
+    run of ``parse_job_output_report`` whichever arm follows it.
     """
     placed = block_of(site.parent, site)  # type: ignore[attr-defined]
     if placed is None:
@@ -338,9 +343,44 @@ def implying_rows(func: ast.AST, site: ast.stmt) -> list[ast.stmt]:
     for s in reversed(block[:index]):
         if is_print(s):
             found.append(s)
-        elif may_divert(s):
+            continue
+        found += sorted((n for n in own_nodes(s) if isinstance(n, ast.stmt) and is_print(n) and _falls_out(n, s)),
+                        key=lambda n: n.lineno, reverse=True)
+        if may_divert(s):
             break
     return found
+
+
+def _falls_out(stmt: ast.stmt, outer: ast.stmt) -> bool:
+    """Whether every way from *stmt*'s end leaves *outer*, which holds it, by falling through it, nothing on the way
+    able to leave (:func:`may_divert`): the rest of each block it sits in, a ``try``'s ``else`` and ``finally`` after
+    its body, the ``finally`` after a handler.  A handler is not entered: nothing after *stmt* in the body can raise
+    then.  None falls out of a loop's body, which goes back to the loop; of a ``finally``, which a raise may be
+    passing through; of a ``with``, whose exit is a call; or of a ``match``, not read (KNOWN_ISSUES.md K50)."""
+    node = stmt
+    while node is not outer:
+        parent = node.parent  # type: ignore[attr-defined]
+        if isinstance(parent, TRYS) and node in parent.handlers:
+            name, later = "handlers", []
+        elif (placed := block_of(parent, node)) is not None:
+            name, block = placed
+            later = block[block.index(node) + 1 :]
+        else:
+            return False
+        if any(may_divert(s) for s in later):
+            return False
+        if isinstance(parent, TRYS):
+            if name == "finalbody":
+                return False
+            if any(may_divert(s) for s in (parent.orelse if name == "body" else []) + parent.finalbody):
+                return False
+        elif isinstance(parent, LOOPS):
+            if name == "body":
+                return False
+        elif not isinstance(parent, (ast.If, ast.ExceptHandler)):
+            return False
+        node = parent
+    return True
 
 
 def iterables_over(func: ast.AST, site: ast.stmt) -> list[ast.expr]:
@@ -536,6 +576,8 @@ _MAP_HOLE = re.compile(
     re.S,
 )
 _UNESCAPED_META = re.compile(r"(?<!\\)[][(){}?*+|^$.]")
+#: a print whose text begins with a hole and a space (``f"{job.PandaID} Finisher : Kill"``): ``Row.texts``
+LEADING_HOLE = re.compile(r"f?[\"']\{[^}]+\}[ ]")
 
 
 def _map_literal(pattern: str) -> int:
@@ -645,13 +687,25 @@ class Row:
             return True
         return mode == "outside" and bool(self.shapes) and all(usable(s) for s in self.shapes)
 
+    def texts(self, record: Record) -> list[str]:
+        """What this row's patterns are read on in *record*: its message, and for a print that begins with a hole the
+        line as the logger wrote it.  A logger with no mark of its own writes that hole's value first, and the log's
+        parser takes it for the token (``records.PREFIX``): ``f"{job.PandaID} Finisher : Kill"`` is the token
+        ``7392812614`` and the message ``Finisher : Kill``, while the map's pattern begins at the space after the hole
+        (KNOWN_ISSUES.md K53)."""
+        if record.token and LEADING_HOLE.match(self.text):
+            return [record.text, f"{record.token} {record.text}"]
+        return [record.text]
+
     def matches(self, record: Record, mode: str) -> tuple[int, str]:
-        """``(literal, source)`` of the best pattern that finds the record; ``(0, "")`` when none does."""
+        """``(literal, source)`` of the best pattern that finds the record (:meth:`texts`); ``(0, "")`` when none
+        does."""
         best = (0, "")
         if not self.written_by(record):
             return best
+        texts = self.texts(record)
         for regex, literal, source in self.patterns(mode):
-            if literal > best[0] and regex.search(record.text):
+            if literal > best[0] and any(regex.search(t) for t in texts):
                 best = (literal, source)
         return best
 
@@ -671,9 +725,9 @@ class Row:
             if not usable(shape):
                 continue
             pattern, groups = _regex(shape, True)
-            m = re.search(pattern, record.text, re.S)
-            if m:
-                return {groups[g]: v for g, v in m.groupdict().items() if not groups[g].endswith("(appended)")}
+            for text in self.texts(record):
+                if m := re.search(pattern, text, re.S):
+                    return {groups[g]: v for g, v in m.groupdict().items() if not groups[g].endswith("(appended)")}
         return {}
 
 
@@ -830,10 +884,37 @@ def _prefix_regex(prefixes: tuple[str, ...]) -> re.Pattern[str]:
     return re.compile(r"\s*" + (bare[0] if len(bare) == 1 else "(?:" + "|".join(bare) + ")"), re.S)
 
 
-#: ``[fragment, [(pattern, owner, prefix regex or None, logs or None)], {text: [(owner, prefix, logs)]},
-#: {(log, token, text): writers}]`` for the installed dump (:func:`line_writers`); the fragment is held, so a dump
-#: installed after is told from it by identity
+#: ``[fragment, [(pattern, owner, prefix regex or None, logs or None, map row)], {text: [(owner, prefix, logs, map
+#: row)]}, {(log, token, text): writers}, {(log, token, text): whole writers}]`` for the installed dump
+#: (:func:`line_writers`, :func:`whole_writers`); the fragment is held, so a dump installed after is told from it by
+#: identity
 _WRITERS: list = []
+
+
+def _writers() -> list | None:
+    """:data:`_WRITERS` for the installed dump, built on its first use; None without a dump."""
+    fragment = mapdump.fragment()
+    if fragment is None:
+        return None
+    if not _WRITERS or _WRITERS[0] is not fragment:
+        rows = []
+        for f in fragment.function_prints:
+            for st in f.statements:
+                logs = frozenset(st.log_files) if st.log_files_basis == "logger" else None
+                for r in st.rows:
+                    if r.pattern and _map_usable(r.pattern):
+                        rows.append((re.compile(r.pattern, re.S), f.owner, _prefix_regex((r.prefix,)) if r.prefix else None, logs, r))
+        _WRITERS[:] = [fragment, rows, {}, {}, {}]
+    return _WRITERS
+
+
+def _found(writers: list, record: Record, log: str) -> list[tuple[str, PrintRow]]:
+    """``(owner, map row)`` of the rows :func:`line_writers` reads *record* by."""
+    by_text = writers[2]
+    if record.text not in by_text:
+        by_text[record.text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(record.text)]
+    line = f"{record.token} {record.text}"
+    return [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
 
 
 def line_writers(record: Record, log: str) -> frozenset[str]:
@@ -847,26 +928,31 @@ def line_writers(record: Record, log: str) -> frozenset[str]:
     (all holes) is not counted: it can print any text at any length, which MIN_PROOF does not read either.  A mark
     inside an outer one's text (:meth:`Row.written_by`) is not read: the message is then more than the row's text,
     which proves nothing below MIN_PROOF.  None without a dump."""
-    fragment = mapdump.fragment()
-    if fragment is None:
+    if (writers := _writers()) is None:
         return frozenset()
-    if not _WRITERS or _WRITERS[0] is not fragment:
-        rows = []
-        for f in fragment.function_prints:
-            for st in f.statements:
-                logs = frozenset(st.log_files) if st.log_files_basis == "logger" else None
-                for r in st.rows:
-                    if r.pattern and _map_usable(r.pattern):
-                        rows.append((re.compile(r.pattern, re.S), f.owner, _prefix_regex((r.prefix,)) if r.prefix else None, logs))
-        _WRITERS[:] = [fragment, rows, {}, {}]
-    by_text, known = _WRITERS[2], _WRITERS[3]
-    if (log, record.token, record.text) not in known:
-        if record.text not in by_text:
-            by_text[record.text] = [(o, p, logs) for regex, o, p, logs in _WRITERS[1] if regex.search(record.text)]
-        line = f"{record.token} {record.text}"
-        known[log, record.token, record.text] = frozenset(
-            o for o, p, logs in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line)))
-    return known[log, record.token, record.text]
+    known: dict[tuple[str, str, str], frozenset[str]] = writers[3]
+    key = (log, record.token, record.text)
+    if key not in known:
+        known[key] = frozenset(o for o, _ in _found(writers, record, log))
+    return known[key]
+
+
+def whole_writers(record: Record, log: str) -> frozenset[str]:
+    """The functions of :func:`line_writers` with a row the map reads *record* as whole (``trace.reads_whole``: its
+    mark, then its message, anchored at both ends), not only a line holding its text: AtlasProdTaskRefiner.doRefine's
+    "start taskType=..." and "done" (107, 174) are AtlasAnalTaskRefiner.doRefine's (205, 280) too, while
+    PostProcessor's "done" rows are not "doBasicPostProcess done with taskStatus=...".  A row the map cannot read
+    whole (None: no capture, or a mark its logger may write that the map did not read) is not counted: the rows with
+    no prefix, PostProcessor.start's "done" and TaskRefiner.start's "start" among them, would take every such text of
+    their log (KNOWN_ISSUES.md K42).  None without a dump."""
+    if (writers := _writers()) is None:
+        return frozenset()
+    known: dict[tuple[str, str, str], frozenset[str]] = writers[4]
+    key = (log, record.token, record.text)
+    if key not in known:
+        known[key] = frozenset(
+            o for o, row in _found(writers, record, log) if trace.reads_whole(row, record.token, record.text) is True)
+    return known[key]
 
 
 def _prefixes(mapped: list) -> list[str]:
@@ -1028,7 +1114,7 @@ class Seen:
     run: Run
     mode: str
     hits: dict[int, list[tuple[int, int, str]]]  # row line -> [(record index, literal, source)]
-    unambiguous: dict[int, list[int]]  # row line -> record indexes only this row matches
+    unambiguous: dict[int, list[int]]  # row line -> record indexes only this row matches, no other function's whole
 
     def present(self, row: Row) -> bool:
         return bool(self.hits.get(row.line))
@@ -1071,14 +1157,23 @@ def seen(fn: Function, run: Run, mode: str) -> Seen:
 
 
 def _seen(fn: Function, run: Run, mode: str, hits: dict[int, list[tuple[int, int, str]]]) -> Seen:
+    """A record is placed (``Seen.unambiguous``) where one row of *fn* reads it and no other function of the dump
+    prints it whole (:func:`whole_writers`): a text printed alike proves neither, of two rows or of two functions
+    (KNOWN_ISSUES.md K42)."""
     per_record: dict[int, set[int]] = {}
     for line, hs in hits.items():
         for i, _, _ in hs:
             per_record.setdefault(i, set()).add(line)
     unambiguous: dict[int, list[int]] = {}
+    owner = ""
     for i, lines in sorted(per_record.items()):
-        if len(lines) == 1:
-            unambiguous.setdefault(next(iter(lines)), []).append(i)
+        if len(lines) != 1:
+            continue
+        if others := whole_writers(run.records[i], run.log.name):
+            owner = owner or f"{fn.rel}::{pathcond.qualified_name(fn.node)}"
+            if others - {owner}:
+                continue
+        unambiguous.setdefault(next(iter(lines)), []).append(i)
     return Seen(fn, run, mode, hits, unambiguous)
 
 
@@ -1108,7 +1203,8 @@ def claim(seens: list[Seen]) -> list[Seen]:
     a value out of text it never wrote (register_files:778
     matched execute:168's traceback and read ``prodSourceLabel`` out of it).
     Only the functions given compete: a writer outside them does not take its
-    record back from a thin shape inside them.
+    record back from a thin shape inside them (one that prints it whole leaves
+    it placed by none, :func:`_seen`).
     """
     strongest: dict[tuple[int, int], int] = {}
     for sn in seens:

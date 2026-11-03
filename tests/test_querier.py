@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "asked", "attr_time", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "mapdump", "outbound", "parts",
+    "asked", "attr_time", "callers", "census", "census_p", "changed", "evaluate", "false_guard", "handlers", "held", "heldcol", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
 ]
 
@@ -1330,6 +1330,7 @@ def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_n
             TOK, LATE, EARLY = "PandaID=12345", ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), ("2026-09-28 06:30:00", "2026-09-28 06:45:00")
             run = [{**line("08:31:10", "start 12345", TOK), "offset": 10}, {**line("08:31:14", "end", TOK), "offset": 20}]
             early = [{**line("06:42:00", "start 12345", TOK), "offset": 10}, {**line("06:46:00", "end", TOK), "offset": 20}]
+            near = [{**line("08:40:10", "start 12345", TOK), "offset": 10}, {**line("08:50:50", "end", TOK), "offset": 20}]
             oldest = {**BEFORE, "covers": [None, "2026-09-28 06:50:00"], "records": []}
 
             def described(window, *files):
@@ -1349,11 +1350,21 @@ def test_a_run_the_record_door_may_have_cut_says_which_end_of_the_search_it_is_n
                 described(EARLY, oldest, {**TODAY, "records": early}),
                 runs_for(log, "12345")[0].describe(),
                 described(LATE, {**TODAY, "records": run}),
+                # today's file read over the asks' windows (covers_to): a run near where the read stopped is asked
+                # past it; one near the time the file was asked is read as cut
+                described(LATE, {**TODAY, "margin_s": 0, "covers_to": "end_stamp", "covers": ["2026-09-28 06:40:00", "2026-09-28 08:51:00"],
+                                 "records": near}),
+                described(LATE, {**TODAY, "margin_s": 0, "covers_to": "asked", "covers": ["2026-09-28 06:40:00", "2026-09-28 08:51:00"],
+                                 "records": near}),
             ]))
             """),
         )
     )
-    cut, cut_searched, asked_then, oldest_first, nothing_before, whole = json.loads(out)
+    cut, cut_searched, asked_then, oldest_first, nothing_before, whole, stopped, asked_now = json.loads(out)
+    assert [[{k: a[k] for k in ("name", "machine", "strings", "window")}, why] for a, why in stopped] == [[
+        {"name": "panda-x.log", "machine": "aipanda093.cern.ch", "strings": ["12345"],
+         "window": ["2026-09-28 08:21:12", "2026-09-28 08:51:00"]}, "a run within 10 min of an end of what was searched"]]
+    assert asked_now.endswith("ends at 2026-09-28 08:50:59: panda-x.log-20260929.gz was read to the time it was asked)")
     assert cut.endswith("(key on 2; read as cut: what was searched on aipanda093 ends at 2026-09-28 08:31:14: the answer of "
                         "panda-x.log-20260929.gz was cut at 1 MB after its last record)")
     assert cut_searched.endswith("(key on 2; read as cut: what was searched on aipanda093 ends at 2026-09-28 08:31:20: the "
@@ -3865,6 +3876,181 @@ def test_a_row_proves_its_arm_only_by_a_record_no_other_row_of_its_function_prin
     assert got["g"] == ["positive", ["row(s) [17] print only on a path through it"]]
 
 
+_SIBLINGS = """
+class Anal:
+    def doRefine(self, tmpLog):
+        tmpLog.debug(f"start taskType={self.taskType}")
+        self.reqID = 1
+        tmpLog.debug("done")
+
+    def post(self, tmpLog, status):
+        self.endTime = 1
+        tmpLog.debug(f"post done with status={status}")
+
+
+class Prod:
+    def doRefine(self, tmpLog):
+        tmpLog.debug(f"start taskType={self.taskType}")
+        tmpLog.debug("done")
+"""
+
+
+def test_a_record_another_function_prints_whole_proves_neither_and_one_it_prints_a_part_of_still_does(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_SIBLINGS)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    < jediTaskID=1 > {}\n"
+    (tmp_path / "x.log").write_text(
+        "".join(stamp.format(i, m) for i, m in enumerate(("start taskType=prod", "done", "post done with status=finished")))
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap.models import PrintRow
+            from bamboo.querier import mapdump, rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import rows_around
+
+            R.ROWS_FROM = "walk"
+            run, = runs_for(read_log("x.log"), "1")
+            mark, cap = "<\\\\ jediTaskID=.*?\\\\ >\\\\ ", "<\\\\ jediTaskID=(.*?)\\\\ >"
+            row = lambda pattern, capture, prefix=mark, prefix_capture=cap, hole="": PrintRow(
+                text=pattern, pattern=pattern, capture=capture, prefix=prefix, prefix_capture=prefix_capture, prefix_hole=hole)
+            prints = lambda owner, *rs: N(
+                owner=owner, statements=[N(rows=[r], log_files=[run.log.name], log_files_basis="logger") for r in rs])
+            start = row("start\\\\ taskType=", "start\\\\ taskType=(.*)")
+            anal = prints("pandaserver/a.py::Anal.doRefine", start, row("done", "done"))
+            post = prints("pandaserver/a.py::Anal.post", row("post\\\\ done\\\\ with\\\\ status=", "post\\\\ done\\\\ with\\\\ status=(.*)"))
+            # AtlasProd's doRefine: the same two lines, under the same mark, in the same log
+            prod = prints("pandaserver/a.py::Prod.doRefine", start, row("done", "done"))
+            # PostProcessor's: "done" alone, which "post done with ..." holds but is not
+            exactly_done = prints("pandaserver/b.py::B.start", row("done", "done"))
+            # a logger whose mark the map cannot read: the row cannot say it reads a line whole
+            unread_mark = prints("pandaserver/b.py::B.dump", row("post\\\\ done", "post\\\\ done(.*)", "", "", "made with the time"))
+
+            def placed(func, arm, *others):
+                fragment = N(function_prints=[anal, post, *others])
+                mapdump.fragment = lambda: fragment
+                fn = R.function("pandaserver/a.py", func, [arm])
+                sn = R.seen(fn, run, "outside")
+                return [sorted(sn.unambiguous), rows_around(fn, sn, R.statement_at(fn.node, arm)) is not None]
+
+            print(json.dumps({
+                "its own": placed("doRefine", 5),
+                "a sibling prints both whole": placed("doRefine", 5, prod),
+                "another prints a part of it": placed("post", 9, exactly_done),
+                "another cannot say": placed("post", 9, unread_mark),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {
+        # the two records around the store are its function's alone: they show it ran
+        "its own": [[4, 6], True],
+        # AtlasAnal's doRefine:260 in MR-T-53344406-reqID, whose run printed "refining with AtlasProdTaskRefiner"
+        "a sibling prints both whole": [[], False],
+        "another prints a part of it": [[10], False],
+        "another cannot say": [[10], False],
+    }
+
+
+_FALLS_OUT = '''
+def adder(self, a):
+    if a:
+        try:
+            log.debug("will call")
+            call()
+            log.debug("is back")
+        except Exception:
+            log.error("excepted")
+    self.status = "failed"
+
+
+def top(self):
+    log.debug("at the top")
+    self.status = "failed"
+
+
+def loop(self, z):
+    for y in z:
+        log.debug("in a loop")
+    self.status = "failed"
+
+
+def final(self):
+    try:
+        log.debug("in a try")
+    finally:
+        log.debug("in a finally")
+    self.status = "failed"
+
+
+def a_call_after(self, a):
+    if a:
+        log.debug("before a call")
+        call()
+    self.status = "failed"
+
+
+def an_else(self):
+    try:
+        log.debug("before an else")
+    except Exception:
+        pass
+    else:
+        call()
+    self.status = "failed"
+
+
+def handled(self):
+    try:
+        call()
+    except Exception:
+        log.debug("handled")
+    finally:
+        cleanup()
+    self.status = "failed"
+
+
+def within(self):
+    with lock:
+        log.debug("in a with")
+    self.status = "failed"
+'''
+
+
+def test_a_print_nested_in_an_earlier_statement_implies_the_site_when_nothing_on_its_way_out_may_leave(tmp_path):
+    (tmp_path / "f.py").write_text(_FALLS_OUT)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from bamboo.codemap.panda import pathcond
+            from bamboo.querier import rows as R
+
+            tree = ast.parse(open("f.py").read())
+            pathcond.attach_parents(tree)
+            print(json.dumps({fn.name: sorted(s.value.args[0].value for s in R.implying_rows(fn, fn.body[-1])) for fn in tree.body}))
+            """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == {
+        # handle_failed_job 374: "... is back" and the handler's print fall out of the if; the call after "will call"
+        # may leave
+        "adder": ["excepted", "is back"],
+        "top": ["at the top"],
+        "loop": [],
+        "final": ["in a try"],
+        "a_call_after": [],
+        "an_else": [],
+        "handled": [],
+        "within": [],
+    }
+
+
 _NARROWED = """
 def f(self, job, ok):
     self.logger.debug("start f")
@@ -4461,6 +4647,361 @@ def test_p_reads_the_status_a_target_was_bound_from_at_a_later_row_with_the_judg
     # a row printing another value than the observed one: any call handed the job may have written it
     assert got["other failed"][0] == "none" and "E4 deferred" not in got["other failed"][1]
     assert got["other finished"][0] == "inconsistent" and got["other finished"][1]["E4 deferred"] > 0
+
+
+# the adder with its finalize: a failed job's status is set "failed" once more, in a method two calls down
+_FINALIZING = _ADDER.replace(
+    '        self.logger.debug("updating the job in the DB")\n',
+    '        self.finalize()\n        self.logger.debug("updating the job in the DB")\n',
+) + """
+    def finalize(self):
+        if self.job.jobStatus == "failed" or self.job_status == "failed":
+            self.handle_failed()
+
+    def handle_failed(self):
+        self.logger.debug("handling the failed job")
+        self.job.jobStatus = "failed"
+"""
+
+
+def test_of_one_pass_s_writes_the_last_that_changed_the_value_is_the_answer_and_one_that_kept_it_a_stay(tmp_path):
+    files = {
+        "c.py": _FINALIZING,
+        # the job handed to a call between the row and finalize: what the row printed is not read past it
+        "g.py": _FINALIZING.replace("        self.finalize()\n", "        touch(self.job)\n        self.finalize()\n"),
+    }
+    at = {}
+    for name, text in files.items():
+        (_corpus(tmp_path) / "pandaserver" / name).write_text(text)
+        lines = text.splitlines()
+        at[name] = {k: lines.index(f"{' ' * n}{s}") + 1 for k, n, s in [
+            ("from_report", 12, "self.job.jobStatus = self.job_status"), ("plugin", 16, 'self.job.jobStatus = "failed"'),
+            ("parse", 12, 'self.job.jobStatus = "failed"'), ("handle", 8, 'self.job.jobStatus = "failed"'),
+            ("parse_call", 8, "parsed = self.parse()"), ("finalize_call", 8, "self.finalize()")]}
+        at[name]["row"] = next(n for n, line in enumerate(lines, 1) if "status after plugin call" in line)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    after = "status after plugin call :job.jobStatus={} jobStatus={}"
+    logs = {
+        # the report said failed: parse's arm and handle_failed's both ran, and the row before finalize shows failed
+        "reported": ["start the report of the job", "no report of the job to parse", after.format("failed", "failed"),
+                     "handling the failed job", "updating the job in the DB"],
+        # the report said finished: the plugin's arm changed it, and handle_failed set it again
+        "plugin": ["start the report of the job", after.format("failed", "finished"), "handling the failed job",
+                   "updating the job in the DB"],
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, judge
+
+        R.ROWS_FROM = "walk"
+        got = {}
+        for file, log, reach in [("c.py", "reported", True), ("c.py", "plugin", True), ("g.py", "reported", True),
+                                 ("c.py", "reported", False)]:
+            at = AT[file]
+            run, = runs_for(read_log(f"{log}.log"), "1")
+            rel = f"pandaserver/{file}"
+            lines = {"process": [at["from_report"], at["plugin"]], "parse": [at["parse"]], "handle_failed": [at["handle"]]}
+            cs = [Candidate(rel, func, ls, [run.log.name], run=run) for func, ls in lines.items()]
+            # the map's reach: process calls on into parse and, through finalize, into handle_failed
+            calls = {"parse": at["parse_call"], "handle_failed": at["finalize_call"] if reach else None}
+            def called_at(fn, c, rel=rel, calls=calls):
+                return [f"{rel}:{calls[c.func]}"] if fn.name == "process" and calls.get(c.func) else []
+            j = judge(cs, {run.log.name: [run]}, question_run=run, subject="jobStatus", observed="failed", called_at=called_at)
+            got[f"{file} {log}{'' if reach else ' no reach'}"] = {
+                "kinds": {k: v.kind for v in j.verdicts for k in [{at["from_report"]: "from_report", at["plugin"]: "plugin",
+                                                                   at["parse"]: "parse", at["handle"]: "handle"}[v.line]]},
+                "why": {k: v.reasons[-1] for v in j.verdicts for k in [f"{v.candidate.func}:{v.line}"] if v.reasons},
+                "chosen": f"{j.chosen.candidate.func}:{j.chosen.line}" if j.chosen else None, "how": j.how}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("AT", repr(at))))
+    got = json.loads(out.splitlines()[-1])
+    c = at["c.py"]
+    # the row before finalize shows failed, and nothing on the way into handle_failed binds it: handle_failed's
+    # assignment is a stay.  The three before the row are left, the last first: which changed it is not read
+    reported = got["c.py reported"]
+    assert reported["kinds"] == {"from_report": "kept", "plugin": "kept", "parse": "positive", "handle": "excluded"}
+    assert reported["why"][f"handle_failed:{c['handle']}"].startswith(
+        f"rule R: a stay, self.job.jobStatus already held 'failed' before it (row process:{c['row']} at reported.log:3"
+    ) and reported["why"][f"handle_failed:{c['handle']}"].endswith("the frames between process and handle_failed not read)")
+    assert reported["chosen"] is None and reported["how"] == (
+        f"3 may have changed it last in the pass: c.py::process:{c['plugin']}, c.py::parse:{c['parse']}, c.py::process:{c['from_report']}"
+    )
+    # the report said finished: the assignment from it wrote 'finished' (the row's jobStatus), and the plugin's arm,
+    # which ran, is the last change -- handle_failed's, after it, a stay by the value it assigned and the row before
+    # finalize alike, said by the row
+    plugin = got["c.py plugin"]
+    assert plugin["kinds"] == {"from_report": "excluded", "plugin": "positive", "parse": "excluded", "handle": "excluded"}
+    assert plugin["why"][f"process:{c['from_report']}"] == (
+        f"rule R: it assigns 'finished' (self.job_status, printed at row process:{c['row']} at plugin.log:2), no write of 'failed'"
+    )
+    assert plugin["why"][f"handle_failed:{c['handle']}"].startswith(
+        f"rule R: a stay, self.job.jobStatus already held 'failed' before it (row process:{c['row']} at plugin.log:2"
+    )
+    assert plugin["chosen"] == f"process:{c['plugin']}" and plugin["how"] == "the last change in the pass"
+    # the job handed to a call on the way: handle_failed's may be the change, and it is the last
+    g = got["g.py reported"]
+    assert g["kinds"]["handle"] == "positive" and g["chosen"] is None
+    assert g["how"].startswith(f"4 may have changed it last in the pass: g.py::handle_failed:{at['g.py']['handle']}, ")
+    # no way placed from process into handle_failed: no order, and R says nothing
+    assert got["c.py reported no reach"]["how"] == "2 positive"
+    assert got["c.py reported no reach"]["kinds"]["handle"] == "positive"
+
+
+def test_a_value_carried_past_a_call_the_maps_reach_reads_as_keeping_it_or_past_its_own_constant_stays(tmp_path):
+    files = {
+        # the job handed to a call between the row and finalize: kept where the reach says it assigns no other status
+        "g.py": _FINALIZING.replace("        self.finalize()\n", "        touch(self.job)\n        self.finalize()\n"),
+        # a method of self binding self.job anew: what the row printed is another object's, whatever the reach says
+        "h.py": _FINALIZING.replace("        self.finalize()\n", "        self.reload()\n        self.finalize()\n")
+        + "\n    def reload(self):\n        self.job = self.job.copy()\n",
+        # the status set failed once more on the way, and set to another value
+        "k.py": _FINALIZING.replace("        self.finalize()\n", '        self.job.jobStatus = "failed"\n        self.finalize()\n'),
+        "m.py": _FINALIZING.replace("        self.finalize()\n", '        self.job.jobStatus = "closed"\n        self.finalize()\n'),
+    }
+    at = {}
+    for name, text in files.items():
+        (_corpus(tmp_path) / "pandaserver" / name).write_text(text)
+        lines = text.splitlines()
+        at[name] = {k: lines.index(f"{' ' * n}{s}") + 1 for k, n, s in [
+            ("from_report", 12, "self.job.jobStatus = self.job_status"), ("plugin", 16, 'self.job.jobStatus = "failed"'),
+            ("parse", 12, 'self.job.jobStatus = "failed"'), ("handle", 8, 'self.job.jobStatus = "failed"'),
+            ("parse_call", 8, "parsed = self.parse()"), ("finalize_call", 8, "self.finalize()")]}
+        # handle_failed's is the last: k.py sets failed in process too
+        at[name]["handle"] = len(lines) - lines[::-1].index('        self.job.jobStatus = "failed"')
+        at[name]["way"] = at[name]["finalize_call"] - 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    text = ["start the report of the job", "no report of the job to parse",
+            "status after plugin call :job.jobStatus=failed jobStatus=failed", "handling the failed job",
+            "updating the job in the DB"]
+    (tmp_path / "reported.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, judge
+
+        R.ROWS_FROM = "walk"
+        got = {}
+        for file, kept in [("g.py", True), ("g.py", False), ("h.py", True), ("k.py", True), ("m.py", True)]:
+            at = AT[file]
+            run, = runs_for(read_log("reported.log"), "1")
+            rel = f"pandaserver/{file}"
+            lines = {"process": [at["from_report"], at["plugin"]], "parse": [at["parse"]], "handle_failed": [at["handle"]]}
+            cs = [Candidate(rel, func, ls, [run.log.name], run=run) for func, ls in lines.items()]
+            calls = {"parse": at["parse_call"], "handle_failed": at["finalize_call"]}
+            def called_at(fn, c, rel=rel, calls=calls):
+                return [f"{rel}:{calls[c.func]}"] if fn.name == "process" and calls.get(c.func) else []
+            # the map's reach as rerun reads it: the call on the way (touch, reload) assigns no other status, 2 closed
+            asked = []
+            def keeps(fn, node, value, kept=kept, way=at["way"]):
+                asked.append([fn.name, node.lineno, value])
+                return 2 if kept and node.lineno == way else None
+            j = judge(cs, {run.log.name: [run]}, question_run=run, subject="jobStatus", observed="failed",
+                      called_at=called_at, keeps=keeps)
+            got[f"{file}{'' if kept else ' open'}"] = {
+                "handle": next([v.kind, v.reasons[-1]] for v in j.verdicts if v.line == at["handle"]),
+                "how": j.how, "asked": sorted(set(map(tuple, asked)))}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("AT", repr(at))))
+    got = json.loads(out.splitlines()[-1])
+    g, h, k = at["g.py"], at["h.py"], at["k.py"]
+    # the reach reads the call handed the job as keeping 'failed': handle_failed's assignment is a stay again, said so
+    kind, why = got["g.py"]["handle"]
+    assert kind == "excluded" and why.startswith("rule R: a stay, self.job.jobStatus already held 'failed' before it (row process:")
+    assert f"nothing on the way binding it; the calls at g.py:{g['way']} reach no assignment of jobStatus but 'failed' " \
+           "(the map's reach, 2 call(s) closed by their name); the frames between process and handle_failed not read)" in why
+    assert ["process", g["way"], "failed"] in got["g.py"]["asked"]
+    # the reach cannot say: the call cuts the value, as before
+    assert got["g.py open"]["handle"][0] == "positive"
+    assert got["g.py open"]["how"].startswith(f"4 may have changed it last in the pass: g.py::handle_failed:{g['handle']}, ")
+    # self.job bound anew by a method of self: the reach of a field is not asked, the value cut
+    assert got["h.py"]["handle"][0] == "positive" and ["process", h["way"], "failed"] not in got["h.py"]["asked"]
+    # failed set once more on the way: kept, said where; closed set on the way: cut
+    kind, why = got["k.py"]["handle"]
+    assert kind == "excluded" and why.endswith(
+        f"nothing on the way binding it but to 'failed' again at k.py:{k['way']}; the frames between process and handle_failed not read)")
+    assert got["m.py"]["handle"][0] == "positive"
+
+
+def test_a_call_keeps_a_field_where_the_maps_reach_from_it_alone_assigns_it_no_other_value_in_memory(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap.models import Anchor, Branch, JunctionNode, ReachCall, ReachHole, ReachNode
+            from bamboo.querier import mapdump, rerun
+
+            def node(owner, start, end, **k):
+                return ReachNode(name=owner, map_id="m", derived_from="d", owner=owner, function=owner.rsplit(".", 1)[-1].split("::")[-1],
+                                 anchor=Anchor(package="p", file=owner.split("::")[0], line_start=start, line_end=end), **k)
+
+            def junction(owner, *outcomes, pre=()):
+                return JunctionNode(name=JunctionNode.make_name("m", "JobSpec.jobStatus", owner), map_id="m", derived_from="d",
+                                    subject="JobSpec.jobStatus", owner=owner,
+                                    branches=[Branch(outcome=o, line=2 + n, row_precondition=list(pre)) for n, o in enumerate(outcomes)],
+                                    anchor=Anchor(package="p", file=owner.split("::")[0], line_start=2, line_end=4))
+
+            rows = [node("p/a.py::f", 1, 20, calls=[
+                        ReachCall(line=4, callee="same()", to="p/s.py::same"),
+                        ReachCall(line=6, callee="other()", to="p/o.py::other"),
+                        ReachCall(line=8, callee="row_only()", to="p/r.py::row_only")],
+                        holes=[ReachHole(line=10, callee="x.get", why="the receiver's class is not declared"),
+                               ReachHole(line=11, callee="x.other", why="the receiver's class is not declared")]),
+                    node("p/s.py::same", 1, 9), node("p/o.py::other", 1, 9), node("p/r.py::row_only", 1, 9)]
+            junctions = [junction("p/s.py::same", "failed"), junction("p/o.py::other", "finished"),
+                         junction("p/r.py::row_only", "finished", pre=["jobStatus=defined"])]
+            mapdump._FRAGMENT[:] = [N(reach_graph=rows, junctions=junctions)]
+            r = object.__new__(rerun.Rerun)
+            r._graph_read, r._kept, r._in_memory = None, {}, {}
+            keeps = r._keeps("JobSpec.jobStatus")
+            fn = N(rel="p/a.py", node=N(body=[N(lineno=2)]))
+            at = lambda line: N(lineno=line, end_lineno=line)
+            print(json.dumps([keeps(fn, at(n), "failed") for n in (4, 6, 8, 10, 11, 12)] + [keeps(fn, at(4), "finished"), len(r._kept)]))
+            """,
+        )
+    )
+    same, other, row_only, closed, hole, none, off, asked = json.loads(out.splitlines()[-1])
+    # a call whose reach assigns only the value carried keeps it; one assigning another value does not
+    assert same == 0 and other is None
+    # in memory the row is not read: an arm whose row must hold 'defined' still moves the object
+    assert row_only is None
+    # a hole whose name no function reaching an arm has is closed by it, and counted; one whose name such a function
+    # has may be the way to it
+    assert closed == 1 and hole is None
+    # no call the reach places at the lines: it goes on to nothing
+    assert none == 0
+    # the value carried decides: 'same' moves a 'finished' off
+    assert off is None
+    # each (function, lines, subject, value) asked once
+    assert asked == 7
+
+
+def test_a_print_that_begins_with_a_hole_is_read_on_the_line_its_markless_logger_wrote(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "f.py").write_text(
+        "def finish(job):\n"
+        "    logger.debug(f\"{job.PandaID} Finisher : Kill\")\n"
+        "    logger.debug(f\"{job.PandaID}  Priority:{job.currentPriority} End:{job.endTime}\")\n"
+        "    logger.debug(\"Finisher : Kill all\")\n"
+        "    logger.debug(\"update\")\n"
+        "    job.jobStatus = 'failed'\n"
+    )
+    stamp = "2026-01-01 00:00:00,000 panda.log.datasetManager: DEBUG    {}\n"
+    (tmp_path / "f.log").write_text("".join(stamp.format(t) for t in [
+        "7392812614 Finisher : Kill", "7392812614  Priority:900 End:2026-10-31 12:45:38", "<PandaID=1> Finisher : Kill all",
+        "updateDatasetLocality_JEDI < taskID=1 insert"]))
+    code = """
+        import json
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log
+
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/f.py", "finish", (6,))
+        log = read_log("f.log")
+        got = {}
+        for row in fn.rows:
+            got[row.line] = [[row.matches(rec, "outside")[0] > 0, row.capture(rec), len(row.texts(rec))] for rec in log.records]
+        print(json.dumps([[rec.token, rec.message] for rec in log.records]))
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code)).splitlines()
+    parsed, got = json.loads(out[-2]), {int(k): v for k, v in json.loads(out[-1]).items()}
+    # a logger with no mark: the parser takes the message's first word for the token; a mark that never closes, its name
+    assert parsed[0] == ["7392812614", "Finisher : Kill"] and parsed[3][0] == "updateDatasetLocality_JEDI"
+    # the print beginning with a hole finds its record on the line as written, and reads the hole there
+    kill, priority, literal, update = got[2], got[3], got[4], got[5]
+    assert kill[0][0] is True and kill[0][1] == {"job.PandaID": "7392812614"} and kill[0][2] == 2
+    assert priority[1][0] is True and priority[1][1].get("job.currentPriority") == "900"
+    assert kill[1][0] is False and priority[0][0] is False
+    # a print with no hole first is read on the message alone, as before: "update" is not found in a mark's name
+    assert literal[2][0] is True and literal[2][2] == 1
+    assert update[3][0] is False and update[3][2] == 1
+
+
+# datasetManager's FinisherThr.run, cut down: each job set failed in the loop, all written by one call after it
+_BATCHED = """
+def run(jobs):
+    up_jobs = []
+    for job in jobs:
+        logger.debug(f"{job.PandaID} Finisher : Kill")
+        job.jobStatus = "failed"
+        up_jobs.append(job)
+    logger.debug("updating ...")
+    taskBuffer.updateJobs(up_jobs, False)
+
+
+def each(jobs):
+    for job in jobs:
+        job.jobStatus = "failed"
+        taskBuffer.updateJobs([job], False)
+"""
+
+
+def test_a_writer_that_writes_its_loop_s_objects_after_it_is_read_on_its_latest_run_before_the_row(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "w.py").write_text(_BATCHED)
+    lines = _BATCHED.splitlines()
+    arm, call, loop, call2 = (lines.index(s) + 1 for s in [
+        '        job.jobStatus = "failed"', "    taskBuffer.updateJobs(up_jobs, False)", "    for job in jobs:",
+        "        taskBuffer.updateJobs([job], False)"])
+    # each's assignment is the second of the same text
+    arm2 = len(lines) - lines[::-1].index('        job.jobStatus = "failed"')
+    stamp = "{} panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "w.log").write_text(stamp.format("2026-01-01 00:10:28,854", "Finisher : Kill"))
+    (tmp_path / "old.log").write_text(stamp.format("2025-12-31 23:59:00,000", "Finisher : Kill"))
+    code = """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.models import KEY_HANDED
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate
+
+        def kf(func, statement, line, unread=KEY_HANDED):
+            return N(owner=f"pandaserver/w.py::{func}", unread=unread, object="job", table="", statement=statement,
+                     writes={"JobSpec.jobStatus": [line]}, handed_to=["pandaserver/t.py::TaskBuffer.updateJobs"])
+
+        mapdump._FRAGMENT[:] = [N(key_froms=[kf("run", CALL, ARM), kf("each", CALL2, ARM2)])]
+        found = rerun.batched("pandaserver/w.py", "run", [ARM], "JobSpec.jobStatus")
+        got = {"batched": [found[0], found[2]] if found else None,
+               "inside": rerun.batched("pandaserver/w.py", "each", [ARM2], "JobSpec.jobStatus"),
+               "other": rerun.batched("pandaserver/w.py", "run", [ARM], "JobSpec.lockedBy")}
+        r = object.__new__(rerun.Rerun)
+        r.data = {"statuslog": {"states": [{"status": "transferring", "time": "2026-01-01 00:00:00"},
+                                           {"status": "failed", "time": "2026-01-01 00:10:42"}]}}
+        state = r.data["statuslog"]["states"][1]
+        for name, holes in [("w", {}), ("w holed", None), ("old", {}), ("w no row", {})]:
+            log = read_log(f"{name.split()[0]}.log")
+            c = Candidate("pandaserver/w.py", "run", [ARM], [log.name])
+            r.lines = []
+            handed = r._batched([c], {}, {log.name: runs_for(log, "1")}, {log.name: ["a part"]} if holes is None else holes,
+                                None if name.endswith("no row") else state, "2026-01-01 00:10:42", "JobSpec.jobStatus")
+            got[name] = [{k: [v.first, v.last] for k, v in handed.items()}, c.run is not None, r.lines]
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("CALL2", str(call2)).replace("ARM2", str(arm2)).replace("CALL", str(call)).replace("ARM", str(arm))))
+    got = json.loads(out.splitlines()[-1])
+    # the job assigned in the loop and handed on after it: a batch; handed on in the loop, or another subject: not
+    assert got["batched"] == [arm, loop] and got["inside"] is None and got["other"] is None
+    # the key's run between the row before and the row, its log searched whole: the candidate's run, said so
+    handed, set_run, said = got["w"]
+    assert handed == {"pandaserver/w.py::run": ["2026-01-01 00:10:28,854", "2026-01-01 00:10:28,854"]} and set_run
+    assert said == [f"  run:{arm} writes in a batch (assigned in the loop at {loop}, handed on to TaskBuffer.updateJobs at {call}): "
+                    "its run is the key's latest from the row before (2026-01-01 00:00:00) to 2026-01-01 00:10:42, "
+                    "2026-01-01 00:10:28,854..2026-01-01 00:10:28,854 in w.log, the log searched with no hole; it rests on no "
+                    "other pass of it printing the key between"]
+    # a part of the log not searched, or the run before the row before: none held, said, nothing asked
+    for name in ("w holed", "old"):
+        assert got[name][:2] == [{}, False]
+        assert got[name][2][0].endswith("no run of the key held from the row before (2026-01-01 00:00:00) to 2026-01-01 00:10:42; not asked")
+    # no row read: nothing
+    assert got["w no row"] == [{}, False, []]
 
 
 def test_a_call_leaves_the_path_knowing_nothing_of_what_it_changes(tmp_path):
@@ -6483,6 +7024,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                       env=None, unsearched=None):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.ends, r.touched, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], "", {}, [], {}, "outside"
+                r.data = {}  # no rows file: no held column (heldcol, K49)
                 r.base_env = lambda at=None: E.Env({})
                 chosen = Verdict(arm.candidate, arm.line, kind)
                 r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}) if env is None else env, chosen, via=via, row=row,
@@ -6514,6 +7056,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 "not read": asked("JediTaskSpec.transUses", ["1 == 1", "task.x", "1 == 2"], row),
                 "through a method": asked("JediTaskSpec.transUses", ["task.useScout()"], row),
                 "a status": asked("JediTaskSpec.status", [], row),
+                "a status, a guard through no method": asked("JediTaskSpec.status", ["task.x < 3"], row),
             }))
             """,
         )
@@ -6555,14 +7098,133 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
         "END JediTaskSpec.rescueTime='A' written last by extract:5 (shown in its run; its guards hold in the run's values), "
         "at 2026-10-29 00:49:09: the run"]
     assert (stood["said"], stood["wrote"]["via"], stood["wrote"]["row"]) == (None, {"owner": "pandajedi/o.py::runImpl", "line": 211}, None)
-    # a condition not read, or read false, is named where H3 stops
-    assert got["not read"]["said"] == ["STOP", "H3: a method the guard reads through (its conditions: 'task.x' not read, "
+    # a condition not read, or read false, is named where H3 stops: the values the guard reads, through no method
+    assert got["not read"]["said"] == ["STOP", "H3: the values its guard reads at its run (its conditions: 'task.x' not read, "
                                                "'1 == 2' read false)"]
     assert (got["not read"]["ends"], got["not read"]["wrote"]["line"]) == ([], 5)
     # a guard read through a method goes on to H4 as for a status
     assert got["through a method"]["said"] == ["SetBy", "useScout"]
-    # a status: H3 as before, and no wrote
-    assert got["a status"] == {"said": ["STOP", "H3: a method the guard reads through"], "ends": [], "wrote": None}
+    # a status: no wrote; with no guard, what made the arm run is its callers'; a guard through no method is read in
+    # no run's values for a status
+    assert got["a status"] == {"said": ["STOP", "H3: extract:5 has no guard of its own to read: what made it run is its "
+                                                "callers'"], "ends": [], "wrote": None}
+    assert got["a status, a guard through no method"]["said"] == [
+        "STOP", "H3: the values its guard reads at its run (its conditions: 'task.x < 3' not read)"]
+
+
+def test_a_guard_over_a_column_the_rows_file_holds_is_read_in_it_by_the_ways_and_the_direction_of_their_changes(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "base.py").write_text(textwrap.dedent("""\
+        class Base:
+            def extract(self, m):
+                if 'k' in m:
+                    self.x = m['k']
+                if m['v'] == 3:
+                    self.y = 1
+
+            def prepro(self, m):
+                if 'pre' not in m:
+                    return None
+                for k, v in list(m.items()):
+                    m[k] = v
+        """))
+    (corpus / "pandajedi" / "anal.py").write_text(textwrap.dedent("""\
+        class Anal:
+            def extract(self, m):
+                self.log.debug("anal only")
+                m['k'] = 1
+                Base.extract(self, m)
+        """))
+    (corpus / "pandajedi" / "gen.py").write_text(textwrap.dedent("""\
+        class Gen:
+            def extract(self, m):
+                del m['k']
+                Base.extract(self, m)
+        """))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import heldcol, mapdump, render as T
+
+            B, A, G, RUN = "pandajedi/base.py", "pandajedi/anal.py", "pandajedi/gen.py", "pandajedi/run.py"
+
+            def change(at, kind, key, via=()):
+                return N(at=at, kind=kind, key=key, via=list(via))
+
+            def rows(*route, changes=()):
+                return N(kind="rows", name="panda:x@9", site_owner="", column="jedi_taskparams.taskparams", steps=[],
+                         route=list(route), changes=list(changes), after=[], after_stops=[])
+
+            def param(owner, route, changes=(), after=(), stops=()):
+                return N(kind="parameter", name="m", site_owner=owner, column="", steps=[], route=list(route),
+                         changes=list(changes), after=list(after), after_stops=[N(kind=k) for k in stops])
+
+            # the '*' store runs only past prepro's early return, read by prepro's own GuardFrom
+            star = change(f"{B}:12", "store", "*")
+            guard = lambda line, test, after: N(owner=f"{B}::extract", test_line=line, test=test, name="m", arms=[line + 1],
+                                                sources=[param(f"{B}::extract", [], after=after, stops=["no_meeting"])])
+            mapdump._FRAGMENT[:] = [N(
+                guard_froms=[guard(3, "'k' in m", [star]), guard(5, "m['v'] == 3", [star]),
+                             N(owner=f"{B}::prepro", test_line=9, test="'pre' not in m", name="m", arms=[10],
+                               sources=[param(f"{B}::prepro", [], after=[star])])],
+                parameter_froms=[
+                    # straight from run.py, through Anal's extract (a store of k before), through Gen's (a delete)
+                    N(owner=f"{B}::extract", parameter="m", stops=[N(kind="raises")], sources=[
+                        rows(f"{RUN}:20"), param(f"{A}::extract", [f"{A}:5"], changes=[change(f"{A}:4", "store", "'k'")]),
+                        param(f"{G}::extract", [f"{G}:4"], changes=[change(f"{G}:3", "delete", "'k'")])]),
+                    N(owner=f"{A}::extract", parameter="m", stops=[], sources=[rows(f"{RUN}:20")]),
+                    N(owner=f"{G}::extract", parameter="m", stops=[], sources=[rows(f"{RUN}:20")]),
+                    N(owner=f"{B}::prepro", parameter="m", stops=[], sources=[rows(f"{RUN}:30")]),
+                ])]
+
+            def read(guard, value, arm=4, shown=None):
+                data = {"task_params": {"value": value, "as_of": "2026-10-29 14:00:00"}}
+                if shown is not None:
+                    # the run prints a line of Anal's extract alone
+                    heldcol.R.functions = lambda rel, name: [1]
+                    heldcol.R.function = lambda rel, name: (rel, name)
+                    heldcol.R.seen = lambda fn, run, mode: N(hits={3: [(0, 9, "")]} if fn == (A, "extract") else {})
+                got = heldcol.read(f"{B}::extract", guard, arm, data, run=shown, mode="positive")
+                return None if got is None else [repr(got.value), [T.text(k) for k in got.keys], got.shown,
+                                                 T.text(got.premise([guard]))]
+
+            print(json.dumps({
+                "held": read("'k' in m", {"k": 2}),
+                "not held": read("not ('k' in m)", {}),
+                "held, the store's test held too": read("'k' in m", {"k": 2, "pre": 1}),
+                "held, shown": read("'k' in m", {"k": 2}, shown="run"),
+                "a value": read("m['v'] == 3", {"v": 3}, arm=6),
+                "no GuardFrom": read("'z' in m", {"z": 1}),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    gone = "store * at base.py:12 did not run: \"'pre' not in m\" at base.py:9 read True"
+    premise = "read in the rows file's task_params as fetched at 2026-10-29 14:00:00{}: the column as the pass left it, no " \
+              "later write of it read (KNOWN_ISSUES.md K49)"
+    # the rows hold k: there at the read unless something may add it after or remove it before -- Gen's delete; the
+    # '*' store is not counted where prepro's early return is taken, read by prepro's own GuardFrom
+    assert got["held"] == ["UNKNOWN", [f"'k' in m True on run.py:20, anal.py:5 (held as fetched; {gone})",
+                                       "'k' in m not read on gen.py:4 (may be changed by delete 'k' at gen.py:3)"],
+                           "", "\"'k' in m\" " + premise.format("")]
+    # the rows lack k: absent unless something may add it before or remove it after -- Anal's store
+    assert got["not held"][:2] == ["UNKNOWN", ["'k' in m False on run.py:20, gen.py:4 (not held as fetched)",
+                                               "'k' in m not read on anal.py:5 (may be changed by store 'k' at anal.py:4)"]]
+    # where the early return is not taken, the '*' store may add k after the read
+    assert got["held, the store's test held too"][:2] == ["UNKNOWN", [
+        "'k' in m not read on run.py:20, anal.py:5 (may be changed by store * at base.py:12)",
+        "'k' in m not read on gen.py:4 (may be changed by store * at base.py:12, delete 'k' at gen.py:3)"]]
+    # the run shows Anal's route by a line only its own function prints: read on it alone
+    assert got["held, shown"] == ["True", [f"'k' in m True on anal.py:5 (held as fetched; {gone})"], "anal.py:5",
+                                  "\"'k' in m\" " + premise.format(", on anal.py:5, the route its run shows")]
+    # a value is read as fetched where nothing changes it on the way
+    assert got["a value"][:2] == ["True", [f"m['v'] 3 on run.py:20, anal.py:5, gen.py:4 (held as fetched; {gone})"]]
+    # a test over no name whose ways reach a held column is not this reading's
+    assert got["no GuardFrom"] is None
 
 
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):
@@ -6599,6 +7261,7 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
             def walk(left):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.opened, r.ends, r.touched, r.row_facts, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], {}, "H2", {}, [], {}, "outside"
+                r.data = {}  # no rows file: no held column (heldcol, K49)
                 r.question, r.branches, r.end_code, r._walking = None, [], None, None
                 r.base_env = lambda at=None: envs.get(at, E.Env({}))
                 r._which_wrote = lambda *x: rerun.OneOf(left, 2)

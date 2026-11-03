@@ -20,7 +20,8 @@ one order:
 5. an object of any other class outside the corpus (:meth:`calls.Types.library_classes`), or of a class of the
    corpus built on a base outside it that supplies the method (:meth:`calls.Types.built_outside`): nothing here says
    what the method does with what it is handed, so it keeps all of it (:data:`LIBRARY`);
-6. a builtin container: its type's method (:data:`BUILTIN`);
+6. a builtin value: a container's method by its type, a scalar's -- a text, a number (:data:`SCALARS`) -- keeping
+   nothing it is handed, as each makes a new value (``", ".join(names)``) (:data:`BUILTIN`);
 7. an object whose class cannot be said, or a value a call outside the corpus made -- ``json.loads``', a row the
    database returned: the builtin's method of the name (:data:`ASSUMED`, the assumption ``builtin_by_name``);
 8. anything else: nothing is said (:data:`UNKNOWN`) -- a module's function, a method read off a class, a class of
@@ -798,6 +799,40 @@ def _together(found: list[Method]) -> Optional[Method]:
 
 #: The builtin container types the table says the methods of.
 _TYPES = frozenset(one for one, _name in BUILTIN_METHODS)
+#: The builtin types of a value that holds no other object and cannot change -- a text, a number, ``None``: its
+#: methods make new values and keep nothing they are handed (``", ".join(names)``, ``"{}".format(job)``).
+SCALARS = frozenset({"str", "int", "float", "bool", "bytes", "complex", "NoneType"})
+
+
+#: The names an annotation spells a value no change in place can touch with: ``int``, ``str | None``,
+#: ``Optional[datetime.datetime]`` (:func:`immutable_annotation`).
+IMMUTABLE_ANNOTATIONS = frozenset(
+    {"int", "str", "float", "bool", "bytes", "complex", "None", "Optional", "Union", "Literal", "typing", "datetime",
+     "date", "time", "timedelta", "Decimal", "decimal"}
+)
+
+
+def immutable_annotation(annotation: Optional[ast.expr]) -> bool:
+    """Whether *annotation* spells only values no change in place can touch (:data:`IMMUTABLE_ANNOTATIONS`); one
+    written as a string is read as what the string holds."""
+    if annotation is None:
+        return False
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return False
+    names: list[str] = []
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.append(node.attr)
+        elif isinstance(node, ast.Constant) and node.value is None:
+            names.append("None")
+        elif isinstance(node, ast.Constant) and not isinstance(node.value, (str, int, float, bool)):
+            return False
+    return bool(names) and all(one in IMMUTABLE_ANNOTATIONS for one in names)
 
 
 def builtin_method(type_name: str, name: str) -> Optional[Method]:
@@ -1273,7 +1308,10 @@ def meaning(
         and not opened
         and all(where == BUILTIN_CLASS for where, _name in classes)
     ):
-        method = _of_types(frozenset(one for _where, one in classes), name)
+        kinds = frozenset(one for _where, one in classes)
+        if kinds <= SCALARS:
+            return Meaning(BUILTIN, Method())
+        method = _of_types(kinds, name)
         return Meaning(BUILTIN, method) if method is not None else _UNKNOWN
     method = by_name(name)
     return (

@@ -835,36 +835,11 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
     return list(sources.values()), list(stops.values())
 
 
-#: The names an annotation spells a value no change in place can touch with: ``int``, ``str | None``,
-#: ``Optional[datetime.datetime]``.
-_IMMUTABLE = frozenset(
-    {
-        "int",
-        "str",
-        "float",
-        "bool",
-        "bytes",
-        "complex",
-        "None",
-        "Optional",
-        "Union",
-        "Literal",
-        "typing",
-        "datetime",
-        "date",
-        "time",
-        "timedelta",
-        "Decimal",
-        "decimal",
-    }
-)
-
-
 def _unchanging(func: ast.AST, name: str, site: ast.AST, ways: list[_Way]) -> bool:
     """Whether nothing can change in place what *site* gives *name*: a parameter annotated with such types only, or
     a value every way of which ends at a literal or a column's value, through no call."""
     if site is getattr(func, "args", None):
-        return _immutable(_annotation(func, name))
+        return callfacts.immutable_annotation(_annotation(func, name))
     ends = [one for one in ways if one.kind != _STOP]
     return bool(ends) and all(
         one.kind in (KEY_CONSTANT, KEY_ROWS, KEY_SEQUENCE)
@@ -882,29 +857,6 @@ def _annotation(func: ast.AST, name: str) -> Optional[ast.expr]:
         if one.arg == name:
             return one.annotation
     return None
-
-
-def _immutable(annotation: Optional[ast.expr]) -> bool:
-    if annotation is None:
-        return False
-    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-        try:
-            annotation = ast.parse(annotation.value, mode="eval").body
-        except SyntaxError:
-            return False
-    names: list[str] = []
-    for node in ast.walk(annotation):
-        if isinstance(node, ast.Name):
-            names.append(node.id)
-        elif isinstance(node, ast.Attribute):
-            names.append(node.attr)
-        elif isinstance(node, ast.Constant) and node.value is None:
-            names.append("None")
-        elif isinstance(node, ast.Constant) and not isinstance(
-            node.value, (str, int, float, bool)
-        ):
-            return False
-    return bool(names) and all(one in _IMMUTABLE for one in names)
 
 
 def _change_said(change: _Change) -> HeldChange:

@@ -214,6 +214,11 @@ class Spec:
         self._changed[name] = value
 
 
+class Task:
+    jediTaskID: int | None
+    inputs: dict
+
+
 class Refiner:
     def fill(self, params):
         params["filled"] = True
@@ -266,6 +271,66 @@ class Refiner:
         if "x" in params:
             pass
         return ret
+
+    def texts(self, params):
+        line = ", ".join(params)
+        shown = "{}".format(params)
+        sep = "-"
+        joined = sep.join(params)
+        self.sink.write(params)
+        if "x" in params:
+            pass
+
+    def returns(self, params):
+        self.cur.execute("INSERT INTO t (a) VALUES (:a) RETURNING id INTO :newID", params)
+        if ":newID" in params:
+            pass
+
+    def plain(self, params):
+        self.cur.execute("UPDATE t SET a=:a", params)
+        if ":a" in params:
+            pass
+
+    def unread(self, params, sql):
+        self.cur.execute(sql, params)
+        if ":a" in params:
+            pass
+
+    def parts(self, params):
+        self.fill_each([params["inner"]])
+        shown = json.dumps([params["shown"]])
+        if "x" in params:
+            pass
+
+    def fill_each(self, maps):
+        for one in maps:
+            one["filled"] = True
+
+    def declared_parts(self, params: Task):
+        self.fill_each([params.inputs], {"id": params.jediTaskID})
+        self.fill_each(params.jediTaskID)
+        if "x" in params.inputs:
+            pass
+
+
+class WrappedCursor:
+    def execute(self, sql, varDict=None):
+        self.cur.execute(sql, varDict)
+
+
+class Proxy:
+    def __init__(self):
+        self.cur = WrappedCursor()
+
+    def wrapped(self, params):
+        self.cur.execute("UPDATE t SET a=:a", params)
+        if ":a" in params:
+            pass
+
+    def wrapped_returns(self, params):
+        self.cur.execute("INSERT INTO u (a) VALUES (:a) RETURNING id INTO :newID", params)
+        if ":newID" in params:
+            pass
 """
 
 
@@ -436,3 +501,74 @@ def test_a_local_container_handing_nothing_out_keeps_no_change_and_a_builtin_han
         ("store", "'b'", ""),
         ("escaped", "*", "ret['p']"),
     ]
+
+
+def test_a_text_s_method_keeps_nothing_and_a_library_object_s_method_keeps_what_it_is_handed(
+    tmp_path,
+):
+    """``", ".join(params)`` and ``"{}".format(params)`` make new texts and keep nothing of the map, nor does a text
+    a name holds (callfacts.meaning); ``self.sink.write(params)``, a method of no class this reading can say and of no
+    definition of the corpus, may keep it."""
+    found = _object_changes(tmp_path, "'x' in params", "texts")
+
+    assert [(kind, key, what) for kind, key, what, *_rest in found] == [
+        ("escaped", "*", "kept by self.sink.write"),
+    ]
+
+
+def test_a_part_of_the_object_put_inside_what_a_call_into_the_corpus_is_handed_may_change_inside(
+    tmp_path,
+):
+    """``self.fill_each([params["inner"]])`` hands a definition of the corpus a list holding a part of the map, and
+    this reading does not follow a container's elements: the part may change inside.  A library's function handed one,
+    ``json.dumps``, changes nothing of it."""
+    found = _object_changes(tmp_path, "'x' in params", "parts")
+
+    assert [(kind, key, what) for kind, key, what, *_rest in found] == [
+        ("inner", "'inner'", "handed inside to self.fill_each"),
+    ]
+
+
+def test_a_part_declared_a_value_no_change_can_touch_changes_nothing_inside(tmp_path):
+    """``Task.jediTaskID`` is declared ``int | None``: handed inside a map, or straight, to a definition that puts into
+    what it is handed, it changes nothing inside; ``Task.inputs``, declared a ``dict``, may."""
+    found = _object_changes(tmp_path, "'x' in params.inputs", "declared_parts")
+
+    assert [(kind, key, what) for kind, key, what, *_rest in found] == [
+        ("inner", ".inputs", "handed inside to self.fill_each"),
+    ]
+
+
+def test_the_driver_changes_a_map_it_is_handed_only_at_the_binds_a_statement_returns_into(
+    tmp_path,
+):
+    """``RETURNING id INTO :newID`` writes ``:newID`` back into the map (sql.written_back); an ``UPDATE`` returning
+    into no bind changes nothing of it; a statement not read may write any key."""
+    assert [
+        (kind, key, what)
+        for kind, key, what, *_rest in _object_changes(
+            tmp_path, "':newID' in params", "returns"
+        )
+    ] == [("store", "':newID'", "self.cur.execute")]
+    assert _object_changes(tmp_path, "':a' in params", "plain") == []
+    assert [
+        (kind, key, what)
+        for kind, key, what, *_rest in _object_changes(
+            tmp_path, "':a' in params", "unread"
+        )
+    ] == [("unread", "*", "self.cur.execute")]
+
+
+def test_a_method_of_the_driver_s_wrapper_is_the_driver_read_at_the_call_handing_the_statement(
+    tmp_path,
+):
+    """``self.cur`` is a ``WrappedCursor``: its ``execute`` is a leaf, read where the statement is handed -- the
+    ``UPDATE`` writes nothing back, the ``RETURNING ... INTO`` its bind -- not through its body, where the statement
+    is a parameter no reading can say."""
+    assert _object_changes(tmp_path, "':a' in params", "wrapped") == []
+    assert [
+        (kind, key, what)
+        for kind, key, what, *_rest in _object_changes(
+            tmp_path, "':newID' in params", "wrapped_returns"
+        )
+    ] == [("store", "':newID'", "self.cur.execute")]

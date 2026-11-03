@@ -7,7 +7,7 @@ from pathlib import Path
 
 from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap.models import Anchor, Branch, JunctionNode
+from bamboo.codemap.models import OFF_ROW_NO_WRITE, Anchor, Branch, JunctionNode, OffRow
 
 PACKAGE = "pkg"
 
@@ -974,6 +974,33 @@ def test_the_arms_that_move_a_subject_off_a_value_leave_out_the_ones_writing_it_
     ]
 
 
+
+def test_in_memory_the_arms_that_move_a_subject_off_a_value_leave_out_only_the_ones_writing_it(tmp_path):
+    """From ``running`` in memory: an arm whose row must hold ``activated``, or whose object is written to no row, still moves the object."""
+    record = _record(tmp_path, mod=("def update(job):\n    pass\n"))
+    junctions = [
+        _junction(
+            "pkg/mod.py::update",
+            2,
+            [
+                ("running", []),
+                ("failed", ["jobStatus=activated"]),
+                ("finished", ["jobStatus IN (activated,running)"]),
+                ("cancelled", []),
+            ],
+        ),
+        _junction("pkg/gone.py::vanished", 3, [("failed", [])]),
+    ]
+    junctions[0].branches[3].off_row = OffRow(why=OFF_ROW_NO_WRITE, functions=["pkg/mod.py::update"])
+
+    on_the_row = reach.moving_off(junctions, record, "JobSpec.jobStatus", "running")
+    in_memory = reach.moving_off_in_memory(junctions, record, "JobSpec.jobStatus", "running")
+
+    assert on_the_row.arms == {"pkg/mod.py::update": ["finished@2"]}
+    assert in_memory.arms == {"pkg/mod.py::update": ["failed@2", "finished@2", "cancelled@2"]}
+    assert in_memory.unmatched == ["pkg/gone.py::vanished"]
+
+
 def test_a_write_the_record_has_no_function_for_leaves_no_answer(tmp_path):
     """A junction no row was found for may be anywhere: "reaches none" would be a guess."""
     record = _record(tmp_path, mod=("def quiet():\n    pass\n"))
@@ -1552,6 +1579,63 @@ def test_a_loop_over_a_name_bound_to_a_call_is_over_what_the_call_is_declared_to
 
     assert record.rows["pkg/mod.py::reassign"].holes == []
     assert "pkg/mod.py::Task.move" in _to(record, "pkg/mod.py::reassign")
+
+
+def test_an_element_is_what_its_container_s_declaration_states(tmp_path):
+    """``site.tokens[scope].get(token)``: ``Site`` declares ``tokens: dict[str, dict[str, str]]``, so an element is a
+    dict and its ``get`` the builtin's -- a loop's element over ``rows: list[dict[str, str]]`` too.  ``dict[str, Any]``
+    says nothing of an element, whose ``get`` may be ``Cache.get``, the corpus's: a hole."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "from typing import Any\n\n"
+            "class Cache:\n"
+            "    def get(self, key, update):\n"
+            "        return update(key)\n\n"
+            "class Site:\n"
+            "    tokens: dict[str, dict[str, str]]\n"
+            "    rows: list[dict[str, str]]\n"
+            "    anything: dict[str, Any]\n\n"
+            "def pick(site: Site, scope, token):\n"
+            "    site.tokens[scope].get(token)\n"
+            "    for row in site.rows:\n"
+            "        row.get(token)\n"
+            "    site.anything[scope].get(token)\n"
+        ),
+    )
+
+    assert [hole.callee for hole in record.rows["pkg/mod.py::pick"].holes] == ["site.anything[scope].get"]
+
+
+def test_what_json_makes_at_a_key_keeps_its_elements_builtins_through_an_empty_default(tmp_path):
+    """``json_dict.get("executor", [])``, ``json_dict`` what its one caller's ``json.loads`` made: what json made at the
+    key, or an empty list -- either way every element is json's, a builtin, and ``executor.get`` the builtin's.  Where
+    the function appends to the list it binds, an element may be what it appends: a hole (``Cache.get``)."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "import json\n\n"
+            "class Cache:\n"
+            "    def get(self, key, update):\n"
+            "        return update(key)\n\n"
+            "def extract(json_dict: dict):\n"
+            "    executors = json_dict.get('executor', [])\n"
+            "    for executor in executors:\n"
+            "        executor.get('metaData', {})\n\n"
+            "def extract_filled(json_dict: dict, cache: Cache):\n"
+            "    executors = json_dict.get('executor', [])\n"
+            "    executors.append(cache)\n"
+            "    for executor in executors:\n"
+            "        executor.get('metaData', {})\n\n"
+            "def caller(text, cache: Cache):\n"
+            "    json_dict = json.loads(text)\n"
+            "    extract(json_dict)\n"
+            "    extract_filled(json_dict, cache)\n"
+        ),
+    )
+
+    assert record.rows["pkg/mod.py::extract"].holes == []
+    assert [hole.callee for hole in record.rows["pkg/mod.py::extract_filled"].holes] == ["executor.get"]
 
 
 def test_a_hole_names_what_its_receiver_is_one_of_with_its_article(tmp_path):

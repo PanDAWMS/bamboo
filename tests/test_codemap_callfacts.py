@@ -285,6 +285,10 @@ _MODULE = (
     "    agent.start_passive_mode(v)\n"
     "    json.dumps(v)\n"
     "    fills(plain, v)\n"
+    "    ', '.join(v)\n"
+    "    f'{text}'.format(v)\n"
+    "    sep = '-'\n"
+    "    sep.join(v)\n"
 )
 
 
@@ -339,6 +343,23 @@ def test_a_call_is_read_in_one_order(tmp_path, callee, kind, assumption):
     assert (meant.kind, meant.assumption) == (kind, assumption)
     if kind == callfacts.PROTOCOL:
         assert ast.unparse(meant.copied_from) == "other"
+
+
+@pytest.mark.parametrize("callee", ["', '.join", "f'{text}'.format", "sep.join"])
+def test_a_text_s_method_keeps_nothing_it_is_handed(tmp_path, callee):
+    """A text's method makes a new text: ``', '.join(v)`` keeps nothing of ``v``, on a literal, a formatted text or a
+    name every value of which is a text -- the scalars reach reads as holding nothing too (``SCALARS``)."""
+    calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, mod=_MODULE), {}))
+    file = f"{PACKAGE}/mod.py"
+    func = next(
+        node for node in ast.walk(calls.types.tree(file)) if isinstance(node, ast.FunctionDef) and node.name == "reads"
+    )
+    call = next(node for node in ast.walk(func) if isinstance(node, ast.Call) and ast.unparse(node.func) == callee)
+
+    meant = callfacts.meaning(calls, file, func, call)
+
+    assert (meant.kind, meant.method) == (callfacts.BUILTIN, callfacts.Method())
+    assert callfacts.put_arguments(meant.method, call) == []
 
 
 @pytest.mark.parametrize(

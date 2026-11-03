@@ -48,7 +48,8 @@ def rec(offset: int, *lines: str, head: bool = True) -> dict:
 
 class FakePanda:
     """list_logs and grep_log over a dict of files per machine; each grep answers from *greps* by (machine, file),
-    and each pattern grep from *patterns*, by default with no record."""
+    and each pattern grep from *patterns*, by default with no record.  A grep's call and a callable reply carry its
+    window, ``(since, until)`` or None."""
 
     def __init__(
         self,
@@ -108,23 +109,23 @@ class FakePanda:
         *,
         pattern=None,
         machine=None,
-        tail_bytes=None,
+        since=None,
+        until=None,
         **_,
     ):
+        window = (since, until) if since or until else None
         if pattern is not None:
-            self.calls.append(("pattern", machine, log_filename, pattern, tail_bytes))
+            self.calls.append(("pattern", machine, log_filename, pattern, window))
             replies = self.patterns.get((machine, log_filename)) or [
                 {"result": {"records": [], "window": None}}
             ]
             reply = replies.pop(0) if len(replies) > 1 else replies[0]
             return answer({machine: reply})
-        self.calls.append(
-            ("grep", machine, log_filename, tuple(fixed_strings), tail_bytes)
-        )
+        self.calls.append(("grep", machine, log_filename, tuple(fixed_strings), window))
         replies = self.greps[(machine, log_filename)]
         reply = replies.pop(0) if len(replies) > 1 else replies[0]
         if callable(reply):
-            reply = reply(fixed_strings, tail_bytes)
+            reply = reply(fixed_strings, window)
         return answer({machine: reply})
 
 
@@ -176,11 +177,20 @@ ADDER_FILES = [
 ]
 
 
-def found(*records, first="2026-10-14 07:00:05,000", offset=0) -> dict:
+def found(
+    *records, first="2026-10-14 07:00:05,000", offset=0, end=None, cut=False
+) -> dict:
+    """An answer of *records*; its window, read only for the current file, runs to the file's end unless *end*."""
     return {
         "result": {
             "records": list(records),
-            "window": {"offset": offset, "first_stamp": first},
+            "window": {
+                "offset": offset,
+                "first_stamp": first,
+                "end": None if end is None else offset + 1000,
+                "end_stamp": end,
+                "cut": cut,
+            },
         }
     }
 
@@ -211,6 +221,7 @@ async def test_a_rotated_file_covers_from_the_rotation_before_it_to_its_own_plus
     (f,) = r["machines"][SERVER[0]]["files"]
     # the machine rotated at 07:00:01 that day (its DBProxy's mtime), not at the adder's own 06:59:58
     assert f["covers"] == ["2026-10-13 07:11:35", "2026-10-14 07:10:01"]
+    assert f["covers_to"] == "rotation"
     assert f["margin_s"] == 600 and f["status"] == "answered"
     assert [x["offset"] for x in f["records"]] == [10]
 
@@ -308,10 +319,124 @@ async def test_an_empty_file_read_from_its_first_byte_covers_from_its_mtime(tmp_
     )
     (cur,) = r["machines"][SERVER[1]]["files"]
     assert cur["covers"] == ["2025-12-19 15:30:35", "2026-10-14 11:50:00"]
-    assert cur["covers_from"] == "unstamped"
+    assert cur["covers_from"] == "unstamped" and cur["covers_to"] == "asked"
     assert cur["status"] == "answered" and cur["error"] is None and cur["records"] == []
-    # nothing more to read: asked once, not again with twice the bytes
+    # nothing more to read: asked once
     assert len([c for c in panda.calls if c[0] == "grep"]) == 1
+
+
+async def test_the_current_file_is_read_over_its_asks_windows_and_covers_to_the_record_the_read_stopped_before(
+    tmp_path,
+):
+    # one grep for both asks, from the earliest start to past the latest end, each widened by the querier's EDGE
+    reply = found(
+        rec(5, "2026-10-14 09:00:00,1 a 7339"),
+        rec(6, "2026-10-14 10:00:05,1 b 7340"),
+        first="2026-10-14 08:49:00",
+        offset=4000,
+        end="2026-10-14 10:11:06",
+    )
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], ADDER): [reply]},
+    )
+    asks = [
+        ask(ADDER, ["7339"], ("2026-10-14 09:00:00", "2026-10-14 09:00:00"), SERVER[0]),
+        ask(ADDER, ["7340"], ("2026-10-14 10:00:00", "2026-10-14 10:00:05"), SERVER[0]),
+    ]
+    _, (a, b) = await run(tmp_path, panda, asks)
+    assert [c for c in panda.calls if c[0] == "grep"] == [
+        (
+            "grep",
+            SERVER[0],
+            ADDER,
+            ("7339", "7340"),
+            ("2026-10-14 08:50:00", "2026-10-14 10:10:06"),
+        )
+    ]
+    fa, fb = a["machines"][SERVER[0]]["files"][0], b["machines"][SERVER[0]]["files"][0]
+    assert (
+        fa["covers"] == fb["covers"] == ["2026-10-14 08:49:00", "2026-10-14 10:11:06"]
+    )
+    assert fa["covers_from"] == "first_stamp" and fa["covers_to"] == "end_stamp"
+    assert fa["since_until"] == ["2026-10-14 08:50:00", "2026-10-14 10:10:06"]
+    assert [x["offset"] for x in fa["records"]] == [5]
+    assert [x["offset"] for x in fb["records"]] == [6]
+
+
+async def test_a_window_cut_at_1_gib_is_read_on_from_the_record_it_stopped_before(
+    tmp_path,
+):
+    replies = [
+        found(
+            rec(5, "2026-10-14 09:00:00,1 a 7339"),
+            first="2026-10-14 08:49:00",
+            offset=4000,
+            end="2026-10-14 09:30:00",
+            cut=True,
+        ),
+        found(
+            rec(9, "2026-10-14 10:00:00,1 b 7339"),
+            first="2026-10-14 09:28:59",
+            offset=900_000,
+            end="2026-10-14 10:11:06",
+        ),
+    ]
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], ADDER): replies},
+    )
+    w = ("2026-10-14 09:00:00", "2026-10-14 10:00:05")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])])
+    assert [c[4] for c in panda.calls if c[0] == "grep"] == [
+        ("2026-10-14 08:50:00", "2026-10-14 10:10:06"),
+        ("2026-10-14 09:30:00", "2026-10-14 10:10:06"),
+    ]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["covers"] == ["2026-10-14 08:49:00", "2026-10-14 10:11:06"]
+    assert [x["offset"] for x in f["records"]] == [5, 9] and not f["truncated"]
+
+
+async def test_a_cut_past_the_asked_end_is_not_read_on(tmp_path):
+    # the server's own 60 s past until is all the cut left out
+    reply = found(
+        rec(5, "2026-10-14 10:00:00,1 a 7339"),
+        first="2026-10-14 09:49:00",
+        offset=4000,
+        end="2026-10-14 10:10:30",
+        cut=True,
+    )
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], ADDER): [reply]},
+    )
+    w = ("2026-10-14 10:00:00", "2026-10-14 10:00:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])])
+    assert len([c for c in panda.calls if c[0] == "grep"]) == 1
+    (f,) = r["machines"][SERVER[0]]["files"]
+    # the file goes on past the record the read stopped before
+    assert f["covers"] == ["2026-10-14 09:49:00", "2026-10-14 10:10:30"]
+    assert f["covers_to"] == "end_stamp"
+
+
+async def test_a_machine_whose_processor_predates_the_window_reads_the_whole_current_file(
+    tmp_path,
+):
+    # it ignores since and until, greps the whole file and says no window: the file listed, from its rotation
+    reply = {
+        "result": {"records": [rec(5, "2026-10-14 10:00:00,1 a 7339")], "window": None}
+    }
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], ADDER): [reply]},
+    )
+    w = ("2026-10-14 10:00:00", "2026-10-14 10:00:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["7339"], w, SERVER[0])])
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["covers"] == ["2026-10-14 06:59:58", "2026-10-14 11:50:00"]
+    assert f["covers_from"] == "rotation" and f["status"] == "answered"
+    assert f["covers_to"] == "asked"
+    assert [x["offset"] for x in f["records"]] == [5]
 
 
 async def test_the_oldest_file_has_no_start(tmp_path):

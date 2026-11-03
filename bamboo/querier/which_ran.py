@@ -16,6 +16,9 @@ Every candidate comes out as one of four, with the rule that put it there:
   call sits (:func:`inside_call`);
   the site is reached only when the value is already the observed one
   (rule 6, solved from the guards on the way to it, the caller's included);
+  of one pass's candidates left, one with the observed value already there
+  before it (a stay) or one assigning another value (rule R,
+  :mod:`bamboo.querier.changed`);
 * **positive** -- every row that must print does, one of them says enough to
   prove it, and a hole of the subject in them holds the observed value; or,
   that failing, the rows printed around the ``if`` chain it sits under leave no
@@ -27,7 +30,9 @@ Every candidate comes out as one of four, with the rule that put it there:
   function at the window holds the key (:func:`passes_at`);
 * **kept** -- read, and nothing above decided it.
 
-The choice: one positive candidate; otherwise, when the list is complete and
+The choice: where rule R orders one pass's candidates, the last that changed the
+value, if it ran, and none where more than one may have; otherwise one positive
+candidate; otherwise, when the list is complete and
 every other one is excluded, the one left (elimination) -- unexamined too, in
 a window that holds the write itself (*holds_write*).  ``--decide strict``
 takes neither while anything is unexamined.
@@ -46,6 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bamboo.codemap.panda import flow, pathcond  # noqa: E402
+from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
@@ -574,11 +580,13 @@ def judge(
     complete: bool = True,
     called_at: Callable[[R.Function, Candidate], list[str]] | None = None,
     holds_write: bool = False,
+    keeps: CH.Keeps | None = None,
 ) -> Judgement:
     """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of every
     call from which it goes on there.  Given it, and no *question_run*, runs of the key in several logs are read as
     one where every run but one ran inside a call that one made (:func:`inside_call`, on the machine both name), and
-    that one is the question's run.
+    that one is the question's run.  *keeps* reads, by the map's reach, a call on the way of a value rule R carries
+    (``changed.breaks``).
 
     A candidate's must rows are read with where a traceback of its run shows its function left by an exception
     (:func:`rows.raised_in`)."""
@@ -814,6 +822,15 @@ def judge(
                 v.kind = "positive"
                 v.reasons.append(f"{proof.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
 
+    # rule R: of one pass's writes, the last that changed the value -- the stays and the writes of another value out
+    change = None
+    if subject and observed and question_run is not None:
+        change = CH.last_change(verdicts, seens, runs_of, question_run, {k: site for k, (_, _, _, site) in joined.items()},
+                                subject, observed, called_at, keeps)
+        for v, why in change.dropped if change is not None else []:
+            v.kind = "excluded"
+            v.reasons.append(why)
+
     positives = [v for v in verdicts if v.kind == "positive"]
     left = [v for v in verdicts if v.kind in ("positive", "kept", "unexamined")]
     unexamined = [v for v in verdicts if v.kind == "unexamined"]
@@ -824,7 +841,11 @@ def judge(
         and ((r := runs_of[v.candidate.owner]) is question_run or (r is not None and id(r) in joined))
     ]
     chosen, how = None, "undecided"
-    if len(positives) == 1 and (decide != "strict" or not unexamined):
+    if change is not None and change.chosen is not None and (decide != "strict" or not unexamined):
+        chosen, how = change.chosen, change.how
+    elif change is not None and len(change.left) > 1:
+        how = change.how
+    elif len(positives) == 1 and (decide != "strict" or not unexamined):
         chosen, how = positives[0], "positive evidence"
     elif len(positives) > 1:
         how = f"{len(positives)} positive"

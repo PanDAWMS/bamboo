@@ -57,6 +57,10 @@ name between; in a definition the object is handed to, every statement.  A chang
   ``pop`` and ``setdefault`` of a literal key, ``update`` of a dict literal, said by the key;
 - what a definition of the corpus the object is handed to, or called on, does to it, to the end, by the rules
   above, the call on the way (*via*);
+- a part of the object put inside what an argument of a call into the corpus makes -- ``updateJobs([self.job])``,
+  whose elements this reading does not follow --: a change inside that part, as of a part handed -- save a part
+  declared a value no change in place can touch (``jediTaskID: int | None``, :func:`callfacts.immutable_annotation`),
+  on the premise that a declaration holds;
 - an object put into another object's attribute: what the corpus does through an attribute of that name, on any
   object, as :func:`may_change` reads a lost object by the attribute's name -- ``self.updatedTaskParams =
   taskParamMap`` is changed by nothing, since the one function reading the attribute only encodes it;
@@ -64,13 +68,19 @@ name between; in a definition the object is handed to, every statement.  A chang
   cannot be followed (a ``*args``, a thread): a change of any key (:data:`EVERY`).
 
 A function or method outside the corpus changes no item of what it is handed or called on, but for the builtin
-containers' methods that do (:data:`callfacts.ASSUMPTIONS` ``library_changes_no_item``); a library object's method
-handed the object keeps it (``library_keeps_what_it_is_handed``), save a logger's.  A name bound to the object --
-``j = job``, a library function's value that may be it, a call of the corpus returning a parameter it is handed --
-is read as the object.  An object put in a local container that hands nothing out -- it only takes things in and
-goes to the driver, a logger or a library (``varMap[":id"] = v`` then ``self.cur.execute(sql, varMap)``) -- is not
-changed through it.  Not read: an object reached through a loop over a container holding it, handed back in a
-``return``'s tuple, or a part of it bound to a name (``sub = m["sub"]``, then ``sub["k"] = v``).
+containers' methods that do (:data:`callfacts.ASSUMPTIONS` ``library_changes_no_item``); whether a method outside
+it keeps the object it is handed is what :func:`callfacts.meaning` says -- a library object's keeps it
+(``library_keeps_what_it_is_handed``), a logger's, another system's client's and a text's or a number's keep
+nothing, a builtin container's what it puts in --, and where that says nothing it keeps it, save a logger's and a
+module's function.  The database's driver -- the cursor, or a method of PanDA's wrappers of it
+(:data:`callfacts.DRIVER_CLASSES`), a leaf not read through -- running a statement on a map it is handed writes the
+keys a ``RETURNING ... INTO`` names (:func:`sql.written_back`), and any key where the statement is not read.  A name
+bound to the object -- ``j = job``, a library function's value that may be it, a call of the corpus returning a
+parameter it is handed -- is read as the object.  An object put in a local container that hands nothing out -- it
+only takes things in and goes to the driver, a logger or a library (``varMap[":id"] = v`` then
+``self.cur.execute(sql, varMap)``) -- is not changed through it.  Not read: an object reached through a loop over a
+container holding it, handed back in a ``return``'s tuple, or a part of it bound to a name (``sub = m["sub"]``,
+then ``sub["k"] = v``).
 """
 
 from __future__ import annotations
@@ -104,10 +114,10 @@ from bamboo.codemap.models import (
     CHANGE_STORE,
     CHANGE_UNREAD,
 )
-from bamboo.codemap.panda import flow, pathcond
+from bamboo.codemap.panda import flow, pathcond, sql
 
 if TYPE_CHECKING:
-    from bamboo.codemap.calls import Calls
+    from bamboo.codemap.calls import Calls, Placed
 
 #: :attr:`Change.name` where every name may be written.
 EVERY = "*"
@@ -258,6 +268,37 @@ def object_changes(
         )
         if reading.between(name, first, statement, last, killers)
     ]
+
+
+def call_changes(
+    calls: "Calls",
+    file: str,
+    func: ast.AST,
+    call: ast.Call,
+    name: str,
+    bound: tuple = (),
+) -> list[ObjectChange]:
+    """What *call*, made in *func* of *file*, may change in place of the object *name* holds there, each place said
+    by its key (:class:`ObjectChange`) -- the reading :func:`object_changes` takes at each call --; none where it
+    cannot change it.  *bound*: the classes ``self`` can be in *func* (:attr:`Target.bound`)."""
+
+    def holds(expression: ast.AST) -> bool:
+        return isinstance(expression, ast.Name) and expression.id == name
+
+    return _reading(calls)._call_changes(file, func, call, holds, bound)
+
+
+def chain_steps(chain: ast.expr) -> Optional[tuple[str, tuple[str, ...]]]:
+    """The name *chain* starts at and the keys of its steps from it, as :class:`ObjectChange` says a key:
+    ``("m", ("'k'", ".x"))`` for ``m['k'].x``, ``("job", ())`` for ``job``; ``None`` where it starts at no name."""
+    steps: list[str] = []
+    here: ast.expr = chain
+    while isinstance(here, (ast.Attribute, ast.Subscript)):
+        steps.append(_step(here))
+        here = here.value
+    if not isinstance(here, ast.Name):
+        return None
+    return here.id, tuple(reversed(steps))
 
 
 def _chain(value: ast.expr) -> Optional[tuple[str, tuple[str, ...]]]:
@@ -422,6 +463,8 @@ class _Reading:
             return _ESCAPED
         if placed.thread or placed.forwarded:
             return _ESCAPED
+        if _on_driver(placed):
+            return []
         targets = list(placed.targets)
         if not targets or placed.unplaced == UNPLACED_OPEN:
             if isinstance(called, ast.Attribute) and (
@@ -436,8 +479,16 @@ class _Reading:
                 )
                 if not named:
                     # Where else it lands is a library's or a builtin's method: it sets no attribute of the
-                    # corpus's, and may keep one it is handed.
-                    if handed:
+                    # corpus's, and may keep one it is handed, as callfacts.meaning says (any, where it is silent).
+                    if (
+                        handed
+                        and _puts_it(
+                            callfacts.meaning(self.calls, file, func, call, placed),
+                            call,
+                            lambda one: bool(held_by(one)),
+                        )
+                        is not False
+                    ):
                         return _ESCAPED
                     if not targets:
                         return []
@@ -688,6 +739,8 @@ class _Reading:
             placed = self.calls.callees(file, func, call, bound)
         except Exception:  # noqa: BLE001 -- a placing that fails says nothing
             return {}, Change(file, line, EVERY, UNREAD, "not placed"), []
+        if _on_driver(placed):
+            return {}, None, []
         runs = list(placed.targets)
         if placed.targets and placed.unplaced != UNPLACED_OPEN:
             return {}, None, runs
@@ -1062,7 +1115,10 @@ class _Reading:
         self, file: str, func: ast.AST, call: ast.Call, holds, bound: tuple
     ) -> list[ObjectChange]:
         """What *call* may do to the object: a builtin container's method on it, what a definition it is handed to
-        or called on does with it, or a change of any key where it is handed where it cannot be followed."""
+        or called on does with it, or a change of any key where it is handed where it cannot be followed.  A part of
+        it put inside what an argument makes -- ``updateJobs([self.job])`` -- reaches a definition of the corpus in
+        an element this reading does not follow, and may change inside.  A part declared a value no change in place
+        can touch changes nothing inside (:meth:`_unchanging`)."""
         called = call.func
         line, here = call.lineno, f"{file}:{call.lineno}"
         values = [*call.args, *(keyword.value for keyword in call.keywords)]
@@ -1075,11 +1131,13 @@ class _Reading:
             if _is_object(one.value if isinstance(one, ast.Starred) else one, holds)
         ]
         parts = [one for one in values if _part_of(one, holds)]
+        parts_inside = _parts_inside(values, holds)
         if not (
             on_object
             or within
             or handed
             or parts
+            or parts_inside
             or any(_inside(one, holds) for one in values)
         ):
             return []
@@ -1118,6 +1176,8 @@ class _Reading:
             return unread("not placed")
         if placed.thread or placed.forwarded:
             return unread(placed.unplaced or "run apart")
+        if _on_driver(placed):
+            return self._driver_changes(file, func, call, handed, parts, holds)
         targets = list(placed.targets)
         found: list[ObjectChange] = []
         if not targets or placed.unplaced == UNPLACED_OPEN:
@@ -1125,7 +1185,7 @@ class _Reading:
                 placed.unplaced in _BY_NAME or placed.unplaced == UNPLACED_OPEN
             ):
                 if called.attr in _DRIVER and not targets:
-                    return []
+                    return self._driver_changes(file, func, call, handed, parts, holds)
                 # A builtin container's method by its name (callfacts.ASSUMPTIONS ``builtin_by_name``).
                 named = (
                     []
@@ -1138,17 +1198,29 @@ class _Reading:
                 )
                 if not named:
                     found += self._library_changes(
-                        file, func, call, on_object, within, handed, holds
+                        file, func, call, placed, on_object, within, handed, holds
                     )
                     if not targets:
                         return found
                 targets += named
             elif placed.unplaced in _OUTSIDE:
                 return self._library_changes(
-                    file, func, call, on_object, within, handed, holds
+                    file, func, call, placed, on_object, within, handed, holds
                 )
             else:
                 return unread(placed.unplaced or "not placed")
+        found += [
+            ObjectChange(
+                file,
+                line,
+                CHANGE_INNER,
+                _first_step(one, holds),
+                f"handed inside to {ast.unparse(called)}",
+                func=func,
+            )
+            for one in parts_inside
+            if not self._unchanging(file, func, one)
+        ]
         for target in targets:
             if not isinstance(target.func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 found += unread(f"run as {type(target.func).__name__}")
@@ -1185,7 +1257,9 @@ class _Reading:
                     for change in self.handed_changes(target, frozenset(whole))
                 ]
             for name, one in pieces:
-                if self.handed_changes(target, frozenset({name})):
+                if not self._unchanging(file, func, one) and self.handed_changes(
+                    target, frozenset({name})
+                ):
                     found.append(
                         ObjectChange(
                             file,
@@ -1197,6 +1271,52 @@ class _Reading:
                         )
                     )
         return _once(found)
+
+    def _unchanging(self, file: str, func: ast.AST, part: ast.AST) -> bool:
+        """Whether *part* is declared a value no change in place can touch -- ``jediTaskID: int | None``
+        (:func:`callfacts.immutable_annotation`) --, on the premise that a declaration holds: nothing a call does
+        changes inside it."""
+        if not isinstance(part, ast.expr):
+            return False
+        declared = self.types._annotation_of(file, func, part)
+        return declared is not None and callfacts.immutable_annotation(declared[1])
+
+    def _driver_changes(
+        self, file: str, func: ast.AST, call: ast.Call, handed: list, parts: list, holds
+    ) -> list[ObjectChange]:
+        """The database's driver running a statement on the map it is handed: a store of each key a ``RETURNING ...
+        INTO`` names (:func:`sql.written_back`) -- inside each map of the list ``executemany`` is handed, inside the
+        part of the object handed --, a change of any key where a statement the call runs is not read, none where
+        no statement returns into a bind."""
+        if not (handed or parts):
+            return []
+        keys: Optional[tuple[str, ...]] = None
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            with sql.across_calls(self.calls):
+                keys = sql.written_back(func, call)
+        if keys == ():
+            return []
+        line, what = call.lineno, ast.unparse(call.func)
+        many = getattr(call.func, "attr", "") == "executemany"
+        found: list[ObjectChange] = []
+        if handed and keys is None:
+            found.append(
+                ObjectChange(file, line, CHANGE_UNREAD, EVERY, what, func=func)
+            )
+        elif handed and many:
+            found.append(ObjectChange(file, line, CHANGE_INNER, EVERY, what, func=func))
+        elif handed:
+            found += [
+                ObjectChange(file, line, CHANGE_STORE, repr(key), what, func=func)
+                for key in keys or ()
+            ]
+        found += [
+            ObjectChange(
+                file, line, CHANGE_INNER, _first_step(one, holds), what, func=func
+            )
+            for one in parts
+        ]
+        return found
 
     def _named_change(
         self,
@@ -1300,14 +1420,16 @@ class _Reading:
         file: str,
         func: ast.AST,
         call: ast.Call,
+        placed: "Placed",
         on_object: bool,
         within: bool,
         handed: list,
         holds,
     ) -> list[ObjectChange]:
         """A function or method outside the corpus: a builtin container's method changing the object it is called
-        on (or a part of it) says so; one handed the object changes no item of it, but a library object's method
-        keeps it (a logger's keeps nothing)."""
+        on (or a part of it) says so; one handed the object changes no item of it, but may keep it, as
+        :func:`callfacts.meaning` says (:func:`_puts_it`) -- where that says nothing, a method keeps it, save a
+        logger's and a module's function."""
         called = call.func
         found: list[ObjectChange] = []
         if isinstance(called, ast.Attribute) and (on_object or within):
@@ -1317,20 +1439,22 @@ class _Reading:
                 call,
                 None if on_object else _first_step(called.value, holds),
             )
-        if (
-            handed
-            and isinstance(called, ast.Attribute)
-            and not on_object
-            and called.attr not in callfacts.LOG_METHODS
-            and not (
+        if not (handed and isinstance(called, ast.Attribute) and not on_object):
+            return found
+        kept = _puts_it(
+            callfacts.meaning(self.calls, file, func, call, placed),
+            call,
+            lambda one: _is_object(one, holds),
+        )
+        if kept is None:
+            kept = called.attr not in callfacts.LOG_METHODS and not (
                 isinstance(called.value, ast.Name)
                 and called.value.id in self.types.imports(file)
             )
-            and not (
-                called.attr in _PUTTING
-                and self._holds_only(
-                    file, func, list(own_nodes(func)), _root_name(called.value)
-                )
+        if kept and not (
+            called.attr in _PUTTING
+            and self._holds_only(
+                file, func, list(own_nodes(func)), _root_name(called.value)
             )
         ):
             found.append(
@@ -1394,6 +1518,26 @@ class _Reading:
                     }:
                         self._attributes.setdefault(name, []).append(target)
         return self._attributes
+
+
+def _on_driver(placed: "Placed") -> bool:
+    """Whether every definition the call is placed at is a method of the driver's wrappers
+    (:data:`callfacts.DRIVER_CLASSES`): a leaf, read at the call as the driver's, not through its body."""
+    return bool(placed.targets) and all(
+        target.cls is not None and target.cls.name in callfacts.DRIVER_CLASSES
+        for target in placed.targets
+    )
+
+
+def _puts_it(meant: callfacts.Meaning, call: ast.Call, holds) -> Optional[bool]:
+    """Whether the method *meant* reads puts into its object one of what *call* hands it that *holds* says may be
+    the object (:func:`callfacts.put_arguments`): a library object's puts all, a logger's, another system's
+    client's and a text's none, a builtin container's what its type says; ``None`` where *meant* says nothing."""
+    if meant.method is None:
+        return None
+    return any(
+        holds(value) for value, *_rest in callfacts.put_arguments(meant.method, call)
+    )
 
 
 def _root_name(node: ast.AST) -> Optional[str]:
@@ -1530,6 +1674,16 @@ def _inside(value: ast.AST, holds) -> bool:
         holds(one) and isinstance(getattr(one, "parent", None), _HOLDERS)
         for one in ast.walk(value)
     )
+
+
+def _parts_inside(values: list[ast.expr], holds) -> list[ast.AST]:
+    """The parts of the object put inside what *values* make: ``self.job`` in ``[self.job]``."""
+    return [
+        one
+        for value in values
+        for one in ast.walk(value)
+        if isinstance(getattr(one, "parent", None), _HOLDERS) and _part_of(one, holds)
+    ]
 
 
 def _builtin_changes(
