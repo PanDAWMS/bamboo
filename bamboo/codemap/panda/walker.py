@@ -8,7 +8,9 @@ and how it left.
 * **Branches.**  An ``if`` goes both ways, or the ways the reader's *decide* leaves; a way taken keeps what its
   test settles of the atoms the walk reads (:meth:`Walker.settle`).
 * **Leaving.**  A ``return``, ``raise``, ``break`` or ``continue`` ends the path (``left``), and a statement that
-  calls anything but a logger forks a copy that leaves there: the call raised (:meth:`Walker.raises`).
+  can raise, as the map reads exceptions (:func:`reaching.may_raise`: any expression but a literal, a name or a
+  display of them, an unpacking, an ``assert``, ``del`` or ``import`` -- a logger's call too), forks a copy that
+  leaves there, ``left`` saying ``call at <line>`` (:meth:`Walker.raises`).
 * **Passed whole.**  A loop, a ``try`` or a ``match`` is one step: what it binds becomes unknown, the rows in it
   are passed in their order, and a copy leaves where it can divert.  A ``with`` is entered.
 * **Calls.**  A call changes what it is handed, as the map reads the call (:func:`changes.call_changes`): a value
@@ -47,7 +49,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 from bamboo.codemap import callfacts
 from bamboo.codemap.callfacts import LOG_LEVELS
 from bamboo.codemap.models import CHANGE_INNER, CHANGE_UNREAD
-from bamboo.codemap.panda import changes, evaluate, pathcond
+from bamboo.codemap.panda import changes, evaluate, pathcond, reaching
 from bamboo.codemap.panda.recognizers.selection import log_level
 
 if TYPE_CHECKING:
@@ -164,10 +166,11 @@ def is_log_call(node: ast.AST) -> bool:
 
 
 def may_divert(stmt: ast.stmt) -> bool:
-    """Whether control can leave *stmt* other than by falling through it."""
+    """Whether control can leave *stmt* other than by falling through it: a jump in it, or a statement in it that
+    can raise (:func:`can_raise`)."""
     if isinstance(stmt, JUMPS) or contains(stmt, JUMPS):
         return True
-    return any(isinstance(n, ast.Call) and not is_log_call(n) for n in own_nodes(stmt))
+    return any(isinstance(n, ast.stmt) and can_raise(n) for n in own_nodes(stmt))
 
 
 # ---------------------------------------------------------------- reading expressions
@@ -298,8 +301,9 @@ def text_of(node: ast.AST) -> str:
 
 
 def can_raise(node: ast.AST) -> bool:
-    """Whether *node* calls anything but a logger."""
-    return any(isinstance(n, ast.Call) and not is_log_call(n) for n in own_nodes(node))
+    """Whether *node* -- a statement, or an expression the walk reads alone (a test, a context expression) -- can
+    raise before it is done, as the map reads exceptions (:func:`reaching.may_raise`)."""
+    return reaching.may_raise(node)
 
 
 def mutating_roots(
@@ -874,7 +878,7 @@ class Walker:
         """Put in *env* what the reader knows on *p* beyond what the path bound."""
 
     def raises(self, node: ast.AST) -> bool:
-        """Whether a path may leave at *node* by an exception."""
+        """Whether a path may leave at *node* by an exception (:func:`can_raise`)."""
         return can_raise(node)
 
     def roots(self, node: ast.AST) -> set[str]:

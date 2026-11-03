@@ -347,6 +347,24 @@ def _raises(statement: ast.AST) -> bool:
     return held
 
 
+def may_raise(node: ast.AST) -> bool:
+    """Whether *node* can raise before it is done, as this flow reads exceptions: a statement by its own
+    expressions, not its blocks -- a ``raise``, ``assert``, ``del`` or ``import``, an unpacking, any expression
+    but a literal, a name or a display of them --, an expression by any part of it.  The walker forks the
+    ways out of its paths by it."""
+    if isinstance(node, ast.stmt):
+        return _raises(node)
+    stack = [node]
+    while stack:
+        here = stack.pop()
+        if isinstance(here, ast.Lambda):
+            continue
+        if not isinstance(here, _SAFE):
+            return True
+        stack.extend(ast.iter_child_nodes(here))
+    return False
+
+
 def _runs_once(node: ast.For | ast.AsyncFor) -> bool:
     """Whether the loop runs at least once: over a list or tuple literal with an element and no ``*``."""
     items = node.iter

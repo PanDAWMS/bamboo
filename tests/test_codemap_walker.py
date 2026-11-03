@@ -193,9 +193,11 @@ def test_an_if_goes_both_ways_and_a_jump_leaves(module, calls):
     w = _walker(module, calls, "checked", "A1", target="job.status", require_all=False)
     paths = w.run(walker.region_of(_at(module, "S1")))
     left = sorted(p.left for p in paths)
-    assert left == ["", "return at 4"]
+    # a store and a logger's call can raise too (reaching.may_raise): the copies leaving at 5 and 6 are alike to
+    # the one leaving at 3, and merge into it
+    assert left == ["", "call at 3", "return at 4"]
     through = next(p for p in paths if not p.left)
-    returned = next(p for p in paths if p.left)
+    returned = next(p for p in paths if p.left == "return at 4")
     assert (returned.arm, returned.state["job.status"]) == (True, "a")
     assert (through.arm, through.state["job.status"]) == (False, "b")
 
@@ -211,8 +213,16 @@ def test_a_call_forks_a_copy_that_leaves_and_forgets_what_it_is_handed(module, c
         require_all=False,
     )
     paths = w.run(walker.region_of(_at(module, "S2")))
-    # the way past the if, and the arm's; a logger's call forks nothing, len() changes nothing but may raise
-    assert sorted(p.left for p in paths) == ["", "", "call at 13", "call at 14"]
+    # the way past the if, and the arm's; each statement that can raise forks a copy, the one at 13 alike to the
+    # one at 12 (len() changes nothing)
+    assert sorted(p.left for p in paths) == [
+        "",
+        "",
+        "call at 11",
+        "call at 12",
+        "call at 14",
+        "call at 15",
+    ]
     on = next(p for p in paths if p.arm and not p.left)
     assert on.target_called
     assert (
@@ -248,8 +258,8 @@ def test_the_rows_are_passed_in_order_and_each_one_asked(module, calls):
         (_at(module, "P2").lineno, "a"),
         (_at(module, "P3").lineno, evaluate.UNKNOWN),
     )
-    # the way not into the if and the copy left at the call miss the rows
-    assert w.dropped["E2 missed"] == 2
+    # the way not into the if and the copies left at 11, 12, 14 and 15 miss a row
+    assert w.dropped["E2 missed"] == 5
     assert asked == [_at(module, "P2").lineno, _at(module, "P3").lineno]
 
 
@@ -271,9 +281,10 @@ def test_a_loop_is_passed_whole(module, calls):
         require_all=False,
     )
     paths = w.run(walker.region_of(_at(module, "S3")))
-    # isOK holds True at S3 (held_at), so the return is not taken; a loop that may divert leaves a copy, named
-    # a call's where no return or raise is in it
-    assert sorted(p.left for p in paths) == ["", "call in for at 22"]
+    # isOK holds True at S3 (held_at), so the return is not taken; S3's ``not`` can raise (reaching reads every
+    # operator so), and the copy the loop leaves, able to divert, is alike to that one; the logger's call at 26
+    # forks one
+    assert sorted(p.left for p in paths) == ["", "call at 20", "call at 26"]
     on = next(p for p in paths if not p.left)
     assert on.state["isOK"] is True
     assert on.state["job.status"] is evaluate.UNKNOWN
@@ -291,9 +302,11 @@ def test_a_branch_taken_settles_its_atoms(module, calls):
         require_all=False,
     )
     paths = w.run(walker.region_of(_at(module, "S4")))
-    # the second if is decided by what taking the first one settled: two ways, not four
-    assert len(paths) == 2
-    assert sorted((p.facts.get("toSkip"), p.arm) for p in paths) == [
+    # the second if is decided by what taking the first one settled: two ways, not four (beside the copies left
+    # where a statement can raise)
+    through = [p for p in paths if not p.left]
+    assert len(through) == 2
+    assert sorted((p.facts.get("toSkip"), p.arm) for p in through) == [
         (False, False),
         (True, True),
     ]
@@ -488,4 +501,28 @@ def test_a_logger_call_is_told_by_the_map_levels():
     pathcond.attach_parents(tree)
     calls = [s.value for s in tree.body]
     assert [walker.is_log_call(c) for c in calls] == [True, False, False]
-    assert walker.can_raise(tree.body[1]) and not walker.can_raise(tree.body[0])
+
+
+def test_a_statement_can_raise_as_the_map_reads_exceptions():
+    """reaching.may_raise: any expression but a literal, a name or a display of them -- an attribute, an f-string, a
+    logger's call --, an unpacking, an ``assert``; a test or a context expression by any part of it."""
+    tree = ast.parse(
+        "x = 1\ny = [x, 'a']\nz = a.b\nw = f'{x}'\nlog.debug('x')\na, b = c\nassert x\n"
+        "if x:\n    pass\nif x.y:\n    pass\n"
+    )
+    pathcond.attach_parents(tree)
+    assert [walker.can_raise(s) for s in tree.body[:7]] == [
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+    ]
+    assert not walker.can_raise(tree.body[7].test) and walker.can_raise(
+        tree.body[8].test
+    )
+    loop = ast.parse("for i in xs:\n    y = i\n").body[0]
+    pathcond.attach_parents(loop)
+    assert not walker.may_divert(loop)
