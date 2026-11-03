@@ -1314,6 +1314,14 @@ value (the harness's reading of adder_gen at the pin, 2026-11-03).
     function before it.
   - The frames between the anchor and a function reached through others are not read (finalize_job_status, between
     process_job_report and handle_failed_job).
+  - *What keeps it on the way* (CK, 2026-11-03).  An assignment of the value's own constant to the chain keeps it.  So
+    does a call P reads as able to change it, where two things hold.  First, the call cannot bind what holds the chain
+    anew: for a chain of self, `self_effects` binds none of its prefixes; else the chain is the field of a name the
+    call is handed.  Second, the map's reach from that call alone (`Rerun._keeps`, a copy of the row as
+    `_called_at` asks) reaches no arm assigning the field another value in memory (`reach.moving_off_in_memory`,
+    births left out), and leaves no hole; holes closed by their name are counted and said.  This rests on the reach's
+    premises, and on the junctions as every assignment of the field by its name.  A write by a name made at run time
+    is none: `JobSpec.pack`'s `object.__setattr__`; 421's closure holds one, peekJob's, on a JobSpec it makes.
 - *The value a write assigns.*  Its constant, or a printed hole of the expression it assigns, unbound between.
 - *The answer.*
   - A write with the observed value before it is a stay, and one assigning another value is no write of it: both are
@@ -1327,18 +1335,23 @@ In the adder's pass, row 444 prints `job.jobStatus=failed jobStatus=failed` befo
 walks.  So handle_failed_job:374 is a stay: nothing on the way into it binds `self.job.jobStatus`, and its one call
 is handed `self.taskBuffer`, `self.job.PandaID` and `self.job.attemptNr`.  The change itself is not read.  Between
 416 and 444 the pass calls parse_job_output_report (421) and execute_plugin (425).  P's reading of a call reads both
-as changing `self.job.jobStatus`: 820, 885, 919 and 959 bind it, and 425 hands `self.job` to the plugin.  The map's
-reach from each, asked for an arm that moves jobStatus off 'failed' (`reach.moving_off`), answers "not known": a
-`.get` on an element whose class is not declared (extract_executor_metadata:710, update_outputs:393).  The walks
-stop at H2, naming 416, 919, 441 and archiveJob:1813, or 416, 441 and 1813.  1813, archiveJob's UPDATE after the
-archive, assigns a statement's bind, so no value before it is read.  In the 65's A-rec, K-rec and N-rec, 444 prints
-`jobStatus=finished`: 416 assigns 'finished' and is no write of 'failed', and 441 is the last change, as before.
+as changing `self.job.jobStatus`: 820, 885, 919 and 959 bind it, and 425 hands `self.job` to the plugin.  Since the
+map's RB (codemap-xx e0f6fce placed the `.get` calls at extract_executor_metadata:710 and update_outputs:393), the
+reach from each reaches no arm assigning jobStatus another value than 'failed' in memory: 421 closes one call by its
+name (DBProxyPool.getProxy:79 `proxy.wakeUp`), 425 eight (update_outputs' appends on dict elements).  So in
+MF-7397695467 and MF-7398402231, 919's 'failed' carries to 441 (959 sets it 'failed' again; the calls at 895, 910
+and 425 keep it), 441 is a stay, and the walks name 1813, 919 and 416.  In MF-7396944927 and MF-7397944082, 416 and
+441 are both kept and no value reaches 441 (no row before it prints the status), so 1813, 441 and 416 stay named.
+1813, archiveJob's UPDATE after the archive, assigns a statement's bind, so no value before it is read.  In the 65's
+A-rec, K-rec and N-rec, 444 prints `jobStatus=finished`: 416 assigns 'finished' and is no write of 'failed', and 441
+is the last change, as before (416's 'finished' does not carry: 421 reaches parse_job_output_report's 'failed' arms).
 
-The Watcher's pass: run:117 sets `job.jobStatus = "failed"`, and archiveJob:1813 runs inside the call at 135.  The
-value at that call is not read past `EventServiceUtils.isEventServiceJob(job)` and `getEventStat(job.jediTaskID,
-...)` between them, which P's reading counts as calls handed the job.  So 1813 may be the last change, and
-MF-7397938541 and MJ-sent-late (m-cut, m-cut2) stop at H2 with "2 may have changed it last in the pass".  updateJobs:654
-assigns the job handed on in another class: it is not read as the same object, and R leaves it as H2 did.
+The Watcher's pass: run:117 sets `job.jobStatus = "failed"`, and archiveJob:1813 runs inside the call at 135.  P's
+reading counts `EventServiceUtils.isEventServiceJob(job)` (129) and `getEventStat(job.jediTaskID, ...)` (130) between
+them as calls handed the job, and the reach from each assigns jobStatus nothing in memory (130 closes one call by its
+name).  So 1813 is a stay and 117 the last change: MF-7397938541 stops at H3 on 117's guard, MJ-sent-late at L2
+(m-cut) and S2 (m-cut2), as before R.  updateJobs:654 assigns the job handed on in another class: it is not read as
+the same object, and R leaves it as H2 did.
 
 Measured (rr1 against r1, map x13xixB14m, out/s/s-predictions.txt), every prediction held:
 - outcomes: MF-7396944927 and MF-7397944082 H3 -> H2; MF-7397938541 H3 -> H2; MJ-sent-late L2 (m-cut) and S2 (m-cut2)
@@ -1347,15 +1360,23 @@ Measured (rr1 against r1, map x13xixB14m, out/s/s-predictions.txt), every predic
   in the pass");
 - attr and MT: the same.
 
+With CK (ck1 against rb2, map x13xxB3m read with codemap-xx 5ccd571, out/ck/ck1-predictions.txt), every prediction
+held: MF-7397938541 H2 -> H3, MJ-sent-late H2 -> L2 (m-cut) and H2 -> S2 (m-cut2); MF-7397695467 and MF-7398402231
+"4 may" -> "3 may" (441 a stay); everything else the same, the 65, attr and MT included.
+
 *Shows:* "rule R: a stay, ... already held ... before it (...)", "rule R: it assigns ... no write of ...", and the
-choice's "the last change in the pass" or "N may have changed it last in the pass: ...".
+choice's "the last change in the pass" or "N may have changed it last in the pass: ...".  A way kept by CK adds "but to
+'<value>' again at <file:line>" and "the calls at <file:line>, ... reach no assignment of <field> but '<value>' (the
+map's reach, N call(s) closed by their name)".
 *Revisit:*
-- with a call that keeps the value where the map's reach from it reaches no arm moving it off the observed one: the
-  adder's 421 and 425 once the map places the `.get` calls (its map_todo RB), and the Watcher's isEventServiceJob
-  (the reach answers no write) and getEventStat (not asked);
 - with the status at the pass's start (the statuslog's row before the question's, under the premise that no status
-  change went unlogged): 416's guard is then read;
-- when a write through a statement's binds (1813) is read for the row's value before it.
+  change went unlogged): 416's guard is then read, and the adder's MF-7396944927 and MF-7397944082, where no value
+  reaches 441, may move;
+- when a write through a statement's binds (1813) is read for the row's value before it;
+- when the frames between a join's call and the write inside it are read: in the Watcher's pass, updateJobs (between
+  run's call at 135 and archiveJob) assigns jobStatus in memory at 649, 652 and 654 for a jumbo job, and the stay of
+  1813 rests on that frame unread;
+- when the map gives a write by a name made at run time (`JobSpec.pack`) as an arm, or says which object it writes.
 
 ## The walks (`asked.py`)
 

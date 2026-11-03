@@ -23,6 +23,12 @@ its own value.
   change it (P's reading of a call, ``printed.self_effects``).  The way is the rest of the source's function, the
   anchor's statements between the two places, and the write's own function before it.  The frames between the anchor
   and a function it reaches through others are not read.  Before the pass's write, the value at the call it ran in.
+* **What keeps the value on the way.**  An assignment of the value's own constant to the chain, and a call P reads as
+  able to change it that cannot bind what holds it anew -- for a chain of ``self``, ``self_effects`` binds none of
+  its prefixes; else the chain is the field of the name the call is handed -- where the map's reach from that call
+  alone goes on to no arm assigning the field another value in memory, with no hole left (*keeps*, rerun's).  It
+  rests on the reach's premises and on the junctions as every assignment of the field by its name: a write of an
+  attribute by a name made at run time (``JobSpec.pack``) is none.
 * **The value an assignment assigns.**  Its constant, or a printed hole of the expression it assigns at a row on
   either side of it, nothing between binding that expression.
 * **The answer** (iv).  A write with the observed value before it is a stay, and an assignment of another value is
@@ -30,9 +36,7 @@ its own value.
   that ran with another value before it: that one changed it, and the ones before it did not change it last.  With
   one left, it is chosen if it ran; with more, they are named and none is chosen.
 
-What it does not read: the status at the pass's start (the statuslog's row before, design (iii) of pv-design.md), and a
-call that keeps the observed value because every write it reaches assigns that value (the map's reach leaves the
-adder's calls at 421 and 425 open).
+What it does not read: the status at the pass's start (the statuslog's row before, design (iii) of pv-design.md).
 """
 from __future__ import annotations
 
@@ -120,22 +124,75 @@ def _parts(s: ast.stmt) -> list[ast.AST]:
     return [s]
 
 
-def breaks(fn: R.Function, s: ast.stmt, chain: str) -> bool:
+#: rerun's reading of a statement's calls by the map's reach: ``(fn, node, value)`` -> how many calls it closed by their
+#: name, where the calls in *node* assign the subject's field no other value than *value*, else None
+Keeps = Callable[[R.Function, ast.AST, str], "int | None"]
+
+
+@dataclass
+class Way:
+    """What kept a value on its way: assignments of its own constant, and calls the map's reach reads as keeping it."""
+
+    binds: list[str] = field(default_factory=list)
+    calls: list[str] = field(default_factory=list)
+    closed: int = 0
+
+    def said(self, attr: str, value: str) -> str:
+        out = "nothing on the way binding it"
+        if self.binds:
+            out += f" but to {value!r} again at {', '.join(dict.fromkeys(self.binds))}"
+        if self.calls:
+            closed = f", {self.closed} call(s) closed by their name" if self.closed else ""
+            out += (f"; the calls at {', '.join(dict.fromkeys(self.calls))} reach no assignment of {attr} but "
+                    f"{value!r} (the map's reach{closed})")
+        return out
+
+
+def _place(fn: R.Function, node: ast.AST) -> str:
+    return f"{Path(fn.rel).name}:{getattr(node, 'lineno', '?')}"
+
+
+def _kept(fn: R.Function, part: ast.AST, value: str | None, keeps: Keeps | None, way: Way | None) -> bool:
+    if value is None or keeps is None or (closed := keeps(fn, part, value)) is None:
+        return False
+    if way is not None:
+        way.calls.append(_place(fn, part))
+        way.closed += closed
+    return True
+
+
+def breaks(fn: R.Function, s: ast.stmt, chain: str, value: str | None = None, keeps: Keeps | None = None,
+           way: Way | None = None) -> bool:
     """Whether statement *s* of *fn* can change what *chain* holds: it binds the chain, or a call in it can (P's reading
     of a call: what a method of self binds of it and the objects below it the calls are handed, else every call handed
-    the chain's root)."""
+    the chain's root).  Given the *value* it holds, an assignment of that constant keeps it, and so does a call that
+    cannot bind what holds the chain anew where *keeps* says the map's reach from it assigns the field no other value;
+    each is noted in *way*."""
     nodes = [n for part in _parts(s) for n in R.own_nodes(part)]
-    if any(PR.affects(t, {chain}) for n in [s, *nodes] for t, _ in PR.binds(n)):
-        return True
+    for n in [s, *nodes]:
+        for target, given in PR.binds(n):
+            if not PR.affects(target, {chain}):
+                continue
+            if value is not None and target == chain and isinstance(given, ast.Constant) and given.value == value:
+                if way is not None:
+                    way.binds.append(_place(fn, n))
+                continue
+            return True
     for part in _parts(s):
         if not any(isinstance(n, ast.Call) and not R.is_log_call(n) for n in R.own_nodes(part)):
             continue
         if PR.root(chain) == "self" and (effects := PR.self_effects(fn.node, part)) is not None:
             bound, handed = effects
-            if any(PR.affects(b, {chain}) for b in bound) or any(chain.startswith((h + ".", h + "[")) for h in handed):
+            if any(chain.startswith((b + ".", b + "[")) for b in bound):
+                # what holds the chain bound anew: the reach of a field does not follow it
+                return True
+            if (any(PR.affects(b, {chain}) for b in bound) or any(chain.startswith((h + ".", h + "[")) for h in handed)) \
+                    and not _kept(fn, part, value, keeps, way):
                 return True
         elif PR.root(chain) in PR.mutating_roots(part):
-            return True
+            # a call cannot bind a name it is handed anew, only change its object: the field of that name alone
+            if PR.root(chain) == "self" or chain.count(".") != 1 or not _kept(fn, part, value, keeps, way):
+                return True
     return False
 
 
@@ -158,24 +215,28 @@ def _class(fn: R.Function) -> ast.ClassDef | None:
     return next((a for a in pathcond.ancestors(fn.node) if isinstance(a, ast.ClassDef)), None)
 
 
-def holds(q: Point, p: Point, chain: str, anchor: R.Function) -> bool:
-    """Whether what *chain* held at *q* still holds at *p*, a later place of the pass: nothing on the way can change it.
-    Across functions only a chain of ``self`` in methods of the anchor's class is one object in both, and the way is
-    the rest of *q*'s function, the anchor's statements between the two, and *p*'s before it."""
+def holds(q: Point, p: Point, chain: str, anchor: R.Function, value: str | None = None,
+          keeps: Keeps | None = None) -> Way | None:
+    """Whether what *chain* held at *q*, *value* where it is known, still holds at *p*, a later place of the pass:
+    nothing on the way can change it (:func:`breaks`), and what kept it.  Across functions only a chain of ``self`` in
+    methods of the anchor's class is one object in both, and the way is the rest of *q*'s function, the anchor's
+    statements between the two, and *p*'s before it."""
+    way = Way()
     if _same_frame(q, p, anchor):
-        return not any(breaks(q.fn, s, chain) for s in _between(q.fn.node, q.stmt, p.stmt, q.printed))
+        broken = any(breaks(q.fn, s, chain, value, keeps, way) for s in _between(q.fn.node, q.stmt, p.stmt, q.printed))
+        return None if broken else way
     cls = _class(anchor)
     if PR.root(chain) != "self" or cls is None or _class(q.fn) is not cls or _class(p.fn) is not cls:
-        return False
+        return None
     if len(q.at) != 1 or len(p.at) != 1 or q.at[0] is p.at[0]:
-        return False
+        return None
     ways: list[tuple[R.Function, tuple[ast.stmt, ...]]] = []
     if q.fn.owner != anchor.owner:
         ways.append((q.fn, _between(q.fn.node, q.stmt, None, q.printed)))
     ways.append((anchor, _between(anchor.node, q.at[0], p.at[0], q.printed and q.fn.owner == anchor.owner)))
     if p.fn.owner != anchor.owner:
         ways.append((p.fn, _between(p.fn.node, None, p.stmt, False)))
-    return not any(breaks(fn, s, chain) for fn, way in ways for s in way)
+    return None if any(breaks(fn, s, chain, value, keeps, way) for fn, stmts in ways for s in stmts) else way
 
 
 def assignment(stmt: ast.stmt | None, subject: str) -> tuple[str, ast.expr] | None:
@@ -200,9 +261,11 @@ def last_change(
     subject: str,
     observed: str,
     called_at: Callable[[R.Function, Any], list[str]] | None,
+    keeps: Keeps | None = None,
 ) -> Change | None:
     """Rule R on a judgement's verdicts: None where it does not apply -- no anchor whose pass holds two writes of one
-    chain, or two of them out of order.  *joined*: ``id(run)`` -> the calls a run inside the question's ran in."""
+    chain, or two of them out of order.  *joined*: ``id(run)`` -> the calls a run inside the question's ran in.
+    *keeps* reads a call on a way of the subject's field by the map's reach (:func:`breaks`)."""
     in_pass = [
         v for v in verdicts
         if v.kind in ("positive", "kept") and (r := runs_of.get(v.candidate.owner)) is not None
@@ -280,18 +343,22 @@ def last_change(
             for expr, value in row.capture(record).items():
                 printed.append((Point(sn.fn, row.stmt, place, True), expr, value.strip(), f"row {sn.fn.name}:{row.line} at {record.span}"))
 
-    def read(p: Point, wanted: str, later: bool) -> tuple[str, str] | None:
+    def keeping(c: str) -> Keeps | None:
+        """*keeps* for a chain of the subject's field: the reach answers for that field alone."""
+        return keeps if c.rsplit(".", 1)[-1] == subject else None
+
+    def read(p: Point, wanted: str, later: bool) -> tuple[str, str, Way] | None:
         """*wanted*'s value at *p* from the rows before it (or, *later*, after it too), every one that holds agreeing;
         said by the first of them in the pass's rows."""
-        found: list[tuple[str, str]] = []
+        found: list[tuple[str, str, Way]] = []
         for q, expr, value, where in printed:
             if expr != wanted:
                 continue
-            if precedes(q, p, anchor) and holds(q, p, wanted, anchor):
-                found.append((value, where))
-            elif later and precedes(p, q, anchor) and holds(p, q, wanted, anchor):
-                found.append((value, where))
-        return found[0] if len({value for value, _ in found}) == 1 else None
+            if precedes(q, p, anchor) and (way := holds(q, p, wanted, anchor, value, keeping(wanted))) is not None:
+                found.append((value, where, way))
+            elif later and precedes(p, q, anchor) and (way := holds(p, q, wanted, anchor, value, keeping(wanted))) is not None:
+                found.append((value, where, way))
+        return found[0] if len({value for value, _, _ in found}) == 1 else None
 
     assigns: dict[int, tuple[str, str] | None] = {}
     for v in order:
@@ -306,7 +373,7 @@ def last_change(
             assigns[id(v)] = None
 
     change = Change(order)
-    before: dict[int, tuple[str, str] | None] = {}
+    before: dict[int, tuple[str, str, Way] | None] = {}
     for n, v in enumerate(order):
         p = points[id(v)]
         if inside(v):
@@ -317,14 +384,14 @@ def last_change(
                 continue
             p = Point(anchor, p.at[0], p.at)
         # said by a printed row where one holds, else by the first assignment
-        held: list[tuple[str, str]] = []
+        held: list[tuple[str, str, Way]] = []
         if (shown := read(p, chain, False)) is not None:
             held.append(shown)
         for e in order[:n]:
             if e.kind == "positive" and not inside(e) and (given := assigns[id(e)]) is not None \
-                    and holds(points[id(e)], p, chain, anchor):
-                held.append((given[0], f"assigned by {_name(e)}"))
-        before[id(v)] = held[0] if len({value for value, _ in held}) == 1 else None
+                    and (way := holds(points[id(e)], p, chain, anchor, given[0], keeping(chain))) is not None:
+                held.append((given[0], f"assigned by {_name(e)}", way))
+        before[id(v)] = held[0] if len({value for value, _, _ in held}) == 1 else None
     for v in order:
         if (b := before[id(v)]) is not None and b[0] == observed:
             frames = "" if v.candidate.owner == anchor.owner else f"; the frames between {anchor.name} and {v.candidate.func} not read"
@@ -333,7 +400,7 @@ def last_change(
                 why = f"the pass writes {chain} as it is at the call at {calls}, {observed!r} there"
             else:
                 why = f"{chain} already held {observed!r} before it"
-            change.dropped.append((v, f"rule R: a stay, {why} ({b[1]}, nothing on the way binding it{frames})"))
+            change.dropped.append((v, f"rule R: a stay, {why} ({b[1]}, {b[2].said(subject, observed)}{frames})"))
         elif not inside(v) and (a := assigns[id(v)]) is not None and a[0] != observed:
             change.dropped.append((v, f"rule R: it assigns {a[0]!r} ({a[1]}), no write of {observed!r}"))
     dropped = {id(v) for v, _ in change.dropped}

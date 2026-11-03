@@ -580,11 +580,13 @@ def judge(
     complete: bool = True,
     called_at: Callable[[R.Function, Candidate], list[str]] | None = None,
     holds_write: bool = False,
+    keeps: CH.Keeps | None = None,
 ) -> Judgement:
     """*called_at* says where a function calls on, by the map, into a candidate's function: the ``file:line`` of every
     call from which it goes on there.  Given it, and no *question_run*, runs of the key in several logs are read as
     one where every run but one ran inside a call that one made (:func:`inside_call`, on the machine both name), and
-    that one is the question's run.
+    that one is the question's run.  *keeps* reads, by the map's reach, a call on the way of a value rule R carries
+    (``changed.breaks``).
 
     A candidate's must rows are read with where a traceback of its run shows its function left by an exception
     (:func:`rows.raised_in`)."""
@@ -824,7 +826,7 @@ def judge(
     change = None
     if subject and observed and question_run is not None:
         change = CH.last_change(verdicts, seens, runs_of, question_run, {k: site for k, (_, _, _, site) in joined.items()},
-                                subject, observed, called_at)
+                                subject, observed, called_at, keeps)
         for v, why in change.dropped if change is not None else []:
             v.kind = "excluded"
             v.reasons.append(why)

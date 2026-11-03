@@ -4752,6 +4752,138 @@ def test_of_one_pass_s_writes_the_last_that_changed_the_value_is_the_answer_and_
     assert got["c.py reported no reach"]["kinds"]["handle"] == "positive"
 
 
+def test_a_value_carried_past_a_call_the_maps_reach_reads_as_keeping_it_or_past_its_own_constant_stays(tmp_path):
+    files = {
+        # the job handed to a call between the row and finalize: kept where the reach says it assigns no other status
+        "g.py": _FINALIZING.replace("        self.finalize()\n", "        touch(self.job)\n        self.finalize()\n"),
+        # a method of self binding self.job anew: what the row printed is another object's, whatever the reach says
+        "h.py": _FINALIZING.replace("        self.finalize()\n", "        self.reload()\n        self.finalize()\n")
+        + "\n    def reload(self):\n        self.job = self.job.copy()\n",
+        # the status set failed once more on the way, and set to another value
+        "k.py": _FINALIZING.replace("        self.finalize()\n", '        self.job.jobStatus = "failed"\n        self.finalize()\n'),
+        "m.py": _FINALIZING.replace("        self.finalize()\n", '        self.job.jobStatus = "closed"\n        self.finalize()\n'),
+    }
+    at = {}
+    for name, text in files.items():
+        (_corpus(tmp_path) / "pandaserver" / name).write_text(text)
+        lines = text.splitlines()
+        at[name] = {k: lines.index(f"{' ' * n}{s}") + 1 for k, n, s in [
+            ("from_report", 12, "self.job.jobStatus = self.job_status"), ("plugin", 16, 'self.job.jobStatus = "failed"'),
+            ("parse", 12, 'self.job.jobStatus = "failed"'), ("handle", 8, 'self.job.jobStatus = "failed"'),
+            ("parse_call", 8, "parsed = self.parse()"), ("finalize_call", 8, "self.finalize()")]}
+        # handle_failed's is the last: k.py sets failed in process too
+        at[name]["handle"] = len(lines) - lines[::-1].index('        self.job.jobStatus = "failed"')
+        at[name]["way"] = at[name]["finalize_call"] - 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    text = ["start the report of the job", "no report of the job to parse",
+            "status after plugin call :job.jobStatus=failed jobStatus=failed", "handling the failed job",
+            "updating the job in the DB"]
+    (tmp_path / "reported.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, judge
+
+        R.ROWS_FROM = "walk"
+        got = {}
+        for file, kept in [("g.py", True), ("g.py", False), ("h.py", True), ("k.py", True), ("m.py", True)]:
+            at = AT[file]
+            run, = runs_for(read_log("reported.log"), "1")
+            rel = f"pandaserver/{file}"
+            lines = {"process": [at["from_report"], at["plugin"]], "parse": [at["parse"]], "handle_failed": [at["handle"]]}
+            cs = [Candidate(rel, func, ls, [run.log.name], run=run) for func, ls in lines.items()]
+            calls = {"parse": at["parse_call"], "handle_failed": at["finalize_call"]}
+            def called_at(fn, c, rel=rel, calls=calls):
+                return [f"{rel}:{calls[c.func]}"] if fn.name == "process" and calls.get(c.func) else []
+            # the map's reach as rerun reads it: the call on the way (touch, reload) assigns no other status, 2 closed
+            asked = []
+            def keeps(fn, node, value, kept=kept, way=at["way"]):
+                asked.append([fn.name, node.lineno, value])
+                return 2 if kept and node.lineno == way else None
+            j = judge(cs, {run.log.name: [run]}, question_run=run, subject="jobStatus", observed="failed",
+                      called_at=called_at, keeps=keeps)
+            got[f"{file}{'' if kept else ' open'}"] = {
+                "handle": next([v.kind, v.reasons[-1]] for v in j.verdicts if v.line == at["handle"]),
+                "how": j.how, "asked": sorted(set(map(tuple, asked)))}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("AT", repr(at))))
+    got = json.loads(out.splitlines()[-1])
+    g, h, k = at["g.py"], at["h.py"], at["k.py"]
+    # the reach reads the call handed the job as keeping 'failed': handle_failed's assignment is a stay again, said so
+    kind, why = got["g.py"]["handle"]
+    assert kind == "excluded" and why.startswith("rule R: a stay, self.job.jobStatus already held 'failed' before it (row process:")
+    assert f"nothing on the way binding it; the calls at g.py:{g['way']} reach no assignment of jobStatus but 'failed' " \
+           "(the map's reach, 2 call(s) closed by their name); the frames between process and handle_failed not read)" in why
+    assert ["process", g["way"], "failed"] in got["g.py"]["asked"]
+    # the reach cannot say: the call cuts the value, as before
+    assert got["g.py open"]["handle"][0] == "positive"
+    assert got["g.py open"]["how"].startswith(f"4 may have changed it last in the pass: g.py::handle_failed:{g['handle']}, ")
+    # self.job bound anew by a method of self: the reach of a field is not asked, the value cut
+    assert got["h.py"]["handle"][0] == "positive" and ["process", h["way"], "failed"] not in got["h.py"]["asked"]
+    # failed set once more on the way: kept, said where; closed set on the way: cut
+    kind, why = got["k.py"]["handle"]
+    assert kind == "excluded" and why.endswith(
+        f"nothing on the way binding it but to 'failed' again at k.py:{k['way']}; the frames between process and handle_failed not read)")
+    assert got["m.py"]["handle"][0] == "positive"
+
+
+def test_a_call_keeps_a_field_where_the_maps_reach_from_it_alone_assigns_it_no_other_value_in_memory(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap.models import Anchor, Branch, JunctionNode, ReachCall, ReachHole, ReachNode
+            from bamboo.querier import mapdump, rerun
+
+            def node(owner, start, end, **k):
+                return ReachNode(name=owner, map_id="m", derived_from="d", owner=owner, function=owner.rsplit(".", 1)[-1].split("::")[-1],
+                                 anchor=Anchor(package="p", file=owner.split("::")[0], line_start=start, line_end=end), **k)
+
+            def junction(owner, *outcomes, pre=()):
+                return JunctionNode(name=JunctionNode.make_name("m", "JobSpec.jobStatus", owner), map_id="m", derived_from="d",
+                                    subject="JobSpec.jobStatus", owner=owner,
+                                    branches=[Branch(outcome=o, line=2 + n, row_precondition=list(pre)) for n, o in enumerate(outcomes)],
+                                    anchor=Anchor(package="p", file=owner.split("::")[0], line_start=2, line_end=4))
+
+            rows = [node("p/a.py::f", 1, 20, calls=[
+                        ReachCall(line=4, callee="same()", to="p/s.py::same"),
+                        ReachCall(line=6, callee="other()", to="p/o.py::other"),
+                        ReachCall(line=8, callee="row_only()", to="p/r.py::row_only")],
+                        holes=[ReachHole(line=10, callee="x.get", why="the receiver's class is not declared"),
+                               ReachHole(line=11, callee="x.other", why="the receiver's class is not declared")]),
+                    node("p/s.py::same", 1, 9), node("p/o.py::other", 1, 9), node("p/r.py::row_only", 1, 9)]
+            junctions = [junction("p/s.py::same", "failed"), junction("p/o.py::other", "finished"),
+                         junction("p/r.py::row_only", "finished", pre=["jobStatus=defined"])]
+            mapdump._FRAGMENT[:] = [N(reach_graph=rows, junctions=junctions)]
+            r = object.__new__(rerun.Rerun)
+            r._graph_read, r._kept, r._in_memory = None, {}, {}
+            keeps = r._keeps("JobSpec.jobStatus")
+            fn = N(rel="p/a.py", node=N(body=[N(lineno=2)]))
+            at = lambda line: N(lineno=line, end_lineno=line)
+            print(json.dumps([keeps(fn, at(n), "failed") for n in (4, 6, 8, 10, 11, 12)] + [keeps(fn, at(4), "finished"), len(r._kept)]))
+            """,
+        )
+    )
+    same, other, row_only, closed, hole, none, off, asked = json.loads(out.splitlines()[-1])
+    # a call whose reach assigns only the value carried keeps it; one assigning another value does not
+    assert same == 0 and other is None
+    # in memory the row is not read: an arm whose row must hold 'defined' still moves the object
+    assert row_only is None
+    # a hole whose name no function reaching an arm has is closed by it, and counted; one whose name such a function
+    # has may be the way to it
+    assert closed == 1 and hole is None
+    # no call the reach places at the lines: it goes on to nothing
+    assert none == 0
+    # the value carried decides: 'same' moves a 'finished' off
+    assert off is None
+    # each (function, lines, subject, value) asked once
+    assert asked == 7
+
+
 def test_a_call_leaves_the_path_knowing_nothing_of_what_it_changes(tmp_path):
     checker = (
         "\nclass Checker:\n    def __init__(self):\n        self.logger = logger\n        self.flag = None\n        self.result = None\n\n"

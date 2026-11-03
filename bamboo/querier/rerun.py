@@ -88,6 +88,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types
@@ -1912,6 +1913,10 @@ class Rerun:
         self._graph_read = None
         #: ``_called_at``'s answers: (caller, callee) function -> the lines of the calls that go on into it
         self._calls_into: dict[tuple[str, str], list[str]] = {}
+        #: ``_keeps``' answers: (function, first line, last line, subject, value) -> calls closed by their name, or None;
+        #: and the in-memory destination per (subject, value)
+        self._kept: dict[tuple[str, int, int, str, str], int | None] = {}
+        self._in_memory: dict[tuple[str, str], Any] = {}
         #: H1's readings by (subject, value), read once (``_writers``); the runs F1 read the rows after (``rows_between``)
         self._readings: dict[tuple[str, str], list] = {}
         self._rows_read: set[str] = set()
@@ -2764,7 +2769,7 @@ class Rerun:
                       for c in cands for run in at_hand if run.log.name in c.log_files], env)
         j = judge(
             cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi), subject=attr, observed=value,
-            question_run=question, env=env, called_at=self._called_at,
+            question_run=question, env=env, called_at=self._called_at, keeps=self._keeps(subject),
         )
         self.say(j.report(question))
         out = []
@@ -2909,7 +2914,7 @@ class Rerun:
         j = judge(
             cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi),
             subject=attr, observed=value, question_run=question, env=env, called_at=self._called_at,
-            holds_write=asking.holds_write,
+            holds_write=asking.holds_write, keeps=self._keeps(subject),
         )
         self.say(j.report(question))
         if j.chosen is None and not last and self.hop not in self.hand:
@@ -3020,6 +3025,7 @@ class Rerun:
             j = judge(
                 cands, runs, mode=self.mode, decide=self.decide, window=(lo, hi),
                 subject=attr, observed=state["status"], question_run=question, env=env, called_at=self._called_at,
+                keeps=self._keeps(history.subject),
             )
             self.say(j.report(question))
             chosen += j.chosen is not None
@@ -3646,6 +3652,43 @@ class Rerun:
                     lines.update(call.lines or [call.line])
             self._calls_into[(start, end)] = [f"{file}:{line}" for line in sorted(lines)]
         return self._calls_into[(start, end)]
+
+    def _keeps(self, subject: str) -> Callable[[R.Function, ast.AST, str], int | None]:
+        """Rule R's reading of a call on the way of a value it carries (``changed.breaks``), by the map's reach: whether
+        the calls in a statement's *node* of *fn* keep *subject*'s field at *value* in the object they change -- from
+        those calls alone, as ``_called_at`` asks a call (a copy of the row holding them, with its holes at their
+        lines), the reach goes on to no arm assigning the field another value in memory
+        (``reach.moving_off_in_memory``; births left out as ``unborn_junctions`` does) and leaves no hole.  The answer
+        is how many calls it closed by their name, or None, as where the dump has no reach_graph."""
+
+        def keeps(fn: R.Function, node: ast.AST, value: str) -> int | None:
+            graph = self._graph()
+            if graph is None:
+                return None
+            RE, record, rows = graph
+            if (subject, value) not in self._in_memory:
+                self._in_memory[subject, value] = RE.moving_off_in_memory(
+                    unborn_junctions(mapdump.fragment().junctions, subject), record, subject, value)
+            destination = self._in_memory[subject, value]
+            start = record.function_at(fn.rel, fn.node.body[0].lineno) if fn.node.body else None
+            first, last = getattr(node, "lineno", None), getattr(node, "end_lineno", None)
+            # a junction the reach cannot place may be the arm
+            if start is None or first is None or destination.unmatched:
+                return None
+            if (start, first, last or first, subject, value) not in self._kept:
+                lines = set(range(first, (last or first) + 1))
+                row = record.rows[start]
+                one = row.model_copy(update={
+                    "owner": f"{start}#keeps{first}",
+                    "calls": [c for c in row.calls if lines & set(c.lines or [c.line])],
+                    "holes": [h for h in row.holes if h.line in lines],
+                })
+                got = RE.ReachGraph([*rows, one]).reach([one.owner], destination)
+                self._kept[start, first, last or first, subject, value] = (
+                    len(got.closed) if got.writes == [] and not got.holes else None)
+            return self._kept[start, first, last or first, subject, value]
+
+        return keeps
 
     def _rows_elsewhere(self, q: Stuck, follow, writers: list, movers: dict, gaps: dict) -> dict[str, tuple[bool, T.Said, dict | None]]:
         """For each mover whose statements' rows reach none of its arms (``elsewhere_of``), what the map's reach says of
