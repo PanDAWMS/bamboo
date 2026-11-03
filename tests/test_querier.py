@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "asked", "attr_time", "callers", "census", "census_p", "evaluate", "false_guard", "handlers", "held", "heldcol", "mapdump", "outbound", "parts",
+    "asked", "attr_time", "callers", "census", "census_p", "changed", "evaluate", "false_guard", "handlers", "held", "heldcol", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
 ]
 
@@ -4647,6 +4647,108 @@ def test_p_reads_the_status_a_target_was_bound_from_at_a_later_row_with_the_judg
     # a row printing another value than the observed one: any call handed the job may have written it
     assert got["other failed"][0] == "none" and "E4 deferred" not in got["other failed"][1]
     assert got["other finished"][0] == "inconsistent" and got["other finished"][1]["E4 deferred"] > 0
+
+
+# the adder with its finalize: a failed job's status is set "failed" once more, in a method two calls down
+_FINALIZING = _ADDER.replace(
+    '        self.logger.debug("updating the job in the DB")\n',
+    '        self.finalize()\n        self.logger.debug("updating the job in the DB")\n',
+) + """
+    def finalize(self):
+        if self.job.jobStatus == "failed" or self.job_status == "failed":
+            self.handle_failed()
+
+    def handle_failed(self):
+        self.logger.debug("handling the failed job")
+        self.job.jobStatus = "failed"
+"""
+
+
+def test_of_one_pass_s_writes_the_last_that_changed_the_value_is_the_answer_and_one_that_kept_it_a_stay(tmp_path):
+    files = {
+        "c.py": _FINALIZING,
+        # the job handed to a call between the row and finalize: what the row printed is not read past it
+        "g.py": _FINALIZING.replace("        self.finalize()\n", "        touch(self.job)\n        self.finalize()\n"),
+    }
+    at = {}
+    for name, text in files.items():
+        (_corpus(tmp_path) / "pandaserver" / name).write_text(text)
+        lines = text.splitlines()
+        at[name] = {k: lines.index(f"{' ' * n}{s}") + 1 for k, n, s in [
+            ("from_report", 12, "self.job.jobStatus = self.job_status"), ("plugin", 16, 'self.job.jobStatus = "failed"'),
+            ("parse", 12, 'self.job.jobStatus = "failed"'), ("handle", 8, 'self.job.jobStatus = "failed"'),
+            ("parse_call", 8, "parsed = self.parse()"), ("finalize_call", 8, "self.finalize()")]}
+        at[name]["row"] = next(n for n, line in enumerate(lines, 1) if "status after plugin call" in line)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    after = "status after plugin call :job.jobStatus={} jobStatus={}"
+    logs = {
+        # the report said failed: parse's arm and handle_failed's both ran, and the row before finalize shows failed
+        "reported": ["start the report of the job", "no report of the job to parse", after.format("failed", "failed"),
+                     "handling the failed job", "updating the job in the DB"],
+        # the report said finished: the plugin's arm changed it, and handle_failed set it again
+        "plugin": ["start the report of the job", after.format("failed", "finished"), "handling the failed job",
+                   "updating the job in the DB"],
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, judge
+
+        R.ROWS_FROM = "walk"
+        got = {}
+        for file, log, reach in [("c.py", "reported", True), ("c.py", "plugin", True), ("g.py", "reported", True),
+                                 ("c.py", "reported", False)]:
+            at = AT[file]
+            run, = runs_for(read_log(f"{log}.log"), "1")
+            rel = f"pandaserver/{file}"
+            lines = {"process": [at["from_report"], at["plugin"]], "parse": [at["parse"]], "handle_failed": [at["handle"]]}
+            cs = [Candidate(rel, func, ls, [run.log.name], run=run) for func, ls in lines.items()]
+            # the map's reach: process calls on into parse and, through finalize, into handle_failed
+            calls = {"parse": at["parse_call"], "handle_failed": at["finalize_call"] if reach else None}
+            def called_at(fn, c, rel=rel, calls=calls):
+                return [f"{rel}:{calls[c.func]}"] if fn.name == "process" and calls.get(c.func) else []
+            j = judge(cs, {run.log.name: [run]}, question_run=run, subject="jobStatus", observed="failed", called_at=called_at)
+            got[f"{file} {log}{'' if reach else ' no reach'}"] = {
+                "kinds": {k: v.kind for v in j.verdicts for k in [{at["from_report"]: "from_report", at["plugin"]: "plugin",
+                                                                   at["parse"]: "parse", at["handle"]: "handle"}[v.line]]},
+                "why": {k: v.reasons[-1] for v in j.verdicts for k in [f"{v.candidate.func}:{v.line}"] if v.reasons},
+                "chosen": f"{j.chosen.candidate.func}:{j.chosen.line}" if j.chosen else None, "how": j.how}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("AT", repr(at))))
+    got = json.loads(out.splitlines()[-1])
+    c = at["c.py"]
+    # the row before finalize shows failed, and nothing on the way into handle_failed binds it: handle_failed's
+    # assignment is a stay.  The three before the row are left, the last first: which changed it is not read
+    reported = got["c.py reported"]
+    assert reported["kinds"] == {"from_report": "kept", "plugin": "kept", "parse": "positive", "handle": "excluded"}
+    assert reported["why"][f"handle_failed:{c['handle']}"].startswith(
+        f"rule R: a stay, self.job.jobStatus already held 'failed' before it (row process:{c['row']} at reported.log:3"
+    ) and reported["why"][f"handle_failed:{c['handle']}"].endswith("the frames between process and handle_failed not read)")
+    assert reported["chosen"] is None and reported["how"] == (
+        f"3 may have changed it last in the pass: c.py::process:{c['plugin']}, c.py::parse:{c['parse']}, c.py::process:{c['from_report']}"
+    )
+    # the report said finished: the assignment from it wrote 'finished' (the row's jobStatus), and the plugin's arm,
+    # which ran, is the last change -- handle_failed's, after it, a stay by the value it assigned
+    plugin = got["c.py plugin"]
+    assert plugin["kinds"] == {"from_report": "excluded", "plugin": "positive", "parse": "excluded", "handle": "excluded"}
+    assert plugin["why"][f"process:{c['from_report']}"] == (
+        f"rule R: it assigns 'finished' (self.job_status, printed at row process:{c['row']} at plugin.log:2), no write of 'failed'"
+    )
+    assert plugin["why"][f"handle_failed:{c['handle']}"].startswith(
+        f"rule R: a stay, self.job.jobStatus already held 'failed' before it (assigned by c.py::process:{c['plugin']}"
+    )
+    assert plugin["chosen"] == f"process:{c['plugin']}" and plugin["how"] == "the last change in the pass"
+    # the job handed to a call on the way: handle_failed's may be the change, and it is the last
+    g = got["g.py reported"]
+    assert g["kinds"]["handle"] == "positive" and g["chosen"] is None
+    assert g["how"].startswith(f"4 may have changed it last in the pass: g.py::handle_failed:{at['g.py']['handle']}, ")
+    # no way placed from process into handle_failed: no order, and R says nothing
+    assert got["c.py reported no reach"]["how"] == "2 positive"
+    assert got["c.py reported no reach"]["kinds"]["handle"] == "positive"
 
 
 def test_a_call_leaves_the_path_knowing_nothing_of_what_it_changes(tmp_path):

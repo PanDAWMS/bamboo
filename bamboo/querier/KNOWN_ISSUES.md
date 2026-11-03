@@ -1294,8 +1294,68 @@ to the loop), of a `finally` (a raise may be passing through), of a `with` (its 
 read).
 
 *Shows:* "row(s) [..] print only on a path through it" with the nested row.
-*Revisit:* when the rule reads the map's flow (`flow.passes_through`'s ways, a raise anywhere) rather than its own;
-when H2 orders the positives of one pass by the flow.
+*Revisit:* when the rule reads the map's flow (`flow.passes_through`'s ways, a raise anywhere) rather than its own.
+H2 now orders one pass's candidates by the flow (K51): 374 is a stay in all four walks.
+
+### K51. Of one pass's writes the last that changed the value is the answer, and one that kept it is a stay
+
+`changed.last_change` (rule R) reads the candidates H2 leaves in one pass: those of the question's run, and of the
+runs inside a call it made.  The value the pass writes is the one it assigned last, so the answer is the last write
+that changed it.  A write of the value already there is a stay, as the census reads a row written again with its own
+value (the harness's reading of adder_gen at the pin, 2026-11-03).
+
+- *The order.*  One function of the pass, the anchor, holds the others or calls on into them (the map's reach,
+  `Rerun._called_at`), and its rows read as one call.  A run inside a call sits at that call.  Two places are in
+  order where the flow runs one after the other and never the reverse.  Any pair out of order, and R says nothing.
+- *The value before a write.*  It is read from a printed hole of the chain the write assigns, at a row before it, or
+  from the constant an earlier write that ran assigned.  Either counts only where nothing on the way binds the chain
+  or hands what holds it to a call that can change it, by P's reading of a call (`printed.self_effects`).
+  - The way runs through the rest of the source's function, the anchor between the two places, and the write's own
+    function before it.
+  - The frames between the anchor and a function reached through others are not read (finalize_job_status, between
+    process_job_report and handle_failed_job).
+- *The value a write assigns.*  Its constant, or a printed hole of the expression it assigns, unbound between.
+- *The answer.*
+  - A write with the observed value before it is a stay, and one assigning another value is no write of it: both are
+    excluded.
+  - Read from the last back, each write left may be the last change, down to one that ran with another value before
+    it.
+  - One left that ran is chosen ("the last change in the pass").  More are named, and none is chosen ("N may have
+    changed it last in the pass: ...").
+
+In the adder's pass, row 444 prints `job.jobStatus=failed jobStatus=failed` before finalize in the 4 m-failed adder
+walks.  So handle_failed_job:374 is a stay: nothing on the way into it binds `self.job.jobStatus`, and its one call
+is handed `self.taskBuffer`, `self.job.PandaID` and `self.job.attemptNr`.  The change itself is not read.  Between
+416 and 444 the pass calls parse_job_output_report (421) and execute_plugin (425).  P's reading of a call reads both
+as changing `self.job.jobStatus`: 820, 885, 919 and 959 bind it, and 425 hands `self.job` to the plugin.  The map's
+reach from each, asked for an arm that moves jobStatus off 'failed' (`reach.moving_off`), answers "not known": a
+`.get` on an element whose class is not declared (extract_executor_metadata:710, update_outputs:393).  The walks
+stop at H2, naming 416, 919, 441 and archiveJob:1813, or 416, 441 and 1813.  1813, archiveJob's UPDATE after the
+archive, assigns a statement's bind, so no value before it is read.  In the 65's A-rec, K-rec and N-rec, 444 prints
+`jobStatus=finished`: 416 assigns 'finished' and is no write of 'failed', and 441 is the last change, as before.
+
+The Watcher's pass: run:117 sets `job.jobStatus = "failed"`, and archiveJob:1813 runs inside the call at 135.  The
+value at that call is not read past `EventServiceUtils.isEventServiceJob(job)` and `getEventStat(job.jediTaskID,
+...)` between them, which P's reading counts as calls handed the job.  So 1813 may be the last change, and
+MF-7397938541 and MJ-sent-late (m-cut, m-cut2) stop at H2 with "2 may have changed it last in the pass".  updateJobs:654
+assigns the job handed on in another class: it is not read as the same object, and R leaves it as H2 did.
+
+Measured (rr1 against r1, map x13xixB14m, out/s/s-predictions.txt), every prediction held:
+- outcomes: MF-7396944927 and MF-7397944082 H3 -> H2; MF-7397938541 H3 -> H2; MJ-sent-late L2 (m-cut) and S2 (m-cut2)
+  -> H2;
+- text only: MF-7397695467 and MF-7398402231 (H2 as before), and 32 of the 65's runs (416 excluded, "the last change
+  in the pass");
+- attr and MT: the same.
+
+*Shows:* "rule R: a stay, ... already held ... before it (...)", "rule R: it assigns ... no write of ...", and the
+choice's "the last change in the pass" or "N may have changed it last in the pass: ...".
+*Revisit:*
+- with a call that keeps the value where the map's reach from it reaches no arm moving it off the observed one: the
+  adder's 421 and 425 once the map places the `.get` calls (its map_todo RB), and the Watcher's isEventServiceJob
+  (the reach answers no write) and getEventStat (not asked);
+- with the status at the pass's start (the statuslog's row before the question's, under the premise that no status
+  change went unlogged): 416's guard is then read;
+- when a write through a statement's binds (1813) is read for the row's value before it.
 
 ## The walks (`asked.py`)
 
