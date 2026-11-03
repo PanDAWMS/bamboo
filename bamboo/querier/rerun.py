@@ -113,6 +113,7 @@ from bamboo.codemap.reading import containing_function
 from bamboo.querier import asked as A
 from bamboo.querier import attr_time as AT
 from bamboo.querier import census as C
+from bamboo.querier import changed as CH
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
 from bamboo.querier import held as HD
@@ -120,6 +121,7 @@ from bamboo.querier import heldcol as HC
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
+from bamboo.querier import printed as PR
 from bamboo.querier import raised as X
 from bamboo.querier import render as T
 from bamboo.querier import reproduce as P
@@ -1425,6 +1427,18 @@ def _guard_read(text: str, env: E.Env) -> object:
         return E.UNKNOWN
 
 
+def _orders_texts(text: str, env: E.Env) -> bool:
+    """Whether condition *text* orders (<, >) a value *env* holds as text: a printed time read back is a string, and
+    text order is not the time's order ('...13:40:26.260951' and '...12:45:38')."""
+    try:
+        tree = ast.parse(E.strip_annotation(text), mode="eval")
+    except SyntaxError:
+        return False
+    return any(isinstance(n, ast.Compare) and any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in n.ops)
+               and any(isinstance(env.lookup(ast.unparse(x)), str) for x in [n.left, *n.comparators])
+               for n in ast.walk(tree))
+
+
 @dataclass(frozen=True)
 class StandIn:
     """A writer arm whose function prints nothing (KNOWN_ISSUES.md K25), read on the run of the caller a history pair
@@ -2405,6 +2419,23 @@ class Rerun:
                 "fn_name": site_fn.name, "chosen_line": chosen.line,
                 "why": T.Said("left-by-elimination-no-pass") if not branch else T.Said("no-pass-at-the-window", {"left": left}),
             })))
+        def through(env: Any) -> list[tuple[str, str]]:
+            """The methods the guards read through whose values *env* leaves unknown: H4 reads which call set each."""
+            out = []
+            for g in guards:
+                for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
+                    for n in ast.walk(atom):
+                        if (
+                            isinstance(n, ast.Call) and not n.args and not n.keywords
+                            and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, (ast.Attribute, ast.Name))
+                            and E.ev(n, env) is E.UNKNOWN
+                        ):
+                            out.append((n.func.attr, ast.unparse(n)))
+            return out
+
+        # an arm its run shows ran (H2's positive, its own run: a stand-in's is its caller's) ran under its guards
+        # (KNOWN_ISSUES.md K54)
+        ran = chosen.kind == "positive" and w.via is None and question is not None
         unread = []
         if attribute:
             shown = chosen.kind == "positive"
@@ -2440,14 +2471,24 @@ class Rerun:
                     self.say(f"{where}{f' at {_row_said(w.row)}' if w.row else ''}: it did not write there; its next row, {_row_said(nxt.row)}")
                     return WroteBy(q, nxt.branch, list(nxt.premises), a.older[1:])
                 raise Excluded(T.at(self.hop, T.Said("it-did-not-write-at-any-row", {"where": where})))
-            if all(got is True for got in read.values()):
+            # a guard the values leave unread held where the run shows the arm ran; one read false still decides, and
+            # one through a method goes on to H4, which says why the arm ran
+            by_run = ([g for g, got in read.items() if got is not True]
+                      if ran and not any(got is False for got in read.values()) and not through(env) else [])
+            if all(got is True or g in by_run for g, got in read.items()):
                 lo, hi = w.window
                 at = (T.Said("in-the-pass-of-the-row", {"status": w.row["status"], "time": w.row["time"]}) if w.row else
                       T.Said("at-time", {"time": hi}) if lo == hi else T.Said("in-window", {"lo": lo, "hi": hi}))
                 via = T.Said("called-at", {"fn": at_fn.name, "line": w.via.line}) if w.via is not None else ""
                 how = (T.Said("its-guards-hold-in-the-run" if shown else "its-guards-hold-in-the-rows") if guards
                        else T.Said("it-has-no-guard"))
-                if used := [g for g in guards if g in held]:
+                used = [g for g in guards if g in held and read[g] is True]
+                if by_run:
+                    how = T.Said("its-guards-held-as-it-ran", {
+                        "guards": [T.Said("guard-quoted", {"guard": g}) for g in by_run],
+                        "rest": T.Said("the-rest-in-the-run") if any(read[g] is True and g not in used for g in guards) else "",
+                    })
+                if used:
                     premise = held[used[0]].premise(used)
                     how = (T.Said("its-guards-hold-held", {"held": premise}) if len(used) == len(guards)
                            else T.Said("its-guards-hold-with-held", {"how": how, "held": premise}))
@@ -2468,26 +2509,82 @@ class Rerun:
                       for g, got in read.items() if got is not True]
             # an arm left by elimination is read in no run: H4 would read its guard's method in a run not its own
             self.need(T.Said("a-run-that-shows-ran-to-read", {"fn_name": site_fn.name, "chosen_line": chosen.line, "left": left, "unread": list(unread)}), shown)
-        methods = []
-        for g in guards:
-            for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
-                for n in ast.walk(atom):
-                    if (
-                        isinstance(n, ast.Call) and not n.args and not n.keywords
-                        and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, (ast.Attribute, ast.Name))
-                        and E.ev(n, env) is E.UNKNOWN
-                    ):
-                        methods.append((n.func.attr, ast.unparse(n)))
+        methods = through(env)
         self.say(f"read through a method: {methods}")
         if not methods:
-            # what H3 lacks is then the values the guard reads at the run (a status's are not read here), not a method's
+            # what H3 lacks is then the values the guard reads at the run, not a method's
             if not guards:
                 self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
-            unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
-            self.need(T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})}), None)
+            if ran and not attribute and site is not None:
+                # a status's arm ran under its guards: where the values they held on came from, said where its run printed
+                # them -- unless they read a guard false, which the run says held
+                held_on, read_false = self._held_on(site_fn, site, guards, question)
+                what = (T.Said("printed-values-read-false", {"guard": read_false[0], "on": read_false[1]}) if read_false is not None
+                        else T.Said("values-held-on", {"held": held_on}))
+            else:
+                unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
+                what = T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})})
+            self.need(what, None)
         method = self.need(T.Said("a-method-the-guard-reads-through", {"conditions": T.Said("its-conditions", {"unread": unread}) if unread else ""}),
                            methods[0][0])
         return SetBy(method, reading, question, guard_record, env)
+
+    def _held_on(self, fn: R.Function, site: ast.AST, guards: list[str], run: Any) -> tuple[list[T.Said], tuple[str, T.Said | str] | None]:
+        """Each guard of *site* (``pathcond.path_condition``'s, outermost first) with the values its terms held at its
+        ``if``, where *fn*'s run printed them (:func:`CH.printed_at`, read as the map's evaluator reads a printed value),
+        and the first guard they read false, with its values (KNOWN_ISSUES.md K54).  Texts are not ordered: a guard
+        ordering a value read as text is not read.  In a loop that holds the site, a row is read only at a record the
+        key is on, and only where each of the loop's rows printed once among those: the key's one pass of the loop."""
+        ifs: list[ast.If] = []
+        previous: ast.AST = site
+        for anc in pathcond.ancestors(site):
+            if isinstance(anc, ast.If) and (previous in anc.body or previous in anc.orelse):
+                ifs.append(anc)
+            previous = anc
+        ifs.reverse()
+        if len(ifs) != len(guards):
+            # a test path_condition could not render: the guards are not placed, and no value is read
+            return [T.Said("guard-held-on", {"guard": g, "on": ""}) for g in guards], None
+        own = {id(n) for n in ast.walk(fn.node)}
+        sn = R.seen(fn, run, self.mode)
+        loops: list[ast.AST] = []
+        previous = site
+        for anc in pathcond.ancestors(site):
+            if anc is fn.node:
+                break
+            if isinstance(anc, R.LOOPS) and previous in anc.body:
+                loops.append(anc)
+            previous = anc
+        keyed = {id(r) for r in run.found_by}
+
+        def in_loop(stmt: ast.stmt) -> bool:
+            return any(a in loops for a in pathcond.ancestors(stmt))
+
+        once = all(sum(id(run.records[i]) in keyed for i, *_ in sn.hits.get(row.line, ())) <= 1
+                   for row in fn.rows if in_loop(row.stmt))
+
+        def read(row: R.Row) -> list[int]:
+            at = sn.unambiguous.get(row.line, [])
+            if loops and in_loop(row.stmt):
+                return [i for i in at if id(run.records[i]) in keyed] if once else []
+            return at
+
+        held: list[T.Said] = []
+        false: tuple[str, T.Said | str] | None = None
+        for n, g in enumerate(guards):
+            on, env = [], E.Env()
+            # an if outside the function (one the def sits in) is not this frame's
+            terms = sorted(PR.chains(g), key=lambda t: (g.find(t), t)) if id(ifs[n]) in own else []
+            for t in terms:
+                if (got := CH.printed_at(fn, sn, ifs[n], t, read, tuple(loops) if once else ())) is not None:
+                    on.append(T.Said("term-printed", {"term": t, "value": got[0], "where": got[1]}))
+                    env.put_printed(t, got[0], got[1])
+                    self.say(f"  {t} = {got[0]!r} ({got[1]})")
+            said: T.Said | str = T.Said("held-on-values", {"values": on}) if on else ""
+            held.append(T.Said("guard-held-on", {"guard": g, "on": said}))
+            if false is None and on and not _orders_texts(g, env) and _guard_read(g, env) is False:
+                false = (g, said)
+        return held, false
 
     def _wrote_said(self, w: Wrote) -> dict:
         """result.json's ``wrote`` for an attribute: H2's answer -- the arm, whether its run shows the line ran (else it was

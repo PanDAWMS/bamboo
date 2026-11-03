@@ -789,10 +789,11 @@ The pass H2 answers with is when the attribute took the value (attr-time-shape.m
 result.json's `wrote` names the arm, whether its run shows the line ran (`shown`; else H2 left it by elimination: the
 one writer of a value that is its time), the call it is read at for a writer that prints nothing (K25), the statuslog
 row whose pass wrote it (none for a value held or a value that is its time), the window asked and the run, and H3 ends
-there (END) where the arm has no guard or every guard holds in the run's values.  A condition not read, or read false,
-is named in H3's stop; a guard read through a method goes on to H4 as for a status, whose steps say why the arm ran,
-not when.  Before, an attribute went on as a status does and stopped at H3 "a method the guard reads through" for an
-arm with no guard: 12 of the 14 attribute cases H2 answered on the harness's round-2 snapshot.
+there (END) where the arm has no guard or every guard holds in the run's values -- or, for an arm its run shows ran,
+where none is read false (K54).  A condition read false, or not read for an arm no run shows ran, is named in H3's
+stop; a guard read through a method goes on to H4 as for a status, whose steps say why the arm ran, not when.
+Before, an attribute went on as a status does and stopped at H3 "a method the guard reads through" for an arm with no
+guard: 12 of the 14 attribute cases H2 answered on the harness's round-2 snapshot.
 
 An arm left by elimination names no run (`wrote.run` null), and its guards are read in the rows' values alone, its
 H3 stopping at "a run that shows <arm> ran" where they do not all hold: no run shows it, and the run the judge read it
@@ -803,7 +804,8 @@ window instead.
 
 *Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers;
 "END <subject>=<value> written last by <arm>[, called at <call>] (shown in its run; it has no guard | its guards hold
-in the run's values), in the pass of the statuslog row <status> at <time>: <run>", or "(by elimination: no run shows
+in the run's values | its guards hold as its run shows it ran ('<condition>', ...)[; the others in the run's values]),
+in the pass of the statuslog row <status> at <time>: <run>", or "(by elimination: no run shows
 the line ran; it has no guard | its guards hold in the rows' values), at <time>[; not searched there: <log> on
 <machines>]"; "<arm> ...; a birth: it wrote as the row was made" or "; its runs are marked by the object's key",
 "F3: <arms> asked over the object's life, from the row's creation at <t> to when the value was read at <t>",
@@ -811,12 +813,13 @@ the line ran; it has no guard | its guards hold in the rows' values), at <time>[
 object's life <t>" (result.json's possibility rows carry `f3`: made, run, span or open); a stop "every writer of
 <subject> on a history row of the object, a birth or marking its runs by the object's key ... (k of n not: K37)",
 "the object's life, to ask <arms> over: <why>", "when the row was made, for the birth <arm> ...", "a writer of
-<subject> in the map", or at H3 "the values its guard reads at its run (its conditions: '<condition>' not read)" (a
-guard through no method; one over a column the rows file holds is read there, K49), "a method the guard reads through
-(...)" (one through a method, read on at H4) or "a run that shows <arm> ran, to read its guards in (by elimination; its
-conditions: ...)".  A status's H3 reads no guard's values: through no method it stops at "the values its guard reads at
-its run", and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'" (both "a method
-the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
+<subject> in the map", or at H3 "the values its guard reads at its run (its conditions: '<condition>' read false |
+not read)" (a guard through no method; one over a column the rows file holds is read there, K49), "a method the guard
+reads through (...)" (one through a method, read on at H4) or "a run that shows <arm> ran, to read its guards in (by
+elimination; its conditions: ...)".  A status's arm its run shows ran stops, through no method, at "where the values
+its guards held on come from, its run showing it ran (...)" (K54; "the values its guard reads at its run" for one no
+run of its own shows), and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'"
+(both "a method the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
 marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
 row into its spec (getTasksToRefine_JEDI and the like) is told apart.
@@ -970,6 +973,44 @@ stop.
 
 *Shows:* "@<line> runs in a loop over rows this investigation does not have" among a name's origins in R2.
 *Revisit:* when the harness's fetch answers the walk's ask for the collection (K36, stage 2).
+
+### K54. An arm its run shows ran ran under its guards; a status's says the values they held on, where its run printed them
+
+H2's positive (a row printed only on a path through the site, P's proof, or P read with the other verdicts) says the
+site ran in the pass, so its path condition held there.  H3 takes that for a guard the run's values leave unread
+(`Rerun.wrote_by`, design D1's G, out/after-q/d1s-design.md; tmaeno: "C2", 11-03 17:30).  It is not taken:
+- for a stand-in (K25), whose run is its caller's and shows the caller's call, not the arm;
+- where a guard reads false: the value decides, as before (K37: an older row, or excluded);
+- where a guard reads through a method: H4 reads which call set it, saying why the arm ran.
+
+An attribute then ends at H3 (K37): "its guards hold as its run shows it ran (...)".  A status does not: what it asks
+is why the arm ran, and that is where the values its guards held on came from.  Where none is a method, H3 stops on
+it, each guard with the values its run printed (V, `Rerun._held_on`, `changed.printed_at`):
+- a hole of the term, or `str()` of it, at a row before the guard's `if` or after it, nothing between able to change
+  it (`changed.holds`, R's rule (ii));
+- or a hole of a chain one assignment after the `if` binds to the term, the term holding up to it and the chain from
+  it to the row (setupper 1107 `job.ddmErrorDiag = disp_error[disp]`, printed at 1108);
+- read as the map's evaluator reads a printed value (`put_printed`).  Text is not ordered: a guard that orders a value
+  read as text is not read (a printed time, with or without microseconds).  A guard the values read false is a stop
+  of its own: the run says it held, so the reading or the positive is wrong.
+- In a loop that holds the site, only the records the key is on are read, and only where each of the loop's rows
+  printed once among them: that is the key's one pass, and the loop is read as gone round once (`flow`'s *once*).
+  datasetManager's FinisherThr runs over its jobs, setupper over its jobs.
+
+Measured as u1 against train xx's T (xxT, 11-03 18:51; out/d1/u1-predictions.txt, every prediction held), it moves
+5 walks in 9 cases and nothing else:
+- hs06sec and queuedTime in m-cut, m-cut2 and attr go from STOP H3 to END H3 (6 cases);
+- the 3 m-failed statuses stop at H3 with their values:
+  - datasetManager run:735: nTokens 1, nOkTokens 0, endTime 2026-10-31 12:45:38, timeOut 2026-10-31 13:40:26.260951;
+  - Watcher run:117: modificationTime 2026-11-02 11:59:24, endTime NULL;
+  - setupper subscribe_dispatch_data_block:1105: disp_error[disp] "... could not register subscription", through
+    1107.
+
+*Shows:* "END ... (shown in its run; its guards hold as its run shows it ran ('<condition>', ...)[; the others in the
+run's values])"; "STOP H3: where the values its guards held on come from, its run showing it ran ('<condition>' held
+on <term> = '<value>' (row <fn>:<line> at <span>[, as <chain> bound at <file>:<line>]), ...; ...)"; "STOP H3: its run's
+printed values read '<condition>' false on ..., though its run shows it ran".
+*Revisit:* when S, the values' sources by the map's trace (d1s-design.md, tmaeno "C2"), is built: a status ends there.
 
 ## `which_ran`
 

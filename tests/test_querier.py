@@ -7029,7 +7029,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 chosen = Verdict(arm.candidate, arm.line, kind)
                 r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}) if env is None else env, chosen, via=via, row=row,
                                                         window=window, unsearched=unsearched or {})
-                rerun.pathcond = N(path_condition=lambda site: guards)
+                rerun.pathcond = N(path_condition=lambda site: guards, ancestors=lambda node: iter(()))
                 try:
                     got = r.asked(rerun.Asked(subject, "A", "7"))
                     said = None if got is None else ["SetBy", got.method]
@@ -7054,9 +7054,14 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 "by elimination, guards read true": asked("JediTaskSpec.rescueTime", ["1 == 1"], None, window=second, kind="kept"),
                 "shown, a guard the run's values hold": asked("JediTaskSpec.rescueTime", ["task.x"], None, window=second, env=held),
                 "not read": asked("JediTaskSpec.transUses", ["1 == 1", "task.x", "1 == 2"], row),
+                "shown, a guard not read": asked("JediTaskSpec.transUses", ["task.y"], row),
+                "shown, one guard read and one not": asked("JediTaskSpec.transUses", ["1 == 1", "task.y"], row),
+                "a stand-in, a guard not read": asked("JediTaskSpec.transUses", ["task.y"], None, call,
+                                                      ("2026-10-29 04:10:00", "2026-10-29 04:10:00")),
                 "through a method": asked("JediTaskSpec.transUses", ["task.useScout()"], row),
                 "a status": asked("JediTaskSpec.status", [], row),
                 "a status, a guard through no method": asked("JediTaskSpec.status", ["task.x < 3"], row),
+                "a status, a stand-in": asked("JediTaskSpec.status", ["task.x < 3"], row, call),
             }))
             """,
         )
@@ -7098,18 +7103,120 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
         "END JediTaskSpec.rescueTime='A' written last by extract:5 (shown in its run; its guards hold in the run's values), "
         "at 2026-10-29 00:49:09: the run"]
     assert (stood["said"], stood["wrote"]["via"], stood["wrote"]["row"]) == (None, {"owner": "pandajedi/o.py::runImpl", "line": 211}, None)
-    # a condition not read, or read false, is named where H3 stops: the values the guard reads, through no method
+    # a condition read false is named where H3 stops, with those not read: the values the guard reads, through no method
     assert got["not read"]["said"] == ["STOP", "H3: the values its guard reads at its run (its conditions: 'task.x' not read, "
                                                "'1 == 2' read false)"]
     assert (got["not read"]["ends"], got["not read"]["wrote"]["line"]) == ([], 5)
+    # an arm its run shows ran ran under its guards: one the values leave unread held (K54)
+    assert got["shown, a guard not read"]["ends"] == [
+        "END JediTaskSpec.transUses='A' written last by extract:5 (shown in its run; its guards hold as its run shows it ran "
+        "('task.y')), in the pass of the statuslog row 'defined' at 2026-10-29 04:10:00.123456: the run"]
+    assert got["shown, one guard read and one not"]["ends"] == [
+        "END JediTaskSpec.transUses='A' written last by extract:5 (shown in its run; its guards hold as its run shows it ran "
+        "('task.y'); the others in the run's values), in the pass of the statuslog row 'defined' at 2026-10-29 "
+        "04:10:00.123456: the run"]
+    # ... not a stand-in's, whose run is its caller's
+    assert got["a stand-in, a guard not read"]["said"] == [
+        "STOP", "H3: the values its guard reads at its run (its conditions: 'task.y' not read)"]
     # a guard read through a method goes on to H4 as for a status
     assert got["through a method"]["said"] == ["SetBy", "useScout"]
-    # a status: no wrote; with no guard, what made the arm run is its callers'; a guard through no method is read in
-    # no run's values for a status
+    # a status: no wrote; with no guard, what made the arm run is its callers'; through no method, its guards held, and
+    # what H3 lacks is where the values they held on came from (none printed here); a stand-in's are not read
     assert got["a status"] == {"said": ["STOP", "H3: extract:5 has no guard of its own to read: what made it run is its "
                                                 "callers'"], "ends": [], "wrote": None}
     assert got["a status, a guard through no method"]["said"] == [
+        "STOP", "H3: where the values its guards held on come from, its run showing it ran ('task.x < 3' held)"]
+    assert got["a status, a stand-in"]["said"] == [
         "STOP", "H3: the values its guard reads at its run (its conditions: 'task.x < 3' not read)"]
+
+
+_FINISHER = """
+class Finisher:
+    def __init__(self, jobs, time_out):
+        self.logger = logger
+        self.jobs = jobs
+        self.time_out = time_out
+
+    def run(self):
+        for job in self.jobs:
+            n_tokens = 0
+            for f in job.files:
+                n_tokens += 1
+            n_ok = count(job)
+            self.logger.debug(f"tokens n:{n_tokens} ok:{n_ok}")
+            if n_tokens <= n_ok:
+                self.logger.debug("finish")
+            else:
+                end = job.endTime
+                self.logger.debug(f"end:{str(end)} limit:{str(self.time_out)}")
+                if end < self.time_out:
+                    diag = reason(job)
+                    if diag != "":
+                        job.errorDiag = diag
+                        self.logger.debug(f"kill with {job.errorDiag}")
+                        job.jobStatus = "failed"
+"""
+
+
+def test_a_status_arm_its_run_shows_ran_names_the_values_its_guards_held_on_where_its_run_printed_them(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "v.py").write_text(_FINISHER)
+    lines = _FINISHER.splitlines()
+    site = lines.index('                        job.jobStatus = "failed"') + 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    tokens, end, kill = "tokens n:1 ok:0", "end:2026-01-01 00:00:00 limit:2026-01-02 00:00:00.500000", "kill with no replica"
+    logs = {
+        "killed": [tokens, end, kill],
+        # the printed counts read the first guard false, which the run says held: a misread, or not this pass
+        "contradicted": ["tokens n:0 ok:1", end, kill],
+        # the key's records show the loop's row twice: they are not one pass of the loop, and no row in it is read
+        "twice": [tokens, tokens, end, kill],
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import render as T
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/v.py", "run", within=[SITE])
+        site = R.statement_at(fn.node, SITE)
+        guards = pathcond.path_condition(site)
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.mode = [], "outside"
+        got = {"guards": guards}
+        for name in ("killed", "contradicted", "twice"):
+            run, = runs_for(read_log(f"{name}.log"), "1")
+            held, false = r._held_on(fn, site, guards, run)
+            got[name] = {"held": [T.text(h) for h in held], "false": None if false is None else [false[0], T.text(false[1])]}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("SITE", str(site))))
+    got = json.loads(out.splitlines()[-1])
+    assert got["guards"] == ["not (n_tokens <= n_ok)", "end < self.time_out", "diag != ''"]
+    row = {k: lines.index(next(x for x in lines if f'f"{k}' in x)) + 1 for k in ("tokens", "end", "kill")}
+    bound = lines.index("                        job.errorDiag = diag") + 1
+
+    def at(n: int, k: str) -> str:
+        return f"row run:{row[k]} at killed.log:{n + 1}"
+
+    # each value said where the run printed it: a count before the guard, a time through str(), and diag through the
+    # one assignment after its guard that binds the printed chain to it
+    killed = got["killed"]
+    assert [h.split(" held")[0] for h in killed["held"]] == ["'not (n_tokens <= n_ok)'", "'end < self.time_out'", '"diag != \'\'"']
+    assert killed["held"][0] == f"'not (n_tokens <= n_ok)' held on n_tokens = '1' ({at(0, 'tokens')}), n_ok = '0' ({at(0, 'tokens')})"
+    assert killed["held"][1] == (f"'end < self.time_out' held on end = '2026-01-01 00:00:00' ({at(1, 'end')}), "
+                                 f"self.time_out = '2026-01-02 00:00:00.500000' ({at(1, 'end')})")
+    assert killed["held"][2] == f"\"diag != ''\" held on diag = 'no replica' ({at(2, 'kill')}, as job.errorDiag bound at v.py:{bound})"
+    # two times read back as text are not ordered: no guard is read false
+    assert killed["false"] is None
+    assert got["contradicted"]["false"][0] == "not (n_tokens <= n_ok)"
+    assert got["contradicted"]["false"][1].startswith(" on n_tokens = '0' (row run:")
+    assert got["twice"] == {"held": ["'not (n_tokens <= n_ok)' held", "'end < self.time_out' held", "\"diag != ''\" held"],
+                            "false": None}
 
 
 def test_a_guard_over_a_column_the_rows_file_holds_is_read_in_it_by_the_ways_and_the_direction_of_their_changes(tmp_path):
