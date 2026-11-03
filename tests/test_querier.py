@@ -1305,6 +1305,41 @@ def test_the_record_door_widens_once_past_an_end_and_reads_a_run_still_there_as_
     assert unlisted[0][0]["machine"] is None and "not in list_logs" in unlisted[0][1]
 
 
+def test_the_record_door_widens_past_what_the_windows_own_asks_searched_only_so_a_widened_record_widens_no_further(tmp_path):
+    # a periodic method's mark, a pass every few minutes: its records join into one run as far as any record reaches,
+    # so a widened ask's record, searched EDGE past its window, had the run near its end again (the harness's round 18:
+    # rescueUnLockedTasksWithPicked_JEDI's mark asked 10 min earlier each round)
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            TOK, W, WIDER = "getX < vo=atlas label=user >", ("2026-09-28 06:45:00", "2026-09-28 06:45:00"), ("2026-09-28 06:39:59", "2026-09-28 06:45:00")
+            passes = [{**line(t, "rescued 12345" if t == "06:42:00" else "rescued 1", TOK), "offset": i}
+                      for i, t in enumerate(("06:41:00", "06:42:00", "06:44:00", "06:46:00"))]
+            first = record(Ask("panda-x.log", ("12345",), W, M1), {M1: answered({**TODAY, "records": passes[1:2]})})
+            own = record(Ask("panda-x.log", (TOK,), W, M1), {M1: answered({**TODAY, "records": passes})})
+            older = [{**line(t, "rescued 1", TOK), "offset": 100 + i} for i, t in enumerate(("06:30:20", "06:35:00", "06:39:30"))]
+            # the widened ask's record: the older file cut at 1 MB, read EDGE before the widened window
+            widened = record(Ask("panda-x.log", (TOK,), WIDER, M1), {M1: answered(
+                {**BEFORE, "truncated": True, "searched": [["2026-09-28 06:29:59", "2026-09-28 06:50:00"]], "records": older},
+                {**TODAY, "records": passes})})
+            _, once = ask_of([first, own], "panda-x.log", "12345", W, M1)
+            log, again = ask_of([first, widened], "panda-x.log", "12345", W, M1)
+            run, = runs_for(log, "12345")
+            print(json.dumps([once, again, [r.stamp for r in run.records][:2], run.describe()]))
+            """),
+        )
+    )
+    once, again, stamps, described = json.loads(out)
+    # the window's own record: the run lies near the file's start, widened past it
+    assert [(a["strings"], a["window"]) for a, _ in once] == [(["getX < vo=atlas label=user >"], ["2026-09-28 06:39:59", "2026-09-28 06:45:00"])]
+    # the mark's ask answered from the widened record alone: the run reaches past what the window's own asks searched,
+    # so it was widened once, and is read as cut at the widened record's start rather than asked again
+    assert again == [] and stamps == ["2026-09-28 06:30:20,000", "2026-09-28 06:35:00,000"]
+    assert "read as cut: what was searched on aipanda093 begins at 2026-09-28 06:29:59" in described
+
+
 def test_the_record_door_widens_a_second_where_the_recording_step_reads_a_cut_string_edge_past_the_window(tmp_path):
     # one rule in two halves, two modules (the recording step imports no querier module): the door asks a second past
     # an end of what was searched, and the recording step asks a cut string again EDGE past each end of the window

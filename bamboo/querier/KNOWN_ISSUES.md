@@ -140,6 +140,14 @@ shown by (13 records at 11:14:22-23, whole in the record); counting only its pie
 mark over hours once the run was widened, and S1 then asked getTasksToBeProcessed_JEDI's marks over a stuck window's 6
 hours (both measured, the analyzer handover's out/k13).  A candidate's rows under a caller's method mark (a logger
 handed in) are read by neither H2 nor S1; how many such rows the map holds is not counted yet.
+A run near an end of what was searched widens the window past it once, and the end is one the asks over the window
+itself searched (`recorded._runs`'s *own*, 2026-11-03).  Before, it was any record at hand: a mark asked for a row's
+moment was answered from the record of the round before's widened ask (`_within` prefers the machine's record), and a
+periodic method's mark (`rescueUnLockedTasksWithPicked_JEDI < vo=atlas label=user >`, a pass every few minutes) is one
+run as far as any record reaches, so each round asked it EDGE further back: MR-T-53351604-rescueTime's 081 went 13:09:14,
+12:59:13, 12:49:12, 12:39:11 in rounds 5-18, and round 6 took three machines to their files' starts (the harness's
+round 18).  A run reaching past the window's own search is read as cut there.  Whether a shared periodic mark needs
+widening at a row's moment at all -- the pass at that second is whole in the window -- is not decided (tmaeno).
 
 ### K40. A truncated file with no `searched` is read up to its last record, whichever string's
 
